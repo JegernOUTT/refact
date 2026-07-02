@@ -102,7 +102,7 @@ fn changed_files_with_stats(repo: &Repository, commit: &Commit) -> Vec<(String, 
     files
 }
 
-pub(crate) fn is_empty_head_error(error: &git2::Error) -> bool {
+pub fn is_empty_head_error(error: &git2::Error) -> bool {
     error.code() == ErrorCode::UnbornBranch
         || error.code() == ErrorCode::NotFound
         || (error.class() == ErrorClass::Reference

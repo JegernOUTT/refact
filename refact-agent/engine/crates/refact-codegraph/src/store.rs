@@ -896,10 +896,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn connect_usages(&self) -> Result<(), String> {
+    pub fn connect_usages(&self) -> Result<bool, String> {
         let dirty_paths = self.dirty_paths()?;
         if dirty_paths.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         debug!(
             "codegraph: connect_usages for {} dirty files",
@@ -951,9 +951,8 @@ impl Store {
             "codegraph: connect_usages complete for {} dirty files",
             dirty_paths.len()
         );
-        Ok(())
+        Ok(true)
     }
-
     pub fn inherits_pairs(&self) -> Result<Vec<(String, String)>, String> {
         let mut stmt = self
             .conn
@@ -1006,7 +1005,8 @@ impl Store {
         self.scalar_i64("SELECT COUNT(*) FROM edges WHERE kind != 'defined_in'")
     }
 
-    pub fn remove_path(&self, path: &str) -> Result<(), String> {
+    pub fn remove_path(&self, path: &str) -> Result<bool, String> {
+        let existed = self.file_node_id(path)?.is_some() || self.stored_file_hash(path)?.is_some();
         let affected_keys = self.symbol_reference_keys_for_path(path)?;
         let tx = self
             .conn
@@ -1017,15 +1017,15 @@ impl Store {
         Self::remove_path_on(&tx, path, true)?;
         tx.commit()
             .map_err(|e| format!("codegraph remove_path commit: {e}"))?;
-        Ok(())
+        Ok(existed)
     }
 
-    pub fn index_file(&self, path: &str, text: &str, lang: &str) -> Result<i64, String> {
+    pub fn index_file(&self, path: &str, text: &str, lang: &str) -> Result<(i64, bool), String> {
         let hash = content_hash(text, lang);
         if self.stored_file_hash(path)?.as_deref() == Some(hash.as_str()) {
             if let Some(file_id) = self.file_node_id(path)? {
                 debug!("codegraph: index_file hash-skip {path}");
-                return Ok(file_id);
+                return Ok((file_id, false));
             }
         }
         let tx = self
@@ -1035,7 +1035,7 @@ impl Store {
         let node_id = Self::index_file_on(&tx, path, text, lang, &hash)?;
         tx.commit()
             .map_err(|e| format!("codegraph index_file commit: {e}"))?;
-        Ok(node_id)
+        Ok((node_id, true))
     }
 
     fn index_file_on(
@@ -1064,15 +1064,19 @@ impl Store {
         Ok(node_id)
     }
 
-    pub fn index_file_graph(&self, path: &str, text: &str, lang: &str) -> Result<i64, String> {
+    pub fn index_file_graph(
+        &self,
+        path: &str,
+        text: &str,
+        lang: &str,
+    ) -> Result<(i64, bool), String> {
         let hash = content_hash(text, lang);
         if self.stored_file_hash(path)?.as_deref() == Some(hash.as_str()) {
             if let Some(file_id) = self.file_node_id(path)? {
                 debug!("codegraph: index_file_graph hash-skip {path}");
-                return Ok(file_id);
+                return Ok((file_id, false));
             }
         }
-
         let (symbols, refs) = extract_symbols(lang, text);
         let routes = refact_codegraph_parsers::frameworks::detect_routes(lang, text);
         debug!(
@@ -1173,7 +1177,7 @@ impl Store {
 
         tx.commit()
             .map_err(|e| format!("codegraph index_file_graph commit: {e}"))?;
-        Ok(file_id)
+        Ok((file_id, true))
     }
 
     pub fn counts(&self) -> Result<Counts, String> {
@@ -1473,15 +1477,17 @@ fn helper() {}
     fn identical_content_uses_hash_skip_without_dirtying() {
         let store = Store::open_in_memory().unwrap();
         let src = "fn a() { b(); }\nfn b() {}\n";
-        let first_id = store.index_file_graph("src/m.rs", src, "rust").unwrap();
+        let (first_id, first_changed) = store.index_file_graph("src/m.rs", src, "rust").unwrap();
         store.connect_usages().unwrap();
         assert!(!store.has_dirty_paths().unwrap());
         let first = store.counts().unwrap();
 
-        let second_id = store.index_file_graph("src/m.rs", src, "rust").unwrap();
+        let (second_id, second_changed) = store.index_file_graph("src/m.rs", src, "rust").unwrap();
         let second = store.counts().unwrap();
 
         assert_eq!(first_id, second_id);
+        assert!(first_changed);
+        assert!(!second_changed);
         assert_eq!(first, second);
         assert!(!store.has_dirty_paths().unwrap());
     }

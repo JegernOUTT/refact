@@ -1,8 +1,10 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use git2::{Oid, Repository};
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 
@@ -12,6 +14,21 @@ use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
+
+const GIT_CACHE_TTL: Duration = Duration::from_secs(30);
+
+type GitCacheKey = (PathBuf, Option<Oid>, usize);
+
+#[derive(Default)]
+struct GitMiningCache {
+    history: HashMap<GitCacheKey, (Instant, refact_git_intel::GitIntel)>,
+    messages: HashMap<GitCacheKey, (Instant, Vec<String>)>,
+}
+
+fn git_cache() -> &'static StdMutex<GitMiningCache> {
+    static CACHE: OnceLock<StdMutex<GitMiningCache>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(GitMiningCache::default()))
+}
 
 fn tool_message(tool_call_id: &String, text: String) -> Vec<ContextEnum> {
     vec![ContextEnum::ChatMessage(ChatMessage {
@@ -43,6 +60,59 @@ async fn project_dir(gcx: Arc<crate::global_context::GlobalContext>) -> Option<P
         .next()
 }
 
+fn git_head_oid(repo_path: &Path) -> Result<Option<Oid>, String> {
+    let repo = Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
+    let head = repo.head();
+    match head {
+        Ok(head) => Ok(head.target()),
+        Err(error) if refact_git_intel::is_empty_head_error(&error) => Ok(None),
+        Err(error) => Err(format!("git head: {error}")),
+    }
+}
+
+fn cached_mine_history(
+    repo_path: &Path,
+    max_commits: usize,
+) -> Result<refact_git_intel::GitIntel, String> {
+    let head = git_head_oid(repo_path)?;
+    let key = (repo_path.to_path_buf(), head, max_commits);
+    let now = Instant::now();
+    if let Some(intel) = {
+        let cache = git_cache().lock().unwrap();
+        cache
+            .history
+            .get(&key)
+            .filter(|(created, _)| now.duration_since(*created) <= GIT_CACHE_TTL)
+            .map(|(_, intel)| intel.clone())
+    } {
+        return Ok(intel);
+    }
+    let intel = refact_git_intel::mine_history(repo_path, max_commits)?;
+    let mut cache = git_cache().lock().unwrap();
+    cache.history.insert(key, (now, intel.clone()));
+    Ok(intel)
+}
+
+fn cached_commit_messages(repo_path: &Path, max: usize) -> Result<Vec<String>, String> {
+    let head = git_head_oid(repo_path)?;
+    let key = (repo_path.to_path_buf(), head, max);
+    let now = Instant::now();
+    if let Some(messages) = {
+        let cache = git_cache().lock().unwrap();
+        cache
+            .messages
+            .get(&key)
+            .filter(|(created, _)| now.duration_since(*created) <= GIT_CACHE_TTL)
+            .map(|(_, messages)| messages.clone())
+    } {
+        return Ok(messages);
+    }
+    let messages = refact_git_intel::collect_commit_messages(repo_path, max)?;
+    let mut cache = git_cache().lock().unwrap();
+    cache.messages.insert(key, (now, messages.clone()));
+    Ok(messages)
+}
+
 pub struct ToolCodegraphOverview {
     pub config_path: String,
 }
@@ -62,7 +132,8 @@ impl Tool for ToolCodegraphOverview {
             .await
             .clone()
             .ok_or_else(|| "codegraph is not available".to_string())?;
-        let overview = service.overview(15).await?;
+        let cached = service.cached_graph_analytics().await?;
+        let overview = cached.analytics.overview.truncated(15);
         let mut msg = format!(
             "Code graph overview:\n  nodes: {}\n  edges: {}\n  connected components: {}\n  strongly-connected components: {} (largest {})\n\nMost central symbols (PageRank):\n",
             overview.node_count,
@@ -78,18 +149,17 @@ impl Tool for ToolCodegraphOverview {
         for (name, score) in overview.top_betweenness.iter().filter(|(_, s)| *s > 0.0) {
             msg.push_str(&format!("  {:.2}  {}\n", score, name));
         }
-        if let Ok(mut communities) = service.communities().await {
-            communities.sort_by(|a, b| b.members.len().cmp(&a.members.len()));
-            if !communities.is_empty() {
-                msg.push_str(&format!("\nModule communities ({}):\n", communities.len()));
-                for c in communities.iter().take(8) {
-                    msg.push_str(&format!(
-                        "  {} ({} members, cohesion {:.2})\n",
-                        c.label,
-                        c.members.len(),
-                        c.cohesion
-                    ));
-                }
+        let mut communities = cached.communities.clone();
+        communities.sort_by(|a, b| b.members.len().cmp(&a.members.len()));
+        if !communities.is_empty() {
+            msg.push_str(&format!("\nModule communities ({}):\n", communities.len()));
+            for c in communities.iter().take(8) {
+                msg.push_str(&format!(
+                    "  {} ({} members, cohesion {:.2})\n",
+                    c.label,
+                    c.members.len(),
+                    c.cohesion
+                ));
             }
         }
         if let Ok(flows) = service.execution_flows(5).await {
@@ -120,24 +190,23 @@ impl Tool for ToolCodegraphOverview {
             }
         }
         let all_files = service.all_files_with_text().await.unwrap_or_default();
-        if let Ok(centrality) = service.per_file_centrality(100).await {
-            let pr: HashMap<String, f64> = centrality.top_pagerank.iter().cloned().collect();
-            let bt: HashMap<String, f64> = centrality.top_betweenness.iter().cloned().collect();
-            let candidates: Vec<(String, f64, f64)> = all_files
-                .iter()
-                .map(|(p, _)| {
-                    let pagerank = pr.get(p).copied().unwrap_or(0.0);
-                    let betweenness = bt.get(p).copied().unwrap_or(0.0);
-                    (p.clone(), pagerank, betweenness)
-                })
-                .collect();
-            let stems = refact_codewiki::entry_points::default_conventional_stems();
-            let ranked = refact_codewiki::entry_points::rank_entry_points(&candidates, &stems);
-            if !ranked.is_empty() {
-                msg.push_str("\nLikely entry points (conventional name + shallow depth):\n");
-                for p in ranked.iter().take(10) {
-                    msg.push_str(&format!("  {}\n", p));
-                }
+        let centrality = cached.analytics.file_centrality.truncated(100);
+        let pr: HashMap<String, f64> = centrality.top_pagerank.iter().cloned().collect();
+        let bt: HashMap<String, f64> = centrality.top_betweenness.iter().cloned().collect();
+        let candidates: Vec<(String, f64, f64)> = all_files
+            .iter()
+            .map(|(p, _)| {
+                let pagerank = pr.get(p).copied().unwrap_or(0.0);
+                let betweenness = bt.get(p).copied().unwrap_or(0.0);
+                (p.clone(), pagerank, betweenness)
+            })
+            .collect();
+        let stems = refact_codewiki::entry_points::default_conventional_stems();
+        let ranked = refact_codewiki::entry_points::rank_entry_points(&candidates, &stems);
+        if !ranked.is_empty() {
+            msg.push_str("\nLikely entry points (conventional name + shallow depth):\n");
+            for p in ranked.iter().take(10) {
+                msg.push_str(&format!("  {}\n", p));
             }
         }
         let mut api_files: Vec<String> = all_files
@@ -277,11 +346,11 @@ impl Tool for ToolCodeHealth {
             }
         }
         if let Some(service) = gcx.codegraph.lock().await.clone() {
-            if let (Ok(nodes), Ok(edges)) =
-                (service.graph_nodes().await, service.graph_edges().await)
-            {
+            if let Ok(cached) = service.cached_graph_analytics().await {
                 let graph = refact_codewiki::graph_intelligence::CodeGraph {
-                    nodes: nodes
+                    nodes: cached
+                        .data
+                        .nodes
                         .iter()
                         .map(
                             |(id, _name, path)| refact_codewiki::graph_intelligence::GraphNode {
@@ -291,7 +360,9 @@ impl Tool for ToolCodeHealth {
                             },
                         )
                         .collect(),
-                    edges: edges
+                    edges: cached
+                        .data
+                        .edges
                         .iter()
                         .map(
                             |(src, dst, kind)| refact_codewiki::graph_intelligence::GraphEdge {
@@ -302,13 +373,13 @@ impl Tool for ToolCodeHealth {
                         )
                         .collect(),
                 };
-                let stored_path = if nodes.iter().any(|(_, _, p)| p == &file_path) {
+                let stored_path = if cached.data.nodes.iter().any(|(_, _, p)| p == &file_path) {
                     Some(file_path.clone())
                 } else {
                     let mut candidates: std::collections::BTreeSet<&str> =
                         std::collections::BTreeSet::new();
                     let requested_base = file_path.rsplit('/').next().unwrap_or(&file_path);
-                    for (_, _, p) in &nodes {
+                    for (_, _, p) in &cached.data.nodes {
                         let base = p.rsplit('/').next().unwrap_or(p);
                         if p.ends_with(file_path.as_str())
                             || file_path.ends_with(p.as_str())
@@ -465,7 +536,7 @@ impl Tool for ToolGitRisk {
         let dir = project_dir(gcx.clone())
             .await
             .ok_or_else(|| "no project directory available".to_string())?;
-        let intel = refact_git_intel::mine_history(&dir, 1000)?;
+        let intel = cached_mine_history(&dir, 1000)?;
         let hotspots = intel.hotspots(15);
         if hotspots.is_empty() {
             return Ok((
@@ -664,7 +735,7 @@ impl Tool for ToolCodeWhy {
         let dir = project_dir(gcx)
             .await
             .ok_or_else(|| "no project directory available".to_string())?;
-        let messages = refact_git_intel::collect_commit_messages(&dir, 2000)?;
+        let messages = cached_commit_messages(&dir, 2000)?;
         let sources: Vec<refact_codewiki::DecisionSource> = messages
             .into_iter()
             .map(|text| refact_codewiki::DecisionSource {
@@ -818,7 +889,7 @@ impl Tool for ToolCodeDuplication {
         let dup_pct = refact_codehealth::duplication::cross_file_duplication_pct(&triples) * 100.0;
         let intel = project_dir(gcx.clone())
             .await
-            .and_then(|dir| refact_git_intel::mine_history(&dir, 1000).ok());
+            .and_then(|dir| cached_mine_history(&dir, 1000).ok());
         let co_change = |a: &str, b: &str| -> u32 {
             match &intel {
                 Some(i) => i
@@ -987,9 +1058,10 @@ impl Tool for ToolCodeMap {
             .clone()
             .ok_or_else(|| "codegraph is not available".to_string())?;
         let files_text = service.all_files_with_text().await?;
-        let nodes = service.graph_nodes().await?;
-        let edges = service.graph_edges().await?;
-        let centrality = service.per_file_centrality(5000).await?;
+        let cached = service.cached_graph_analytics().await?;
+        let nodes = cached.data.nodes;
+        let edges = cached.data.edges;
+        let centrality = cached.analytics.file_centrality.truncated(5000);
         if files_text.is_empty() {
             return Ok((
                 false,

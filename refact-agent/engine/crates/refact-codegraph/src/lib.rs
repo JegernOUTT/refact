@@ -14,7 +14,7 @@ pub use retrieval::CodeHit;
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AMutex;
@@ -52,6 +52,14 @@ pub fn lang_from_path(path: &str) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CachedGraphAnalytics {
+    pub generation: u64,
+    pub data: analytics::GraphData,
+    pub analytics: analytics::GraphAnalytics,
+    pub communities: Vec<communities::Community>,
+}
+
 pub struct CodeGraphService {
     store: AMutex<Store>,
     read_store: Option<AMutex<Store>>,
@@ -59,6 +67,9 @@ pub struct CodeGraphService {
     queue_notify: Notify,
     db_path: PathBuf,
     initial_index_done: AtomicBool,
+    graph_generation: AtomicU64,
+    analytics_cache: AMutex<Option<CachedGraphAnalytics>>,
+    analytics_rebuild_count: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -78,6 +89,9 @@ impl CodeGraphService {
             queue_notify: Notify::new(),
             db_path,
             initial_index_done: AtomicBool::new(false),
+            graph_generation: AtomicU64::new(0),
+            analytics_cache: AMutex::new(None),
+            analytics_rebuild_count: AtomicUsize::new(0),
         })
     }
 
@@ -90,6 +104,9 @@ impl CodeGraphService {
             queue_notify: Notify::new(),
             db_path: PathBuf::from(":memory:"),
             initial_index_done: AtomicBool::new(true),
+            graph_generation: AtomicU64::new(0),
+            analytics_cache: AMutex::new(None),
+            analytics_rebuild_count: AtomicUsize::new(0),
         })
     }
 
@@ -167,14 +184,33 @@ impl CodeGraphService {
         }
     }
 
+    fn bump_graph_generation(&self) {
+        self.graph_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub fn analytics_rebuild_count(&self) -> usize {
+        self.analytics_rebuild_count.load(Ordering::Relaxed)
+    }
+
     pub async fn index_file(&self, path: &str, text: &str, lang: &str) -> Result<(), String> {
         let store = self.store.lock().await;
-        store.index_file_graph(path, text, lang).map(|_| ())
+        let (_file_id, changed) = store.index_file_graph(path, text, lang)?;
+        drop(store);
+        if changed {
+            self.bump_graph_generation();
+        }
+        Ok(())
     }
 
     pub async fn remove_path(&self, path: &str) -> Result<(), String> {
         let store = self.store.lock().await;
-        store.remove_path(path)
+        let changed = store.remove_path(path)?;
+        drop(store);
+        if changed {
+            self.bump_graph_generation();
+        }
+        Ok(())
     }
 
     pub async fn counts(&self) -> Result<Counts, String> {
@@ -183,7 +219,12 @@ impl CodeGraphService {
 
     pub async fn connect_usages(&self) -> Result<(), String> {
         let store = self.store.lock().await;
-        store.connect_usages()
+        let changed = store.connect_usages()?;
+        drop(store);
+        if changed {
+            self.bump_graph_generation();
+        }
+        Ok(())
     }
 
     pub async fn has_dirty_usage_paths(&self) -> Result<bool, String> {
@@ -194,9 +235,40 @@ impl CodeGraphService {
         self.with_read_store(|store| store.doc_usages(cpath)).await
     }
 
+    pub async fn cached_graph_analytics(&self) -> Result<CachedGraphAnalytics, String> {
+        let generation = self.graph_generation.load(Ordering::Relaxed);
+        let mut cache = self.analytics_cache.lock().await;
+        if let Some(cached) = cache
+            .as_ref()
+            .filter(|cached| cached.generation == generation)
+        {
+            return Ok(cached.clone());
+        }
+        let rebuilt = self
+            .with_read_store(|store| {
+                let data = analytics::GraphData::from_store(store)?;
+                let analytics = analytics::compute_graph_analytics_from_data(&data);
+                let communities = communities::detect_communities_from_data(&data)?;
+                Ok(CachedGraphAnalytics {
+                    generation,
+                    data,
+                    analytics,
+                    communities,
+                })
+            })
+            .await?;
+        self.analytics_rebuild_count.fetch_add(1, Ordering::Relaxed);
+        *cache = Some(rebuilt.clone());
+        Ok(rebuilt)
+    }
+
     pub async fn overview(&self, top_n: usize) -> Result<analytics::GraphOverview, String> {
-        self.with_read_store(|store| analytics::compute_overview(store, top_n))
-            .await
+        Ok(self
+            .cached_graph_analytics()
+            .await?
+            .analytics
+            .overview
+            .truncated(top_n))
     }
 
     pub async fn all_files_with_text(&self) -> Result<Vec<(String, String)>, String> {
@@ -208,32 +280,36 @@ impl CodeGraphService {
         self.with_read_store(|store| store.all_paths()).await
     }
 
-    pub async fn graph_nodes(&self) -> Result<Vec<(i64, String, String)>, String> {
-        self.with_read_store(|store| store.node_names()).await
+    pub async fn graph_nodes(&self) -> Result<Vec<analytics::GraphNode>, String> {
+        Ok(self.cached_graph_analytics().await?.data.nodes)
     }
 
-    pub async fn graph_edges(&self) -> Result<Vec<(i64, i64, String)>, String> {
-        self.with_read_store(|store| store.graph_edges()).await
+    pub async fn graph_edges(&self) -> Result<Vec<analytics::GraphEdge>, String> {
+        Ok(self.cached_graph_analytics().await?.data.edges)
     }
 
     pub async fn per_file_centrality(
         &self,
         top_n: usize,
     ) -> Result<crate::analytics::FileCentrality, String> {
-        self.with_read_store(|store| analytics::per_file_centrality(store, top_n))
-            .await
+        Ok(self
+            .cached_graph_analytics()
+            .await?
+            .analytics
+            .file_centrality
+            .truncated(top_n))
     }
 
     pub async fn communities(&self) -> Result<Vec<communities::Community>, String> {
-        self.with_read_store(communities::detect_communities).await
+        Ok(self.cached_graph_analytics().await?.communities)
     }
 
     pub async fn execution_flows(
         &self,
         max_flows: usize,
     ) -> Result<Vec<communities::ExecFlow>, String> {
-        self.with_read_store(|store| communities::execution_flows(store, max_flows))
-            .await
+        let cached = self.cached_graph_analytics().await?;
+        communities::execution_flows_from_data(&cached.data, max_flows)
     }
 
     pub async fn dead_code(&self) -> Result<Vec<dead_code::DeadSymbol>, String> {
@@ -364,6 +440,32 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(100), notified)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn overview_reuses_cached_graph_analytics_until_index_changes() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        service
+            .index_file("src/a.rs", "pub fn helper() {}\n", "rust")
+            .await
+            .unwrap();
+        service.connect_usages().await.unwrap();
+
+        let first = service.overview(10).await.unwrap();
+        assert_eq!(service.analytics_rebuild_count(), 1);
+        let second = service.overview(10).await.unwrap();
+        assert_eq!(service.analytics_rebuild_count(), 1);
+        assert_eq!(first, second);
+
+        service
+            .index_file("src/b.rs", "fn run() { helper(); }\n", "rust")
+            .await
+            .unwrap();
+        service.connect_usages().await.unwrap();
+        let third = service.overview(10).await.unwrap();
+
+        assert_eq!(service.analytics_rebuild_count(), 2);
+        assert_ne!(first.node_count, third.node_count);
     }
 
     #[tokio::test]

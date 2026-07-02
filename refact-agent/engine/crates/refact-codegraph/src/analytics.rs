@@ -7,20 +7,46 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::Store;
 
+const BETWEENNESS_EXACT_NODE_LIMIT: usize = 1024;
+const BETWEENNESS_SAMPLE_LIMIT: usize = 512;
+
+pub type GraphNode = (i64, String, String);
+pub type GraphEdge = (i64, i64, String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphData {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+impl GraphData {
+    pub fn from_store(store: &Store) -> Result<Self, String> {
+        Ok(Self {
+            nodes: store.node_names()?,
+            edges: store.graph_edges()?,
+        })
+    }
+}
+
 pub fn build_petgraph(
     store: &Store,
 ) -> Result<(DiGraph<i64, ()>, HashMap<i64, NodeIndex>), String> {
+    let data = GraphData::from_store(store)?;
+    Ok(build_petgraph_from_data(&data))
+}
+
+pub fn build_petgraph_from_data(data: &GraphData) -> (DiGraph<i64, ()>, HashMap<i64, NodeIndex>) {
     let mut g: DiGraph<i64, ()> = DiGraph::new();
     let mut idx: HashMap<i64, NodeIndex> = HashMap::new();
-    for (id, _name, _path) in store.node_names()? {
-        idx.entry(id).or_insert_with(|| g.add_node(id));
+    for (id, _name, _path) in &data.nodes {
+        idx.entry(*id).or_insert_with(|| g.add_node(*id));
     }
-    for (src, dst, _kind) in store.graph_edges()? {
-        let s = *idx.entry(src).or_insert_with(|| g.add_node(src));
-        let d = *idx.entry(dst).or_insert_with(|| g.add_node(dst));
+    for (src, dst, _kind) in &data.edges {
+        let s = *idx.entry(*src).or_insert_with(|| g.add_node(*src));
+        let d = *idx.entry(*dst).or_insert_with(|| g.add_node(*dst));
         g.add_edge(s, d, ());
     }
-    Ok((g, idx))
+    (g, idx)
 }
 
 pub fn pagerank(g: &DiGraph<i64, ()>, damping: f64, iters: usize) -> HashMap<NodeIndex, f64> {
@@ -59,10 +85,36 @@ pub fn pagerank(g: &DiGraph<i64, ()>, damping: f64, iters: usize) -> HashMap<Nod
     rank
 }
 
-/// Brandes' algorithm for betweenness centrality on an unweighted digraph.
 pub fn betweenness_centrality(g: &DiGraph<i64, ()>) -> HashMap<NodeIndex, f64> {
+    let sources: Vec<NodeIndex> = g.node_indices().collect();
+    betweenness_centrality_for_sources(g, &sources, 1.0)
+}
+
+fn analytics_betweenness_centrality(g: &DiGraph<i64, ()>) -> HashMap<NodeIndex, f64> {
+    let nodes: Vec<NodeIndex> = g.node_indices().collect();
+    if nodes.len() <= BETWEENNESS_EXACT_NODE_LIMIT {
+        return betweenness_centrality_for_sources(g, &nodes, 1.0);
+    }
+    let stride = nodes.len().div_ceil(BETWEENNESS_SAMPLE_LIMIT);
+    let sources: Vec<NodeIndex> = nodes
+        .into_iter()
+        .step_by(stride.max(1))
+        .take(BETWEENNESS_SAMPLE_LIMIT)
+        .collect();
+    if sources.is_empty() {
+        return HashMap::new();
+    }
+    let scale = g.node_count() as f64 / sources.len() as f64;
+    betweenness_centrality_for_sources(g, &sources, scale)
+}
+
+fn betweenness_centrality_for_sources(
+    g: &DiGraph<i64, ()>,
+    sources: &[NodeIndex],
+    scale: f64,
+) -> HashMap<NodeIndex, f64> {
     let mut cb: HashMap<NodeIndex, f64> = g.node_indices().map(|i| (i, 0.0)).collect();
-    for s in g.node_indices() {
+    for &s in sources {
         let mut stack: Vec<NodeIndex> = Vec::new();
         let mut pred: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
         let mut sigma: HashMap<NodeIndex, f64> = g.node_indices().map(|i| (i, 0.0)).collect();
@@ -88,12 +140,14 @@ pub fn betweenness_centrality(g: &DiGraph<i64, ()>) -> HashMap<NodeIndex, f64> {
         while let Some(w) = stack.pop() {
             if let Some(ps) = pred.get(&w) {
                 for &v in ps {
-                    let contrib = (sigma[&v] / sigma[&w]) * (1.0 + delta[&w]);
-                    *delta.get_mut(&v).unwrap() += contrib;
+                    if sigma[&w] > 0.0 {
+                        let contrib = (sigma[&v] / sigma[&w]) * (1.0 + delta[&w]);
+                        *delta.get_mut(&v).unwrap() += contrib;
+                    }
                 }
             }
             if w != s {
-                *cb.get_mut(&w).unwrap() += delta[&w];
+                *cb.get_mut(&w).unwrap() += delta[&w] * scale;
             }
         }
     }
@@ -111,24 +165,77 @@ pub struct GraphOverview {
     pub top_betweenness: Vec<(String, f64)>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl GraphOverview {
+    pub fn truncated(&self, top_n: usize) -> Self {
+        let mut overview = self.clone();
+        overview.top_pagerank.truncate(top_n);
+        overview.top_betweenness.truncate(top_n);
+        overview
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileCentrality {
     pub top_pagerank: Vec<(String, f64)>,
     pub top_betweenness: Vec<(String, f64)>,
 }
 
-pub fn per_file_centrality(store: &Store, top_n: usize) -> Result<FileCentrality, String> {
-    let (g, _idx) = build_petgraph(store)?;
-    let paths: HashMap<i64, String> = store
-        .node_names()?
-        .into_iter()
-        .map(|(id, _name, path)| (id, path))
+impl FileCentrality {
+    pub fn truncated(&self, top_n: usize) -> Self {
+        let mut centrality = self.clone();
+        centrality.top_pagerank.truncate(top_n);
+        centrality.top_betweenness.truncate(top_n);
+        centrality
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphAnalytics {
+    pub overview: GraphOverview,
+    pub file_centrality: FileCentrality,
+}
+
+pub fn compute_graph_analytics(store: &Store) -> Result<GraphAnalytics, String> {
+    let data = GraphData::from_store(store)?;
+    Ok(compute_graph_analytics_from_data(&data))
+}
+
+pub fn compute_graph_analytics_from_data(data: &GraphData) -> GraphAnalytics {
+    let (g, _idx) = build_petgraph_from_data(data);
+    let names: HashMap<i64, String> = data
+        .nodes
+        .iter()
+        .map(|(id, name, _)| (*id, name.clone()))
+        .collect();
+    let paths: HashMap<i64, String> = data
+        .nodes
+        .iter()
+        .map(|(id, _name, path)| (*id, path.clone()))
         .collect();
 
     let pr = pagerank(&g, 0.85, 40);
-    let bc = betweenness_centrality(&g);
+    let bc = analytics_betweenness_centrality(&g);
+    let sccs = tarjan_scc(&g);
+    let largest_scc = sccs.iter().map(|c| c.len()).max().unwrap_or(0);
+    let component_count = connected_components(&g);
 
-    let rank = |m: &HashMap<NodeIndex, f64>| -> Vec<(String, f64)> {
+    let rank_symbols = |m: &HashMap<NodeIndex, f64>| -> Vec<(String, f64)> {
+        let mut scored: Vec<(String, f64)> = m
+            .iter()
+            .map(|(ni, score)| {
+                let node_id = g[*ni];
+                (names.get(&node_id).cloned().unwrap_or_default(), *score)
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored
+    };
+
+    let rank_files = |m: &HashMap<NodeIndex, f64>| -> Vec<(String, f64)> {
         let mut by_path: HashMap<String, f64> = HashMap::new();
         for (ni, score) in m {
             let node_id = g[*ni];
@@ -146,56 +253,34 @@ pub fn per_file_centrality(store: &Store, top_n: usize) -> Result<FileCentrality
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0))
         });
-        scored.truncate(top_n);
         scored
     };
 
-    Ok(FileCentrality {
-        top_pagerank: rank(&pr),
-        top_betweenness: rank(&bc),
-    })
+    GraphAnalytics {
+        overview: GraphOverview {
+            node_count: g.node_count(),
+            edge_count: g.edge_count(),
+            scc_count: sccs.len(),
+            largest_scc,
+            component_count,
+            top_pagerank: rank_symbols(&pr),
+            top_betweenness: rank_symbols(&bc),
+        },
+        file_centrality: FileCentrality {
+            top_pagerank: rank_files(&pr),
+            top_betweenness: rank_files(&bc),
+        },
+    }
+}
+
+pub fn per_file_centrality(store: &Store, top_n: usize) -> Result<FileCentrality, String> {
+    Ok(compute_graph_analytics(store)?
+        .file_centrality
+        .truncated(top_n))
 }
 
 pub fn compute_overview(store: &Store, top_n: usize) -> Result<GraphOverview, String> {
-    let (g, _idx) = build_petgraph(store)?;
-    let names: HashMap<i64, String> = store
-        .node_names()?
-        .into_iter()
-        .map(|(id, name, _)| (id, name))
-        .collect();
-
-    let pr = pagerank(&g, 0.85, 40);
-    let bc = betweenness_centrality(&g);
-    let sccs = tarjan_scc(&g);
-    let largest_scc = sccs.iter().map(|c| c.len()).max().unwrap_or(0);
-    let component_count = connected_components(&g);
-
-    let rank = |m: &HashMap<NodeIndex, f64>| -> Vec<(String, f64)> {
-        let mut scored: Vec<(String, f64)> = m
-            .iter()
-            .map(|(ni, score)| {
-                let node_id = g[*ni];
-                (names.get(&node_id).cloned().unwrap_or_default(), *score)
-            })
-            .collect();
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        scored.truncate(top_n);
-        scored
-    };
-
-    Ok(GraphOverview {
-        node_count: g.node_count(),
-        edge_count: g.edge_count(),
-        scc_count: sccs.len(),
-        largest_scc,
-        component_count,
-        top_pagerank: rank(&pr),
-        top_betweenness: rank(&bc),
-    })
+    Ok(compute_graph_analytics(store)?.overview.truncated(top_n))
 }
 
 #[cfg(test)]

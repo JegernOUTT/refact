@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use crate::analytics::GraphData;
 use crate::store::Store;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,7 +57,11 @@ impl LouvainGraph {
 }
 
 pub fn detect_communities(store: &Store) -> Result<Vec<Community>, String> {
-    let nodes = store.node_names()?;
+    detect_communities_from_data(&GraphData::from_store(store)?)
+}
+
+pub fn detect_communities_from_data(data: &GraphData) -> Result<Vec<Community>, String> {
+    let nodes = data.nodes.clone();
     if nodes.is_empty() {
         return Ok(Vec::new());
     }
@@ -74,11 +79,11 @@ pub fn detect_communities(store: &Store) -> Result<Vec<Community>, String> {
         members: ids.iter().map(|id| vec![*id]).collect(),
         adj: vec![BTreeMap::new(); ids.len()],
     };
-    for (src, dst, kind) in store.graph_edges()? {
+    for (src, dst, kind) in &data.edges {
         if kind != "calls" && kind != "inherits" {
             continue;
         }
-        let (Some(&a), Some(&b)) = (id_to_pos.get(&src), id_to_pos.get(&dst)) else {
+        let (Some(&a), Some(&b)) = (id_to_pos.get(src), id_to_pos.get(dst)) else {
             continue;
         };
         if a == b {
@@ -313,11 +318,18 @@ fn label_for(id: usize, members: &[i64], paths: &HashMap<i64, String>) -> String
 }
 
 pub fn execution_flows(store: &Store, max_flows: usize) -> Result<Vec<ExecFlow>, String> {
+    execution_flows_from_data(&GraphData::from_store(store)?, max_flows)
+}
+
+pub fn execution_flows_from_data(
+    data: &GraphData,
+    max_flows: usize,
+) -> Result<Vec<ExecFlow>, String> {
     if max_flows == 0 {
         return Ok(Vec::new());
     }
 
-    let nodes = store.node_names()?;
+    let nodes = data.nodes.clone();
     if nodes.is_empty() {
         return Ok(Vec::new());
     }
@@ -332,18 +344,18 @@ pub fn execution_flows(store: &Store, max_flows: usize) -> Result<Vec<ExecFlow>,
     let mut outdeg = BTreeMap::<i64, usize>::new();
     let mut entries = BTreeSet::<i64>::new();
 
-    for (src, dst, kind) in store.graph_edges()? {
+    for (src, dst, kind) in &data.edges {
         if kind != "calls" && kind != "route_handler" {
             continue;
         }
-        if !known_ids.contains(&src) || !known_ids.contains(&dst) {
+        if !known_ids.contains(src) || !known_ids.contains(dst) {
             continue;
         }
-        out.entry(src).or_default().push(dst);
-        *outdeg.entry(src).or_insert(0) += 1;
-        *indeg.entry(dst).or_insert(0) += 1;
+        out.entry(*src).or_default().push(*dst);
+        *outdeg.entry(*src).or_insert(0) += 1;
+        *indeg.entry(*dst).or_insert(0) += 1;
         if kind == "route_handler" {
-            entries.insert(dst);
+            entries.insert(*dst);
         }
     }
     for targets in out.values_mut() {
