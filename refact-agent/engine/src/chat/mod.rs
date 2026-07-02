@@ -26,6 +26,7 @@ pub mod prompts;
 mod queue;
 pub(crate) mod retry_policy;
 mod session;
+pub mod session_runtime;
 pub mod stream_core;
 pub mod summarization;
 pub mod system_context;
@@ -46,7 +47,7 @@ pub(crate) mod verify_cmd;
 pub use session::{
     SessionsMap, create_sessions_map, start_session_cleanup_task,
     get_or_create_session_with_trajectory, close_all_chat_sessions,
-    try_restore_session_if_trajectory_exists,
+    try_restore_session_if_trajectory_exists, snapshot_with_agents,
 };
 pub use queue::process_command_queue;
 pub use trajectories::{
