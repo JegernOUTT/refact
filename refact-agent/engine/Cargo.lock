@@ -4023,6 +4023,7 @@ dependencies = [
  "rand 0.8.5",
  "refact-core",
  "refact-ext",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",
