@@ -89,7 +89,7 @@ async fn atomic_write_json_with_tmp_path(
 
 use super::types::{
     ChatSession, ExternalReloadPending, GoalSnapshotBudgetExt, SessionState, TaskMeta,
-    ThreadParams, TrajectorySourceIdentity,
+    ThreadParams, TrajectorySourceIdentity, TrajectorySourceIdentitySessionExt,
 };
 use super::session::has_displayable_assistant_content;
 use super::config::timeouts;
