@@ -30,10 +30,12 @@ pub async fn codegraph_init(gcx: Arc<GlobalContext>) {
     match CodeGraphService::open(db_path.clone()) {
         Ok(service) => {
             *gcx.codegraph.lock().await = Some(Arc::new(service));
+            *gcx.codegraph_error.lock().unwrap() = String::new();
             info!("codegraph: store ready at {db_path:?}");
         }
         Err(err) => {
             error!("codegraph: failed to open store at {db_path:?}: {err}");
+            *gcx.codegraph_error.lock().unwrap() = err;
         }
     }
 }
@@ -58,6 +60,9 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
                 Ok(true) => {
                     if let Err(err) = service.connect_usages().await {
                         error!("codegraph: connect_usages failed: {err}");
+                        *gcx.codegraph_error.lock().unwrap() = err;
+                    } else {
+                        *gcx.codegraph_error.lock().unwrap() = String::new();
                     }
                 }
                 Ok(false) => {}
@@ -93,10 +98,14 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
                     let lang = lang_from_path(&path);
                     if let Err(err) = service.index_file(&path, &text, lang).await {
                         error!("codegraph: index {path} failed: {err}");
+                        *gcx.codegraph_error.lock().unwrap() = err;
                     }
                 }
                 Err(_) => {
-                    let _ = service.remove_path(&path).await;
+                    if let Err(err) = service.remove_path(&path).await {
+                        error!("codegraph: remove {path} failed: {err}");
+                        *gcx.codegraph_error.lock().unwrap() = err;
+                    }
                 }
             }
         }
