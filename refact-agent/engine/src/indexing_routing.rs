@@ -70,6 +70,93 @@ pub async fn route_index_enqueue(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vecdb::vdb_structs::{
+        EmbeddingModelConfig, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch,
+    };
+    use async_trait::async_trait;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RecordingVecdb {
+        enqueue_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl VecdbSearch for RecordingVecdb {
+        async fn vecdb_search(
+            &self,
+            query: String,
+            _top_n: usize,
+            _filter_mb: Option<String>,
+        ) -> Result<SearchResult, String> {
+            Ok(SearchResult {
+                query_text: query,
+                results: vec![],
+            })
+        }
+
+        async fn get_status(&self) -> Result<VecDbStatus, String> {
+            Ok(VecDbStatus {
+                files_unprocessed: 0,
+                files_total: 0,
+                requests_made_since_start: 0,
+                vectors_made_since_start: 0,
+                db_size: 0,
+                db_cache_size: 0,
+                state: "done".to_string(),
+                queue_additions: false,
+                vecdb_max_files_hit: false,
+                vecdb_errors: Default::default(),
+            })
+        }
+
+        async fn remove_file(&self, _file_path: &PathBuf) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn vectorizer_enqueue_files(
+            &self,
+            documents: &[String],
+            _process_immediately: bool,
+            _roots: refact_core::memory_plane::MemoryPlaneRoots,
+        ) {
+            self.enqueue_calls
+                .fetch_add(documents.len(), Ordering::SeqCst);
+        }
+
+        fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
+            (
+                EmbeddingModelConfig {
+                    endpoint: String::new(),
+                    endpoint_style: String::new(),
+                    embedding_endpoint_style: String::new(),
+                    api_key: String::new(),
+                    model_name: String::new(),
+                    embedding_size: 0,
+                    dimensions: None,
+                    query_prefix: String::new(),
+                    document_prefix: String::new(),
+                    rejection_threshold: 0.0,
+                    embedding_batch: 1,
+                    n_ctx: 0,
+                },
+                0,
+            )
+        }
+
+        async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
+            Ok(vec![])
+        }
+
+        async fn vecdb_search_with_embedding(
+            &self,
+            _embedding: &Vec<f32>,
+            _top_n: usize,
+            _filter_mb: Option<String>,
+        ) -> Result<Vec<VecdbRecord>, String> {
+            Ok(vec![])
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn partitions_memory_and_code_paths() {
@@ -159,5 +246,30 @@ mod tests {
         assert!(code_paths.contains(&non_refact_task_trajectory));
         assert!(code_paths.contains(&task_meta));
         assert!(code_paths.contains(&code));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn codegraph_absent_does_not_route_code_to_vecdb() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+        let enqueue_calls = Arc::new(AtomicUsize::new(0));
+        *gcx.vec_db.lock().await = Some(Arc::new(RecordingVecdb {
+            enqueue_calls: enqueue_calls.clone(),
+        }));
+        *gcx.codegraph.lock().await = None;
+        let code_path = dir.path().join("src").join("main.rs");
+
+        route_index_enqueue(
+            gcx,
+            &[code_path.to_string_lossy().to_string()],
+            false,
+            false,
+        )
+        .await;
+
+        assert_eq!(enqueue_calls.load(Ordering::SeqCst), 0);
     }
 }

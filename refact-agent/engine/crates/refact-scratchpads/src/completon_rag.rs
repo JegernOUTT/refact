@@ -10,8 +10,6 @@ use std::time::Instant;
 use std::vec;
 use tracing::info;
 
-const DEBUG: bool = false;
-
 const TAKE_USAGES_AROUND_CURSOR: usize = 20;
 
 async fn _render_context_files(

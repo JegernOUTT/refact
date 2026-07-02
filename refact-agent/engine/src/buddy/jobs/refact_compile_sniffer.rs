@@ -293,6 +293,18 @@ mod tests {
         assert!(!RefactCompileSnifferJob.should_run(gcx, &ctx).await);
     }
 
+    #[test]
+    fn compile_error_evidence_suppresses_stale_failing_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        let log_path = logs_dir.join("rustbinary.2026-05-15");
+        std::fs::write(&log_path, "error[E0425]: cannot find value").unwrap();
+        mark_old(&log_path);
+
+        assert!(compile_error_evidence(&logs_dir).is_none());
+    }
+
     #[tokio::test]
     async fn refact_compile_sniffer_should_not_rerun_same_fingerprint() {
         let dir = tempfile::tempdir().unwrap();

@@ -36,14 +36,12 @@ struct FunctionMetric<'a> {
     nloc: u32,
     ccn: u32,
     max_nesting: u32,
-    cognitive: u32,
     bumps: u32,
     params: usize,
 }
 
 #[derive(Clone)]
 struct ClassMetric<'a> {
-    node: Node<'a>,
     name: String,
     line: usize,
     total_nloc: u32,
@@ -340,7 +338,7 @@ fn collect_functions<'a>(node: Node<'a>, bytes: &'a [u8], out: &mut Vec<Function
 }
 
 fn function_metric<'a>(node: Node<'a>, bytes: &'a [u8]) -> FunctionMetric<'a> {
-    let (ccn, max_nesting, cognitive, bumps) = walk_complexity(node);
+    let (ccn, max_nesting, bumps) = walk_complexity(node);
     FunctionMetric {
         node,
         name: function_name(node, bytes),
@@ -348,7 +346,6 @@ fn function_metric<'a>(node: Node<'a>, bytes: &'a [u8]) -> FunctionMetric<'a> {
         nloc: lines_of_code(node),
         ccn,
         max_nesting,
-        cognitive,
         bumps,
         params: parameter_count(node),
     }
@@ -407,7 +404,6 @@ fn collect_classes<'a>(
                 .collect();
             let (lcom4, field_count) = compute_lcom4(&methods, bytes);
             ClassMetric {
-                node,
                 name: class_name(node, bytes),
                 line: node.start_position().row + 1,
                 total_nloc: lines_of_code(node),
@@ -530,11 +526,10 @@ fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
         .collect()
 }
 
-fn walk_complexity(node: Node<'_>) -> (u32, u32, u32, u32) {
+fn walk_complexity(node: Node<'_>) -> (u32, u32, u32) {
     let mut ccn = 1;
     let mut max_nesting = 0;
-    let mut cognitive = 0;
-    fn rec(node: Node<'_>, depth: u32, ccn: &mut u32, max_nesting: &mut u32, cognitive: &mut u32) {
+    fn rec(node: Node<'_>, depth: u32, ccn: &mut u32, max_nesting: &mut u32) {
         let mut inc = 0;
         let mut nest = 0;
         if CONTROL_KINDS.contains(&node.kind()) {
@@ -545,15 +540,10 @@ fn walk_complexity(node: Node<'_>) -> (u32, u32, u32, u32) {
         }
         *ccn += inc;
         let new_depth = depth + nest;
-        if nest > 0 {
-            *cognitive += 1 + depth;
-        } else if inc > 0 {
-            *cognitive += 1;
-        }
         *max_nesting = (*max_nesting).max(new_depth);
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            rec(child, new_depth, ccn, max_nesting, cognitive);
+            rec(child, new_depth, ccn, max_nesting);
         }
     }
     let mut bumps = 0;
@@ -562,13 +552,13 @@ fn walk_complexity(node: Node<'_>) -> (u32, u32, u32, u32) {
     for child in body.children(&mut cursor) {
         let before = max_nesting;
         let mut child_peak = 0;
-        rec(child, 0, &mut ccn, &mut child_peak, &mut cognitive);
+        rec(child, 0, &mut ccn, &mut child_peak);
         max_nesting = before.max(child_peak);
         if child_peak >= 2 {
             bumps += 1;
         }
     }
-    (ccn, max_nesting, cognitive, bumps)
+    (ccn, max_nesting, bumps)
 }
 
 fn complex_conditions(node: Node<'_>) -> Vec<(usize, u32, &'static str)> {
@@ -830,6 +820,30 @@ mod tests {
         let src =
             "def check(a, b, c):\n    if a and b or c:\n        return True\n    return False\n";
         let findings = detect_biomarkers("python", src);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.biomarker != "complex_conditional"),
+            "got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn javascript_boolean_condition_counts_operator_tokens_once() {
+        let src = "function check(a, b, c) {\n    if (a && b || c) {\n        return true;\n    }\n    return false;\n}\n";
+        let findings = detect_biomarkers("javascript", src);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.biomarker != "complex_conditional"),
+            "got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn typescript_boolean_condition_counts_operator_tokens_once() {
+        let src = "function check(a: boolean, b: boolean, c: boolean): boolean {\n    if (a && b || c) {\n        return true;\n    }\n    return false;\n}\n";
+        let findings = detect_biomarkers("typescript", src);
         assert!(
             findings
                 .iter()

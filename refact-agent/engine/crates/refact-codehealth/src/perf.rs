@@ -455,4 +455,26 @@ for url in urls:
             "{findings:?}"
         );
     }
+
+    #[test]
+    fn javascript_fetch_is_io() {
+        let src = "async function f(urls) {\n    for (const url of urls) {\n        await fetch(url);\n    }\n}\n";
+        let findings = detect_perf("javascript", src);
+
+        assert!(
+            findings.iter().any(|f| f.biomarker == "io_in_loop"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn typescript_client_get_is_io() {
+        let src = "async function f(client: HttpClient, urls: string[]) {\n    for (const url of urls) {\n        await client.get(url);\n    }\n}\n";
+        let findings = detect_perf("typescript", src);
+
+        assert!(
+            findings.iter().any(|f| f.biomarker == "io_in_loop"),
+            "{findings:?}"
+        );
+    }
 }
