@@ -20,4 +20,5 @@ pub use decisions::{
     classify_evidence, extract_decisions, Decision, DecisionGraph, DecisionSource, DecisionStatus,
     Relation,
 };
-pub use wiki::{generate_entry, is_stale, search_wiki, SummarizerLlm, WikiEntry};
+pub use rag::{search_hybrid, ScoredDoc};
+pub use wiki::{generate_entry, is_stale, SummarizerLlm, WikiEntry};

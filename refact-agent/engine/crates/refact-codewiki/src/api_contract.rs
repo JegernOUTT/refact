@@ -56,8 +56,8 @@ pub fn is_fastapi_router(parsed: &ParsedFile) -> bool {
 
 pub fn is_aspnet_controller(parsed: &ParsedFile) -> bool {
     let bases = ["ControllerBase", "Controller", "ApiController"];
-    let attrs = [
-        "ApiController",
+    let class_attrs = ["ApiController", "Route"];
+    let method_attrs = [
         "Route",
         "HttpGet",
         "HttpPost",
@@ -66,24 +66,48 @@ pub fn is_aspnet_controller(parsed: &ParsedFile) -> bool {
         "HttpPatch",
     ];
 
-    parsed
+    let has_class_signal = parsed
         .symbols
         .iter()
         .filter(|symbol| symbol.kind == "class")
         .any(|symbol| {
             bases.iter().any(|base| symbol.signature.contains(base))
                 || symbol.decorators.iter().any(|decorator| {
-                    let attr = decorator
-                        .trim_start_matches('@')
-                        .trim_start_matches('[')
-                        .split('(')
-                        .next()
-                        .unwrap_or("")
-                        .trim_end_matches(']');
-
-                    attrs.contains(&attr)
+                    csharp_attribute_name(decorator)
+                        .map(|attr| class_attrs.contains(&attr))
+                        .unwrap_or(false)
                 })
-        })
+        });
+
+    has_class_signal
+        || parsed
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind == "method")
+            .any(|symbol| {
+                symbol.decorators.iter().any(|decorator| {
+                    csharp_attribute_name(decorator)
+                        .map(|attr| method_attrs.contains(&attr))
+                        .unwrap_or(false)
+                })
+            })
+}
+
+fn csharp_attribute_name(decorator: &str) -> Option<&str> {
+    let attr = decorator
+        .trim_start_matches('@')
+        .trim_start_matches('[')
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(']')
+        .trim();
+
+    if attr.is_empty() {
+        None
+    } else {
+        Some(attr.rsplit('.').next().unwrap_or(attr))
+    }
 }
 
 pub fn detect_api_contract(parsed: &ParsedFile) -> bool {
@@ -180,6 +204,24 @@ mod tests {
             kind: "class".to_string(),
             signature: "public class Users".to_string(),
             decorators: vec!["[ApiController]".to_string()],
+        });
+
+        assert!(is_aspnet_controller(&parsed));
+        assert!(detect_api_contract(&parsed));
+    }
+
+    #[test]
+    fn api_contract_csharp_method_route_decorator_is_true() {
+        let mut parsed = parsed_file("csharp");
+        parsed.symbols.push(Symbol {
+            kind: "class".to_string(),
+            signature: "public class Users".to_string(),
+            decorators: Vec::new(),
+        });
+        parsed.symbols.push(Symbol {
+            kind: "method".to_string(),
+            signature: "public IActionResult List()".to_string(),
+            decorators: vec!["[HttpGet(\"/users\")]".to_string()],
         });
 
         assert!(is_aspnet_controller(&parsed));

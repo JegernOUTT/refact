@@ -153,8 +153,11 @@ pub fn search_hybrid<'a>(
             .then_with(|| entries[a.0].module.cmp(&entries[b.0].module))
     });
     let bm25_ranking: Vec<usize> = bm25_scores.into_iter().map(|(idx, _)| idx).collect();
+    if bm25_ranking.is_empty() {
+        return vec![];
+    }
 
-    let mut prior_ranking: Vec<usize> = (0..entries.len()).collect();
+    let mut prior_ranking = bm25_ranking.clone();
     prior_ranking.sort_by(|a, b| {
         pagerank_prior(&entries[*b])
             .total_cmp(&pagerank_prior(&entries[*a]))
@@ -198,6 +201,16 @@ mod tests {
         assert_eq!(hits[0].entry.module, "auth");
         assert_eq!(hits[0].method, "hybrid");
         assert!(search_hybrid(&entries, "a an to", 5).is_empty());
+    }
+
+    #[test]
+    fn search_hybrid_returns_empty_when_bm25_has_no_hits() {
+        let entries = vec![
+            entry("render", "draws widgets on screen", 1.0),
+            entry("storage", "persists user preferences", 0.9),
+        ];
+
+        assert!(search_hybrid(&entries, "oauth token refresh", 5).is_empty());
     }
 
     #[test]

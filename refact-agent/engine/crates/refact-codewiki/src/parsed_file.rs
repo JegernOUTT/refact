@@ -77,6 +77,11 @@ fn build_csharp_file(lang: &str, root: Node, text: &str) -> ParsedFile {
                     parsed.symbols.push(symbol);
                 }
             }
+            "method_declaration" => {
+                if let Some(symbol) = csharp_method_symbol(node, text) {
+                    parsed.symbols.push(symbol);
+                }
+            }
             _ => {}
         }
 
@@ -162,10 +167,7 @@ fn python_decorated_symbols(node: Node, text: &str) -> Vec<Symbol> {
 
 fn python_symbol(node: Node, text: &str, decorators: Vec<String>) -> Option<Symbol> {
     let raw = node_text(node, text)?.trim();
-    let signature = raw
-        .find(':')
-        .map(|idx| raw[..=idx].trim().to_string())
-        .unwrap_or_else(|| raw.lines().next().unwrap_or("").trim().to_string());
+    let signature = raw.lines().next().unwrap_or("").trim().to_string();
     let kind = match node.kind() {
         "function_definition" => "function",
         "class_definition" => "class",
@@ -208,6 +210,22 @@ fn csharp_class_symbol(node: Node, text: &str) -> Option<Symbol> {
 
     Some(Symbol {
         kind: "class".to_string(),
+        signature,
+        decorators,
+    })
+}
+
+fn csharp_method_symbol(node: Node, text: &str) -> Option<Symbol> {
+    let raw = node_text(node, text)?.trim();
+    let signature = raw
+        .find('{')
+        .or_else(|| raw.find("=>"))
+        .map(|idx| raw[..idx].trim().to_string())
+        .unwrap_or_else(|| raw.lines().next().unwrap_or("").trim().to_string());
+    let decorators = csharp_attribute_lists(node, text);
+
+    Some(Symbol {
+        kind: "method".to_string(),
         signature,
         decorators,
     })
@@ -275,6 +293,18 @@ mod tests {
     }
 
     #[test]
+    fn parsed_file_python_keeps_typed_function_signature() {
+        let src = "def h(user_id: int) -> str:\n    return str(user_id)\n";
+        let parsed = build_parsed_file("python", src);
+
+        assert!(parsed
+            .symbols
+            .iter()
+            .any(|symbol| symbol.kind == "function"
+                && symbol.signature == "def h(user_id: int) -> str:"));
+    }
+
+    #[test]
     fn parsed_file_csharp_aspnet_detects_api_contract() {
         let src = "[ApiController]\npublic class Foo : ControllerBase {}";
         let parsed = build_parsed_file("csharp", src);
@@ -285,6 +315,20 @@ mod tests {
                 .decorators
                 .iter()
                 .any(|decorator| decorator.contains("ApiController"))));
+        assert!(detect_api_contract(&parsed));
+    }
+
+    #[test]
+    fn parsed_file_csharp_aspnet_detects_method_route_attribute() {
+        let src = "public class Foo {\n    [HttpGet(\"/users\")]\n    public IActionResult List() { return Ok(); }\n}";
+        let parsed = build_parsed_file("csharp", src);
+
+        assert!(parsed.symbols.iter().any(|symbol| symbol.kind == "method"
+            && symbol.signature.contains("IActionResult List")
+            && symbol
+                .decorators
+                .iter()
+                .any(|decorator| decorator.contains("HttpGet"))));
         assert!(detect_api_contract(&parsed));
     }
 }

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::gate::{verify_quote_default, Verdict};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecisionStatus {
     Verified,
@@ -56,26 +58,11 @@ fn split_sentences(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Evidence gate: Verified if the evidence appears verbatim in the source text;
-/// Fuzzy if every whitespace token of the evidence appears (in any order);
-/// Unverified otherwise.
 pub fn classify_evidence(evidence: &str, source_text: &str) -> DecisionStatus {
-    let ev = evidence.trim();
-    if ev.is_empty() {
-        return DecisionStatus::Unverified;
-    }
-    let hay = source_text.to_lowercase();
-    let needle = ev.to_lowercase();
-    if hay.contains(&needle) {
-        return DecisionStatus::Verified;
-    }
-    let all_tokens_present = needle
-        .split_whitespace()
-        .all(|tok| hay.split(|c: char| !c.is_alphanumeric()).any(|w| w == tok));
-    if all_tokens_present {
-        DecisionStatus::Fuzzy
-    } else {
-        DecisionStatus::Unverified
+    match verify_quote_default(evidence, source_text) {
+        Verdict::Exact => DecisionStatus::Verified,
+        Verdict::Fuzzy => DecisionStatus::Fuzzy,
+        Verdict::Unverified => DecisionStatus::Unverified,
     }
 }
 

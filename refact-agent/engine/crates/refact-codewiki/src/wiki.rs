@@ -48,6 +48,7 @@ fn tokenize(s: &str) -> HashSet<String> {
 }
 
 /// Keyword-overlap RAG retrieval over wiki entries (module name + summary).
+#[deprecated(since = "0.1.0", note = "use rag::search_hybrid")]
 pub fn search_wiki<'a>(entries: &'a [WikiEntry], query: &str, top_n: usize) -> Vec<&'a WikiEntry> {
     let q = tokenize(query);
     if q.is_empty() {
@@ -90,6 +91,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn wiki_search_ranks_by_keyword_overlap() {
         let entries = vec![
             WikiEntry {
@@ -111,6 +113,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn wiki_search_empty_query_is_safe() {
         let entries: Vec<WikiEntry> = vec![];
         assert!(search_wiki(&entries, "anything", 5).is_empty());
