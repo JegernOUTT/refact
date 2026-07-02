@@ -4036,12 +4036,14 @@ dependencies = [
 name = "refact-codegraph"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "petgraph",
  "refact-codegraph-parsers",
  "refact-core",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",

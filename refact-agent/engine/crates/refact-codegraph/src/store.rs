@@ -6,6 +6,7 @@ use std::path::Path;
 use refact_codegraph_parsers::Resolver;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use crate::extract::{edge_kind_str, extract_symbols};
@@ -57,12 +58,11 @@ fn qualify(path: &str, in_file_path: &str) -> String {
 }
 
 fn content_hash(text: &str, lang: &str) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in lang.bytes().chain([0xff]).chain(text.bytes()) {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
+    let mut hasher = Sha256::new();
+    hasher.update(lang.as_bytes());
+    hasher.update([0xff]);
+    hasher.update(text.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 fn reference_last_segment(name: &str) -> &str {
@@ -1153,6 +1153,17 @@ mod tests {
             .unwrap()
     }
 
+    fn node_count(store: &Store, path: &str, name: &str) -> i64 {
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE path = ?1 AND name = ?2",
+                params![path, name],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
     #[test]
     fn open_recreates_old_schema_db_cleanly() {
         let dir = tempfile::tempdir().unwrap();
@@ -1273,25 +1284,39 @@ fn helper() {}
             .index_file_graph("src/m.rs", "fn a() {}\n", "rust")
             .unwrap();
         let first_hash = store.stored_file_hash("src/m.rs").unwrap().unwrap();
-        let first = store.counts().unwrap();
+        assert_eq!(first_hash.len(), 64);
+        assert_eq!(node_count(&store, "src/m.rs", "a"), 1);
 
         store
-            .index_file_graph("src/m.rs", "fn a() {}\nfn b() {}\n", "rust")
+            .index_file_graph("src/m.rs", "fn b() {}\n", "rust")
             .unwrap();
         let second_hash = store.stored_file_hash("src/m.rs").unwrap().unwrap();
-        let second = store.counts().unwrap();
 
         assert_ne!(first_hash, second_hash);
-        assert!(second.nodes > first.nodes);
-        let b_nodes: i64 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM nodes WHERE path = 'src/m.rs' AND name = 'b'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(b_nodes, 1);
+        assert_eq!(node_count(&store, "src/m.rs", "a"), 0);
+        assert_eq!(node_count(&store, "src/m.rs", "b"), 1);
+    }
+
+    #[test]
+    fn remove_path_clears_hash_and_readd_same_content_reindexes() {
+        let store = Store::open_in_memory().unwrap();
+        let path = "src/m.rs";
+        let src = "fn a() {}\n";
+        store.index_file_graph(path, src, "rust").unwrap();
+        let first_hash = store.stored_file_hash(path).unwrap().unwrap();
+        assert_eq!(node_count(&store, path, "a"), 1);
+
+        store.remove_path(path).unwrap();
+
+        assert!(store.stored_file_hash(path).unwrap().is_none());
+        assert_eq!(node_count(&store, path, "a"), 0);
+        assert_eq!(store.counts().unwrap().files, 0);
+
+        store.index_file_graph(path, src, "rust").unwrap();
+        let second_hash = store.stored_file_hash(path).unwrap().unwrap();
+
+        assert_eq!(first_hash, second_hash);
+        assert_eq!(node_count(&store, path, "a"), 1);
     }
 
     #[test]
