@@ -927,50 +927,6 @@ impl ChatSession {
         }
     }
 
-    pub fn snapshot_with_agents(
-        app: AppState,
-        session: &ChatSession,
-    ) -> impl std::future::Future<Output = (ChatEvent, Vec<BackgroundAgentSummary>)> + Send + 'static
-    {
-        let chat_id = session.chat_id.clone();
-        let base_background_agents: HashMap<String, BackgroundAgentSummary> =
-            session.background_agents.clone();
-        let mut snapshot = session.snapshot();
-        async move {
-            let browser = crate::integrations::browser_runtime::browser_snapshot_for_chat(
-                app.clone(),
-                &chat_id,
-            )
-            .await;
-            let mut background_agents = base_background_agents;
-            let agents = app
-                .agents
-                .list_for_parent(&chat_id, AgentListFilter::default())
-                .await;
-            for agent in agents.iter().map(BackgroundAgentSummary::from) {
-                if should_replace_background_agent(background_agents.get(&agent.agent_id), &agent) {
-                    background_agents.insert(agent.agent_id.clone(), agent);
-                }
-            }
-            let mut background_agents: Vec<_> = background_agents.into_values().collect();
-            background_agents.sort_by(|a, b| {
-                b.change_seq
-                    .cmp(&a.change_seq)
-                    .then(a.agent_id.cmp(&b.agent_id))
-            });
-            if let ChatEvent::Snapshot {
-                background_agents: snapshot_background_agents,
-                browser: snapshot_browser,
-                ..
-            } = &mut snapshot
-            {
-                *snapshot_background_agents = background_agents.clone();
-                *snapshot_browser = browser;
-            }
-            (snapshot, background_agents)
-        }
-    }
-
     pub fn is_duplicate_request(&mut self, request_id: &str) -> bool {
         if self.recent_request_ids_set.contains(request_id) {
             return true;
@@ -2100,6 +2056,50 @@ impl ChatSession {
             accepted_ids,
             denied_ids,
         }
+    }
+}
+
+pub fn snapshot_with_agents(
+    app: AppState,
+    session: &ChatSession,
+) -> impl std::future::Future<Output = (ChatEvent, Vec<BackgroundAgentSummary>)> + Send + 'static
+{
+    let chat_id = session.chat_id.clone();
+    let base_background_agents: HashMap<String, BackgroundAgentSummary> =
+        session.background_agents.clone();
+    let mut snapshot = session.snapshot();
+    async move {
+        let browser = crate::integrations::browser_runtime::browser_snapshot_for_chat(
+            app.clone(),
+            &chat_id,
+        )
+        .await;
+        let mut background_agents = base_background_agents;
+        let agents = app
+            .agents
+            .list_for_parent(&chat_id, AgentListFilter::default())
+            .await;
+        for agent in agents.iter().map(BackgroundAgentSummary::from) {
+            if should_replace_background_agent(background_agents.get(&agent.agent_id), &agent) {
+                background_agents.insert(agent.agent_id.clone(), agent);
+            }
+        }
+        let mut background_agents: Vec<_> = background_agents.into_values().collect();
+        background_agents.sort_by(|a, b| {
+            b.change_seq
+                .cmp(&a.change_seq)
+                .then(a.agent_id.cmp(&b.agent_id))
+        });
+        if let ChatEvent::Snapshot {
+            background_agents: snapshot_background_agents,
+            browser: snapshot_browser,
+            ..
+        } = &mut snapshot
+        {
+            *snapshot_background_agents = background_agents.clone();
+            *snapshot_browser = browser;
+        }
+        (snapshot, background_agents)
     }
 }
 
