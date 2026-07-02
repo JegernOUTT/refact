@@ -13,6 +13,7 @@ describe("configSlice", () => {
     expect(state.features?.statistics).toBe(true);
     expect(state.features?.vecdb).toBe(true);
     expect(state.features?.ast).toBe(true);
+    expect(state.features?.codegraph).toBe(true);
   });
 
   it("updates plugin backend readiness fields by property presence", () => {

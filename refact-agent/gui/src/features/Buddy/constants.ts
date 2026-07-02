@@ -370,6 +370,18 @@ export const SIGNALS: Record<string, SignalDef> = {
     duration: 0,
     animVariant: "building",
   },
+  codegraph_indexing: {
+    mood: "focused",
+    animationType: "work",
+    xp: 4,
+    icon: "🕸️",
+    isError: false,
+    isWin: false,
+    scene: "working",
+    category: "active",
+    duration: 0,
+    animVariant: "sorting",
+  },
   ast_parsing: {
     mood: "focused",
     animationType: "work",

@@ -48,7 +48,7 @@ export const GeneralSettingsSection: React.FC = () => {
         : null;
 
   const featureEntries = Object.entries(features ?? {});
-  const lockedFeatures = new Set(["ast", "vecdb"]);
+  const lockedFeatures = new Set(["ast", "vecdb", "codegraph"]);
 
   return (
     <SettingsSection

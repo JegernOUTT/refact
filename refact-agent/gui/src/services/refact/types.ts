@@ -1459,6 +1459,62 @@ export type VecDbStatus = {
   vecdb_errors: Record<string, number>;
 };
 
+export type CodeGraphState = "turned_off" | "indexing" | "working" | "error";
+
+export type CodeGraphCounts = {
+  nodes: number;
+  edges: number;
+  files: number;
+  fts_docs: number;
+};
+
+export type CodeGraphStatus = {
+  counts: CodeGraphCounts;
+  queued: number;
+  state: CodeGraphState;
+  error: string;
+};
+
+export type RagStatus = {
+  ast: Record<string, unknown> | null;
+  ast_alive: string;
+  vecdb: VecDbStatus | null;
+  vecdb_alive: string;
+  vec_db_error: string;
+  codegraph: CodeGraphStatus | null;
+  codegraph_alive: string;
+  codegraph_error: string;
+};
+
+export function isCodeGraphState(value: unknown): value is CodeGraphState {
+  return (
+    value === "turned_off" ||
+    value === "indexing" ||
+    value === "working" ||
+    value === "error"
+  );
+}
+
+export function isCodeGraphCounts(value: unknown): value is CodeGraphCounts {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.nodes === "number" &&
+    typeof value.edges === "number" &&
+    typeof value.files === "number" &&
+    typeof value.fts_docs === "number"
+  );
+}
+
+export function isCodeGraphStatus(value: unknown): value is CodeGraphStatus {
+  if (!isRecord(value)) return false;
+  return (
+    isCodeGraphCounts(value.counts) &&
+    typeof value.queued === "number" &&
+    isCodeGraphState(value.state) &&
+    typeof value.error === "string"
+  );
+}
+
 export function isVecDbStatus(obj: unknown): obj is VecDbStatus {
   if (!obj) return false;
   if (typeof obj !== "object") return false;
@@ -1507,6 +1563,20 @@ export function isVecDbStatus(obj: unknown): obj is VecDbStatus {
   }
 
   return true;
+}
+
+export function isRagStatus(value: unknown): value is RagStatus {
+  if (!isRecord(value)) return false;
+  return (
+    (value.ast === null || isRecord(value.ast)) &&
+    typeof value.ast_alive === "string" &&
+    (value.vecdb === null || isVecDbStatus(value.vecdb)) &&
+    typeof value.vecdb_alive === "string" &&
+    typeof value.vec_db_error === "string" &&
+    (value.codegraph === null || isCodeGraphStatus(value.codegraph)) &&
+    typeof value.codegraph_alive === "string" &&
+    typeof value.codegraph_error === "string"
+  );
 }
 export function isMCPArgumentsArray(json: unknown): json is MCPArgs {
   if (!json) return false;

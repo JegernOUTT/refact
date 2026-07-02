@@ -100,7 +100,9 @@ export const FeatureMenu: React.FC = () => {
               <div className={`${styles.featureList} rf-stagger`}>
                 {keysAndValues.map(([feature, value]) => {
                   const setInSettings =
-                    feature === "ast" || feature === "vecdb";
+                    feature === "ast" ||
+                    feature === "vecdb" ||
+                    feature === "codegraph";
                   return (
                     <div
                       className={`${styles.featureRow} rf-enter`}

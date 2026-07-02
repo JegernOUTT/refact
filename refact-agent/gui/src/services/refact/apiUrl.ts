@@ -31,6 +31,7 @@ const ENGINE_V1_ENDPOINT_SEGMENTS = new Set([
   "chats",
   "checkpoints-preview",
   "checkpoints-restore",
+  "codegraph-status",
   "code-completion",
   "code-lens",
   "customization",

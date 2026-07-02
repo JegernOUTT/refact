@@ -22,6 +22,7 @@ import {
   integrationsApi,
   knowledgeApi,
   knowledgeGraphApi,
+  ragStatusApi,
   providersApi,
   modelsApi,
   trajectoriesApi,
@@ -61,6 +62,7 @@ import { checkpointsSlice } from "../features/Checkpoints/checkpointsSlice";
 import { checkpointsApi } from "../services/refact/checkpoints";
 import { patchesAndDiffsTrackerSlice } from "../features/PatchesAndDiffsTracker/patchesAndDiffsTrackerSlice";
 import { tasksSlice } from "../features/Tasks";
+import { knowledgeSlice } from "../features/Knowledge/knowledgeSlice";
 import { connectionSlice } from "../features/Connection";
 import { browserSlice } from "../features/Browser";
 import { skillsStatusApi } from "../services/refact/skillsStatus";
@@ -110,6 +112,7 @@ const rootReducer = combineSlices(
     [checkpointsApi.reducerPath]: checkpointsApi.reducer,
     [knowledgeApi.reducerPath]: knowledgeApi.reducer,
     [knowledgeGraphApi.reducerPath]: knowledgeGraphApi.reducer,
+    [ragStatusApi.reducerPath]: ragStatusApi.reducer,
     [providersApi.reducerPath]: providersApi.reducer,
     [modelsApi.reducerPath]: modelsApi.reducer,
     [trajectoriesApi.reducerPath]: trajectoriesApi.reducer,
@@ -144,6 +147,7 @@ const rootReducer = combineSlices(
   checkpointsSlice,
   patchesAndDiffsTrackerSlice,
   tasksSlice,
+  knowledgeSlice,
   connectionSlice,
   browserSlice,
   notificationsSlice,
@@ -235,6 +239,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           checkpointsApi.middleware,
           knowledgeApi.middleware,
           knowledgeGraphApi.middleware,
+          ragStatusApi.middleware,
           providersApi.middleware,
           modelsApi.middleware,
           trajectoriesApi.middleware,

@@ -3,6 +3,13 @@
   padding: 0;
 }
 
+.ragStatuses {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: var(--rf-space-1);
+}
+
 .iconConnected {
   color: var(--rf-color-success);
 }
@@ -82,6 +89,51 @@
 
 .statusButton:disabled:hover {
   background: transparent;
+}
+
+.miniStatusButton {
+  display: flex;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--rf-radius-ctl);
+  cursor: pointer;
+}
+
+.miniStatusButton:disabled {
+  cursor: default;
+}
+
+.miniStatusButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(var(--rf-hairline) * -2);
+}
+
+.miniStatusButton:hover:not(:disabled),
+.miniStatusButton:focus-visible {
+  background: var(--rf-surface-1);
+}
+
+.iconIdle {
+  color: var(--rf-color-muted);
+}
+
+.miniStatus-success:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--rf-color-success) 16%, transparent);
+}
+
+.miniStatus-working:hover:not(:disabled),
+.miniStatus-warning:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--rf-color-warning) 16%, transparent);
+}
+
+.miniStatus-error:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--rf-color-danger) 16%, transparent);
 }
 
 @media (prefers-reduced-motion: reduce) {

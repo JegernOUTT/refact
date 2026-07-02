@@ -42,6 +42,12 @@ describe("sanitizeEngineBaseUrl", () => {
     );
   });
 
+  test("strips stale v1 codegraph status path back to the engine base", () => {
+    expect(
+      sanitizeEngineBaseUrl("https://example.com/proxy/v1/codegraph-status"),
+    ).toBe("https://example.com/proxy");
+  });
+
   test("rejects unsupported browser schemes and invalid non-empty values", () => {
     expect(sanitizeEngineBaseUrl("http2://127.0.0.1:8001")).toBeNull();
     expect(sanitizeEngineBaseUrl("ws://127.0.0.1:8001")).toBeNull();

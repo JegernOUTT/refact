@@ -156,6 +156,7 @@ export type SignalType =
   | "knowledge_update"
   | "indexing"
   | "vecdb_building"
+  | "codegraph_indexing"
   | "ast_parsing"
   | "compression"
   | "task_created"

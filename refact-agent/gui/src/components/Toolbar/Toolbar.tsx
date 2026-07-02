@@ -33,7 +33,7 @@ import {
   type EngineApiConfig,
 } from "../../services/refact/apiUrl";
 import { IconButton, Tooltip } from "../ui";
-import { ConnectionStatusIndicator } from "../ConnectionStatus";
+import { ConnectionStatusIndicator, RagStatusIndicators } from "../ConnectionStatus";
 import styles from "./Toolbar.module.css";
 
 export type DashboardTab = {
@@ -290,6 +290,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         className={classNames(styles.toolbarSection, styles.connectionSection)}
       >
         <ConnectionStatusIndicator />
+        <RagStatusIndicators />
         <a
           className={styles.engineUrl}
           href={engineUrl}
