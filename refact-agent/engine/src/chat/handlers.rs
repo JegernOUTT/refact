@@ -14,7 +14,7 @@ use super::queue::{
     add_mode_switch_event_and_plan_if_changed, resolve_worktree_setparams_update,
     worktree_activation_message, worktree_disabled_message,
 };
-use super::session::get_or_create_session_with_trajectory;
+use super::session::{get_or_create_session_with_trajectory, snapshot_with_agents};
 use super::content::{validate_content_with_attachments, validate_context_files};
 use super::queue::process_command_queue;
 use super::trajectory_ops::sanitize_messages_for_model_switch;
@@ -57,7 +57,7 @@ pub async fn handle_v1_chat_subscribe(
     let session = session_arc.lock().await;
     let mut rx = session.subscribe();
     let initial_seq = session.event_seq;
-    let snapshot = ChatSession::snapshot_with_agents(app.clone(), &session);
+    let snapshot = snapshot_with_agents(app.clone(), &session);
     drop(session);
     let (snapshot, background_agents) = snapshot.await;
     {
@@ -113,7 +113,7 @@ pub async fn handle_v1_chat_subscribe(
                             // emitted between snapshot and the new receiver start.
                             rx = session.subscribe();
                             let recovery_seq = session.event_seq;
-                            let recovery_snapshot = ChatSession::snapshot_with_agents(app.clone(), &session);
+                            let recovery_snapshot = snapshot_with_agents(app.clone(), &session);
                             drop(session);
                             let (recovery_snapshot, background_agents) = recovery_snapshot.await;
                             {

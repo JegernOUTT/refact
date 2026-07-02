@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::chat::snapshot_with_agents;
     use serde_json::json;
     use crate::agents::types::{AgentCompletion, BgAgentKind, BgAgentStatus, CreateAgentRequest};
     use crate::app_state::AppState;
@@ -274,8 +275,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (snap, snapshot_background_agents) =
-            ChatSession::snapshot_with_agents(app, &session).await;
+        let (snap, snapshot_background_agents) = snapshot_with_agents(app, &session).await;
         assert_eq!(snapshot_background_agents.len(), 4);
 
         match snap {
