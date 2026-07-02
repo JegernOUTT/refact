@@ -15,12 +15,25 @@ pub use frameworks::{FrameworkDetector, FrameworkRegistry};
 pub use ir::{Edge, EdgeKind, LangExtractor, RawRef, SymbolKind, SymbolNode};
 pub use resolver::{Resolution, ResolutionTier, Resolver};
 
+pub fn normalize_lang(lang: &str) -> &str {
+    match lang {
+        "py" => "python",
+        "jsx" => "javascript",
+        "tsx" => "typescript",
+        "cs" => "csharp",
+        "rb" => "ruby",
+        "c++" | "cc" | "cxx" => "cpp",
+        _ => lang,
+    }
+}
+
 pub fn parse_tree(lang: &str, text: &str) -> Option<tree_sitter::Tree> {
+    let lang = normalize_lang(lang);
     match lang {
         "rust" => RustExtractor::parse(text),
         "python" => PythonExtractor::parse(text),
-        "javascript" | "jsx" => JavaScriptExtractor::parse(text),
-        "typescript" | "tsx" => TypeScriptExtractor::parse(text),
+        "javascript" => JavaScriptExtractor::parse(text),
+        "typescript" => TypeScriptExtractor::parse(text),
         "java" => JavaExtractor::parse(text),
         "kotlin" => KotlinExtractor::parse(text),
         "c" => CExtractor::parse(text),

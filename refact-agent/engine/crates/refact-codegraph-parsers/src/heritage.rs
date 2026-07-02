@@ -18,6 +18,7 @@ pub struct HeritageRel {
 }
 
 pub fn extract_heritage(lang: &str, text: &str) -> Vec<HeritageRel> {
+    let lang = crate::normalize_lang(lang);
     let Some(_tree) = crate::parse_tree(lang, text) else {
         return Vec::new();
     };
@@ -26,11 +27,11 @@ pub fn extract_heritage(lang: &str, text: &str) -> Vec<HeritageRel> {
         "rust" => extract_rust(text),
         "java" => extract_java_like(text, false),
         "kotlin" => extract_kotlin(text),
-        "csharp" | "cs" => extract_csharp(text),
-        "python" | "py" => extract_python(text),
-        "ruby" | "rb" => extract_ruby(text),
-        "c" | "cpp" | "c++" | "cc" | "cxx" => extract_cpp(text),
-        "typescript" | "tsx" | "javascript" | "jsx" => extract_ts(text),
+        "csharp" => extract_csharp(text),
+        "python" => extract_python(text),
+        "ruby" => extract_ruby(text),
+        "c" | "cpp" => extract_cpp(text),
+        "typescript" | "javascript" => extract_ts(text),
         "go" => extract_go(text),
         "php" => extract_php(text),
         "swift" => extract_swift(text),
@@ -145,18 +146,43 @@ fn split_bases(text: &str) -> impl Iterator<Item = &str> {
         .map(str::trim)
 }
 
+fn parse_derive_attr(text: &str) -> Vec<String> {
+    let Some(start) = text.find('(') else {
+        return Vec::new();
+    };
+    let Some(end) = text.rfind(')') else {
+        return Vec::new();
+    };
+    split_bases(&text[start + 1..end]).map(clean_name).collect()
+}
+
 fn extract_rust(text: &str) -> Vec<HeritageRel> {
     let mut out = Vec::new();
     let mut pending_derives = Vec::new();
+    let mut derive_attr = String::new();
 
     for raw in text.lines() {
         let line = raw.trim();
-        if line.starts_with("#[derive") {
-            if let Some(start) = line.find('(') {
-                if let Some(end) = line.rfind(')') {
-                    pending_derives.extend(split_bases(&line[start + 1..end]).map(clean_name));
-                }
+        if !derive_attr.is_empty() {
+            derive_attr.push(' ');
+            derive_attr.push_str(line);
+            if line.contains(')') {
+                pending_derives.extend(parse_derive_attr(&derive_attr));
+                derive_attr.clear();
             }
+            continue;
+        }
+
+        if line.starts_with("#[derive") {
+            if line.contains(')') {
+                pending_derives.extend(parse_derive_attr(line));
+            } else {
+                derive_attr.push_str(line);
+            }
+            continue;
+        }
+
+        if line.starts_with("#[") {
             continue;
         }
 
@@ -345,22 +371,31 @@ fn extract_cpp(text: &str) -> Vec<HeritageRel> {
 }
 
 fn extract_ts(text: &str) -> Vec<HeritageRel> {
-    let mut out = extract_java_like(text, true);
-    for line in text.lines().map(str::trim) {
-        if let Some(name) = take_ident_after(line, "interface") {
-            if let Some(ext) = clause_after(line, " extends ") {
-                for base in split_bases(until_any(ext, &["{"])) {
-                    push(&mut out, name.clone(), base, HeritageKind::Implements);
-                }
-            }
-        }
-    }
-    out
+    extract_java_like(text, false)
 }
 
 fn extract_go(text: &str) -> Vec<HeritageRel> {
     let mut out = Vec::new();
+    let mut current: Option<(String, String)> = None;
+
     for line in text.lines().map(str::trim) {
+        if let Some((name, body)) = current.as_mut() {
+            if let Some((before_close, _)) = line.split_once('}') {
+                body.push('\n');
+                body.push_str(before_close);
+                for base in body.lines().flat_map(split_bases) {
+                    if !base.contains('(') {
+                        push(&mut out, name.clone(), base, HeritageKind::Implements);
+                    }
+                }
+                current = None;
+            } else {
+                body.push('\n');
+                body.push_str(line);
+            }
+            continue;
+        }
+
         if line.starts_with("type ") && line.contains(" interface") {
             if let Some(name) = take_ident_after(line, "type") {
                 if let Some(body) = line
@@ -372,6 +407,8 @@ fn extract_go(text: &str) -> Vec<HeritageRel> {
                             push(&mut out, name.clone(), base, HeritageKind::Implements);
                         }
                     }
+                } else if let Some((_, body_start)) = line.split_once('{') {
+                    current = Some((name, body_start.to_string()));
                 }
             }
         }
@@ -448,6 +485,14 @@ mod tests {
     }
 
     #[test]
+    fn extracts_rust_multiline_derives_across_attributes() {
+        let src = "#[derive(\nClone,\nDebug,\n)]\n#[repr(C)]\nstruct S;";
+        let rels = extract_heritage("rust", src);
+        assert!(has(&rels, "S", "Clone", HeritageKind::Derive));
+        assert!(has(&rels, "S", "Debug", HeritageKind::Derive));
+    }
+
+    #[test]
     fn extracts_java_heritage() {
         let rels = extract_heritage(
             "java",
@@ -477,5 +522,61 @@ mod tests {
         let rels = extract_heritage("typescript", "class C extends A implements I {}");
         assert!(has(&rels, "C", "A", HeritageKind::Extends));
         assert!(has(&rels, "C", "I", HeritageKind::Implements));
+    }
+
+    #[test]
+    fn accepted_aliases_extract_heritage() {
+        let cases = [
+            (
+                "py",
+                "class C(A):\n    pass\n",
+                "C",
+                "A",
+                HeritageKind::Extends,
+            ),
+            ("cs", "class C : A {}", "C", "A", HeritageKind::Extends),
+            ("rb", "class C < A\nend", "C", "A", HeritageKind::Extends),
+            (
+                "c++",
+                "class C : public A {};",
+                "C",
+                "A",
+                HeritageKind::Extends,
+            ),
+            (
+                "cc",
+                "class C : public A {};",
+                "C",
+                "A",
+                HeritageKind::Extends,
+            ),
+            (
+                "cxx",
+                "class C : public A {};",
+                "C",
+                "A",
+                HeritageKind::Extends,
+            ),
+        ];
+
+        for (lang, src, subtype, base, kind) in cases {
+            let rels = extract_heritage(lang, src);
+            assert!(has(&rels, subtype, base, kind), "{lang} got {rels:?}");
+        }
+    }
+
+    #[test]
+    fn typescript_interface_extends_is_extends() {
+        let rels = extract_heritage("typescript", "interface Child extends Parent {}");
+        assert!(has(&rels, "Child", "Parent", HeritageKind::Extends));
+    }
+
+    #[test]
+    fn extracts_go_multiline_interface_embedding() {
+        let rels = extract_heritage(
+            "go",
+            "type Reader interface {\n    io.Reader\n    Close() error\n}\n",
+        );
+        assert!(has(&rels, "Reader", "Reader", HeritageKind::Implements));
     }
 }

@@ -45,7 +45,8 @@ pub fn resolve_ts_import(spec: &str, mappings: &PathMappings) -> Option<String> 
 
     for (pattern, target) in &mappings.paths {
         if let Some(captured) = match_ts_pattern(spec, pattern) {
-            return Some(apply_ts_target(target, captured));
+            let mapped = apply_ts_target(target, captured);
+            return Some(apply_ts_base_url(&mappings.base_url, &mapped));
         }
     }
 
@@ -384,6 +385,15 @@ fn apply_ts_target(target: &str, captured: Option<&str>) -> String {
     }
 }
 
+fn apply_ts_base_url(base_url: &str, target: &str) -> String {
+    let target = target.strip_prefix("./").unwrap_or(target);
+    if base_url.is_empty() || target.starts_with('/') {
+        target.to_string()
+    } else {
+        join_path(base_url, target)
+    }
+}
+
 fn join_path(base: &str, tail: &str) -> String {
     if base.is_empty() {
         tail.trim_start_matches('/').to_string()
@@ -468,6 +478,21 @@ mod tests {
         );
         assert_eq!(mappings.base_url, "src");
         assert_eq!(mappings.paths.len(), 2);
+        assert_eq!(
+            resolve_ts_import("@app/user/service", &mappings).as_deref(),
+            Some("src/app/user/service")
+        );
+        assert_eq!(
+            resolve_ts_import("@lib", &mappings).as_deref(),
+            Some("src/lib/index.ts")
+        );
+    }
+
+    #[test]
+    fn resolves_ts_paths_without_base_url() {
+        let mappings = parse_tsconfig(
+            r#"{"compilerOptions":{"paths":{"@app/*":["app/*"],"@lib":["lib/index.ts"]}}}"#,
+        );
         assert_eq!(
             resolve_ts_import("@app/user/service", &mappings).as_deref(),
             Some("app/user/service")

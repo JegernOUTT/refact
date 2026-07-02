@@ -60,7 +60,9 @@ fn class_heritage(node: Node, bytes: &[u8]) -> Vec<String> {
                 let mut hc = child.walk();
                 for h in child.named_children(&mut hc) {
                     match h.kind() {
-                        "extends_clause" => extract_type_names(h, bytes, &mut out),
+                        "extends_clause" | "implements_clause" => {
+                            extract_type_names(h, bytes, &mut out)
+                        }
                         "identifier" | "member_expression" => {
                             out.push(node_text(h, bytes).to_string())
                         }
@@ -68,7 +70,7 @@ fn class_heritage(node: Node, bytes: &[u8]) -> Vec<String> {
                     }
                 }
             }
-            "extends_clause" => extract_type_names(child, bytes, &mut out),
+            "extends_clause" | "implements_clause" => extract_type_names(child, bytes, &mut out),
             _ => {}
         }
     }

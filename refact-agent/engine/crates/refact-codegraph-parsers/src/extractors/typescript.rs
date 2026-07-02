@@ -78,6 +78,8 @@ function compute(): number {
         assert!(paths.contains(&"compute".to_string()));
         let id = symbols.iter().find(|s| s.name() == "Id").unwrap();
         assert_eq!(id.kind, SymbolKind::TypeAlias);
+        let circle = symbols.iter().find(|s| s.name() == "Circle").unwrap();
+        assert_eq!(circle.this_class_derived_from, vec!["Shape".to_string()]);
         assert!(refs
             .iter()
             .any(|r| r.name == "compute" && r.from == "Circle::area"));
