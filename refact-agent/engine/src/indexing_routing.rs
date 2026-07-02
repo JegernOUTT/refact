@@ -31,6 +31,7 @@ pub async fn route_index_enqueue(
     gcx: Arc<GlobalContext>,
     paths: &[String],
     process_immediately: bool,
+    vecdb_only: bool,
 ) {
     if paths.is_empty() {
         return;
@@ -46,6 +47,10 @@ pub async fn route_index_enqueue(
             db.vectorizer_enqueue_files(&memory_paths, process_immediately, roots.clone())
                 .await;
         }
+    }
+
+    if vecdb_only {
+        return;
     }
 
     if !code_paths.is_empty() {

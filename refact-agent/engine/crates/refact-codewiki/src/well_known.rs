@@ -1,64 +1,15 @@
-pub const CATEGORY_CODE: &str = "code";
-pub const CATEGORY_CONFIG: &str = "config";
-pub const CATEGORY_DOC: &str = "doc";
-pub const CATEGORY_DATA: &str = "data";
-pub const CATEGORY_PIPELINE: &str = "pipeline";
+pub use refact_core::path_classifier::{
+    CATEGORY_CODE, CATEGORY_CONFIG, CATEGORY_DATA, CATEGORY_DOC, CATEGORY_PIPELINE,
+};
 
-const DOC_SUFFIXES: &[&str] = &[".md", ".mdx", ".rst", ".txt", ".adoc"];
-const CONFIG_LANGUAGES: &[&str] = &["yaml", "toml", "json", "ini", "properties", "hcl"];
-const DATA_DIR_TOKENS: &[&str] = &[
-    "migrations",
-    "versions",
-    "models",
-    "schema",
-    "schemas",
-    "entities",
-];
-const DATA_SUFFIXES: &[&str] = &[".sql", ".prisma", ".graphql", ".proto"];
-const PIPELINE_PATH_HINTS: &[&str] = &[
-    ".github/workflows/",
-    ".gitlab-ci",
-    "jenkinsfile",
-    "azure-pipelines",
-    ".circleci/",
-    "/pipelines/",
-    "/etl/",
-];
+use refact_core::path_classifier;
 
 pub fn file_category(path: &str, language: &str, is_config: bool) -> &'static str {
-    let suffix = suffix(path);
-
-    if DOC_SUFFIXES.contains(&suffix.as_str()) {
-        return CATEGORY_DOC;
-    }
-
-    let lower_path = path.replace('\\', "/").to_lowercase();
-    if PIPELINE_PATH_HINTS
-        .iter()
-        .any(|hint| lower_path.contains(hint))
-    {
-        return CATEGORY_PIPELINE;
-    }
-
-    let parent_segments = parent_segments(path);
-    if DATA_SUFFIXES.contains(&suffix.as_str())
-        || parent_segments
-            .iter()
-            .any(|segment| DATA_DIR_TOKENS.contains(&segment.as_str()))
-    {
-        return CATEGORY_DATA;
-    }
-
-    let lower_language = language.to_lowercase();
-    if is_config || CONFIG_LANGUAGES.contains(&lower_language.as_str()) {
-        return CATEGORY_CONFIG;
-    }
-
-    CATEGORY_CODE
+    path_classifier::file_category(path, language, is_config)
 }
 
 pub fn well_known_role(path: &str) -> Option<&'static str> {
-    let name = basename(path).to_lowercase();
+    let name = path_classifier::basename(path).to_lowercase();
 
     if let Some(role) = role_by_name(&name) {
         return Some(role);
@@ -68,7 +19,7 @@ pub fn well_known_role(path: &str) -> Option<&'static str> {
         return Some("Resolved dependency lockfile pinning exact versions.");
     }
 
-    let parent_segments = parent_segments(path);
+    let parent_segments = path_classifier::parent_segments_lowercase(path);
     if parent_segments
         .windows(2)
         .any(|segments| segments == [".github", "workflows"])
@@ -77,24 +28,6 @@ pub fn well_known_role(path: &str) -> Option<&'static str> {
     }
 
     None
-}
-
-fn suffix(path: &str) -> String {
-    let name = basename(path);
-    match name.rfind('.') {
-        Some(index) if index < name.len() - 1 => name[index..].to_lowercase(),
-        _ => String::new(),
-    }
-}
-
-fn basename(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or("")
-}
-
-fn parent_segments(path: &str) -> Vec<String> {
-    let mut parts: Vec<&str> = path.split(['/', '\\']).collect();
-    parts.pop();
-    parts.into_iter().map(|part| part.to_lowercase()).collect()
 }
 
 fn role_by_name(name: &str) -> Option<&'static str> {
@@ -211,6 +144,14 @@ mod tests {
     fn finds_github_workflow_role_by_parent_segments() {
         assert_eq!(
             well_known_role(".github/workflows/ci.yml"),
+            Some("GitHub Actions CI/CD workflow definition.")
+        );
+    }
+
+    #[test]
+    fn finds_github_workflow_role_with_windows_separators() {
+        assert_eq!(
+            well_known_role(r".github\\workflows\\ci.yml"),
             Some("GitHub Actions CI/CD workflow definition.")
         );
     }

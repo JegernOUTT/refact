@@ -4078,6 +4078,7 @@ name = "refact-codehealth"
 version = "0.1.0"
 dependencies = [
  "refact-codegraph-parsers",
+ "refact-core",
  "serde",
  "tree-sitter",
 ]
@@ -4087,6 +4088,7 @@ name = "refact-codewiki"
 version = "0.1.0"
 dependencies = [
  "refact-codegraph-parsers",
+ "refact-core",
  "serde",
  "tree-sitter",
 ]
@@ -4206,6 +4208,7 @@ name = "refact-git-intel"
 version = "0.1.0"
 dependencies = [
  "git2",
+ "refact-core",
  "serde",
  "tempfile",
 ]

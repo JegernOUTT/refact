@@ -771,7 +771,8 @@ async fn enqueue_some_docs(gcx: Arc<GlobalContext>, paths: &Vec<String>, force: 
     if normalized_paths.len() > 5 {
         info!("    ...");
     }
-    crate::indexing_routing::route_index_enqueue(gcx.clone(), &normalized_paths, force).await;
+    crate::indexing_routing::route_index_enqueue(gcx.clone(), &normalized_paths, force, false)
+        .await;
     let cache_correction_arc =
         crate::files_correction::files_cache_rebuild_as_needed(gcx.clone()).await;
     let mut moar_files: Vec<PathBuf> = Vec::new();
@@ -876,9 +877,13 @@ pub async fn enqueue_all_files_from_workspace_folders(
     );
     let paths_nodups: Vec<String> = updated_or_removed.into_iter().collect();
 
-    let _ = vecdb_only;
-    crate::indexing_routing::route_index_enqueue(gcx.clone(), &paths_nodups, wake_up_indexers)
-        .await;
+    crate::indexing_routing::route_index_enqueue(
+        gcx.clone(),
+        &paths_nodups,
+        wake_up_indexers,
+        vecdb_only,
+    )
+    .await;
 
     all_files.len() as i32
 }

@@ -1125,6 +1125,12 @@ fn parse_remote_url_handles_ssh_https_dot_git_combinations() {
             "repo",
             RepoHost::GitLabSelfHosted("gitlab.example.com".to_string()),
         ),
+        (
+            "https://example.com/org/platform/team/repo.git",
+            "org/platform/team",
+            "repo",
+            RepoHost::Unsupported("example.com".to_string()),
+        ),
     ];
     for (url, owner, repo, host) in fixtures {
         let parsed = parse_remote_url(url).expect("remote URL must parse");

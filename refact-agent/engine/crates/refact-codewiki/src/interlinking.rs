@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use refact_core::path_classifier;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GeneratedPage {
     pub page_id: String,
@@ -90,7 +92,7 @@ impl LinkIndex {
             return Some(page_id);
         }
 
-        if !ref_.contains('/') && ref_.contains('.') {
+        if !path_classifier::has_path_separator(ref_) && ref_.contains('.') {
             if let Some(page_id) = self.by_basename.get(ref_) {
                 return Some(page_id);
             }
@@ -248,7 +250,7 @@ fn strip_fenced_code_blocks(text: &str) -> String {
 }
 
 fn basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
+    path_classifier::basename(path)
 }
 
 fn is_preceded_by_backtick(text: &str, index: usize) -> bool {
@@ -273,7 +275,7 @@ fn is_valid_ref_token(token: &str) -> bool {
 }
 
 fn is_file_ref(ref_: &str) -> bool {
-    ref_.contains('/')
+    path_classifier::has_path_separator(ref_)
         || [".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java"]
             .iter()
             .any(|suffix| ref_.ends_with(suffix))
@@ -393,6 +395,17 @@ mod tests {
         let index = LinkIndex::build(&pages);
 
         assert_eq!(index.resolve("bar"), None);
+        assert_eq!(index.resolve("bar.py"), Some(&"target".to_string()));
+    }
+
+    #[test]
+    fn basename_resolution_handles_windows_paths() {
+        let pages = vec![
+            page("source", "Source", "overview", "", "See `bar.py`."),
+            page("target", "Target", "file_page", r"foo\\bar.py", ""),
+        ];
+        let index = LinkIndex::build(&pages);
+
         assert_eq!(index.resolve("bar.py"), Some(&"target".to_string()));
     }
 

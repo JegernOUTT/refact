@@ -1,4 +1,5 @@
 use crate::biomarkers::{Dimension, Finding, Severity};
+use refact_core::path_classifier::is_test_path;
 use std::collections::{HashMap, HashSet};
 
 const SMALL_TEAM_MAX_CONTRIBUTORS: u32 = 3;
@@ -380,26 +381,6 @@ fn severity_rank(severity: Severity) -> u8 {
     }
 }
 
-fn is_test_path(path: &str) -> bool {
-    let normalized = path.replace('\\', "/").to_lowercase();
-    let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
-    basename.starts_with("test_")
-        || basename.ends_with("_test.py")
-        || basename.ends_with(".test.ts")
-        || basename.ends_with(".test.tsx")
-        || basename.ends_with(".test.js")
-        || basename.ends_with(".test.mts")
-        || basename.ends_with(".test.cts")
-        || basename.ends_with(".spec.ts")
-        || basename.ends_with(".spec.js")
-        || basename.ends_with(".spec.mts")
-        || basename.ends_with(".spec.cts")
-        || basename.ends_with("_test.go")
-        || normalized.contains("/test/")
-        || normalized.contains("/tests/")
-        || normalized.contains("/__tests__/")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,6 +613,21 @@ mod tests {
             co_change_count: 8.0,
         });
         assert!(only(m, "hidden_coupling").is_empty());
+    }
+
+    #[test]
+    fn hidden_coupling_keeps_tests_with_tests_across_js_ts_variants() {
+        let mut m = base_meta();
+        m.file_path = "src/foo.spec.tsx".to_string();
+        m.commit_count_total = 10;
+        m.repo_commit_counts
+            .insert("src/foo.test.jsx".to_string(), 10);
+        m.co_change_partners.push(CoChangePartner {
+            path: "src/foo.test.jsx".to_string(),
+            co_change_count: 8.0,
+        });
+
+        assert_eq!(only(m, "hidden_coupling")[0].severity, Severity::Critical);
     }
 
     #[test]

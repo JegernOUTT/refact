@@ -1,34 +1,19 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-const GLUE_STEMS: [&str; 2] = ["index", "mod"];
-const SHALLOW_ENTRY_DEPTH: usize = 1;
+use refact_core::path_classifier;
 
 pub fn entry_point_depth(path: &str) -> usize {
-    path.split('/')
-        .filter(|part| !part.is_empty())
-        .count()
-        .saturating_sub(1)
-}
-
-fn stem(path: &str) -> String {
-    let basename = path
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .next_back()
-        .unwrap_or("");
-    let stem = basename.rsplit_once('.').map_or(basename, |(stem, _)| stem);
-    stem.to_lowercase()
+    path_classifier::entry_point_depth(path)
 }
 
 pub fn is_glue_leaf(path: &str) -> bool {
-    let stem = stem(path);
-    GLUE_STEMS.contains(&stem.as_str()) && entry_point_depth(path) > SHALLOW_ENTRY_DEPTH
+    path_classifier::is_glue_leaf(path)
 }
 
 fn name_bucket(path: &str, conventional_stems: &HashSet<String>) -> u8 {
-    let stem = stem(path);
-    if GLUE_STEMS.contains(&stem.as_str()) {
+    let stem = path_classifier::path_stem_lowercase(path);
+    if path_classifier::is_glue_stem(&stem) {
         2
     } else if conventional_stems.contains(&stem) {
         0
@@ -65,18 +50,11 @@ pub fn rank_entry_points(
 }
 
 pub fn default_conventional_stems() -> HashSet<String> {
-    [
-        "main",
-        "index",
-        "app",
-        "server",
-        "cli",
-        "bootstrap",
-        "entry",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
+    path_classifier::default_conventional_entry_stems()
+        .iter()
+        .copied()
+        .map(String::from)
+        .collect()
 }
 
 fn compare_rank_keys(
@@ -91,7 +69,7 @@ fn compare_rank_keys(
 }
 
 pub fn is_conventional_entry(path: &str) -> bool {
-    !is_glue_leaf(path) && default_conventional_stems().contains(&stem(path))
+    path_classifier::is_conventional_entry(path)
 }
 
 #[cfg(test)]
@@ -101,6 +79,7 @@ mod tests {
     #[test]
     fn is_conventional_entry_matches_stems_but_not_glue_leaves() {
         assert!(is_conventional_entry("src/main.rs"));
+        assert!(is_conventional_entry(r"src\\main.rs"));
         assert!(is_conventional_entry("index.js"));
         assert!(!is_conventional_entry("pkg/sub/index.ts"));
         assert!(!is_conventional_entry("app/__init__.py"));
@@ -113,6 +92,7 @@ mod tests {
         assert_eq!(entry_point_depth("src/main.py"), 1);
         assert_eq!(entry_point_depth("a/b/c.py"), 2);
         assert_eq!(entry_point_depth("/a//b/c.py"), 2);
+        assert_eq!(entry_point_depth(r"a\\b\\c.py"), 2);
     }
 
     #[test]
@@ -146,6 +126,7 @@ mod tests {
     fn glue_leaf_requires_deep_depth() {
         assert!(!is_glue_leaf("index.js"));
         assert!(is_glue_leaf("a/b/index.js"));
+        assert!(is_glue_leaf(r"a\\b\\index.js"));
     }
 
     #[test]

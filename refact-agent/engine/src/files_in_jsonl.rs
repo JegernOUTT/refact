@@ -34,8 +34,7 @@ pub async fn enqueue_all_docs_from_jsonl(
         jsonl_files.clear();
         jsonl_files.extend(paths);
     }
-    let _ = (force, vecdb_only);
-    crate::indexing_routing::route_index_enqueue(gcx.clone(), &docs, false).await;
+    crate::indexing_routing::route_index_enqueue(gcx.clone(), &docs, force, vecdb_only).await;
 }
 
 pub async fn enqueue_all_docs_from_jsonl_but_read_first(

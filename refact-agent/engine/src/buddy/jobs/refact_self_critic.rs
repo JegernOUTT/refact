@@ -2,7 +2,9 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, REFACT_SELF_CRITIC_WORKFLOW_ID};
-use crate::buddy::jobs::autonomous_chats::{execute_autonomous_spec, AutonomousBuddyChatSpec};
+use crate::buddy::jobs::autonomous_chats::{
+    execute_autonomous_spec, same_signal, AutonomousBuddyChatSpec,
+};
 use crate::buddy::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
 use crate::app_state::AppState;
 
@@ -83,8 +85,9 @@ impl BuddyJob for RefactSelfCriticJob {
         PRIORITY
     }
 
-    async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
-        true
+    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
+        let spec = build_self_critic_spec(ctx);
+        !same_signal(ctx, &spec.signal_hash)
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
@@ -106,18 +109,29 @@ mod tests {
     use crate::buddy::autonomous_workflows::{
         AUTONOMOUS_BUDDY_WORKFLOWS, REFACT_COMPILE_SNIFFER_WORKFLOW_ID,
     };
+    use crate::buddy::jobs::autonomous_chats::{serialize_last_autonomous_result, AutonomousLastResult};
     use crate::buddy::conversation_ledger::workflow_id_to_mapping;
     use crate::buddy::settings::BuddySettings;
     use crate::buddy::types::{BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse};
 
     fn test_context(project_root: &Path) -> BuddyJobContext {
+        test_context_with_last_result(project_root, None)
+    }
+
+    fn test_context_with_last_result(
+        project_root: &Path,
+        last_result: Option<String>,
+    ) -> BuddyJobContext {
         BuddyJobContext {
             identity_name: "Pixel".to_string(),
             personality: Default::default(),
             onboarding: BuddyOnboarding::default(),
             recent_diagnostics: vec![],
             project_root: project_root.to_path_buf(),
-            job_state: BuddyJobState::default(),
+            job_state: BuddyJobState {
+                last_result,
+                ..Default::default()
+            },
             workflow_summaries: vec![],
             total_workflow_runs: 0,
             suggestion_state: vec![],
@@ -138,13 +152,20 @@ mod tests {
         let job = RefactSelfCriticJob;
 
         assert_eq!(job.cooldown_seconds(), 24 * 60 * 60);
-        assert!(job.should_run(gcx, &ctx).await);
+        assert!(job.should_run(gcx.clone(), &ctx).await);
 
         let spec = build_self_critic_spec(&ctx);
         assert_eq!(spec.workflow_id, REFACT_SELF_CRITIC_WORKFLOW_ID);
         assert_eq!(spec.project_root, dir.path().to_string_lossy().to_string());
         assert!(spec.evidence.contains("prompt_fingerprint="));
         assert!(!spec.evidence.contains("date="));
+
+        let last = AutonomousLastResult::new(spec.signal_hash.clone(), "chat-1");
+        let ctx = test_context_with_last_result(
+            dir.path(),
+            Some(serialize_last_autonomous_result(&last)),
+        );
+        assert!(!job.should_run(gcx, &ctx).await);
     }
 
     #[test]

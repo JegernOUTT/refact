@@ -78,11 +78,7 @@ async fn build_memory_pulse(project_root: &std::path::Path, fact_store: &FactSto
     );
     pulse.stale_conflicts = unique_fact_payload_ids(&stale_facts, &["memory_ids", "doc_ids"]);
     let knowledge_dir = project_root.join(".refact").join("knowledge");
-    if knowledge_dir.exists() {
-        if let Ok(rd) = std::fs::read_dir(&knowledge_dir) {
-            pulse.total = rd.count() as u32;
-        }
-    }
+    pulse.total = count_markdown_docs(&knowledge_dir);
     let memory_ops = crate::buddy::storage::load_memory_ops(project_root).await;
     pulse.pending_ops = memory_ops
         .pending_count
@@ -96,6 +92,29 @@ async fn build_memory_pulse(project_root: &std::path::Path, fact_store: &FactSto
     pulse.review_candidates = counts.review_candidates;
     pulse.conflict_candidates = counts.conflict_candidates;
     pulse
+}
+
+fn count_markdown_docs(dir: &Path) -> u32 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .map(|path| {
+            if path.is_dir() {
+                count_markdown_docs(&path)
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            {
+                1
+            } else {
+                0
+            }
+        })
+        .sum()
 }
 
 fn unique_fact_payload_ids(facts: &[&crate::buddy::types::BuddyFact], fields: &[&str]) -> u32 {
@@ -479,6 +498,20 @@ mod tests {
         assert_eq!(pulse.pending_ops, 1);
         assert_eq!(pulse.merge_candidates, 1);
         assert_eq!(pulse.duplicate_candidates, 1);
+    }
+
+    #[tokio::test]
+    async fn memory_pulse_counts_markdown_docs_not_directory_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let knowledge = temp.path().join(".refact").join("knowledge");
+        std::fs::create_dir_all(knowledge.join("nested")).unwrap();
+        std::fs::write(knowledge.join("a.md"), "a").unwrap();
+        std::fs::write(knowledge.join("nested").join("b.MD"), "b").unwrap();
+        std::fs::write(knowledge.join("index.json"), "{}").unwrap();
+
+        let pulse = build_memory_pulse(temp.path(), &FactStore::new()).await;
+
+        assert_eq!(pulse.total, 2);
     }
 
     #[tokio::test]
