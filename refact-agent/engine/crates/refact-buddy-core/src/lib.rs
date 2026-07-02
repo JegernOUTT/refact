@@ -12,6 +12,7 @@ pub mod settings;
 pub mod snapshot;
 pub mod speech_policy;
 pub mod state;
+pub mod storage;
 pub mod types;
 pub mod user_action;
 pub mod user_activity;

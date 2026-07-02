@@ -7,6 +7,7 @@ edition = "2021"
 refact-core = { path = "../refact-core" }
 refact-ext = { path = "../refact-ext" }
 chrono = { version = "0.4.31", features = ["serde"] }
+indexmap.workspace = true
 rand = "0.8.5"
 regex.workspace = true
 serde.workspace = true

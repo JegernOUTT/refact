@@ -4045,6 +4045,7 @@ name = "refact-buddy-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "indexmap 1.9.3",
  "rand 0.8.5",
  "refact-core",
  "refact-ext",
