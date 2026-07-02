@@ -171,6 +171,13 @@ pub async fn filter_privacy_allowed_files(
         .collect()
 }
 
+#[derive(Debug, Clone)]
+struct PendingBranchHeadChange {
+    old_head: Option<String>,
+    new_head: Option<String>,
+    last_event: Instant,
+}
+
 pub async fn update_document_text_from_disk(
     doc: &mut Document,
     gcx: Arc<GlobalContext>,
@@ -213,6 +220,9 @@ pub struct DocumentsState {
     pub git_branch_heads: Arc<StdMutex<HashMap<PathBuf, String>>>,
     pub branch_reindex_last_ts: Arc<AtomicU64>,
     pub file_event_debounce: Arc<StdMutex<HashMap<PathBuf, Instant>>>,
+    file_event_debounce_tasks: Arc<StdMutex<HashMap<PathBuf, tokio::task::JoinHandle<()>>>>,
+    branch_head_debounce: Arc<StdMutex<HashMap<PathBuf, PendingBranchHeadChange>>>,
+    branch_head_debounce_tasks: Arc<StdMutex<HashMap<PathBuf, tokio::task::JoinHandle<()>>>>,
 }
 
 async fn mem_overwrite_or_create_document(
@@ -252,6 +262,9 @@ impl DocumentsState {
             git_branch_heads: Arc::new(StdMutex::new(HashMap::new())),
             branch_reindex_last_ts: Arc::new(AtomicU64::new(0)),
             file_event_debounce: Arc::new(StdMutex::new(HashMap::new())),
+            file_event_debounce_tasks: Arc::new(StdMutex::new(HashMap::new())),
+            branch_head_debounce: Arc::new(StdMutex::new(HashMap::new())),
+            branch_head_debounce_tasks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 }
@@ -1165,6 +1178,10 @@ fn is_git_head_path(p: &Path) -> bool {
 
 const FILE_EVENT_DEBOUNCE_WINDOW: Duration = Duration::from_millis(100);
 const FILE_EVENT_DEBOUNCE_RETAIN: Duration = Duration::from_secs(10);
+#[cfg(not(test))]
+const BRANCH_HEAD_DEBOUNCE_WINDOW: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const BRANCH_HEAD_DEBOUNCE_WINDOW: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 struct BranchHeadChange {
@@ -1288,6 +1305,50 @@ fn record_git_head_change(gcx: &Arc<GlobalContext>, repo_path: &Path) -> Option<
     })
 }
 
+fn record_pending_git_head_change(
+    gcx: &Arc<GlobalContext>,
+    repo_path: &Path,
+    now: Instant,
+) -> Option<PathBuf> {
+    let repo_path = canonical_path(repo_path.to_string_lossy());
+    let new_head = read_git_head(&repo_path);
+    let old_head = {
+        let mut heads = gcx.documents_state.git_branch_heads.lock().unwrap();
+        let old_head = heads.get(&repo_path).cloned();
+        if new_head == old_head {
+            return None;
+        }
+        tracing::info!(
+            "git HEAD changed in {}: {:?} -> {:?}",
+            repo_path.display(),
+            old_head,
+            new_head
+        );
+        match &new_head {
+            Some(h) => {
+                heads.insert(repo_path.clone(), h.clone());
+            }
+            None => {
+                heads.remove(&repo_path);
+            }
+        }
+        old_head
+    };
+    let mut pending = gcx.documents_state.branch_head_debounce.lock().unwrap();
+    pending
+        .entry(repo_path.clone())
+        .and_modify(|change| {
+            change.new_head = new_head.clone();
+            change.last_event = now;
+        })
+        .or_insert(PendingBranchHeadChange {
+            old_head,
+            new_head,
+            last_event: now,
+        });
+    Some(repo_path)
+}
+
 async fn enqueue_branch_head_changes(gcx: Arc<GlobalContext>, changes: Vec<BranchHeadChange>) {
     let mut docs = IndexSet::new();
     for change in &changes {
@@ -1315,7 +1376,93 @@ async fn enqueue_branch_head_changes(gcx: Arc<GlobalContext>, changes: Vec<Branc
         "Branch switch detected, enqueueing {} changed file(s)",
         docs.len()
     );
+    for doc in &docs {
+        let path = PathBuf::from(doc);
+        if !path.exists() {
+            on_did_delete(gcx.clone(), &path).await;
+        }
+    }
     enqueue_some_docs(gcx, &docs, true).await;
+}
+
+fn schedule_branch_head_debounce(gcx: Arc<GlobalContext>, repo_path: PathBuf) {
+    let mut tasks = gcx
+        .documents_state
+        .branch_head_debounce_tasks
+        .lock()
+        .unwrap();
+    if tasks.contains_key(&repo_path) {
+        return;
+    }
+    let task_gcx = gcx.clone();
+    let task_repo_path = repo_path.clone();
+    let handle = tokio::spawn(async move {
+        flush_branch_head_debounce(task_gcx, task_repo_path).await;
+    });
+    tasks.insert(repo_path, handle);
+}
+
+async fn flush_branch_head_debounce(gcx: Arc<GlobalContext>, repo_path: PathBuf) {
+    loop {
+        if gcx.shutdown_flag.load(Ordering::Relaxed) {
+            gcx.documents_state
+                .branch_head_debounce_tasks
+                .lock()
+                .unwrap()
+                .remove(&repo_path);
+            return;
+        }
+        tokio::time::sleep(BRANCH_HEAD_DEBOUNCE_WINDOW).await;
+        if gcx.shutdown_flag.load(Ordering::Relaxed) {
+            gcx.documents_state
+                .branch_head_debounce_tasks
+                .lock()
+                .unwrap()
+                .remove(&repo_path);
+            return;
+        }
+        let change = {
+            let now = Instant::now();
+            let mut pending = gcx.documents_state.branch_head_debounce.lock().unwrap();
+            let Some(existing) = pending.get(&repo_path) else {
+                gcx.documents_state
+                    .branch_head_debounce_tasks
+                    .lock()
+                    .unwrap()
+                    .remove(&repo_path);
+                return;
+            };
+            if now.saturating_duration_since(existing.last_event) < BRANCH_HEAD_DEBOUNCE_WINDOW {
+                continue;
+            }
+            let pending_change = pending.remove(&repo_path).unwrap();
+            gcx.documents_state
+                .branch_head_debounce_tasks
+                .lock()
+                .unwrap()
+                .remove(&repo_path);
+            pending_change
+        };
+        if change.old_head != change.new_head {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            gcx.documents_state
+                .branch_reindex_last_ts
+                .store(now_ms, Ordering::Relaxed);
+            enqueue_branch_head_changes(
+                gcx,
+                vec![BranchHeadChange {
+                    repo_path,
+                    old_head: change.old_head,
+                    new_head: change.new_head,
+                }],
+            )
+            .await;
+        }
+        return;
+    }
 }
 
 async fn on_git_head_change(gcx_weak: Weak<GlobalContext>, event: Event) {
@@ -1336,28 +1483,11 @@ async fn on_git_head_change(gcx_weak: Weak<GlobalContext>, event: Event) {
         return;
     }
 
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    let last_ms = gcx
-        .documents_state
-        .branch_reindex_last_ts
-        .load(Ordering::Relaxed);
-    if now_ms.saturating_sub(last_ms) < 2000 {
-        return;
-    }
-
-    let changes = repo_paths
-        .iter()
-        .filter_map(|repo_path| record_git_head_change(&gcx, repo_path))
-        .collect::<Vec<_>>();
-
-    if !changes.is_empty() {
-        gcx.documents_state
-            .branch_reindex_last_ts
-            .store(now_ms, Ordering::Relaxed);
-        enqueue_branch_head_changes(gcx, changes).await;
+    let now = Instant::now();
+    for repo_path in repo_paths {
+        if let Some(repo_path) = record_pending_git_head_change(&gcx, &repo_path, now) {
+            schedule_branch_head_debounce(gcx.clone(), repo_path);
+        }
     }
 }
 
@@ -1380,16 +1510,80 @@ pub async fn on_explicit_branch_change(gcx: Arc<GlobalContext>, repo_path: &Path
     }
 }
 
-fn should_skip_debounced_file_event(gcx: &Arc<GlobalContext>, path: &Path, now: Instant) -> bool {
-    let mut debounce = gcx.documents_state.file_event_debounce.lock().unwrap();
-    debounce.retain(|_, last| now.saturating_duration_since(*last) <= FILE_EVENT_DEBOUNCE_RETAIN);
-    if let Some(last) = debounce.get(path) {
-        if now.saturating_duration_since(*last) < FILE_EVENT_DEBOUNCE_WINDOW {
-            return true;
+fn schedule_debounced_file_event(gcx: Arc<GlobalContext>, path: PathBuf, now: Instant) {
+    {
+        let mut debounce = gcx.documents_state.file_event_debounce.lock().unwrap();
+        debounce
+            .retain(|_, last| now.saturating_duration_since(*last) <= FILE_EVENT_DEBOUNCE_RETAIN);
+        debounce.insert(path.clone(), now);
+    }
+
+    let mut tasks = gcx
+        .documents_state
+        .file_event_debounce_tasks
+        .lock()
+        .unwrap();
+    if tasks.contains_key(&path) {
+        return;
+    }
+    let task_gcx = gcx.clone();
+    let task_path = path.clone();
+    let handle = tokio::spawn(async move {
+        flush_debounced_file_event(task_gcx, task_path).await;
+    });
+    tasks.insert(path, handle);
+}
+
+async fn flush_debounced_file_event(gcx: Arc<GlobalContext>, path: PathBuf) {
+    loop {
+        if gcx.shutdown_flag.load(Ordering::Relaxed) {
+            gcx.documents_state
+                .file_event_debounce_tasks
+                .lock()
+                .unwrap()
+                .remove(&path);
+            return;
+        }
+        tokio::time::sleep(FILE_EVENT_DEBOUNCE_WINDOW).await;
+        if gcx.shutdown_flag.load(Ordering::Relaxed) {
+            gcx.documents_state
+                .file_event_debounce_tasks
+                .lock()
+                .unwrap()
+                .remove(&path);
+            return;
+        }
+        let should_enqueue = {
+            let now = Instant::now();
+            let mut debounce = gcx.documents_state.file_event_debounce.lock().unwrap();
+            let Some(last) = debounce.get(&path).copied() else {
+                gcx.documents_state
+                    .file_event_debounce_tasks
+                    .lock()
+                    .unwrap()
+                    .remove(&path);
+                return;
+            };
+            if now.saturating_duration_since(last) < FILE_EVENT_DEBOUNCE_WINDOW {
+                false
+            } else {
+                debounce.remove(&path);
+                gcx.documents_state
+                    .file_event_debounce_tasks
+                    .lock()
+                    .unwrap()
+                    .remove(&path);
+                true
+            }
+        };
+        if should_enqueue {
+            if !path.exists() {
+                on_did_delete(gcx.clone(), &path).await;
+            }
+            enqueue_some_docs(gcx, &vec![path.to_string_lossy().to_string()], false).await;
+            return;
         }
     }
-    debounce.insert(path.to_path_buf(), now);
-    false
 }
 
 pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
@@ -1446,9 +1640,12 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
             if normalized_path.exists()
                 && event_path_is_valid_file(&normalized_path, &blocklist_roots)
             {
-                if debounce_paths
-                    && should_skip_debounced_file_event(&gcx, &normalized_path, debounce_now)
-                {
+                if debounce_paths {
+                    schedule_debounced_file_event(
+                        gcx.clone(),
+                        normalized_path.clone(),
+                        debounce_now,
+                    );
                     continue;
                 }
                 docs.push(normalized_path.to_string_lossy().to_string());
@@ -2150,21 +2347,46 @@ mod tests {
     #[tokio::test]
     async fn debounced_duplicate_events_single_enqueue() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        allow_all_privacy(&gcx);
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("src").join("lib.rs");
-        write_file(&file, "pub fn debounce() {}\n");
+        write_file(&file, "pub fn debounce() -> &'static str { \"first\" }\n");
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![normalized(temp.path())];
+        *gcx.documents_state.workspace_files.lock().unwrap() = vec![normalized(&file)];
         let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
         *gcx.codegraph.lock().await = Some(service.clone());
 
         let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
             .add_path(file.clone());
         file_watcher_event(event, Arc::downgrade(&gcx)).await;
+        write_file(&file, "pub fn debounce() -> &'static str { \"second\" }\n");
         let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
             .add_path(file.clone());
         file_watcher_event(event, Arc::downgrade(&gcx)).await;
 
+        assert_eq!(service.queue_len(), 0);
+        tokio::time::sleep(FILE_EVENT_DEBOUNCE_WINDOW + Duration::from_millis(80)).await;
+
         assert_eq!(service.queue_len(), 1);
+        let batch = service.drain_batch(10);
+        let indexed_path = normalized(&file).to_string_lossy().to_string();
+        assert_eq!(batch, vec![indexed_path.clone()]);
+        let text = get_file_text_from_memory_or_disk(gcx.clone(), &PathBuf::from(&indexed_path))
+            .await
+            .unwrap();
+        service
+            .index_file(&indexed_path, &text, "rust")
+            .await
+            .unwrap();
+        let mut files = service.all_files_with_text().await.unwrap();
+        files.sort();
+        assert_eq!(
+            files,
+            vec![(
+                normalized(&file).to_string_lossy().to_string(),
+                "pub fn debounce() -> &'static str { \"second\" }\n".to_string(),
+            ),]
+        );
     }
 
     #[tokio::test]
@@ -2204,6 +2426,7 @@ mod tests {
         let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
             .add_path(head_path);
         on_git_head_change(Arc::downgrade(&gcx), event).await;
+        tokio::time::sleep(BRANCH_HEAD_DEBOUNCE_WINDOW + Duration::from_millis(80)).await;
 
         assert_eq!(
             service.drain_batch(10),
@@ -2226,6 +2449,7 @@ mod tests {
         )))
         .add_path(file.clone());
         file_watcher_event(event, Arc::downgrade(&gcx)).await;
+        tokio::time::sleep(FILE_EVENT_DEBOUNCE_WINDOW + Duration::from_millis(80)).await;
 
         assert_eq!(
             service.drain_batch(10),
@@ -2264,6 +2488,7 @@ mod tests {
             notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))
                 .add_path(new_file.clone());
         file_watcher_event(create_event, Arc::downgrade(&gcx)).await;
+        tokio::time::sleep(FILE_EVENT_DEBOUNCE_WINDOW + Duration::from_millis(80)).await;
 
         let workspace_files = gcx.documents_state.workspace_files.lock().unwrap().clone();
         assert!(!workspace_files.contains(&normalized(&old_file)));
@@ -2309,6 +2534,7 @@ mod tests {
             .add_path(head_path);
 
         on_git_head_change(Arc::downgrade(&gcx), event).await;
+        tokio::time::sleep(BRANCH_HEAD_DEBOUNCE_WINDOW + Duration::from_millis(80)).await;
 
         let heads = gcx.documents_state.git_branch_heads.lock().unwrap();
         assert_eq!(
@@ -2342,6 +2568,7 @@ mod tests {
             .add_path(head_path);
 
         on_git_head_change(Arc::downgrade(&gcx), event).await;
+        tokio::time::sleep(BRANCH_HEAD_DEBOUNCE_WINDOW + Duration::from_millis(80)).await;
 
         let ts = gcx
             .documents_state
@@ -2354,36 +2581,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debounce_rapid_head_changes() {
+    async fn debounce_rapid_head_changes_flushes_newest_head() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let temp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(temp.path()).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let file = temp.path().join("src").join("lib.rs");
+        write_file(&file, "pub fn branch_test() -> &'static str { \"main\" }\n");
+        let main_oid = git_commit_all(&repo, "main");
+        {
+            let main_commit = repo.find_commit(main_oid).unwrap();
+            repo.branch("dev", &main_commit, false).unwrap();
+            repo.branch("feature", &main_commit, false).unwrap();
+        }
+        git_checkout_branch(&repo, "dev");
+        write_file(&file, "pub fn branch_test() -> &'static str { \"dev\" }\n");
+        git_commit_all(&repo, "dev");
+        git_checkout_branch(&repo, "feature");
+        write_file(
+            &file,
+            "pub fn branch_test() -> &'static str { \"feature\" }\n",
+        );
+        git_commit_all(&repo, "feature");
+        git_checkout_branch(&repo, "main");
         let canonical_repo = normalized(temp.path());
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        gcx.documents_state
-            .branch_reindex_last_ts
-            .store(now_ms, Ordering::Relaxed);
-
-        write_head(temp.path(), "ref: refs/heads/dev\n");
         {
             let mut heads = gcx.documents_state.git_branch_heads.lock().unwrap();
             heads.insert(canonical_repo.clone(), "ref: refs/heads/main".to_string());
         }
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![canonical_repo.clone()];
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![canonical_repo.clone()];
+        *gcx.documents_state.workspace_files.lock().unwrap() = vec![normalized(&file)];
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        *gcx.codegraph.lock().await = Some(service.clone());
 
+        git_checkout_branch(&repo, "dev");
         let head_path = temp.path().join(".git").join("HEAD");
         let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
             .add_path(head_path);
 
         on_git_head_change(Arc::downgrade(&gcx), event).await;
+        git_checkout_branch(&repo, "feature");
+        let head_path = temp.path().join(".git").join("HEAD");
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(head_path);
+        on_git_head_change(Arc::downgrade(&gcx), event).await;
+        tokio::time::sleep(BRANCH_HEAD_DEBOUNCE_WINDOW + Duration::from_millis(80)).await;
 
         let heads = gcx.documents_state.git_branch_heads.lock().unwrap();
         assert_eq!(
             heads.get(&canonical_repo),
-            Some(&"ref: refs/heads/main".to_string()),
-            "debounce should prevent head update during rapid changes"
+            Some(&"ref: refs/heads/feature".to_string()),
+            "debounce should keep latest head from rapid changes"
+        );
+        assert_eq!(
+            service.drain_batch(10),
+            vec![normalized(&file).to_string_lossy().to_string()],
+            "debounce should enqueue the final branch diff once"
         );
     }
 
