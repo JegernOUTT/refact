@@ -27,6 +27,18 @@ fn file_stem(cpath: &str) -> String {
         .unwrap_or_else(|| cpath.to_string())
 }
 
+fn friendly_dcp(dcp: &str) -> String {
+    if let Some((namespace, symbol_path)) = dcp.split_once("::") {
+        if symbol_path.is_empty() {
+            file_stem(namespace)
+        } else {
+            format!("{}::{}", file_stem(namespace), symbol_path)
+        }
+    } else {
+        dcp.to_string()
+    }
+}
+
 pub fn symbol_node_to_ast(symbol: &SymbolNode, node_path: &str) -> AstDefinition {
     let mut official_path = vec![file_stem(node_path)];
     official_path.extend(symbol.official_path.iter().cloned());
@@ -63,7 +75,15 @@ pub fn definitions(
     store: &Store,
     double_colon_path: &str,
 ) -> Result<Vec<Arc<AstDefinition>>, String> {
-    Ok(rows_to_defs(store.symbol_data_by_dcp(double_colon_path)?))
+    let mut rows = store.symbol_data_by_dcp(double_colon_path)?;
+    if rows.is_empty() {
+        for stored_dcp in store.all_symbol_dcps()? {
+            if friendly_dcp(&stored_dcp) == double_colon_path {
+                rows.extend(store.symbol_data_by_dcp(&stored_dcp)?);
+            }
+        }
+    }
+    Ok(rows_to_defs(rows))
 }
 
 pub fn definition_paths_fuzzy(
@@ -75,6 +95,7 @@ pub fn definition_paths_fuzzy(
     let mut matches: Vec<String> = store
         .all_symbol_dcps()?
         .into_iter()
+        .map(|p| friendly_dcp(&p))
         .filter(|p| p.to_lowercase().contains(&needle))
         .collect();
     matches.sort();

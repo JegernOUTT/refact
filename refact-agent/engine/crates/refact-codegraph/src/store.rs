@@ -1,22 +1,58 @@
 use std::collections::HashMap;
+use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 
 use refact_codegraph_parsers::Resolver;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::extract::{edge_kind_str, extract_symbols};
 use crate::schema;
 
-fn file_stem_of(path: &str) -> String {
-    Path::new(path)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string())
+fn normalized_file_namespace(path: &str) -> String {
+    let raw = Path::new(path);
+    let normalized_path = if raw.is_absolute() {
+        let absolute = raw.canonicalize().unwrap_or_else(|_| raw.to_path_buf());
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| {
+                let cwd = cwd.canonicalize().unwrap_or(cwd);
+                cwd.ancestors().find_map(|ancestor| {
+                    absolute
+                        .strip_prefix(ancestor)
+                        .ok()
+                        .map(|p| p.to_path_buf())
+                })
+            })
+            .unwrap_or(absolute)
+    } else {
+        raw.to_path_buf()
+    };
+
+    let mut parts = Vec::new();
+    for component in normalized_path.components() {
+        match component {
+            std::path::Component::CurDir | std::path::Component::RootDir => {}
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            std::path::Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
+            std::path::Component::Prefix(prefix) => {
+                parts.push(prefix.as_os_str().to_string_lossy().to_string())
+            }
+        }
+    }
+    let normalized = parts.join("/");
+    if normalized.is_empty() {
+        "unknown".to_string()
+    } else {
+        normalized
+    }
 }
 
-fn qualify(stem: &str, in_file_path: &str) -> String {
-    format!("{}::{}", stem, in_file_path)
+fn qualify(path: &str, in_file_path: &str) -> String {
+    format!("{}::{}", normalized_file_namespace(path), in_file_path)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +73,13 @@ impl Store {
             let _ = std::fs::create_dir_all(parent);
         }
         let conn = Connection::open(path).map_err(|e| format!("codegraph open {path:?}: {e}"))?;
+        let conn = if Self::schema_mismatch(&conn)? {
+            drop(conn);
+            Self::remove_sqlite_files(path)?;
+            Connection::open(path).map_err(|e| format!("codegraph reopen {path:?}: {e}"))?
+        } else {
+            conn
+        };
         let store = Self { conn };
         store.apply_schema()?;
         Ok(store)
@@ -47,6 +90,57 @@ impl Store {
         let store = Self { conn };
         store.apply_schema()?;
         Ok(store)
+    }
+
+    fn schema_mismatch(conn: &Connection) -> Result<bool, String> {
+        let object_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table', 'virtual table') \
+                 AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("codegraph schema inspect: {e}"))?;
+        if object_count == 0 {
+            return Ok(false);
+        }
+
+        let meta_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("codegraph meta inspect: {e}"))?;
+        if meta_count == 0 {
+            return Ok(true);
+        }
+
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("codegraph schema_version inspect: {e}"))?;
+        Ok(raw.and_then(|v| v.parse::<i64>().ok()) != Some(schema::SCHEMA_VERSION))
+    }
+
+    fn remove_sqlite_files(path: &Path) -> Result<(), String> {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let candidate = if suffix.is_empty() {
+                path.to_path_buf()
+            } else {
+                Path::new(&format!("{}{}", path.to_string_lossy(), suffix)).to_path_buf()
+            };
+            match fs::remove_file(&candidate) {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(err) => return Err(format!("codegraph remove stale db {candidate:?}: {err}")),
+            }
+        }
+        Ok(())
     }
 
     fn apply_schema(&self) -> Result<(), String> {
@@ -275,10 +369,13 @@ impl Store {
         Ok(out)
     }
 
-    fn all_pending_refs(&self) -> Result<Vec<(i64, String, String, i64)>, String> {
+    fn all_pending_refs(&self) -> Result<Vec<(i64, String, String, String, i64)>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT from_node_id, name, kind, line FROM pending_refs")
+            .prepare(
+                "SELECT p.from_node_id, n.path, p.name, p.kind, p.line \
+                 FROM pending_refs p JOIN nodes n ON n.id = p.from_node_id",
+            )
             .map_err(|e| format!("codegraph all_pending_refs prepare: {e}"))?;
         let rows = stmt
             .query_map([], |row| {
@@ -286,7 +383,8 @@ impl Store {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })
             .map_err(|e| format!("codegraph all_pending_refs: {e}"))?;
@@ -310,8 +408,12 @@ impl Store {
             .execute("DELETE FROM edges WHERE kind != 'defined_in'", [])
             .map_err(|e| format!("codegraph connect_usages clear: {e}"))?;
 
-        for (from_node_id, name, kind, line) in self.all_pending_refs()? {
-            if let Some(res) = resolver.resolve(&name) {
+        for (from_node_id, from_path, name, kind, line) in self.all_pending_refs()? {
+            let local_name = qualify(&from_path, &name);
+            if let Some(res) = resolver
+                .resolve(&local_name)
+                .or_else(|| resolver.resolve(&name))
+            {
                 if let Some(&dst_id) = dcp_to_node.get(&res.target) {
                     if dst_id != from_node_id {
                         self.add_edge_line(
@@ -423,15 +525,14 @@ impl Store {
         let file_id = self.index_file(path, text, lang)?;
 
         let (symbols, refs) = extract_symbols(lang, text);
-        if symbols.is_empty() && refs.is_empty() {
+        let routes = refact_codegraph_parsers::frameworks::detect_routes(lang, text);
+        if symbols.is_empty() && refs.is_empty() && routes.is_empty() {
             return Ok(file_id);
         }
 
-        let stem = file_stem_of(path);
-
         let mut resolver = Resolver::new();
         for symbol in &symbols {
-            resolver.add_symbol(&qualify(&stem, &symbol.double_colon_path()));
+            resolver.add_symbol(&qualify(path, &symbol.double_colon_path()));
         }
 
         let mut path_to_node: HashMap<String, i64> = HashMap::new();
@@ -448,7 +549,7 @@ impl Store {
                 symbol.body_line2 as i64,
                 &data,
             )?;
-            let dcp = qualify(&stem, &symbol.double_colon_path());
+            let dcp = qualify(path, &symbol.double_colon_path());
             self.add_symbol(&dcp, node_id)?;
             self.add_edge(node_id, file_id, "defined_in", 1.0)?;
             path_to_node.insert(dcp, node_id);
@@ -458,7 +559,7 @@ impl Store {
             if symbol.this_class_derived_from.is_empty() {
                 continue;
             }
-            let from_dcp = qualify(&stem, &symbol.double_colon_path());
+            let from_dcp = qualify(path, &symbol.double_colon_path());
             if let Some(&from_id) = path_to_node.get(&from_dcp) {
                 for base in &symbol.this_class_derived_from {
                     self.add_pending_ref(from_id, base, "inherits", symbol.decl_line1 as i64)?;
@@ -467,12 +568,16 @@ impl Store {
         }
 
         for r in &refs {
-            let from_dcp = qualify(&stem, &r.from);
+            let from_dcp = qualify(path, &r.from);
             let Some(&src_id) = path_to_node.get(&from_dcp) else {
                 continue;
             };
             self.add_pending_ref(src_id, &r.name, edge_kind_str(r.kind), r.line as i64)?;
-            if let Some(res) = resolver.resolve(&r.name) {
+            let local_name = qualify(path, &r.name);
+            if let Some(res) = resolver
+                .resolve(&local_name)
+                .or_else(|| resolver.resolve(&r.name))
+            {
                 if let Some(&dst_id) = path_to_node.get(&res.target) {
                     if src_id != dst_id {
                         self.add_edge_line(
@@ -487,7 +592,7 @@ impl Store {
             }
         }
 
-        for route in refact_codegraph_parsers::frameworks::detect_routes(lang, text) {
+        for route in routes {
             let route_id = self.insert_node("route", path, &route.label(), lang, 0, 0)?;
             self.add_edge(route_id, file_id, "defined_in", 1.0)?;
             self.add_pending_ref(route_id, &route.handler, "route_handler", 0)?;
@@ -634,6 +739,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn open_recreates_old_schema_db_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("codegraph.sqlite");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(schema::SCHEMA_SQL).unwrap();
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES('schema_version', '1')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO nodes(kind, path, name, lang, line1, line2) \
+                 VALUES('file', 'stale.rs', 'stale.rs', 'rust', 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&db_path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), schema::SCHEMA_VERSION);
+        assert_eq!(store.counts().unwrap(), Counts::default());
+    }
+
+    #[test]
     fn schema_roundtrip() {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), schema::SCHEMA_VERSION);
@@ -734,6 +864,51 @@ fn helper() {}
     }
 
     #[test]
+    fn same_basename_files_do_not_collide() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .index_file_graph("src/a/m.rs", "pub fn helper() {}\n", "rust")
+            .unwrap();
+        store
+            .index_file_graph(
+                "src/b/m.rs",
+                "fn run() { helper(); }\nfn helper() {}\n",
+                "rust",
+            )
+            .unwrap();
+
+        store.connect_usages().unwrap();
+
+        let local_calls: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges e \
+                 JOIN nodes sn ON sn.id = e.src \
+                 JOIN nodes dn ON dn.id = e.dst \
+                 WHERE e.kind = 'calls' AND sn.path = 'src/b/m.rs' AND dn.path = 'src/b/m.rs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let wrong_calls: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges e \
+                 JOIN nodes sn ON sn.id = e.src \
+                 JOIN nodes dn ON dn.id = e.dst \
+                 WHERE e.kind = 'calls' AND sn.path = 'src/b/m.rs' AND dn.path = 'src/a/m.rs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(local_calls, 1, "b/m.rs run should call local helper");
+        assert_eq!(
+            wrong_calls, 0,
+            "same-basename helper must not steal the call"
+        );
+    }
+
+    #[test]
     fn framework_routes_create_route_handler_edges() {
         let store = Store::open_in_memory().unwrap();
         let src = "\
@@ -758,6 +933,32 @@ def list_users():
             route_edges, 1,
             "GET /users -> list_users route_handler edge"
         );
+    }
+
+    #[test]
+    fn non_js_python_framework_route_handler_edges_are_indexed() {
+        let store = Store::open_in_memory().unwrap();
+        let src = r#"
+package main
+func listUsers(c *gin.Context) {}
+func main() {
+    r.GET("/users", listUsers)
+}
+"#;
+        store.index_file_graph("api.go", src, "go").unwrap();
+        store.connect_usages().unwrap();
+
+        let route_edges: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges e \
+                 JOIN nodes dn ON dn.id = e.dst \
+                 WHERE e.kind = 'route_handler' AND dn.name = 'listUsers'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(route_edges, 1, "GET /users -> listUsers route_handler edge");
     }
 
     #[test]

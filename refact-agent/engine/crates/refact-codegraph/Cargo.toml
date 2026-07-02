@@ -14,5 +14,8 @@ tracing = { workspace = true }
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 petgraph = "0.6"
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [features]
 code_embeddings = []

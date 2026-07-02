@@ -1,5 +1,4 @@
 pub mod extractors;
-pub mod framework_detectors;
 pub mod frameworks;
 pub mod heritage;
 pub mod import_resolution;

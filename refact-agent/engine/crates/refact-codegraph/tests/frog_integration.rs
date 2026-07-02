@@ -33,17 +33,17 @@ fn frog_suite_extracts_expected_symbols() {
         .collect();
 
     for expected in [
-        "frog::Frog",
-        "frog::Frog::__init__",
-        "frog::Frog::bounce_off_banks",
-        "frog::Frog::jump",
-        "frog::Frog::croak",
-        "frog::Frog::swim",
-        "frog::AlternativeFrog",
-        "frog::AlternativeFrog::alternative_jump",
-        "frog::standalone_jumping_function",
-        "jump_to_conclusions::draw_hello_frog",
-        "jump_to_conclusions::main_loop",
+        "tests/emergency_frog_situation/frog.py::Frog",
+        "tests/emergency_frog_situation/frog.py::Frog::__init__",
+        "tests/emergency_frog_situation/frog.py::Frog::bounce_off_banks",
+        "tests/emergency_frog_situation/frog.py::Frog::jump",
+        "tests/emergency_frog_situation/frog.py::Frog::croak",
+        "tests/emergency_frog_situation/frog.py::Frog::swim",
+        "tests/emergency_frog_situation/frog.py::AlternativeFrog",
+        "tests/emergency_frog_situation/frog.py::AlternativeFrog::alternative_jump",
+        "tests/emergency_frog_situation/frog.py::standalone_jumping_function",
+        "tests/emergency_frog_situation/jump_to_conclusions.py::draw_hello_frog",
+        "tests/emergency_frog_situation/jump_to_conclusions.py::main_loop",
     ] {
         assert!(
             symbols.iter().any(|s| s == expected),
