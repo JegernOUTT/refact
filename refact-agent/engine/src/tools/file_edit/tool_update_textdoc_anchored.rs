@@ -4,9 +4,9 @@ use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::privacy::load_privacy_if_needed;
 use crate::tools::file_edit::auxiliary::{
-    append_scope_warnings, await_ast_indexing, convert_edit_to_diffchunks, edit_result_summary,
-    check_scope_guard, parse_bool_arg, parse_path_for_update, parse_string_arg,
-    scope_warnings_to_tool_message, str_replace_anchored, sync_documents_ast, AnchorMode,
+    append_scope_warnings, check_scope_guard, convert_edit_to_diffchunks, edit_result_summary,
+    fast_enqueue_for_edit, parse_bool_arg, parse_path_for_update, parse_string_arg,
+    scope_warnings_to_tool_message, str_replace_anchored, AnchorMode,
 };
 use crate::tools::tools_description::{
     MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
@@ -104,7 +104,6 @@ pub async fn tool_update_text_doc_anchored_exec(
     scope_guard_context: Option<&Arc<AMutex<AtCommandsContext>>>,
 ) -> Result<(String, String, Vec<DiffChunk>, String), String> {
     let a = parse_args(gcx.clone(), args, execution_scope).await?;
-    await_ast_indexing(gcx.clone()).await?;
     if let Some(ccx) = scope_guard_context {
         check_scope_guard(ccx, &a.path).await?;
     }
@@ -119,7 +118,9 @@ pub async fn tool_update_text_doc_anchored_exec(
         dry,
     )
     .await?;
-    sync_documents_ast(gcx.clone(), &a.path).await?;
+    if !dry {
+        fast_enqueue_for_edit(gcx.clone(), &[a.path.clone()]).await?;
+    }
     let chunks = convert_edit_to_diffchunks(a.path.clone(), &before, &after)?;
     let summary = append_scope_warnings(
         edit_result_summary(&before, &after, &a.path),

@@ -405,25 +405,20 @@ pub fn convert_edit_to_diffchunks(
     Ok(diff_chunks)
 }
 
-pub async fn await_ast_indexing(gcx: Arc<GlobalContext>) -> Result<(), String> {
-    let codegraph_mb = gcx.codegraph.lock().await.clone();
-    if let Some(service) = codegraph_mb {
-        service.wait_until_ready(20_000).await;
+pub async fn fast_enqueue_for_edit(
+    gcx: Arc<GlobalContext>,
+    docs: &[PathBuf],
+) -> Result<(), String> {
+    if docs.is_empty() {
+        return Ok(());
     }
-    Ok(())
-}
-
-pub async fn sync_documents_ast(gcx: Arc<GlobalContext>, doc: &PathBuf) -> Result<(), String> {
+    let paths: Vec<String> = docs
+        .iter()
+        .map(|doc| doc.to_string_lossy().to_string())
+        .collect();
     let codegraph_mb = gcx.codegraph.lock().await.clone();
     if let Some(service) = codegraph_mb {
-        let path = doc.to_string_lossy().to_string();
-        if let Ok(text) =
-            crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx.clone(), doc).await
-        {
-            let lang = refact_codegraph::lang_from_path(&path);
-            let _ = service.index_file(&path, &text, lang).await;
-            let _ = service.connect_usages().await;
-        }
+        service.enqueue_files(&paths);
     }
     Ok(())
 }
@@ -811,9 +806,9 @@ mod tests {
         use crate::global_context::GlobalContext;
         use crate::privacy::{FilePrivacySettings, PrivacySettings};
         use crate::tasks::types::{BoardCard, ScopeGuardMode, TaskBoard};
+        use crate::tools::file_edit::auxiliary::check_scope_guard;
         use crate::tools::file_edit::tool_apply_patch::tool_apply_patch_exec;
         use crate::tools::file_edit::tool_create_textdoc::tool_create_text_doc_exec;
-        use crate::tools::file_edit::auxiliary::check_scope_guard;
         use crate::tools::file_edit::tool_undo_textdoc::tool_undo_text_doc_exec;
         use crate::tools::file_edit::tool_update_textdoc::tool_update_text_doc_exec;
         use crate::tools::file_edit::tool_update_textdoc_anchored::tool_update_text_doc_anchored_exec;
@@ -830,6 +825,7 @@ mod tests {
         use std::fs;
         use std::path::{Path, PathBuf};
         use std::sync::Arc;
+        use std::time::Duration;
         use tokio::sync::Mutex as AMutex;
 
         struct Fixture {
@@ -1298,6 +1294,35 @@ mod tests {
                 fs::read_to_string(f.source.join("src/undo.txt")).unwrap(),
                 "source\n"
             );
+        }
+
+        #[tokio::test]
+        async fn edit_tools_enqueue_without_waiting_for_initial_codegraph_index() {
+            let f = fixture().await;
+            let service = Arc::new(
+                refact_codegraph::CodeGraphService::open(f._temp.path().join("codegraph.sqlite"))
+                    .unwrap(),
+            );
+            assert!(!service.is_initial_index_done());
+            service.enqueue_files(&["queued.rs".to_string()]);
+            *f.gcx.codegraph.lock().await = Some(service.clone());
+            let create_args = args(vec![
+                ("path", json!("src/fast.rs")),
+                ("content", json!("fast")),
+            ]);
+
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                tool_create_text_doc_exec(f.gcx.clone(), &create_args, false, Some(&f.scope), None),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                fs::read_to_string(f.root.join("src/fast.rs")).unwrap(),
+                "fast\n"
+            );
+            assert_eq!(service.queue_len(), 2);
         }
 
         #[tokio::test]

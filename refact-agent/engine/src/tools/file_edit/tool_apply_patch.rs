@@ -5,12 +5,11 @@ use crate::files_in_workspace::{get_file_text_from_memory_or_disk, remove_memory
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
-use crate::worktrees::scope::ExecutionScope;
 use crate::tools::file_edit::auxiliary::{
-    await_ast_indexing, check_scope_guard, convert_edit_to_diffchunks, normalize_line_endings,
-    resolve_path_with_scope, restore_line_endings, sync_documents_ast, write_file,
-    ResolvedToolPath,
+    check_scope_guard, convert_edit_to_diffchunks, fast_enqueue_for_edit, normalize_line_endings,
+    resolve_path_with_scope, restore_line_endings, write_file, ResolvedToolPath,
 };
+use crate::worktrees::scope::ExecutionScope;
 use crate::tools::file_edit::openai_apply_patch::{
     apply_update_chunks, parse_patch, validate_relative_path, FileOperation, ParsedPatch,
 };
@@ -190,7 +189,6 @@ pub async fn tool_apply_patch_exec(
     scope_guard_context: Option<&Arc<AMutex<AtCommandsContext>>>,
 ) -> Result<ApplyPatchResult, String> {
     let parsed = parse_patch_arg(args)?;
-    await_ast_indexing(gcx.clone()).await?;
 
     let mut file_results = Vec::new();
     let mut all_chunks = Vec::new();
@@ -221,7 +219,7 @@ pub async fn tool_apply_patch_exec(
                     overlay.insert(full_path.clone(), OverlayState::Present(contents.clone()));
                 } else {
                     write_file(gcx.clone(), &full_path, &contents, false, None).await?;
-                    sync_documents_ast(gcx.clone(), &full_path).await?;
+                    fast_enqueue_for_edit(gcx.clone(), &[full_path.clone()]).await?;
                 }
 
                 let chunks =
@@ -266,6 +264,7 @@ pub async fn tool_apply_patch_exec(
                         .await
                         .map_err(|e| format!("Failed to delete: {}", e))?;
                     remove_memory_document_for_path(gcx.clone(), &full_path).await;
+                    fast_enqueue_for_edit(gcx.clone(), &[full_path.clone()]).await?;
                 }
 
                 let chunk = DiffChunk {
@@ -354,7 +353,8 @@ pub async fn tool_apply_patch_exec(
                             .await
                             .map_err(|e| format!("Failed to remove: {}", e))?;
                         remove_memory_document_for_path(gcx.clone(), &full_path).await;
-                        sync_documents_ast(gcx.clone(), &dest_path).await?;
+                        fast_enqueue_for_edit(gcx.clone(), &[full_path.clone(), dest_path.clone()])
+                            .await?;
                     }
 
                     let chunk = DiffChunk {
@@ -386,7 +386,7 @@ pub async fn tool_apply_patch_exec(
                         );
                     } else {
                         write_file(gcx.clone(), &full_path, &new_file_content, false, None).await?;
-                        sync_documents_ast(gcx.clone(), &full_path).await?;
+                        fast_enqueue_for_edit(gcx.clone(), &[full_path.clone()]).await?;
                     }
 
                     let diff_chunks = convert_edit_to_diffchunks(

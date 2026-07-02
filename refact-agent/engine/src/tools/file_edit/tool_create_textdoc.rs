@@ -5,9 +5,9 @@ use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::privacy::load_privacy_if_needed;
 use crate::tools::file_edit::auxiliary::{
-    append_scope_warnings, await_ast_indexing, convert_edit_to_diffchunks, edit_result_summary,
-    check_scope_guard, normalize_line_endings, parse_path_for_create, parse_string_arg,
-    restore_line_endings, scope_warnings_to_tool_message, sync_documents_ast, write_file,
+    append_scope_warnings, check_scope_guard, convert_edit_to_diffchunks, edit_result_summary,
+    fast_enqueue_for_edit, normalize_line_endings, parse_path_for_create, parse_string_arg,
+    restore_line_endings, scope_warnings_to_tool_message, write_file,
 };
 use crate::tools::tools_description::{
     MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
@@ -62,12 +62,13 @@ pub async fn tool_create_text_doc_exec(
     scope_guard_context: Option<&Arc<AMutex<AtCommandsContext>>>,
 ) -> Result<(String, String, Vec<DiffChunk>, String), String> {
     let (path, content, _, scope_warnings) = parse_args(gcx.clone(), args, execution_scope).await?;
-    await_ast_indexing(gcx.clone()).await?;
     if let Some(ccx) = scope_guard_context {
         check_scope_guard(ccx, &path).await?;
     }
     let (before, after) = write_file(gcx.clone(), &path, &content, dry, None).await?;
-    sync_documents_ast(gcx.clone(), &path).await?;
+    if !dry {
+        fast_enqueue_for_edit(gcx.clone(), &[path.clone()]).await?;
+    }
     let chunks = convert_edit_to_diffchunks(path.clone(), &before, &after)?;
     let summary = if before.is_empty() {
         format!(
