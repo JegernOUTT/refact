@@ -24,6 +24,10 @@ fn tool_message(tool_call_id: &String, text: String) -> Vec<ContextEnum> {
     })]
 }
 
+fn codegraph_dependency() -> Vec<String> {
+    vec!["codegraph".to_string()]
+}
+
 fn string_arg(args: &HashMap<String, Value>, key: &str) -> Result<String, String> {
     match args.get(key) {
         Some(Value::String(s)) => Ok(s.clone()),
@@ -174,6 +178,10 @@ impl Tool for ToolCodegraphOverview {
             output_schema: None,
             annotations: None,
         }
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        codegraph_dependency()
     }
 }
 
@@ -435,6 +443,10 @@ impl Tool for ToolCodeHealth {
             annotations: None,
         }
     }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        codegraph_dependency()
+    }
 }
 
 pub struct ToolGitRisk {
@@ -629,6 +641,10 @@ impl Tool for ToolGitRisk {
             annotations: None,
         }
     }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        codegraph_dependency()
+    }
 }
 
 pub struct ToolCodeWhy {
@@ -755,6 +771,10 @@ impl Tool for ToolCodeWhy {
             output_schema: None,
             annotations: None,
         }
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        codegraph_dependency()
     }
 }
 
@@ -941,6 +961,10 @@ impl Tool for ToolCodeDuplication {
             annotations: None,
         }
     }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        codegraph_dependency()
+    }
 }
 
 pub struct ToolCodeMap {
@@ -1106,5 +1130,9 @@ impl Tool for ToolCodeMap {
             output_schema: None,
             annotations: None,
         }
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        codegraph_dependency()
     }
 }

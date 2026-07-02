@@ -540,7 +540,7 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
                     line1: start_line,
                     line2: end_line,
                     file_rev: None,
-                    symbols: vec![sym.path()],
+                    symbols: vec![sym.path_drop0()],
                     gradient_type: 5,
                     usefulness: 100.0,
                     skip_pp: true,

@@ -85,23 +85,35 @@ pub fn apply_mcp_lazy_filter(mut tools: Vec<Box<dyn Tool + Send>>) -> ToolsForMo
 
 fn tool_available(
     tool: &Box<dyn Tool + Send>,
-    ast_on: bool,
+    codegraph_on: bool,
     vecdb_on: bool,
     is_there_a_thinking_model: bool,
     allow_knowledge: bool,
     allow_experimental: bool,
 ) -> bool {
     let dependencies = tool.tool_depends_on();
-    if dependencies.contains(&"ast".to_string()) && !ast_on {
+    if dependencies
+        .iter()
+        .any(|dependency| dependency == "ast" || dependency == "codegraph")
+        && !codegraph_on
+    {
         return false;
     }
-    if dependencies.contains(&"vecdb".to_string()) && !vecdb_on {
+    if dependencies.iter().any(|dependency| dependency == "vecdb") && !vecdb_on {
         return false;
     }
-    if dependencies.contains(&"thinking".to_string()) && !is_there_a_thinking_model {
+    if dependencies
+        .iter()
+        .any(|dependency| dependency == "thinking")
+        && !is_there_a_thinking_model
+    {
         return false;
     }
-    if dependencies.contains(&"knowledge".to_string()) && !allow_knowledge {
+    if dependencies
+        .iter()
+        .any(|dependency| dependency == "knowledge")
+        && !allow_knowledge
+    {
         return false;
     }
     if tool.tool_description().experimental && !allow_experimental {
@@ -113,10 +125,10 @@ fn tool_available(
 async fn tool_available_from_gcx(
     gcx: Arc<GlobalContext>,
 ) -> impl Fn(&Box<dyn Tool + Send>) -> bool {
-    let (ast_on, vecdb_on, allow_experimental) = {
+    let (codegraph_on, vecdb_on, allow_experimental) = {
         let vecdb_on = gcx.vec_db.lock().await.is_some();
-        let ast_on = gcx.codegraph.lock().await.is_some();
-        (ast_on, vecdb_on, gcx.cmdline.experimental)
+        let codegraph_on = gcx.codegraph.lock().await.is_some();
+        (codegraph_on, vecdb_on, gcx.cmdline.experimental)
     };
 
     let is_there_a_thinking_model = match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await
@@ -132,7 +144,7 @@ async fn tool_available_from_gcx(
     move |tool: &Box<dyn Tool + Send>| {
         tool_available(
             tool,
-            ast_on,
+            codegraph_on,
             vecdb_on,
             is_there_a_thinking_model,
             allow_knowledge,

@@ -75,15 +75,12 @@ async fn symbol_def_via_codegraph(
     let mut all_context_files = Vec::new();
 
     for symbol in symbols {
-        let defs = service.definitions(symbol).await.unwrap_or_default();
+        let defs = service.definitions(symbol).await?;
         if defs.is_empty() {
             corrections = true;
-            let fuzzy = service
-                .definition_paths_fuzzy(symbol, 20)
-                .await
-                .unwrap_or_default();
+            let fuzzy = service.definition_paths_fuzzy(symbol, 20).await?;
             if fuzzy.is_empty() {
-                let counters = service.fetch_counters().await.unwrap_or_default();
+                let counters = service.fetch_counters().await?;
                 all_messages.push(format!(
                     "For symbol `{}`:\n⚠️ No definitions found ({} total in codegraph). 💡 Check spelling or use regex_search() to find\n",
                     symbol, counters.counter_defs
@@ -212,7 +209,7 @@ impl Tool for ToolAstDefinition {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Find definition of a symbol in the project using AST".to_string(),
+            description: "Find definition of a symbol in the project using the codegraph".to_string(),
             input_schema: json_schema_from_params(&[("symbols", "string", "Comma-separated list of symbols to search for (functions, methods, classes, type aliases). No spaces allowed in symbol names.")], &["symbols"]),
             output_schema: None,
             annotations: None,
@@ -220,6 +217,6 @@ impl Tool for ToolAstDefinition {
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
-        vec!["ast".to_string()]
+        vec!["codegraph".to_string()]
     }
 }

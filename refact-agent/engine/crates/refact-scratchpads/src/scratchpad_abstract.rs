@@ -48,7 +48,7 @@ impl FinishReason {
             FinishReason::None => "".to_string(),
             FinishReason::Stop => "stop".to_string(),
             FinishReason::Length => "length".to_string(),
-            FinishReason::ScratchpadStop => "stop".to_string(),
+            FinishReason::ScratchpadStop => "scratchpad-stop".to_string(),
         }
     }
 
@@ -148,5 +148,22 @@ impl HasTokenizerAndEot {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FinishReason;
+
+    #[test]
+    fn scratchpad_stop_round_trips() {
+        let finish = FinishReason::from_str("scratchpad-stop");
+
+        assert_eq!(finish, FinishReason::ScratchpadStop);
+        assert_eq!(finish.to_string(), "scratchpad-stop");
+        assert_eq!(
+            FinishReason::from_json_val(&finish.to_json_val()).unwrap(),
+            FinishReason::ScratchpadStop
+        );
     }
 }

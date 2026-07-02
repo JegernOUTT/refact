@@ -114,10 +114,7 @@ impl AtCommand for AtAstDefinition {
         let codegraph_opt = gcx.codegraph.lock().await.clone();
         match codegraph_opt {
             Some(service) => {
-                let defs = service
-                    .definitions(arg_symbol.text.as_str())
-                    .await
-                    .unwrap_or_default();
+                let defs = service.definitions(arg_symbol.text.as_str()).await?;
                 Ok(build_definition_context(gcx.clone(), &arg_symbol.text, &defs).await)
             }
             None => Err("codegraph is not available".to_string()),
@@ -144,7 +141,10 @@ async fn build_definition_context(
             format!("`{}` (defined in {})", symbol_text, path0)
         }
     } else {
-        format!("`{}` (definition not found in the AST tree)", symbol_text)
+        format!(
+            "`{}` (definition not found in the project index)",
+            symbol_text
+        )
     };
 
     let mut result = vec![];

@@ -56,7 +56,9 @@ use crate::providers::http::{
     handle_v1_providers_list,
 };
 
-use crate::http::routers::v1::vecdb::{handle_v1_vecdb_search, handle_v1_vecdb_status};
+use crate::http::routers::v1::vecdb::{
+    handle_v1_codegraph_search, handle_v1_vecdb_search, handle_v1_vecdb_status,
+};
 use crate::http::routers::v1::knowledge_graph::handle_v1_knowledge_graph;
 use crate::http::routers::v1::knowledge_ops::{
     handle_v1_knowledge_update_memory, handle_v1_knowledge_delete_memory,
@@ -429,6 +431,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
     let builder = builder
         .route("/vdb-search", post(handle_v1_vecdb_search))
         .route("/vdb-status", get(handle_v1_vecdb_status))
+        .route("/codegraph-search", post(handle_v1_codegraph_search))
         .route("/codegraph-status", get(handle_v1_codegraph_status))
         .route("/knowledge-graph", get(handle_v1_knowledge_graph))
         .route(
