@@ -3,10 +3,10 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Weak, Mutex as StdMutex};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use indexmap::IndexSet;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use notify::event::{CreateKind, ModifyKind, RemoveKind};
+use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind};
 use ropey::Rope;
 use tokio::sync::{RwLock as ARwLock, Mutex as AMutex};
 use walkdir::WalkDir;
@@ -64,6 +64,17 @@ fn path_for_blocklist(path: &Path, roots: &[PathBuf]) -> PathBuf {
         .max_by_key(|(root, _)| root.components().count())
         .map(|(_, rel)| rel.to_path_buf())
         .unwrap_or_else(|| path.to_path_buf())
+}
+
+fn event_path_is_valid_file(path: &PathBuf, roots: &[PathBuf]) -> bool {
+    let scan_root = roots
+        .iter()
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count());
+    match scan_root {
+        Some(root) => is_valid_file_for_scan(path, root, false, false).is_ok(),
+        None => is_valid_file(path, false, false).is_ok(),
+    }
 }
 
 pub async fn remove_memory_document_for_path(gcx: Arc<GlobalContext>, path: &PathBuf) -> bool {
@@ -201,6 +212,7 @@ pub struct DocumentsState {
     pub fs_watcher: Arc<StdMutex<Option<Arc<ARwLock<RecommendedWatcher>>>>>,
     pub git_branch_heads: Arc<StdMutex<HashMap<PathBuf, String>>>,
     pub branch_reindex_last_ts: Arc<AtomicU64>,
+    pub file_event_debounce: Arc<StdMutex<HashMap<PathBuf, Instant>>>,
 }
 
 async fn mem_overwrite_or_create_document(
@@ -239,6 +251,7 @@ impl DocumentsState {
             fs_watcher: Arc::new(StdMutex::new(None)),
             git_branch_heads: Arc::new(StdMutex::new(HashMap::new())),
             branch_reindex_last_ts: Arc::new(AtomicU64::new(0)),
+            file_event_debounce: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 }
@@ -469,7 +482,7 @@ pub async fn detect_vcs_for_a_file_path(file_path: &Path) -> Option<(PathBuf, &'
 }
 
 pub fn get_vcs_type(path: &Path) -> Option<&'static str> {
-    if path.join(".git").is_dir() {
+    if path.join(".git").exists() {
         Some("git")
     } else if path.join(".svn").is_dir() {
         Some("svn")
@@ -776,20 +789,25 @@ async fn enqueue_some_docs(gcx: Arc<GlobalContext>, paths: &Vec<String>, force: 
     let cache_correction_arc =
         crate::files_correction::files_cache_rebuild_as_needed(gcx.clone()).await;
     let mut moar_files: Vec<PathBuf> = Vec::new();
+    let mut removed_files: HashSet<PathBuf> = HashSet::new();
     for p in normalized_paths {
         let path = PathBuf::from(p);
-        if cache_correction_arc.filenames.find_matches(&path).len() == 0 {
+        if path.exists() && cache_correction_arc.filenames.find_matches(&path).len() == 0 {
             moar_files.push(path);
+        } else if !path.exists() {
+            removed_files.insert(path);
         }
     }
-    if workspace_files_changed || !moar_files.is_empty() {
+    if workspace_files_changed || !moar_files.is_empty() || !removed_files.is_empty() {
         info!("this made file cache dirty");
         let dirty_arc = {
-            gcx.documents_state
-                .workspace_files
-                .lock()
-                .unwrap()
-                .extend(moar_files);
+            let mut workspace_files = gcx.documents_state.workspace_files.lock().unwrap();
+            if !removed_files.is_empty() {
+                workspace_files.retain(|path| !removed_files.contains(path));
+            }
+            workspace_files.extend(moar_files);
+            let mut seen = HashSet::new();
+            workspace_files.retain(|path| seen.insert(path.clone()));
             gcx.documents_state.cache_dirty.clone()
         };
         let now = std::time::SystemTime::now()
@@ -855,6 +873,7 @@ pub async fn enqueue_all_files_from_workspace_folders(
             let mut roots = gcx.documents_state.workspace_vcs_roots.lock().unwrap();
             *roots = workspace_vcs_roots;
         }
+        update_git_branch_heads_for_roots(&gcx, &vcs_folders);
         // indexing_everywhere is immutable in shared GlobalContext; callers will reload as needed.
         gcx.documents_state.cache_dirty.clone()
     };
@@ -1107,9 +1126,33 @@ pub async fn remove_folder(gcx: Arc<GlobalContext>, path: &PathBuf) {
 
 fn read_git_head(repo_path: &Path) -> Option<String> {
     let head_path = repo_path.join(".git").join("HEAD");
-    std::fs::read_to_string(&head_path)
+    if let Some(head) = std::fs::read_to_string(&head_path)
         .ok()
         .map(|s| s.trim().to_string())
+    {
+        return Some(head);
+    }
+    let repository = git2::Repository::open(repo_path).ok()?;
+    repository
+        .head()
+        .ok()
+        .and_then(|head| head.target().map(|oid| oid.to_string()))
+}
+
+fn update_git_branch_heads_for_roots(gcx: &Arc<GlobalContext>, repo_paths: &[PathBuf]) {
+    let repo_paths = repo_paths
+        .iter()
+        .map(|path| canonical_path(path.to_string_lossy()))
+        .collect::<HashSet<_>>();
+    let mut heads = gcx.documents_state.git_branch_heads.lock().unwrap();
+    heads.retain(|repo_path, _| repo_paths.contains(repo_path));
+    for repo_path in repo_paths {
+        if let Some(head) = read_git_head(&repo_path) {
+            heads.insert(repo_path, head);
+        } else {
+            heads.remove(&repo_path);
+        }
+    }
 }
 
 fn is_git_head_path(p: &Path) -> bool {
@@ -1118,6 +1161,161 @@ fn is_git_head_path(p: &Path) -> bool {
             .and_then(|pp| pp.file_name())
             .map(|n| n == ".git")
             .unwrap_or(false)
+}
+
+const FILE_EVENT_DEBOUNCE_WINDOW: Duration = Duration::from_millis(100);
+const FILE_EVENT_DEBOUNCE_RETAIN: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone)]
+struct BranchHeadChange {
+    repo_path: PathBuf,
+    old_head: Option<String>,
+    new_head: Option<String>,
+}
+
+fn resolve_head_text_to_oid(
+    repository: &git2::Repository,
+    head_text: &str,
+) -> Result<git2::Oid, String> {
+    let head_text = head_text.trim();
+    if let Some(ref_name) = head_text.strip_prefix("ref:") {
+        let ref_name = ref_name.trim();
+        return repository
+            .refname_to_id(ref_name)
+            .or_else(|_| repository.revparse_single(ref_name).map(|obj| obj.id()))
+            .map_err(|e| format!("resolve {ref_name}: {e}"));
+    }
+    git2::Oid::from_str(head_text)
+        .or_else(|_| repository.revparse_single(head_text).map(|obj| obj.id()))
+        .map_err(|e| format!("resolve {head_text}: {e}"))
+}
+
+fn changed_files_between_heads(
+    repo_path: &Path,
+    old_head: Option<&str>,
+    new_head: Option<&str>,
+) -> Result<Vec<PathBuf>, String> {
+    let old_head = old_head.ok_or_else(|| "previous HEAD is unknown".to_string())?;
+    let new_head = new_head.ok_or_else(|| "new HEAD is unknown".to_string())?;
+    if old_head == new_head {
+        return Ok(Vec::new());
+    }
+    let repository = git2::Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
+    let old_oid = resolve_head_text_to_oid(&repository, old_head)?;
+    let new_oid = resolve_head_text_to_oid(&repository, new_head)?;
+    if old_oid == new_oid {
+        return Ok(Vec::new());
+    }
+    let old_tree = repository
+        .find_object(old_oid, None)
+        .and_then(|obj| obj.peel_to_tree())
+        .map_err(|e| format!("read old tree: {e}"))?;
+    let new_tree = repository
+        .find_object(new_oid, None)
+        .and_then(|obj| obj.peel_to_tree())
+        .map_err(|e| format!("read new tree: {e}"))?;
+    let mut diff_options = git2::DiffOptions::new();
+    diff_options.include_typechange(true);
+    let mut diff = repository
+        .diff_tree_to_tree(Some(&old_tree), Some(&new_tree), Some(&mut diff_options))
+        .map_err(|e| format!("git diff: {e}"))?;
+    let mut find_options = git2::DiffFindOptions::new();
+    find_options
+        .renames(true)
+        .rename_threshold(50)
+        .rename_limit(200);
+    if let Err(err) = diff.find_similar(Some(&mut find_options)) {
+        tracing::debug!("branch switch rename detection skipped: {err}");
+    }
+
+    let mut paths = IndexSet::new();
+    for delta in diff.deltas() {
+        match delta.status() {
+            git2::Delta::Added | git2::Delta::Copied => {
+                if let Some(path) = delta.new_file().path() {
+                    paths.insert(canonical_path(repo_path.join(path).to_string_lossy()));
+                }
+            }
+            git2::Delta::Deleted => {
+                if let Some(path) = delta.old_file().path() {
+                    paths.insert(canonical_path(repo_path.join(path).to_string_lossy()));
+                }
+            }
+            git2::Delta::Renamed => {
+                if let Some(path) = delta.old_file().path() {
+                    paths.insert(canonical_path(repo_path.join(path).to_string_lossy()));
+                }
+                if let Some(path) = delta.new_file().path() {
+                    paths.insert(canonical_path(repo_path.join(path).to_string_lossy()));
+                }
+            }
+            _ => {
+                if let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) {
+                    paths.insert(canonical_path(repo_path.join(path).to_string_lossy()));
+                }
+            }
+        }
+    }
+    Ok(paths.into_iter().collect())
+}
+
+fn record_git_head_change(gcx: &Arc<GlobalContext>, repo_path: &Path) -> Option<BranchHeadChange> {
+    let repo_path = canonical_path(repo_path.to_string_lossy());
+    let new_head = read_git_head(&repo_path);
+    let mut heads = gcx.documents_state.git_branch_heads.lock().unwrap();
+    let old_head = heads.get(&repo_path).cloned();
+    if new_head == old_head {
+        return None;
+    }
+    tracing::info!(
+        "git HEAD changed in {}: {:?} -> {:?}",
+        repo_path.display(),
+        old_head,
+        new_head
+    );
+    match &new_head {
+        Some(h) => {
+            heads.insert(repo_path.clone(), h.clone());
+        }
+        None => {
+            heads.remove(&repo_path);
+        }
+    }
+    Some(BranchHeadChange {
+        repo_path,
+        old_head,
+        new_head,
+    })
+}
+
+async fn enqueue_branch_head_changes(gcx: Arc<GlobalContext>, changes: Vec<BranchHeadChange>) {
+    let mut docs = IndexSet::new();
+    for change in &changes {
+        match changed_files_between_heads(
+            &change.repo_path,
+            change.old_head.as_deref(),
+            change.new_head.as_deref(),
+        ) {
+            Ok(paths) => {
+                docs.extend(paths.into_iter().map(|p| p.to_string_lossy().to_string()));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Branch switch diff failed for {}: {}; triggering full workspace reindex",
+                    change.repo_path.display(),
+                    err
+                );
+                enqueue_all_files_from_workspace_folders(gcx, true, false).await;
+                return;
+            }
+        }
+    }
+    let docs = docs.into_iter().collect::<Vec<_>>();
+    tracing::info!(
+        "Branch switch detected, enqueueing {} changed file(s)",
+        docs.len()
+    );
+    enqueue_some_docs(gcx, &docs, true).await;
 }
 
 async fn on_git_head_change(gcx_weak: Weak<GlobalContext>, event: Event) {
@@ -1150,54 +1348,21 @@ async fn on_git_head_change(gcx_weak: Weak<GlobalContext>, event: Event) {
         return;
     }
 
-    let mut any_changed = false;
-    {
-        let mut heads = gcx.documents_state.git_branch_heads.lock().unwrap();
-        for repo_path in &repo_paths {
-            let new_head = read_git_head(repo_path);
-            let old_head = heads.get(repo_path).cloned();
-            if new_head != old_head {
-                tracing::info!(
-                    "git HEAD changed in {}: {:?} -> {:?}",
-                    repo_path.display(),
-                    old_head,
-                    new_head
-                );
-                match &new_head {
-                    Some(h) => {
-                        heads.insert(repo_path.clone(), h.clone());
-                    }
-                    None => {
-                        heads.remove(repo_path);
-                    }
-                }
-                any_changed = true;
-            }
-        }
-    }
+    let changes = repo_paths
+        .iter()
+        .filter_map(|repo_path| record_git_head_change(&gcx, repo_path))
+        .collect::<Vec<_>>();
 
-    if any_changed {
+    if !changes.is_empty() {
         gcx.documents_state
             .branch_reindex_last_ts
             .store(now_ms, Ordering::Relaxed);
-        tracing::info!("Branch switch detected, triggering full workspace reindex");
-        enqueue_all_files_from_workspace_folders(gcx, true, false).await;
+        enqueue_branch_head_changes(gcx, changes).await;
     }
 }
 
 pub async fn on_explicit_branch_change(gcx: Arc<GlobalContext>, repo_path: &PathBuf) {
-    let new_head = read_git_head(repo_path);
-    {
-        let mut heads = gcx.documents_state.git_branch_heads.lock().unwrap();
-        match &new_head {
-            Some(h) => {
-                heads.insert(repo_path.clone(), h.clone());
-            }
-            None => {
-                heads.remove(repo_path);
-            }
-        }
-    }
+    let change = record_git_head_change(&gcx, repo_path);
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1205,52 +1370,61 @@ pub async fn on_explicit_branch_change(gcx: Arc<GlobalContext>, repo_path: &Path
     gcx.documents_state
         .branch_reindex_last_ts
         .store(now_ms, Ordering::Relaxed);
-    tracing::info!(
-        "Explicit branch change notification for {}, triggering full workspace reindex",
-        repo_path.display()
-    );
-    enqueue_all_files_from_workspace_folders(gcx, true, false).await;
+
+    if let Some(change) = change {
+        tracing::info!(
+            "Explicit branch change notification for {}, enqueueing changed files",
+            change.repo_path.display()
+        );
+        enqueue_branch_head_changes(gcx, vec![change]).await;
+    }
+}
+
+fn should_skip_debounced_file_event(gcx: &Arc<GlobalContext>, path: &Path, now: Instant) -> bool {
+    let mut debounce = gcx.documents_state.file_event_debounce.lock().unwrap();
+    debounce.retain(|_, last| now.saturating_duration_since(*last) <= FILE_EVENT_DEBOUNCE_RETAIN);
+    if let Some(last) = debounce.get(path) {
+        if now.saturating_duration_since(*last) < FILE_EVENT_DEBOUNCE_WINDOW {
+            return true;
+        }
+    }
+    debounce.insert(path.to_path_buf(), now);
+    false
 }
 
 pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
     async fn on_file_change(gcx_weak: Weak<GlobalContext>, event: Event) {
         let mut docs = vec![];
-        let indexing_everywhere_arc;
-        if let Some(gcx) = gcx_weak.clone().upgrade() {
-            indexing_everywhere_arc = reload_indexing_everywhere_if_needed(gcx.clone()).await;
-        } else {
-            return; // the program is shutting down
-        }
-        if let Some(gcx) = gcx_weak.clone().upgrade() {
-            if event.paths.iter().any(|p| path_triggers_registry_reload(p)) {
-                crate::yaml_configs::customization_registry::invalidate_all_registry_caches(
-                    gcx.clone(),
-                )
-                .await;
-            }
-        }
-        let (worktree_mappings, blocklist_roots) = if let Some(gcx) = gcx_weak.clone().upgrade() {
-            let mut blocklist_roots = gcx
-                .documents_state
-                .workspace_vcs_roots
-                .lock()
-                .unwrap()
-                .clone();
-            blocklist_roots
-                .extend(crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await);
-            blocklist_roots = blocklist_roots
-                .into_iter()
-                .map(crate::files_correction::canonicalize_normalized_path)
-                .collect();
-            blocklist_roots.sort();
-            blocklist_roots.dedup();
-            (
-                crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path()),
-                blocklist_roots,
-            )
-        } else {
-            return;
+        let mut removed_docs = vec![];
+        let gcx = match gcx_weak.clone().upgrade() {
+            Some(gcx) => gcx,
+            None => return,
         };
+        let indexing_everywhere_arc = reload_indexing_everywhere_if_needed(gcx.clone()).await;
+        if event.paths.iter().any(|p| path_triggers_registry_reload(p)) {
+            crate::yaml_configs::customization_registry::invalidate_all_registry_caches(
+                gcx.clone(),
+            )
+            .await;
+        }
+        let mut blocklist_roots = gcx
+            .documents_state
+            .workspace_vcs_roots
+            .lock()
+            .unwrap()
+            .clone();
+        blocklist_roots
+            .extend(crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await);
+        blocklist_roots = blocklist_roots
+            .into_iter()
+            .map(crate::files_correction::canonicalize_normalized_path)
+            .collect();
+        blocklist_roots.sort();
+        blocklist_roots.dedup();
+        let worktree_mappings =
+            crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path());
+        let debounce_paths = !matches!(&event.kind, EventKind::Remove(_));
+        let debounce_now = Instant::now();
         for p in &event.paths {
             if path_is_refact_internal(p) {
                 continue;
@@ -1269,22 +1443,30 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
             if crate::file_filter::is_generated_index_path(&normalized_path) {
                 continue;
             }
-
-            if (normalized_path.exists() && is_valid_file(&normalized_path, false, false).is_ok())
-                || (!p.exists()
-                    && !normalized_path.exists()
-                    && normalized_path.extension().is_some())
+            if normalized_path.exists()
+                && event_path_is_valid_file(&normalized_path, &blocklist_roots)
             {
+                if debounce_paths
+                    && should_skip_debounced_file_event(&gcx, &normalized_path, debounce_now)
+                {
+                    continue;
+                }
+                docs.push(normalized_path.to_string_lossy().to_string());
+            } else if !p.exists()
+                && !normalized_path.exists()
+                && normalized_path.extension().is_some()
+            {
+                removed_docs.push(normalized_path.clone());
                 docs.push(normalized_path.to_string_lossy().to_string());
             }
         }
         if docs.is_empty() {
             return;
         }
-        // info!("EventKind::Create/Modify/Remove {} paths", event.paths.len());
-        if let Some(gcx) = gcx_weak.clone().upgrade() {
-            enqueue_some_docs(gcx, &docs, false).await;
+        for path in removed_docs {
+            on_did_delete(gcx.clone(), &path).await;
         }
+        enqueue_some_docs(gcx, &docs, false).await;
     }
 
     async fn on_dot_git_dir_change(gcx_weak: Weak<GlobalContext>, event: Event) {
@@ -1362,13 +1544,19 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
             on_dot_git_dir_change(gcx_weak, event).await
         }
 
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+        EventKind::Create(_)
+        | EventKind::Modify(_)
+        | EventKind::Remove(_)
+        | EventKind::Access(AccessKind::Close(AccessMode::Write))
             if event.paths.iter().any(|p| is_git_head_path(p)) =>
         {
             on_git_head_change(gcx_weak.clone(), event).await
         }
 
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+        EventKind::Create(_)
+        | EventKind::Modify(_)
+        | EventKind::Remove(_)
+        | EventKind::Access(AccessKind::Close(AccessMode::Write)) => {
             on_file_change(gcx_weak.clone(), event).await
         }
 
@@ -1900,6 +2088,42 @@ mod tests {
         std::fs::write(git_dir.join("HEAD"), content).unwrap();
     }
 
+    fn git_signature() -> git2::Signature<'static> {
+        git2::Signature::now("test", "test@test.com").unwrap()
+    }
+
+    fn git_commit_all(repo: &git2::Repository, message: &str) -> git2::Oid {
+        let sig = git_signature();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.update_all(["*"].iter(), None).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo
+            .head()
+            .ok()
+            .and_then(|head| head.target())
+            .and_then(|oid| repo.find_commit(oid).ok());
+        match parent {
+            Some(parent) => repo
+                .commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+                .unwrap(),
+            None => repo
+                .commit(Some("HEAD"), &sig, &sig, message, &tree, &[])
+                .unwrap(),
+        }
+    }
+
+    fn git_checkout_branch(repo: &git2::Repository, branch: &str) {
+        repo.set_head(&format!("refs/heads/{branch}")).unwrap();
+        let mut checkout = git2::build::CheckoutBuilder::new();
+        checkout.force();
+        repo.checkout_head(Some(&mut checkout)).unwrap();
+    }
+
     #[test]
     fn is_git_head_path_detects_head() {
         assert!(is_git_head_path(Path::new("/project/.git/HEAD")));
@@ -1924,19 +2148,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn debounced_duplicate_events_single_enqueue() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("src").join("lib.rs");
+        write_file(&file, "pub fn debounce() {}\n");
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![normalized(temp.path())];
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        *gcx.codegraph.lock().await = Some(service.clone());
+
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(file.clone());
+        file_watcher_event(event, Arc::downgrade(&gcx)).await;
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(file.clone());
+        file_watcher_event(event, Arc::downgrade(&gcx)).await;
+
+        assert_eq!(service.queue_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn branch_switch_enqueues_only_changed_files() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(temp.path()).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let changed = temp.path().join("src").join("changed.rs");
+        let unchanged = temp.path().join("src").join("unchanged.rs");
+        write_file(&changed, "pub fn changed() -> &'static str { \"main\" }\n");
+        write_file(&unchanged, "pub fn unchanged() {}\n");
+        let main_oid = git_commit_all(&repo, "main");
+        {
+            let main_commit = repo.find_commit(main_oid).unwrap();
+            repo.branch("dev", &main_commit, false).unwrap();
+        }
+        git_checkout_branch(&repo, "dev");
+        write_file(&changed, "pub fn changed() -> &'static str { \"dev\" }\n");
+        git_commit_all(&repo, "dev");
+        git_checkout_branch(&repo, "main");
+
+        let canonical_repo = normalized(temp.path());
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![canonical_repo.clone()];
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![canonical_repo.clone()];
+        *gcx.documents_state.workspace_files.lock().unwrap() =
+            vec![normalized(&changed), normalized(&unchanged)];
+        {
+            let mut heads = gcx.documents_state.git_branch_heads.lock().unwrap();
+            heads.insert(canonical_repo.clone(), "ref: refs/heads/main".to_string());
+        }
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        *gcx.codegraph.lock().await = Some(service.clone());
+
+        git_checkout_branch(&repo, "dev");
+        let head_path = temp.path().join(".git").join("HEAD");
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(head_path);
+        on_git_head_change(Arc::downgrade(&gcx), event).await;
+
+        assert_eq!(
+            service.drain_batch(10),
+            vec![normalized(&changed).to_string_lossy().to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn close_write_event_routes_to_file_change() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("src").join("close_write.rs");
+        write_file(&file, "pub fn close_write() {}\n");
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![normalized(temp.path())];
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        *gcx.codegraph.lock().await = Some(service.clone());
+
+        let event = notify::Event::new(notify::EventKind::Access(AccessKind::Close(
+            AccessMode::Write,
+        )))
+        .add_path(file.clone());
+        file_watcher_event(event, Arc::downgrade(&gcx)).await;
+
+        assert_eq!(
+            service.drain_batch(10),
+            vec![normalized(&file).to_string_lossy().to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_remove_create_removes_old_and_enqueues_new() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let old_file = temp.path().join("src").join("old.rs");
+        let new_file = temp.path().join("src").join("new.rs");
+        write_file(&old_file, "pub fn old_name() {}\n");
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![normalized(temp.path())];
+        *gcx.documents_state.workspace_files.lock().unwrap() = vec![normalized(&old_file)];
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        service
+            .index_file(
+                &normalized(&old_file).to_string_lossy(),
+                "pub fn old_name() {}\n",
+                "rust",
+            )
+            .await
+            .unwrap();
+        assert_eq!(service.counts().await.unwrap().files, 1);
+        *gcx.codegraph.lock().await = Some(service.clone());
+
+        std::fs::remove_file(&old_file).unwrap();
+        let remove_event =
+            notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::File))
+                .add_path(old_file.clone());
+        file_watcher_event(remove_event, Arc::downgrade(&gcx)).await;
+        write_file(&new_file, "pub fn new_name() {}\n");
+        let create_event =
+            notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))
+                .add_path(new_file.clone());
+        file_watcher_event(create_event, Arc::downgrade(&gcx)).await;
+
+        let workspace_files = gcx.documents_state.workspace_files.lock().unwrap().clone();
+        assert!(!workspace_files.contains(&normalized(&old_file)));
+        assert!(workspace_files.contains(&normalized(&new_file)));
+        assert_eq!(service.counts().await.unwrap().files, 0);
+        assert_eq!(
+            service.drain_batch(10),
+            vec![
+                normalized(&old_file).to_string_lossy().to_string(),
+                normalized(&new_file).to_string_lossy().to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn branch_head_change_triggers_reindex() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let temp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(temp.path()).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let file = temp.path().join("src").join("lib.rs");
+        write_file(&file, "pub fn branch_test() -> &'static str { \"main\" }\n");
+        let main_oid = git_commit_all(&repo, "main");
+        {
+            let main_commit = repo.find_commit(main_oid).unwrap();
+            repo.branch("dev", &main_commit, false).unwrap();
+        }
+        git_checkout_branch(&repo, "dev");
+        write_file(&file, "pub fn branch_test() -> &'static str { \"dev\" }\n");
+        git_commit_all(&repo, "dev");
+        git_checkout_branch(&repo, "main");
         let canonical_repo = normalized(temp.path());
-
-        write_head(temp.path(), "ref: refs/heads/main\n");
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![canonical_repo.clone()];
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![canonical_repo.clone()];
         {
             let mut heads = gcx.documents_state.git_branch_heads.lock().unwrap();
             heads.insert(canonical_repo.clone(), "ref: refs/heads/main".to_string());
         }
 
-        write_head(temp.path(), "ref: refs/heads/dev\n");
-
+        git_checkout_branch(&repo, "dev");
         let head_path = temp.path().join(".git").join("HEAD");
         let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
             .add_path(head_path);
