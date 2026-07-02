@@ -1,13 +1,20 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod chat_local_types;
 pub mod code_lens;
-pub mod internal_roles;
-pub mod plan_role;
-pub mod goal_role;
 pub mod diagnostics;
+pub mod goal_role;
+pub mod internal_roles;
 pub mod notification_event;
+pub mod plan_role;
 
+pub use chat_local_types::{
+    max_queue_size, session_cleanup_interval, session_idle_timeout, stream_heartbeat,
+    stream_idle_timeout, stream_total_timeout, BurstGuard, BurstGuardDecision,
+    EnqueueCommandOutcome, PendingBrowserMessage, PendingSkillDeactivation,
+    TrajectorySourceIdentity,
+};
 pub use notification_event::{NotificationEvent, NotificationQuestion};
 pub use refact_core::buddy_meta::BuddyThreadMeta;
 pub use refact_core::chat_types::{ChatMessage, ContextFile};
@@ -990,14 +997,6 @@ pub struct ActiveCommandContext {
     pub model_override: Option<String>,
     pub context_fork: Option<String>,
     pub started_at_index: Option<usize>,
-    pub activation_tool_call_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingSkillDeactivation {
-    pub start_index: usize,
-    pub report: String,
-    pub skill_name: String,
     pub activation_tool_call_id: Option<String>,
 }
 

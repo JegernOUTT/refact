@@ -9,9 +9,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ChatUsage, DiffChunk};
 use crate::chat::diagnostics::{
     filter_ui_only_messages, is_ui_only_message, safe_provider_error_diagnostic,
 };
-use crate::chat::history_limit::{
-    compute_context_budget, pressure_for_used_tokens, ContextPressure,
-};
+use crate::chat::history_limit::{compute_context_budget, pressure_for_used_tokens, ContextPressure};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::types::{ChatEvent, ChatSession, CompressionPhase, CompressionReason, SessionState};
 use crate::global_context::GlobalContext;
@@ -20,6 +18,8 @@ use refact_chat_history::compression_exemption::{exemption_for, CompressionExemp
 use refact_chat_history::trajectory_ops::{
     should_preserve_tool, COMPRESSION_REPORT_KIND, COMPRESSION_REPORT_ROLE,
 };
+pub use refact_chat_api::chat_local_types::is_segment_summary;
+use refact_chat_api::chat_local_types::SEGMENT_SUMMARY_KIND as SUMMARY_KIND;
 
 const SEGMENT_SUMMARY_OVERHEAD_TOKENS: usize = 1024;
 const TOOL_CALL_ARGUMENTS_MAX_CHARS: usize = 1000;
@@ -34,7 +34,6 @@ const MESSAGE_CONTENT_TRUNCATED_MARKER: &str = "\n[... message content truncated
 const TOOL_CALL_ARGUMENTS_TRUNCATED_MARKER: &str = "…";
 const GOAL_HINT_TRUNCATED_MARKER: &str = "\n[... user goal truncated ...]";
 const GOAL_HINT_PROMPT_PREFIX: &str = "User goal for this segment: ";
-const SUMMARY_KIND: &str = "llm_segment_summary";
 const SUMMARY_SCHEMA_VERSION: u64 = 3;
 const SUMMARY_INSERT_MODE: &str = "source_preserving";
 const SEGMENT_REPORT_TIER: &str = "tier1_llm";
@@ -208,18 +207,6 @@ Compress: routine tool outputs into compressed_tool_outputs when useful. \
 Drop: routine reads/searches unless they changed the plan. \
 Do not narrate process, do not use first person unless quoting the user, invent facts, or include full code snippets unless essential. \
 Only preserve context_file message IDs that must remain verbatim.";
-
-pub fn is_segment_summary(message: &ChatMessage) -> bool {
-    if message.role != "assistant" || is_ui_only_message(message) {
-        return false;
-    }
-    message
-        .extra
-        .get("compression")
-        .and_then(|value| value.get("kind"))
-        .and_then(|value| value.as_str())
-        == Some(SUMMARY_KIND)
-}
 
 fn is_excluded_from_segment(message: &ChatMessage) -> bool {
     if is_segment_summary(message) {
@@ -2748,7 +2735,9 @@ async fn run_reserved_segment_summarization(
     let episode_start_tokens = crate::chat::trajectory_ops::approx_token_count(&raw_messages);
     let target_saved_tokens =
         episode_start_tokens.saturating_mul(COMPRESSION_TARGET_REDUCTION_PERCENT) / 100;
-    let safety_iterations = raw_messages.len().saturating_add(COMPRESSION_SAFETY_ITERATION_SLACK);
+    let safety_iterations = raw_messages
+        .len()
+        .saturating_add(COMPRESSION_SAFETY_ITERATION_SLACK);
 
     let mut tried_source_hashes: HashSet<String> = known_insufficient_hashes;
     let mut insufficient_hashes_to_record: Vec<String> = Vec::new();
@@ -2970,7 +2959,8 @@ async fn run_reserved_segment_summarization(
         } else {
             CompressionReason::NoEligibleSegment
         };
-        if emit_compression_skipped_if_owned(&mut session, attempt, reason) && forced_context_limit {
+        if emit_compression_skipped_if_owned(&mut session, attempt, reason) && forced_context_limit
+        {
             append_compression_outcome_event(&mut session, reason);
         }
         CompactionOutcome::NothingToCompact

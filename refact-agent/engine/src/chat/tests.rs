@@ -7,8 +7,8 @@ mod tests {
     use crate::call_validation::{ChatMessage, ChatContent, ChatUsage, ChatToolCall, ChatToolFunction};
     use crate::scratchpads::multimodality::MultimodalElement;
     use crate::chat::types::{
-        BackgroundAgentSummary, BurstGuard, BurstGuardDecision, ChatEvent, ChatSession, DeltaOp,
-        EventEnvelope, SessionState, PauseReason, QueuedItem, RuntimeState, ThreadParams,
+        BackgroundAgentSummary, ChatEvent, ChatSession, DeltaOp, EventEnvelope, SessionState,
+        PauseReason, QueuedItem, RuntimeState, ThreadParams,
     };
     use crate::exec::{ExecMode, ExecProcessId, ExecStatus, ProcessCompletionEvent};
     use std::collections::HashSet;
@@ -75,36 +75,6 @@ mod tests {
             target_files: vec![format!("{title}.rs")],
             model: "test-model".to_string(),
         }
-    }
-
-    #[tokio::test]
-    async fn burst_guard_allows_first_five_calls() {
-        let guard = BurstGuard::new();
-        for _ in 0..5 {
-            assert_eq!(guard.record_and_check().await, BurstGuardDecision::Allow);
-        }
-    }
-
-    #[tokio::test]
-    async fn burst_guard_defers_sixth_call() {
-        let guard = BurstGuard::new();
-        for _ in 0..5 {
-            assert_eq!(guard.record_and_check().await, BurstGuardDecision::Allow);
-        }
-
-        assert_eq!(guard.record_and_check().await, BurstGuardDecision::Defer);
-    }
-
-    #[tokio::test]
-    async fn burst_guard_allows_after_window_slides() {
-        let guard = BurstGuard::new();
-        for _ in 0..5 {
-            assert_eq!(guard.record_and_check().await, BurstGuardDecision::Allow);
-        }
-
-        tokio::time::sleep(std::time::Duration::from_secs(11)).await;
-
-        assert_eq!(guard.record_and_check().await, BurstGuardDecision::Allow);
     }
 
     #[test]

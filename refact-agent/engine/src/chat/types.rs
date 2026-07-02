@@ -5,91 +5,20 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Notify, Mutex as AMutex};
 
 use crate::call_validation::{ChatMessage, ChatUsage};
-use crate::git::checkpoints::Checkpoint;
-use super::config::{limits, timeouts};
 
+pub use refact_chat_api::chat_local_types::{
+    max_queue_size, session_cleanup_interval, session_idle_timeout, stream_heartbeat,
+    stream_idle_timeout, stream_total_timeout, BurstGuard, BurstGuardDecision,
+    EnqueueCommandOutcome, PendingBrowserMessage, PendingSkillDeactivation,
+    TrajectorySourceIdentity,
+};
 pub use refact_chat_api::{
     ActiveCommandContext, BackgroundAgentSummary, BrowserMeta, BrowserSnapshot, BrowserTabInfo,
     BuddyThreadMeta, ChatCommand, ChatEvent, CommandRequest, CompressionPhase, CompressionReason,
     DeltaOp, DiffBox, EventEnvelope, GoalAttempt, GoalBudget, GoalEvent, GoalProgress,
-    GoalSnapshot, GoalStatus, PauseReason, PendingSkillDeactivation, QueuedItem, RuntimeState,
-    SessionState, TaskMeta, ThreadParams, TimelineEntry, ToolDecisionItem, WindowBounds,
-    WorktreeMeta,
+    GoalSnapshot, GoalStatus, PauseReason, QueuedItem, RuntimeState, SessionState, TaskMeta,
+    ThreadParams, TimelineEntry, ToolDecisionItem, WindowBounds, WorktreeMeta,
 };
-
-pub fn max_queue_size() -> usize {
-    limits().max_queue_size
-}
-pub fn session_idle_timeout() -> std::time::Duration {
-    timeouts().session_idle
-}
-pub fn session_cleanup_interval() -> std::time::Duration {
-    timeouts().session_cleanup_interval
-}
-pub fn stream_idle_timeout() -> std::time::Duration {
-    timeouts().stream_idle
-}
-pub fn stream_total_timeout() -> std::time::Duration {
-    timeouts().stream_total
-}
-pub fn stream_heartbeat() -> std::time::Duration {
-    timeouts().stream_heartbeat
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EnqueueCommandOutcome {
-    Accepted,
-    Duplicate,
-    Full,
-}
-
-#[derive(Debug)]
-pub struct BurstGuard {
-    inner: tokio::sync::Mutex<BurstGuardInner>,
-}
-
-#[derive(Debug, Default)]
-struct BurstGuardInner {
-    recent: VecDeque<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BurstGuardDecision {
-    Allow,
-    Defer,
-}
-
-impl BurstGuard {
-    pub fn new() -> Self {
-        Self {
-            inner: tokio::sync::Mutex::new(BurstGuardInner::default()),
-        }
-    }
-
-    pub async fn record_and_check(&self) -> BurstGuardDecision {
-        let now = chrono::Utc::now();
-        let mut guard = self.inner.lock().await;
-        while let Some(front) = guard.recent.front() {
-            if now.signed_duration_since(*front).num_seconds() > 10 {
-                guard.recent.pop_front();
-            } else {
-                break;
-            }
-        }
-        if guard.recent.len() >= 5 {
-            BurstGuardDecision::Defer
-        } else {
-            guard.recent.push_back(now);
-            BurstGuardDecision::Allow
-        }
-    }
-}
-
-impl Default for BurstGuard {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 fn epoch_ms_now() -> u64 {
     SystemTime::now()
@@ -281,99 +210,22 @@ impl GoalSnapshotBudgetExt for GoalSnapshot {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub enum TrajectorySourceIdentity {
-    #[default]
-    Normal,
-    Task {
-        task_id: String,
-        role: String,
-        agent_id: Option<String>,
-        card_id: Option<String>,
-        planner_chat_id: Option<String>,
-    },
-    Buddy,
+pub(crate) trait TrajectorySourceIdentitySessionExt {
+    fn from_session(session: &ChatSession) -> Self;
+    fn matches_session(&self, session: &ChatSession) -> bool;
+    fn matches_session_for_delete(&self, session: &ChatSession) -> bool;
 }
 
-impl TrajectorySourceIdentity {
-    pub(crate) fn task(
-        task_id: String,
-        role: String,
-        agent_id: Option<String>,
-        card_id: Option<String>,
-        planner_chat_id: Option<String>,
-    ) -> Self {
-        Self::Task {
-            task_id,
-            role,
-            agent_id,
-            card_id,
-            planner_chat_id,
-        }
-    }
-
-    pub(crate) fn from_task_meta(task_meta: &TaskMeta) -> Self {
-        Self::task(
-            task_meta.task_id.clone(),
-            task_meta.role.clone(),
-            task_meta.agent_id.clone(),
-            task_meta.card_id.clone(),
-            task_meta.planner_chat_id.clone(),
-        )
-    }
-
-    pub(crate) fn from_extra(
-        extra: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<Self, String> {
-        let buddy_meta_present = extra
-            .get("buddy_meta")
-            .is_some_and(|value| !value.is_null());
-        let task_meta_value = extra.get("task_meta").filter(|value| !value.is_null());
-
-        if buddy_meta_present && task_meta_value.is_some() {
-            return Err("trajectory cannot contain both task_meta and buddy_meta".to_string());
-        }
-        if buddy_meta_present {
-            return Ok(Self::Buddy);
-        }
-        if let Some(value) = task_meta_value {
-            let task_meta = serde_json::from_value::<TaskMeta>(value.clone())
-                .map_err(|e| format!("invalid task_meta: {}", e))?;
-            return Ok(Self::from_task_meta(&task_meta));
-        }
-        Ok(Self::Normal)
-    }
-
-    pub(crate) fn from_json(json: &serde_json::Value) -> Result<Self, String> {
-        let Some(root) = json.as_object() else {
-            return Err("trajectory JSON root must be an object".to_string());
-        };
-        Self::from_extra(root)
-    }
-
-    pub(crate) fn from_session_parts(thread: &ThreadParams) -> Self {
-        if thread.buddy_meta.is_some() {
-            Self::Buddy
-        } else if let Some(task_meta) = thread.task_meta.as_ref() {
-            Self::from_task_meta(task_meta)
-        } else {
-            Self::Normal
-        }
-    }
-
-    pub(crate) fn from_session(session: &ChatSession) -> Self {
+impl TrajectorySourceIdentitySessionExt for TrajectorySourceIdentity {
+    fn from_session(session: &ChatSession) -> Self {
         Self::from_session_parts(&session.thread)
     }
 
-    pub(crate) fn emits_generic_event(&self) -> bool {
-        !matches!(self, Self::Buddy)
-    }
-
-    pub(crate) fn matches_session(&self, session: &ChatSession) -> bool {
+    fn matches_session(&self, session: &ChatSession) -> bool {
         &Self::from_session(session) == self
     }
 
-    pub(crate) fn matches_session_for_delete(&self, session: &ChatSession) -> bool {
+    fn matches_session_for_delete(&self, session: &ChatSession) -> bool {
         let active_source = Self::from_session(session);
         match (self, active_source) {
             (
@@ -494,16 +346,4 @@ pub struct ChatSession {
     /// every `ChatEvent::Snapshot` carries the current agent set instead of an empty list.
     pub background_agents: HashMap<String, BackgroundAgentSummary>,
     pub goal_stopped_by_abort: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingBrowserMessage {
-    pub pending_message_id: String,
-    pub content: serde_json::Value,
-    pub attachments: Vec<serde_json::Value>,
-    pub checkpoints: Vec<Checkpoint>,
-    pub context_files: Vec<serde_json::Value>,
-    pub suppress_auto_enrichment: bool,
-    pub skill_activation_name: Option<String>,
-    pub skill_context_msg: Option<ChatMessage>,
 }
