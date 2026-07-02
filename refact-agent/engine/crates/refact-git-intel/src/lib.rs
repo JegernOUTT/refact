@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use git2::{Commit, ErrorClass, ErrorCode, Repository, Revwalk};
+use git2::{Commit, ErrorClass, ErrorCode, Oid, Repository, Revwalk};
 use serde::{Deserialize, Serialize};
 
 pub mod blame;
@@ -118,6 +118,16 @@ pub(crate) fn push_head_or_empty(revwalk: &mut Revwalk) -> Result<bool, String> 
     }
 }
 
+fn push_oid_or_empty(revwalk: &mut Revwalk, oid: Option<Oid>) -> Result<bool, String> {
+    match oid {
+        Some(oid) => revwalk
+            .push(oid)
+            .map(|()| true)
+            .map_err(|e| format!("git push: {e}")),
+        None => Ok(false),
+    }
+}
+
 fn temporal_weight(now_ts: i64, ts: i64) -> f64 {
     let age_days = now_ts.saturating_sub(ts).max(0) as f64 / 86_400.0;
     (-std::f64::consts::LN_2 * age_days / TEMPORAL_HALFLIFE_DAYS)
@@ -154,6 +164,27 @@ pub fn collect_commit_messages(repo_path: &Path, max: usize) -> Result<Vec<Strin
     if !push_head_or_empty(&mut revwalk)? {
         return Ok(Vec::new());
     }
+    collect_commit_messages_from_revwalk(&repo, revwalk, max)
+}
+
+pub fn collect_commit_messages_at(
+    repo_path: &Path,
+    head: Option<Oid>,
+    max: usize,
+) -> Result<Vec<String>, String> {
+    let repo = Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
+    let mut revwalk = repo.revwalk().map_err(|e| format!("git revwalk: {e}"))?;
+    if !push_oid_or_empty(&mut revwalk, head)? {
+        return Ok(Vec::new());
+    }
+    collect_commit_messages_from_revwalk(&repo, revwalk, max)
+}
+
+fn collect_commit_messages_from_revwalk(
+    repo: &Repository,
+    revwalk: Revwalk,
+    max: usize,
+) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for (i, oid) in revwalk.enumerate() {
         if i >= max {
@@ -174,7 +205,27 @@ pub fn mine_history(repo_path: &Path, max_commits: usize) -> Result<GitIntel, St
     if !push_head_or_empty(&mut revwalk)? {
         return Ok(GitIntel::default());
     }
+    mine_history_from_revwalk(&repo, revwalk, max_commits)
+}
 
+pub fn mine_history_at(
+    repo_path: &Path,
+    head: Option<Oid>,
+    max_commits: usize,
+) -> Result<GitIntel, String> {
+    let repo = Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
+    let mut revwalk = repo.revwalk().map_err(|e| format!("git revwalk: {e}"))?;
+    if !push_oid_or_empty(&mut revwalk, head)? {
+        return Ok(GitIntel::default());
+    }
+    mine_history_from_revwalk(&repo, revwalk, max_commits)
+}
+
+fn mine_history_from_revwalk(
+    repo: &Repository,
+    revwalk: Revwalk,
+    max_commits: usize,
+) -> Result<GitIntel, String> {
     let mut intel = GitIntel::default();
     for (i, oid) in revwalk.enumerate() {
         if i >= max_commits {
@@ -188,7 +239,7 @@ pub fn mine_history(repo_path: &Path, max_commits: usize) -> Result<GitIntel, St
         let committer = commit.committer().email().unwrap_or("unknown").to_string();
         let ts = commit.time().seconds();
         let message = commit.message().unwrap_or("").to_string();
-        let file_stats = changed_files_with_stats(&repo, &commit);
+        let file_stats = changed_files_with_stats(repo, &commit);
         let files: Vec<String> = file_stats.iter().map(|(path, _, _)| path.clone()).collect();
 
         intel.commits_analyzed += 1;

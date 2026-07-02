@@ -70,12 +70,31 @@ fn git_head_oid(repo_path: &Path) -> Result<Option<Oid>, String> {
     }
 }
 
+fn git_head_unchanged(repo_path: &Path, expected: &Option<Oid>) -> bool {
+    git_head_oid(repo_path)
+        .ok()
+        .is_some_and(|current| &current == expected)
+}
+
 fn cached_mine_history(
     repo_path: &Path,
     max_commits: usize,
 ) -> Result<refact_git_intel::GitIntel, String> {
+    cached_mine_history_with(repo_path, max_commits, |path, head, max| {
+        refact_git_intel::mine_history_at(path, head, max)
+    })
+}
+
+fn cached_mine_history_with<F>(
+    repo_path: &Path,
+    max_commits: usize,
+    mine: F,
+) -> Result<refact_git_intel::GitIntel, String>
+where
+    F: FnOnce(&Path, Option<Oid>, usize) -> Result<refact_git_intel::GitIntel, String>,
+{
     let head = git_head_oid(repo_path)?;
-    let key = (repo_path.to_path_buf(), head, max_commits);
+    let key = (repo_path.to_path_buf(), head.clone(), max_commits);
     let now = Instant::now();
     if let Some(intel) = {
         let cache = git_cache().lock().unwrap();
@@ -87,15 +106,30 @@ fn cached_mine_history(
     } {
         return Ok(intel);
     }
-    let intel = refact_git_intel::mine_history(repo_path, max_commits)?;
-    let mut cache = git_cache().lock().unwrap();
-    cache.history.insert(key, (now, intel.clone()));
+    let intel = mine(repo_path, head.clone(), max_commits)?;
+    if git_head_unchanged(repo_path, &head) {
+        let mut cache = git_cache().lock().unwrap();
+        cache.history.insert(key, (now, intel.clone()));
+    }
     Ok(intel)
 }
 
 fn cached_commit_messages(repo_path: &Path, max: usize) -> Result<Vec<String>, String> {
+    cached_commit_messages_with(repo_path, max, |path, head, max| {
+        refact_git_intel::collect_commit_messages_at(path, head, max)
+    })
+}
+
+fn cached_commit_messages_with<F>(
+    repo_path: &Path,
+    max: usize,
+    collect: F,
+) -> Result<Vec<String>, String>
+where
+    F: FnOnce(&Path, Option<Oid>, usize) -> Result<Vec<String>, String>,
+{
     let head = git_head_oid(repo_path)?;
-    let key = (repo_path.to_path_buf(), head, max);
+    let key = (repo_path.to_path_buf(), head.clone(), max);
     let now = Instant::now();
     if let Some(messages) = {
         let cache = git_cache().lock().unwrap();
@@ -107,9 +141,11 @@ fn cached_commit_messages(repo_path: &Path, max: usize) -> Result<Vec<String>, S
     } {
         return Ok(messages);
     }
-    let messages = refact_git_intel::collect_commit_messages(repo_path, max)?;
-    let mut cache = git_cache().lock().unwrap();
-    cache.messages.insert(key, (now, messages.clone()));
+    let messages = collect(repo_path, head.clone(), max)?;
+    if git_head_unchanged(repo_path, &head) {
+        let mut cache = git_cache().lock().unwrap();
+        cache.messages.insert(key, (now, messages.clone()));
+    }
     Ok(messages)
 }
 
@@ -1206,5 +1242,79 @@ impl Tool for ToolCodeMap {
 
     fn tool_depends_on(&self) -> Vec<String> {
         codegraph_dependency()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::{Repository, Signature, Time};
+
+    fn commit_file(repo: &Repository, path: &str, contents: &str, msg: &str) -> git2::Oid {
+        let workdir = repo.workdir().unwrap();
+        std::fs::write(workdir.join(path), contents).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(path)).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let time = Time::new(1_700_000_000, 0);
+        let sig = Signature::new("Tester", "tester@example.com", &time).unwrap();
+        let parents: Vec<git2::Commit> = repo
+            .head()
+            .ok()
+            .and_then(|head| head.target())
+            .and_then(|oid| repo.find_commit(oid).ok())
+            .into_iter()
+            .collect();
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
+            .unwrap()
+    }
+
+    fn two_branch_repo() -> (tempfile::TempDir, git2::Oid) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let main_oid = commit_file(&repo, "file.txt", "main\n", "main branch history");
+        let main_commit = repo.find_commit(main_oid).unwrap();
+        repo.branch("side", &main_commit, false).unwrap();
+        repo.set_head("refs/heads/side").unwrap();
+        commit_file(&repo, "file.txt", "side\n", "side branch history");
+        repo.set_head("refs/heads/main").unwrap();
+        (dir, main_oid)
+    }
+
+    #[test]
+    fn git_mining_cache_does_not_store_new_head_results_under_old_head_key() {
+        let (dir, main_oid) = two_branch_repo();
+        let repo_path = dir.path();
+        let max = 10;
+        let key = (repo_path.to_path_buf(), Some(main_oid), max);
+        assert_eq!(git_head_oid(repo_path).unwrap(), Some(main_oid));
+
+        let history = cached_mine_history_with(repo_path, max, |path, _head, max| {
+            let repo = Repository::open(path).unwrap();
+            repo.set_head("refs/heads/side").unwrap();
+            refact_git_intel::mine_history(path, max)
+        })
+        .unwrap();
+
+        assert_eq!(history.commit_records[0].message, "side branch history");
+        assert!(git_cache().lock().unwrap().history.get(&key).is_none());
+
+        Repository::open(repo_path)
+            .unwrap()
+            .set_head("refs/heads/main")
+            .unwrap();
+        let messages = cached_commit_messages_with(repo_path, max, |path, _head, max| {
+            let repo = Repository::open(path).unwrap();
+            repo.set_head("refs/heads/side").unwrap();
+            refact_git_intel::collect_commit_messages(path, max)
+        })
+        .unwrap();
+
+        assert_eq!(messages[0], "side branch history");
+        assert!(git_cache().lock().unwrap().messages.get(&key).is_none());
     }
 }
