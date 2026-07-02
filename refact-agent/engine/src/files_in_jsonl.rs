@@ -81,7 +81,11 @@ async fn parse_jsonl(jsonl_path: &String) -> Result<Vec<PathBuf>, String> {
 
 pub async fn read_the_jsonl(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     let files_jsonl_path = gcx.cmdline.files_jsonl_path.clone();
-    match parse_jsonl(&files_jsonl_path).await {
+    read_jsonl_path(&files_jsonl_path).await
+}
+
+async fn read_jsonl_path(files_jsonl_path: &str) -> Vec<PathBuf> {
+    match parse_jsonl(&files_jsonl_path.to_string()).await {
         Ok(docs) => docs,
         Err(e) => {
             info!("invalid jsonl file {:?}: {:?}", files_jsonl_path, e);
@@ -105,13 +109,34 @@ fn make_async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::
     Ok((watcher, rx))
 }
 
-pub async fn reload_if_jsonl_changes_background_task(gcx: Arc<GlobalContext>) {
-    async fn on_modify(gcx: Arc<GlobalContext>) {
-        enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), false, false).await;
+async fn handle_jsonl_event(
+    gcx: Arc<GlobalContext>,
+    files_jsonl_path: &str,
+    event_kind: EventKind,
+) {
+    match event_kind {
+        EventKind::Any => {}
+        EventKind::Access(_) => {}
+        EventKind::Create(_) => {
+            info!("files_jsonl_path {:?} was created", files_jsonl_path);
+            enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), false, false).await;
+        }
+        EventKind::Modify(_) => {
+            info!("files_jsonl_path {:?} was modified", files_jsonl_path);
+            enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), false, false).await;
+        }
+        EventKind::Remove(_) => {
+            info!("files_jsonl_path {:?} was removed", files_jsonl_path);
+            enqueue_all_docs_from_jsonl(gcx.clone(), vec![], false, false).await;
+        }
+        EventKind::Other => {}
     }
+}
+
+pub async fn reload_if_jsonl_changes_background_task(gcx: Arc<GlobalContext>) {
     let (mut watcher, mut rx) = make_async_watcher().expect("Failed to make file watcher");
     let files_jsonl_path = gcx.cmdline.files_jsonl_path.clone();
-    on_modify(gcx.clone()).await;
+    enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), false, false).await;
     if watcher
         .watch(
             &PathBuf::from(files_jsonl_path.clone()),
@@ -127,23 +152,50 @@ pub async fn reload_if_jsonl_changes_background_task(gcx: Arc<GlobalContext>) {
     }
     while let Some(res) = rx.next().await {
         match res {
-            Ok(event) => match event.kind {
-                EventKind::Any => {}
-                EventKind::Access(_) => {}
-                EventKind::Create(_) => {
-                    info!("files_jsonl_path {:?} was created", files_jsonl_path);
-                }
-                EventKind::Modify(_) => {
-                    info!("files_jsonl_path {:?} was modified", files_jsonl_path);
-                    enqueue_all_docs_from_jsonl(gcx.clone(), vec![], false, false).await;
-                }
-                EventKind::Remove(_) => {
-                    info!("files_jsonl_path {:?} was removed", files_jsonl_path);
-                    enqueue_all_docs_from_jsonl(gcx.clone(), vec![], false, false).await;
-                }
-                EventKind::Other => {}
-            },
+            Ok(event) => handle_jsonl_event(gcx.clone(), &files_jsonl_path, event.kind).await,
             Err(e) => info!("file watch error: {:?}", e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{CreateKind, DataChange, ModifyKind};
+
+    fn tracked_jsonl_files(gcx: &Arc<GlobalContext>) -> Vec<PathBuf> {
+        gcx.documents_state.jsonl_files.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn modified_jsonl_event_rereads_contents() {
+        let temp = tempfile::tempdir().unwrap();
+        let jsonl_path = temp.path().join("files.jsonl");
+        let first_path = temp.path().join("first.rs");
+        let second_path = temp.path().join("second.rs");
+        let jsonl_path_str = jsonl_path.to_string_lossy().to_string();
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        Arc::get_mut(&mut gcx)
+            .expect("test owns gcx")
+            .cmdline
+            .files_jsonl_path = jsonl_path_str.clone();
+
+        std::fs::write(&jsonl_path, "{\"path\":\"first.rs\"}\n").unwrap();
+        handle_jsonl_event(
+            gcx.clone(),
+            &jsonl_path_str,
+            EventKind::Create(CreateKind::File),
+        )
+        .await;
+        assert_eq!(tracked_jsonl_files(&gcx), vec![first_path]);
+
+        std::fs::write(&jsonl_path, "{\"path\":\"second.rs\"}\n").unwrap();
+        handle_jsonl_event(
+            gcx.clone(),
+            &jsonl_path_str,
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+        )
+        .await;
+        assert_eq!(tracked_jsonl_files(&gcx), vec![second_path]);
     }
 }

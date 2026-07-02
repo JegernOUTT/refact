@@ -89,19 +89,37 @@ pub fn is_generated_index_path(path: &Path) -> bool {
             _ => None,
         })
         .collect();
-    if !parts
-        .iter()
-        .any(|part| part == ".refact" || part == "refact")
-    {
-        return false;
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    for idx in 0..parts.len() {
+        if parts[idx] == ".refact" && is_generated_index_suffix(&parts[idx..]) {
+            return true;
+        }
+        if parts[idx] == "refact"
+            && idx > 0
+            && parts[idx - 1] == ".config"
+            && is_generated_index_suffix(&parts[idx..])
+        {
+            return true;
+        }
     }
-    let n = parts.len();
-    if n < 2 {
-        return false;
-    }
-    let parent = parts[n - 2].as_str();
-    matches!(parent, "trajectories" | "tasks" | "planner" | "agents")
-        || (n >= 3 && parts[n - 3] == "agents")
+    false
+}
+
+fn is_generated_index_suffix(parts: &[&str]) -> bool {
+    matches!(parts, [_, "trajectories", "index.json"])
+        || matches!(parts, [_, "tasks", "index.json"])
+        || matches!(
+            parts,
+            [_, "tasks", _, "trajectories", "planner", "index.json"]
+        )
+        || matches!(
+            parts,
+            [_, "tasks", _, "trajectories", "agents", "index.json"]
+        )
+        || matches!(
+            parts,
+            [_, "tasks", _, "trajectories", "agents", _, "index.json"]
+        )
 }
 
 pub fn is_refact_codegraph_path(path: &Path) -> bool {
@@ -185,6 +203,9 @@ mod tests {
             "/repo/.refact/tasks/task-1/trajectories/planner/index.json",
             "/repo/.refact/tasks/task-1/trajectories/agents/index.json",
             "/repo/.refact/tasks/task-1/trajectories/agents/agent-1/index.json",
+            "/home/user/.config/refact/trajectories/index.json",
+            "/home/user/.config/refact/tasks/index.json",
+            "/home/user/.config/refact/tasks/task-1/trajectories/planner/index.json",
         ] {
             assert!(is_generated_index_path(Path::new(path)), "{path}");
         }
@@ -198,6 +219,9 @@ mod tests {
             "/repo/.refact/tasks/task-1/trajectories/planner/archive/index.json",
             "/repo/.refact/tasks/task-1/notes/index.json",
             "/repo/.refact/knowledge/index.json",
+            "/work/refact/docs/trajectories/index.json",
+            "/home/user/refact/trajectories/index.json",
+            "/repo/.config/not-refact/trajectories/index.json",
         ] {
             assert!(!is_generated_index_path(Path::new(path)), "{path}");
         }
