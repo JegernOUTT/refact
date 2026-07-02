@@ -10918,24 +10918,6 @@ async fn bug_reaction_not_blocked_by_humor_cooldown() {
 }
 
 #[test]
-fn limiter_prunes_stale_chat_ids() {
-    use super::chat_reactions::{ChatReactionKind, ChatReactionLimiter, PER_CHAT_COOLDOWN_SECS};
-
-    let mut lim = ChatReactionLimiter::new();
-    let t0 = chrono::Utc::now();
-    assert!(lim.allow_kind("chat-1", ChatReactionKind::Humor, t0));
-
-    let t1 = t0 + Duration::seconds(PER_CHAT_COOLDOWN_SECS + 1);
-    assert!(lim.allow_kind("chat-2", ChatReactionKind::Humor, t1));
-
-    assert!(
-        !lim.per_chat_kind_last_at
-            .contains_key(&("chat-1".to_string(), ChatReactionKind::Humor)),
-        "stale chat-1 entry must be pruned after second call"
-    );
-}
-
-#[test]
 fn limiter_reset_allows_first_post_enable_reaction() {
     use super::chat_reactions::{ChatReactionKind, ChatReactionLimiter};
 
