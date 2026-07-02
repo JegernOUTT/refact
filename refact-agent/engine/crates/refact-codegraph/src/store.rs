@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use refact_codegraph_parsers::Resolver;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -12,25 +12,56 @@ use tracing::debug;
 use crate::extract::{edge_kind_str, extract_symbols};
 use crate::schema;
 
-fn normalized_file_namespace(path: &str) -> String {
-    let raw = Path::new(path);
-    let normalized_path = if raw.is_absolute() {
-        let absolute = raw.canonicalize().unwrap_or_else(|_| raw.to_path_buf());
-        std::env::current_dir()
-            .ok()
-            .and_then(|cwd| {
-                let cwd = cwd.canonicalize().unwrap_or(cwd);
-                cwd.ancestors().find_map(|ancestor| {
-                    absolute
-                        .strip_prefix(ancestor)
-                        .ok()
-                        .map(|p| p.to_path_buf())
-                })
-            })
-            .unwrap_or(absolute)
+fn normalize_path_for_namespace(path: &Path) -> PathBuf {
+    let normalized = if path.is_absolute() {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
     } else {
-        raw.to_path_buf()
+        path.to_path_buf()
     };
+    strip_stable_project_root(&normalized).unwrap_or(normalized)
+}
+
+fn strip_stable_project_root(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut workspace_root = None;
+    let mut manifest_root = None;
+    let mut git_root = None;
+    for ancestor in path.ancestors() {
+        if workspace_root.is_none() && has_workspace_root_marker(ancestor) {
+            workspace_root = Some(ancestor.to_path_buf());
+        }
+        if manifest_root.is_none() && has_manifest_root_marker(ancestor) {
+            manifest_root = Some(ancestor.to_path_buf());
+        }
+        if git_root.is_none() && ancestor.join(".git").exists() {
+            git_root = Some(ancestor.to_path_buf());
+        }
+    }
+    let root = workspace_root.or(manifest_root).or(git_root)?;
+    path.strip_prefix(root).ok().map(|p| p.to_path_buf())
+}
+
+fn has_workspace_root_marker(path: &Path) -> bool {
+    path.join("Cargo.lock").exists()
+        || path.join("go.work").exists()
+        || path.join("pnpm-lock.yaml").exists()
+        || path.join("package-lock.json").exists()
+        || path.join("yarn.lock").exists()
+        || path.join("poetry.lock").exists()
+        || path.join("uv.lock").exists()
+}
+
+fn has_manifest_root_marker(path: &Path) -> bool {
+    path.join("Cargo.toml").exists()
+        || path.join("package.json").exists()
+        || path.join("pyproject.toml").exists()
+        || path.join("go.mod").exists()
+}
+
+fn normalized_file_namespace(path: &str) -> String {
+    let normalized_path = normalize_path_for_namespace(Path::new(path));
 
     let mut parts = Vec::new();
     for component in normalized_path.components() {
@@ -161,8 +192,12 @@ const SYMBOL_FUZZY_SQL: &str = "SELECT DISTINCT double_colon_path FROM ( \
          WHERE symbol_search MATCH ?3 \
      ) ORDER BY double_colon_path LIMIT ?4";
 
-const SYMBOL_FUZZY_PATH_SQL: &str = "SELECT double_colon_path FROM symbol_search \
+const SYMBOL_FUZZY_PATH_SQL: &str = "SELECT DISTINCT double_colon_path FROM symbol_search \
          WHERE symbol_search MATCH ?1 ORDER BY double_colon_path LIMIT ?2";
+
+const SYMBOL_FUZZY_PATH_SHORT_SQL: &str = "SELECT DISTINCT double_colon_path FROM symbol_search \
+         WHERE double_colon_path LIKE ?1 ESCAPE '\\' OR friendly_path LIKE ?1 ESCAPE '\\' \
+         ORDER BY double_colon_path LIMIT ?2";
 
 const SYMBOL_FUZZY_SHORT_SQL: &str = "SELECT DISTINCT double_colon_path FROM ( \
          SELECT double_colon_path FROM symbols \
@@ -517,6 +552,13 @@ impl Store {
         let limit = limit.min(i64::MAX as usize) as i64;
         let fts_pattern = format!("\"{}\"", pattern.replace('"', "\"\""));
         if pattern_has_path_separator(&pattern) {
+            if pattern.chars().count() < 3 {
+                let contains_pattern = format!("%{}%", escape_like(&pattern));
+                return self.query_symbol_paths_fuzzy(
+                    SYMBOL_FUZZY_PATH_SHORT_SQL,
+                    params![contains_pattern, limit],
+                );
+            }
             return self
                 .query_symbol_paths_fuzzy(SYMBOL_FUZZY_PATH_SQL, params![fts_pattern, limit]);
         }
@@ -715,11 +757,10 @@ impl Store {
         Ok(out)
     }
 
-    fn pending_refs_for_dirty_paths(
-        &self,
+    fn pending_refs_for_dirty_paths_on(
+        conn: &Connection,
     ) -> Result<Vec<(i64, String, String, String, i64)>, String> {
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare(
                 "SELECT p.from_node_id, n.path, p.name, p.kind, p.line \
                  FROM pending_refs p JOIN nodes n ON n.id = p.from_node_id \
@@ -744,14 +785,13 @@ impl Store {
         Ok(out)
     }
 
-    fn symbols_for_refs(
-        &self,
+    fn symbols_for_refs_on(
+        conn: &Connection,
         refs: &[(i64, String, String, String, i64)],
     ) -> Result<Vec<(String, i64)>, String> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare(
                 "SELECT s.double_colon_path, s.node_id FROM symbols s \
                  JOIN nodes n ON n.id = s.node_id \
@@ -776,9 +816,8 @@ impl Store {
         Ok(out)
     }
 
-    fn dirty_paths(&self) -> Result<Vec<String>, String> {
-        let mut stmt = self
-            .conn
+    fn dirty_paths_on(conn: &Connection) -> Result<Vec<String>, String> {
+        let mut stmt = conn
             .prepare("SELECT path FROM dirty_paths ORDER BY path")
             .map_err(|e| format!("codegraph dirty_paths prepare: {e}"))?;
         let rows = stmt
@@ -789,6 +828,10 @@ impl Store {
             out.push(r.map_err(|e| format!("codegraph dirty_paths row: {e}"))?);
         }
         Ok(out)
+    }
+
+    fn dirty_paths(&self) -> Result<Vec<String>, String> {
+        Self::dirty_paths_on(&self.conn)
     }
 
     pub fn has_dirty_paths(&self) -> Result<bool, String> {
@@ -927,8 +970,12 @@ impl Store {
             dirty_paths.len()
         );
 
-        let refs = self.pending_refs_for_dirty_paths()?;
-        let symbols = self.symbols_for_refs(&refs)?;
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("codegraph connect_usages transaction: {e}"))?;
+        let refs = Self::pending_refs_for_dirty_paths_on(&tx)?;
+        let symbols = Self::symbols_for_refs_on(&tx, &refs)?;
         let mut resolver = Resolver::new();
         let mut dcp_to_node: HashMap<String, i64> = HashMap::new();
         for (dcp, node_id) in &symbols {
@@ -936,13 +983,27 @@ impl Store {
             dcp_to_node.entry(dcp.clone()).or_insert(*node_id);
         }
 
-        self.conn
-            .execute(
-                "DELETE FROM edges WHERE kind != 'defined_in' \
-                 AND src IN (SELECT id FROM nodes WHERE path IN (SELECT path FROM dirty_paths))",
-                [],
-            )
-            .map_err(|e| format!("codegraph connect_usages clear: {e}"))?;
+        Self::connect_usages_rebuild_on(&tx, refs, &resolver, &dcp_to_node)?;
+        tx.commit()
+            .map_err(|e| format!("codegraph connect_usages commit: {e}"))?;
+        debug!(
+            "codegraph: connect_usages complete for {} dirty files",
+            dirty_paths.len()
+        );
+        Ok(true)
+    }
+    fn connect_usages_rebuild_on(
+        conn: &Connection,
+        refs: Vec<(i64, String, String, String, i64)>,
+        resolver: &Resolver,
+        dcp_to_node: &HashMap<String, i64>,
+    ) -> Result<(), String> {
+        conn.execute(
+            "DELETE FROM edges WHERE kind != 'defined_in' \
+             AND src IN (SELECT id FROM nodes WHERE path IN (SELECT path FROM dirty_paths))",
+            [],
+        )
+        .map_err(|e| format!("codegraph connect_usages clear: {e}"))?;
 
         for (from_node_id, from_path, name, kind, line) in refs {
             let local_name = qualify(&from_path, &name);
@@ -953,7 +1014,7 @@ impl Store {
                 if let Some(&dst_id) = dcp_to_node.get(&res.target) {
                     if dst_id != from_node_id {
                         Self::add_edge_line_on(
-                            &self.conn,
+                            conn,
                             from_node_id,
                             dst_id,
                             &kind,
@@ -965,15 +1026,11 @@ impl Store {
             }
         }
 
-        self.conn
-            .execute("DELETE FROM dirty_paths", [])
+        conn.execute("DELETE FROM dirty_paths", [])
             .map_err(|e| format!("codegraph connect_usages clear dirty paths: {e}"))?;
-        debug!(
-            "codegraph: connect_usages complete for {} dirty files",
-            dirty_paths.len()
-        );
-        Ok(true)
+        Ok(())
     }
+
     pub fn inherits_pairs(&self) -> Result<Vec<(String, String)>, String> {
         let mut stmt = self
             .conn
@@ -1351,6 +1408,8 @@ impl Store {
 mod tests {
     use super::*;
 
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn call_edges_to_helper(store: &Store, source_path: &str) -> i64 {
         store
             .conn
@@ -1365,6 +1424,22 @@ mod tests {
             .unwrap()
     }
 
+    fn usage_edges_for_path(store: &Store, source_path: &str) -> Vec<(String, String)> {
+        let mut stmt = store
+            .conn
+            .prepare(
+                "SELECT e.kind, dn.name FROM edges e \
+                 JOIN nodes sn ON sn.id = e.src \
+                 JOIN nodes dn ON dn.id = e.dst \
+                 WHERE e.kind != 'defined_in' AND sn.path = ?1 ORDER BY e.kind, dn.name",
+            )
+            .unwrap();
+        stmt.query_map(params![source_path], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    }
+
     fn node_count(store: &Store, path: &str, name: &str) -> i64 {
         store
             .conn
@@ -1374,6 +1449,134 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap()
+    }
+
+    struct CwdGuard(PathBuf);
+
+    impl CwdGuard {
+        fn change_to(path: &Path) -> Self {
+            let previous = std::env::current_dir().unwrap();
+            std::env::set_current_dir(path).unwrap();
+            Self(previous)
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn normalized_file_namespace_is_cwd_independent_for_absolute_paths() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let src_dir = root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(root.join("Cargo.lock"), "# lock\n").unwrap();
+        let file = src_dir.join("lib.rs");
+        std::fs::write(&file, "fn lib() {}\n").unwrap();
+        let file = file.canonicalize().unwrap();
+        let file = file.to_string_lossy().to_string();
+        let _guard = CwdGuard::change_to(&root);
+
+        let from_root = normalized_file_namespace(&file);
+        std::env::set_current_dir(&src_dir).unwrap();
+        let from_child = normalized_file_namespace(&file);
+
+        assert_eq!(from_root, "src/lib.rs");
+        assert_eq!(from_root, from_child);
+    }
+
+    #[test]
+    fn fuzzy_path_lookup_deduplicates_duplicate_double_colon_paths() {
+        let store = Store::open_in_memory().unwrap();
+        let first = store
+            .insert_node("function", "src/mod.rs", "helper", "rust", 1, 1)
+            .unwrap();
+        let second = store
+            .insert_node("function", "src/mod.rs", "helper", "rust", 2, 2)
+            .unwrap();
+        store.add_symbol("src/mod.rs::helper", first).unwrap();
+        store.add_symbol("src/mod.rs::helper", second).unwrap();
+
+        let hits = store.symbol_paths_fuzzy("src/mod.rs::helper", 10).unwrap();
+
+        assert_eq!(hits, vec!["src/mod.rs::helper".to_string()]);
+    }
+
+    #[test]
+    fn fuzzy_path_lookup_short_separator_pattern_uses_substring_fallback() {
+        let store = Store::open_in_memory().unwrap();
+        let node = store
+            .insert_node("function", "a/b.rs", "helper", "rust", 1, 1)
+            .unwrap();
+        store.add_symbol("a/b.rs::helper", node).unwrap();
+
+        let hits = store.symbol_paths_fuzzy("a/", 10).unwrap();
+
+        assert_eq!(hits, vec!["a/b.rs::helper".to_string()]);
+    }
+
+    #[test]
+    fn connect_usages_rebuild_transaction_hides_partial_edges_from_readers() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("codegraph.sqlite");
+        let store = Store::open(&db_path).unwrap();
+        let file = store
+            .insert_node("file", "src/use.rs", "use.rs", "rust", 1, 1)
+            .unwrap();
+        let run = store
+            .insert_node("function", "src/use.rs", "run", "rust", 1, 1)
+            .unwrap();
+        store.add_edge(run, file, "defined_in", 1.0).unwrap();
+        let old_target = store
+            .insert_node("function", "src/defs.rs", "old_target", "rust", 1, 1)
+            .unwrap();
+        let new_target = store
+            .insert_node("function", "src/defs.rs", "new_target", "rust", 2, 2)
+            .unwrap();
+        store
+            .add_symbol("src/defs.rs::old_target", old_target)
+            .unwrap();
+        store
+            .add_symbol("src/defs.rs::new_target", new_target)
+            .unwrap();
+        store
+            .add_edge_line(run, old_target, "calls", 1.0, 1)
+            .unwrap();
+        store
+            .add_pending_ref(run, "new_target", "calls", 1)
+            .unwrap();
+        Store::mark_path_dirty_on(&store.conn, "src/use.rs").unwrap();
+        let read_store = Store::open_readonly(&db_path).unwrap();
+        assert_eq!(
+            usage_edges_for_path(&read_store, "src/use.rs"),
+            vec![("calls".to_string(), "old_target".to_string())]
+        );
+        let refs = Store::pending_refs_for_dirty_paths_on(&store.conn).unwrap();
+        let symbols = Store::symbols_for_refs_on(&store.conn, &refs).unwrap();
+        let mut resolver = Resolver::new();
+        let mut dcp_to_node = HashMap::new();
+        for (dcp, node_id) in &symbols {
+            resolver.add_symbol(dcp);
+            dcp_to_node.entry(dcp.clone()).or_insert(*node_id);
+        }
+
+        let tx = store.conn.unchecked_transaction().unwrap();
+        Store::connect_usages_rebuild_on(&tx, refs, &resolver, &dcp_to_node).unwrap();
+        assert_eq!(
+            usage_edges_for_path(&read_store, "src/use.rs"),
+            vec![("calls".to_string(), "old_target".to_string())]
+        );
+        tx.commit().unwrap();
+
+        assert_eq!(
+            usage_edges_for_path(&read_store, "src/use.rs"),
+            vec![("calls".to_string(), "new_target".to_string())]
+        );
+        assert!(Store::dirty_paths_on(&store.conn).unwrap().is_empty());
     }
 
     #[test]
