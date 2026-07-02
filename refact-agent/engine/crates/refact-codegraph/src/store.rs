@@ -1535,6 +1535,26 @@ fn helper() {}
     }
 
     #[test]
+    fn remove_path_clears_hash_and_rename_same_content_indexes_new_path() {
+        let store = Store::open_in_memory().unwrap();
+        let old_path = "src/old.rs";
+        let new_path = "src/new.rs";
+        let src = "fn moved() {}\n";
+        store.index_file_graph(old_path, src, "rust").unwrap();
+        let old_hash = store.stored_file_hash(old_path).unwrap().unwrap();
+        assert_eq!(node_count(&store, old_path, "moved"), 1);
+
+        store.remove_path(old_path).unwrap();
+        store.index_file_graph(new_path, src, "rust").unwrap();
+
+        assert!(store.stored_file_hash(old_path).unwrap().is_none());
+        assert_eq!(store.stored_file_hash(new_path).unwrap().unwrap(), old_hash);
+        assert_eq!(node_count(&store, old_path, "moved"), 0);
+        assert_eq!(node_count(&store, new_path, "moved"), 1);
+        assert_eq!(store.counts().unwrap().files, 1);
+    }
+
+    #[test]
     fn connect_usages_only_rebuilds_dirty_source_paths() {
         let store = Store::open_in_memory().unwrap();
         store

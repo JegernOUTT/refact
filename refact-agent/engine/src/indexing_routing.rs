@@ -335,6 +335,49 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn code_under_memory_roots_routes_to_codegraph_with_zero_vecdb_enqueue() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+        let project_root = get_project_dirs(gcx.clone())
+            .await
+            .into_iter()
+            .next()
+            .expect("test workspace must resolve to a project dir");
+        let enqueue_calls = Arc::new(AtomicUsize::new(0));
+        let vecdb_documents = Arc::new(Mutex::new(Vec::new()));
+        *gcx.vec_db.lock().await = Some(Arc::new(RecordingVecdb {
+            enqueue_calls: enqueue_calls.clone(),
+            documents: vecdb_documents.clone(),
+        }));
+        let codegraph = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        *gcx.codegraph.lock().await = Some(codegraph.clone());
+
+        let knowledge_source = project_root
+            .join(".refact")
+            .join("knowledge")
+            .join("source.rs");
+        let task_trajectory_tool = project_root
+            .join(".refact")
+            .join("tasks")
+            .join("T-1")
+            .join("trajectories")
+            .join("tool.py");
+        let paths = vec![
+            knowledge_source.to_string_lossy().to_string(),
+            task_trajectory_tool.to_string_lossy().to_string(),
+        ];
+
+        route_index_enqueue(gcx, &paths, false, false).await;
+
+        assert_eq!(enqueue_calls.load(Ordering::SeqCst), 0);
+        assert!(vecdb_documents.lock().unwrap().is_empty());
+        assert_eq!(codegraph.drain_batch(10), paths);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn codegraph_absent_does_not_route_code_to_vecdb() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;

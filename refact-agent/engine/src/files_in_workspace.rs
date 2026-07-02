@@ -2524,6 +2524,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn branch_switch_enqueues_deleted_files_and_removes_old_index() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(temp.path()).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let deleted = temp.path().join("src").join("deleted.rs");
+        let kept = temp.path().join("src").join("kept.rs");
+        write_file(&deleted, "pub fn deleted() {}\n");
+        write_file(&kept, "pub fn kept() {}\n");
+        let main_oid = git_commit_all(&repo, "main");
+        {
+            let main_commit = repo.find_commit(main_oid).unwrap();
+            repo.branch("dev", &main_commit, false).unwrap();
+        }
+        git_checkout_branch(&repo, "dev");
+        std::fs::remove_file(&deleted).unwrap();
+        git_commit_all(&repo, "dev deletes file");
+        git_checkout_branch(&repo, "main");
+
+        let canonical_repo = normalized(temp.path());
+        let deleted_path = normalized(&deleted).to_string_lossy().to_string();
+        let kept_path = normalized(&kept);
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![canonical_repo.clone()];
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![canonical_repo.clone()];
+        *gcx.documents_state.workspace_files.lock().unwrap() =
+            vec![PathBuf::from(&deleted_path), kept_path.clone()];
+        {
+            let mut heads = gcx.documents_state.git_branch_heads.lock().unwrap();
+            heads.insert(canonical_repo, "ref: refs/heads/main".to_string());
+        }
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        service
+            .index_file(&deleted_path, "pub fn deleted() {}\n", "rust")
+            .await
+            .unwrap();
+        *gcx.codegraph.lock().await = Some(service.clone());
+
+        git_checkout_branch(&repo, "dev");
+        let head_path = temp.path().join(".git").join("HEAD");
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(head_path);
+        on_git_head_change(Arc::downgrade(&gcx), event).await;
+        tokio::time::sleep(BRANCH_HEAD_DEBOUNCE_WINDOW + Duration::from_millis(80)).await;
+
+        assert_eq!(service.counts().await.unwrap().files, 0);
+        assert_eq!(service.drain_batch(10), vec![deleted_path.clone()]);
+        let workspace_files = gcx.documents_state.workspace_files.lock().unwrap().clone();
+        assert!(!workspace_files.contains(&PathBuf::from(&deleted_path)));
+        assert!(workspace_files.contains(&kept_path));
+    }
+
+    #[tokio::test]
+    async fn branch_switch_diff_failure_falls_back_to_full_workspace_reindex() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("src").join("fallback.rs");
+        write_file(&file, "pub fn fallback() {}\n");
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![normalized(temp.path())];
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        *gcx.codegraph.lock().await = Some(service.clone());
+
+        enqueue_branch_head_changes(
+            gcx.clone(),
+            vec![BranchHeadChange {
+                repo_path: temp.path().join("not-a-repo"),
+                old_head: Some("missing-old".to_string()),
+                new_head: Some("missing-new".to_string()),
+            }],
+        )
+        .await;
+
+        let indexed_path = normalized(&file).to_string_lossy().to_string();
+        assert_eq!(service.drain_batch(10), vec![indexed_path.clone()]);
+        assert!(gcx
+            .documents_state
+            .workspace_files
+            .lock()
+            .unwrap()
+            .contains(&PathBuf::from(indexed_path)));
+    }
+
+    #[tokio::test]
     async fn close_write_event_routes_to_file_change() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let temp = tempfile::tempdir().unwrap();
