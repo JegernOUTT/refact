@@ -6,6 +6,7 @@ pub mod diagnostics;
 pub mod drafts;
 pub mod events;
 pub mod facts;
+pub mod memory_lifecycle_model;
 pub mod opportunities;
 pub mod policy;
 pub mod queue;
