@@ -17,6 +17,8 @@ pub struct DiagnosticContext {
     pub source_file: Option<String>,
     pub tool_name: Option<String>,
     pub chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
     pub collected_at: String,
     pub severity: DiagnosticSeverity,
 }
@@ -38,6 +40,7 @@ pub fn collect_diagnostics_from_error(error: &str) -> DiagnosticContext {
         source_file: None,
         tool_name: None,
         chat_id: None,
+        model_id: None,
         collected_at: Utc::now().to_rfc3339(),
         severity,
     }
@@ -56,11 +59,12 @@ pub fn diagnostic_id(ctx: &DiagnosticContext) -> String {
 
 pub fn diagnostic_signature(ctx: &DiagnosticContext) -> String {
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         ctx.error_type,
         ctx.error_message,
         ctx.source_file.as_deref().unwrap_or(""),
-        ctx.tool_name.as_deref().unwrap_or("")
+        ctx.tool_name.as_deref().unwrap_or(""),
+        ctx.model_id.as_deref().unwrap_or("")
     )
 }
 

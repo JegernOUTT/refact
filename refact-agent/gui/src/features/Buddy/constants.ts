@@ -202,6 +202,18 @@ export const SIGNALS: Record<string, SignalDef> = {
     duration: 8000,
     animVariant: "shake_worried",
   },
+  error: {
+    mood: "concerned",
+    animationType: "shake",
+    xp: 0,
+    icon: "❌",
+    isError: true,
+    isWin: false,
+    scene: "alert",
+    category: "speech",
+    duration: 8000,
+    animVariant: "shake_worried",
+  },
   streaming: {
     mood: "focused",
     animationType: "work",

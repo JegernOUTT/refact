@@ -460,7 +460,6 @@ export interface BuddyAnimState {
   tailEnergy: number;
   tailDroop: number;
   armPose: BuddyArmPose;
-  armAnimPhase: number;
   wingFlap: number;
   dancePhase: number;
   sweatTimer: number;
@@ -689,6 +688,50 @@ export interface BuddyActivityEntry {
   failure_summary?: string | null;
 }
 
+export interface BuddyChatPhrase {
+  kind: string;
+  text: string;
+}
+
+export interface BuddyChatPhraseBank {
+  day: string;
+  generated_at: string;
+  evidence_summary: string;
+  lines: BuddyChatPhrase[];
+}
+
+export interface BuddyOnboarding {
+  greeted: boolean;
+  tour_completed: boolean;
+  first_launch_at: string;
+  last_greeting_version: string;
+}
+
+export interface BuddyJobStateEntry {
+  last_run?: string | null;
+  last_result?: string | null;
+  run_count: number;
+  snoozed_until?: string | null;
+  dismissed: boolean;
+}
+
+export interface BuddyIntentBudgetState {
+  last_emitted_at?: string | null;
+  hour_count: number;
+  day_count: number;
+  hour_window_start?: string | null;
+  day_window_start?: string | null;
+}
+
+export interface BuddySpeechRotationState {
+  by_intent: Record<string, BuddyIntentBudgetState>;
+}
+
+export interface BuddyDismissEntry {
+  cooldown_key: string;
+  dismissed_at: string;
+}
+
 export interface BuddySuggestion {
   id: string;
   suggestion_type: string;
@@ -725,10 +768,15 @@ export interface BuddyState {
   semantic: BuddySemanticSnapshot;
   recent_activities: BuddyActivityEntry[];
   suggestion_state: BuddySuggestion[];
+  chat_phrase_bank?: BuddyChatPhraseBank | null;
   pet: BuddyPetState;
   personality: BuddyPersonalityProfile;
+  onboarding?: BuddyOnboarding;
+  job_cooldowns?: Record<string, BuddyJobStateEntry>;
+  speech_rotation?: BuddySpeechRotationState;
   active_quest?: BuddyQuest | null;
   opportunities: BuddyOpportunity[];
+  dismissed_history?: BuddyDismissEntry[];
 }
 
 export type HumorLevel = "off" | "light" | "normal";
@@ -941,6 +989,8 @@ export interface TaskPulse {
   stuck: number;
   abandoned: number;
   by_status: Record<string, number>;
+  recent_stuck_alerts_1h?: number;
+  recent_abandoned_alerts_24h?: number;
 }
 
 export interface TrajectoryPulse {
@@ -953,6 +1003,14 @@ export interface MemoryPulse {
   total: number;
   orphan: number;
   stale_conflicts: number;
+  duplicate_candidates?: number;
+  merge_candidates?: number;
+  archive_candidates?: number;
+  review_candidates?: number;
+  conflict_candidates?: number;
+  pending_ops?: number;
+  applied_ops?: number;
+  failed_ops?: number;
 }
 
 export interface ProviderPulse {
@@ -973,6 +1031,22 @@ export interface CustomizationPulse {
   commands: number;
   subagents: number;
   hooks: number;
+  competitor_import?: CompetitorImportPulse;
+}
+
+export interface CompetitorImportPulse {
+  last_run_at?: string | null;
+  discovered_candidates: number;
+  created: number;
+  updated: number;
+  stale: number;
+  conflicts: number;
+  user_modified: number;
+  unsupported: number;
+  errors: number;
+  sources_seen: Record<string, number>;
+  attention_items: number;
+  has_attention_items: boolean;
 }
 
 export interface DiagnosticPulse {
@@ -1139,7 +1213,6 @@ export interface BuddyConversationEntry {
   message_count: number;
   icon: string;
   badge: string | null;
-  workflow_id?: string | null;
 }
 
 export interface BuddyThreadMeta {
@@ -1189,11 +1262,7 @@ export type BuddySSEEvent =
   | { event_type: "ActivityAdded"; activity: BuddyActivityEntry }
   | { event_type: "SuggestionAdded"; suggestion: BuddySuggestion }
   | { event_type: "SuggestionDismissed"; suggestion_id: string }
-  | {
-      event_type: "SettingsChanged";
-      settings: BuddySettings;
-      storage?: BuddyStorageMetadata;
-    }
+  | { event_type: "SettingsChanged"; settings: BuddySettings }
   | { event_type: "DiagnosticAdded"; diagnostic: DiagnosticContext }
   | { event_type: "RuntimeEvent"; event: BuddyRuntimeEvent }
   | { event_type: "SpeechUpdated"; speech: BuddySpeechItem }

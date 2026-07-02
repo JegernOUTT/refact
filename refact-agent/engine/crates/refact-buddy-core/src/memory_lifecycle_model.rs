@@ -521,7 +521,6 @@ pub fn memory_op_status_is_finalized(status: MemoryOpStatus) -> bool {
     )
 }
 
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryOpIdempotencyInput {
@@ -568,7 +567,6 @@ impl MemoryOpIdempotencyInput {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MemoryLifecycleOpCounts {
     pub duplicate_candidates: u32,
@@ -577,7 +575,6 @@ pub struct MemoryLifecycleOpCounts {
     pub review_candidates: u32,
     pub conflict_candidates: u32,
 }
-
 
 pub fn memory_lifecycle_op_counts(ops: &[MemoryLifecycleOp]) -> MemoryLifecycleOpCounts {
     let mut counts = MemoryLifecycleOpCounts::default();
@@ -610,7 +607,6 @@ pub fn memory_lifecycle_op_counts(ops: &[MemoryLifecycleOp]) -> MemoryLifecycleO
     }
     counts
 }
-
 
 pub fn normalize_tags(tags: &[String]) -> Vec<String> {
     let mut normalized: Vec<String> = tags
@@ -654,7 +650,6 @@ pub fn normalize_memory_status(status: Option<&str>) -> String {
         .and_then(parse_memory_lifecycle_status)
         .unwrap_or_else(|| "active".to_string())
 }
-
 
 pub fn normalize_paths(paths: &[String]) -> Vec<String> {
     let mut normalized: Vec<String> = paths
@@ -780,7 +775,6 @@ pub fn default_requires_approval(op_type: MemoryOpType, confidence: f32) -> bool
         _ => true,
     }
 }
-
 
 pub fn normalize_strings(values: &[String]) -> Vec<String> {
     let mut normalized: Vec<String> = values
@@ -927,4 +921,3 @@ pub fn hash_list(h: &mut Sha256, name: &str, values: &[String]) {
         hash_field(h, name, value);
     }
 }
-

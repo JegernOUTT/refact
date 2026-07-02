@@ -51,6 +51,7 @@ import {
   addDraft,
   consumeDraft,
   removeDraft,
+  resetBuddyForWorkspaceChange,
 } from "../features/Buddy/buddySlice";
 import { executeBuddyNavigation } from "../features/Buddy/executeBuddyAction";
 
@@ -664,6 +665,7 @@ export function useSidebarSubscription() {
           !workspaceRootsEqual(serverWorkspaceRootsRef.current, workspaceRoots);
         if (workspaceChanged) {
           dispatch(sidebarWorkspaceChanged({ subscriptionId }));
+          dispatch(resetBuddyForWorkspaceChange());
           dispatch(replaceSnapshotHistory({ items: [] }));
           taskListRef.current = [];
           flushTaskList();

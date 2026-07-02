@@ -1,6 +1,6 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Button, Text } from "../../components/ui";
-import { CheckIcon, CopyIcon, ExternalLinkIcon } from "@radix-ui/react-icons";
+import { Check, Copy, ExternalLink } from "lucide-react";
+import { Flex, Button, Icon, Text } from "../../components/ui";
 import { useAppSelector, useCopyToClipboard } from "../../hooks";
 import { selectCurrentThreadId, selectThread } from "../Chat/Thread/selectors";
 import {
@@ -59,7 +59,7 @@ const CopyInlineButton: React.FC<{
       aria-label={ariaLabel}
       data-testid={testId}
     >
-      {copied ? <CheckIcon /> : <CopyIcon />}
+      <Icon icon={copied ? Check : Copy} size="sm" />
     </button>
   );
 };
@@ -228,7 +228,7 @@ const ChatCrashReportPanel: React.FC<{ errorDetails: string | null }> = ({
             disabled={!canCopyWholeThread || isFetchingTrajectory}
             data-testid="copy-crash-thread-json"
           >
-            <CopyIcon />
+            <Icon icon={Copy} size="sm" />
             <Text size="2">
               {isCopyingAll || isFetchingTrajectory
                 ? "Copying thread JSON…"
@@ -248,7 +248,7 @@ const ChatCrashReportPanel: React.FC<{ errorDetails: string | null }> = ({
           </Button>
           <Button asChild variant="outline">
             <a href={issueUrl(chatId)} target="_blank" rel="noreferrer">
-              <ExternalLinkIcon />
+              <Icon icon={ExternalLink} size="sm" />
               Open GitHub issue
             </a>
           </Button>

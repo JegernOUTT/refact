@@ -13,7 +13,7 @@ type WorkflowGroup = {
 };
 
 function workflowIdFor(entry: BuddyConversationEntry): string {
-  return entry.workflow_id ?? entry.badge ?? "workflow";
+  return entry.badge ?? "workflow";
 }
 
 function workflowTitle(workflowId: string): string {

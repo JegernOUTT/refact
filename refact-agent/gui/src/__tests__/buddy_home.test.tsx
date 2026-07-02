@@ -204,7 +204,6 @@ function makeConversation(
     message_count: 3,
     icon: "⚙️",
     badge: "refact_self_critic",
-    workflow_id: "refact_self_critic",
     ...overrides,
   };
 }
@@ -450,8 +449,7 @@ describe("AutonomousChats_groups_by_workflow_id", () => {
           makeConversation({
             id: "buddy-a",
             title: "Buddy A",
-            badge: "Buddy",
-            workflow_id: "buddy_memory_garden",
+            badge: "buddy_memory_garden",
           }),
         ]}
       />,
@@ -4275,19 +4273,18 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
       http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([
           makeConversation({
-            id: "workflow-buddy-chat",
+            id: "buddy_memory_garden",
             kind: "workflow",
             title: "Workflow Buddy Chat",
             badge: "Memory Garden",
-            workflow_id: "buddy_memory_garden",
             message_count: 4,
           }),
         ]),
       ),
-      http.get("*/v1/trajectories/workflow-buddy-chat", () => {
+      http.get("*/v1/trajectories/buddy_memory_garden", () => {
         trajectoryCalled = true;
         return HttpResponse.json({
-          id: "workflow-buddy-chat",
+          id: "buddy_memory_garden",
           title: "Workflow Buddy Chat",
           created_at: "2024-01-01T00:00:00Z",
           updated_at: "2024-01-02T00:00:00Z",
@@ -4317,7 +4314,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
       expect(trajectoryCalled).toBe(true);
     });
 
-    const rt = store.getState().chat.threads["workflow-buddy-chat"];
+    const rt = store.getState().chat.threads.buddy_memory_garden;
     expect(rt?.thread.buddy_meta).toEqual({
       is_buddy_chat: true,
       buddy_chat_kind: "workflow",
@@ -4326,7 +4323,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
     expect(rt?.thread.messages).toHaveLength(1);
     expect(store.getState().pages.at(-1)?.name).toBe("chat");
     expect(store.getState().chat.open_thread_ids).toContain(
-      "workflow-buddy-chat",
+      "buddy_memory_garden",
     );
   });
 

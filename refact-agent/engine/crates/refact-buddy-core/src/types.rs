@@ -377,6 +377,8 @@ pub struct BuddySpeechItem {
     pub ttl_seconds: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_intent: Option<String>,
     pub created_at: String,
     #[serde(default)]
     pub controls: Vec<BuddyControl>,
@@ -821,6 +823,8 @@ pub struct InvestigationContext {
     pub fact_keys: Vec<String>,
     #[serde(default)]
     pub diagnostic_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_key: Option<String>,
     #[serde(default)]
     pub log_excerpt: String,
     #[serde(default)]

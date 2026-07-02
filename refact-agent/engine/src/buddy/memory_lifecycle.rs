@@ -219,6 +219,7 @@ pub struct MemoryDocSnapshot {
     pub kind: String,
     pub source_class: Option<MemorySourceClass>,
     pub source_confidence: Option<f32>,
+    pub source_id: Option<String>,
     pub source_tool: Option<String>,
     pub source_chat_id: Option<String>,
     pub source_trajectory_id: Option<String>,
@@ -242,6 +243,11 @@ const MAX_MEMORY_LIFECYCLE_FILE_BYTES: u64 = 256 * 1024;
 const MAX_GIT_MEMORY_OPS: usize = 80;
 const MAX_GIT_MEMORY_PATHS: usize = 12;
 const MAX_GIT_CREATE_OPS_PER_KIND: usize = 8;
+pub const MEMORY_OP_EXACT_DUPLICATE_REASON: &str = "exact content_hash duplicate";
+pub const MEMORY_OP_NEAR_DUPLICATE_REASON: &str = "vecdb near-duplicate on write";
+pub const MEMORY_OP_AUTO_APPLY_MIN_CONFIDENCE: f32 = 0.94;
+const MEMORY_OP_AUTO_APPLY_MIN_ALPHABETIC_CHARS: usize = 12;
+const NEAR_DUPLICATE_MAX_DISTANCE: f32 = 0.10;
 
 impl MemoryDocSnapshot {
     pub fn from_knowledge_doc(doc: &KnowledgeDoc) -> Self {
@@ -271,6 +277,7 @@ impl MemoryDocSnapshot {
             kind: frontmatter.kind_or_default().to_string(),
             source_class: Some(memory_source_class(frontmatter)),
             source_confidence: frontmatter.source_confidence,
+            source_id: frontmatter.source_id.clone(),
             source_tool: frontmatter.source_tool.clone(),
             source_chat_id: frontmatter.source_chat_id.clone(),
             source_trajectory_id: frontmatter.source_trajectory_id.clone(),
@@ -317,6 +324,7 @@ impl MemoryDocSnapshot {
             kind: frontmatter.kind_or_default().to_string(),
             source_class: Some(memory_source_class(&frontmatter)),
             source_confidence: frontmatter.source_confidence,
+            source_id: frontmatter.source_id.clone(),
             source_tool: frontmatter.source_tool.clone(),
             source_chat_id: frontmatter.source_chat_id.clone(),
             source_trajectory_id: frontmatter.source_trajectory_id.clone(),
@@ -353,6 +361,7 @@ impl MemoryDocSnapshot {
         self.status = normalize_memory_status(Some(&self.status));
         self.kind = normalize_kind(&self.kind);
         self.source_tool = normalize_optional_string(self.source_tool.as_deref());
+        self.source_id = normalize_optional_string(self.source_id.as_deref());
         self.source_chat_id = normalize_optional_string(self.source_chat_id.as_deref());
         self.source_trajectory_id = normalize_optional_string(self.source_trajectory_id.as_deref());
         self.source_message_range = normalize_optional_string(self.source_message_range.as_deref());
@@ -569,9 +578,13 @@ pub fn detect_memory_lifecycle_ops(
             continue;
         }
         if merge_groups.insert(format!("hash:{hash}")) {
-            if let Some(op) =
-                build_merge_candidate(&docs, &group, "exact content_hash duplicate", 0.94, now)
-            {
+            if let Some(op) = build_merge_candidate(
+                &docs,
+                &group,
+                MEMORY_OP_EXACT_DUPLICATE_REASON,
+                MEMORY_OP_AUTO_APPLY_MIN_CONFIDENCE,
+                now,
+            ) {
                 ops.push(op);
             }
         }
@@ -672,6 +685,22 @@ pub fn detect_memory_lifecycle_ops(
     ops.dedup_by(|a, b| a.idempotency_key == b.idempotency_key);
     ops.truncate(MAX_MEMORY_LIFECYCLE_OPS);
     ops
+}
+
+pub fn memory_op_auto_apply_eligible(op: &MemoryLifecycleOp) -> bool {
+    op.op_type == MemoryOpType::MergeArchive
+        && op.confidence >= MEMORY_OP_AUTO_APPLY_MIN_CONFIDENCE
+        && op.evidence.starts_with(MEMORY_OP_EXACT_DUPLICATE_REASON)
+        && op
+            .payload
+            .canonical
+            .as_ref()
+            .is_some_and(|canonical| canonical_body_is_sane(&canonical.content))
+}
+
+fn canonical_body_is_sane(content: &str) -> bool {
+    content.chars().filter(|c| c.is_alphabetic()).count()
+        >= MEMORY_OP_AUTO_APPLY_MIN_ALPHABETIC_CHARS
 }
 
 fn best_age_days(input: &MemoryScoreInput, now: DateTime<Utc>) -> Option<i64> {
@@ -1153,20 +1182,110 @@ pub async fn load_memory_doc_snapshots_from_knowledge_dirs(
             let Ok(text) = tokio::fs::read_to_string(&path).await else {
                 continue;
             };
-            let (frontmatter, content) = KnowledgeFrontmatter::parse(&text);
+            let (frontmatter, body_start) = KnowledgeFrontmatter::parse(&text);
             if frontmatter.is_archived() || frontmatter.is_deprecated() {
                 continue;
             }
-            docs.push(MemoryDocSnapshot::from_parts(
-                path,
-                frontmatter,
-                content.to_string(),
-            ));
+            let body = text.get(body_start..).unwrap_or("").to_string();
+            docs.push(MemoryDocSnapshot::from_parts(path, frontmatter, body));
         }
         pending_dirs.sort();
         stack.extend(pending_dirs.into_iter().rev());
     }
     docs
+}
+
+pub async fn propose_supersede_for_near_duplicate(
+    gcx: std::sync::Arc<crate::global_context::GlobalContext>,
+    new_path: &Path,
+) -> Option<MemoryLifecycleOp> {
+    let text = tokio::fs::read_to_string(new_path).await.ok()?;
+    let (frontmatter, body_start) = KnowledgeFrontmatter::parse(&text);
+    if frontmatter.is_archived() || frontmatter.is_deprecated() {
+        return None;
+    }
+    let body = text.get(body_start..).unwrap_or("");
+    let mut knowledge_dirs: Vec<PathBuf> = get_project_dirs(gcx.clone())
+        .await
+        .into_iter()
+        .map(|dir| dir.join(KNOWLEDGE_FOLDER_NAME))
+        .collect();
+    knowledge_dirs.push(get_global_knowledge_dir(gcx.clone()).await);
+    let new_path = new_path.to_path_buf();
+    if !knowledge_dirs.iter().any(|dir| new_path.starts_with(dir)) {
+        return None;
+    }
+    let vecdb_arc = gcx.vec_db.clone();
+    let vecdb = vecdb_arc.lock().await.clone()?;
+    let query: String = body.chars().take(2000).collect();
+    if query.trim().is_empty() {
+        return None;
+    }
+    let embedding = vecdb.embed_query(&query).await.ok()?;
+    let mut hits = Vec::new();
+    for kd in &knowledge_dirs {
+        let prefix = if kd.to_string_lossy().ends_with(std::path::MAIN_SEPARATOR) {
+            kd.to_string_lossy().to_string()
+        } else {
+            format!("{}{}", kd.to_string_lossy(), std::path::MAIN_SEPARATOR)
+        };
+        let filter = format!("(scope LIKE '{}%')", prefix.replace('"', "\\\""));
+        if let Ok(mut res) = vecdb
+            .vecdb_search_with_embedding(&embedding, 8, Some(filter))
+            .await
+        {
+            hits.append(&mut res);
+        }
+    }
+    hits.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+    let new_canon = tokio::fs::canonicalize(&new_path).await.ok();
+    let mut hit = None;
+    for rec in hits {
+        if rec.distance > NEAR_DUPLICATE_MAX_DISTANCE
+            || rec.file_path.extension().and_then(|ext| ext.to_str()) != Some("md")
+            || !knowledge_dirs
+                .iter()
+                .any(|dir| rec.file_path.starts_with(dir))
+            || rec
+                .file_path
+                .components()
+                .any(|c| c.as_os_str() == "trajectories")
+            || rec.file_path == new_path
+        {
+            continue;
+        }
+        if let Some(new_canon) = &new_canon {
+            if tokio::fs::canonicalize(&rec.file_path).await.ok().as_ref() == Some(new_canon) {
+                continue;
+            }
+        }
+        hit = Some(rec);
+        break;
+    }
+    let hit = hit?;
+    let existing_text = tokio::fs::read_to_string(&hit.file_path).await.ok()?;
+    let (existing_frontmatter, existing_body_start) = KnowledgeFrontmatter::parse(&existing_text);
+    if existing_frontmatter.is_archived()
+        || existing_frontmatter.is_deprecated()
+        || existing_frontmatter.is_pinned()
+    {
+        return None;
+    }
+    let existing_body = existing_text
+        .get(existing_body_start..)
+        .unwrap_or("")
+        .to_string();
+    let new_doc = MemoryDocSnapshot::from_parts(new_path, frontmatter, body.to_string());
+    let existing_doc =
+        MemoryDocSnapshot::from_parts(hit.file_path, existing_frontmatter, existing_body);
+    let docs = vec![new_doc, existing_doc];
+    build_merge_candidate(
+        &docs,
+        &[0, 1],
+        MEMORY_OP_NEAR_DUPLICATE_REASON,
+        0.85,
+        Utc::now(),
+    )
 }
 
 pub async fn find_memory_by_source(
@@ -1985,6 +2104,20 @@ async fn apply_create_memory(
     frontmatter.source_content_hash = Some(source_content_hash);
 
     let path = memories_add(gcx.gcx.clone(), &frontmatter, &content).await?;
+    if let Some(supersede_op) = propose_supersede_for_near_duplicate(gcx.gcx.clone(), &path).await {
+        let roots = get_project_dirs(gcx.gcx.clone()).await;
+        if let Some(project_root) = roots
+            .iter()
+            .find(|root| path.starts_with(root))
+            .or_else(|| roots.first())
+        {
+            if let Err(err) =
+                crate::buddy::storage::enqueue_memory_op(project_root, supersede_op).await
+            {
+                tracing::warn!("failed to enqueue near-duplicate memory op: {}", err);
+            }
+        }
+    }
     Ok(MemoryApplyOutcome::applied(vec![path]))
 }
 
@@ -2457,6 +2590,102 @@ mod tests {
         );
         op.status = status;
         op
+    }
+
+    fn auto_apply_test_op(
+        op_type: MemoryOpType,
+        confidence: f32,
+        evidence: &str,
+    ) -> MemoryLifecycleOp {
+        let mut op = MemoryLifecycleOp::pending(
+            "op-auto",
+            MemorySource::MemoryGarden,
+            op_type,
+            strings(&[".refact/knowledge/item.md"]),
+            evidence,
+            confidence,
+            "2026-05-02T00:00:00Z",
+        );
+        op.requires_approval = true;
+        op.payload.canonical = Some(MemoryCreatePayload {
+            content: "Canonical merged body with plenty of alphabetic text.".to_string(),
+            ..Default::default()
+        });
+        op
+    }
+
+    #[test]
+    fn exact_duplicate_merge_op_is_auto_apply_eligible() {
+        let op = auto_apply_test_op(
+            MemoryOpType::MergeArchive,
+            MEMORY_OP_AUTO_APPLY_MIN_CONFIDENCE,
+            &format!(
+                "{}: canonical=a, superseded=b",
+                MEMORY_OP_EXACT_DUPLICATE_REASON
+            ),
+        );
+
+        assert!(memory_op_auto_apply_eligible(&op));
+    }
+
+    #[test]
+    fn auto_apply_eligibility_rejects_lower_confidence() {
+        let op = auto_apply_test_op(
+            MemoryOpType::MergeArchive,
+            MEMORY_OP_AUTO_APPLY_MIN_CONFIDENCE - 0.01,
+            &format!(
+                "{}: canonical=a, superseded=b",
+                MEMORY_OP_EXACT_DUPLICATE_REASON
+            ),
+        );
+
+        assert!(!memory_op_auto_apply_eligible(&op));
+    }
+
+    #[test]
+    fn auto_apply_eligibility_rejects_non_merge_archive() {
+        let op = auto_apply_test_op(
+            MemoryOpType::ArchiveCandidate,
+            MEMORY_OP_AUTO_APPLY_MIN_CONFIDENCE,
+            &format!(
+                "{}: canonical=a, superseded=b",
+                MEMORY_OP_EXACT_DUPLICATE_REASON
+            ),
+        );
+
+        assert!(!memory_op_auto_apply_eligible(&op));
+    }
+
+    #[test]
+    fn auto_apply_eligibility_rejects_different_evidence_prefix() {
+        let op = auto_apply_test_op(
+            MemoryOpType::MergeArchive,
+            MEMORY_OP_AUTO_APPLY_MIN_CONFIDENCE,
+            "near duplicate: canonical=a, superseded=b",
+        );
+
+        assert!(!memory_op_auto_apply_eligible(&op));
+    }
+
+    #[test]
+    fn auto_apply_eligibility_rejects_degenerate_canonical_body() {
+        let mut op = auto_apply_test_op(
+            MemoryOpType::MergeArchive,
+            MEMORY_OP_AUTO_APPLY_MIN_CONFIDENCE,
+            &format!(
+                "{}: canonical=a, superseded=b",
+                MEMORY_OP_EXACT_DUPLICATE_REASON
+            ),
+        );
+        op.payload.canonical = Some(MemoryCreatePayload {
+            content: "247".to_string(),
+            ..Default::default()
+        });
+
+        assert!(!memory_op_auto_apply_eligible(&op));
+
+        op.payload.canonical = None;
+        assert!(!memory_op_auto_apply_eligible(&op));
     }
 
     fn legacy_test_op(op_id: &str, evidence: &str, status: MemoryOpStatus) -> MemoryLifecycleOp {

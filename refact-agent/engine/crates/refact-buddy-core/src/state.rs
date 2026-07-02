@@ -97,6 +97,21 @@ const DIRTY_THRESHOLD: u8 = 40;
 const BORED_THRESHOLD: u8 = 60;
 const LONELY_THRESHOLD: u8 = 40;
 const PET_TICK_SECONDS: u64 = 15;
+const PET_SCORE_CAP: u64 = 10_000;
+const SKILL_SPECS: [(&str, u64); 12] = [
+    ("edit", 20),
+    ("search", 30),
+    ("debug", 50),
+    ("knowledge", 60),
+    ("browser", 70),
+    ("refactor", 80),
+    ("test", 90),
+    ("review", 100),
+    ("git", 110),
+    ("arch", 120),
+    ("plan", 140),
+    ("mem", 150),
+];
 static PERSONA_CACHE_VERSION: AtomicU64 = AtomicU64::new(0);
 
 struct PersonalitySeed {
@@ -362,6 +377,34 @@ fn sync_progression(state: &mut BuddyState) {
     }
 }
 
+fn cumulative_xp(state: &BuddyState) -> u64 {
+    let completed_stage_xp = STAGE_SPECS
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take(state.progression.stage as usize)
+        .map(|(_, spec)| spec.growth_goal)
+        .fold(0u64, u64::saturating_add);
+    completed_stage_xp.saturating_add(state.progression.xp)
+}
+
+pub fn sync_skills(state: &mut BuddyState) {
+    let xp = cumulative_xp(state);
+    let previously_unlocked = state.skills.unlocked.clone();
+    state.skills.unlocked = SKILL_SPECS
+        .iter()
+        .filter(|(id, threshold)| {
+            xp >= *threshold || previously_unlocked.iter().any(|old| old == id)
+        })
+        .map(|(id, _)| (*id).to_string())
+        .collect();
+    state.skills.locked = SKILL_SPECS
+        .iter()
+        .filter(|(id, _)| !state.skills.unlocked.iter().any(|unlocked| unlocked == id))
+        .map(|(id, _)| (*id).to_string())
+        .collect();
+}
+
 fn sync_conditions(state: &mut BuddyState) {
     let needs = &state.pet.needs;
     let condition = &mut state.pet.condition;
@@ -469,6 +512,8 @@ fn sync_semantic(state: &mut BuddyState) {
 pub fn sync_state(state: &mut BuddyState) {
     let sleeping = state.pet.condition.sleeping;
     state.identity.palette_index = state.identity.palette_index.min(MAX_PALETTE_INDEX);
+    state.pet.evolution.care_score = state.pet.evolution.care_score.min(PET_SCORE_CAP);
+    state.pet.evolution.neglect_score = state.pet.evolution.neglect_score.min(PET_SCORE_CAP);
     if state.onboarding.first_launch_at.is_empty() {
         state.onboarding.first_launch_at = if state.identity.created_at.is_empty() {
             Utc::now().to_rfc3339()
@@ -482,6 +527,7 @@ pub fn sync_state(state: &mut BuddyState) {
     sync_progression(state);
     sync_conditions(state);
     let _ = maybe_advance_stage(state);
+    sync_skills(state);
     if sleeping {
         state.pet.condition.sleeping = true;
     }
@@ -592,11 +638,32 @@ pub fn refresh_active_quest_progress(state: &mut BuddyState) -> bool {
     true
 }
 
+pub fn mark_greeted(state: &mut BuddyState) -> bool {
+    if state.onboarding.greeted {
+        return false;
+    }
+    state.onboarding.greeted = true;
+    sync_state(state);
+    true
+}
+
+pub fn mark_tour_completed(state: &mut BuddyState) -> bool {
+    if state.onboarding.tour_completed {
+        return false;
+    }
+    state.onboarding.tour_completed = true;
+    sync_state(state);
+    true
+}
+
 pub fn complete_active_quest(state: &mut BuddyState) -> Option<BuddyQuest> {
     let mut quest = state.active_quest.take()?;
     quest.progress = quest.goal.max(1);
     quest.status = "completed".to_string();
     quest.completed_at = Some(Utc::now().to_rfc3339());
+    if quest.quest_type == "start_setup" {
+        state.onboarding.tour_completed = true;
+    }
     state.semantic.last_active = Utc::now().to_rfc3339();
     sync_state(state);
     Some(quest)
@@ -654,6 +721,7 @@ pub fn apply_pet_tick(state: &mut BuddyState, elapsed_seconds: u64) -> bool {
     let critical = critical_need_count(state);
     if score >= 85 && critical == 0 {
         state.pet.evolution.care_score = state.pet.evolution.care_score.saturating_add(steps * 2);
+        state.pet.evolution.neglect_score = state.pet.evolution.neglect_score.saturating_sub(steps);
     } else if score >= 70 && critical <= 1 {
         state.pet.evolution.care_score = state.pet.evolution.care_score.saturating_add(steps);
     }
@@ -671,6 +739,8 @@ pub fn apply_pet_tick(state: &mut BuddyState, elapsed_seconds: u64) -> bool {
             .neglect_score
             .saturating_add(steps * critical);
     }
+    state.pet.evolution.care_score = state.pet.evolution.care_score.min(PET_SCORE_CAP);
+    state.pet.evolution.neglect_score = state.pet.evolution.neglect_score.min(PET_SCORE_CAP);
 
     state.semantic.last_active = Utc::now().to_rfc3339();
     let _ = maybe_advance_stage(state);
@@ -751,7 +821,7 @@ pub fn apply_care_action(
     };
 
     state.progression.xp = state.progression.xp.saturating_add(xp_reward);
-    state.pet.evolution.neglect_score = state.pet.evolution.neglect_score.saturating_sub(3);
+    state.pet.evolution.neglect_score = state.pet.evolution.neglect_score.saturating_sub(25);
     state.semantic.last_active = Utc::now().to_rfc3339();
     let keep_sleep = matches!(action, BuddyCareAction::Sleep);
     if keep_sleep {
@@ -922,6 +992,134 @@ mod tests {
         assert!(message.contains("Snack"));
         assert!(state.pet.needs.hunger > 10);
         assert_eq!(state.recent_activities[0].activity_type, "care_feed");
+    }
+
+    #[test]
+    fn mark_greeted_is_idempotent() {
+        let mut state = default_buddy_state();
+
+        assert!(mark_greeted(&mut state));
+        assert!(state.onboarding.greeted);
+        assert!(!mark_greeted(&mut state));
+    }
+
+    #[test]
+    fn completing_start_setup_quest_marks_tour_completed() {
+        let mut state = default_buddy_state();
+        activate_quest(
+            &mut state,
+            BuddyQuest {
+                id: "setup".to_string(),
+                quest_type: "start_setup".to_string(),
+                title: "Start setup".to_string(),
+                description: "Tour".to_string(),
+                icon: "✨".to_string(),
+                created_at: Utc::now().to_rfc3339(),
+                accepted_at: Utc::now().to_rfc3339(),
+                status: "active".to_string(),
+                completed_at: None,
+                progress: 0,
+                goal: 1,
+                baseline: 0,
+                reward_xp: 0,
+                controls: vec![],
+            },
+        );
+
+        let completed = complete_active_quest(&mut state).unwrap();
+
+        assert_eq!(completed.quest_type, "start_setup");
+        assert!(state.onboarding.tour_completed);
+    }
+
+    #[test]
+    fn pet_tick_clamps_huge_neglect_score() {
+        let mut state = default_buddy_state();
+        state.pet.evolution.neglect_score = u64::MAX;
+        state.pet.needs.hunger = 0;
+        state.pet.needs.energy = 0;
+        state.pet.needs.hygiene = 0;
+        state.pet.needs.affection = 0;
+        state.pet.needs.boredom = 100;
+
+        apply_pet_tick(&mut state, 15);
+
+        assert_eq!(state.pet.evolution.neglect_score, PET_SCORE_CAP);
+    }
+
+    #[test]
+    fn healthy_pet_tick_decays_neglect() {
+        let mut state = default_buddy_state();
+        state.personality.traits = Default::default();
+        state.pet.evolution.neglect_score = 9;
+        state.pet.needs.hunger = 100;
+        state.pet.needs.energy = 100;
+        state.pet.needs.hygiene = 100;
+        state.pet.needs.affection = 100;
+        state.pet.needs.boredom = 0;
+
+        apply_pet_tick(&mut state, 15);
+
+        assert_eq!(state.pet.evolution.neglect_score, 8);
+    }
+
+    #[test]
+    fn care_action_repairs_twenty_five_neglect() {
+        let mut state = default_buddy_state();
+        state.pet.evolution.neglect_score = 40;
+
+        let _ = apply_care_action(&mut state, BuddyCareAction::Pet, None);
+
+        assert_eq!(state.pet.evolution.neglect_score, 15);
+    }
+
+    #[test]
+    fn sync_state_clamps_persisted_neglect_score() {
+        let mut state = default_buddy_state();
+        state.pet.evolution.neglect_score = 925_000;
+
+        sync_state(&mut state);
+
+        assert_eq!(state.pet.evolution.neglect_score, PET_SCORE_CAP);
+    }
+
+    #[test]
+    fn fresh_state_unlocks_no_skills() {
+        let state = default_buddy_state();
+
+        assert!(state.skills.unlocked.is_empty());
+        assert_eq!(
+            state.skills.locked.first().map(String::as_str),
+            Some("edit")
+        );
+    }
+
+    #[test]
+    fn stage_two_with_xp_unlocks_skill_prefix() {
+        let mut state = default_buddy_state();
+        state.progression.stage = 2;
+        state.progression.xp = 7;
+        sync_state(&mut state);
+
+        assert_eq!(
+            state.skills.unlocked,
+            vec!["edit", "search", "debug", "knowledge"]
+        );
+        assert_eq!(
+            state.skills.locked.first().map(String::as_str),
+            Some("browser")
+        );
+    }
+
+    #[test]
+    fn unlocked_skills_never_relock() {
+        let mut state = default_buddy_state();
+        state.skills.unlocked = vec!["mem".to_string()];
+
+        sync_state(&mut state);
+
+        assert!(state.skills.unlocked.iter().any(|id| id == "mem"));
+        assert!(!state.skills.locked.iter().any(|id| id == "mem"));
     }
 
     #[test]

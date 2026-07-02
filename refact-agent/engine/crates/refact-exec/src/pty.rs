@@ -121,7 +121,6 @@ mod tests {
         panic!("pty output did not echo stdin: {:?}", read.chunks);
     }
 
-
     #[cfg(unix)]
     #[tokio::test]
     async fn pty_output_is_combined() {

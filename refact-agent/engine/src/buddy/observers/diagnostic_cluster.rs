@@ -26,17 +26,18 @@ fn stable_bucket_part(value: &str) -> String {
     }
 }
 
-fn diagnostic_source_bucket(diag: &DiagnosticContext) -> String {
-    let tool = diag
+pub(crate) fn diagnostic_source_bucket(diag: &DiagnosticContext) -> String {
+    let mut bucket = diag
         .tool_name
         .as_deref()
         .or(diag.source_file.as_deref())
         .map(stable_bucket_part)
         .unwrap_or_else(|| "unknown_source".to_string());
-    // DiagnosticContext currently has no explicit model id field. If callers
-    // pass a model-like value in tool_name/source_file this remains stable via
-    // the source bucket above, without adding time-based dimensions.
-    tool
+    if let Some(model_id) = diag.model_id.as_deref() {
+        bucket.push(':');
+        bucket.push_str(&stable_bucket_part(model_id));
+    }
+    bucket
 }
 
 pub fn detect_diagnostic_cluster_facts(
@@ -84,6 +85,9 @@ pub fn detect_diagnostic_cluster_facts(
                 .first()
                 .map(|diag| diag.collected_at.clone())
                 .unwrap_or_default();
+            let model_id = cluster_diagnostics
+                .iter()
+                .find_map(|diag| diag.model_id.clone());
             facts.push(BuddyFact {
                 kind: BuddyFactKind::DiagnosticCluster,
                 key: format!("diag:cluster:{}:{}", error_type, source_bucket),
@@ -95,6 +99,7 @@ pub fn detect_diagnostic_cluster_facts(
                     "window_seconds": 1800,
                     "diagnostic_ids": diagnostic_ids,
                     "sample_collected_at": sample_collected_at,
+                    "model_id": model_id,
                 }),
                 seen_at: now,
                 confidence: 0.9,
@@ -115,6 +120,9 @@ pub fn detect_diagnostic_cluster_facts(
             .first()
             .map(|diag| diag.collected_at.clone())
             .unwrap_or_default();
+        let model_id = frontend_diagnostics
+            .iter()
+            .find_map(|diag| diag.model_id.clone());
         facts.push(BuddyFact {
             kind: BuddyFactKind::FrontendErrorBurst,
             key: "diag:fe_burst:global".to_string(),
@@ -125,6 +133,7 @@ pub fn detect_diagnostic_cluster_facts(
                 "window_seconds": 300,
                 "diagnostic_ids": diagnostic_ids,
                 "sample_collected_at": sample_collected_at,
+                "model_id": model_id,
             }),
             seen_at: now,
             confidence: 0.95,
@@ -172,9 +181,21 @@ mod tests {
             source_file: None,
             tool_name: Some(tool_name.to_string()),
             chat_id: None,
+            model_id: None,
             collected_at: now.to_rfc3339(),
             severity: DiagnosticSeverity::High,
         }
+    }
+
+    fn diagnostic_with_model(
+        error_type: &str,
+        tool_name: &str,
+        model_id: &str,
+        now: DateTime<Utc>,
+    ) -> DiagnosticContext {
+        let mut diag = diagnostic(error_type, tool_name, now);
+        diag.model_id = Some(model_id.to_string());
+        diag
     }
 
     #[test]
@@ -187,8 +208,27 @@ mod tests {
         }
 
         let facts = detect_diagnostic_cluster_facts(&diagnostics, now);
-        let keys = facts.iter().map(|fact| fact.key.as_str()).collect::<Vec<_>>();
+        let keys = facts
+            .iter()
+            .map(|fact| fact.key.as_str())
+            .collect::<Vec<_>>();
         assert!(keys.contains(&"diag:cluster:provider_error:frontend"));
         assert!(keys.contains(&"diag:cluster:provider_error:mcp_tool"));
+    }
+
+    #[test]
+    fn diagnostic_cluster_key_includes_model_bucket() {
+        let now = Utc::now();
+        let diagnostics = (0..3)
+            .map(|_| diagnostic_with_model("provider_error", "chat", "gpt-4.1", now))
+            .collect::<Vec<_>>();
+
+        let facts = detect_diagnostic_cluster_facts(&diagnostics, now);
+        let fact = facts
+            .iter()
+            .find(|fact| fact.kind == BuddyFactKind::DiagnosticCluster)
+            .unwrap();
+        assert_eq!(fact.key, "diag:cluster:provider_error:chat:gpt-4.1");
+        assert_eq!(fact.payload["model_id"], "gpt-4.1");
     }
 }

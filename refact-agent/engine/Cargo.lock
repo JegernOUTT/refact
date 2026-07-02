@@ -4045,6 +4045,7 @@ name = "refact-buddy-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hex",
  "indexmap 1.9.3",
  "rand 0.8.5",
  "refact-core",
@@ -4053,6 +4054,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",

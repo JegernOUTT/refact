@@ -30,11 +30,11 @@ use super::settings::BuddySettings;
 use super::snapshot::BuddySnapshot;
 use super::storage::RuntimeQueueRecord;
 use super::types::{
-    BuddyActivity, BuddyCareAction, BuddyChatPhraseBank, BuddyDraft, BuddyFact, BuddyFactKind,
-    BuddyOpportunity, BuddyPersonalityProfile, BuddyPulse, BuddyQuest, BuddyRuntimeEvent,
-    BuddySpeechItem, BuddyState, BuddySuggestion, OpportunityStatus,
+    BuddyActivity, BuddyChatPhraseBank, BuddyDraft, BuddyFact, BuddyFactKind, BuddyOpportunity,
+    BuddyPersonalityProfile, BuddyPulse, BuddyQuest, BuddyRuntimeEvent, BuddySpeechItem,
+    BuddyState, BuddySuggestion, OpportunityStatus,
 };
-use super::voice_service::{SpeechIntent, VoiceCtx, VoiceIntent, voice_service};
+use super::voice_service::{SpeechIntent, SpeechIntentWireToken, VoiceCtx, VoiceIntent, voice_service};
 
 const SUGGESTION_RATE_LIMIT_SECS: u64 = 300;
 const SUGGESTION_EXPIRY_SECS: i64 = 300;
@@ -42,6 +42,8 @@ const PET_DECAY_INTERVAL_SECS: u64 = 15;
 const OBSERVER_CONCURRENCY: usize = 4;
 const MEMORY_OPS_ARCHIVE_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
 const MEMORY_OPS_COMPACT_INTERVAL_SECS: u64 = 6 * 60 * 60;
+const MEMORY_OPS_DRAIN_INTERVAL_SECS: u64 = 600;
+const MEMORY_OPS_DRAIN_MAX_APPLIES: usize = 25;
 const BUDDY_SPEECH_MAX_CHARS: usize = 280;
 const BUDDY_TITLE_MAX_CHARS: usize = 120;
 const BUDDY_DESCRIPTION_MAX_CHARS: usize = 500;
@@ -801,34 +803,6 @@ impl BuddyService {
         event
     }
 
-    #[allow(dead_code)]
-    pub fn update_runtime_progress(&mut self, dedupe_key: &str, progress: u8, title: Option<&str>) {
-        self.runtime_queue
-            .update_progress(dedupe_key, progress, title);
-        if let Some(e) = self
-            .runtime_queue
-            .items
-            .iter()
-            .find(|e| e.dedupe_key.as_deref() == Some(dedupe_key))
-            .cloned()
-        {
-            let _ = self
-                .events_tx
-                .send(BuddyEvent::RuntimeEvent { event: e.clone() });
-            self.persist_event(e);
-        }
-        // If progress also touched now_playing, persist the new slot value.
-        if self
-            .runtime_queue
-            .now_playing
-            .as_ref()
-            .and_then(|np| np.dedupe_key.as_deref())
-            == Some(dedupe_key)
-        {
-            self.persist_now_playing(self.runtime_queue.now_playing.clone());
-        }
-    }
-
     pub fn complete_runtime_event(&mut self, dedupe_key: &str, status: &str) {
         self.runtime_queue.complete(dedupe_key, status);
         if let Some(e) = self
@@ -956,6 +930,7 @@ impl BuddyService {
             persistent: false,
             ttl_seconds: 12,
             dedupe_key: Some(format!("quest_complete_{}", quest.quest_type)),
+            speech_intent: Some(SpeechIntent::QuestComplete.wire_token().to_string()),
             created_at: Utc::now().to_rfc3339(),
             controls: vec![],
             chat_id: None,
@@ -991,51 +966,8 @@ impl BuddyService {
         });
     }
 
-    #[allow(dead_code)]
-    pub fn accept_quest(&mut self, quest: BuddyQuest) {
-        let title = quest.title.clone();
-        super::state::activate_quest(&mut self.state, quest.clone());
-        self.dirty = true;
-        let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-            state: self.state.clone(),
-        });
-        self.update_speech(BuddySpeechItem {
-            id: format!("quest-accept-{}", quest.id),
-            text: format!("Quest accepted: {title}. I’ll keep score from here."),
-            mood: "happy".to_string(),
-            scope: "global".to_string(),
-            persistent: false,
-            ttl_seconds: 12,
-            dedupe_key: Some(format!("quest_accept_{}", quest.quest_type)),
-            created_at: Utc::now().to_rfc3339(),
-            controls: quest.controls,
-            chat_id: None,
-        });
-    }
-
     pub fn grant_xp(&mut self, amount: u64) {
         super::state::grant_xp(&mut self.state, amount);
-        self.refresh_active_quest();
-        self.dirty = true;
-        let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-            state: self.state.clone(),
-        });
-    }
-
-    #[allow(dead_code)]
-    pub fn apply_care_action(&mut self, action: BuddyCareAction, toy: Option<&str>) -> String {
-        let (_, message) = super::state::apply_care_action(&mut self.state, action.clone(), toy);
-        self.refresh_active_quest();
-        self.dirty = true;
-        let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-            state: self.state.clone(),
-        });
-        message
-    }
-
-    #[allow(dead_code)]
-    pub fn reroll_personality(&mut self) {
-        super::state::reroll_personality(&mut self.state);
         self.refresh_active_quest();
         self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::StateUpdated {
@@ -1096,47 +1028,6 @@ impl BuddyService {
         self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::SuggestionDismissed {
             suggestion_id: id.to_string(),
-        });
-    }
-
-    #[allow(dead_code)]
-    pub fn workflow_completed(
-        &mut self,
-        workflow_id: &str,
-        xp: u64,
-        activity: super::types::BuddyActivity,
-    ) {
-        super::state::add_activity(&mut self.state, activity.clone());
-        let _ = self.events_tx.send(BuddyEvent::ActivityAdded { activity });
-        super::state::grant_xp(&mut self.state, xp);
-        let now = Utc::now().to_rfc3339();
-        if let Some(ws) = self
-            .state
-            .workflow_summaries
-            .iter_mut()
-            .find(|w| w.workflow_id == workflow_id)
-        {
-            ws.last_run = Some(now);
-            ws.run_count += 1;
-            ws.last_outcome = Some("success".to_string());
-            ws.failure_category = None;
-            ws.failure_summary = None;
-        } else {
-            self.state
-                .workflow_summaries
-                .push(super::types::BuddyWorkflowSummary {
-                    workflow_id: workflow_id.to_string(),
-                    last_run: Some(now),
-                    run_count: 1,
-                    failure_category: None,
-                    failure_summary: None,
-                    last_outcome: Some("success".to_string()),
-                });
-        }
-        self.refresh_active_quest();
-        self.dirty = true;
-        let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-            state: self.state.clone(),
         });
     }
 
@@ -1457,6 +1348,17 @@ impl BuddyService {
         source: Option<&str>,
         chat_id: Option<&str>,
     ) {
+        self.report_error_with_model(error_type, error_msg, source, chat_id, None);
+    }
+
+    pub fn report_error_with_model(
+        &mut self,
+        error_type: &str,
+        error_msg: &str,
+        source: Option<&str>,
+        chat_id: Option<&str>,
+        model_id: Option<&str>,
+    ) {
         let lower = error_msg.to_lowercase();
         let severity = if lower.contains("critical") || lower.contains("panic") {
             super::diagnostics::DiagnosticSeverity::Critical
@@ -1473,6 +1375,7 @@ impl BuddyService {
             source_file: source.map(|s| s.to_string()),
             tool_name: None,
             chat_id: chat_id.map(|s| s.to_string()),
+            model_id: model_id.map(|s| s.to_string()),
             collected_at: Utc::now().to_rfc3339(),
             severity,
         };
@@ -1678,10 +1581,21 @@ pub async fn report_error_persisted(
     source: Option<&str>,
     chat_id: Option<&str>,
 ) {
+    report_error_persisted_with_model(gcx, error_type, error_msg, source, chat_id, None).await;
+}
+
+pub async fn report_error_persisted_with_model(
+    gcx: AppState,
+    error_type: &str,
+    error_msg: &str,
+    source: Option<&str>,
+    chat_id: Option<&str>,
+    model_id: Option<&str>,
+) {
     let buddy_arc = gcx.buddy.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     if let Some(svc) = lock.as_mut() {
-        svc.report_error(error_type, error_msg, source, chat_id);
+        svc.report_error_with_model(error_type, error_msg, source, chat_id, model_id);
     }
 }
 
@@ -1854,7 +1768,24 @@ pub async fn buddy_background_task(gcx: AppState) {
     let state = super::state::load_state(&project_root).await;
     let settings = super::settings::load_settings(&project_root).await;
     let recent_diagnostics = load_diagnostics_for_service(&project_root).await;
-    let memory_ops = super::storage::load_memory_ops(&project_root).await;
+    let mut memory_ops = super::storage::load_memory_ops(&project_root).await;
+    let before_memory_ops = memory_ops.pending_count + memory_ops.approved_count;
+    if before_memory_ops > 5000 {
+        match super::storage::compact_memory_ops(&project_root).await {
+            Ok(compacted) => {
+                let after_memory_ops = compacted.pending_count + compacted.approved_count;
+                info!(
+                    "buddy: compacted large memory ops queue at startup: {} -> {} pending/approved ops",
+                    before_memory_ops, after_memory_ops
+                );
+                memory_ops = compacted;
+            }
+            Err(err) => warn!(
+                "buddy: failed to compact large memory ops queue at startup: {}",
+                err
+            ),
+        }
+    }
     let runtime_queue = super::storage::load_runtime_queue(&project_root).await;
 
     let events_tx = gcx.buddy.buddy_events_tx.clone();
@@ -2172,6 +2103,37 @@ pub async fn buddy_background_task(gcx: AppState) {
                     }
                 }
                 Err(err) => warn!("buddy: failed to compact memory ops queue: {}", err),
+            }
+        }
+        if expiry_tick % MEMORY_OPS_DRAIN_INTERVAL_SECS == 0 {
+            let drain_settings = {
+                let buddy = buddy_arc.lock().await;
+                buddy
+                    .as_ref()
+                    .map(|svc| (svc.settings.autonomy_level, svc.settings.enabled))
+            };
+            if let Some((autonomy, enabled)) = drain_settings {
+                if enabled {
+                    match super::storage::drain_memory_ops(
+                        &project_root,
+                        gcx.clone(),
+                        autonomy,
+                        MEMORY_OPS_DRAIN_MAX_APPLIES,
+                    )
+                    .await
+                    {
+                        Ok((memory_ops, changed)) => {
+                            let mut buddy = buddy_arc.lock().await;
+                            if let Some(svc) = buddy.as_mut() {
+                                svc.memory_ops = memory_ops;
+                            }
+                            if changed > 0 {
+                                info!("buddy: drained {} memory ops", changed);
+                            }
+                        }
+                        Err(err) => warn!("buddy: failed to drain memory ops queue: {}", err),
+                    }
+                }
             }
         }
     }

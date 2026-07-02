@@ -155,6 +155,7 @@ async fn voice_quest_speech(
             created_at: chrono::Utc::now().to_rfc3339(),
             controls: vec![],
             chat_id: None,
+            speech_intent: None,
         };
     };
     let pulse_one_liner = format!(

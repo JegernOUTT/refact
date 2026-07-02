@@ -652,7 +652,7 @@ export const openExistingBuddyChat = createAsyncThunk<
   const buddyMeta: BuddyThreadMeta = {
     is_buddy_chat: true,
     buddy_chat_kind: openableKind,
-    workflow_id: openableKind === "workflow" ? entry.workflow_id ?? null : null,
+    workflow_id: openableKind === "workflow" ? entry.id : null,
   };
 
   const fallback: ChatHistoryItem = {

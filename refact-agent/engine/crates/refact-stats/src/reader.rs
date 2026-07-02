@@ -1805,7 +1805,10 @@ mod tests {
             categorize_error("maximum context length is 200000 tokens"),
             "context_length"
         );
-        assert_eq!(categorize_error("401 Unauthorized: invalid api key"), "auth");
+        assert_eq!(
+            categorize_error("401 Unauthorized: invalid api key"),
+            "auth"
+        );
         assert_eq!(categorize_error("connection reset by peer"), "network");
         assert_eq!(categorize_error("502 Bad Gateway"), "server");
         assert_eq!(categorize_error("something weird happened"), "other");

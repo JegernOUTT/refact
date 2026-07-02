@@ -96,7 +96,8 @@
     var(--rf-color-accent),
     var(--rf-color-accent)
   );
-  transition: width 0.5s ease;
+  transition: width calc(var(--rf-dur-slow) + var(--rf-dur-med))
+    var(--rf-ease-standard);
 }
 
 .xpText {
@@ -196,5 +197,5 @@
   height: 100%;
   border-radius: 2px;
   background: var(--rf-color-accent);
-  transition: width 0.3s ease;
+  transition: width var(--rf-dur-slow) var(--rf-ease-standard);
 }

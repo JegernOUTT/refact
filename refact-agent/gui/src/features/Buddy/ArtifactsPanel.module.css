@@ -13,6 +13,33 @@
   gap: var(--rf-space-2);
 }
 
+.titleGroup,
+.headerActions,
+.filters,
+.footerActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.headerActions {
+  justify-content: flex-end;
+}
+
+.filters {
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2xs);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-surface-1);
+}
+
+.footerActions {
+  justify-content: center;
+}
+
 .tableScroll {
   width: 100%;
   max-width: 100%;

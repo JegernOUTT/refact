@@ -1755,15 +1755,18 @@ export function stepAnimFrame(
   semantic: BuddySemanticState,
   emit: (e: BuddyEvent) => void,
   env: BuddyEnvContext | null = null,
+  reducedMotion = false,
 ): void {
   anim.frame++;
 
   processBeats(anim);
 
-  anim.bobPhase +=
-    anim.idleAction === "doze"
-      ? 0.03
-      : 0.04 + (semantic.mood.energy / 100) * 0.05;
+  if (!reducedMotion) {
+    anim.bobPhase +=
+      anim.idleAction === "doze"
+        ? 0.03
+        : 0.04 + (semantic.mood.energy / 100) * 0.05;
+  }
   anim.squashX += (anim.squashTargetX - anim.squashX) * 0.12;
   anim.squashY += (anim.squashTargetY - anim.squashY) * 0.12;
   anim.squashTargetX += (1 - anim.squashTargetX) * 0.04;
@@ -1794,7 +1797,7 @@ export function stepAnimFrame(
     anim.sweatTimer = 110;
   }
 
-  if (anim.combo.displayTimer > 0 && anim.frame % 6 === 0) {
+  if (!reducedMotion && anim.combo.displayTimer > 0 && anim.frame % 6 === 0) {
     anim.sparks.push({
       x: CANVAS_CENTER_X + anim.walkOffsetX + (Math.random() - 0.5) * 40,
       y: CANVAS_CENTER_Y + (Math.random() - 0.5) * 20 - 8,
@@ -1807,7 +1810,7 @@ export function stepAnimFrame(
 
   updateBlink(anim, semantic);
   updateGaze(anim, semantic);
-  updateBreath(anim, semantic);
+  if (!reducedMotion) updateBreath(anim, semantic);
   updateBodyLanguage(anim, semantic);
 
   if (anim.celebrationTimer > 0) anim.celebrationTimer--;
@@ -1862,12 +1865,14 @@ export function stepAnimFrame(
 
   const stage = semantic.progress.stage;
   anim.moodType = semantic.activity.mood;
-  anim.levitationOffset = stage >= 5 ? Math.sin(anim.frame * 0.03) * 3 : 0;
+  anim.levitationOffset =
+    stage >= 5 && !reducedMotion ? Math.sin(anim.frame * 0.03) * 3 : 0;
   anim.auraPulseIntensity =
-    stage >= 5 ? 0.5 + Math.sin(anim.frame * 0.04) * 0.5 : 0;
+    stage >= 5 && !reducedMotion ? 0.5 + Math.sin(anim.frame * 0.04) * 0.5 : 0;
 
   anim.stageQuirkTick++;
   if (
+    !reducedMotion &&
     (semantic.activity.animationType === "idle" ||
       anim.idleAction === "doze") &&
     !anim.quirkActive &&
@@ -1936,7 +1941,7 @@ export function stepAnimFrame(
     if (anim.shadowClone.life <= 0) anim.shadowClone = null;
   }
 
-  updateWalk(anim, semantic);
+  if (!reducedMotion) updateWalk(anim, semantic);
 
   if (anim.toyActive) {
     anim.toyAnimPhase += 0.12;
@@ -1998,6 +2003,12 @@ export function stepAnimFrame(
     anim.idleAction !== "doze"
   ) {
     anim.idleAction = "none";
+    return;
+  }
+
+  if (reducedMotion) {
+    anim.idleAction = "none";
+    anim.idleActionTimer = 0;
     return;
   }
 

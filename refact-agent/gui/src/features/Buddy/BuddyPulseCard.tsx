@@ -37,6 +37,21 @@ export const BuddyPulseCard: React.FC = () => {
     );
   }
 
+  const memoryOps = [
+    { label: "pending", value: pulse.memory.pending_ops ?? 0 },
+    { label: "applied", value: pulse.memory.applied_ops ?? 0 },
+    { label: "failed", value: pulse.memory.failed_ops ?? 0 },
+  ].filter((item) => item.value > 0);
+  const memoryCandidateTotal =
+    (pulse.memory.merge_candidates ?? 0) +
+    (pulse.memory.archive_candidates ?? 0) +
+    (pulse.memory.review_candidates ?? 0) +
+    (pulse.memory.conflict_candidates ?? 0);
+  const memoryDetails = [
+    ...memoryOps.map((item) => `${item.value} ${item.label}`),
+    ...(memoryCandidateTotal > 0 ? [`${memoryCandidateTotal} candidates`] : []),
+  ];
+
   return (
     <Surface
       className={styles.card}
@@ -63,6 +78,7 @@ export const BuddyPulseCard: React.FC = () => {
         <PulseRow label="Memory">
           {pulse.memory.total} docs · {pulse.memory.orphan} orphan ·{" "}
           {pulse.memory.stale_conflicts} conflict
+          {memoryDetails.length > 0 ? ` · ${memoryDetails.join(" · ")}` : ""}
         </PulseRow>
         <PulseRow label="Providers">
           <StatusDot

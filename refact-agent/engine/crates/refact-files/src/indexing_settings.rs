@@ -15,8 +15,10 @@ pub struct IndexingSettings {
 
 impl Default for IndexingSettings {
     fn default() -> Self {
-        serde_yaml::from_str(include_str!("../../../src/yaml_configs/default_indexing.yaml"))
-            .expect("src/yaml_configs/default_indexing.yaml to be valid IndexingSettings")
+        serde_yaml::from_str(include_str!(
+            "../../../src/yaml_configs/default_indexing.yaml"
+        ))
+        .expect("src/yaml_configs/default_indexing.yaml to be valid IndexingSettings")
     }
 }
 

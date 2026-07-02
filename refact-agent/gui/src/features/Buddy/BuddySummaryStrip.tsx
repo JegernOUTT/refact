@@ -1,7 +1,7 @@
 import React from "react";
 import { ArrowRight } from "lucide-react";
 import { Button, Icon, Surface, Text } from "../../components/ui";
-import { formatCompactNumber } from "./buddyUtils";
+import { formatCompactNumber, xpDisplay } from "./buddyUtils";
 import { stageIcon } from "./buddyIcons";
 import type { BuddyPetState, Palette, Stage } from "./types";
 import styles from "./BuddySummaryStrip.module.css";
@@ -22,6 +22,7 @@ interface BuddySummaryStripProps {
   xp: number;
   xpNext: number | undefined;
   xpFill: number;
+  atMaxStage: boolean;
   pet: BuddyPetState | undefined;
   statsData: StatsSummaryData | undefined;
   successRate: number | null;
@@ -55,16 +56,14 @@ export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
   xp,
   xpNext,
   xpFill,
+  atMaxStage,
   pet,
   statsData,
   successRate,
   onViewStats,
 }) => {
-  const xpLabel = xpNext
-    ? xp >= xpNext
-      ? `${xpNext} / ${xpNext} XP · MAX`
-      : `${xp} / ${xpNext} XP`
-    : `${xp} XP · MAX`;
+  const xpLabel = xpDisplay(xp, xpNext, atMaxStage);
+  const displayedXpFill = atMaxStage ? 100 : xpFill;
 
   return (
     <Surface
@@ -93,7 +92,11 @@ export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
           <div className={styles.xpBar}>
             <div
               className={styles.xpFill}
-              style={{ "--buddy-xp-fill": `${xpFill}%` } as React.CSSProperties}
+              style={
+                {
+                  "--buddy-xp-fill": `${displayedXpFill}%`,
+                } as React.CSSProperties
+              }
             />
           </div>
         </div>

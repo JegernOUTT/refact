@@ -873,7 +873,12 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
 }
 
 pub async fn maybe_enqueue_chat_activity_reaction(app: AppState, activity: ChatActivityCompletion) {
-    let analysis_text = CHAT_ACTIVITY_ANALYSIS_TEXT.to_string();
+    let title = activity.thread.title.trim();
+    let analysis_text = if title.is_empty() {
+        CHAT_ACTIVITY_ANALYSIS_TEXT.to_string()
+    } else {
+        format!("chat '{}' completed activity safely", title)
+    };
 
     let plan = {
         let mut svc_guard = app.buddy.buddy.lock().await;

@@ -84,6 +84,7 @@ pub async fn handle_v1_buddy_frontend_error(
         source_file: Some(req.url.clone()),
         tool_name: Some("frontend".to_string()),
         chat_id: None,
+        model_id: None,
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity,
     };

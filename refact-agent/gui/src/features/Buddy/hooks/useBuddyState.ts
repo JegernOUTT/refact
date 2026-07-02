@@ -11,7 +11,39 @@ import {
   clearNowPlaying,
 } from "../buddySlice";
 import { SIGNALS, STAGES, SKILLS } from "../constants";
-import type { BuddySemanticState, BuddyEvent } from "../types";
+import { anxietyFromNeglect } from "../buddyUtils";
+import { useUpdateBuddySettingsMutation } from "../../../services/refact/buddy";
+import type { BuddySemanticState, BuddyEvent, MoodType } from "../types";
+
+const SEMANTIC_MOOD_MAP: Record<string, MoodType> = {
+  sleepy: "sleepy",
+  restless: "curious",
+  questing: "focused",
+  hungry: "eating",
+  grimy: "concerned",
+  needy: "concerned",
+  playful: "happy",
+  excited: "celebrate",
+  neutral: "idle",
+  calm: "idle",
+  cheerful: "happy",
+  worried: "concerned",
+  happy: "happy",
+  curious: "curious",
+  focused: "focused",
+};
+
+function semanticMood(mood: string, currentMood: MoodType): MoodType {
+  const normalizedMood = mood.toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(SEMANTIC_MOOD_MAP, normalizedMood)) {
+    return SEMANTIC_MOOD_MAP[normalizedMood] as MoodType;
+  }
+  return currentMood;
+}
+
+export function clinginessFromAffection(affection: number): number {
+  return Math.min(100, Math.max(0, 100 - affection));
+}
 
 export interface BuddyStateHandle {
   state: BuddySemanticState;
@@ -38,12 +70,15 @@ export function useBuddyState(
   const reduxSnapshot = useAppSelector(selectBuddySnapshot);
 
   const nowPlaying = useAppSelector(selectNowPlaying);
-  const prevSnapshotStageRef = useRef<number | null>(null);
+  const prevSnapshotProgressRef = useRef<{
+    identityKey: string;
+    stage: number;
+  } | null>(null);
   const prevNowPlayingIdRef = useRef<string | null>(null);
-  // null = not yet initialized; prevents fake milestone events on first hydration
   const prevLocalStageRef = useRef<number | null>(null);
   const prevLocalSkillsRef = useRef<string[] | null>(null);
   const onBuddyEventRef = useRef(onBuddyEvent);
+  const [updateSettings] = useUpdateBuddySettingsMutation();
   useEffect(() => {
     onBuddyEventRef.current = onBuddyEvent;
   }, [onBuddyEvent]);
@@ -58,11 +93,7 @@ export function useBuddyState(
         paletteIndex: identity.palette_index,
       },
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    reduxSnapshot?.state.identity.name,
-    reduxSnapshot?.state.identity.palette_index,
-  ]);
+  }, [reduxSnapshot]);
 
   useEffect(() => {
     if (!reduxSnapshot) return;
@@ -80,7 +111,7 @@ export function useBuddyState(
                 2,
             ),
           ),
-          clinginess: personality.traits.sociability,
+          clinginess: clinginessFromAffection(pet.needs.affection),
           resilience: personality.traits.resilience,
           chaos: personality.traits.chaos,
           sociability: personality.traits.sociability,
@@ -95,19 +126,12 @@ export function useBuddyState(
           ),
           energy: pet.needs.energy,
           curiosity: personality.traits.curiosity,
-          anxiety: Math.max(0, Math.round(pet.evolution.neglect_score / 2)),
+          anxiety: anxietyFromNeglect(pet.evolution.neglect_score),
           boredom: pet.needs.boredom,
           affection: pet.needs.affection,
         },
         activity: {
-          mood:
-            semantic.mood === "Sleepy"
-              ? "sleepy"
-              : semantic.mood === "Restless"
-                ? "curious"
-                : semantic.mood === "Questing"
-                  ? "focused"
-                  : state.activity.mood,
+          mood: semanticMood(semantic.mood, state.activity.mood),
           animationType:
             semantic.focus === "dreaming"
               ? "sleep"
@@ -121,45 +145,34 @@ export function useBuddyState(
         },
       },
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    reduxSnapshot?.state.personality.traits.playfulness,
-    reduxSnapshot?.state.personality.traits.chaos,
-    reduxSnapshot?.state.personality.traits.sociability,
-    reduxSnapshot?.state.personality.traits.curiosity,
-    reduxSnapshot?.state.personality.traits.resilience,
-    reduxSnapshot?.state.pet.needs.hunger,
-    reduxSnapshot?.state.pet.needs.energy,
-    reduxSnapshot?.state.pet.needs.boredom,
-    reduxSnapshot?.state.pet.needs.affection,
-    reduxSnapshot?.state.pet.evolution.neglect_score,
-    reduxSnapshot?.state.semantic.mood,
-    reduxSnapshot?.state.semantic.focus,
-    reduxSnapshot?.state.progression.level,
+    reduxSnapshot,
+    state.activity.animationType,
+    state.activity.lastSignalTime,
+    state.activity.lastSignalType,
+    state.activity.mood,
   ]);
 
   useEffect(() => {
     if (!reduxSnapshot) return;
-    const { progression } = reduxSnapshot.state;
+    const { identity, progression } = reduxSnapshot.state;
     const curr = progression.stage;
-    const prev = prevSnapshotStageRef.current;
-    prevSnapshotStageRef.current = curr;
+    const identityKey = `${identity.name}:${identity.created_at}`;
+    const prev = prevSnapshotProgressRef.current;
+    const identityChanged = prev?.identityKey !== identityKey;
+    prevSnapshotProgressRef.current = { identityKey, stage: curr };
+    if (identityChanged) prevLocalStageRef.current = curr;
 
     dispatch({
       kind: "patch",
       patch: { progress: { xp: progression.xp, stage: curr } },
     });
 
-    if (prev !== null && curr > prev) {
+    if (prev !== null && !identityChanged && curr > prev.stage) {
       dispatch({ kind: "signal", signalType: "stage_up" });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    reduxSnapshot?.state.progression.stage,
-    reduxSnapshot?.state.progression.xp,
-  ]);
+  }, [reduxSnapshot]);
 
-  // Skills sync is independent — fires when skills change even without XP/stage change
   const skillsKey = reduxSnapshot?.state.skills.unlocked.join(",") ?? "";
   useEffect(() => {
     if (!reduxSnapshot) return;
@@ -167,18 +180,12 @@ export function useBuddyState(
       kind: "patch",
       patch: { skills: reduxSnapshot.state.skills.unlocked },
     });
-    // skillsKey changes whenever unlocked array contents change
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [skillsKey]);
+  }, [reduxSnapshot, skillsKey]);
 
-  // Emit stage_evolved and skill_unlocked events when canvas state changes.
-  // prevLocalStageRef / prevLocalSkillsRef start as null so first hydration
-  // from snapshot never triggers false milestone events.
   useEffect(() => {
     const prev = prevLocalStageRef.current;
     const curr = state.progress.stage;
     prevLocalStageRef.current = curr;
-    // Only emit after the ref has been initialised (prev !== null)
     if (prev !== null && curr > prev) {
       const stageDef = STAGES[curr];
       onBuddyEventRef.current?.({
@@ -193,7 +200,7 @@ export function useBuddyState(
     const prev = prevLocalSkillsRef.current;
     const curr = state.skills;
     prevLocalSkillsRef.current = curr;
-    if (prev === null) return; // skip first hydration
+    if (prev === null) return;
     const newSkills = curr.filter((s) => !prev.includes(s));
     for (const skillId of newSkills) {
       const def = SKILLS.find((s) => s.id === skillId);
@@ -207,24 +214,17 @@ export function useBuddyState(
     }
   }, [state.skills]);
 
-  // Animation is driven solely by nowPlaying RuntimeEvents.
-  // No signalQueue — RuntimeEvent is the single source of live Buddy UX.
-
   useEffect(() => {
     if (!nowPlaying) {
       prevNowPlayingIdRef.current = null;
       return;
     }
-    // Only trigger animation burst when a genuinely NEW event arrives
     const isNewEvent = nowPlaying.id !== prevNowPlayingIdRef.current;
     prevNowPlayingIdRef.current = nowPlaying.id;
     if (isNewEvent) {
       dispatch({ kind: "signal", signalType: nowPlaying.signal_type });
     }
 
-    // Backend may emit signal_type values not present in the local SIGNALS
-    // map (e.g. newly-added or experimental types). Look up defensively so
-    // an unknown type degrades gracefully instead of crashing the panel.
     const signalDef = SIGNALS[nowPlaying.signal_type] as
       | (typeof SIGNALS)[keyof typeof SIGNALS]
       | undefined;
@@ -258,7 +258,11 @@ export function useBuddyState(
     (name: string) => dispatch({ kind: "rename", name }),
     [],
   );
-  const nextPalette = useCallback(() => dispatch({ kind: "next_palette" }), []);
+  const nextPalette = useCallback(() => {
+    const nextIndex = (state.paletteIndex + 1) % 8;
+    dispatch({ kind: "next_palette" });
+    void updateSettings({ palette_index: nextIndex }).catch(() => undefined);
+  }, [state.paletteIndex, updateSettings]);
   const reset = useCallback(() => dispatch({ kind: "reset" }), []);
 
   const handleCanvasEvent = useCallback((event: BuddyEvent) => {

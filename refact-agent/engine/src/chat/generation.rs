@@ -930,7 +930,8 @@ async fn maybe_compact_after_high_pressure_length_stop(
     if matches!(
         outcome,
         crate::chat::summarization::CompactionOutcome::LlmUnavailable
-    ) && crate::chat::summarization::apply_deterministic_compaction_for_recovery(session_arc).await
+    ) && crate::chat::summarization::apply_deterministic_compaction_for_recovery(session_arc)
+        .await
     {
         warn!("High-pressure length stop recovered via deterministic full sweep");
         return true;
@@ -1435,8 +1436,8 @@ pub fn start_generation(
                     }
                     continue;
                 }
-                let is_context_limit = error.retry_decision().is_context_limit()
-                    && !abort_flag.load(Ordering::SeqCst);
+                let is_context_limit =
+                    error.retry_decision().is_context_limit() && !abort_flag.load(Ordering::SeqCst);
                 if is_context_limit {
                     let original_error = error.message.clone();
                     let round = {
@@ -1518,13 +1519,16 @@ pub fn start_generation(
                         let err_clone = error_message.clone();
                         let chat_id2 = chat_id.clone();
                         let chat_label2 = chat_label.clone();
+                        let model2 = session.thread.model.clone();
                         tokio::spawn(async move {
+                            let model_ref = Some(model2.as_str()).filter(|m| !m.is_empty());
                             app2.buddy_event_sink
-                                .report_error(
+                                .report_error_with_model(
                                     "llm_error",
                                     &err_clone,
                                     Some("chat/generation.rs"),
                                     Some(&chat_id2),
+                                    model_ref,
                                 )
                                 .await;
                             let short_err: String = err_clone.chars().take(60).collect();

@@ -543,6 +543,21 @@ impl BuddyEventSink for AppBuddyEventSink {
         }
     }
 
+    async fn report_error_with_model(
+        &self,
+        error_type: &str,
+        error_msg: &str,
+        source: Option<&str>,
+        chat_id: Option<&str>,
+        model_id: Option<&str>,
+    ) {
+        let buddy_arc = self.buddy.clone();
+        let mut lock = buddy_arc.lock().await;
+        if let Some(svc) = lock.as_mut() {
+            svc.report_error_with_model(error_type, error_msg, source, chat_id, model_id);
+        }
+    }
+
     async fn mark_chat_error(&self, event: BuddyRuntimeEvent) {
         let buddy_arc = self.buddy.clone();
         let mut lock = buddy_arc.lock().await;

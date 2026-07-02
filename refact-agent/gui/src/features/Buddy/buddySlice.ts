@@ -317,9 +317,10 @@ export function normalizeBuddySettings(
 
 export type BuddySettingsPatch = Partial<BuddySettings> & {
   clear_personality_prompt?: boolean;
+  palette_index?: number;
 };
 
-export type BuddySettingsPatchKey = keyof BuddySettings;
+export type BuddySettingsPatchKey = keyof BuddySettings | "palette_index";
 
 export type BuddySettingsResponse = BuddySettings & {
   storage?: BuddyStorageMetadata;
@@ -335,7 +336,11 @@ function applyBuddySettingsPatch(
   current: BuddySettings,
   patch: BuddySettingsPatch,
 ): BuddySettings {
-  const { clear_personality_prompt, observers, ...settingsPatch } = patch;
+  const { clear_personality_prompt, observers, ...settingsPatchWithPalette } =
+    patch;
+  const settingsPatch: Partial<BuddySettings> = { ...settingsPatchWithPalette };
+  delete (settingsPatch as Partial<BuddySettings> & { palette_index?: number })
+    .palette_index;
   const next: Partial<BuddySettings> = {
     ...current,
     ...settingsPatch,
@@ -418,7 +423,19 @@ export function defaultBuddyPulse(): BuddyPulse {
     generated_at: null,
     tasks: { total: 0, stuck: 0, abandoned: 0, by_status: {} },
     trajectories: { total: 0, untitled: 0, oldest_age_days: 0 },
-    memory: { total: 0, orphan: 0, stale_conflicts: 0 },
+    memory: {
+      total: 0,
+      orphan: 0,
+      stale_conflicts: 0,
+      duplicate_candidates: 0,
+      merge_candidates: 0,
+      archive_candidates: 0,
+      review_candidates: 0,
+      conflict_candidates: 0,
+      pending_ops: 0,
+      applied_ops: 0,
+      failed_ops: 0,
+    },
     providers: { defaults_ok: true, broken_refs: 0, quota_warnings: 0 },
     mcp: { total: 0, failing: 0, auth_expiring: 0 },
     customization: { modes: 0, skills: 0, commands: 0, subagents: 0, hooks: 0 },
@@ -695,11 +712,27 @@ export const buddySlice = createSlice({
         if (found) found.dismissed = true;
       }
     },
+    resetBuddyForWorkspaceChange: (state) => {
+      state.snapshot = null;
+      state.loaded = false;
+      state.conversations = [];
+      state.recentDiagnostics = [];
+      state.runtimeQueue = [];
+      state.nowPlaying = null;
+      state.activeSpeech = null;
+      state.opportunities = [];
+      state.pulse = null;
+      state.activeDrafts = [];
+      state.pendingSettingsRequests = [];
+      state.chatBubbleImpressions = [];
+      persistChatBubblePolicy(
+        state.chatBubbleSnoozedUntil,
+        state.chatBubbleImpressions,
+      );
+    },
     updateBuddySettings: (state, action: PayloadAction<BuddySettings>) => {
       if (state.snapshot) {
         setSnapshotSettingsPreservingDisabled(state, action.payload);
-        const storage = (action.payload as BuddySettingsResponse).storage;
-        if (storage) state.snapshot.storage = storage;
         applyPendingSettingsRequests(state);
       }
       // If snapshot is null but buddy is being re-enabled, wait for the next
@@ -1041,6 +1074,7 @@ export const {
   addBuddyActivity,
   addBuddySuggestion,
   dismissBuddySuggestion,
+  resetBuddyForWorkspaceChange,
   updateBuddySettings,
   patchBuddySettings,
   beginBuddySettingsRequest,

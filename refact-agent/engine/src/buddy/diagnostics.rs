@@ -9,3 +9,13 @@ use crate::app_state::AppState;
 pub async fn collect_diagnostics(_gcx: AppState, error: &str) -> DiagnosticContext {
     collect_diagnostics_from_error(error)
 }
+
+pub async fn collect_diagnostics_with_model(
+    _gcx: AppState,
+    error: &str,
+    model_id: Option<String>,
+) -> DiagnosticContext {
+    let mut ctx = collect_diagnostics_from_error(error);
+    ctx.model_id = model_id;
+    ctx
+}

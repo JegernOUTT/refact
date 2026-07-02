@@ -109,6 +109,7 @@ impl BuddyJob for StatsWatcherJob {
                         created_at: chrono::Utc::now().to_rfc3339(),
                         controls: vec![],
                         chat_id: None,
+                        speech_intent: None,
                     },
                 };
                 speech.ttl_seconds = 12;
@@ -201,6 +202,7 @@ mod tests {
                 chat_id: None,
                 collected_at: collected_at.clone(),
                 severity: DiagnosticSeverity::High,
+                model_id: None,
             })
             .collect();
         BuddyJobContext {

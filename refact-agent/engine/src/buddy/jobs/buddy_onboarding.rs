@@ -182,7 +182,8 @@ impl BuddyJob for BuddyOnboardingJob {
         if same_signal(&ctx, &spec.signal_hash) {
             return BuddyJobResult::default();
         }
-        let mut result = execute_autonomous_spec(gcx, &ctx, spec.clone(), self.cooldown_seconds()).await;
+        let mut result =
+            execute_autonomous_spec(gcx, &ctx, spec.clone(), self.cooldown_seconds()).await;
         if result.last_result.is_none() {
             result.last_result = Some(serialize_scan(&spec.signal_hash, &scan));
         }
@@ -253,5 +254,4 @@ mod tests {
         assert_eq!(scan.candidates[0].path, "new-service");
         assert_eq!(scan.candidates[0].kind, "dir");
     }
-
 }

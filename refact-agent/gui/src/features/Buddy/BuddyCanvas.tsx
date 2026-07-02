@@ -3,6 +3,7 @@ import {
   BuddySpeechBubble,
   type BuddySpeechExitKind,
 } from "./BuddySpeechBubble";
+import { useReducedMotion } from "../../hooks";
 import { createInitialAnimState } from "./state";
 import { renderFrame } from "./canvas/render";
 import {
@@ -172,6 +173,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   const controlExitRef = useRef<BubbleControlExitState | null>(null);
   const bubbleClosingRef = useRef<BubbleClosingState | null>(null);
   const speechControlCount = speechControls?.length ?? 0;
+  const reducedMotion = useReducedMotion();
 
   useEffect(() => {
     speechOverrideRef.current = speechOverride;
@@ -230,9 +232,9 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   }, [state.activity, emit]);
 
   useEffect(() => {
+    let active = true;
     const loop = () => {
-      if (document.hidden) {
-        frameIdRef.current = requestAnimationFrame(loop);
+      if (!active || document.hidden) {
         return;
       }
 
@@ -250,7 +252,13 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         }
         const backingScale = targetSize / CANVAS_SIZE;
         const sem = semanticRef.current;
-        stepAnimFrame(animRef.current, sem, emit, envRef.current);
+        stepAnimFrame(
+          animRef.current,
+          sem,
+          emit,
+          envRef.current,
+          reducedMotion,
+        );
         ctx.save();
         ctx.scale(backingScale, backingScale);
         renderFrame(ctx, animRef.current, sem, backingScale);
@@ -427,14 +435,33 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
       }
       frameIdRef.current = requestAnimationFrame(loop);
     };
-    frameIdRef.current = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(frameIdRef.current);
+    const startLoop = () => {
+      if (!document.hidden) {
+        cancelAnimationFrame(frameIdRef.current);
+        frameIdRef.current = requestAnimationFrame(loop);
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        cancelAnimationFrame(frameIdRef.current);
+      } else {
+        startLoop();
+      }
+    };
+    startLoop();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      active = false;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      cancelAnimationFrame(frameIdRef.current);
+    };
   }, [
     chatCompanionBubbleOverride,
     compactBubbleOverride,
     displaySize,
     emit,
     randomizeBubblePosition,
+    reducedMotion,
     speechControlCount,
   ]);
 

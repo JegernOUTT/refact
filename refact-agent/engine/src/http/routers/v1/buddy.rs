@@ -7,12 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::buddy::diagnostics::DiagnosticContext;
 use crate::buddy::events::BuddyEvent;
-use crate::buddy::memory_lifecycle::{apply_memory_lifecycle_op_status, MemoryOpStatus};
+use crate::buddy::memory_lifecycle::{MemoryLifecycleOp, MemoryOpStatus, MemoryOpsState};
 use crate::buddy::pulse_inject::build_buddy_pulse_payload;
 use crate::buddy::settings::{
     AutonomyLevel, BuddySettings, HumorLevel, ObserverToggles, MAX_PALETTE_INDEX,
 };
-use crate::buddy::storage::{enqueue_memory_op, load_memory_ops};
+use crate::buddy::storage::{apply_artifact_decisions, load_memory_ops};
 use crate::buddy::types::{BuddyActivity, BuddyCareAction, BuddyConversationEntry, BuddySuggestion};
 use crate::buddy::user_activity::time_of_day_pattern;
 use refact_buddy_core::user_action::UserAction;
@@ -43,6 +43,38 @@ pub struct UserActivityQuery {
 #[derive(Debug, Deserialize)]
 pub struct BuddyArtifactRequest {
     pub op_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArtifactsQuery {
+    pub status: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ArtifactsPageResponse {
+    pub ops: Vec<MemoryLifecycleOp>,
+    pub total_matching: usize,
+    pub pending_count: usize,
+    pub approved_count: usize,
+    pub applied_count: usize,
+    pub rejected_count: usize,
+    pub failed_count: usize,
+    pub skipped_count: usize,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArtifactDecisionItem {
+    pub op_id: String,
+    pub accept: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArtifactsDecisionsRequest {
+    pub decisions: Vec<ArtifactDecisionItem>,
 }
 
 pub async fn handle_v1_buddy_user_action(
@@ -82,14 +114,65 @@ pub async fn handle_v1_buddy_pulse_preview(
 
 pub async fn handle_v1_buddy_artifacts(
     State(app): State<AppState>,
-) -> Result<axum::Json<crate::buddy::memory_lifecycle::MemoryOpsState>, ScratchError> {
+    Query(query): Query<ArtifactsQuery>,
+) -> Result<axum::Json<ArtifactsPageResponse>, ScratchError> {
     let buddy_arc = app.buddy.buddy.clone();
     let lock = buddy_arc.lock().await;
     let state = lock
         .as_ref()
         .map(|service| service.memory_ops.clone())
         .unwrap_or_default();
-    Ok(axum::Json(state))
+    let mut pending_count = 0usize;
+    let mut approved_count = 0usize;
+    let mut applied_count = 0usize;
+    let mut rejected_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut skipped_count = 0usize;
+    for op in &state.ops {
+        match op.status {
+            MemoryOpStatus::Pending => pending_count += 1,
+            MemoryOpStatus::Approved => approved_count += 1,
+            MemoryOpStatus::Applied => applied_count += 1,
+            MemoryOpStatus::Rejected => rejected_count += 1,
+            MemoryOpStatus::Failed => failed_count += 1,
+            MemoryOpStatus::Skipped => skipped_count += 1,
+        }
+    }
+    let status = query
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let mut ops = state
+        .ops
+        .into_iter()
+        .filter(|op| {
+            status
+                .map(|status| op.status.as_str().eq_ignore_ascii_case(status))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    ops.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.op_id.cmp(&b.op_id))
+    });
+    let total_matching = ops.len();
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let ops = ops.into_iter().skip(offset).take(limit).collect();
+    Ok(axum::Json(ArtifactsPageResponse {
+        ops,
+        total_matching,
+        pending_count,
+        approved_count,
+        applied_count,
+        rejected_count,
+        failed_count,
+        skipped_count,
+        limit,
+        offset,
+    }))
 }
 
 pub async fn handle_v1_buddy_artifact_approve(
@@ -104,6 +187,49 @@ pub async fn handle_v1_buddy_artifact_reject(
     axum::Json(req): axum::Json<BuddyArtifactRequest>,
 ) -> Result<StatusCode, ScratchError> {
     update_buddy_artifact_status(app, req.op_id, MemoryOpStatus::Rejected).await
+}
+
+pub async fn handle_v1_buddy_artifacts_decisions(
+    State(app): State<AppState>,
+    axum::Json(req): axum::Json<ArtifactsDecisionsRequest>,
+) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    if req.decisions.is_empty() || req.decisions.len() > 500 {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "decisions must contain 1-500 items".to_string(),
+        ));
+    }
+    let mut decisions = Vec::with_capacity(req.decisions.len());
+    for decision in req.decisions {
+        let op_id = decision.op_id.trim().to_string();
+        if op_id.is_empty() {
+            return Err(ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                "op_id is required".to_string(),
+            ));
+        }
+        decisions.push((op_id, decision.accept));
+    }
+
+    let project_root = crate::files_correction::get_project_dirs(app.gcx.clone())
+        .await
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no project root".to_string(),
+            )
+        })?;
+
+    let (state, decided, failed) = apply_artifact_decisions(&project_root, app.clone(), &decisions)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    sync_buddy_memory_ops(&app, state).await;
+    Ok(axum::Json(serde_json::json!({
+        "decided": decided,
+        "failed": failed
+    })))
 }
 
 async fn update_buddy_artifact_status(
@@ -131,34 +257,28 @@ async fn update_buddy_artifact_status(
         })?;
 
     let state = load_memory_ops(&project_root).await;
-    let mut op = state
-        .ops
-        .into_iter()
-        .find(|op| op.op_id == op_id)
-        .ok_or_else(|| {
-            ScratchError::new(
-                StatusCode::NOT_FOUND,
-                format!("artifact not found: {op_id}"),
-            )
-        })?;
+    if !state.ops.iter().any(|op| op.op_id == op_id) {
+        return Err(ScratchError::new(
+            StatusCode::NOT_FOUND,
+            format!("artifact not found: {op_id}"),
+        ));
+    }
 
-    op.status = status;
-    op.error = None;
-    let updated = if status == MemoryOpStatus::Approved {
-        apply_memory_lifecycle_op_status(app.clone(), &op).await
-    } else {
-        op
-    };
-
-    let state = enqueue_memory_op(&project_root, updated)
+    let accept = status == MemoryOpStatus::Approved;
+    let decisions = [(op_id, accept)];
+    let (state, _, _) = apply_artifact_decisions(&project_root, app.clone(), &decisions)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    sync_buddy_memory_ops(&app, state).await;
+    Ok(StatusCode::OK)
+}
+
+async fn sync_buddy_memory_ops(app: &AppState, state: MemoryOpsState) {
     let buddy_arc = app.buddy.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     if let Some(service) = lock.as_mut() {
         service.memory_ops = state;
     }
-    Ok(StatusCode::OK)
 }
 
 pub async fn handle_v1_buddy_snapshot(
@@ -560,22 +680,32 @@ pub async fn handle_v1_buddy_care(
     });
     let signal_type = format!("care_{}", req.action.as_str());
     let dedupe_key = format!("care_{}", req.action.as_str());
+    let status = match &req.action {
+        BuddyCareAction::Play => "completed",
+        _ => "info",
+    };
+    let mood = match &req.action {
+        BuddyCareAction::Play => "excited",
+        BuddyCareAction::Feed | BuddyCareAction::Clean | BuddyCareAction::Pet => "happy",
+        BuddyCareAction::Sleep => "neutral",
+    };
     svc.enqueue_runtime_event(crate::buddy::actor::make_runtime_event(
         &signal_type,
         &message,
         "buddy",
         &dedupe_key,
-        "info",
+        status,
         None,
     ));
     svc.update_speech(crate::buddy::types::BuddySpeechItem {
         id: uuid::Uuid::new_v4().to_string(),
         text: message.clone(),
-        mood: "neutral".to_string(),
+        mood: mood.to_string(),
         scope: "global".to_string(),
         persistent: false,
         ttl_seconds: 8,
         dedupe_key: Some(format!("care_{}", req.action.as_str())),
+        speech_intent: None,
         created_at: chrono::Utc::now().to_rfc3339(),
         controls: vec![],
         chat_id: None,
@@ -624,6 +754,7 @@ pub async fn handle_v1_buddy_personality_reroll(
         persistent: false,
         ttl_seconds: 10,
         dedupe_key: Some("personality_reroll".to_string()),
+        speech_intent: None,
         created_at: chrono::Utc::now().to_rfc3339(),
         controls: vec![],
         chat_id: None,
@@ -1033,15 +1164,13 @@ pub struct DiagnosticsCollectRequest {
     pub source_file: Option<String>,
     pub tool_name: Option<String>,
     pub chat_id: Option<String>,
-    #[allow(dead_code)]
-    pub diagnostic_id: Option<String>,
     pub collected_at: Option<String>,
 }
 
 pub async fn handle_v1_buddy_diagnostics_collect(
     State(app): State<AppState>,
     axum::Json(req): axum::Json<DiagnosticsCollectRequest>,
-) -> Result<axum::Json<DiagnosticContext>, ScratchError> {
+) -> Result<axum::Json<serde_json::Value>, ScratchError> {
     let mut ctx = crate::buddy::diagnostics::collect_diagnostics(app.clone(), &req.error).await;
     ctx.source_file = req
         .source_file
@@ -1068,10 +1197,7 @@ pub async fn handle_v1_buddy_diagnostics_collect(
             serde_json::json!(crate::buddy::diagnostics::diagnostic_id(&ctx)),
         );
     }
-    let ctx: DiagnosticContext = serde_json::from_value(payload)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(axum::Json(ctx))
+    Ok(axum::Json(payload))
 }
 
 pub async fn handle_v1_buddy_diagnostics_list(

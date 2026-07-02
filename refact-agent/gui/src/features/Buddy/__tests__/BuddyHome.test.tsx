@@ -3,8 +3,14 @@ import { describe, expect, it } from "vitest";
 import { render, screen, waitFor, within } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { setUpStore } from "../../../app/store";
-import { setBuddySnapshot } from "../buddySlice";
+import {
+  beginBuddySettingsRequest,
+  markBuddyNotificationSeen,
+  resetBuddyForWorkspaceChange,
+  setBuddySnapshot,
+} from "../buddySlice";
 import { BuddyHome } from "../BuddyHome";
+import type { Artifact, ArtifactsPage } from "../../../services/refact/buddy";
 import type {
   BuddyActivityEntry,
   BuddyConversationEntry,
@@ -157,6 +163,27 @@ function makeConversation(
   };
 }
 
+function makeArtifactsPage(ops: Artifact[] = []): ArtifactsPage {
+  return {
+    ops,
+    total_matching: ops.length,
+    pending_count: ops.filter((op) => op.status.toLowerCase() === "pending")
+      .length,
+    approved_count: ops.filter((op) => op.status.toLowerCase() === "approved")
+      .length,
+    applied_count: ops.filter((op) => op.status.toLowerCase() === "applied")
+      .length,
+    rejected_count: ops.filter((op) => op.status.toLowerCase() === "rejected")
+      .length,
+    failed_count: ops.filter((op) => op.status.toLowerCase() === "failed")
+      .length,
+    skipped_count: ops.filter((op) => op.status.toLowerCase() === "skipped")
+      .length,
+    limit: 50,
+    offset: 0,
+  };
+}
+
 function makeSnapshot(overrides?: Partial<BuddySnapshot>): BuddySnapshot {
   const settings = overrides?.settings ?? makeSettings();
   const opportunity = makeOpportunity();
@@ -269,6 +296,9 @@ function installBuddyHomeHandlers(settings = makeSettings()) {
         },
       }),
     ),
+    http.get("*/v1/buddy/artifacts", () =>
+      HttpResponse.json(makeArtifactsPage()),
+    ),
     http.post("*/v1/buddy/settings", async ({ request }) => {
       const patch = (await request.json()) as Partial<BuddySettings>;
       return HttpResponse.json({ ...settings, ...patch });
@@ -279,6 +309,21 @@ function installBuddyHomeHandlers(settings = makeSettings()) {
 describe("BuddyHome", () => {
   it("renders major enabled home regions from store and RTK Query data", async () => {
     installBuddyHomeHandlers();
+    server.use(
+      http.get("*/v1/buddy/artifacts", () =>
+        HttpResponse.json(
+          makeArtifactsPage([
+            {
+              op_id: "op-home-1",
+              title: "Remember home context",
+              op_type: "create_memory",
+              status: "pending",
+              created_at: "2026-05-15T00:00:00Z",
+            },
+          ]),
+        ),
+      ),
+    );
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
 
@@ -300,6 +345,9 @@ describe("BuddyHome", () => {
     expect(screen.getByTestId("buddy-activity-panel")).toBeInTheDocument();
     expect(screen.getByText("Task coach noticed pattern")).toBeInTheDocument();
     expect(screen.getByTestId("buddy-recent-errors-panel")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("buddy-artifacts-panel"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Model unavailable")).toBeInTheDocument();
     expect(await screen.findByText("Recent Buddy chat")).toBeInTheDocument();
   });
@@ -363,5 +411,57 @@ describe("BuddyHome", () => {
       await screen.findByTestId("buddy-home-settings-section"),
     ).toBeInTheDocument();
     expect(screen.getByTestId("buddy-settings-panel")).toBeInTheDocument();
+  });
+
+  it("resets workspace-scoped Buddy state while preserving seen notifications", () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+    store.dispatch(markBuddyNotificationSeen("opp-1"));
+    store.dispatch(
+      beginBuddySettingsRequest({
+        requestSeq: 1,
+        keys: ["enabled"],
+        patch: { enabled: false },
+      }),
+    );
+
+    store.dispatch(resetBuddyForWorkspaceChange());
+
+    const buddyState = store.getState().buddy;
+    expect(buddyState.snapshot).toBeNull();
+    expect(buddyState.loaded).toBe(false);
+    expect(buddyState.pendingSettingsRequests).toEqual([]);
+    expect(buddyState.seenNotificationIds["opp-1"]).toBeGreaterThan(0);
+  });
+
+  it("shows memory operation and candidate counters in the pulse card", async () => {
+    installBuddyHomeHandlers();
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot({
+          pulse: makePulse({
+            memory: {
+              total: 50,
+              orphan: 5,
+              stale_conflicts: 1,
+              merge_candidates: 2,
+              archive_candidates: 3,
+              review_candidates: 4,
+              conflict_candidates: 1,
+              pending_ops: 6,
+              applied_ops: 7,
+              failed_ops: 1,
+            },
+          }),
+        }),
+      ),
+    );
+
+    render(<BuddyHome />, { store });
+
+    expect(await screen.findByTestId("buddy-pulse-card")).toHaveTextContent(
+      "50 docs · 5 orphan · 1 conflict · 6 pending · 7 applied · 1 failed · 10 candidates",
+    );
   });
 });

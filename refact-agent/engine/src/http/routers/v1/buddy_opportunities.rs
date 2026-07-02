@@ -5,6 +5,7 @@ use axum::response::Result;
 use hyper::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use uuid::Uuid;
 use crate::buddy::drafts::{draft_kind_str, DraftCreateError, DraftTarget, DraftValidationError};
 use crate::buddy::opportunities::is_terminal_status;
 use crate::buddy::types::{
-    BuddyAction, BuddyDraft, BuddyPulse, CustomizationKind, DefaultsKind, DraftKind,
+    BuddyAction, BuddyDraft, BuddyFactKind, BuddyPulse, CustomizationKind, DefaultsKind, DraftKind,
     InvestigationContext, MarketKind, OpportunityStatus, PulseScope,
 };
 use crate::app_state::AppState;
@@ -813,6 +814,35 @@ fn diagnostic_severity_label(
     }
 }
 
+fn stable_diagnostic_memory_key(
+    diagnostics: &[crate::buddy::diagnostics::DiagnosticContext],
+) -> Option<String> {
+    let mut parts: Vec<String> = diagnostics
+        .iter()
+        .map(|diag| {
+            format!(
+                "{}\0{}",
+                diag.error_type,
+                crate::buddy::observers::diagnostic_cluster::diagnostic_source_bucket(diag)
+            )
+        })
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    parts.sort();
+    parts.dedup();
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part.len().to_string().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(part.as_bytes());
+        hasher.update(b"\0");
+    }
+    let hash = hex::encode(hasher.finalize());
+    Some(format!("diag:signal:{}", &hash[..16]))
+}
+
 pub(crate) async fn enrich_investigation_context(app: &AppState, ctx: &mut InvestigationContext) {
     if !ctx.diagnostic_ids.is_empty() {
         let buddy_arc = app.buddy.buddy.clone();
@@ -835,6 +865,52 @@ pub(crate) async fn enrich_investigation_context(app: &AppState, ctx: &mut Inves
                 })
                 .collect();
             ctx.log_excerpt = diagnostic_lines.join("\n");
+            if ctx.memory_key.is_none() {
+                ctx.memory_key = ctx
+                    .fact_keys
+                    .iter()
+                    .find(|key| key.starts_with("diag:cluster:"))
+                    .cloned()
+                    .or_else(|| {
+                        ctx.fact_keys
+                            .iter()
+                            .filter_map(|key| {
+                                svc.fact_store.iter().find(|fact| fact.key == key.as_str())
+                            })
+                            .find_map(|fact| {
+                                if fact.kind != BuddyFactKind::DiagnosticCluster {
+                                    return None;
+                                }
+                                let error_type =
+                                    fact.payload.get("error_type").and_then(|v| v.as_str())?;
+                                let source_bucket =
+                                    fact.payload.get("source_bucket").and_then(|v| v.as_str())?;
+                                Some(format!("diag:cluster:{}:{}", error_type, source_bucket))
+                            })
+                    })
+                    .or_else(|| stable_diagnostic_memory_key(&diagnostics));
+            }
+        }
+    }
+
+    if ctx.memory_key.is_none() && !ctx.fact_keys.is_empty() {
+        ctx.memory_key = ctx
+            .fact_keys
+            .iter()
+            .find(|key| key.starts_with("diag:cluster:"))
+            .cloned();
+    }
+
+    if ctx.memory_key.is_none() && !ctx.diagnostic_ids.is_empty() {
+        let buddy_arc = app.buddy.buddy.clone();
+        let lock = buddy_arc.lock().await;
+        if let Some(svc) = lock.as_ref() {
+            let diagnostics: Vec<_> = ctx
+                .diagnostic_ids
+                .iter()
+                .filter_map(|id| svc.diagnostic_by_id(id))
+                .collect();
+            ctx.memory_key = stable_diagnostic_memory_key(&diagnostics);
         }
     }
 
@@ -857,6 +933,13 @@ pub(crate) async fn enrich_investigation_context(app: &AppState, ctx: &mut Inves
 
     ctx.log_excerpt = cap_text_to_chars(&ctx.log_excerpt, 4000);
     ctx.config_summary = cap_text_to_chars(&ctx.config_summary, 1000);
+}
+
+fn memory_key_instruction(memory_key: &str) -> String {
+    format!(
+        "Memory idempotency key: {}\n{}",
+        memory_key, MEMORY_KEY_SAVE_INSTRUCTION
+    )
 }
 
 async fn render_caps_config_summary(app: &AppState) -> Option<String> {
@@ -896,6 +979,11 @@ pub(crate) async fn read_recent_log_lines(
 }
 
 const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
+
+const MEMORY_KEY_SAVE_INSTRUCTION: &str = concat!(
+    "When saving findings with buddy_memory_create, ",
+    "set source_id exactly to this key."
+);
 
 pub(crate) fn is_log_candidate(path: &std::path::Path) -> bool {
     // Delegate to the shared candidate check so classic rustbinary.* and daemon worker-*.log
@@ -992,6 +1080,9 @@ pub(crate) fn build_investigation_data_envelope(ctx: &InvestigationContext) -> S
     }
     if !ctx.diagnostic_ids.is_empty() {
         parts.push(format!("Diagnostic IDs: {}", ctx.diagnostic_ids.join(", ")));
+    }
+    if let Some(memory_key) = ctx.memory_key.as_deref().filter(|key| !key.is_empty()) {
+        parts.push(memory_key_instruction(memory_key));
     }
     if !ctx.log_excerpt.is_empty() {
         let escaped = escape_envelope_content(&ctx.log_excerpt);

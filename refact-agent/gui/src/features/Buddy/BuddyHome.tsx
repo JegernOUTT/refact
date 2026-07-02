@@ -18,6 +18,7 @@ import { BuddyOpportunitiesFeed } from "./BuddyOpportunitiesFeed";
 import { BuddySettingsPanel } from "./BuddySettingsPanel";
 import { BuddyWorld } from "./BuddyWorld";
 import { BuddySummaryStrip } from "./BuddySummaryStrip";
+import { ArtifactsPanel } from "./ArtifactsPanel";
 import { BuddyPersonalityPanel, type NeedRow } from "./BuddyPersonalityPanel";
 import { BuddyActivityPanel } from "./BuddyActivityPanel";
 import {
@@ -43,6 +44,7 @@ import {
   snoozeHomeNotifications,
   markBuddyNotificationSeen,
   clearExpiredBuddyNotificationSnooze,
+  setBuddySnapshot,
 } from "./buddySlice";
 import {
   openBuddyChat,
@@ -65,6 +67,7 @@ import {
   getOpportunityActionIndexFromControl,
 } from "./buddyOpportunityActions";
 import {
+  buddyApi,
   useDeleteDraftMutation,
   useDismissBuddyRuntimeEventMutation,
   useGetDraftQuery,
@@ -263,6 +266,7 @@ export const BuddyHome: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [speechIndex, setSpeechIndex] = useState(0);
   const [recentErrorNow, setRecentErrorNow] = useState(() => Date.now());
+  const [isRetryingBuddySnapshot, setIsRetryingBuddySnapshot] = useState(false);
   const [updateSettings, { isLoading: isSavingSettings }] =
     useUpdateBuddySettingsMutation();
 
@@ -287,11 +291,13 @@ export const BuddyHome: React.FC = () => {
   const stageIndex = progression?.stage ?? state.progress.stage;
   const stage = STAGES[stageIndex] ?? STAGES[0];
   const nextStage = STAGES[stageIndex + 1];
+  const atMaxStage = stageIndex >= STAGES.length - 1;
 
   const xp = progression?.xp ?? state.progress.xp;
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  const xpNext = progression?.xp_next ?? nextStage?.xpThreshold;
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  const xpNext =
+    progression?.xp_next !== undefined && progression.xp_next > 0
+      ? progression.xp_next
+      : nextStage?.xpThreshold;
   const xpFill = useMemo(() => computeXpFill(xp, xpNext ?? 0), [xp, xpNext]);
 
   const name = identity?.name ?? state.name;
@@ -327,6 +333,22 @@ export const BuddyHome: React.FC = () => {
   const handleEnable = useCallback(() => {
     void updateSettings({ enabled: true });
   }, [updateSettings]);
+
+  const handleRetryBuddySnapshot = useCallback(async () => {
+    setIsRetryingBuddySnapshot(true);
+    try {
+      const nextSnapshot = await dispatch(
+        buddyApi.endpoints.getBuddySnapshot.initiate(undefined, {
+          forceRefetch: true,
+        }),
+      ).unwrap();
+      dispatch(setBuddySnapshot(nextSnapshot));
+    } catch {
+      return;
+    } finally {
+      setIsRetryingBuddySnapshot(false);
+    }
+  }, [dispatch]);
 
   const handleViewStats = useCallback(() => {
     dispatch(push({ name: "stats dashboard" }));
@@ -703,6 +725,15 @@ export const BuddyHome: React.FC = () => {
           <Text size="2" color="gray">
             {name} is not available
           </Text>
+          <Button
+            type="button"
+            size="sm"
+            variant="primary"
+            onClick={() => void handleRetryBuddySnapshot()}
+            disabled={isRetryingBuddySnapshot}
+          >
+            {isRetryingBuddySnapshot ? "Retrying…" : "Retry"}
+          </Button>
         </Flex>
       </div>
     );
@@ -830,6 +861,7 @@ export const BuddyHome: React.FC = () => {
           xp={xp}
           xpNext={xpNext}
           xpFill={xpFill}
+          atMaxStage={atMaxStage}
           pet={pet}
           statsData={statsData}
           successRate={successRate}
@@ -880,6 +912,12 @@ export const BuddyHome: React.FC = () => {
             <BuddyHomeDraftReview draftId={draftId} />
           </div>
         )}
+
+        <section
+          className={classNames(styles.artifactsSection, "rf-enter-rise")}
+        >
+          <ArtifactsPanel />
+        </section>
 
         <section className={classNames(styles.mainGrid, "rf-stagger")}>
           <div className={styles.panelColumn}>

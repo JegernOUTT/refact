@@ -1,4 +1,5 @@
 use chrono::{Datelike, Utc};
+use std::collections::HashMap;
 
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, BUDDY_REFACTOR_HUNTER_WORKFLOW_ID};
 use crate::buddy::jobs::autonomous_chats::{execute_autonomous_spec, AutonomousBuddyChatSpec};
@@ -15,10 +16,32 @@ fn week_key() -> String {
     format!("{}-{:02}", week.year(), week.week())
 }
 
+fn top_diagnostic_counts(ctx: &BuddyJobContext) -> String {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for diag in &ctx.recent_diagnostics {
+        *counts.entry(diag.error_type.clone()).or_default() += 1;
+    }
+    let mut counts = counts.into_iter().collect::<Vec<_>>();
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    counts
+        .into_iter()
+        .take(3)
+        .map(|(error_type, count)| format!("{}={}", error_type, count))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn build_refactor_hunter_spec(ctx: &BuddyJobContext) -> AutonomousBuddyChatSpec {
     let meta = autonomous_workflow_meta(BUDDY_REFACTOR_HUNTER_WORKFLOW_ID).unwrap();
     let project_root = ctx.project_root.to_string_lossy().to_string();
-    let evidence = format!("project_root={}\nweek={}", project_root, week_key());
+    let evidence = format!(
+        "project_root={}\nweek={}\ngit_uncommitted={} git_diff_lines_4h={}\ntop_diagnostics={}",
+        project_root,
+        week_key(),
+        ctx.pulse.git.uncommitted_files,
+        ctx.pulse.git.diff_lines_4h,
+        top_diagnostic_counts(ctx)
+    );
     AutonomousBuddyChatSpec::new(
         meta.id,
         meta.title,
@@ -48,7 +71,13 @@ impl BuddyJob for BuddyRefactorHunterJob {
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
-        execute_autonomous_spec(gcx, &ctx, build_refactor_hunter_spec(&ctx), self.cooldown_seconds()).await
+        execute_autonomous_spec(
+            gcx,
+            &ctx,
+            build_refactor_hunter_spec(&ctx),
+            self.cooldown_seconds(),
+        )
+        .await
     }
 }
 

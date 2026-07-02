@@ -615,6 +615,7 @@ mod rules {
                             preload: InvestigationContext {
                                 fact_keys: vec![fact.key.clone()],
                                 diagnostic_ids: diagnostic_ids.clone(),
+                                memory_key: None,
                                 log_excerpt: String::new(),
                                 config_summary: String::new(),
                                 initial_user_message: format!(
@@ -665,6 +666,7 @@ mod rules {
                             preload: InvestigationContext {
                                 fact_keys: vec![fact.key.clone()],
                                 diagnostic_ids: diagnostic_ids.clone(),
+                                memory_key: None,
                                 log_excerpt: String::new(),
                                 config_summary: String::new(),
                                 initial_user_message: "Investigate frontend error burst"
@@ -755,6 +757,7 @@ mod rules {
                             preload: InvestigationContext {
                                 fact_keys: vec![fact.key.clone()],
                                 diagnostic_ids: vec![],
+                                memory_key: None,
                                 log_excerpt: String::new(),
                                 config_summary: String::new(),
                                 initial_user_message: "Review worktree cleanup candidates and help me choose safe IDs to clean".to_string(),
@@ -1022,6 +1025,7 @@ mod rules {
                             preload: InvestigationContext {
                                 fact_keys: vec![fact.key.clone()],
                                 diagnostic_ids: vec![],
+                                memory_key: None,
                                 log_excerpt: String::new(),
                                 config_summary: String::new(),
                                 initial_user_message: "Help me break out of this chat loop"

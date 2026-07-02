@@ -122,3 +122,11 @@
   border-bottom: 8px solid transparent;
   border-left: 9px solid var(--rf-border-strong);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .cloud,
+  .cloudOverlay {
+    animation: none;
+    transition: none;
+  }
+}

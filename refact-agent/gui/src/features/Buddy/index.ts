@@ -1,6 +1,7 @@
 export { BuddyCanvas } from "./BuddyCanvas";
 export { BuddyChatCompanion } from "./BuddyChatCompanion";
 export { BuddyHome } from "./BuddyHome";
+export { ArtifactsPanel } from "./ArtifactsPanel";
 export { BuddyPanel } from "./BuddyPanel";
 export { BuddyRecentChats } from "./BuddyRecentChats";
 export { AutonomousChats } from "./AutonomousChats";

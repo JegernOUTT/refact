@@ -5,6 +5,21 @@ export function computeXpFill(xp: number, xpNext: number): number {
   return Math.min(100, Math.max(0, (xp / xpNext) * 100));
 }
 
+export function xpDisplay(
+  xp: number,
+  xpNext: number | undefined,
+  atMaxStage: boolean,
+): string {
+  if (atMaxStage || xpNext === undefined || xpNext <= 0) {
+    return `${xp} XP · MAX`;
+  }
+  return `${Math.min(xp, xpNext)} / ${xpNext} XP`;
+}
+
+export function anxietyFromNeglect(neglectScore: number): number {
+  return Math.min(100, Math.max(0, Math.round(neglectScore / 2)));
+}
+
 export function formatBuddyTime(ts: string | null | undefined): string {
   if (!ts) return "";
   const date = new Date(ts);

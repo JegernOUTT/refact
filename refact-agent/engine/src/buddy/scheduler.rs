@@ -10,7 +10,7 @@ use super::types::{
     BuddyPersonalityProfile, BuddyPetState, BuddyPulse, BuddyRuntimeEvent, BuddySpeechItem,
     BuddySuggestion, BuddyWorkflowSummary, BuddyChatPhraseBank,
 };
-use super::voice_service::SpeechIntent;
+use super::voice_service::{SpeechIntent, SpeechIntentWireToken};
 use crate::buddy::autonomous_workflows::is_autonomous_workflow_id;
 use crate::app_state::AppState;
 
@@ -44,6 +44,7 @@ pub struct BuddyJobResult {
     pub workflow_failure: Option<super::workflows::WorkflowFailureReport>,
     pub last_result: Option<String>,
     pub xp: u64,
+    pub mark_greeted: bool,
 }
 
 impl Default for BuddyJobResult {
@@ -58,6 +59,7 @@ impl Default for BuddyJobResult {
             workflow_failure: None,
             last_result: None,
             xp: 0,
+            mark_greeted: false,
         }
     }
 }
@@ -458,7 +460,10 @@ impl BuddyScheduler {
                     if let Some(activity) = result.activity {
                         svc.add_activity(activity);
                     }
-                    if let Some(speech) = result.speech {
+                    if let Some(mut speech) = result.speech {
+                        if let Some(intent) = result.speech_intent {
+                            speech.speech_intent = Some(intent.wire_token().to_string());
+                        }
                         svc.update_speech(speech);
                         if let Some(intent) = result.speech_intent {
                             super::speech_policy::record_emission(
@@ -466,6 +471,9 @@ impl BuddyScheduler {
                                 intent,
                                 now,
                             );
+                        }
+                        if result.mark_greeted && super::state::mark_greeted(&mut svc.state) {
+                            svc.dirty = true;
                         }
                         svc.dirty = true;
                     }
@@ -637,6 +645,7 @@ mod tests {
                     persistent: false,
                     ttl_seconds: 10,
                     dedupe_key: Some("no-intent-speech".to_string()),
+                    speech_intent: None,
                     created_at: chrono::Utc::now().to_rfc3339(),
                     controls: vec![],
                     chat_id: None,
@@ -684,6 +693,7 @@ mod tests {
                     persistent: false,
                     ttl_seconds: 10,
                     dedupe_key: Some(format!("speech-{}", self.id)),
+                    speech_intent: None,
                     created_at: chrono::Utc::now().to_rfc3339(),
                     controls: vec![],
                     chat_id: None,
@@ -757,6 +767,7 @@ mod tests {
             persistent: false,
             ttl_seconds: 10,
             dedupe_key: None,
+            speech_intent: Some(intent.wire_token().to_string()),
             created_at: chrono::Utc::now().to_rfc3339(),
             controls: vec![],
             chat_id: None,
@@ -817,10 +828,9 @@ mod tests {
 
         let buddy = buddy_arc.lock().await;
         let service = buddy.as_ref().unwrap();
-        assert_eq!(
-            service.active_speech.as_ref().unwrap().text,
-            "speech speech_two"
-        );
+        let active_speech = service.active_speech.as_ref().unwrap();
+        assert_eq!(active_speech.text, "speech speech_two");
+        assert_eq!(active_speech.speech_intent.as_deref(), Some("error_alert"));
     }
 
     #[tokio::test]

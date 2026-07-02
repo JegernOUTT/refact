@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use std::sync::Arc;
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 #[cfg(test)]
 use std::sync::Mutex as StdMutex;
@@ -30,8 +30,32 @@ const VOICE_MAX_CHARS: usize = 80;
 const CHAT_REACTION_VOICE_MAX_CHARS: usize = 120;
 const CHAT_PHRASE_BANK_MAX_TOKENS: usize = 700;
 const VOICE_CACHE_MAX_ITEMS: usize = 128;
+const RECENT_LINE_TTL: Duration = Duration::from_secs(30 * 60);
+const RECENT_LINE_MAX_ITEMS: usize = 32;
 
 pub use refact_buddy_core::voice_service::SpeechIntent;
+
+pub trait SpeechIntentWireToken {
+    fn wire_token(self) -> &'static str;
+}
+
+impl SpeechIntentWireToken for SpeechIntent {
+    fn wire_token(self) -> &'static str {
+        match self {
+            SpeechIntent::Humor => "humor",
+            SpeechIntent::Suggestion => "suggestion",
+            SpeechIntent::Insight => "insight",
+            SpeechIntent::Win => "win",
+            SpeechIntent::ErrorAlert => "error_alert",
+            SpeechIntent::Greeting => "greeting",
+            SpeechIntent::Tour => "tour",
+            SpeechIntent::Milestone => "milestone",
+            SpeechIntent::MemoryPulseCommentary => "memory_pulse_commentary",
+            SpeechIntent::QuestAccept => "quest_accept",
+            SpeechIntent::QuestComplete => "quest_complete",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VoiceIntent {
@@ -61,6 +85,7 @@ pub(crate) enum ChatReactionSpeechIntent {
 
 pub struct VoiceService {
     cache: Arc<AMutex<HashMap<u64, (String, Instant)>>>,
+    recent_lines: Arc<AMutex<VecDeque<(u64, Instant)>>>,
     ttl: Duration,
     renderer: Arc<dyn VoiceRenderer>,
 }
@@ -73,6 +98,7 @@ struct VoiceRenderRequest {
     vibe: String,
     summary: String,
     prompt: String,
+    traits_line: String,
     identity_name: String,
     pulse_one_liner: String,
     workflow_id: Option<String>,
@@ -262,6 +288,7 @@ impl VoiceService {
     pub fn new() -> Self {
         Self {
             cache: Arc::new(AMutex::new(HashMap::new())),
+            recent_lines: Arc::new(AMutex::new(VecDeque::new())),
             ttl: VOICE_TTL,
             renderer: Arc::new(SubchatVoiceRenderer),
         }
@@ -271,6 +298,7 @@ impl VoiceService {
     fn new_with_renderer(renderer: Arc<dyn VoiceRenderer>) -> Self {
         Self {
             cache: Arc::new(AMutex::new(HashMap::new())),
+            recent_lines: Arc::new(AMutex::new(VecDeque::new())),
             ttl: VOICE_TTL,
             renderer,
         }
@@ -301,6 +329,7 @@ impl VoiceService {
             persistent: false,
             ttl_seconds: 10,
             dedupe_key: Some(intent_kind.to_string()),
+            speech_intent: Some(intent.wire_token().to_string()),
             created_at: chrono::Utc::now().to_rfc3339(),
             controls: vec![],
             chat_id: None,
@@ -394,8 +423,13 @@ impl VoiceService {
     fn fallback_for(&self, intent_kind: &str, ctx: &VoiceCtx<'_>) -> String {
         let phrases = fallback_phrases(intent_kind);
         let idx = fallback_index(intent_kind, &ctx.persona.archetype_id, phrases.len());
+        self.fallback_for_index(intent_kind, ctx, idx)
+    }
+
+    fn fallback_for_index(&self, intent_kind: &str, ctx: &VoiceCtx<'_>, idx: usize) -> String {
+        let phrases = fallback_phrases(intent_kind);
         let style = fallback_style(&ctx.persona.archetype_id);
-        normalize_voice_line(&format!("{}: {}", style, phrases[idx]))
+        normalize_voice_line(&format!("{}: {}", style, phrases[idx % phrases.len()]))
     }
 
     async fn render_line(&self, gcx: AppState, ctx: &VoiceCtx<'_>, intent_kind: &str) -> String {
@@ -412,7 +446,7 @@ impl VoiceService {
     ) -> String {
         let key = self.cache_key(intent_kind, ctx);
         if let Some(cached) = self.cache_get(key).await {
-            return cached;
+            return self.avoid_recent_line(intent_kind, ctx, cached).await;
         }
 
         let fallback = self.fallback_for(intent_kind, ctx);
@@ -426,6 +460,7 @@ impl VoiceService {
             .filter(|text| !text.is_empty())
             .unwrap_or(fallback);
 
+        let rendered = self.avoid_recent_line(intent_kind, ctx, rendered).await;
         self.cache_insert(key, rendered.clone()).await;
         rendered
     }
@@ -434,10 +469,45 @@ impl VoiceService {
         let mut hasher = DefaultHasher::new();
         intent_kind.hash(&mut hasher);
         ctx.persona.archetype_id.hash(&mut hasher);
+        traits_line(ctx.persona).hash(&mut hasher);
         ctx.pulse_one_liner.hash(&mut hasher);
         ctx.workflow_id.hash(&mut hasher);
         ctx.workflow_summary.hash(&mut hasher);
         hasher.finish()
+    }
+
+    async fn avoid_recent_line(
+        &self,
+        intent_kind: &str,
+        ctx: &VoiceCtx<'_>,
+        rendered: String,
+    ) -> String {
+        let now = Instant::now();
+        let rendered_hash = normalized_line_hash(&rendered);
+        let mut recent = self.recent_lines.lock().await;
+        prune_recent_lines(&mut recent, now);
+        let seen = recent
+            .iter()
+            .filter(|(hash, _)| *hash == rendered_hash)
+            .count();
+        let text = if seen == 0 {
+            rendered
+        } else {
+            let phrases = fallback_phrases(intent_kind);
+            let base = fallback_index(intent_kind, &ctx.persona.archetype_id, phrases.len());
+            (1..=phrases.len())
+                .map(|offset| self.fallback_for_index(intent_kind, ctx, base + seen + offset))
+                .find(|candidate| {
+                    let hash = normalized_line_hash(candidate);
+                    !recent.iter().any(|(recent_hash, _)| *recent_hash == hash)
+                })
+                .unwrap_or_else(|| self.fallback_for_index(intent_kind, ctx, base + seen))
+        };
+        recent.push_back((normalized_line_hash(&text), now));
+        while recent.len() > RECENT_LINE_MAX_ITEMS {
+            recent.pop_front();
+        }
+        text
     }
 
     async fn cache_get(&self, key: u64) -> Option<String> {
@@ -489,6 +559,7 @@ impl VoiceRenderRequest {
             vibe: ctx.persona.vibe.clone(),
             summary: ctx.persona.summary.clone(),
             prompt: ctx.persona.prompt.clone(),
+            traits_line: traits_line(ctx.persona),
             identity_name: ctx.identity_name.to_string(),
             pulse_one_liner: ctx.pulse_one_liner.clone(),
             workflow_id: ctx.workflow_id.map(str::to_string),
@@ -499,19 +570,19 @@ impl VoiceRenderRequest {
     fn system_prompt(&self) -> String {
         if self.intent_kind == "chat_phrase_bank" {
             return format!(
-                "You write a reusable daily Buddy chat phrase bank. Persona: {} ({}) with vibe '{}'. Style guide: {}. Create fresh, humorous, project-aware one-liners from the provided recent signals. Do not use generic canned phrases. Do not quote private names, paths, secrets, or exact user text. Return only lines shaped as kind: phrase, no markdown.",
-                self.archetype_label, self.archetype_id, self.vibe, self.prompt
+                "You write a reusable daily Buddy chat phrase bank. Persona: {} ({}) with vibe '{}'. Personality dials: {}. Style guide: {}. Create fresh, humorous, project-aware one-liners from the provided recent signals. Do not use generic canned phrases. Do not quote private names, paths, secrets, or exact user text. Return only lines shaped as kind: phrase, no markdown.",
+                self.archetype_label, self.archetype_id, self.vibe, self.traits_line, self.prompt
             );
         }
         if self.intent_kind.starts_with("speech:chat_reaction_") {
             return format!(
-                "You write one short in-character Buddy chat reaction that is entertaining, warm, and a little gremlin-chaotic. Persona: {} ({}) with vibe '{}'. Style guide: {}. Return exactly one line under 120 characters, no markdown, no code blocks, no quotes, no verbatim input. Never echo private user text; summarize only broad interaction patterns.",
-                self.archetype_label, self.archetype_id, self.vibe, self.prompt
+                "You write one short in-character Buddy chat reaction that is entertaining, warm, and a little gremlin-chaotic. Persona: {} ({}) with vibe '{}'. Personality dials: {}. Style guide: {}. Return exactly one line under 120 characters, no markdown, no code blocks, no quotes, no verbatim input. Never echo private user text; summarize only broad interaction patterns.",
+                self.archetype_label, self.archetype_id, self.vibe, self.traits_line, self.prompt
             );
         }
         format!(
-            "You write short in-character UI copy for Buddy, a project companion. Persona: {} ({}) with vibe '{}'. Style guide: {}. Return one line under 80 characters, no markdown, no quotes.",
-            self.archetype_label, self.archetype_id, self.vibe, self.prompt
+            "You write short in-character UI copy for Buddy, a project companion. Persona: {} ({}) with vibe '{}'. Personality dials: {}. Style guide: {}. Return one line under 80 characters, no markdown, no quotes.",
+            self.archetype_label, self.archetype_id, self.vibe, self.traits_line, self.prompt
         )
     }
 
@@ -617,6 +688,29 @@ fn parse_chat_phrase_bank_line(raw: &str) -> Option<BuddyChatPhrase> {
         kind: kind.to_string(),
         text,
     })
+}
+
+fn traits_line(persona: &BuddyPersonalityProfile) -> String {
+    format!(
+        "playfulness={} chaos={} sociability={} curiosity={} resilience={}",
+        persona.traits.playfulness,
+        persona.traits.chaos,
+        persona.traits.sociability,
+        persona.traits.curiosity,
+        persona.traits.resilience
+    )
+}
+
+fn normalized_line_hash(text: &str) -> u64 {
+    let lower = text.to_lowercase();
+    let normalized = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut hasher = DefaultHasher::new();
+    normalized.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn prune_recent_lines(recent: &mut VecDeque<(u64, Instant)>, now: Instant) {
+    recent.retain(|(_, seen_at)| now.saturating_duration_since(*seen_at) < RECENT_LINE_TTL);
 }
 
 async fn render_via_subchat(gcx: AppState, request: VoiceRenderRequest) -> Option<String> {
@@ -804,14 +898,16 @@ mod tests {
     use super::*;
 
     fn persona(archetype_id: &str) -> BuddyPersonalityProfile {
-        BuddyPersonalityProfile {
+        let mut profile = BuddyPersonalityProfile {
             archetype_id: archetype_id.to_string(),
             archetype_label: archetype_id.to_string(),
             vibe: "bright".to_string(),
             summary: "A helpful test buddy.".to_string(),
             prompt: "Helpful and concise".to_string(),
             traits: Default::default(),
-        }
+        };
+        profile.traits.playfulness = 77;
+        profile
     }
 
     fn voice_ctx<'a>(persona: &'a BuddyPersonalityProfile) -> VoiceCtx<'a> {
@@ -840,7 +936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voice_cache_hits_within_ttl_window() {
+    async fn voice_cache_hits_count_as_recent_lines() {
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
         let renderer = TestVoiceRenderer::new(vec![Some("cached sparkle".to_string())]);
         let service = VoiceService::new_with_renderer(renderer.clone());
@@ -852,7 +948,27 @@ mod tests {
         let second = service.render_chat_title(gcx, voice_ctx(&persona)).await;
 
         assert_eq!(first, "cached sparkle");
-        assert_eq!(second, "cached sparkle");
+        assert_ne!(second, "cached sparkle");
+        assert_eq!(renderer.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn voice_avoids_saying_same_cached_line_twice() {
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let renderer = TestVoiceRenderer::new(vec![Some("cached sparkle".to_string())]);
+        let service = VoiceService::new_with_renderer(renderer.clone());
+        let persona = persona("helper_sprite");
+
+        let first = service
+            .render_speech(gcx.clone(), voice_ctx(&persona), SpeechIntent::Greeting)
+            .await;
+        let second = service
+            .render_speech(gcx, voice_ctx(&persona), SpeechIntent::Greeting)
+            .await;
+
+        assert_eq!(first.text, "cached sparkle");
+        assert_ne!(first.text, second.text);
+        assert!(fallback_phrases(SpeechIntent::Greeting.as_str()).len() >= 2);
         assert_eq!(renderer.calls(), 1);
     }
 
@@ -940,6 +1056,7 @@ mod tests {
         let (system, user) = prompts.first().expect("prompt captured");
         assert!(system.contains("Never echo private user text"));
         assert!(system.contains("broad interaction patterns"));
+        assert!(system.contains("playfulness=77"));
         assert!(user.contains("chaotic cute Pixel gremlin joke"));
         assert!(user.contains("not the exact text"));
         assert!(!user.contains("token=secret"));

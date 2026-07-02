@@ -38,6 +38,27 @@ fn greeting_controls(ctx: &BuddyJobContext) -> Vec<BuddyControl> {
     }
 }
 
+fn greeting_workflow_summary(
+    ctx: &BuddyJobContext,
+    pulse_one_liner: &str,
+    fallback: &str,
+) -> String {
+    ctx.workflow_summaries
+        .last()
+        .map(|summary| {
+            let status = summary
+                .last_outcome
+                .as_deref()
+                .or(summary.failure_summary.as_deref())
+                .unwrap_or("unknown");
+            format!(
+                "recent workflow: {} {}; {}",
+                summary.workflow_id, status, pulse_one_liner
+            )
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 pub struct GreetingJob;
 
 #[async_trait::async_trait]
@@ -66,12 +87,14 @@ impl BuddyJob for GreetingJob {
                     snapshot.pulse.memory.pending_ops,
                     snapshot.pulse.tasks.recent_stuck_alert_count_1h()
                 );
+                let workflow_summary =
+                    greeting_workflow_summary(&ctx, &pulse_one_liner, &fallback_text);
                 let voice_ctx = VoiceCtx {
                     persona: &snapshot.state.personality,
                     identity_name: snapshot.state.identity.name.as_str(),
                     pulse_one_liner,
-                    workflow_id: None,
-                    workflow_summary: Some(&fallback_text),
+                    workflow_id: Some("greeting"),
+                    workflow_summary: Some(&workflow_summary),
                 };
                 voice_service()
                     .await
@@ -89,6 +112,7 @@ impl BuddyJob for GreetingJob {
                 created_at: chrono::Utc::now().to_rfc3339(),
                 controls: vec![],
                 chat_id: None,
+                speech_intent: None,
             },
         };
         speech.ttl_seconds = if ctx.onboarding.greeted { 8 } else { 15 };
@@ -97,6 +121,7 @@ impl BuddyJob for GreetingJob {
         BuddyJobResult {
             speech: Some(speech),
             speech_intent: Some(SpeechIntent::Greeting),
+            mark_greeted: true,
             ..Default::default()
         }
     }
@@ -168,6 +193,7 @@ mod tests {
         let speech = result.speech.unwrap();
         assert_eq!(speech.text, "voice hello");
         assert_eq!(speech.dedupe_key.as_deref(), Some("greeting"));
+        assert!(result.mark_greeted);
         assert_eq!(renderer.intent_kinds(), vec!["speech:greeting".to_string()]);
     }
 }

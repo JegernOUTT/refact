@@ -54,6 +54,10 @@ const MAX_BEHAVIOR_TRAJECTORY_SCAN_FILES: usize = 5_000;
 const MAX_BEHAVIOR_TRAJECTORY_SCAN_ENTRIES: usize = 5_000;
 const MAX_BEHAVIOR_TASK_DIR_SCAN_ENTRIES: usize = 1_000;
 const MODEL_COST_RECENT_EVENT_LIMIT: usize = 500;
+const MEMORY_KEY_SAVE_INSTRUCTION: &str = concat!(
+    "When saving findings with buddy_memory_create, ",
+    "set source_id exactly to this key."
+);
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +109,14 @@ impl AutonomousBuddyChatSpec {
     pub fn with_signal_hash(mut self, signal_hash: impl Into<String>) -> Self {
         self.signal_hash = signal_hash.into();
         self
+    }
+
+    pub fn diagnostic_memory_key(&self) -> Option<String> {
+        if self.workflow_id == ERROR_DETECTIVE_WORKFLOW_ID && self.signal_hash.len() >= 16 {
+            Some(format!("diag:signal:{}", &self.signal_hash[..16]))
+        } else {
+            None
+        }
     }
 
     pub fn with_display(
@@ -163,6 +175,13 @@ where
         hasher.update(b"\0");
     }
     hex::encode(hasher.finalize())
+}
+
+fn memory_key_instruction(memory_key: &str) -> String {
+    format!(
+        "Memory idempotency key: {}\n{}",
+        memory_key, MEMORY_KEY_SAVE_INSTRUCTION
+    )
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2089,6 +2108,9 @@ async fn build_autonomous_messages(
     )
     .await
     .ok_or_else(|| format!("subagent config '{}' not found", spec.workflow_id))?;
+    if subagent_config.tools.is_empty() {
+        tracing::warn!(workflow_id = %spec.workflow_id, "autonomous subagent config has no tools");
+    }
 
     let system_prompt = subagent_config.messages.system_prompt.ok_or_else(|| {
         format!(
@@ -2116,10 +2138,20 @@ async fn build_autonomous_messages(
 fn render_autonomous_template(template: &str, spec: &AutonomousBuddyChatSpec) -> String {
     let prompt = redact_and_cap_prompt(&spec.prompt);
     let evidence = redact_and_cap_evidence(&spec.evidence);
+    let memory_key = spec.diagnostic_memory_key().unwrap_or_default();
+    let memory_instruction = if memory_key.is_empty() {
+        String::new()
+    } else {
+        memory_key_instruction(&memory_key)
+    };
     let replacements = [
         ("{{workflow_id}}", spec.workflow_id.as_str()),
         ("{{title}}", spec.title.as_str()),
         ("{{signal_hash}}", spec.signal_hash.as_str()),
+        (
+            "{{memory_idempotency_instruction}}",
+            memory_instruction.as_str(),
+        ),
         ("{{icon}}", spec.icon.as_str()),
         ("{{badge}}", spec.badge.as_str()),
         ("{{priority}}", spec.priority.as_str()),
@@ -2130,6 +2162,13 @@ fn render_autonomous_template(template: &str, spec: &AutonomousBuddyChatSpec) ->
     let mut rendered = template.to_string();
     for (needle, value) in replacements {
         rendered = rendered.replace(needle, value);
+    }
+    if spec.workflow_id == ERROR_DETECTIVE_WORKFLOW_ID
+        && !rendered.contains("Memory idempotency key:")
+        && !memory_instruction.is_empty()
+    {
+        rendered.push('\n');
+        rendered.push_str(&memory_instruction);
     }
     rendered
 }
@@ -4693,6 +4732,24 @@ mod tests {
             assert!(!rendered.contains(raw), "raw secret leaked: {rendered}");
         }
         assert!(rendered.contains("[REDACTED"));
+    }
+
+    #[test]
+    fn rendered_error_detective_prompt_includes_memory_key_instruction() {
+        let stable = signal_hash([ERROR_DETECTIVE_WORKFLOW_ID, "diagnostic-signal"]);
+        let spec = AutonomousBuddyChatSpec::new(
+            ERROR_DETECTIVE_WORKFLOW_ID,
+            "Error Detective",
+            "Investigate diagnostics",
+            "Diagnostic signal evidence",
+        )
+        .with_signal_hash(stable.clone());
+        let rendered =
+            render_autonomous_template("Task:\n{{prompt}}\nEvidence:\n{{evidence}}", &spec);
+        let expected_key = format!("diag:signal:{}", &stable[..16]);
+
+        assert!(rendered.contains(&format!("Memory idempotency key: {expected_key}")));
+        assert!(rendered.contains(MEMORY_KEY_SAVE_INSTRUCTION));
     }
 
     #[test]

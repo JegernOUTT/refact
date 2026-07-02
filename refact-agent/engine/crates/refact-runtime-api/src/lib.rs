@@ -4,9 +4,7 @@ use async_trait::async_trait;
 use refact_buddy_core::snapshot::BuddySnapshot;
 use refact_buddy_core::types::{BuddyRuntimeEvent, BuddySuggestion};
 use refact_buddy_core::user_action::UserAction;
-use refact_chat_api::{
-    ChatCommand, ChatMessage, ContextFile, GoalSnapshot, PauseReason, ThreadParams,
-};
+use refact_chat_api::{ChatCommand, ChatMessage, ContextFile, GoalSnapshot, PauseReason, ThreadParams};
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 use refact_tool_api::ToolDesc;
 
@@ -34,6 +32,18 @@ pub trait BuddyEventSink: Send + Sync {
         source: Option<&str>,
         chat_id: Option<&str>,
     );
+    async fn report_error_with_model(
+        &self,
+        error_type: &str,
+        error_msg: &str,
+        source: Option<&str>,
+        chat_id: Option<&str>,
+        model_id: Option<&str>,
+    ) {
+        let _ = model_id;
+        self.report_error(error_type, error_msg, source, chat_id)
+            .await;
+    }
     async fn mark_chat_error(&self, event: BuddyRuntimeEvent);
     async fn maybe_add_suggestion(&self, suggestion: BuddySuggestion);
     async fn build_pulse_message(&self) -> Option<ChatMessage>;

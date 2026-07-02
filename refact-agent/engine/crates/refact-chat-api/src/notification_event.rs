@@ -48,7 +48,8 @@ mod tests {
         assert_eq!(json["type"], "ask_questions");
         assert_eq!(json["questions"][0]["type"], "single_choice");
 
-        let roundtrip: NotificationEvent = serde_json::from_value(json).expect("event deserializes");
+        let roundtrip: NotificationEvent =
+            serde_json::from_value(json).expect("event deserializes");
         let NotificationEvent::AskQuestions {
             chat_id,
             tool_call_id,
@@ -64,7 +65,10 @@ mod tests {
         assert_eq!(questions[0].id, "q-1");
         assert_eq!(questions[0].question_type, "single_choice");
         assert_eq!(questions[0].text, "Pick a pond");
-        assert_eq!(questions[0].options, Some(vec!["north".to_string(), "south".to_string()]));
+        assert_eq!(
+            questions[0].options,
+            Some(vec!["north".to_string(), "south".to_string()])
+        );
     }
 
     #[test]

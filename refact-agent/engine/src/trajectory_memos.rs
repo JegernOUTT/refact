@@ -9,11 +9,13 @@ use tracing::{info, warn};
 use walkdir::WalkDir;
 
 use crate::buddy::memory_lifecycle::{
-    compute_content_hash, compute_idempotency_key, MemoryCandidate, MemoryCandidateStatus,
-    MemoryLifecycleOp, MemoryOpType, MemorySource,
+    compute_content_hash, compute_idempotency_key, load_memory_doc_snapshots_from_knowledge_dirs,
+    MemoryCandidate, MemoryCandidateStatus, MemoryDocSnapshot, MemoryLifecycleOp, MemoryOpType,
+    MemorySource,
 };
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::chat::trajectories::extract_text_with_image_placeholders_from_json;
+use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use crate::memories::extract_file_paths;
@@ -212,8 +214,10 @@ async fn persist_extraction_result(
         .filter(|_| is_title_generated)
         .map(|m| m.title.clone())
         .unwrap_or_else(|| current_title.to_string());
-    let candidates =
+    let mut candidates =
         memory_candidates_from_extraction(extraction, trajectory_id, root_chat_id, &memo_title);
+    let existing_docs = load_existing_memo_docs(path).await;
+    candidates = dedupe_memo_candidates(candidates, &existing_docs, root_chat_id);
     let ops = memory_ops_from_candidates(&candidates, now);
     if !ops.is_empty() {
         enqueue_trajectory_memory_ops(path, &ops).await?;
@@ -523,6 +527,57 @@ fn memory_ops_from_candidates(
         .collect()
 }
 
+async fn load_existing_memo_docs(path: &Path) -> Vec<MemoryDocSnapshot> {
+    let Some(project_root) = trajectory_project_root(path) else {
+        return Vec::new();
+    };
+    load_memory_doc_snapshots_from_knowledge_dirs(&[project_root.join(KNOWLEDGE_FOLDER_NAME)]).await
+}
+
+fn normalized_memo_title(title: &str) -> String {
+    let collapsed = title
+        .trim()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let stripped = if let Some(rest) = collapsed.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            rest[end + 1..].trim_start()
+        } else {
+            collapsed.as_str()
+        }
+    } else {
+        collapsed.as_str()
+    };
+    stripped.to_lowercase()
+}
+
+fn dedupe_memo_candidates(
+    candidates: Vec<MemoryCandidate>,
+    existing_docs: &[MemoryDocSnapshot],
+    root_chat_id: &str,
+) -> Vec<MemoryCandidate> {
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            let title = normalized_memo_title(&candidate.title);
+            if !seen.insert((title.clone(), candidate.content_hash.clone())) {
+                return false;
+            }
+            !existing_docs.iter().any(|doc| {
+                normalized_memo_title(&doc.title) == title
+                    && (doc.content_hash == candidate.content_hash
+                        || doc
+                            .source_id
+                            .as_deref()
+                            .map(|source_id| source_id.contains(root_chat_id))
+                            .unwrap_or(false))
+            })
+        })
+        .collect()
+}
+
 async fn enqueue_trajectory_memory_ops(
     path: &Path,
     ops: &[MemoryLifecycleOp],
@@ -780,6 +835,84 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert_eq!(first[0].idempotency_key, second[0].idempotency_key);
         assert_eq!(first[0].op_id, second[0].op_id);
+    }
+
+    #[test]
+    fn normalized_memo_title_strips_type_prefix_and_whitespace() {
+        assert_eq!(
+            normalized_memo_title(" [decision]   Queue   Persistence \n Plan "),
+            "queue persistence plan"
+        );
+        assert_eq!(
+            normalized_memo_title("Queue Persistence"),
+            "queue persistence"
+        );
+    }
+
+    #[test]
+    fn memo_title_dedupe_skips_existing_and_batch_duplicates() {
+        let extraction = ExtractionResult {
+            meta: None,
+            memos: vec![
+                ExtractedMemo {
+                    memo_type: "decision".to_string(),
+                    content: "Use bounded queues.".to_string(),
+                },
+                ExtractedMemo {
+                    memo_type: "lesson".to_string(),
+                    content: "Prefer bounded queues.".to_string(),
+                },
+                ExtractedMemo {
+                    memo_type: "pattern".to_string(),
+                    content: "Ship idempotent writes.".to_string(),
+                },
+            ],
+        };
+        let candidates = memory_candidates_from_extraction(
+            &extraction,
+            "trajectory-a",
+            "root-a",
+            "Queue Persistence",
+        );
+        let existing = vec![MemoryDocSnapshot {
+            title: "[decision] Queue Persistence".to_string(),
+            content_hash: "different".to_string(),
+            source_id: Some("trajectory-old:memo:0-0:root-a:hash".to_string()),
+            ..Default::default()
+        }];
+        let deduped = dedupe_memo_candidates(candidates, &existing, "root-a");
+
+        assert_eq!(deduped.len(), 0);
+
+        let extraction = ExtractionResult {
+            meta: None,
+            memos: vec![
+                ExtractedMemo {
+                    memo_type: "decision".to_string(),
+                    content: "Use bounded queues.".to_string(),
+                },
+                ExtractedMemo {
+                    memo_type: "lesson".to_string(),
+                    content: "Use bounded queues.".to_string(),
+                },
+                ExtractedMemo {
+                    memo_type: "pattern".to_string(),
+                    content: "Prefer bounded queues.".to_string(),
+                },
+            ],
+        };
+        let candidates = memory_candidates_from_extraction(
+            &extraction,
+            "trajectory-a",
+            "root-a",
+            "Queue Persistence",
+        );
+        let deduped = dedupe_memo_candidates(candidates, &[], "other-root");
+
+        assert_eq!(deduped.len(), 2);
+        assert!(deduped
+            .iter()
+            .all(|candidate| normalized_memo_title(&candidate.title) == "queue persistence"));
     }
 
     #[tokio::test]

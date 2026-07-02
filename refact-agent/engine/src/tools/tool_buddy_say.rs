@@ -142,6 +142,7 @@ impl Tool for ToolBuddySay {
             created_at: chrono::Utc::now().to_rfc3339(),
             controls: vec![],
             chat_id: None,
+            speech_intent: None,
         };
 
         let gcx = ccx.lock().await.app.gcx.clone();
@@ -305,6 +306,7 @@ impl Tool for ToolBuddyRenderControls {
             created_at: chrono::Utc::now().to_rfc3339(),
             controls,
             chat_id: None,
+            speech_intent: None,
         };
 
         let gcx = ccx.lock().await.app.gcx.clone();

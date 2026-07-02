@@ -851,6 +851,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             post(buddy::handle_v1_buddy_artifact_reject),
         )
         .route(
+            "/buddy/artifacts/decisions",
+            post(buddy::handle_v1_buddy_artifacts_decisions),
+        )
+        .route(
             "/buddy/user_activity",
             get(buddy::handle_v1_buddy_user_activity),
         )

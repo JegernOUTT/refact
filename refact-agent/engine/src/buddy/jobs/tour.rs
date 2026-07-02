@@ -18,6 +18,7 @@ fn tour_fallback_speech(text: String) -> BuddySpeechItem {
         created_at: chrono::Utc::now().to_rfc3339(),
         controls: vec![],
         chat_id: None,
+        speech_intent: None,
     }
 }
 
@@ -104,6 +105,7 @@ mod tests {
                 style: "primary".to_string(),
             }],
             chat_id: Some("chat".to_string()),
+            speech_intent: None,
         };
 
         let normalized = normalize_tour_speech(fallback.clone(), voice);
@@ -134,6 +136,7 @@ mod tests {
             created_at: "voice-created".to_string(),
             controls: vec![],
             chat_id: Some("chat".to_string()),
+            speech_intent: None,
         };
 
         let normalized = normalize_tour_speech(fallback.clone(), voice);

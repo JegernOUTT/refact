@@ -12,8 +12,8 @@ use walkdir::WalkDir;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::buddy::memory_lifecycle::{
     archive_memory_file_checked, compute_content_hash, find_memory_by_source, normalize_kind,
-    normalize_tags, MemoryCreatePayload, MemoryLifecycleOp, MemoryLifecyclePayload, MemoryOpStatus,
-    MemoryOpType, MemorySource,
+    normalize_tags, propose_supersede_for_near_duplicate, MemoryCreatePayload, MemoryLifecycleOp,
+    MemoryLifecyclePayload, MemoryOpStatus, MemoryOpType, MemorySource,
 };
 use crate::buddy::jobs::autonomous_chats::redact_and_cap_text;
 use crate::buddy::storage::enqueue_memory_op;
@@ -546,9 +546,16 @@ async fn create_memory(
         source_content_hash: Some(content_hash),
         ..Default::default()
     };
-    if let Err(err) = append_audit_op(gcx, op).await {
+    if let Err(err) = append_audit_op(gcx.clone(), op).await {
         let _ = tokio::fs::remove_file(&path).await;
         return Err(err);
+    }
+    if let Some(supersede_op) = propose_supersede_for_near_duplicate(gcx.clone(), &path).await {
+        if let Ok(root) = project_root(gcx).await {
+            if let Err(err) = enqueue_memory_op(&root, supersede_op).await {
+                tracing::warn!("failed to enqueue near-duplicate memory op: {}", err);
+            }
+        }
     }
     Ok(CreateOutcome::Created(path))
 }

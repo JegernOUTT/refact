@@ -22,11 +22,23 @@ const subscribe = (onStoreChange: () => void) => {
 
   if (typeof mediaQuery.addEventListener === "function") {
     mediaQuery.addEventListener("change", onStoreChange);
-    return () => mediaQuery.removeEventListener("change", onStoreChange);
+    return () => {
+      if (typeof mediaQuery.removeEventListener === "function") {
+        mediaQuery.removeEventListener("change", onStoreChange);
+      }
+    };
   }
 
-  mediaQuery.addListener(onStoreChange);
-  return () => mediaQuery.removeListener(onStoreChange);
+  if (typeof mediaQuery.addListener === "function") {
+    mediaQuery.addListener(onStoreChange);
+    return () => {
+      if (typeof mediaQuery.removeListener === "function") {
+        mediaQuery.removeListener(onStoreChange);
+      }
+    };
+  }
+
+  return () => undefined;
 };
 
 const getSnapshot = () => getMediaQuery()?.matches ?? false;

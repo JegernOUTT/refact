@@ -200,7 +200,8 @@ impl Tool for ToolBuddySpeak {
         let text = cap(required_str(args, "text")?, 240);
         let mood = required_str(args, "mood")?.to_string();
         validate(&mood, VALID_MOODS, "mood")?;
-        validate(required_str(args, "intent")?, VALID_INTENTS, "intent")?;
+        let intent = required_str(args, "intent")?.to_string();
+        validate(&intent, VALID_INTENTS, "intent")?;
         let (gcx, _) = context(ccx).await;
         let buddy_arc = gcx.buddy.clone();
         let mut lock = buddy_arc.lock().await;
@@ -224,6 +225,7 @@ impl Tool for ToolBuddySpeak {
             created_at: chrono::Utc::now().to_rfc3339(),
             controls: vec![],
             chat_id: None,
+            speech_intent: Some(intent),
         });
         ok_message(tool_call_id, format!("Spoke: {}", text))
     }

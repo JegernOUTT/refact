@@ -150,6 +150,15 @@
   min-width: 0;
 }
 
+.artifactsSection {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.artifactsSection > * {
+  min-width: 0;
+}
+
 .draftPanel {
   display: flex;
   flex-direction: column;

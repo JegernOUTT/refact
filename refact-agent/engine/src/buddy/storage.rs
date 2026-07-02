@@ -10,12 +10,15 @@ use tracing::warn;
 pub use refact_buddy_core::storage::*;
 
 use super::memory_lifecycle::{
-    apply_memory_lifecycle_op_status, memory_op_duplicate_should_replace, MemoryLifecycleOp,
-    MemoryOpStatus, MemoryOpsRecord, MemoryOpsState, MemorySource,
+    apply_memory_lifecycle_op_status, memory_op_auto_apply_eligible,
+    memory_op_duplicate_should_replace, MemoryLifecycleOp, MemoryOpStatus, MemoryOpsRecord,
+    MemoryOpsState, MemorySource,
 };
+use super::settings::AutonomyLevel;
 use crate::app_state::AppState;
 
 const MEMORY_OPS_COMPACT_KEEP_DAYS: i64 = 7;
+const MEMORY_OPS_PENDING_TTL_DAYS: i64 = 30;
 
 fn memory_ops_path(project_root: &Path) -> PathBuf {
     project_root.join(".refact/buddy/memory_ops.jsonl")
@@ -29,7 +32,7 @@ fn memory_ops_bad_path(project_root: &Path) -> PathBuf {
     project_root.join(".refact/buddy/memory_ops.jsonl.bad")
 }
 
-async fn rewrite_memory_ops_records(
+pub(crate) async fn rewrite_memory_ops_records(
     path: &Path,
     records: Vec<MemoryOpsRecord>,
 ) -> Result<(), String> {
@@ -80,10 +83,11 @@ fn memory_op_is_final_status(status: MemoryOpStatus) -> bool {
 }
 
 fn memory_op_survives_compaction(op: &MemoryLifecycleOp, now: DateTime<Utc>) -> bool {
-    if op.source != MemorySource::MemoryGarden {
-        return true;
-    }
     if !memory_op_is_final_status(op.status) {
+        let cutoff = now - chrono::Duration::days(MEMORY_OPS_PENDING_TTL_DAYS);
+        return memory_op_timestamp(op) >= cutoff;
+    }
+    if op.source != MemorySource::MemoryGarden {
         return true;
     }
     let cutoff = now - chrono::Duration::days(MEMORY_OPS_COMPACT_KEEP_DAYS);
@@ -302,7 +306,6 @@ pub async fn load_memory_ops(project_root: &Path) -> MemoryOpsState {
     MemoryOpsState::from_records_with_malformed(records, malformed_lines)
 }
 
-#[allow(dead_code)]
 pub async fn compact_memory_ops(project_root: &Path) -> Result<MemoryOpsState, String> {
     let (records, _) = read_memory_ops_records(project_root).await;
     let state = compact_memory_ops_records(records, Utc::now());
@@ -347,30 +350,109 @@ pub async fn archive_memory_ops_if_oversized(
     Ok(true)
 }
 
-#[allow(dead_code)]
-pub async fn apply_queued_memory_ops(
+pub async fn drain_memory_ops(
     project_root: &Path,
     gcx: AppState,
-) -> Result<MemoryOpsState, String> {
+    autonomy: AutonomyLevel,
+    max_applies: usize,
+) -> Result<(MemoryOpsState, usize), String> {
     let state = load_memory_ops(project_root).await;
-    for op in state.ops {
-        if !matches!(
-            op.status,
-            MemoryOpStatus::Pending | MemoryOpStatus::Approved
-        ) {
+    let malformed_lines = state.malformed_lines;
+    let mut ops = state.ops;
+    let mut changed = 0usize;
+    let mut applied = 0usize;
+    for op in ops.iter_mut() {
+        if applied >= max_applies {
+            break;
+        }
+        let auto_apply = op.status == MemoryOpStatus::Pending
+            && op.requires_approval
+            && autonomy == AutonomyLevel::SafeAuto
+            && memory_op_auto_apply_eligible(op);
+        let eligible = op.status == MemoryOpStatus::Approved
+            || (op.status == MemoryOpStatus::Pending && !op.requires_approval)
+            || auto_apply;
+        if !eligible {
             continue;
         }
-        let updated = apply_memory_lifecycle_op_status(gcx.clone(), &op).await;
-        enqueue_memory_op(project_root, updated).await?;
+        let original = op.clone().normalized();
+        let mut working = original.clone();
+        if auto_apply {
+            working.status = MemoryOpStatus::Approved;
+            working.error = None;
+        }
+        let updated = apply_memory_lifecycle_op_status(gcx.clone(), &working)
+            .await
+            .normalized();
+        if updated != original {
+            changed += 1;
+        }
+        *op = updated;
+        applied += 1;
     }
-    Ok(load_memory_ops(project_root).await)
+    let state = MemoryOpsState::from_records_with_malformed(
+        ops.into_iter().map(|op| MemoryOpsRecord::Op { op }),
+        malformed_lines,
+    );
+    if changed > 0 {
+        let path = memory_ops_path(project_root);
+        rewrite_memory_ops_records(&path, state.canonical_records()).await?;
+    }
+    Ok((state, changed))
+}
+
+pub async fn apply_artifact_decisions(
+    project_root: &Path,
+    gcx: AppState,
+    decisions: &[(String, bool)],
+) -> Result<(MemoryOpsState, usize, usize), String> {
+    let state = load_memory_ops(project_root).await;
+    let malformed_lines = state.malformed_lines;
+    let mut ops = state.ops;
+    let mut decided = 0usize;
+    let mut failed = 0usize;
+    for (op_id, accept) in decisions {
+        let Some(op) = ops.iter_mut().find(|op| op.op_id == *op_id) else {
+            failed += 1;
+            continue;
+        };
+        if memory_op_is_final_status(op.status) {
+            continue;
+        }
+        let original = op.clone().normalized();
+        if *accept {
+            op.status = MemoryOpStatus::Approved;
+            op.error = None;
+            let updated = apply_memory_lifecycle_op_status(gcx.clone(), op).await;
+            *op = updated;
+            if op.status == MemoryOpStatus::Failed {
+                failed += 1;
+            }
+        } else {
+            op.status = MemoryOpStatus::Rejected;
+            op.error = None;
+        }
+        if op.clone().normalized() != original {
+            decided += 1;
+        }
+    }
+    let state = MemoryOpsState::from_records_with_malformed(
+        ops.into_iter().map(|op| MemoryOpsRecord::Op { op }),
+        malformed_lines,
+    );
+    if decided > 0 {
+        let path = memory_ops_path(project_root);
+        rewrite_memory_ops_records(&path, state.canonical_records()).await?;
+    }
+    Ok((state, decided, failed))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::buddy::memory_lifecycle::{
-        MemoryLifecycleOp, MemoryOpStatus, MemoryOpType, MEMORY_OP_EVIDENCE_MAX_CHARS,
+        MemoryCreatePayload, MemoryLifecycleOp, MemoryLifecyclePayload, MemoryOpStatus,
+        MemoryOpType, MEMORY_OP_EVIDENCE_MAX_CHARS, MEMORY_OP_EXACT_DUPLICATE_REASON,
     };
 
     fn test_op(op_id: &str, evidence: &str, status: MemoryOpStatus) -> MemoryLifecycleOp {
@@ -428,6 +510,33 @@ mod tests {
         rewrite_memory_ops_records(&memory_ops_path(root), records)
             .await
             .unwrap();
+    }
+
+    async fn test_gcx_with_workspace(dir: &Path) -> AppState {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *AppState::from_gcx(gcx.clone())
+                .await
+                .workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.to_path_buf()];
+        }
+        AppState::from_gcx(gcx).await
+    }
+
+    async fn write_test_memory(root: &Path, name: &str) -> String {
+        let dir = root.join(crate::file_filter::KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join(name);
+        tokio::fs::write(
+            &path,
+            "---\ntitle: Test\ntags:\n- memory\n---\n\nExisting body\n",
+        )
+        .await
+        .unwrap();
+        path.to_string_lossy().to_string()
     }
 
     #[tokio::test]
@@ -680,21 +789,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_memory_ops_preserves_pending_regardless_of_age() {
+    async fn compact_memory_ops_applies_pending_ttl_and_preserves_git_final() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let pending = op_with_time(
+        let old_pending = op_with_time(
             "op-pending-old",
             MemorySource::MemoryGarden,
             MemoryOpStatus::Pending,
-            Utc::now() - chrono::Duration::days(30),
+            Utc::now() - chrono::Duration::days(40),
         );
-        write_memory_ops_records_for_test(root, vec![pending.clone()]).await;
+        let fresh_pending = op_with_time(
+            "op-pending-fresh",
+            MemorySource::MemoryGarden,
+            MemoryOpStatus::Pending,
+            Utc::now(),
+        );
+        let old_git_applied = op_with_time(
+            "op-git-applied-old",
+            MemorySource::Git,
+            MemoryOpStatus::Applied,
+            Utc::now() - chrono::Duration::days(40),
+        );
+        write_memory_ops_records_for_test(
+            root,
+            vec![old_pending, fresh_pending.clone(), old_git_applied.clone()],
+        )
+        .await;
 
         let state = compact_memory_ops(root).await.unwrap();
 
-        assert_eq!(state.ops, vec![pending.normalized()]);
+        let mut ops = state.ops.clone();
+        ops.sort_by(|a, b| a.op_id.cmp(&b.op_id));
+        let mut expected = vec![fresh_pending.normalized(), old_git_applied.normalized()];
+        expected.sort_by(|a, b| a.op_id.cmp(&b.op_id));
+        assert_eq!(ops, expected);
         assert_eq!(state.pending_count, 1);
+        assert_eq!(state.applied_count, 1);
     }
 
     #[tokio::test]
@@ -745,7 +875,7 @@ mod tests {
             "op-keep",
             MemorySource::MemoryGarden,
             MemoryOpStatus::Pending,
-            now - chrono::Duration::days(30),
+            now - chrono::Duration::days(29),
         );
         let drop = op_with_time(
             "op-drop",
@@ -777,7 +907,7 @@ mod tests {
             "op-keep",
             MemorySource::MemoryGarden,
             MemoryOpStatus::Pending,
-            Utc::now() - chrono::Duration::days(30),
+            Utc::now() - chrono::Duration::days(29),
         );
         let drop = op_with_time(
             "op-drop",
@@ -896,14 +1026,97 @@ mod tests {
         op.status = MemoryOpStatus::Pending;
 
         enqueue_memory_op(root, op.clone()).await.unwrap();
-        let state = apply_queued_memory_ops(root, AppState::from_gcx(gcx).await)
-            .await
-            .unwrap();
+        let (state, changed) = drain_memory_ops(
+            root,
+            AppState::from_gcx(gcx).await,
+            AutonomyLevel::Suggest,
+            100,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(state.ops.len(), 1);
         assert_eq!(state.ops[0].status, MemoryOpStatus::Pending);
         assert_eq!(state.ops[0].error, None);
+        assert_eq!(changed, 0);
         assert_eq!(state.pending_count, 1);
         assert_eq!(state.failed_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drain_applies_approved_mark_review_needed_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let target = write_test_memory(root, "review.md").await;
+        let gcx = test_gcx_with_workspace(root).await;
+        let mut op = test_op("op-review", "review", MemoryOpStatus::Approved);
+        op.op_type = MemoryOpType::MarkReviewNeeded;
+        op.requires_approval = false;
+        op.target_paths = vec![target];
+        op.payload = MemoryLifecyclePayload {
+            review_after: Some("2026-05-02".to_string()),
+            ..Default::default()
+        };
+
+        enqueue_memory_op(root, op).await.unwrap();
+        let (state, changed) = drain_memory_ops(root, gcx, AutonomyLevel::Suggest, 100)
+            .await
+            .unwrap();
+
+        assert_eq!(changed, 1);
+        assert_eq!(state.ops.len(), 1);
+        assert!(matches!(
+            state.ops[0].status,
+            MemoryOpStatus::Applied | MemoryOpStatus::Skipped
+        ));
+        assert_eq!(state.pending_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drain_safe_auto_picks_exact_duplicate_but_suggest_does_not() {
+        let suggest_dir = tempfile::tempdir().unwrap();
+        let suggest_root = suggest_dir.path();
+        let suggest_gcx = test_gcx_with_workspace(suggest_root).await;
+        let mut op = test_op(
+            "op-auto-merge",
+            &format!(
+                "{}: canonical=a, superseded=b",
+                MEMORY_OP_EXACT_DUPLICATE_REASON
+            ),
+            MemoryOpStatus::Pending,
+        );
+        op.op_type = MemoryOpType::MergeArchive;
+        op.requires_approval = true;
+        op.confidence = 0.94;
+        op.payload = MemoryLifecyclePayload {
+            canonical: Some(MemoryCreatePayload {
+                content: "Canonical merged body with plenty of alphabetic text.".to_string(),
+                ..Default::default()
+            }),
+            superseded_paths: vec!["knowledge/missing.md".to_string()],
+            ..Default::default()
+        };
+        enqueue_memory_op(suggest_root, op.clone()).await.unwrap();
+
+        let (suggest_state, suggest_changed) =
+            drain_memory_ops(suggest_root, suggest_gcx, AutonomyLevel::Suggest, 100)
+                .await
+                .unwrap();
+
+        assert_eq!(suggest_changed, 0);
+        assert_eq!(suggest_state.ops[0].status, MemoryOpStatus::Pending);
+
+        let safe_dir = tempfile::tempdir().unwrap();
+        let safe_root = safe_dir.path();
+        let safe_gcx = test_gcx_with_workspace(safe_root).await;
+        enqueue_memory_op(safe_root, op).await.unwrap();
+
+        let (safe_state, safe_changed) =
+            drain_memory_ops(safe_root, safe_gcx, AutonomyLevel::SafeAuto, 100)
+                .await
+                .unwrap();
+
+        assert_eq!(safe_changed, 1);
+        assert_ne!(safe_state.ops[0].status, MemoryOpStatus::Pending);
     }
 }

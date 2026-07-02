@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, REFACT_SELF_CRITIC_WORKFLOW_ID};
@@ -46,9 +47,24 @@ fn hash_prompt_tree_at(defaults_dir: &Path) -> String {
 }
 
 fn default_prompt_fingerprint() -> String {
-    let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("crates/refact-yaml-configs/src/defaults");
+    let defaults_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/refact-yaml-configs/src/defaults");
     hash_prompt_tree_at(&defaults_dir)
+}
+
+fn top_diagnostic_counts(ctx: &BuddyJobContext) -> String {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for diag in &ctx.recent_diagnostics {
+        *counts.entry(diag.error_type.clone()).or_default() += 1;
+    }
+    let mut counts = counts.into_iter().collect::<Vec<_>>();
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    counts
+        .into_iter()
+        .take(3)
+        .map(|(error_type, count)| format!("{}={}", error_type, count))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn build_self_critic_spec(ctx: &BuddyJobContext) -> AutonomousBuddyChatSpec {
@@ -56,8 +72,11 @@ fn build_self_critic_spec(ctx: &BuddyJobContext) -> AutonomousBuddyChatSpec {
     let project_root = ctx.project_root.to_string_lossy().to_string();
     let prompt_fingerprint = default_prompt_fingerprint();
     let evidence = format!(
-        "prompt_fingerprint={}\nproject_root={}",
-        prompt_fingerprint, project_root
+        "prompt_fingerprint={}\nproject_root={}\nworkflow_runs={}\ntop_diagnostics={}",
+        prompt_fingerprint,
+        project_root,
+        ctx.total_workflow_runs,
+        top_diagnostic_counts(ctx)
     );
     AutonomousBuddyChatSpec::new(
         meta.id,
@@ -88,7 +107,13 @@ impl BuddyJob for RefactSelfCriticJob {
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
-        execute_autonomous_spec(gcx, &ctx, build_self_critic_spec(&ctx), self.cooldown_seconds()).await
+        execute_autonomous_spec(
+            gcx,
+            &ctx,
+            build_self_critic_spec(&ctx),
+            self.cooldown_seconds(),
+        )
+        .await
     }
 }
 

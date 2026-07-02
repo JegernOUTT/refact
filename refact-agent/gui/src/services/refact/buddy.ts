@@ -43,6 +43,7 @@ type BuddyApiState = {
 
 type BuddySettingsUpdateRequest = Partial<BuddySettings> & {
   clear_personality_prompt?: boolean;
+  palette_index?: number;
 };
 
 const BUDDY_SETTINGS_PATCH_KEYS = [
@@ -62,6 +63,7 @@ const BUDDY_SETTINGS_PATCH_KEYS = [
   "daily_digest_hour",
   "observers",
   "clear_personality_prompt",
+  "palette_index",
 ] as const satisfies readonly (keyof BuddySettingsUpdateRequest)[];
 let buddySettingsRequestSeq = 0;
 
@@ -71,7 +73,9 @@ function getBuddySettingsPatchKeys(
   const keys: BuddySettingsPatchKey[] = [];
   for (const key of BUDDY_SETTINGS_PATCH_KEYS) {
     if (key === "clear_personality_prompt") continue;
-    if (Object.prototype.hasOwnProperty.call(settings, key)) keys.push(key);
+    if (Object.prototype.hasOwnProperty.call(settings, key)) {
+      keys.push(key);
+    }
   }
   if (
     Object.prototype.hasOwnProperty.call(settings, "clear_personality_prompt")
@@ -183,9 +187,28 @@ export type Artifact = {
   created_at: string;
   applied_at?: string | null;
   rejected_at?: string | null;
+  confidence?: number;
+  requires_approval?: boolean;
+  evidence?: string;
+  source?: string;
 };
 
-export type MemoryOpsState = { ops: Artifact[] };
+export type ArtifactsPage = {
+  ops: Artifact[];
+  total_matching: number;
+  pending_count: number;
+  approved_count: number;
+  applied_count: number;
+  rejected_count: number;
+  failed_count: number;
+  skipped_count: number;
+  limit: number;
+  offset: number;
+};
+
+export type ArtifactDecision = { op_id: string; accept: boolean };
+
+export type ArtifactsDecisionsResponse = { decided: number; failed: number };
 
 export type UserActionPayload =
   | { type: "file_opened"; path: string; ts: string }
@@ -884,40 +907,33 @@ export const buddyApi = createApi({
         }
       },
     }),
-    getBuddyArtifacts: builder.query<MemoryOpsState, undefined>({
-      queryFn: async (_args, api, _opts, baseQuery) => {
+    getBuddyArtifacts: builder.query<
+      ArtifactsPage,
+      { status?: string; limit?: number; offset?: number } | undefined
+    >({
+      queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
         const result = await baseQuery(
-          buddyUrlFromState(state, "/v1/buddy/artifacts"),
+          buddyUrlFromState(state, "/v1/buddy/artifacts", args),
         );
         if (result.error) return { error: result.error };
-        return { data: result.data as MemoryOpsState };
+        return { data: result.data as ArtifactsPage };
       },
       providesTags: ["BuddyArtifacts"],
     }),
-    approveBuddyArtifact: builder.mutation<undefined, { op_id: string }>({
+    decideBuddyArtifacts: builder.mutation<
+      ArtifactsDecisionsResponse,
+      { decisions: ArtifactDecision[] }
+    >({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
         const result = await baseQuery({
-          url: buddyUrlFromState(state, "/v1/buddy/artifact_approve"),
+          url: buddyUrlFromState(state, "/v1/buddy/artifacts/decisions"),
           method: "POST",
           body,
         });
         if (result.error) return { error: result.error };
-        return { data: undefined };
-      },
-      invalidatesTags: ["BuddyArtifacts"],
-    }),
-    rejectBuddyArtifact: builder.mutation<undefined, { op_id: string }>({
-      queryFn: async (body, api, _opts, baseQuery) => {
-        const state = api.getState() as BuddyApiState;
-        const result = await baseQuery({
-          url: buddyUrlFromState(state, "/v1/buddy/artifact_reject"),
-          method: "POST",
-          body,
-        });
-        if (result.error) return { error: result.error };
-        return { data: undefined };
+        return { data: result.data as ArtifactsDecisionsResponse };
       },
       invalidatesTags: ["BuddyArtifacts"],
     }),
@@ -956,6 +972,5 @@ export const {
   useGetUserActivityQuery,
   useReportFrontendErrorMutation,
   useGetBuddyArtifactsQuery,
-  useApproveBuddyArtifactMutation,
-  useRejectBuddyArtifactMutation,
+  useDecideBuddyArtifactsMutation,
 } = buddyApi;
