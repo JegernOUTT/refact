@@ -42,10 +42,19 @@ fn friendly_dcp(dcp: &str) -> String {
 pub fn symbol_node_to_ast(
     symbol: &SymbolNode,
     node_path: &str,
+    double_colon_path: &str,
     usages: Vec<AstUsage>,
 ) -> AstDefinition {
-    let mut official_path = vec![file_stem(node_path)];
-    official_path.extend(symbol.official_path.iter().cloned());
+    let official_path = if double_colon_path.is_empty() {
+        let mut path = vec![node_path.to_string()];
+        path.extend(symbol.official_path.iter().cloned());
+        path
+    } else {
+        double_colon_path
+            .split("::")
+            .map(|part| part.to_string())
+            .collect()
+    };
     AstDefinition {
         official_path,
         symbol_type: symbol_type_of(&symbol.kind),
@@ -79,9 +88,14 @@ fn rows_to_defs(store: &Store, rows: Vec<SymbolData>) -> Result<Vec<Arc<AstDefin
         let usages = store
             .usage_data_for_node(row.node_id)?
             .into_iter()
-            .map(|(line, resolved_as, kind)| usage_to_ast(line, friendly_dcp(&resolved_as), kind))
+            .map(|(line, resolved_as, kind)| usage_to_ast(line, resolved_as, kind))
             .collect();
-        defs.push(Arc::new(symbol_node_to_ast(&symbol, &row.path, usages)));
+        defs.push(Arc::new(symbol_node_to_ast(
+            &symbol,
+            &row.path,
+            &row.double_colon_path,
+            usages,
+        )));
     }
     Ok(defs)
 }
@@ -114,8 +128,9 @@ pub fn definition_paths_fuzzy(
     let mut matches: Vec<String> = store
         .all_symbol_dcps()?
         .into_iter()
-        .map(|p| friendly_dcp(&p))
-        .filter(|p| p.to_lowercase().contains(&needle))
+        .filter(|p| {
+            p.to_lowercase().contains(&needle) || friendly_dcp(p).to_lowercase().contains(&needle)
+        })
         .collect();
     matches.sort();
     matches.dedup();
@@ -213,13 +228,13 @@ fn helper() {}
     }
 
     #[test]
-    fn doc_defs_returns_ast_definitions_with_file_prefixed_paths() {
+    fn doc_defs_returns_ast_definitions_with_path_qualified_paths() {
         let store = store_with_rust();
         let defs = doc_defs(&store, "src/widget.rs").unwrap();
         let paths: Vec<String> = defs.iter().map(|d| d.path()).collect();
-        assert!(paths.contains(&"widget::Widget".to_string()));
-        assert!(paths.contains(&"widget::Widget::render".to_string()));
-        assert!(paths.contains(&"widget::helper".to_string()));
+        assert!(paths.contains(&"src/widget.rs::Widget".to_string()));
+        assert!(paths.contains(&"src/widget.rs::Widget::render".to_string()));
+        assert!(paths.contains(&"src/widget.rs::helper".to_string()));
 
         let widget = defs.iter().find(|d| d.name() == "Widget").unwrap();
         assert_eq!(widget.symbol_type, SymbolType::StructDeclaration);
@@ -239,7 +254,9 @@ fn helper() {}
         let render = defs.iter().find(|d| d.name() == "render").unwrap();
 
         assert!(render.usages.iter().any(|usage| {
-            usage.resolved_as == "widget::helper" && usage.debug_hint == "calls" && usage.uline == 4
+            usage.resolved_as == "src/widget.rs::helper"
+                && usage.debug_hint == "calls"
+                && usage.uline == 4
         }));
     }
 
@@ -256,6 +273,43 @@ fn helper() {}
         let store = store_with_rust();
         let hits = definition_paths_fuzzy(&store, "render", 10).unwrap();
         assert!(hits.iter().any(|p| p.contains("render")));
+    }
+
+    #[test]
+    fn same_basename_facade_keeps_path_qualified_identities() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .index_file_graph("src/a/m.rs", "pub fn helper() {}\n", "rust")
+            .unwrap();
+        store
+            .index_file_graph(
+                "src/b/m.rs",
+                "fn run() { helper(); }\nfn helper() {}\n",
+                "rust",
+            )
+            .unwrap();
+        store.connect_usages().unwrap();
+
+        let helper_defs = definitions(&store, "m::helper").unwrap();
+        let helper_paths: Vec<String> = helper_defs.iter().map(|d| d.path()).collect();
+        assert_eq!(helper_defs.len(), 2, "helper defs: {helper_paths:?}");
+        assert!(helper_paths.contains(&"src/a/m.rs::helper".to_string()));
+        assert!(helper_paths.contains(&"src/b/m.rs::helper".to_string()));
+
+        let fuzzy = definition_paths_fuzzy(&store, "helper", 10).unwrap();
+        assert!(fuzzy.contains(&"src/a/m.rs::helper".to_string()));
+        assert!(fuzzy.contains(&"src/b/m.rs::helper".to_string()));
+
+        let run_defs = definitions(&store, "src/b/m.rs::run").unwrap();
+        assert_eq!(run_defs.len(), 1);
+        let run = &run_defs[0];
+        assert_eq!(run.path(), "src/b/m.rs::run");
+        assert!(run.usages.iter().any(|usage| {
+            usage.resolved_as == "src/b/m.rs::helper" && usage.debug_hint == "calls"
+        }));
+        assert!(!run.usages.iter().any(|usage| {
+            usage.resolved_as == "src/a/m.rs::helper" && usage.debug_hint == "calls"
+        }));
     }
 
     #[test]

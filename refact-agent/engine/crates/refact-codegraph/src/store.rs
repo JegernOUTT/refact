@@ -99,6 +99,7 @@ pub struct Counts {
 pub struct SymbolData {
     pub node_id: i64,
     pub path: String,
+    pub double_colon_path: String,
     pub data: String,
 }
 
@@ -288,16 +289,18 @@ impl Store {
 
     pub fn symbol_data_for_path(&self, path: &str) -> Result<Vec<SymbolData>, String> {
         self.query_symbol_data(
-            "SELECT id, path, data FROM nodes WHERE path = ?1 AND data IS NOT NULL ORDER BY line1",
+            "SELECT n.id, n.path, COALESCE(s.double_colon_path, ''), n.data \
+             FROM nodes n LEFT JOIN symbols s ON s.node_id = n.id \
+             WHERE n.path = ?1 AND n.data IS NOT NULL ORDER BY n.line1",
             path,
         )
     }
 
     pub fn symbol_data_by_dcp(&self, dcp: &str) -> Result<Vec<SymbolData>, String> {
         self.query_symbol_data(
-            "SELECT n.id, n.path, n.data FROM symbols s JOIN nodes n ON n.id = s.node_id \
+            "SELECT n.id, n.path, s.double_colon_path, n.data FROM symbols s JOIN nodes n ON n.id = s.node_id \
              WHERE (s.double_colon_path = ?1 OR s.double_colon_path LIKE '%::' || ?1) \
-             AND n.data IS NOT NULL",
+             AND n.data IS NOT NULL ORDER BY n.path, n.line1, s.double_colon_path",
             dcp,
         )
     }
@@ -312,7 +315,8 @@ impl Store {
                 Ok(SymbolData {
                     node_id: row.get(0)?,
                     path: row.get(1)?,
-                    data: row.get(2)?,
+                    double_colon_path: row.get(2)?,
+                    data: row.get(3)?,
                 })
             })
             .map_err(|e| format!("codegraph query_symbol_data: {e}"))?;
