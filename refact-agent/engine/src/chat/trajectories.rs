@@ -2330,10 +2330,11 @@ pub async fn save_trajectory_snapshot(
         .await?;
     }
 
+    let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
     let vec_db = app.workspace.vec_db.clone();
     if let Some(vecdb) = vec_db.lock().await.as_ref() {
         vecdb
-            .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], false)
+            .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], false, roots)
             .await;
     }
 

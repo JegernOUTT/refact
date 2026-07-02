@@ -4,37 +4,37 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::ops::Div;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 use tokio::sync::{Mutex as AMutex, Notify as ANotify};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use refact_core::ast_types::Document;
+use refact_core::memory_plane::{MemoryPlaneFileKind, MemoryPlaneRoots};
 use refact_core::vecdb_types::FileReader;
 
 use crate::fetch_embedding::get_embedding_with_retries;
 use crate::vdb_markdown_splitter::MarkdownFileSplitter;
 use crate::vdb_sqlite::VecDBSqlite;
 use crate::vdb_structs::{SimpleTextHashVector, SplitResult, VecDbStatus, VecdbConstants, VecdbRecord};
-use crate::vdb_trajectory_splitter::{TrajectoryFileSplitter, is_trajectory_file};
+use crate::vdb_trajectory_splitter::TrajectoryFileSplitter;
 
 const DEBUG_WRITE_VECDB_FILES: bool = false;
 const COOLDOWN_SECONDS: u64 = 10;
 
-const SOURCE_FILE_EXTENSIONS: &[&str] = &[
-    "c", "cpp", "cc", "h", "hpp", "cs", "java", "py", "rb", "go", "rs", "ts", "tsx", "js", "jsx",
-    "php", "swift", "kt", "kts", "scala", "r", "m", "mm", "pl", "lua", "sh", "bash", "sql", "html",
-    "css", "md", "mdx", "json", "yaml", "yml", "toml", "xml",
-];
+fn memory_plane_file_kind(
+    path: &PathBuf,
+    roots: &MemoryPlaneRoots,
+) -> Result<MemoryPlaneFileKind, String> {
+    roots
+        .classify_file(path)
+        .ok_or_else(|| format!("Unsupported memory-plane path {}", path.display()))
+}
 
-fn is_path_to_enqueue_valid(path: &PathBuf) -> Result<(), String> {
-    let extension = path.extension().unwrap_or_default();
-    if !SOURCE_FILE_EXTENSIONS.contains(&extension.to_str().unwrap_or_default()) {
-        return Err(format!("Unsupported file extension {:?}", extension));
-    }
-    Ok(())
+fn is_path_to_enqueue_valid(path: &PathBuf, roots: &MemoryPlaneRoots) -> Result<(), String> {
+    memory_plane_file_kind(path, roots).map(|_| ())
 }
 
 enum MessageToVecdbThread {
@@ -47,6 +47,7 @@ pub struct FileVectorizerService {
     pub vstatus: Arc<AMutex<VecDbStatus>>,
     pub vstatus_notify: Arc<ANotify>,
     constants: VecdbConstants,
+    memory_plane_roots: Arc<RwLock<MemoryPlaneRoots>>,
     vecdb_todo: Arc<AMutex<VecDeque<MessageToVecdbThread>>>,
 }
 
@@ -214,11 +215,12 @@ async fn vectorize_thread(
     let mut run_actual_model_on_these: Vec<SplitResult> = vec![];
     let mut ready_to_vecdb: Vec<VecdbRecord> = vec![];
 
-    let (vecdb_todo, constants, vecdb_handler_arc, vstatus, vstatus_notify) = {
+    let (vecdb_todo, constants, memory_plane_roots, vecdb_handler_arc, vstatus, vstatus_notify) = {
         let vservice_locked = vservice.lock().await;
         (
             vservice_locked.vecdb_todo.clone(),
             vservice_locked.constants.clone(),
+            vservice_locked.memory_plane_roots.clone(),
             vservice_locked.vecdb_handler.clone(),
             vservice_locked.vstatus.clone(),
             vservice_locked.vstatus_notify.clone(),
@@ -391,36 +393,30 @@ async fn vectorize_thread(
             }
         };
 
+        let file_kind = {
+            let roots = memory_plane_roots.read().unwrap();
+            match memory_plane_file_kind(&doc_path, &roots) {
+                Ok(kind) => kind,
+                Err(err) => {
+                    info!("embeddings {} rejected: {}", last_30_chars, err);
+                    continue;
+                }
+            }
+        };
+
         let mut doc = Document::new(&doc_path);
         doc.update_text(&text);
 
-        let is_trajectory = is_trajectory_file(&doc.doc_path);
-        if !is_trajectory {
+        if file_kind == MemoryPlaneFileKind::KnowledgeMarkdown {
             if let Err(err) = doc.does_text_look_good() {
                 info!("embeddings {} doesn't look good: {}", last_30_chars, err);
                 continue;
             }
         }
 
-        let is_markdown = doc
-            .doc_path
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .map(|e| e == "md" || e == "mdx")
-            .unwrap_or(false);
-
-        let mut splits = if is_trajectory {
+        let mut splits = if file_kind == MemoryPlaneFileKind::TrajectoryJson {
             let traj_splitter = TrajectoryFileSplitter::new(constants.splitter_window_size);
             traj_splitter
-                .split(&text, &doc.doc_path)
-                .await
-                .unwrap_or_else(|err| {
-                    info!("{}", err);
-                    vec![]
-                })
-        } else if is_markdown {
-            let md_splitter = MarkdownFileSplitter::new(constants.embedding_model.n_ctx);
-            md_splitter
                 .split(&text, &doc.doc_path)
                 .await
                 .unwrap_or_else(|err| {
@@ -477,7 +473,11 @@ async fn vectorize_thread(
 }
 
 impl FileVectorizerService {
-    pub async fn new(vecdb_handler: Arc<AMutex<VecDBSqlite>>, constants: VecdbConstants) -> Self {
+    pub async fn new(
+        vecdb_handler: Arc<AMutex<VecDBSqlite>>,
+        constants: VecdbConstants,
+        memory_plane_roots: MemoryPlaneRoots,
+    ) -> Self {
         let vstatus = Arc::new(AMutex::new(VecDbStatus {
             files_unprocessed: 0,
             files_total: 0,
@@ -495,6 +495,7 @@ impl FileVectorizerService {
             vstatus: vstatus.clone(),
             vstatus_notify: Arc::new(ANotify::new()),
             constants,
+            memory_plane_roots: Arc::new(RwLock::new(memory_plane_roots)),
             vecdb_todo: Default::default(),
         }
     }
@@ -515,12 +516,12 @@ pub async fn vecdb_start_background_tasks(
     vec![retrieve_thread_handle]
 }
 
-fn _filter_docs_to_enqueue(docs: &[String]) -> Vec<String> {
+fn _filter_docs_to_enqueue(docs: &[String], roots: &MemoryPlaneRoots) -> Vec<String> {
     let mut rejected_reasons = HashMap::new();
     let mut filtered_docs = vec![];
     for d in docs {
         let path: PathBuf = d.clone().into();
-        match is_path_to_enqueue_valid(&path) {
+        match is_path_to_enqueue_valid(&path, roots) {
             Ok(_) => filtered_docs.push(d.clone()),
             Err(e) => {
                 rejected_reasons
@@ -543,11 +544,13 @@ pub async fn vectorizer_enqueue_files(
     vservice: Arc<AMutex<FileVectorizerService>>,
     documents: &[String],
     process_immediately: bool,
+    roots: &MemoryPlaneRoots,
 ) {
     info!("adding {} files", documents.len());
-    let documents = _filter_docs_to_enqueue(documents);
+    let documents = _filter_docs_to_enqueue(documents, roots);
     let (vecdb_todo, vstatus, vstatus_notify, vecdb_max_files) = {
         let service = vservice.lock().await;
+        *service.memory_plane_roots.write().unwrap() = roots.clone();
         (
             service.vecdb_todo.clone(),
             service.vstatus.clone(),
@@ -581,5 +584,63 @@ pub async fn vectorizer_enqueue_files(
         if process_immediately {
             vstatus_notify.notify_waiters();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roots() -> MemoryPlaneRoots {
+        MemoryPlaneRoots::new(
+            vec![PathBuf::from("/workspace/project")],
+            Some(PathBuf::from("/home/user/.config/refact/knowledge")),
+            Some(PathBuf::from("/home/user/.config/refact/trajectories")),
+        )
+    }
+
+    #[test]
+    fn filter_docs_accepts_only_memory_plane_files() {
+        let roots = roots();
+        let knowledge = "/workspace/project/.refact/knowledge/note.md".to_string();
+        let trajectory =
+            "/workspace/project/.refact/tasks/task-1/trajectories/agents/chat.json".to_string();
+        let source_file = "/workspace/project/src/main.rs".to_string();
+        let task_memory = "/workspace/project/.refact/tasks/task-1/memories/note.md".to_string();
+        let broad_trajectory =
+            "/workspace/project/src/tasks/task-1/trajectories/chat.json".to_string();
+
+        let filtered = _filter_docs_to_enqueue(
+            &[
+                knowledge.clone(),
+                trajectory.clone(),
+                source_file,
+                task_memory,
+                broad_trajectory,
+            ],
+            &roots,
+        );
+
+        assert_eq!(filtered, vec![knowledge, trajectory]);
+    }
+
+    #[test]
+    fn enqueue_validation_rejects_source_file_at_sink() {
+        let roots = roots();
+
+        assert!(
+            is_path_to_enqueue_valid(&PathBuf::from("/workspace/project/src/main.rs"), &roots)
+                .is_err()
+        );
+        assert!(is_path_to_enqueue_valid(
+            &PathBuf::from("/workspace/project/.refact/knowledge/source.rs"),
+            &roots
+        )
+        .is_err());
+        assert!(is_path_to_enqueue_valid(
+            &PathBuf::from("/workspace/project/.refact/knowledge/note.md"),
+            &roots
+        )
+        .is_ok());
     }
 }

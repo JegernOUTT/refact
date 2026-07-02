@@ -651,10 +651,11 @@ pub async fn memories_add(
         idx.add_from_frontmatter(file_path.clone(), frontmatter, Some(content));
     }
 
+    let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
     let vec_db = gcx.vec_db.clone();
     if let Some(vecdb) = vec_db.lock().await.as_ref() {
         vecdb
-            .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], true)
+            .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], true, roots)
             .await;
     }
 
@@ -1521,13 +1522,18 @@ pub async fn rewrite_memory_document(
         }
     }
 
+    let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
     let vec_db = gcx.vec_db.clone();
     if let Some(vecdb) = vec_db.lock().await.as_ref() {
         if frontmatter.is_archived() || frontmatter.is_deprecated() {
             let _ = vecdb.remove_file(&path_buf).await;
         } else {
             vecdb
-                .vectorizer_enqueue_files(&vec![path_buf.to_string_lossy().to_string()], true)
+                .vectorizer_enqueue_files(
+                    &vec![path_buf.to_string_lossy().to_string()],
+                    true,
+                    roots,
+                )
                 .await;
         }
     }
@@ -2074,6 +2080,7 @@ mod firewall_tests {
             &self,
             _documents: &[String],
             _process_immediately: bool,
+            _roots: refact_core::memory_plane::MemoryPlaneRoots,
         ) {
         }
 

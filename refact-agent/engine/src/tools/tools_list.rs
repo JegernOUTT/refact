@@ -873,6 +873,7 @@ mod tests {
             &self,
             _documents: &[String],
             _process_immediately: bool,
+            _roots: refact_core::memory_plane::MemoryPlaneRoots,
         ) {
         }
 

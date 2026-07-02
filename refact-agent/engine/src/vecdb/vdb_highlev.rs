@@ -178,6 +178,7 @@ async fn initialize_vecdb_with_context(
     };
 
     let config = init_config.unwrap_or_default();
+    let memory_plane_roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
     let vec_db = refact_vecdb::vdb_init::init_vecdb_fail_safe(
         &vecdb_dir,
         &legacy_cache_dir,
@@ -186,6 +187,7 @@ async fn initialize_vecdb_with_context(
         constants,
         config,
         shutdown_flag,
+        memory_plane_roots,
     )
     .await?;
 

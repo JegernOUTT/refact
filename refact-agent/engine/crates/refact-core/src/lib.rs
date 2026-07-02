@@ -5,6 +5,7 @@ pub mod chunk_utils;
 pub mod custom_error;
 pub mod knowledge_frontmatter;
 pub mod llm_types;
+pub mod memory_plane;
 pub mod model_caps;
 pub mod models_dev;
 pub mod net_utils;

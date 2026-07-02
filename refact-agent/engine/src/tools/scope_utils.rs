@@ -573,6 +573,7 @@ mod worktree_scope_read_tools {
             &self,
             _documents: &[String],
             _process_immediately: bool,
+            _roots: refact_core::memory_plane::MemoryPlaneRoots,
         ) {
         }
 

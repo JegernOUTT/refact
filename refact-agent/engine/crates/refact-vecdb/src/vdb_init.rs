@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
+use refact_core::memory_plane::MemoryPlaneRoots;
 use refact_core::vecdb_types::VecdbSearch;
 
 use crate::vdb_highlev::VecDb;
@@ -55,6 +56,7 @@ pub async fn init_vecdb_fail_safe(
     constants: VecdbConstants,
     init_config: VecDbInitConfig,
     shutdown_flag: Arc<AtomicBool>,
+    memory_plane_roots: MemoryPlaneRoots,
 ) -> Result<VecDb, VecDbInitError> {
     let mut attempt: usize = 0;
     let mut delay = Duration::from_millis(init_config.initial_delay_ms);
@@ -76,6 +78,7 @@ pub async fn init_vecdb_fail_safe(
             workspace_folder.clone(),
             insecure,
             constants.clone(),
+            memory_plane_roots.clone(),
         )
         .await
         {
