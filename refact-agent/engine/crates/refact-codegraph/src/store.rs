@@ -6,6 +6,7 @@ use std::path::Path;
 use refact_codegraph_parsers::Resolver;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::extract::{edge_kind_str, extract_symbols};
 use crate::schema;
@@ -521,6 +522,10 @@ impl Store {
         if dirty_paths.is_empty() {
             return Ok(());
         }
+        debug!(
+            "codegraph: connect_usages for {} dirty files",
+            dirty_paths.len()
+        );
 
         let dirty_set: HashSet<String> = dirty_paths.iter().cloned().collect();
         let symbols = self.all_symbols()?;
@@ -565,6 +570,10 @@ impl Store {
         self.conn
             .execute("DELETE FROM dirty_paths", [])
             .map_err(|e| format!("codegraph connect_usages clear dirty paths: {e}"))?;
+        debug!(
+            "codegraph: connect_usages complete for {} dirty files",
+            dirty_paths.len()
+        );
         Ok(())
     }
 
@@ -675,6 +684,12 @@ impl Store {
 
         let (symbols, refs) = extract_symbols(lang, text);
         let routes = refact_codegraph_parsers::frameworks::detect_routes(lang, text);
+        debug!(
+            "codegraph: index_file_graph {path}: {} symbols, {} refs, {} routes",
+            symbols.len(),
+            refs.len(),
+            routes.len()
+        );
         if symbols.is_empty() && refs.is_empty() && routes.is_empty() {
             return Ok(file_id);
         }
