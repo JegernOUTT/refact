@@ -164,7 +164,7 @@ mod tests {
         let output = build_code_lens_output(&defs, true);
 
         assert!(output.iter().any(|lens| {
-            lens.line1 == 2 && lens.debug_string.as_deref() == Some("↗widget::helper")
+            lens.line1 == 2 && lens.debug_string.as_deref() == Some("↗src/widget.rs::helper")
         }));
     }
 }
