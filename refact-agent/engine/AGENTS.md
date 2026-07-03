@@ -327,6 +327,8 @@ CodeGraph-dependent tools are visible only when `gcx.codegraph` is available. `s
 | `git_risk` | Git intelligence: churn hotspots, bus factor per file, and co-changed file pairs. |
 | `code_why` | Evidence-backed decisions from commit history that match a query. |
 | `code_duplication` | Project-wide token clone pairs, co-change-weighted DRY violations, and test smells. |
+| `security_scan` | Per-file security findings including secrets, injection, dangerous eval/deserialization, TLS, crypto, and random risks. |
+| `pr_blast` | PR blast-radius analysis over reverse CodeGraph dependencies, impacted files, risk score, and reviewer path hints. |
 | `code_map` | Documentation-worthy file map with selection score, forward links, and backlink hubs. |
 
 ### Exec runtime — PTY and process tools

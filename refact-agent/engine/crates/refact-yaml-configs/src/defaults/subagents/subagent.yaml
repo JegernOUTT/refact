@@ -96,6 +96,8 @@ tools:
   - git_risk
   - code_why
   - code_duplication
+  - security_scan
+  - pr_blast
   - code_map
   - knowledge
   - search_trajectories

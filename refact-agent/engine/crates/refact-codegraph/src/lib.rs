@@ -446,6 +446,24 @@ impl CodeGraphService {
         self.with_read_store(dead_code::dead_code).await
     }
 
+    pub async fn security_scan(
+        &self,
+        _path: &str,
+        lang: &str,
+        text: &str,
+    ) -> Result<Vec<security_scan::SecurityFinding>, String> {
+        Ok(security_scan::scan(lang, text))
+    }
+
+    pub async fn pr_blast(
+        &self,
+        changed_files: &[String],
+        max_depth: usize,
+    ) -> Result<pr_blast::BlastReport, String> {
+        self.with_read_store(|store| pr_blast::blast_radius(store, changed_files, max_depth))
+            .await
+    }
+
     pub async fn type_hierarchy(&self, subtree_of: &str) -> Result<String, String> {
         self.with_read_store(|store| facade::type_hierarchy(store, subtree_of))
             .await

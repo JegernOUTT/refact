@@ -148,7 +148,7 @@ CodeGraph is the source-code index. It stores graph nodes, edges, symbols, file 
 
 VecDB remains the semantic memory/knowledge index. Workspace enqueueing runs through `src/indexing_routing.rs`, which sends memory-plane roots such as knowledge and trajectories to VecDB and source-code paths to CodeGraph. This keeps code retrieval separate from memory search and prevents generated `.refact` history from being treated like source code unless it is outside the memory-plane roots.
 
-CodeGraph-dependent built-in tools are `search_symbol_definition`, `codegraph_overview`, `code_health`, `git_risk`, `code_why`, `code_duplication`, and `code_map`.
+CodeGraph-dependent built-in tools are `search_symbol_definition`, `codegraph_overview`, `code_health`, `git_risk`, `code_why`, `code_duplication`, `security_scan`, `pr_blast`, and `code_map`.
 
 ## Contributing
 

@@ -415,14 +415,14 @@ fn line_has_command_injection(line: &str, lower: &str) -> bool {
 }
 
 fn line_has_dangerous_eval(line: &str, lower: &str) -> bool {
-    (lower.contains("eval(")
+    let dangerous_call = lower.contains("eval(")
         || lower.contains("exec(")
         || line.contains("Function(")
         || lower.contains("pickle.loads(")
         || lower.contains("marshal.load(")
         || lower.contains("deserialize(")
-        || (lower.contains("yaml.load(") && !lower.contains("safeloader")))
-        && call_has_external_input(line)
+        || (lower.contains("yaml.load(") && !lower.contains("safeloader"));
+    dangerous_call && call_has_external_input(line)
 }
 
 fn line_has_weak_crypto(_line: &str, lower: &str) -> bool {
@@ -588,6 +588,12 @@ mod tests {
     fn detects_dangerous_eval() {
         let findings = scan("python", "eval(user_input)\n");
         assert!(has_rule(&findings, "dangerous_eval"));
+    }
+
+    #[test]
+    fn ignores_literal_eval() {
+        let findings = scan("python", "eval(\"2 + 2\")\n");
+        assert!(!has_rule(&findings, "dangerous_eval"));
     }
 
     #[test]

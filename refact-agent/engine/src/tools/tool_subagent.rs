@@ -29,6 +29,8 @@ const ALLOWED_FOR_SUBAGENT: &[&str] = &[
     "git_risk",
     "code_why",
     "code_duplication",
+    "security_scan",
+    "pr_blast",
     "code_map",
     "knowledge",
     "search_trajectories",
@@ -507,6 +509,8 @@ mod tests {
             "git_risk",
             "code_why",
             "code_duplication",
+            "security_scan",
+            "pr_blast",
             "code_map",
             "knowledge",
             "search_trajectories",
@@ -535,7 +539,8 @@ mod tests {
             concat!(
                 "cat, tree, search_pattern, search_symbol_definition, search_semantic, ",
                 "codegraph_overview, code_health, git_risk, code_why, code_duplication, ",
-                "code_map, knowledge, search_trajectories, get_trajectory_context, web, ",
+                "security_scan, pr_blast, code_map, knowledge, search_trajectories, ",
+                "get_trajectory_context, web, ",
                 "web_search, shell, tasks_set, compress_chat_probe, compress_chat_apply"
             )
         );
@@ -656,6 +661,8 @@ mod tests {
                     "git_risk".to_string(),
                     "code_why".to_string(),
                     "code_duplication".to_string(),
+                    "security_scan".to_string(),
+                    "pr_blast".to_string(),
                     "code_map".to_string(),
                 ],
                 &configured_tools,
@@ -669,6 +676,8 @@ mod tests {
                 "git_risk".to_string(),
                 "code_why".to_string(),
                 "code_duplication".to_string(),
+                "security_scan".to_string(),
+                "pr_blast".to_string(),
                 "code_map".to_string(),
             ]
         );

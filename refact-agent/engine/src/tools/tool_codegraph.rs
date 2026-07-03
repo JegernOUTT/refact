@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use git2::{Oid, Repository};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -51,6 +51,93 @@ fn string_arg(args: &HashMap<String, Value>, key: &str) -> Result<String, String
         Some(v) => Err(format!("argument `{key}` is not a string: {v:?}")),
         None => Err(format!("argument `{key}` is missing")),
     }
+}
+
+fn string_list_arg(args: &HashMap<String, Value>, key: &str) -> Result<Vec<String>, String> {
+    let values = match args.get(key) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                item.as_str()
+                    .map(|item| item.trim().to_string())
+                    .ok_or_else(|| format!("argument `{key}[{index}]` is not a string: {item:?}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(Value::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.starts_with('[') {
+                serde_json::from_str::<Vec<String>>(trimmed)
+                    .map_err(|err| format!("argument `{key}` is not a string array: {err}"))?
+            } else {
+                trimmed
+                    .split(',')
+                    .map(|item| item.trim().to_string())
+                    .collect()
+            }
+        }
+        Some(value) => return Err(format!("argument `{key}` is not a string array: {value:?}")),
+        None => return Err(format!("argument `{key}` is missing")),
+    };
+    Ok(values
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect())
+}
+
+fn optional_usize_arg(
+    args: &HashMap<String, Value>,
+    key: &str,
+    default: usize,
+) -> Result<usize, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(default),
+        Some(Value::String(value)) => value
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| format!("argument `{key}` must be a positive integer")),
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| format!("argument `{key}` must be a positive integer")),
+        Some(value) => Err(format!(
+            "argument `{key}` must be a positive integer: {value:?}"
+        )),
+    }
+}
+
+fn normalize_indexed_path(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches("./").to_string()
+}
+
+fn resolve_indexed_paths(requested: Vec<String>, indexed: &[String]) -> Vec<String> {
+    requested
+        .into_iter()
+        .map(|path| {
+            let normalized = normalize_indexed_path(&path);
+            if let Some(indexed_path) = indexed.iter().find(|indexed_path| {
+                indexed_path.as_str() == path || normalize_indexed_path(indexed_path) == normalized
+            }) {
+                return indexed_path.clone();
+            }
+
+            let suffix = format!("/{normalized}");
+            let candidates = indexed
+                .iter()
+                .filter(|indexed_path| {
+                    let indexed_normalized = normalize_indexed_path(indexed_path);
+                    indexed_normalized.ends_with(&suffix)
+                        || normalized.ends_with(&indexed_normalized)
+                })
+                .collect::<Vec<_>>();
+            if candidates.len() == 1 {
+                candidates[0].clone()
+            } else {
+                path
+            }
+        })
+        .collect()
 }
 
 async fn project_dir(gcx: Arc<crate::global_context::GlobalContext>) -> Option<PathBuf> {
@@ -1072,6 +1159,237 @@ impl Tool for ToolCodeDuplication {
     fn tool_depends_on(&self) -> Vec<String> {
         codegraph_dependency()
     }
+}
+
+pub struct ToolSecurityScan {
+    pub config_path: String,
+}
+
+#[async_trait]
+impl Tool for ToolSecurityScan {
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let file_path = string_arg(args, "file_path")?;
+        let gcx = ccx.lock().await.app.gcx.clone();
+        let text = crate::files_in_workspace::get_file_text_from_memory_or_disk(
+            gcx.clone(),
+            &PathBuf::from(&file_path),
+        )
+        .await?
+        .to_string();
+        let service = gcx
+            .codegraph
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| "codegraph is not available".to_string())?;
+        let lang = refact_codegraph::lang_from_path(&file_path);
+        let findings = service.security_scan(&file_path, lang, &text).await?;
+        if findings.is_empty() {
+            return Ok((
+                false,
+                tool_message(
+                    tool_call_id,
+                    format!("Security scan for `{file_path}` found no findings (lang: {lang})."),
+                ),
+            ));
+        }
+
+        let mut counts: HashMap<&'static str, usize> = HashMap::new();
+        for finding in &findings {
+            *counts.entry(severity_label(finding.severity)).or_insert(0) += 1;
+        }
+        let mut msg = format!(
+            "Security scan for `{}` found {} findings (lang: {}).\n",
+            file_path,
+            findings.len(),
+            lang
+        );
+        msg.push_str(&format!(
+            "Severity counts: Critical={} High={} Medium={} Low={}\n\n",
+            counts.get("Critical").copied().unwrap_or(0),
+            counts.get("High").copied().unwrap_or(0),
+            counts.get("Medium").copied().unwrap_or(0),
+            counts.get("Low").copied().unwrap_or(0)
+        ));
+        for finding in findings.iter().take(50) {
+            msg.push_str(&format!(
+                "  {}:{} [{:?}] {} — {}\n",
+                file_path, finding.line, finding.severity, finding.rule, finding.snippet
+            ));
+        }
+        if findings.len() > 50 {
+            msg.push_str(&format!(
+                "  ... {} more findings omitted\n",
+                findings.len() - 50
+            ));
+        }
+        Ok((false, tool_message(tool_call_id, msg)))
+    }
+
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "security_scan".to_string(),
+            display_name: "Security Scan".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: self.config_path.clone(),
+            },
+            experimental: false,
+            allow_parallel: true,
+            description: "Security scan for a file: detects hardcoded secrets, SQL/command injection, dangerous eval/deserialization, TLS verification disabled, weak crypto, and insecure random usage.".to_string(),
+            input_schema: json_schema_from_params(
+                &[("file_path", "string", "Path to the file to scan.")],
+                &["file_path"],
+            ),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        codegraph_dependency()
+    }
+}
+
+pub struct ToolPrBlast {
+    pub config_path: String,
+}
+
+#[async_trait]
+impl Tool for ToolPrBlast {
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let changed_files = string_list_arg(args, "changed_files")?;
+        if changed_files.is_empty() {
+            return Err("argument `changed_files` must not be empty".to_string());
+        }
+        let max_depth = optional_usize_arg(args, "max_depth", 3)?.clamp(1, 10);
+        let gcx = ccx.lock().await.app.gcx.clone();
+        let service = gcx
+            .codegraph
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| "codegraph is not available".to_string())?;
+        let indexed_paths = service.all_paths().await?;
+        let changed_files = resolve_indexed_paths(changed_files, &indexed_paths);
+        let report = service.pr_blast(&changed_files, max_depth).await?;
+        let reviewers = refact_codegraph::pr_blast::reviewers_for_blast(&report);
+
+        let mut msg = format!(
+            "PR blast radius (max depth {}) for {} changed files:\n",
+            max_depth,
+            report.changed_files.len()
+        );
+        for path in &report.changed_files {
+            msg.push_str(&format!("  changed: {}\n", path));
+        }
+        msg.push_str(&format!(
+            "\nImpacted files: {}\nRisk score: {:.2}\n",
+            report.impacted_file_count, report.risk_score
+        ));
+        if report.directly_impacted.is_empty() && report.transitively_impacted.is_empty() {
+            msg.push_str("\nNo reverse dependencies found for these files.\n");
+        } else {
+            if !report.directly_impacted.is_empty() {
+                msg.push_str(&format!(
+                    "\nDirectly impacted symbols ({}):\n",
+                    report.directly_impacted.len()
+                ));
+                for impact in report.directly_impacted.iter().take(30) {
+                    push_blast_impact(&mut msg, impact);
+                }
+                if report.directly_impacted.len() > 30 {
+                    msg.push_str(&format!(
+                        "  ... {} more direct impacts omitted\n",
+                        report.directly_impacted.len() - 30
+                    ));
+                }
+            }
+            if !report.transitively_impacted.is_empty() {
+                msg.push_str(&format!(
+                    "\nTransitively impacted symbols ({}):\n",
+                    report.transitively_impacted.len()
+                ));
+                for impact in report.transitively_impacted.iter().take(30) {
+                    push_blast_impact(&mut msg, impact);
+                }
+                if report.transitively_impacted.len() > 30 {
+                    msg.push_str(&format!(
+                        "  ... {} more transitive impacts omitted\n",
+                        report.transitively_impacted.len() - 30
+                    ));
+                }
+            }
+        }
+        if !reviewers.is_empty() {
+            msg.push_str("\nSuggested reviewer paths:\n");
+            for reviewer in reviewers {
+                msg.push_str(&format!("  {}\n", reviewer));
+            }
+        }
+        Ok((false, tool_message(tool_call_id, msg)))
+    }
+
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "pr_blast".to_string(),
+            display_name: "PR Blast Radius".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: self.config_path.clone(),
+            },
+            experimental: false,
+            allow_parallel: true,
+            description: "PR blast-radius analysis: given changed files, walks reverse codegraph dependencies to list directly and transitively impacted symbols, impacted file count, risk score, and reviewer path suggestions.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "changed_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Changed file paths to analyze."
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Maximum reverse dependency depth to walk. Defaults to 3, max 10."
+                    }
+                },
+                "required": ["changed_files"]
+            }),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        codegraph_dependency()
+    }
+}
+
+fn severity_label(severity: refact_codegraph::security_scan::Severity) -> &'static str {
+    match severity {
+        refact_codegraph::security_scan::Severity::Low => "Low",
+        refact_codegraph::security_scan::Severity::Medium => "Medium",
+        refact_codegraph::security_scan::Severity::High => "High",
+        refact_codegraph::security_scan::Severity::Critical => "Critical",
+    }
+}
+
+fn push_blast_impact(msg: &mut String, impact: &refact_codegraph::pr_blast::BlastImpact) {
+    msg.push_str(&format!(
+        "  d{} {} @ {} via {}\n",
+        impact.distance, impact.symbol, impact.path, impact.via
+    ));
 }
 
 pub struct ToolCodeMap {

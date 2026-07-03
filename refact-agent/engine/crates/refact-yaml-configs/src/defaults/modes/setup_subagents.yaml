@@ -192,6 +192,8 @@ tools:
   - git_risk
   - code_why
   - code_duplication
+  - security_scan
+  - pr_blast
   - code_map
   - tree
   - cat
@@ -231,6 +233,10 @@ tool_confirm:
     - match: "code_why"
       action: auto
     - match: "code_duplication"
+      action: auto
+    - match: "security_scan"
+      action: auto
+    - match: "pr_blast"
       action: auto
     - match: "code_map"
       action: auto
