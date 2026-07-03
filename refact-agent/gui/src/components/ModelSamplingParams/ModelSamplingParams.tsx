@@ -3,6 +3,7 @@ import { RotateCcw } from "lucide-react";
 
 import { IconButton, FieldSlider, FieldSwitch, SegmentedControl } from "../ui";
 import { useGetCapsQuery } from "../../services/refact/caps";
+import type { ModelType } from "../../services/refact";
 import { ReasoningIcon } from "../../features/Providers/ProviderForm/ProviderModelsList/components/CapabilityIcons";
 import styles from "./ModelSamplingParams.module.css";
 
@@ -23,6 +24,14 @@ type ModelSamplingParamsProps = {
   ) => void;
   disabled?: boolean;
   size?: "1" | "2";
+  capability?: ModelType;
+};
+
+type SamplingModelDetail = {
+  default_max_tokens?: number | null;
+  max_output_tokens?: number | null;
+  reasoning_effort_options?: string[] | null;
+  supports_thinking_budget?: boolean;
 };
 
 function formatTokens(tokens: number): string {
@@ -37,31 +46,46 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
   values,
   onChange,
   disabled = false,
+  capability = "chat",
 }) => {
   const { data: capsData } = useGetCapsQuery(undefined);
 
-  const modelDetail = useMemo(() => {
-    if (!model || !capsData?.chat_models) return null;
-    const m = capsData.chat_models[model] as
-      | {
-          n_ctx?: number;
-          default_max_tokens?: number | null;
-          max_output_tokens?: number | null;
-          reasoning_effort_options?: string[] | null;
-          supports_thinking_budget?: boolean;
-          supports_adaptive_thinking_budget?: boolean;
-        }
-      | undefined;
-    return m ?? null;
-  }, [model, capsData]);
+  const modelDetail = useMemo<SamplingModelDetail | null>(() => {
+    if (capability === "embedding") return null;
+    if (!model || !capsData) return null;
+
+    if (capability === "completion") {
+      const completionModel = Object.entries(capsData.completion_models).find(
+        ([name]) => name === model,
+      )?.[1];
+      const contextWindow =
+        completionModel?.n_ctx ?? capsData.code_completion_n_ctx;
+      const maxTokens = Math.max(1024, Math.min(contextWindow, 16384));
+      return {
+        default_max_tokens: maxTokens,
+        max_output_tokens: maxTokens,
+      };
+    }
+
+    return (
+      Object.entries(capsData.chat_models).find(
+        ([name]) => name === model,
+      )?.[1] ?? null
+    );
+  }, [model, capsData, capability]);
+
+  if (capability === "embedding") {
+    return null;
+  }
 
   const defaultMaxTokens = modelDetail?.default_max_tokens ?? 4096;
   const maxOutputTokens = modelDetail?.max_output_tokens ?? 16384;
   const reasoningEffortOptions = modelDetail?.reasoning_effort_options;
   const supportsThinkingBudget = modelDetail?.supports_thinking_budget ?? false;
   const supportsReasoning =
-    (reasoningEffortOptions != null && reasoningEffortOptions.length > 0) ||
-    supportsThinkingBudget;
+    capability === "chat" &&
+    ((reasoningEffortOptions != null && reasoningEffortOptions.length > 0) ||
+      supportsThinkingBudget);
 
   return (
     <div className={`${styles.container} rf-stagger`}>

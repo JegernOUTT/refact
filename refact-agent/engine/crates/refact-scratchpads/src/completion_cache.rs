@@ -1,7 +1,7 @@
 use refact_core::chat_types::CodeCompletionPost;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
-use std::collections::HashMap;
 
 use ropey::Rope;
 
@@ -33,6 +33,7 @@ impl CompletionSaveToCache {
 pub struct CompletionCache {
     pub map: HashMap<(String, String), serde_json::Value>,
     pub in_added_order: Vec<(String, String)>,
+    pub generation: u64,
 }
 
 impl CompletionCache {
@@ -40,8 +41,28 @@ impl CompletionCache {
         Self {
             map: HashMap::new(),
             in_added_order: Vec::new(),
+            generation: 0,
         }
     }
+
+    pub fn bump_generation(&mut self) -> u64 {
+        self.map.clear();
+        self.in_added_order.clear();
+        self.generation = self.generation.saturating_add(1);
+        self.generation
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+pub fn cache_generation(cache: Arc<StdRwLock<CompletionCache>>) -> u64 {
+    cache.read().unwrap().generation()
+}
+
+pub fn cache_bump_generation(cache: Arc<StdRwLock<CompletionCache>>) -> u64 {
+    cache.write().unwrap().bump_generation()
 }
 
 pub fn cache_get(
@@ -88,7 +109,7 @@ pub fn cache_key_from_post(post: &CodeCompletionPost) -> (String, String) {
                 "dummy1-{}:{}",
                 post.inputs.cursor.line, post.inputs.cursor.character
             ),
-            "".to_string(),
+            cache_part2_from_post(post),
         );
     }
     let rope = Rope::from_str(text_maybe.unwrap());
@@ -99,7 +120,7 @@ pub fn cache_key_from_post(post: &CodeCompletionPost) -> (String, String) {
                 "dummy2-{}:{}",
                 post.inputs.cursor.line, post.inputs.cursor.character
             ),
-            "".to_string(),
+            cache_part2_from_post(post),
         );
     }
     let mut cursor_line = cursor_line_maybe.unwrap();
@@ -127,20 +148,30 @@ pub fn cache_key_from_post(post: &CodeCompletionPost) -> (String, String) {
     let mut key = "".to_string();
     key.push_str(&linesvec.join(""));
     key.push_str(&cursor_line.to_string());
-    let chars = key.chars();
-
-    if chars.clone().count() > CACHE_KEY_CHARS {
-        key = chars.skip(key.len() - CACHE_KEY_CHARS).collect();
+    let char_count = key.chars().count();
+    if char_count > CACHE_KEY_CHARS {
+        key = key.chars().skip(char_count - CACHE_KEY_CHARS).collect();
     }
     return (key, cache_part2_from_post(post));
 }
 
 pub fn cache_part2_from_post(post: &CodeCompletionPost) -> String {
-    if post.inputs.multiline {
+    let line_mode = if post.inputs.multiline {
         "multiline".to_string()
     } else {
         "singleline".to_string()
-    }
+    };
+    serde_json::json!({
+        "generation": post.cache_generation,
+        "salt": post.cache_salt,
+        "model": post.model,
+        "line_mode": line_mode,
+        "parameters": post.parameters,
+        "use_ast": post.use_ast,
+        "use_vecdb": post.use_vecdb,
+        "rag_tokens_n": post.rag_tokens_n,
+    })
+    .to_string()
 }
 
 impl Drop for CompletionSaveToCache {
@@ -182,5 +213,115 @@ impl Drop for CompletionSaveToCache {
                 ),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use refact_core::chat_types::{CodeCompletionInputs, CursorPosition, SamplingParameters};
+
+    fn post(file: &str, source: &str) -> CodeCompletionPost {
+        let mut sources = HashMap::new();
+        sources.insert(file.to_string(), source.to_string());
+        CodeCompletionPost {
+            inputs: CodeCompletionInputs {
+                sources,
+                cursor: CursorPosition {
+                    file: file.to_string(),
+                    line: 0,
+                    character: source.chars().count() as i32,
+                },
+                multiline: false,
+            },
+            parameters: SamplingParameters {
+                max_new_tokens: 50,
+                ..Default::default()
+            },
+            model: "custom/model".to_string(),
+            stream: false,
+            no_cache: false,
+            use_ast: true,
+            use_vecdb: false,
+            rag_tokens_n: 128,
+            cache_salt: "salt-a".to_string(),
+            cache_generation: 1,
+        }
+    }
+
+    fn test_post() -> CodeCompletionPost {
+        post("/tmp/main.rs", "fn main() {\n    pri\n}")
+    }
+
+    #[test]
+    fn completion_cache_key_changes_with_generation() {
+        let mut post = test_post();
+        let key1 = cache_key_from_post(&post);
+        post.cache_generation += 1;
+        let key2 = cache_key_from_post(&post);
+
+        assert_ne!(key1.1, key2.1);
+    }
+
+    #[test]
+    fn completion_cache_key_changes_with_model_salt_and_rag_settings() {
+        let mut post = test_post();
+        let key1 = cache_key_from_post(&post);
+        post.cache_salt = "salt-b".to_string();
+        let key2 = cache_key_from_post(&post);
+        post.cache_salt = "salt-a".to_string();
+        post.use_vecdb = true;
+        let key3 = cache_key_from_post(&post);
+
+        assert_ne!(key1.1, key2.1);
+        assert_ne!(key1.1, key3.1);
+    }
+
+    #[test]
+    fn completion_cache_bump_clears_entries() {
+        let cache = Arc::new(StdRwLock::new(CompletionCache::new()));
+        let post = test_post();
+        let key = cache_key_from_post(&post);
+        cache_put(cache.clone(), key.clone(), serde_json::json!({"value": 1}));
+
+        assert!(cache_get(cache.clone(), key).is_some());
+        assert_eq!(cache_bump_generation(cache.clone()), 1);
+        assert!(cache.read().unwrap().map.is_empty());
+        assert!(cache.read().unwrap().in_added_order.is_empty());
+    }
+
+    #[test]
+    fn fallback_cache_key_includes_post_salt() {
+        let mut first = post("missing.rs", "let a = 1;");
+        first.inputs.cursor.file = "other.rs".to_string();
+        let mut second = first.clone();
+        second.model = "model-b".to_string();
+
+        let first_key = cache_key_from_post(&first);
+        let second_key = cache_key_from_post(&second);
+
+        assert_eq!(first_key.0, second_key.0);
+        assert_ne!(first_key.1, second_key.1);
+    }
+
+    #[test]
+    fn cache_key_changes_with_generation_salt() {
+        let first = post("test.rs", "let a = 1;");
+        let mut second = first.clone();
+        second.rag_tokens_n = 256;
+
+        assert_ne!(
+            cache_key_from_post(&first).1,
+            cache_key_from_post(&second).1
+        );
+    }
+
+    #[test]
+    fn cache_key_truncates_unicode_by_chars() {
+        let source = "é".repeat(CACHE_KEY_CHARS + 3);
+        let key = cache_key_from_post(&post("test.rs", &source)).0;
+
+        assert_eq!(key.chars().count(), CACHE_KEY_CHARS);
+        assert!(key.chars().all(|c| c == 'é'));
     }
 }

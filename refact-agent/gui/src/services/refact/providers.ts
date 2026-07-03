@@ -12,6 +12,17 @@ export type WireFormat =
   | "anthropic_messages"
   | "refact";
 
+export type CompletionEndpointStyle =
+  | "openai_completions"
+  | "openai_chat_completions"
+  | "openai_responses";
+
+export type EmbeddingEndpointStyle =
+  | "openai"
+  | "ollama_native"
+  | "voyage"
+  | "cohere_v2";
+
 export type ProviderModel = {
   id: string;
   base_name: string;
@@ -19,13 +30,15 @@ export type ProviderModel = {
   n_ctx: number;
   supports_tools: boolean;
   supports_multimodality: boolean;
+  supports_reasoning?: string | null;
   reasoning_effort_options?: string[] | null;
   supports_thinking_budget?: boolean;
   supports_adaptive_thinking_budget?: boolean;
   supports_cache_control?: boolean;
+  name?: string;
   supports_agent: boolean;
-  wire_format_override: WireFormat | null;
-  endpoint_override: string | null;
+  wire_format_override?: WireFormat | null;
+  endpoint_override?: string | null;
   user_configured: boolean;
   removable: boolean;
 };
@@ -37,6 +50,8 @@ export type ProviderRuntime = {
   enabled: boolean;
   readonly: boolean;
   wire_format: WireFormat;
+  completion_endpoint_style?: CompletionEndpointStyle | "";
+  embedding_endpoint_style?: EmbeddingEndpointStyle | "";
   chat_endpoint: string;
   completion_endpoint: string;
   embedding_endpoint: string;
@@ -82,6 +97,36 @@ export type ProviderSchemaResponse = {
 
 export type ProviderModelsResponse = {
   models: ProviderModel[];
+};
+
+export type CompletionProviderModelConfig = {
+  n_ctx?: number;
+  name?: string;
+  tokenizer?: string;
+  scratchpad?: string;
+  scratchpad_patch?: Record<string, unknown>;
+  model_family?: string | null;
+};
+
+export type EmbeddingProviderModelConfig = {
+  n_ctx?: number;
+  name?: string;
+  tokenizer?: string;
+  embedding_size?: number;
+  dimensions?: number;
+  query_prefix?: string;
+  document_prefix?: string;
+  rejection_threshold?: number;
+  embedding_batch?: number;
+};
+
+export type ProviderFormRoleSettings = Record<string, unknown> & {
+  completion_endpoint?: string;
+  completion_endpoint_style?: string;
+  completion_models?: Record<string, CompletionProviderModelConfig>;
+  embedding_endpoint?: string;
+  embedding_endpoint_style?: string;
+  embedding_model?: EmbeddingProviderModelConfig;
 };
 
 // Available models from model discovery (lazy loaded)
@@ -351,8 +396,9 @@ export type ProviderDefaults = {
   chat_light: ModelTypeDefaults;
   chat_thinking: ModelTypeDefaults;
   chat_buddy?: ModelTypeDefaults;
-  completion_model?: string;
-  embedding_model?: string;
+  completion_model?: string | null;
+  embedding_model?: string | null;
+  [key: string]: unknown;
 };
 
 export type ProviderDefaultsUpdateRequest = ProviderDefaults & {
@@ -1506,6 +1552,7 @@ function isProviderDetailResponseWire(
   if (!hasProperty(data, "readonly") || typeof data.readonly !== "boolean")
     return false;
   if (!hasProperty(data, "settings")) return false;
+  if (!isProviderFormRoleSettings(data.settings)) return false;
   if (hasProperty(data, "runtime") && !isProviderRuntime(data.runtime)) {
     return false;
   }
@@ -1520,6 +1567,51 @@ function isProviderRuntime(data: unknown): data is ProviderRuntimeWire | null {
   if (
     !hasProperty(data, "display_name") ||
     typeof data.display_name !== "string"
+  )
+    return false;
+  if (!hasProperty(data, "enabled") || typeof data.enabled !== "boolean")
+    return false;
+  if (!hasProperty(data, "readonly") || typeof data.readonly !== "boolean")
+    return false;
+  if (!hasProperty(data, "wire_format") || !isWireFormat(data.wire_format))
+    return false;
+  if (
+    hasProperty(data, "completion_endpoint_style") &&
+    !isCompletionEndpointStyleOrEmpty(data.completion_endpoint_style)
+  )
+    return false;
+  if (
+    hasProperty(data, "embedding_endpoint_style") &&
+    !isEmbeddingEndpointStyleOrEmpty(data.embedding_endpoint_style)
+  )
+    return false;
+  if (
+    !hasProperty(data, "chat_endpoint") ||
+    typeof data.chat_endpoint !== "string"
+  )
+    return false;
+  if (
+    !hasProperty(data, "completion_endpoint") ||
+    typeof data.completion_endpoint !== "string"
+  )
+    return false;
+  if (
+    !hasProperty(data, "embedding_endpoint") ||
+    typeof data.embedding_endpoint !== "string"
+  )
+    return false;
+  if (!hasProperty(data, "chat_models") || !Array.isArray(data.chat_models))
+    return false;
+  if (!data.chat_models.every(isProviderModel)) return false;
+  if (
+    !hasProperty(data, "completion_models") ||
+    !Array.isArray(data.completion_models)
+  )
+    return false;
+  if (!data.completion_models.every(isProviderModel)) return false;
+  if (
+    !hasProperty(data, "embedding_model") ||
+    (data.embedding_model !== null && !isProviderModel(data.embedding_model))
   )
     return false;
   return true;
@@ -1579,6 +1671,7 @@ function isProviderModelsResponse(
   if (typeof data !== "object" || data === null) return false;
   if (!hasProperty(data, "models")) return false;
   if (!Array.isArray(data.models)) return false;
+  if (!data.models.every(isProviderModel)) return false;
   return true;
 }
 
@@ -1612,8 +1705,60 @@ function isOAuthStartMode(data: unknown): data is OAuthStartMode {
   return data === "callback" || data === "manual_code" || data === "device";
 }
 
+function isWireFormat(data: unknown): data is WireFormat {
+  return (
+    data === "openai_chat_completions" ||
+    data === "openai_responses" ||
+    data === "anthropic_messages" ||
+    data === "refact"
+  );
+}
+
+function isCompletionEndpointStyleOrEmpty(
+  data: unknown,
+): data is CompletionEndpointStyle | "" {
+  return (
+    data === "" ||
+    data === "openai_completions" ||
+    data === "openai_chat_completions" ||
+    data === "openai_responses"
+  );
+}
+
+function isEmbeddingEndpointStyleOrEmpty(
+  data: unknown,
+): data is EmbeddingEndpointStyle | "" {
+  return (
+    data === "" ||
+    data === "openai" ||
+    data === "ollama_native" ||
+    data === "voyage" ||
+    data === "cohere_v2"
+  );
+}
+
+function isOptionalBooleanField(data: object, key: string): boolean {
+  return !hasProperty(data, key) || typeof data[key] === "boolean";
+}
+
+function isOptionalStringArrayField(data: object, key: string): boolean {
+  return (
+    !hasProperty(data, key) ||
+    (Array.isArray(data[key]) &&
+      data[key].every((value) => typeof value === "string"))
+  );
+}
+
 function isOptionalStringField(data: object, key: string): boolean {
   return !hasProperty(data, key) || typeof data[key] === "string";
+}
+
+function isOptionalNullableStringField(data: object, key: string): boolean {
+  return (
+    !hasProperty(data, key) ||
+    data[key] === null ||
+    typeof data[key] === "string"
+  );
 }
 
 function isOptionalNumberField(data: object, key: string): boolean {
@@ -1621,6 +1766,46 @@ function isOptionalNumberField(data: object, key: string): boolean {
     !hasProperty(data, key) ||
     (typeof data[key] === "number" && Number.isFinite(data[key]))
   );
+}
+
+function isRoleSettingsObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCompletionModelsSettingsField(data: object, key: string): boolean {
+  return !hasProperty(data, key) || isRoleSettingsObject(data[key]);
+}
+
+function isEmbeddingModelSettingsField(data: object, key: string): boolean {
+  // Accept the legacy bare-string shape and the object shape.
+  return (
+    !hasProperty(data, key) ||
+    typeof data[key] === "string" ||
+    isRoleSettingsObject(data[key])
+  );
+}
+
+// Validates the role-separated provider settings the GUI actually edits.
+// Only present fields are checked; unrelated provider settings keys are tolerated.
+function isProviderFormRoleSettings(data: unknown): boolean {
+  if (!isRoleSettingsObject(data)) return false;
+  const settings = data as object;
+  if (!isOptionalStringField(settings, "completion_endpoint")) return false;
+  if (
+    hasProperty(settings, "completion_endpoint_style") &&
+    !isCompletionEndpointStyleOrEmpty(settings.completion_endpoint_style)
+  )
+    return false;
+  if (!isCompletionModelsSettingsField(settings, "completion_models"))
+    return false;
+  if (!isOptionalStringField(settings, "embedding_endpoint")) return false;
+  if (
+    hasProperty(settings, "embedding_endpoint_style") &&
+    !isEmbeddingEndpointStyleOrEmpty(settings.embedding_endpoint_style)
+  )
+    return false;
+  if (!isEmbeddingModelSettingsField(settings, "embedding_model")) return false;
+  return true;
 }
 
 function isOAuthStartResponse(data: unknown): data is OAuthStartResponse {
@@ -1652,10 +1837,17 @@ function isOAuthExchangeResponse(data: unknown): data is OAuthExchangeResponse {
 
 function isModelTypeDefaults(data: unknown): data is ModelTypeDefaults {
   if (typeof data !== "object" || data === null) return false;
+  if (!isOptionalStringField(data, "model")) return false;
+  if (!isOptionalNumberField(data, "max_new_tokens")) return false;
+  if (!isOptionalNumberField(data, "temperature")) return false;
+  if (!isOptionalNumberField(data, "top_p")) return false;
+  if (!isOptionalBooleanField(data, "boost_reasoning")) return false;
+  if (!isOptionalStringField(data, "reasoning_effort")) return false;
+  if (!isOptionalNumberField(data, "thinking_budget")) return false;
   return true;
 }
 
-function isProviderDefaults(data: unknown): data is ProviderDefaults {
+export function isProviderDefaults(data: unknown): data is ProviderDefaults {
   if (typeof data !== "object" || data === null) return false;
   const obj = data as Record<string, unknown>;
   if (hasProperty(obj, "chat") && !isModelTypeDefaults(obj.chat)) return false;
@@ -1678,7 +1870,74 @@ function isProviderDefaults(data: unknown): data is ProviderDefaults {
     return false;
   if (hasProperty(obj, "chat_buddy") && !isModelTypeDefaults(obj.chat_buddy))
     return false;
+  if (!isOptionalNullableStringField(obj, "completion_model")) return false;
+  if (!isOptionalNullableStringField(obj, "embedding_model")) return false;
   if (hasProperty(obj, "detail")) return false;
+  return true;
+}
+
+function isProviderModel(data: unknown): data is ProviderModel {
+  if (typeof data !== "object" || data === null) return false;
+  if (!hasProperty(data, "id") || typeof data.id !== "string") return false;
+  if (!hasProperty(data, "enabled") || typeof data.enabled !== "boolean")
+    return false;
+  if (!hasProperty(data, "removable") || typeof data.removable !== "boolean")
+    return false;
+  if (
+    !hasProperty(data, "user_configured") ||
+    typeof data.user_configured !== "boolean"
+  )
+    return false;
+  if (!hasProperty(data, "base_name") || typeof data.base_name !== "string")
+    return false;
+  if (!hasProperty(data, "n_ctx") || typeof data.n_ctx !== "number")
+    return false;
+  if (
+    !hasProperty(data, "supports_tools") ||
+    typeof data.supports_tools !== "boolean"
+  )
+    return false;
+  if (
+    !hasProperty(data, "supports_multimodality") ||
+    typeof data.supports_multimodality !== "boolean"
+  )
+    return false;
+  if (!hasProperty(data, "supports_agent")) return false;
+  if (typeof data.supports_agent !== "boolean") return false;
+  if (
+    hasProperty(data, "supports_reasoning") &&
+    data.supports_reasoning !== null &&
+    typeof data.supports_reasoning !== "string"
+  )
+    return false;
+  if (
+    hasProperty(data, "reasoning_effort_options") &&
+    data.reasoning_effort_options !== null &&
+    (!Array.isArray(data.reasoning_effort_options) ||
+      !data.reasoning_effort_options.every(
+        (value) => typeof value === "string",
+      ))
+  )
+    return false;
+  if (!isOptionalBooleanField(data, "supports_thinking_budget")) return false;
+  if (!isOptionalBooleanField(data, "supports_adaptive_thinking_budget"))
+    return false;
+  if (!isOptionalBooleanField(data, "supports_cache_control")) return false;
+  if (!isOptionalStringField(data, "name")) return false;
+  if (
+    hasProperty(data, "wire_format_override") &&
+    data.wire_format_override !== null &&
+    !isWireFormat(data.wire_format_override)
+  )
+    return false;
+  if (
+    hasProperty(data, "endpoint_override") &&
+    data.endpoint_override !== null &&
+    typeof data.endpoint_override !== "string"
+  )
+    return false;
+  if (!isOptionalStringArrayField(data, "available_providers")) return false;
+
   return true;
 }
 

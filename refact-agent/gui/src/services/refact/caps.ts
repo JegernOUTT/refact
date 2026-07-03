@@ -1,7 +1,14 @@
 import { RootState } from "../../app/store";
 import { CAPS_URL } from "./consts";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
-import { CodeChatModel, CodeCompletionModel, EmbeddingModel } from "./models";
+import {
+  CodeChatModel,
+  CodeCompletionModel,
+  EmbeddingModel,
+  isCodeChatModel,
+  isCodeCompletionModel,
+  isEmbeddingModel,
+} from "./models";
 import { buildApiUrlFromState } from "./apiUrl";
 
 export const capsApi = createApi({
@@ -90,7 +97,13 @@ export type CapsResponse = {
   completion_models: Record<string, CodeCompletionModel>;
   completion_default_model: string;
   code_completion_n_ctx: number;
+  // The engine wire caps expose a single authoritative embedding model
+  // (VecDB indexes one embedding dimension at a time). `embedding_models`
+  // (plural) is accepted for forward/back-compat but is NOT populated by the
+  // current backend; consumers should treat `embedding_model` as the source of
+  // truth and only fall back to the plural map when present.
   embedding_model?: EmbeddingModel;
+  embedding_models?: Record<string, EmbeddingModel>;
   chat_model_2: string;
   task_planner_agent_model: string;
   chat_thinking_model: string;
@@ -110,14 +123,39 @@ export type CapsResponse = {
 export function isCapsResponse(json: unknown): json is CapsResponse {
   if (!json) return false;
   if (typeof json !== "object") return false;
+  if (!("caps_version" in json) || typeof json.caps_version !== "number")
+    return false;
   if (!("metadata" in json)) return false;
   if (!isCapsMetadata(json.metadata)) return false;
   if (!("chat_default_model" in json)) return false;
   if (typeof json.chat_default_model !== "string") return false;
+  if (!("completion_default_model" in json)) return false;
+  if (typeof json.completion_default_model !== "string") return false;
+  if (!("completion_models" in json)) return false;
+  if (!isModelRecord(json.completion_models, isCodeCompletionModel))
+    return false;
   if (!isOptionalStringField(json, "chat_model_2")) return false;
   if (!isOptionalStringField(json, "task_planner_agent_model")) return false;
   if (!("chat_models" in json)) return false;
+  if (!isModelRecord(json.chat_models, isCodeChatModel)) return false;
+  if ("embedding_model" in json && !isEmbeddingModel(json.embedding_model))
+    return false;
+  if (
+    "embedding_models" in json &&
+    !isModelRecord(json.embedding_models, isEmbeddingModel)
+  )
+    return false;
+  if (!("embedding_model" in json) && !("embedding_models" in json))
+    return false;
   return true;
+}
+
+function isModelRecord<T>(
+  value: unknown,
+  modelGuard: (model: unknown) => model is T,
+): value is Record<string, T> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value).every(modelGuard);
 }
 
 function isOptionalStringField(

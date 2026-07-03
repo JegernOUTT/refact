@@ -38,6 +38,21 @@ fn is_path_to_enqueue_valid(path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+fn document_cache_hash(constants: &VecdbConstants, text: &str) -> String {
+    let embedding_model = &constants.embedding_model;
+    let cache_input = format!(
+        "model={}\nsize={}\ndimensions={:?}\nstyle={}\nemb_style={}\ndoc_prefix={}\n---\n{}",
+        embedding_model.model_name,
+        embedding_model.embedding_size,
+        embedding_model.dimensions,
+        embedding_model.endpoint_style,
+        embedding_model.embedding_endpoint_style,
+        embedding_model.document_prefix,
+        text
+    );
+    refact_ast::ast::chunk_utils::official_text_hashing_function(&cache_input)
+}
+
 enum MessageToVecdbThread {
     RegularDocument(String),
     ImmediatelyRegularDocument(String),
@@ -60,16 +75,20 @@ async fn vectorize_batch_from_q(
     vecdb_handler_arc: Arc<AMutex<VecDBSqlite>>,
 ) -> Result<(), String> {
     #[allow(non_snake_case)]
-    let B = constants.embedding_model.embedding_batch;
+    let B = constants.embedding_model.embedding_batch.max(1);
     let batch = run_actual_model_on_these
         .drain(..B.min(run_actual_model_on_these.len()))
         .collect::<Vec<_>>();
     assert!(batch.len() > 0);
 
+    let embedding_inputs = batch
+        .iter()
+        .map(|x| constants.embedding_model.prefixed_document(&x.window_text))
+        .collect();
     let batch_result = match get_embedding_with_retries(
         client.clone(),
         &constants.embedding_model,
-        batch.iter().map(|x| x.window_text.clone()).collect(),
+        embedding_inputs,
         10,
     )
     .await
@@ -103,8 +122,7 @@ async fn vectorize_batch_from_q(
     let mut send_to_cache = vec![];
     for (i, data_res) in batch.iter().enumerate() {
         if batch_result[i].is_empty() {
-            info!("skipping an empty embedding split");
-            continue;
+            return Err("vectorize: embedding validation returned empty vector".to_string());
         }
         ready_to_vecdb.push(VecdbRecord {
             vector: Some(batch_result[i].clone()),
@@ -117,7 +135,7 @@ async fn vectorize_batch_from_q(
         send_to_cache.push(SimpleTextHashVector {
             vector: Some(batch_result[i].clone()),
             window_text: data_res.window_text.clone(),
-            window_text_hash: data_res.window_text_hash.clone(),
+            window_text_hash: document_cache_hash(constants, &data_res.window_text),
         });
     }
 
@@ -138,23 +156,14 @@ async fn vectorize_batch_from_q(
     Ok(())
 }
 
-async fn from_splits_to_vecdb_records_applying_cache(
-    splits: &mut Vec<SplitResult>,
+fn apply_cached_vectors_result(
+    batch: Vec<SplitResult>,
+    vectors_maybe: Result<Vec<Option<Vec<f32>>>, String>,
     ready_to_vecdb: &mut Vec<VecdbRecord>,
     run_actual_model_on_these: &mut Vec<SplitResult>,
-    vecdb_handler_arc: Arc<AMutex<VecDBSqlite>>,
-    group_size: usize,
 ) {
-    while !splits.is_empty() {
-        let batch: Vec<SplitResult> = splits
-            .drain(..group_size.min(splits.len()))
-            .collect::<Vec<_>>();
-        let vectors_maybe = vecdb_handler_arc
-            .lock()
-            .await
-            .fetch_vectors_from_cache(&batch)
-            .await;
-        if let Ok(vectors) = vectors_maybe {
+    match vectors_maybe {
+        Ok(vectors) => {
             for (split, maybe_vector) in batch.iter().zip(vectors.iter()) {
                 if maybe_vector.is_none() {
                     run_actual_model_on_these.push(split.clone());
@@ -169,9 +178,45 @@ async fn from_splits_to_vecdb_records_applying_cache(
                     usefulness: 0.0,
                 });
             }
-        } else if let Err(err) = vectors_maybe {
-            tracing::error!("{}", err);
         }
+        Err(err) => {
+            tracing::error!("{}", err);
+            run_actual_model_on_these.extend(batch);
+        }
+    }
+}
+
+async fn from_splits_to_vecdb_records_applying_cache(
+    splits: &mut Vec<SplitResult>,
+    ready_to_vecdb: &mut Vec<VecdbRecord>,
+    run_actual_model_on_these: &mut Vec<SplitResult>,
+    vecdb_handler_arc: Arc<AMutex<VecDBSqlite>>,
+    group_size: usize,
+    constants: &VecdbConstants,
+) {
+    while !splits.is_empty() {
+        let batch: Vec<SplitResult> = splits
+            .drain(..group_size.min(splits.len()))
+            .collect::<Vec<_>>();
+        let cache_lookup = batch
+            .iter()
+            .map(|split| {
+                let mut split = split.clone();
+                split.window_text_hash = document_cache_hash(constants, &split.window_text);
+                split
+            })
+            .collect();
+        let vectors_maybe = vecdb_handler_arc
+            .lock()
+            .await
+            .fetch_vectors_from_cache(&cache_lookup)
+            .await;
+        apply_cached_vectors_result(
+            batch,
+            vectors_maybe,
+            ready_to_vecdb,
+            run_actual_model_on_these,
+        );
     }
 }
 
@@ -288,8 +333,9 @@ async fn vectorize_thread(
 
         let flush = ready_to_vecdb.len() > 100 || files_unprocessed == 0 || work_on_one.is_none();
         loop {
+            let embedding_batch = constants.embedding_model.embedding_batch.max(1);
             if run_actual_model_on_these.len() > 0 && flush
-                || run_actual_model_on_these.len() >= constants.embedding_model.embedding_batch
+                || run_actual_model_on_these.len() >= embedding_batch
             {
                 if let Err(err) = vectorize_batch_from_q(
                     &mut run_actual_model_on_these,
@@ -472,6 +518,7 @@ async fn vectorize_thread(
             &mut run_actual_model_on_these,
             vecdb_handler_arc.clone(),
             10,
+            &constants,
         )
         .await;
     }
@@ -545,6 +592,17 @@ pub async fn vectorizer_enqueue_files(
     documents: &[String],
     process_immediately: bool,
 ) {
+    enqueue_files_impl(vservice, documents, process_immediately).await;
+}
+
+async fn enqueue_files_impl(
+    vservice: Arc<AMutex<FileVectorizerService>>,
+    documents: &[String],
+    process_immediately: bool,
+) -> usize {
+    if documents.is_empty() {
+        return 0;
+    }
     info!("adding {} files", documents.len());
     let documents = _filter_docs_to_enqueue(documents);
     let (vecdb_todo, vstatus, vstatus_notify, vecdb_max_files) = {
@@ -568,7 +626,7 @@ pub async fn vectorizer_enqueue_files(
     {
         {
             let mut vecdb_todo_locked = vecdb_todo.lock().await;
-            for doc in documents.iter() {
+            for doc in documents_my_copy.iter() {
                 if process_immediately {
                     vecdb_todo_locked.push_back(MessageToVecdbThread::ImmediatelyRegularDocument(
                         doc.clone(),
@@ -582,5 +640,157 @@ pub async fn vectorizer_enqueue_files(
         if process_immediately {
             vstatus_notify.notify_waiters();
         }
+    }
+    documents_my_copy.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vdb_structs::EmbeddingModelConfig;
+
+    fn test_constants(vecdb_max_files: usize) -> VecdbConstants {
+        VecdbConstants {
+            embedding_model: EmbeddingModelConfig {
+                endpoint: "test://record-only".to_string(),
+                endpoint_style: "openai".to_string(),
+                embedding_endpoint_style: "openai".to_string(),
+                api_key: String::new(),
+                auth_token: String::new(),
+                extra_headers: Default::default(),
+                model_name: "test-embedding".to_string(),
+                embedding_size: 2,
+                dimensions: None,
+                query_prefix: String::new(),
+                document_prefix: "doc: ".to_string(),
+                rejection_threshold: 0.63,
+                embedding_batch: 0,
+                n_ctx: 128,
+            },
+            tokenizer: None,
+            splitter_window_size: 128,
+            vecdb_max_files,
+        }
+    }
+
+    #[test]
+    fn document_cache_hash_includes_prefix_identity() {
+        let mut constants = test_constants(10);
+        let without_prefix = document_cache_hash(&constants, "same text");
+        constants.embedding_model.document_prefix = "passage: ".to_string();
+        let with_prefix = document_cache_hash(&constants, "same text");
+
+        assert_ne!(without_prefix, with_prefix);
+    }
+
+    #[tokio::test]
+    async fn vectorize_batch_uses_document_prefix_and_handles_zero_batch() {
+        let constants = test_constants(10);
+        let tmp =
+            std::env::temp_dir().join(format!("refact-vecdb-thread-{}", uuid::Uuid::new_v4()));
+        let legacy = tmp.join("legacy");
+        let handler = VecDBSqlite::init(&tmp, &legacy, "test-embedding", 2, "vecdb_thread_test")
+            .await
+            .unwrap();
+        let handler = Arc::new(AMutex::new(handler));
+        let vstatus = Arc::new(AMutex::new(VecDbStatus {
+            files_unprocessed: 0,
+            files_total: 0,
+            requests_made_since_start: 0,
+            vectors_made_since_start: 0,
+            db_size: 0,
+            db_cache_size: 0,
+            state: "testing".to_string(),
+            queue_additions: false,
+            vecdb_max_files_hit: false,
+            vecdb_errors: IndexMap::new(),
+        }));
+        let mut run = vec![SplitResult {
+            file_path: PathBuf::from("/tmp/a.rs"),
+            window_text: "fn main() {}".to_string(),
+            window_text_hash: "legacy".to_string(),
+            start_line: 1,
+            end_line: 1,
+            symbol_path: String::new(),
+        }];
+        let mut ready = vec![];
+
+        vectorize_batch_from_q(
+            &mut run,
+            &mut ready,
+            vstatus,
+            Arc::new(AMutex::new(reqwest::Client::new())),
+            &constants,
+            handler,
+        )
+        .await
+        .unwrap();
+
+        assert!(run.is_empty());
+        assert_eq!(ready.len(), 1);
+        assert_eq!(
+            crate::fetch_embedding::take_last_embedding_inputs(),
+            vec!["doc: fn main() {}".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[tokio::test]
+    async fn enqueue_files_applies_vecdb_max_files_truncation() {
+        let tmp =
+            std::env::temp_dir().join(format!("refact-vecdb-enqueue-{}", uuid::Uuid::new_v4()));
+        let legacy = tmp.join("legacy");
+        let handler = VecDBSqlite::init(&tmp, &legacy, "test-embedding", 2, "vecdb_enqueue_test")
+            .await
+            .unwrap();
+        let service = Arc::new(AMutex::new(
+            FileVectorizerService::new(Arc::new(AMutex::new(handler)), test_constants(2)).await,
+        ));
+        let docs = vec![
+            "/tmp/a.rs".to_string(),
+            "/tmp/b.rs".to_string(),
+            "/tmp/c.rs".to_string(),
+        ];
+
+        let enqueued = enqueue_files_impl(service.clone(), &docs, false).await;
+
+        assert_eq!(enqueued, 2);
+        let service_locked = service.lock().await;
+        assert!(service_locked.vstatus.lock().await.vecdb_max_files_hit);
+        assert_eq!(service_locked.vecdb_todo.lock().await.len(), 2);
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+}
+
+#[cfg(test)]
+mod cache_error_tests {
+    use super::*;
+
+    fn split(text: &str) -> SplitResult {
+        SplitResult {
+            file_path: PathBuf::from("/tmp/test.rs"),
+            window_text: text.to_string(),
+            window_text_hash: refact_ast::ast::chunk_utils::official_text_hashing_function(text),
+            start_line: 1,
+            end_line: 1,
+            symbol_path: String::new(),
+        }
+    }
+
+    #[test]
+    fn vdb_thread_cache_lookup_error_keeps_batch_for_embedding() {
+        let batch = vec![split("one"), split("two")];
+        let mut ready = vec![];
+        let mut run_actual = vec![];
+
+        apply_cached_vectors_result(
+            batch,
+            Err("cache failed".to_string()),
+            &mut ready,
+            &mut run_actual,
+        );
+
+        assert!(ready.is_empty());
+        assert_eq!(run_actual.len(), 2);
     }
 }

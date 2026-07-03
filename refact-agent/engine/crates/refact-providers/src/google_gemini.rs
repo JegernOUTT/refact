@@ -227,6 +227,8 @@ available:
             completion_endpoint: String::new(),
             embedding_endpoint:
                 "https://generativelanguage.googleapis.com/v1beta/openai/embeddings".to_string(),
+            completion_endpoint_style: String::new(),
+            embedding_endpoint_style: String::new(),
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),

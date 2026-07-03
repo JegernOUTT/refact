@@ -92,6 +92,8 @@ The engine uses these local locations by default:
 
 Provider setup is normally handled from the GUI, but the engine ultimately loads YAML files from `providers.d`. Current provider families include OpenAI-compatible APIs, Anthropic, OpenRouter, Ollama, LM Studio, vLLM, Groq, DeepSeek, Doubao, xAI, Google Gemini, Qwen, Kimi, Zhipu, MiniMax, GitHub Copilot, Claude Code, and custom endpoints. Available models are derived from provider config and provider/runtime catalogs instead of a fixed hard-coded model list.
 
+Custom provider YAML keeps chat, completion, and embedding roles separate. Existing chat-only configs using `custom_models` and `enabled_models` remain valid for chat. Code completion uses `completion_models` plus `completion_default_model` in caps/defaults, and VecDB uses `embedding_model` plus the embedding default. Endpoint styles are string-backed: completion currently supports `openai_completions` and `openai_chat_completions`; embeddings currently support `openai` and `ollama_native`. Future or invalid styles are preserved as config strings but return explicit unsupported/invalid-style errors when used.
+
 ## API overview
 
 Selected HTTP endpoints under `/v1`:

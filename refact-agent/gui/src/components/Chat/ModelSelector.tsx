@@ -8,7 +8,10 @@ import {
   formatContextWindow,
   formatPricing,
 } from "../../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
-import { enrichAndGroupModels } from "../../utils/enrichModels";
+import {
+  enrichAndGroupModels,
+  type ModelSelectorCapability,
+} from "../../utils/enrichModels";
 import { isLegacyRefactModel } from "../../utils/modelProviders";
 import {
   ModelSelector as KitModelSelector,
@@ -27,6 +30,7 @@ export type ModelSelectorProps = {
   defaultValue?: string;
   allowUnset?: boolean;
   unsetLabel?: string;
+  capability?: ModelSelectorCapability;
 };
 
 function modelBadges(
@@ -60,10 +64,31 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
   defaultValue,
   allowUnset = false,
   unsetLabel = "None",
+  capability = "chat",
 }) => {
   const { data: caps } = useGetCapsQuery(undefined);
 
   const usableModels = useMemo(() => {
+    if (capability === "completion") {
+      return Object.keys(caps?.completion_models ?? {}).map((model) => ({
+        value: model,
+        disabled: false,
+        textValue: model,
+      }));
+    }
+
+    if (capability === "embedding") {
+      const embeddingModel = caps?.embedding_model;
+      if (!embeddingModel) return [];
+      return [
+        {
+          value: embeddingModel.id,
+          disabled: false,
+          textValue: embeddingModel.id,
+        },
+      ];
+    }
+
     return Object.keys(caps?.chat_models ?? {})
       .filter((model) => !isLegacyRefactModel(model))
       .map((model) => ({
@@ -71,14 +96,26 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
         disabled: false,
         textValue: model,
       }));
-  }, [caps?.chat_models]);
+  }, [
+    capability,
+    caps?.chat_models,
+    caps?.completion_models,
+    caps?.embedding_model,
+  ]);
 
   const groupedModels = useMemo(
-    () => enrichAndGroupModels(usableModels, caps),
-    [usableModels, caps],
+    () => enrichAndGroupModels(usableModels, caps, capability),
+    [usableModels, caps, capability],
   );
 
-  const defaultModel = defaultValue ?? caps?.chat_default_model ?? "";
+  const defaultModel =
+    defaultValue ??
+    (capability === "completion"
+      ? caps?.completion_default_model
+      : capability === "embedding"
+        ? caps?.embedding_model?.id
+        : caps?.chat_default_model) ??
+    "";
   const effectiveValue = value ?? defaultModel;
   const hasEffectiveValueInList = groupedModels.some((group) =>
     group.models.some((model) => model.value === effectiveValue),

@@ -20,6 +20,17 @@ pub struct VecDBSqlite {
     emb_table_name: String,
 }
 
+const SCOPED_SEARCH_BROADENING_FACTOR: usize = 20;
+
+fn register_vec0_extension() {
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
+    });
+}
+
 #[derive(Debug, PartialEq)]
 struct DataColumn {
     name: String,
@@ -183,6 +194,7 @@ impl VecDBSqlite {
         embedding_size: i32,
         emb_table_name: &str,
     ) -> Result<VecDBSqlite, String> {
+        register_vec0_extension();
         let db_path = get_db_path(dest_dir, legacy_cache_dir, model_name, embedding_size).await?;
         if let Some(parent) = db_path.parent() {
             fs::create_dir_all(parent)
@@ -376,12 +388,20 @@ impl VecDBSqlite {
         let embedding_bytes: Vec<u8> = embedding.as_bytes().to_vec();
         let emb_table_name = self.emb_table_name.clone();
         let scope_prefix = vecdb_scope_filter_mb.clone();
+        let knn_top_n = if scope_prefix.is_some() {
+            top_n
+                .saturating_mul(SCOPED_SEARCH_BROADENING_FACTOR)
+                .max(top_n)
+        } else {
+            top_n
+        };
 
         let mut results = with_retry(
             || {
                 let embedding_bytes = embedding_bytes.clone();
                 let emb_table_name = emb_table_name.clone();
                 let scope_prefix = scope_prefix.clone();
+                let knn_top_n = knn_top_n;
 
                 self.conn.call(move |connection| {
                     let query = match &scope_prefix {
@@ -397,8 +417,8 @@ impl VecDBSqlite {
 
                     let mut stmt = connection.prepare(&query)?;
                     let params = match &scope_prefix {
-                        Some(_) => rusqlite::params![&embedding_bytes, top_n],
-                        None => rusqlite::params![&embedding_bytes, top_n],
+                        Some(_) => rusqlite::params![&embedding_bytes, knn_top_n],
+                        None => rusqlite::params![&embedding_bytes, knn_top_n],
                     };
 
                     let rows = stmt.query_map(params, |row| {
@@ -430,8 +450,12 @@ impl VecDBSqlite {
         )
         .await?;
 
-        if let Some(prefix) = scope_prefix {
+        if let Some(prefix) = &scope_prefix {
             results.retain(|r| r.file_path.to_string_lossy().starts_with(prefix.as_str()));
+        }
+
+        if scope_prefix.is_some() {
+            results.truncate(top_n);
         }
 
         Ok(results)
@@ -479,5 +503,49 @@ impl VecDBSqlite {
             "remove vector records",
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn scoped_search_broadens_before_filtering() {
+        let tmp =
+            std::env::temp_dir().join(format!("refact-vecdb-sqlite-{}", uuid::Uuid::new_v4()));
+        let legacy = tmp.join("legacy");
+        let mut db = VecDBSqlite::init(&tmp, &legacy, "test-embedding", 2, "vecdb_sqlite_test")
+            .await
+            .unwrap();
+        let mut records = Vec::new();
+        for i in 0..10 {
+            records.push(VecdbRecord {
+                vector: Some(vec![1.0, 0.0]),
+                file_path: PathBuf::from(format!("/global/{i}.rs")),
+                start_line: 1,
+                end_line: 1,
+                distance: -1.0,
+                usefulness: 0.0,
+            });
+        }
+        records.push(VecdbRecord {
+            vector: Some(vec![0.9, 0.1]),
+            file_path: PathBuf::from("/scope/good.rs"),
+            start_line: 1,
+            end_line: 1,
+            distance: -1.0,
+            usefulness: 0.0,
+        });
+        db.vecdb_records_add(&records).await.unwrap();
+
+        let scoped = db
+            .vecdb_search(&vec![1.0, 0.0], 1, Some("/scope".to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].file_path, PathBuf::from("/scope/good.rs"));
+        let _ = std::fs::remove_dir_all(tmp);
     }
 }

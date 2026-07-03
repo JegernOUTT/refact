@@ -90,6 +90,8 @@ const baseDefaults = {
   chat_light: {},
   chat_thinking: {},
   chat_buddy: {},
+  completion_model: "",
+  embedding_model: "",
 };
 
 const baseCaps = {
@@ -99,6 +101,7 @@ const baseCaps = {
   chat_light_model: "",
   chat_thinking_model: "",
   chat_buddy_model: "",
+  completion_default_model: "",
 };
 
 function setupMocks(overrides: { draftData?: unknown } = {}) {
@@ -147,7 +150,7 @@ describe("DefaultModels — embedded", () => {
     vi.clearAllMocks();
   });
 
-  it("renders all 6 role tabs with short labels", () => {
+  it("renders all role tabs with short labels", () => {
     setupMocks();
     render(<DefaultModels {...defaultProps} embedded />);
     for (const label of [
@@ -157,6 +160,8 @@ describe("DefaultModels — embedded", () => {
       "Light",
       "Thinking",
       "Companion",
+      "Completion",
+      "Embedding",
     ]) {
       expect(screen.getByRole("tab", { name: label })).toBeInTheDocument();
     }
@@ -218,6 +223,21 @@ describe("DefaultModels — embedded", () => {
         screen.getByRole("button", { name: "Save Changes" }),
       ).not.toBeDisabled();
     }
+  });
+
+  it("does not render sampling controls for the completion slot", () => {
+    setupMocks();
+    (useGetCapsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
+      data: { ...baseCaps, completion_default_model: "custom/coder" },
+      refetch: vi.fn(),
+    });
+    render(<DefaultModels {...defaultProps} embedded />);
+    // Chat tab is active by default and resolves a model → sampling shown.
+    expect(screen.getByTestId("sampling-params")).toBeInTheDocument();
+    // Completion slot resolves a model but must NOT expose sampling controls
+    // (the defaults contract cannot persist completion sampling).
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Completion" }));
+    expect(screen.queryByTestId("sampling-params")).not.toBeInTheDocument();
   });
 
   it("applies draft overrides and enables Save when draft is present", () => {

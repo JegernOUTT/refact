@@ -144,6 +144,8 @@ impl DoubaoProvider {
             chat_endpoint: self.chat_endpoint()?,
             completion_endpoint: String::new(),
             embedding_endpoint: String::new(),
+            completion_endpoint_style: String::new(),
+            embedding_endpoint_style: String::new(),
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),

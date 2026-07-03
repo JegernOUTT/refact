@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 
 import { SchemaField } from "./SchemaField";
 import { ProviderOAuth } from "./ProviderOAuth";
+import { RoleSeparatedModelConfig } from "./RoleSeparatedModelConfig";
 import { Spinner } from "../../../components/Spinner";
 
 import { useProviderForm } from "./useProviderForm";
@@ -624,6 +625,10 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
 
         {hasCredentials ? (
           <ProviderModelsList provider={currentProvider} />
+        ) : null}
+
+        {hasCredentials && baseProvider === "custom" && detailedProvider ? (
+          <RoleSeparatedModelConfig provider={detailedProvider} />
         ) : null}
       </div>
     </div>
