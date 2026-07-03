@@ -8,6 +8,11 @@ use crate::http::routers::v1::code_completion::{
     handle_v1_code_completion_web, handle_v1_code_completion_prompt,
 };
 use crate::http::routers::v1::code_lens::handle_v1_code_lens;
+use crate::http::routers::v1::code_intel::{
+    handle_v1_code_intel_communities, handle_v1_code_intel_dead_code, handle_v1_code_intel_graph,
+    handle_v1_code_intel_overview, handle_v1_code_intel_pr_blast,
+    handle_v1_code_intel_security_scan,
+};
 use crate::http::routers::v1::ast::{
     handle_v1_ast_file_dump, handle_v1_ast_file_symbols, handle_v1_ast_status,
 };
@@ -125,6 +130,7 @@ pub mod chat_based_handlers;
 mod chat_modes;
 pub mod code_completion;
 mod code_edit;
+pub mod code_intel;
 pub mod code_lens;
 mod commands_marketplace;
 pub mod customization;
@@ -433,6 +439,18 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/vdb-status", get(handle_v1_vecdb_status))
         .route("/codegraph-search", post(handle_v1_codegraph_search))
         .route("/codegraph-status", get(handle_v1_codegraph_status))
+        .route("/code-intel/overview", get(handle_v1_code_intel_overview))
+        .route("/code-intel/graph", get(handle_v1_code_intel_graph))
+        .route(
+            "/code-intel/communities",
+            get(handle_v1_code_intel_communities),
+        )
+        .route("/code-intel/dead-code", get(handle_v1_code_intel_dead_code))
+        .route("/code-intel/pr-blast", post(handle_v1_code_intel_pr_blast))
+        .route(
+            "/code-intel/security-scan",
+            post(handle_v1_code_intel_security_scan),
+        )
         .route("/knowledge-graph", get(handle_v1_knowledge_graph))
         .route(
             "/knowledge/update-memory",
