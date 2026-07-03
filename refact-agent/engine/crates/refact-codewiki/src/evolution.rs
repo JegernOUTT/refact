@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::decisions::*;
+pub use crate::semantic_match::DEFAULT_DEDUP_TAU;
 
 pub const RELATED_TAU: f64 = 0.6;
-pub const DEFAULT_DEDUP_TAU: f64 = 0.83;
 pub const SUPERSEDE_AUTOFLIP_CONFIDENCE: f64 = 0.85;
 
 const REVERSAL_SIGNALS: &[&str] = &[
@@ -252,6 +252,8 @@ mod tests {
             evidence: statement.to_string(),
             source_kind: "test".to_string(),
             status: DecisionStatus::Verified,
+            provenance: Provenance::Verbatim,
+            corroboration_count: 1,
         }
     }
 

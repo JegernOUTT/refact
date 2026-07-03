@@ -18,6 +18,7 @@ pub struct ExtractedDecision {
     pub source_kind: String,
     pub source_rank: u8,
     pub status: DecisionStatus,
+    pub provenance: Provenance,
 }
 
 const INLINE_MARKERS: &[&str] = &[
@@ -79,7 +80,89 @@ fn decision(
         source_kind: source_kind.to_string(),
         source_rank,
         status,
+        provenance: Provenance::Verbatim,
     }
+}
+
+fn prose_decisions(text: &str, source_kind: &str, source_rank: u8) -> Vec<ExtractedDecision> {
+    extract_decisions(&[DecisionSource {
+        kind: source_kind.to_string(),
+        text: text.to_string(),
+    }])
+    .into_iter()
+    .map(|decision| ExtractedDecision {
+        statement: decision.statement,
+        evidence: decision.evidence,
+        source_kind: decision.source_kind,
+        source_rank,
+        status: decision.status,
+        provenance: decision.provenance,
+    })
+    .collect()
+}
+
+fn prose_candidate_has_object(decision: &ExtractedDecision) -> bool {
+    let lower = decision.statement.to_ascii_lowercase();
+    if let Some(index) = lower.find(" because ") {
+        let after = &decision.statement[index + " because ".len()..];
+        if word_count(after) >= 4 {
+            return true;
+        }
+    }
+
+    if let Some(index) = lower.find("because ") {
+        let after = &decision.statement[index + "because ".len()..];
+        if word_count(after) >= 4 {
+            return true;
+        }
+    }
+
+    if has_action_with_rationale(&lower, "switch") || has_action_with_rationale(&lower, "use") {
+        return true;
+    }
+
+    has_word_count_after_marker(&decision.statement, "decided to", 4)
+        || has_word_count_after_marker(&decision.statement, "we chose", 4)
+        || has_word_count_after_marker(&decision.statement, "chosen", 4)
+        || has_word_count_after_marker(&decision.statement, "switched to", 4)
+        || has_word_count_after_marker(&decision.statement, "switch to", 4)
+        || has_word_count_after_marker(&decision.statement, "we now", 4)
+        || has_word_count_after_marker(&decision.statement, "no longer", 4)
+        || has_chose_over_object(&lower)
+}
+
+fn has_word_count_after_marker(text: &str, marker: &str, min_words: usize) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let Some(index) = lower.find(marker) else {
+        return false;
+    };
+    word_count(&text[index + marker.len()..]) >= min_words
+}
+
+fn has_action_with_rationale(lower: &str, verb: &str) -> bool {
+    let Some(index) = lower.find(verb) else {
+        return false;
+    };
+    let after = &lower[index + verb.len()..];
+    word_count(after) >= 4 && (lower.contains(" because ") || lower.contains("because "))
+}
+
+fn has_chose_over_object(lower: &str) -> bool {
+    let Some(chose_pos) = lower.find("chose") else {
+        return false;
+    };
+    let Some(over_pos) = lower[chose_pos..].find(" over ") else {
+        return false;
+    };
+    let between = &lower[chose_pos + "chose".len()..chose_pos + over_pos];
+    let after = &lower[chose_pos + over_pos + " over ".len()..];
+    word_count(between) >= 1 && word_count(after) >= 1
+}
+
+fn word_count(text: &str) -> usize {
+    text.split_whitespace()
+        .filter(|word| word.chars().any(char::is_alphanumeric))
+        .count()
 }
 
 pub fn mine_inline_markers(text: &str, source_kind: &str) -> Vec<ExtractedDecision> {
@@ -213,7 +296,7 @@ pub fn mine_adr(text: &str) -> Vec<ExtractedDecision> {
         }
         _ => title,
     };
-    let status = classify_evidence(&evidence, text);
+    let status = classify_evidence(&evidence, text, Provenance::Verbatim);
 
     vec![decision(
         statement,
@@ -391,6 +474,25 @@ fn push_deduped(out: &mut Vec<ExtractedDecision>, candidate: ExtractedDecision) 
     }
 }
 
+fn dedup_extracted(decisions: Vec<ExtractedDecision>) -> Vec<ExtractedDecision> {
+    let mut out = Vec::new();
+    for candidate in decisions {
+        if candidate.source_rank == SOURCE_RANK_COMMIT
+            && strip_comment_leader(&candidate.statement).1
+        {
+            continue;
+        }
+        if candidate.source_rank == SOURCE_RANK_COMMIT
+            && !candidate.source_kind.eq("code_comment")
+            && !prose_candidate_has_object(&candidate)
+        {
+            continue;
+        }
+        push_deduped(&mut out, candidate);
+    }
+    out
+}
+
 pub fn extract_all(sources: &[DecisionSource]) -> Vec<ExtractedDecision> {
     let mut out = Vec::new();
 
@@ -398,14 +500,27 @@ pub fn extract_all(sources: &[DecisionSource]) -> Vec<ExtractedDecision> {
         let mut extracted = match source.kind.as_str() {
             "adr" => mine_adr(&source.text),
             "changelog" => mine_changelog(&source.text),
-            "pr" => mine_pr_body(&source.text),
+            "pr" => {
+                let mut decisions = mine_pr_body(&source.text);
+                decisions.extend(prose_decisions(&source.text, &source.kind, SOURCE_RANK_PR));
+                decisions
+            }
             "commit" | "comment" => {
                 let mut decisions = mine_inline_markers(&source.text, &source.kind);
                 decisions.extend(harvest_rationale_comments(&source.text));
+                if source.kind == "commit" {
+                    decisions.extend(prose_decisions(
+                        &source.text,
+                        &source.kind,
+                        SOURCE_RANK_COMMIT,
+                    ));
+                }
                 decisions
             }
             _ => mine_inline_markers(&source.text, &source.kind),
         };
+
+        extracted = dedup_extracted(extracted);
 
         for candidate in extracted.drain(..) {
             push_deduped(&mut out, candidate);
@@ -426,6 +541,7 @@ mod tests {
         assert_eq!(decisions[0].statement, "use sqlite");
         assert_eq!(decisions[0].source_rank, SOURCE_RANK_INLINE_MARKER);
         assert_eq!(decisions[0].status, DecisionStatus::Verified);
+        assert_eq!(decisions[0].provenance, Provenance::Verbatim);
     }
 
     #[test]
@@ -467,6 +583,58 @@ mod tests {
             "we use a cache because lookups are hot"
         );
         assert_eq!(decisions[0].source_rank, SOURCE_RANK_CODE_COMMENT);
+    }
+
+    #[test]
+    fn commit_prose_yields_decision() {
+        let sources = vec![DecisionSource {
+            kind: "commit".to_string(),
+            text: "switch storage to sqlite instead of postgres because embedded deployment"
+                .to_string(),
+        }];
+
+        let decisions = extract_all(&sources);
+
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].statement, sources[0].text);
+        assert_eq!(decisions[0].evidence, sources[0].text);
+        assert_eq!(decisions[0].source_rank, SOURCE_RANK_COMMIT);
+        assert_eq!(decisions[0].provenance, Provenance::Verbatim);
+    }
+
+    #[test]
+    fn commit_instead_of_without_decision_object_yields_nothing() {
+        let sources = vec![DecisionSource {
+            kind: "commit".to_string(),
+            text: "switch storage to sqlite instead of postgres".to_string(),
+        }];
+
+        assert!(extract_all(&sources).is_empty());
+    }
+
+    #[test]
+    fn commit_without_decision_language_yields_nothing() {
+        let sources = vec![DecisionSource {
+            kind: "commit".to_string(),
+            text: "update deps".to_string(),
+        }];
+
+        assert!(extract_all(&sources).is_empty());
+    }
+
+    #[test]
+    fn pr_prose_yields_decision_without_section_gate() {
+        let sources = vec![DecisionSource {
+            kind: "pr".to_string(),
+            text: "switch storage to sqlite instead of postgres because embedded deployment"
+                .to_string(),
+        }];
+
+        let decisions = extract_all(&sources);
+
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].source_rank, SOURCE_RANK_PR);
+        assert_eq!(decisions[0].provenance, Provenance::Verbatim);
     }
 
     #[test]

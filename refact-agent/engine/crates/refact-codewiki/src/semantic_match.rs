@@ -70,6 +70,10 @@ pub fn find_related_decisions(
     out
 }
 
+pub fn is_duplicate_decision_text(a: &str, b: &str) -> bool {
+    crate::evolution::text_similarity(a, b) >= DEFAULT_DEDUP_TAU
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +157,13 @@ mod tests {
         let results = vec![hit("decision:abc", 0.7)];
         let exclude_ids = HashSet::new();
         assert!(find_related_decisions(&results, 0.5, 0.83, &exclude_ids, 0).is_empty());
+    }
+
+    #[test]
+    fn duplicate_decision_text_uses_default_tau() {
+        assert!(is_duplicate_decision_text(
+            "Use SQLite for storage",
+            "Use SQLite for storage storage"
+        ));
     }
 }

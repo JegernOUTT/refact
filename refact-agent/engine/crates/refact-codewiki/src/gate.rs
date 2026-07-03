@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use crate::decisions::Provenance;
+
 pub fn normalize_text(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
@@ -8,22 +10,24 @@ pub fn normalize_text(text: &str) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verdict {
+pub enum Verification {
     Exact,
     Fuzzy,
     Unverified,
 }
 
-pub fn verify_quote(quote: &str, source_text: &str, fuzzy_threshold: f64) -> Verdict {
+pub type Verdict = Verification;
+
+pub fn verify_quote(quote: &str, source_text: &str, fuzzy_threshold: f64) -> Verification {
     let q = normalize_text(quote);
     let src = normalize_text(source_text);
 
     if q.is_empty() || src.is_empty() {
-        return Verdict::Unverified;
+        return Verification::Unverified;
     }
 
     if src.contains(q.as_str()) {
-        return Verdict::Exact;
+        return Verification::Exact;
     }
 
     let q_tokens: HashSet<&str> = q.split_whitespace().collect();
@@ -35,13 +39,13 @@ pub fn verify_quote(quote: &str, source_text: &str, fuzzy_threshold: f64) -> Ver
         / q_tokens.len() as f64;
 
     if overlap >= fuzzy_threshold {
-        Verdict::Fuzzy
+        Verification::Fuzzy
     } else {
-        Verdict::Unverified
+        Verification::Unverified
     }
 }
 
-pub fn verify_quote_default(quote: &str, source_text: &str) -> Verdict {
+pub fn verify_quote_default(quote: &str, source_text: &str) -> Verification {
     verify_quote(quote, source_text, 0.6)
 }
 
@@ -85,7 +89,7 @@ pub fn apply_substring_gate(mut candidates: Vec<GateCandidate>) -> (Vec<GateCand
             produced_any = true;
             let verdict = verify_quote(&val, &source_text, 0.6);
 
-            if verdict == Verdict::Unverified {
+            if verdict == Verification::Unverified {
                 field.clear();
             } else {
                 verdicts.push(verdict);
@@ -98,9 +102,15 @@ pub fn apply_substring_gate(mut candidates: Vec<GateCandidate>) -> (Vec<GateCand
             continue;
         }
 
-        candidate.verification = if verdicts.iter().any(|verdict| *verdict == Verdict::Exact) {
+        candidate.verification = if verdicts
+            .iter()
+            .any(|verdict| *verdict == Verification::Exact)
+        {
             "exact".to_string()
-        } else if verdicts.iter().any(|verdict| *verdict == Verdict::Fuzzy) {
+        } else if verdicts
+            .iter()
+            .any(|verdict| *verdict == Verification::Fuzzy)
+        {
             "fuzzy".to_string()
         } else {
             "unverified".to_string()
@@ -112,26 +122,38 @@ pub fn apply_substring_gate(mut candidates: Vec<GateCandidate>) -> (Vec<GateCand
     (kept, rejected_count)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verification {
-    Exact,
-    Fuzzy,
-    Unverified,
+pub trait ConfidenceEvidence {
+    fn parts(self) -> (Provenance, Verification);
 }
 
-pub fn compute_confidence(
+impl ConfidenceEvidence for Verification {
+    fn parts(self) -> (Provenance, Verification) {
+        (Provenance::Verbatim, self)
+    }
+}
+
+impl ConfidenceEvidence for (Provenance, Verification) {
+    fn parts(self) -> (Provenance, Verification) {
+        self
+    }
+}
+
+pub fn compute_confidence<E: ConfidenceEvidence>(
     top_rank: u8,
     corroboration_count: u32,
-    verification: Verification,
+    evidence: E,
 ) -> f64 {
+    let (provenance, verification) = evidence.parts();
     let base = 0.4 + 0.5 * (top_rank as f64 / 9.0);
     let corroboration_bonus = (0.04 * corroboration_count.saturating_sub(1) as f64).min(0.12);
     let mut conf = base + corroboration_bonus;
 
-    match verification {
-        Verification::Exact => {}
-        Verification::Fuzzy => conf *= 0.85,
-        Verification::Unverified => conf *= 0.6,
+    if provenance == Provenance::Paraphrase {
+        match verification {
+            Verification::Exact => conf += 0.05,
+            Verification::Fuzzy => conf *= 0.85,
+            Verification::Unverified => conf *= 0.6,
+        }
     }
 
     (conf.clamp(0.0, 0.99) * 1000.0).round() / 1000.0
@@ -176,7 +198,7 @@ mod tests {
     fn verify_exact_substring() {
         assert_eq!(
             verify_quote("quick brown", "The quick brown fox", 0.6),
-            Verdict::Exact
+            Verification::Exact
         );
     }
 
@@ -184,7 +206,7 @@ mod tests {
     fn verify_is_whitespace_and_case_insensitive() {
         assert_eq!(
             verify_quote("QUICK\nBROWN", "the   quick brown fox", 0.6),
-            Verdict::Exact
+            Verification::Exact
         );
     }
 
@@ -196,7 +218,7 @@ mod tests {
                 "alpha beta gamma zeta",
                 0.6
             ),
-            Verdict::Fuzzy
+            Verification::Fuzzy
         );
     }
 
@@ -204,7 +226,7 @@ mod tests {
     fn verify_unverified_when_token_recall_below_threshold() {
         assert_eq!(
             verify_quote("alpha beta gamma delta epsilon", "alpha beta zeta", 0.6),
-            Verdict::Unverified
+            Verification::Unverified
         );
     }
 
@@ -252,9 +274,32 @@ mod tests {
     #[test]
     fn confidence_exact_fuzzy_unverified_and_cap() {
         assert_eq!(compute_confidence(9, 1, Verification::Exact), 0.9);
-        assert_eq!(compute_confidence(9, 1, Verification::Fuzzy), 0.765);
-        assert_eq!(compute_confidence(9, 1, Verification::Unverified), 0.54);
-        assert_eq!(compute_confidence(9, 5, Verification::Exact), 0.99);
+        assert_eq!(compute_confidence(9, 1, Verification::Fuzzy), 0.9);
+        assert_eq!(compute_confidence(9, 1, Verification::Unverified), 0.9);
+        assert_eq!(
+            compute_confidence(9, 1, (Provenance::Paraphrase, Verification::Exact)),
+            0.95
+        );
+        assert_eq!(
+            compute_confidence(9, 1, (Provenance::Paraphrase, Verification::Fuzzy)),
+            0.765
+        );
+        assert_eq!(
+            compute_confidence(9, 1, (Provenance::Paraphrase, Verification::Unverified)),
+            0.54
+        );
+        assert_eq!(
+            compute_confidence(9, 5, (Provenance::Paraphrase, Verification::Exact)),
+            0.99
+        );
+    }
+
+    #[test]
+    fn verbatim_skips_verification_no_boost() {
+        assert_eq!(
+            compute_confidence(6, 1, (Provenance::Verbatim, Verification::Exact)),
+            compute_confidence(6, 1, (Provenance::Verbatim, Verification::Unverified))
+        );
     }
 }
 
