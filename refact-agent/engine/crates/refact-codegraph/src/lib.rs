@@ -73,7 +73,7 @@ pub struct CodeGraphService {
 }
 
 fn normalize_indexed_path(path: &str) -> String {
-    let mut normalized = path.trim().replace('\\', "/");
+    let mut normalized = refact_git_intel::paths::normalize_separators(path);
     while let Some(stripped) = normalized.strip_prefix("./") {
         normalized = stripped.to_string();
     }
@@ -82,8 +82,32 @@ fn normalize_indexed_path(path: &str) -> String {
 
 fn matches_indexed_path(requested: &str, indexed: &str) -> bool {
     requested == indexed
-        || requested.ends_with(&format!("/{indexed}"))
-        || indexed.ends_with(&format!("/{requested}"))
+        || matches_repo_relative_suffix(requested, indexed)
+        || matches_repo_relative_suffix(indexed, requested)
+}
+
+fn matches_repo_relative_suffix(path: &str, suffix: &str) -> bool {
+    let Some(root) = root_for_suffix_match(path, suffix) else {
+        return false;
+    };
+    let repo_root = if root.is_empty() && path.starts_with('/') {
+        "/"
+    } else {
+        root
+    };
+    refact_git_intel::paths::repo_relative(path, repo_root)
+        .is_some_and(|relative| refact_git_intel::paths::normalize_separators(relative) == suffix)
+}
+
+fn root_for_suffix_match<'a>(path: &'a str, suffix: &str) -> Option<&'a str> {
+    let prefix_len = path.len().checked_sub(suffix.len() + 1)?;
+    if path.get(prefix_len..prefix_len + 1) != Some("/") {
+        return None;
+    }
+    if path.get(prefix_len + 1..) != Some(suffix) {
+        return None;
+    }
+    Some(&path[..prefix_len])
 }
 
 fn resolve_indexed_paths(requested: &[String], indexed: &[String]) -> Vec<String> {
@@ -684,6 +708,32 @@ mod tests {
 
         assert_eq!(service.analytics_rebuild_count(), 2);
         assert_ne!(first.node_count, third.node_count);
+    }
+
+    #[test]
+    fn resolve_indexed_paths_behavior_unchanged() {
+        let indexed = vec![
+            "/repo/src/core.rs".to_string(),
+            "/repo/src/caller.rs".to_string(),
+            "/repo/examples/core.rs".to_string(),
+        ];
+
+        assert_eq!(
+            resolve_indexed_paths(&[" .\\src\\caller.rs ".to_string()], &indexed),
+            vec!["/repo/src/caller.rs".to_string()]
+        );
+        assert_eq!(
+            resolve_indexed_paths(&["src/core.rs".to_string()], &indexed),
+            vec!["/repo/src/core.rs".to_string()]
+        );
+        assert_eq!(
+            resolve_indexed_paths(&["core.rs".to_string()], &indexed),
+            vec!["core.rs".to_string()]
+        );
+        assert_eq!(
+            resolve_indexed_paths(&["missing.rs".to_string()], &indexed),
+            vec!["missing.rs".to_string()]
+        );
     }
 
     #[tokio::test]

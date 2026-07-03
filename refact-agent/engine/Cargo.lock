@@ -4073,6 +4073,7 @@ dependencies = [
  "petgraph",
  "refact-codegraph-parsers",
  "refact-core",
+ "refact-git-intel",
  "rusqlite",
  "serde",
  "serde_json",

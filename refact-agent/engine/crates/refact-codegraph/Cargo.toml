@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 refact-codegraph-parsers = { path = "../refact-codegraph-parsers" }
+refact-git-intel = { path = "../refact-git-intel" }
 refact-core = { path = "../refact-core" }
 
 serde = { workspace = true }
