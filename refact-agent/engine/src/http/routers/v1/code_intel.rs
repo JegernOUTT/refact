@@ -253,6 +253,17 @@ struct GitReviewerResponse {
 }
 
 #[derive(Serialize)]
+struct GitFindingResponse {
+    path: String,
+    biomarker: String,
+    category: String,
+    dimension: refact_codehealth::biomarkers::Dimension,
+    severity: refact_codehealth::biomarkers::Severity,
+    line: usize,
+    detail: String,
+}
+
+#[derive(Serialize)]
 struct GitRiskResponse {
     commits_analyzed: u32,
     agent_authored_pct: f64,
@@ -261,6 +272,8 @@ struct GitRiskResponse {
     co_change: Vec<GitCoChangeResponse>,
     coupling: Vec<refact_git_intel::coupling::CouplingEdge>,
     reviewers: Vec<GitReviewerResponse>,
+    findings: Vec<GitFindingResponse>,
+    recent_commit_risks: Vec<crate::tools::tool_codegraph::RecentCommitRiskSummary>,
 }
 
 #[derive(Serialize)]
@@ -758,7 +771,7 @@ pub async fn handle_v1_code_intel_git_risk(
     State(app): State<AppState>,
     Query(query): Query<CodeIntelListQuery>,
 ) -> Result<Response<Body>, ScratchError> {
-    let Some(_service) = codegraph_service(&app).await else {
+    let Some(service) = codegraph_service(&app).await else {
         return codegraph_off_response();
     };
     let limit = clamped_limit(query.limit, DEFAULT_GIT_RISK_LIMIT, MAX_GIT_RISK_LIMIT);
@@ -768,58 +781,38 @@ pub async fn handle_v1_code_intel_git_risk(
     };
     let intel = crate::tools::tool_codegraph::cached_mine_history(&dir, GIT_HISTORY_MAX_COMMITS)
         .map_err(store_error)?;
-    let now_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let temporal_map: HashMap<String, f64> =
-        intel.temporal_hotspots(now_ts, limit).into_iter().collect();
-    let entropy_map = intel.change_entropy();
+    let assembly = crate::tools::tool_codegraph::build_git_risk_assembly(
+        &intel,
+        &dir,
+        Some(&service),
+        limit,
+        filter.as_deref(),
+    )
+    .await;
 
-    let hotspots = intel
-        .hotspots(limit)
-        .into_iter()
-        .filter(|hotspot| {
-            filter
-                .as_deref()
-                .is_none_or(|filter| path_matches_filter(&hotspot.path, filter))
-        })
-        .map(|hotspot| {
-            let churn_risk = intel.churn_risk(&hotspot.path);
-            GitHotspotResponse {
-                path: hotspot.path.clone(),
-                churn: hotspot.churn,
-                risk: churn_risk,
-                churn_risk,
-                churn_percentile: intel.churn_percentile(&hotspot.path),
-                temporal_score: temporal_map.get(&hotspot.path).copied().unwrap_or(0.0),
-                change_entropy: entropy_map.get(&hotspot.path).copied().unwrap_or(0.0),
-                change_entropy_pct: intel.change_entropy_pct(&hotspot.path),
-                bus_factor: intel.bus_factor(&hotspot.path),
-                ownership_risk: intel.ownership_risk(&hotspot.path),
-                knowledge_loss: intel.knowledge_loss(&hotspot.path),
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let mut ownership_paths = hotspots
+    let hotspots = assembly
+        .files
         .iter()
-        .map(|hotspot| hotspot.path.clone())
+        .map(|file| GitHotspotResponse {
+            path: file.meta.file_path.clone(),
+            churn: file.meta.commit_count_total,
+            risk: file.churn_risk,
+            churn_risk: file.churn_risk,
+            churn_percentile: file.meta.churn_percentile,
+            temporal_score: file.temporal_score,
+            change_entropy: file.meta.change_entropy,
+            change_entropy_pct: file.meta.change_entropy_pct,
+            bus_factor: file.meta.bus_factor as usize,
+            ownership_risk: intel.ownership_risk(&file.meta.file_path),
+            knowledge_loss: intel.knowledge_loss(&file.meta.file_path),
+        })
         .collect::<Vec<_>>();
-    if ownership_paths.is_empty() && filter.is_some() {
-        ownership_paths = intel
-            .file_authors
-            .keys()
-            .filter(|path| {
-                filter
-                    .as_deref()
-                    .is_some_and(|filter| path_matches_filter(path, filter))
-            })
-            .cloned()
-            .collect();
-        ownership_paths.sort();
-        ownership_paths.truncate(limit);
-    }
+
+    let ownership_paths = assembly
+        .files
+        .iter()
+        .map(|file| file.meta.file_path.clone())
+        .collect::<Vec<_>>();
     let ownership = ownership_paths
         .iter()
         .map(|path| {
@@ -867,6 +860,24 @@ pub async fn handle_v1_code_intel_git_risk(
             .into_iter()
             .map(|(author, score)| GitReviewerResponse { author, score })
             .collect();
+    let findings = assembly
+        .files
+        .iter()
+        .flat_map(|file| {
+            file.findings
+                .iter()
+                .cloned()
+                .map(|finding| GitFindingResponse {
+                    path: file.meta.file_path.clone(),
+                    biomarker: finding.biomarker,
+                    category: finding.category,
+                    dimension: finding.dimension,
+                    severity: finding.severity,
+                    line: finding.line,
+                    detail: finding.detail,
+                })
+        })
+        .collect::<Vec<_>>();
 
     json_response(&GitRiskResponse {
         commits_analyzed: intel.commits_analyzed,
@@ -876,6 +887,8 @@ pub async fn handle_v1_code_intel_git_risk(
         co_change,
         coupling,
         reviewers,
+        findings,
+        recent_commit_risks: assembly.recent_commit_risks,
     })
 }
 
@@ -1205,10 +1218,6 @@ mod tests {
     use super::*;
     use crate::http::routers::make_refact_http_server;
 
-    fn commit_file(repo: &Repository, path: &str, contents: &str, msg: &str) {
-        commit_file_as(repo, path, contents, msg, "Tester", "tester@example.com");
-    }
-
     fn commit_file_as(
         repo: &Repository,
         path: &str,
@@ -1371,6 +1380,12 @@ mod tests {
         make_refact_http_server(app)
     }
 
+    fn git_risk_source(a: i32, b: i32, c: i32) -> String {
+        format!(
+            "pub fn alpha(x: i32) -> i32 {{\n    if x > 0 {{\n        if x > 1 {{\n            for i in 0..x {{\n                if i % 2 == 0 {{\n                    return {a};\n                }}\n            }}\n            return {b};\n        }}\n    }}\n    {c}\n}}\n"
+        )
+    }
+
     async fn router_with_partial_codegraph() -> axum::Router {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
@@ -1393,28 +1408,42 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
-        commit_file(
+        commit_file_as(
             &repo,
             "src/a.rs",
-            "pub fn alpha() -> i32 { 1 }\n",
+            &git_risk_source(1, 1, 1),
             "introduce alpha",
+            "Alice",
+            "alice@example.com",
         );
-        commit_file(
+        commit_file_as(
             &repo,
             "src/b.rs",
             "pub fn beta() -> i32 { 2 }\n",
             "introduce beta",
+            "Bob",
+            "bob@example.com",
         );
-        commit_file(
+        commit_file_as(
             &repo,
             "src/a.rs",
-            "pub fn alpha() -> i32 { 3 }\n",
+            &git_risk_source(2, 1, 1),
+            "fix crash in alpha",
+            "Bob",
+            "bob@example.com",
+        );
+        commit_file_as(
+            &repo,
+            "src/a.rs",
+            &git_risk_source(3, 1, 1),
             "update alpha",
+            "Carol",
+            "carol@example.com",
         );
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
         codegraph
-            .index_file("src/a.rs", "pub fn alpha() -> i32 { 3 }\n", "rust")
+            .index_file("src/a.rs", &git_risk_source(3, 1, 1), "rust")
             .await
             .unwrap();
         codegraph.connect_usages().await.unwrap();
@@ -1636,18 +1665,25 @@ mod tests {
         let (status, json) = get_json(router, "/v1/code-intel/git-risk?limit=2").await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["commits_analyzed"], 3);
+        assert_eq!(json["commits_analyzed"], 4);
         let hotspots = json["hotspots"].as_array().unwrap();
         assert!(hotspots.iter().any(|entry| {
             entry["path"].as_str() == Some("src/a.rs")
-                && entry["churn"].as_u64() == Some(2)
-                && entry["risk"].is_number()
+                && entry["churn"].as_u64() == Some(3)
+                && entry["risk"]
+                    .as_f64()
+                    .is_some_and(|risk| (0.0..=1.0).contains(&risk))
         }));
         assert!(json["ownership"].as_array().unwrap().iter().any(|entry| {
             entry["path"].as_str() == Some("src/a.rs")
-                && entry["top_owner"].as_str() == Some("tester@example.com")
-                && entry["bus_factor"].as_u64() == Some(1)
+                && entry["top_owner"].as_str().is_some()
+                && entry["bus_factor"].as_u64().is_some_and(|bus| bus >= 1)
         }));
+        assert!(json["findings"].as_array().unwrap().iter().any(|finding| {
+            finding["path"].as_str() == Some("src/a.rs")
+                && finding["biomarker"].as_str() == Some("prior_defect")
+        }));
+        assert!(!json["recent_commit_risks"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

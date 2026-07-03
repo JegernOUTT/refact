@@ -222,10 +222,22 @@ fn commit_in_window(commit: &CommitRecord, now_ts: i64, window_secs: i64) -> boo
 }
 
 fn percentile(values: &[f64], target: f64) -> f64 {
-    if values.is_empty() {
+    if values.is_empty() || !target.is_finite() {
         return 0.0;
     }
-    values.iter().filter(|v| **v <= target).count() as f64 / values.len() as f64
+    let finite = values.iter().filter(|value| value.is_finite()).count();
+    if finite <= 1 {
+        return if finite == 1 && target > 0.0 {
+            1.0
+        } else {
+            0.0
+        };
+    }
+    let less = values
+        .iter()
+        .filter(|value| value.is_finite() && **value < target)
+        .count();
+    (less as f64 / (finite - 1) as f64).clamp(0.0, 1.0)
 }
 
 pub fn collect_commit_messages(repo_path: &Path, max: usize) -> Result<Vec<String>, String> {
@@ -757,32 +769,13 @@ impl GitIntel {
     }
 
     pub fn churn_risk(&self, file: &str) -> f64 {
-        let mut churn_by_file: HashMap<String, u64> = HashMap::new();
-        for commit in &self.commit_records {
-            for (path, added, deleted) in &commit.files {
-                let churn = u64::from(*added).saturating_add(u64::from(*deleted));
-                let total = churn_by_file.entry(path.clone()).or_default();
-                *total = total.saturating_add(churn);
-            }
+        let churn_percentile = self.churn_percentile(file);
+        if churn_percentile <= 0.0 && !self.file_churn.contains_key(file) {
+            return 0.0;
         }
-        let mut max_relative: f64 = 0.0;
-        let mut target_relative = 0.0;
-        for (path, churn) in churn_by_file {
-            let commits = *self.file_churn.get(&path).unwrap_or(&0);
-            if commits == 0 {
-                continue;
-            }
-            let relative = churn as f64 / commits as f64;
-            max_relative = max_relative.max(relative);
-            if path == file {
-                target_relative = relative;
-            }
-        }
-        if max_relative == 0.0 {
-            0.0
-        } else {
-            (target_relative / max_relative).clamp(0.0, 1.0)
-        }
+        let entropy_pct = self.change_entropy_pct(file);
+        let ownership_risk = if self.ownership_risk(file) { 1.0 } else { 0.0 };
+        (churn_percentile * 0.5 + entropy_pct * 0.3 + ownership_risk * 0.2).clamp(0.0, 1.0)
     }
 
     pub fn significant_commits(&self, max: usize) -> Vec<usize> {
@@ -1126,7 +1119,7 @@ mod tests {
         assert!((recent_share - 0.5).abs() < 1e-9);
         assert_eq!(intel.recent_owner("a.rs", now, 0), (String::new(), 0.0));
 
-        assert!((intel.churn_percentile("b.rs") - 2.0 / 3.0).abs() < 1e-9);
+        assert!((intel.churn_percentile("b.rs") - 0.5).abs() < 1e-9);
         assert_eq!(intel.churn_percentile("missing.rs"), 0.0);
         assert_eq!(intel.change_entropy_pct("missing.rs"), 0.0);
         assert_eq!(
@@ -1415,13 +1408,14 @@ mod tests {
         assert_eq!(features[0].1.la, u32::MAX);
         assert_eq!(features[0].1.ld, u32::MAX);
         assert!(features[0].1.entropy.is_finite());
-        assert_eq!(intel.churn_risk("huge.rs"), 1.0);
+        assert!((0.0..=1.0).contains(&intel.churn_risk("huge.rs")));
     }
 
     #[test]
     fn organizational_metrics_flag_risks() {
         let mut intel = GitIntel::default();
         intel.file_churn.insert("risk.rs".into(), 6);
+        intel.file_churn.insert("middle.rs".into(), 4);
         intel.file_churn.insert("calm.rs".into(), 2);
         intel.file_authors.insert(
             "risk.rs".into(),
@@ -1447,8 +1441,40 @@ mod tests {
         assert!(intel.ownership_risk("risk.rs"));
         assert!(intel.developer_congestion("risk.rs", 6, 0.4));
         assert!(intel.knowledge_loss("calm.rs"));
-        assert_eq!(intel.churn_risk("risk.rs"), 1.0);
+        assert!(intel.churn_risk("risk.rs") > intel.churn_risk("calm.rs"));
         assert!(intel.churn_risk("calm.rs") < 1.0);
+    }
+
+    #[test]
+    fn churn_risk_scale_sane() {
+        let mut intel = GitIntel::default();
+        intel.file_churn.insert("hot.rs".into(), 32);
+        intel.file_churn.insert("warm.rs".into(), 8);
+        intel.file_churn.insert("cold.rs".into(), 1);
+        intel.file_authors.insert(
+            "hot.rs".into(),
+            HashMap::from([
+                ("a@x.com".into(), 2),
+                ("b@x.com".into(), 2),
+                ("c@x.com".into(), 2),
+                ("d@x.com".into(), 0),
+                ("e@x.com".into(), 0),
+            ]),
+        );
+        intel
+            .file_authors
+            .insert("cold.rs".into(), HashMap::from([("a@x.com".into(), 1)]));
+        intel.commit_records = vec![CommitRecord {
+            oid: None,
+            ts: 1,
+            author: "a@x.com".into(),
+            committer: "a@x.com".into(),
+            message: "focused churn".into(),
+            files: vec![("hot.rs".into(), 32, 0)],
+        }];
+
+        assert!(intel.churn_risk("hot.rs") >= 0.3);
+        assert!(intel.churn_risk("cold.rs") < 0.1);
     }
 
     #[test]

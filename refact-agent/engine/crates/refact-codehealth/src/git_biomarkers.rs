@@ -9,6 +9,7 @@ pub struct CoChangePartner {
     pub co_change_count: f64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct FunctionGitFacts {
     pub name: String,
     pub median_age_days: u32,

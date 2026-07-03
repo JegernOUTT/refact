@@ -19,6 +19,10 @@ use crate::tools::tools_description::{
 const GIT_CACHE_TTL: Duration = Duration::from_secs(30);
 const PR_BLAST_REVIEWER_LIMIT: usize = 3;
 const PR_BLAST_BOT_AUTHOR_PATTERNS: [&str; 3] = ["[bot]", "agent@", "noreply"];
+const GIT_META_FUNCTION_FACT_TOP_K: usize = 10;
+const GIT_STABLE_AGE_DAYS: i64 = 180;
+const GIT_RISK_RECENT_COMMITS: usize = 50;
+const GIT_RISK_RECENT_COMMIT_LIMIT: usize = 10;
 
 type GitCacheKey = (PathBuf, Option<Oid>, usize);
 
@@ -47,6 +51,26 @@ pub(crate) struct CloneAnalysis {
     pub(crate) files: usize,
     pub(crate) text_by_path: HashMap<String, (String, String)>,
     pub(crate) tokens_by_path: HashMap<String, usize>,
+}
+
+pub(crate) struct GitRiskFileAssembly {
+    pub(crate) meta: refact_codehealth::git_biomarkers::GitMeta,
+    pub(crate) findings: Vec<refact_codehealth::biomarkers::Finding>,
+    pub(crate) temporal_score: f64,
+    pub(crate) churn_risk: f64,
+}
+
+pub(crate) struct GitRiskAssembly {
+    pub(crate) files: Vec<GitRiskFileAssembly>,
+    pub(crate) recent_commit_risks: Vec<RecentCommitRiskSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct RecentCommitRiskSummary {
+    pub(crate) sha: String,
+    pub(crate) summary: String,
+    pub(crate) risk: f64,
+    pub(crate) top_factor_names: Vec<String>,
 }
 
 #[derive(Default)]
@@ -421,6 +445,472 @@ fn co_change_key(path: &str, project_root: Option<&Path>) -> String {
         }
         None => refact_git_intel::paths::normalize_separators(path),
     }
+}
+
+pub(crate) fn git_churn_by_file(intel: &refact_git_intel::GitIntel) -> HashMap<String, u32> {
+    intel.file_churn.clone()
+}
+
+pub(crate) async fn build_git_meta(
+    intel: &refact_git_intel::GitIntel,
+    repo_root: &Path,
+    path_repo_relative: &str,
+    service: Option<&Arc<refact_codegraph::CodeGraphService>>,
+    function_ranges: Option<&[(String, usize, usize)]>,
+) -> refact_codehealth::git_biomarkers::GitMeta {
+    let now_ts = now_unix_ts();
+    let entropy_map = intel.change_entropy();
+    let (added_90d, deleted_90d) = intel.lines_in_window(path_repo_relative, now_ts, 90);
+    let (primary_owner_name, primary_owner_commit_pct) = intel.primary_owner(path_repo_relative);
+    let (recent_owner_name, recent_owner_commit_pct) =
+        intel.recent_owner(path_repo_relative, now_ts, 90);
+    let functions = match function_ranges {
+        Some(ranges) => build_function_git_facts(repo_root, path_repo_relative, ranges, now_ts),
+        None => Vec::new(),
+    };
+    let repo_function_mod_p80 = function_mod_p80(&functions);
+    let import_edges = match service {
+        Some(service) => git_meta_import_edges(service, repo_root, path_repo_relative)
+            .await
+            .unwrap_or_default(),
+        None => HashSet::new(),
+    };
+
+    refact_codehealth::git_biomarkers::GitMeta {
+        file_path: path_repo_relative.to_string(),
+        change_entropy: entropy_map.get(path_repo_relative).copied().unwrap_or(0.0),
+        change_entropy_pct: intel.change_entropy_pct(path_repo_relative),
+        commit_count_90d: intel.commit_count_in_window(path_repo_relative, now_ts, 90),
+        commit_count_total: intel
+            .file_churn
+            .get(path_repo_relative)
+            .copied()
+            .unwrap_or(0),
+        is_hotspot: intel.is_hotspot_file(path_repo_relative, GIT_META_FUNCTION_FACT_TOP_K),
+        is_stable: file_is_stable(intel, path_repo_relative, now_ts),
+        churn_percentile: intel.churn_percentile(path_repo_relative),
+        lines_added_90d: added_90d,
+        lines_deleted_90d: deleted_90d,
+        nloc: nloc_for_file(repo_root, path_repo_relative),
+        contributor_count: intel
+            .file_authors
+            .get(path_repo_relative)
+            .map(|authors| authors.len().min(u32::MAX as usize) as u32)
+            .unwrap_or(0),
+        primary_owner_commit_pct,
+        primary_owner_name,
+        recent_owner_name,
+        recent_owner_commit_pct,
+        bus_factor: intel.bus_factor(path_repo_relative) as u32,
+        prior_defect_count: intel.prior_defects(path_repo_relative),
+        repo_active_contributors_90d: Some(intel.active_contributors_in_window(now_ts, 90)),
+        repo_function_mod_p80,
+        co_change_partners: intel
+            .co_change_partners(path_repo_relative, 1)
+            .into_iter()
+            .map(
+                |(path, count)| refact_codehealth::git_biomarkers::CoChangePartner {
+                    path,
+                    co_change_count: count as f64,
+                },
+            )
+            .collect(),
+        top_authors: intel
+            .ownership(path_repo_relative)
+            .into_iter()
+            .map(|owner| (owner.author, owner.commits))
+            .collect(),
+        functions,
+        repo_commit_counts: git_churn_by_file(intel),
+        import_edges,
+    }
+}
+
+pub(crate) async fn build_git_risk_assembly(
+    intel: &refact_git_intel::GitIntel,
+    repo_root: &Path,
+    service: Option<&Arc<refact_codegraph::CodeGraphService>>,
+    limit: usize,
+    filter: Option<&str>,
+) -> GitRiskAssembly {
+    let now_ts = now_unix_ts();
+    let all_hotspots = intel.hotspots(intel.file_churn.len().max(1));
+    let mut selected = all_hotspots
+        .into_iter()
+        .filter(|hotspot| {
+            filter.is_none_or(|filter| path_matches_git_filter(&hotspot.path, filter))
+        })
+        .take(limit)
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        if let Some(filter) = filter {
+            selected = intel
+                .file_churn
+                .keys()
+                .filter(|path| path_matches_git_filter(path, filter))
+                .take(limit)
+                .map(|path| refact_git_intel::Hotspot {
+                    path: path.clone(),
+                    churn: intel.file_churn.get(path).copied().unwrap_or(0),
+                })
+                .collect();
+        }
+    }
+    let temporal_map: HashMap<String, f64> = intel
+        .temporal_hotspots(now_ts, intel.file_churn.len().max(1))
+        .into_iter()
+        .collect();
+    let mut files = Vec::new();
+    for (index, hotspot) in selected.iter().enumerate() {
+        let ranges = if index < GIT_META_FUNCTION_FACT_TOP_K {
+            function_ranges_from_disk(repo_root, &hotspot.path)
+        } else {
+            Vec::new()
+        };
+        let mut meta = build_git_meta(
+            intel,
+            repo_root,
+            &hotspot.path,
+            service,
+            (!ranges.is_empty()).then_some(ranges.as_slice()),
+        )
+        .await;
+        meta.is_hotspot = true;
+        let findings = refact_codehealth::git_biomarkers::git_biomarkers(&meta);
+        files.push(GitRiskFileAssembly {
+            temporal_score: temporal_map.get(&hotspot.path).copied().unwrap_or(0.0),
+            churn_risk: intel.churn_risk(&hotspot.path),
+            meta,
+            findings,
+        });
+    }
+    let p80 = function_mod_p80(
+        &files
+            .iter()
+            .flat_map(|file| file.meta.functions.iter().cloned())
+            .collect::<Vec<_>>(),
+    );
+    if p80.is_some() {
+        for file in &mut files {
+            file.meta.repo_function_mod_p80 = p80;
+            file.findings = refact_codehealth::git_biomarkers::git_biomarkers(&file.meta);
+        }
+    }
+
+    GitRiskAssembly {
+        files,
+        recent_commit_risks: recent_commit_risk_summaries(intel),
+    }
+}
+
+fn now_unix_ts() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or(0)
+}
+
+fn file_is_stable(intel: &refact_git_intel::GitIntel, file: &str, now_ts: i64) -> bool {
+    let last_ts = intel
+        .commit_records
+        .iter()
+        .filter(|commit| commit.files.iter().any(|(path, _, _)| path == file))
+        .map(|commit| commit.ts)
+        .max();
+    last_ts.is_some_and(|ts| now_ts.saturating_sub(ts) / 86_400 > GIT_STABLE_AGE_DAYS)
+}
+
+fn nloc_for_file(repo_root: &Path, path_repo_relative: &str) -> u32 {
+    std::fs::read_to_string(repo_root.join(path_repo_relative))
+        .map(|text| {
+            text.lines()
+                .filter(|line| !line.trim().is_empty())
+                .count()
+                .min(u32::MAX as usize) as u32
+        })
+        .unwrap_or(0)
+}
+
+fn function_ranges_from_disk(
+    repo_root: &Path,
+    path_repo_relative: &str,
+) -> Vec<(String, usize, usize)> {
+    let Ok(text) = std::fs::read_to_string(repo_root.join(path_repo_relative)) else {
+        return Vec::new();
+    };
+    let lang = refact_codegraph::lang_from_path(path_repo_relative);
+    refact_codehealth::analyze(lang, &text)
+        .functions
+        .into_iter()
+        .map(|function| {
+            let line2 = function
+                .line1
+                .saturating_add(function.loc as usize)
+                .saturating_sub(1)
+                .max(function.line1);
+            (function.name, function.line1, line2)
+        })
+        .collect()
+}
+
+fn build_function_git_facts(
+    repo_root: &Path,
+    path_repo_relative: &str,
+    ranges: &[(String, usize, usize)],
+    now_ts: i64,
+) -> Vec<refact_codehealth::git_biomarkers::FunctionGitFacts> {
+    let range_facts = refact_git_intel::blame::range_facts(repo_root, path_repo_relative, ranges)
+        .unwrap_or_default();
+    let health_by_range = function_health_by_range(repo_root, path_repo_relative);
+    range_facts
+        .into_iter()
+        .map(|fact| {
+            let health = health_by_range
+                .get(&(fact.name.clone(), fact.line1))
+                .or_else(|| health_by_range.get(&(fact.name.clone(), 0)));
+            refact_codehealth::git_biomarkers::FunctionGitFacts {
+                name: fact.name,
+                median_age_days: age_days_from_ts(now_ts, fact.last_modified_ts),
+                recent_mod_count: fact.author_count,
+                modification_count: fact.commit_count,
+                ccn: health.map(|(ccn, _)| *ccn).unwrap_or(0),
+                max_nesting: health.map(|(_, nesting)| *nesting).unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
+fn function_health_by_range(
+    repo_root: &Path,
+    path_repo_relative: &str,
+) -> HashMap<(String, usize), (u32, u32)> {
+    let Ok(text) = std::fs::read_to_string(repo_root.join(path_repo_relative)) else {
+        return HashMap::new();
+    };
+    let lang = refact_codegraph::lang_from_path(path_repo_relative);
+    let mut out = HashMap::new();
+    for function in refact_codehealth::analyze(lang, &text).functions {
+        out.insert(
+            (function.name.clone(), function.line1),
+            (function.complexity, function.nesting),
+        );
+        out.entry((function.name, 0))
+            .or_insert((function.complexity, function.nesting));
+    }
+    out
+}
+
+fn age_days_from_ts(now_ts: i64, ts: i64) -> u32 {
+    if ts <= 0 {
+        return 0;
+    }
+    let days = now_ts.saturating_sub(ts).max(0) / 86_400;
+    days.min(u32::MAX as i64) as u32
+}
+
+fn function_mod_p80(
+    functions: &[refact_codehealth::git_biomarkers::FunctionGitFacts],
+) -> Option<u32> {
+    if functions.is_empty() {
+        return None;
+    }
+    let mut counts = functions
+        .iter()
+        .map(|function| function.modification_count)
+        .collect::<Vec<_>>();
+    counts.sort_unstable();
+    let index = ((counts.len() as f64 * 0.8).ceil() as usize).saturating_sub(1);
+    counts.get(index).copied()
+}
+
+async fn git_meta_import_edges(
+    service: &Arc<refact_codegraph::CodeGraphService>,
+    repo_root: &Path,
+    path_repo_relative: &str,
+) -> Result<HashSet<String>, String> {
+    let cached = service.cached_graph_analytics().await?;
+    let repo_root = repo_root.to_string_lossy();
+    let mut path_by_id = HashMap::new();
+    let mut source_paths = HashSet::new();
+    for (id, _name, path) in &cached.data.nodes {
+        path_by_id.insert(*id, path.clone());
+        if refact_git_intel::paths::paths_refer_to_same_file(path, path_repo_relative, &repo_root) {
+            source_paths.insert(path.clone());
+        }
+    }
+
+    let mut out = HashSet::new();
+    for (src, dst, kind) in &cached.data.edges {
+        if kind != "calls" && kind != "imports" {
+            continue;
+        }
+        let Some(src_path) = path_by_id.get(src) else {
+            continue;
+        };
+        if !source_paths.contains(src_path) {
+            continue;
+        }
+        let Some(dst_path) = path_by_id.get(dst) else {
+            continue;
+        };
+        if refact_git_intel::paths::paths_refer_to_same_file(src_path, dst_path, &repo_root) {
+            continue;
+        }
+        out.insert(refact_git_intel::paths::repo_relative_or_basename(
+            dst_path, &repo_root,
+        ));
+    }
+    Ok(out)
+}
+
+fn path_matches_git_filter(path: &str, filter: &str) -> bool {
+    let normalized = refact_git_intel::paths::normalize_separators(path);
+    normalized == filter
+        || normalized.ends_with(filter)
+        || normalized.rsplit('/').next() == Some(filter)
+}
+
+fn recent_commit_risk_summaries(
+    intel: &refact_git_intel::GitIntel,
+) -> Vec<RecentCommitRiskSummary> {
+    intel
+        .recent_commit_risks(GIT_RISK_RECENT_COMMITS)
+        .into_iter()
+        .take(GIT_RISK_RECENT_COMMIT_LIMIT)
+        .map(|risk| RecentCommitRiskSummary {
+            sha: truncate_chars(&risk.commit_id, 12),
+            summary: truncate_chars(&risk.summary, 80),
+            risk: risk.risk,
+            top_factor_names: commit_risk_factor_names(&risk.inputs),
+        })
+        .collect()
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    value.chars().take(max_chars).collect()
+}
+
+fn commit_risk_factor_names(inputs: &refact_git_intel::change_risk::RiskInputs) -> Vec<String> {
+    let mut factors = [
+        ("lines_added", inputs.la),
+        ("lines_deleted", inputs.ld),
+        ("files", inputs.nf),
+        ("directories", inputs.nd),
+        ("subsystems", inputs.ns),
+        ("entropy", inputs.entropy * 100.0),
+        ("low_experience", 100.0 / (inputs.exp + 1.0)),
+    ];
+    factors.sort_by(|left, right| right.1.total_cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+    factors
+        .into_iter()
+        .filter(|(_, score)| *score > 0.0)
+        .take(3)
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+pub(crate) fn git_risk_tool_output(
+    intel: &refact_git_intel::GitIntel,
+    assembly: &GitRiskAssembly,
+) -> String {
+    let mut msg = format!(
+        "Git risk (over {} commits) — recency-weighted hotspots:\n",
+        intel.commits_analyzed
+    );
+    for file in &assembly.files {
+        let meta = &file.meta;
+        let mut flags = Vec::new();
+        if intel.ownership_risk(&meta.file_path) {
+            flags.push("ownership-risk");
+        }
+        if intel.knowledge_loss(&meta.file_path) {
+            flags.push("knowledge-loss");
+        }
+        if meta.prior_defect_count > 0 {
+            flags.push("prior-defect");
+        }
+        msg.push_str(&format!(
+            "  churn={} risk={:.2} temporal={:.2} bus_factor={} {}{}\n",
+            meta.commit_count_total,
+            file.churn_risk,
+            file.temporal_score,
+            meta.bus_factor,
+            meta.file_path,
+            if flags.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", flags.join(", "))
+            }
+        ));
+    }
+    let pairs = intel.co_change_pairs(2);
+    if !pairs.is_empty() {
+        msg.push_str("\nFrequently co-changed files:\n");
+        for ((a, b), c) in pairs.iter().take(10) {
+            msg.push_str(&format!("  {}x  {} <-> {}\n", c, a, b));
+        }
+    }
+    let agent_pct = intel.agent_authored_pct();
+    if agent_pct > 0.0 {
+        msg.push_str(&format!(
+            "\nAI/agent authorship: {:.0}% of analyzed commits\n",
+            agent_pct * 100.0
+        ));
+    }
+    let coupling = refact_git_intel::coupling::build_coupling_graph(intel, 8);
+    if !coupling.edges.is_empty() {
+        msg.push_str("\nStrongest coupling (normalized):\n");
+        for e in coupling.edges.iter().take(8) {
+            msg.push_str(&format!(
+                "  strength={:.2} ({}x)  {} <-> {}\n",
+                e.strength, e.co_changes, e.a, e.b
+            ));
+        }
+    }
+    let hotspot_paths: Vec<String> = assembly
+        .files
+        .iter()
+        .map(|file| file.meta.file_path.clone())
+        .collect();
+    let reviewers = refact_git_intel::coupling::reviewer_suggestions(intel, &hotspot_paths, 5);
+    if !reviewers.is_empty() {
+        msg.push_str("\nSuggested reviewers (by ownership of hot files + co-change neighbors):\n");
+        for (author, score) in &reviewers {
+            msg.push_str(&format!("  {} (score {:.2})\n", author, score));
+        }
+    }
+    let mut biomarker_lines = Vec::new();
+    for file in &assembly.files {
+        for f in &file.findings {
+            biomarker_lines.push(format!(
+                "  {} [{:?}] {} — {}",
+                f.biomarker, f.severity, file.meta.file_path, f.detail
+            ));
+        }
+    }
+    if !biomarker_lines.is_empty() {
+        msg.push_str("\nGit-driven health biomarkers:\n");
+        for line in biomarker_lines.iter().take(20) {
+            msg.push_str(line);
+            msg.push('\n');
+        }
+    }
+    if !assembly.recent_commit_risks.is_empty() {
+        msg.push_str("\nRecent commit change-risk (Kamei):\n");
+        for risk in &assembly.recent_commit_risks {
+            msg.push_str(&format!(
+                "  {:.2} {} {} [{}]\n",
+                risk.risk,
+                risk.sha,
+                risk.summary,
+                risk.top_factor_names.join(", ")
+            ));
+        }
+    }
+    msg
 }
 
 pub struct ToolCodegraphOverview {
@@ -873,163 +1363,18 @@ impl Tool for ToolGitRisk {
             .await
             .ok_or_else(|| "no project directory available".to_string())?;
         let intel = cached_mine_history(&dir, 1000)?;
-        let hotspots = intel.hotspots(15);
-        if hotspots.is_empty() {
+        if intel.hotspots(1).is_empty() {
             return Ok((
                 false,
                 tool_message(tool_call_id, "No git history found.".to_string()),
             ));
         }
-        let now_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let temporal = intel.temporal_hotspots(now_ts, 15);
-        let mut msg = format!(
-            "Git risk (over {} commits) — recency-weighted hotspots:\n",
-            intel.commits_analyzed
-        );
-        let temporal_map: std::collections::HashMap<&String, f64> =
-            temporal.iter().map(|(p, s)| (p, *s)).collect();
-        for h in &hotspots {
-            let bus = intel.bus_factor(&h.path);
-            let mut flags = Vec::new();
-            if intel.ownership_risk(&h.path) {
-                flags.push("ownership-risk");
-            }
-            if intel.knowledge_loss(&h.path) {
-                flags.push("knowledge-loss");
-            }
-            let hot = temporal_map.get(&h.path).copied().unwrap_or(0.0);
-            msg.push_str(&format!(
-                "  churn={} temporal={:.2} bus_factor={} {}{}\n",
-                h.churn,
-                hot,
-                bus,
-                h.path,
-                if flags.is_empty() {
-                    String::new()
-                } else {
-                    format!("  [{}]", flags.join(", "))
-                }
-            ));
-        }
-        let pairs = intel.co_change_pairs(2);
-        if !pairs.is_empty() {
-            msg.push_str("\nFrequently co-changed files:\n");
-            for ((a, b), c) in pairs.iter().take(10) {
-                msg.push_str(&format!("  {}x  {} <-> {}\n", c, a, b));
-            }
-        }
-        let agent_pct = intel.agent_authored_pct();
-        if agent_pct > 0.0 {
-            msg.push_str(&format!(
-                "\nAI/agent authorship: {:.0}% of analyzed commits\n",
-                agent_pct * 100.0
-            ));
-        }
-        let coupling = refact_git_intel::coupling::build_coupling_graph(&intel, 8);
-        if !coupling.edges.is_empty() {
-            msg.push_str("\nStrongest coupling (normalized):\n");
-            for e in coupling.edges.iter().take(8) {
-                msg.push_str(&format!(
-                    "  strength={:.2} ({}x)  {} <-> {}\n",
-                    e.strength, e.co_changes, e.a, e.b
-                ));
-            }
-        }
-        let hotspot_paths: Vec<String> = hotspots.iter().map(|h| h.path.clone()).collect();
-        let reviewers = refact_git_intel::coupling::reviewer_suggestions(&intel, &hotspot_paths, 5);
-        if !reviewers.is_empty() {
-            msg.push_str(
-                "\nSuggested reviewers (by ownership of hot files + co-change neighbors):\n",
-            );
-            for (author, score) in &reviewers {
-                msg.push_str(&format!("  {} (score {:.2})\n", author, score));
-            }
-        }
-        let entropy_map = intel.change_entropy();
-        let mut biomarker_lines: Vec<String> = Vec::new();
-        for h in hotspots.iter().take(10) {
-            let p = &h.path;
-            let nloc = match crate::files_in_workspace::get_file_text_from_memory_or_disk(
-                gcx.clone(),
-                &dir.join(p),
-            )
-            .await
-            {
-                Ok(rope) => rope
-                    .to_string()
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .count() as u32,
-                Err(_) => 0,
-            };
-            let (added_90d, deleted_90d) = intel.lines_in_window(p, now_ts, 90);
-            let (primary_owner_name, primary_owner_commit_pct) = intel.primary_owner(p);
-            let (recent_owner_name, recent_owner_commit_pct) = intel.recent_owner(p, now_ts, 90);
-            let meta = refact_codehealth::git_biomarkers::GitMeta {
-                file_path: p.clone(),
-                change_entropy: entropy_map.get(p).copied().unwrap_or(0.0),
-                change_entropy_pct: intel.change_entropy_pct(p),
-                commit_count_90d: intel.commit_count_in_window(p, now_ts, 90),
-                commit_count_total: intel.file_churn.get(p).copied().unwrap_or(0),
-                is_hotspot: true,
-                is_stable: false,
-                churn_percentile: intel.churn_percentile(p),
-                lines_added_90d: added_90d,
-                lines_deleted_90d: deleted_90d,
-                nloc,
-                contributor_count: intel
-                    .file_authors
-                    .get(p)
-                    .map(|m| m.len() as u32)
-                    .unwrap_or(0),
-                primary_owner_commit_pct,
-                primary_owner_name,
-                recent_owner_name,
-                recent_owner_commit_pct,
-                bus_factor: intel.bus_factor(p) as u32,
-                prior_defect_count: 0,
-                repo_active_contributors_90d: Some(intel.active_contributors_in_window(now_ts, 90)),
-                repo_function_mod_p80: None,
-                co_change_partners: intel
-                    .co_change_partners(p, 1)
-                    .into_iter()
-                    .map(
-                        |(path, c)| refact_codehealth::git_biomarkers::CoChangePartner {
-                            path,
-                            co_change_count: c as f64,
-                        },
-                    )
-                    .collect(),
-                top_authors: intel
-                    .ownership(p)
-                    .into_iter()
-                    .map(|o| (o.author, o.commits))
-                    .collect(),
-                functions: Vec::new(),
-                repo_commit_counts: intel.file_churn.clone(),
-                import_edges: std::collections::HashSet::new(),
-            };
-            for f in refact_codehealth::git_biomarkers::git_biomarkers(&meta) {
-                if f.biomarker == "hidden_coupling" {
-                    continue;
-                }
-                biomarker_lines.push(format!(
-                    "  {} [{:?}] {} — {}",
-                    f.biomarker, f.severity, p, f.detail
-                ));
-            }
-        }
-        if !biomarker_lines.is_empty() {
-            msg.push_str("\nGit-driven health biomarkers:\n");
-            for line in biomarker_lines.iter().take(20) {
-                msg.push_str(line);
-                msg.push('\n');
-            }
-        }
-        Ok((false, tool_message(tool_call_id, msg)))
+        let service = gcx.codegraph.lock().await.clone();
+        let assembly = build_git_risk_assembly(&intel, &dir, service.as_ref(), 15, None).await;
+        Ok((
+            false,
+            tool_message(tool_call_id, git_risk_tool_output(&intel, &assembly)),
+        ))
     }
 
     fn tool_description(&self) -> ToolDesc {
@@ -2181,6 +2526,26 @@ mod tests {
     use git2::{Repository, Signature, Time};
 
     fn commit_file(repo: &Repository, path: &str, contents: &str, msg: &str) -> git2::Oid {
+        commit_file_at(
+            repo,
+            path,
+            contents,
+            msg,
+            "Tester",
+            "tester@example.com",
+            1_700_000_000,
+        )
+    }
+
+    fn commit_file_at(
+        repo: &Repository,
+        path: &str,
+        contents: &str,
+        msg: &str,
+        name: &str,
+        email: &str,
+        ts: i64,
+    ) -> git2::Oid {
         let workdir = repo.workdir().unwrap();
         let full_path = workdir.join(path);
         if let Some(parent) = full_path.parent() {
@@ -2192,8 +2557,8 @@ mod tests {
         index.write().unwrap();
         let tree_oid = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_oid).unwrap();
-        let time = Time::new(1_700_000_000, 0);
-        let sig = Signature::new("Tester", "tester@example.com", &time).unwrap();
+        let time = Time::new(ts, 0);
+        let sig = Signature::new(name, email, &time).unwrap();
         let parents: Vec<git2::Commit> = repo
             .head()
             .ok()
@@ -2444,6 +2809,183 @@ mod tests {
         ));
     }
 
+    fn branchy_hotspot_source(a: i32, b: i32, c: i32) -> String {
+        format!(
+            "pub fn hot(x: i32) -> i32 {{\n    if x > 0 {{\n        if x > 1 {{\n            for i in 0..x {{\n                if i % 2 == 0 {{\n                    return {a};\n                }}\n            }}\n            return {b};\n        }}\n    }}\n    {c}\n}}\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn build_git_meta_fills_all_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_file_at(
+            &repo,
+            "src/a.rs",
+            &branchy_hotspot_source(1, 1, 1),
+            "introduce hot",
+            "Alice",
+            "alice@example.com",
+            1_600_000_000,
+        );
+        commit_file_at(
+            &repo,
+            "src/a.rs",
+            &branchy_hotspot_source(2, 1, 1),
+            "fix crash in hot",
+            "Bob",
+            "bob@example.com",
+            1_600_000_100,
+        );
+        commit_file_at(
+            &repo,
+            "src/a.rs",
+            &branchy_hotspot_source(2, 2, 1),
+            "update hot",
+            "Carol",
+            "carol@example.com",
+            1_600_000_200,
+        );
+        let intel = refact_git_intel::mine_history(dir.path(), 20).unwrap();
+        let ranges = vec![("hot".to_string(), 1, 11)];
+
+        let meta = build_git_meta(&intel, dir.path(), "src/a.rs", None, Some(&ranges)).await;
+
+        assert_eq!(meta.prior_defect_count, 1);
+        assert!(meta.is_stable);
+        assert_eq!(meta.functions.len(), 1);
+        assert_eq!(meta.functions[0].name, "hot");
+        assert!(meta.functions[0].modification_count >= 3);
+        assert!(meta.functions[0].ccn >= 4);
+        assert!(meta.repo_function_mod_p80.is_some());
+        assert_eq!(meta.repo_commit_counts.get("src/a.rs"), Some(&3));
+    }
+
+    #[tokio::test]
+    async fn hidden_coupling_fires_without_import_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut intel = refact_git_intel::GitIntel::default();
+        intel.file_churn.insert("src/a.rs".into(), 6);
+        intel.file_churn.insert("src/b.rs".into(), 6);
+        intel
+            .co_change
+            .insert(("src/a.rs".into(), "src/b.rs".into()), 6);
+        intel.commit_records = (0..6)
+            .map(|i| refact_git_intel::CommitRecord {
+                oid: Some(format!("c{i}")),
+                ts: 1_700_000_000 + i,
+                author: "dev@example.com".into(),
+                committer: "dev@example.com".into(),
+                message: format!("change {i}"),
+                files: vec![("src/a.rs".into(), 1, 0), ("src/b.rs".into(), 1, 0)],
+            })
+            .collect();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "fn a() {}\n").unwrap();
+
+        let meta = build_git_meta(&intel, dir.path(), "src/a.rs", None, None).await;
+        let findings = refact_codehealth::git_biomarkers::git_biomarkers(&meta);
+
+        assert!(findings
+            .iter()
+            .any(|finding| finding.biomarker == "hidden_coupling"));
+    }
+
+    #[tokio::test]
+    async fn suppressed_with_import_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut intel = refact_git_intel::GitIntel::default();
+        intel.file_churn.insert("src/a.rs".into(), 6);
+        intel.file_churn.insert("src/b.rs".into(), 6);
+        intel
+            .co_change
+            .insert(("src/a.rs".into(), "src/b.rs".into()), 6);
+        intel.commit_records = (0..6)
+            .map(|i| refact_git_intel::CommitRecord {
+                oid: Some(format!("c{i}")),
+                ts: 1_700_000_000 + i,
+                author: "dev@example.com".into(),
+                committer: "dev@example.com".into(),
+                message: format!("change {i}"),
+                files: vec![("src/a.rs".into(), 1, 0), ("src/b.rs".into(), 1, 0)],
+            })
+            .collect();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "fn a() { b(); }\n").unwrap();
+        let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        service
+            .index_file("src/a.rs", "fn a() { b(); }\n", "rust")
+            .await
+            .unwrap();
+        service
+            .index_file("src/b.rs", "fn b() {}\n", "rust")
+            .await
+            .unwrap();
+        service.connect_usages().await.unwrap();
+
+        let meta = build_git_meta(&intel, dir.path(), "src/a.rs", Some(&service), None).await;
+        let findings = refact_codehealth::git_biomarkers::git_biomarkers(&meta);
+
+        assert!(meta.import_edges.contains("src/b.rs"));
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.biomarker == "hidden_coupling"));
+    }
+
+    #[tokio::test]
+    async fn build_git_risk_assembly_reaches_dead_detectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_file_at(
+            &repo,
+            "src/a.rs",
+            &branchy_hotspot_source(1, 1, 1),
+            "introduce hot",
+            "Alice",
+            "alice@example.com",
+            1_600_000_000,
+        );
+        commit_file_at(
+            &repo,
+            "src/a.rs",
+            &branchy_hotspot_source(2, 1, 1),
+            "fix crash in hot",
+            "Bob",
+            "bob@example.com",
+            1_600_000_100,
+        );
+        commit_file_at(
+            &repo,
+            "src/a.rs",
+            &branchy_hotspot_source(2, 2, 1),
+            "fix regression in hot",
+            "Carol",
+            "carol@example.com",
+            1_600_000_200,
+        );
+        commit_file_at(
+            &repo,
+            "src/a.rs",
+            &branchy_hotspot_source(2, 2, 2),
+            "update hot again",
+            "Dana",
+            "dana@example.com",
+            1_600_000_300,
+        );
+        let intel = refact_git_intel::mine_history(dir.path(), 20).unwrap();
+
+        let assembly = build_git_risk_assembly(&intel, dir.path(), None, 1, None).await;
+        let finding_names = assembly.files[0]
+            .findings
+            .iter()
+            .map(|finding| finding.biomarker.as_str())
+            .collect::<HashSet<_>>();
+
+        assert!(finding_names.contains("prior_defect"));
+        assert!(finding_names.contains("function_hotspot"));
+        assert!(finding_names.contains("code_age_volatility"));
+    }
+
     fn shared_clone_body(name: &str) -> String {
         let mut src = format!("fn {name}(input: i32) -> i32 {{\n    let mut total = input;\n");
         for _ in 0..30 {
@@ -2451,6 +2993,73 @@ mod tests {
         }
         src.push_str("    total\n}\n");
         src
+    }
+
+    #[test]
+    fn git_risk_tool_and_http_share_assembly_text() {
+        let mut intel = refact_git_intel::GitIntel::default();
+        intel.file_churn.insert("src/a.rs".into(), 3);
+        intel.file_authors.insert(
+            "src/a.rs".into(),
+            HashMap::from([
+                ("alice@example.com".into(), 2),
+                ("bob@example.com".into(), 1),
+            ]),
+        );
+        intel.commit_records = vec![refact_git_intel::CommitRecord {
+            oid: Some("abcdef1234567890".into()),
+            ts: 1,
+            author: "alice@example.com".into(),
+            committer: "alice@example.com".into(),
+            message: "large risky change".into(),
+            files: vec![("src/a.rs".into(), 200, 10)],
+        }];
+        let meta = refact_codehealth::git_biomarkers::GitMeta {
+            file_path: "src/a.rs".into(),
+            change_entropy: 0.0,
+            change_entropy_pct: 0.0,
+            commit_count_90d: 1,
+            commit_count_total: 3,
+            is_hotspot: true,
+            is_stable: false,
+            churn_percentile: 1.0,
+            lines_added_90d: 200,
+            lines_deleted_90d: 10,
+            nloc: 20,
+            contributor_count: 2,
+            primary_owner_commit_pct: 0.67,
+            primary_owner_name: "alice@example.com".into(),
+            recent_owner_name: "alice@example.com".into(),
+            recent_owner_commit_pct: 1.0,
+            bus_factor: 2,
+            prior_defect_count: 1,
+            repo_active_contributors_90d: Some(2),
+            repo_function_mod_p80: None,
+            co_change_partners: Vec::new(),
+            top_authors: vec![
+                ("alice@example.com".into(), 2),
+                ("bob@example.com".into(), 1),
+            ],
+            functions: Vec::new(),
+            repo_commit_counts: HashMap::from([("src/a.rs".into(), 3)]),
+            import_edges: HashSet::new(),
+        };
+        let findings = refact_codehealth::git_biomarkers::git_biomarkers(&meta);
+        let assembly = GitRiskAssembly {
+            files: vec![GitRiskFileAssembly {
+                meta,
+                findings,
+                temporal_score: 1.0,
+                churn_risk: 0.5,
+            }],
+            recent_commit_risks: recent_commit_risk_summaries(&intel),
+        };
+
+        let tool_text = git_risk_tool_output(&intel, &assembly);
+
+        assert!(tool_text.contains("src/a.rs"));
+        assert!(tool_text.contains("prior_defect"));
+        assert!(tool_text.contains("Recent commit change-risk"));
     }
 
     #[tokio::test]
