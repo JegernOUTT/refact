@@ -88,6 +88,81 @@ debug = false
 [profile.dev.build-override]
 debug = false
 
+# Keep CodeGraph's parser and SQLite dependencies optimized in dev builds so
+# target/debug/refact-lsp indexes source at near-release speed while workspace
+# crates remain debuggable. Add new tree-sitter grammar crates here.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
+[profile.dev.package.rusqlite]
+opt-level = 3
+
+[profile.dev.package.sqlite-vec]
+opt-level = 3
+
+[profile.dev.package.tokio-rusqlite]
+opt-level = 3
+
+[profile.dev.package.tree-sitter]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-bash]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-c]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-c-sharp]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-cpp]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-elixir]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-go]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-haskell]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-java]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-javascript]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-kotlin-ng]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-language]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-ocaml]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-php]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-python]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-ruby]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-rust]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-scala]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-swift]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-typescript]
+opt-level = 3
+
 [package]
 name = "refact-lsp"
 version = "8.2.3"

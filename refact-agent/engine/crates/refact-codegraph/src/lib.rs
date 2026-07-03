@@ -586,6 +586,111 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
+    const BENCH_INDEX_CORPUS: &[(&str, &str)] = &[
+        ("../gui/src/__tests__/buddy.test.ts", "typescript"),
+        ("../gui/src/__tests__/buddy_home.test.tsx", "typescript"),
+        (
+            "../gui/src/features/Tasks/TaskWorkspace.test.tsx",
+            "typescript",
+        ),
+        ("../gui/src/features/Chat/Thread/reducer.ts", "typescript"),
+        ("../gui/src/features/Tasks/TaskWorkspace.tsx", "typescript"),
+        ("../gui/src/features/Buddy/canvas/animLoop.ts", "typescript"),
+        ("../gui/src/app/middleware.ts", "typescript"),
+        ("../gui/src/features/Buddy/BuddyWorld.tsx", "typescript"),
+        (
+            "../gui/src/components/ChatContent/ToolsContent.tsx",
+            "typescript",
+        ),
+        ("../gui/src/__tests__/buddy_showcase.test.ts", "typescript"),
+        ("../gui/src/services/refact/types.ts", "typescript"),
+        ("../gui/src/services/refact/providers.ts", "typescript"),
+        (
+            "../gui/src/features/Chat/Thread/reducer.test.ts",
+            "typescript",
+        ),
+        (
+            "../gui/src/__tests__/buddy_world_draw.test.ts",
+            "typescript",
+        ),
+        (
+            "../gui/src/features/Buddy/BuddyChatCompanion.tsx",
+            "typescript",
+        ),
+        (
+            "../gui/src/features/Buddy/buddyWorldDrawAtmosphere.ts",
+            "typescript",
+        ),
+        ("../gui/src/features/Buddy/buddyWorldModel.ts", "typescript"),
+        ("../gui/src/__tests__/chatSSEProtocol.test.ts", "typescript"),
+        (
+            "../gui/src/features/Buddy/buddyWorldDrawActor.ts",
+            "typescript",
+        ),
+        ("../gui/src/features/Chat/Thread/selectors.ts", "typescript"),
+        ("src/chat/trajectories.rs", "rust"),
+        ("crates/refact-tui/src/app.rs", "rust"),
+        ("src/buddy/tests.rs", "rust"),
+        ("src/chat/summarization.rs", "rust"),
+        ("src/chat/session.rs", "rust"),
+        ("src/buddy/jobs/autonomous_chats.rs", "rust"),
+        ("crates/refact-worktrees/src/service.rs", "rust"),
+        ("crates/refact-llm/src/adapters/anthropic.rs", "rust"),
+        ("src/providers/http.rs", "rust"),
+        ("src/chat/queue.rs", "rust"),
+        ("src/chat/generation.rs", "rust"),
+        ("src/buddy/memory_lifecycle.rs", "rust"),
+        ("src/chat/stream_core.rs", "rust"),
+        ("crates/refact-exec/src/registry.rs", "rust"),
+        ("src/files_in_workspace.rs", "rust"),
+        ("src/scheduler/runner.rs", "rust"),
+        ("src/subchat.rs", "rust"),
+        ("crates/refact-chat-history/src/trajectory_ops.rs", "rust"),
+        ("src/tools/tool_task_memory.rs", "rust"),
+        ("src/tools/tool_process.rs", "rust"),
+        ("src/tools/tool_task_merge_agent.rs", "rust"),
+        ("crates/refact-agentic/src/mode_transition.rs", "rust"),
+        ("src/buddy/actor.rs", "rust"),
+        ("crates/refact-llm/src/adapters/openai_responses.rs", "rust"),
+        ("src/chat/task_agent_monitor.rs", "rust"),
+        ("src/daemon/cli.rs", "rust"),
+        ("src/http/routers/v1/tasks.rs", "rust"),
+        ("src/tools/tool_compress_chat.rs", "rust"),
+        ("src/memories.rs", "rust"),
+        ("src/http/routers/v1/mcp_marketplace.rs", "rust"),
+    ];
+
+    #[tokio::test]
+    #[ignore = "manual dev-profile indexing benchmark"]
+    async fn bench_index() {
+        let engine_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let service = CodeGraphService::open_in_memory().unwrap();
+        let mut bytes = 0usize;
+        let started = Instant::now();
+
+        for (rel_path, lang) in BENCH_INDEX_CORPUS {
+            let full_path = engine_root.join(rel_path);
+            let text = std::fs::read_to_string(&full_path)
+                .unwrap_or_else(|err| panic!("read {}: {err}", full_path.display()));
+            bytes += text.len();
+            service.index_file(rel_path, &text, lang).await.unwrap();
+        }
+
+        let elapsed = started.elapsed();
+        let counts = service.counts().await.unwrap();
+        assert_eq!(counts.files, BENCH_INDEX_CORPUS.len() as i64);
+        println!(
+            "bench_index files={} bytes={} nodes={} edges={} fts_docs={} elapsed_ms={:.3} ms_per_file={:.3}",
+            BENCH_INDEX_CORPUS.len(),
+            bytes,
+            counts.nodes,
+            counts.edges,
+            counts.fts_docs,
+            elapsed.as_secs_f64() * 1000.0,
+            elapsed.as_secs_f64() * 1000.0 / BENCH_INDEX_CORPUS.len() as f64
+        );
+    }
+
     #[test]
     fn enqueue_files_deduplicates_pending_paths_fifo() {
         let service = CodeGraphService::open_in_memory().unwrap();

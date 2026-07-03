@@ -17,6 +17,8 @@ bash tools/compile_bench.sh               # compile-time before/after benchmark
 
 Release profile: `opt-level = "z"`, `lto = true`, `strip = true`, `codegen-units = 1`.
 
+Dev profile keeps workspace crates debuggable but optimizes CodeGraph's parser and SQLite dependencies with `[profile.dev.package.*] opt-level = 3`: tree-sitter core, every tree-sitter grammar crate, `tree-sitter-language`, `rusqlite`, `tokio-rusqlite`, `libsqlite3-sys`, and `sqlite-vec`. This makes `target/debug/refact-lsp` indexing close to release speed for parse-dominated cold indexes; the first dev build is slower because these dependencies compile optimized, and the shared sccache setup mitigates repeated work across worktrees.
+
 ## Architecture
 
 `GlobalContext` (`Arc<ARwLock<GlobalContext>>`) is the central shared state. HTTP server (Axum) and LSP server (tower-lsp) both hold a reference. Background tasks (workspace file watcher, CodeGraph indexer, VecDB memory-plane vectorizer, git shadow cleanup, knowledge graph, trajectory memos, agent monitor, OAuth refresh) are spawned via `start_background_tasks()` (~18 tokio tasks). Workspace indexing is routed through `indexing_routing.rs`: memory-plane files go to VecDB, while source-code files go to CodeGraph.
