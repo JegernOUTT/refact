@@ -26,7 +26,7 @@ Release profile: `opt-level = "z"`, `lto = true`, `strip = true`, `codegen-units
 ```
 crates/
   refact-codegraph/          — SQLite graph store, FTS retrieval, graph analytics, security scan helpers
-  refact-codegraph-parsers/  — tree-sitter extractors, import resolution, heritage/framework detection
+  refact-codegraph-parsers/  — tree-sitter extractors and framework detection
   refact-codehealth/         — deterministic code health, biomarkers, duplication, coverage trends
   refact-codewiki/           — code-map/wiki selection and link graph helpers
   refact-git-intel/          — churn, coupling, blame, provenance, change-risk signals

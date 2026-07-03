@@ -22,7 +22,7 @@ React App → Redux (RTK Query) → LSP Server (:8001)   [chat, tools, caps, mod
                                → IDE (postMessage)     [file ops, theme, context]
 ```
 
-CodeGraph status is a first-class GUI surface: RTK Query polls `/v1/rag-status`, stores the typed `RagStatus` payload in the Knowledge slice, and renders mini CodeGraph/VecDB/AST status chips in the toolbar.
+CodeGraph status is a first-class GUI surface: RTK Query polls `/v1/rag-status`, stores the typed `RagStatus` payload in the Knowledge slice, and renders toolbar mini indicators for CodeGraph, VecDB, and the legacy AST compatibility status.
 
 ### Directory Layout
 
@@ -465,7 +465,7 @@ Chat can proceed when ALL true: `snapshot_received && !streaming && !waiting_for
 - **Customization**: Agent modes, subagent forms, tool parameter editor.
 - **Tour/Onboarding**: Welcome screen, guided tour bubbles.
 - **FIM Debug**: Fill-in-Middle debug panel with search context and symbol list.
-- **CodeGraph status**: Toolbar mini indicators surface CodeGraph/VecDB/AST indexing state from `/v1/rag-status`; CodeGraph settings are host-provided feature flags and status lives in the Knowledge slice.
+- **CodeGraph status**: Toolbar mini indicators surface CodeGraph, VecDB, and legacy AST compatibility state from `/v1/rag-status`; CodeGraph settings are host-provided feature flags and status lives in the Knowledge slice.
 - **Docker**: Container list, start/stop/kill/remove, env vars, smart links.
 - **Compression Hints**: 🗜️ icon when context approaches limit. `compression_strength: "absent" | "weak" | "strong"`.
 - **Queued Messages**: Send while streaming. Priority queue bypasses tool wait.
