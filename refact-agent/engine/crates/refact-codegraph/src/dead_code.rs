@@ -80,7 +80,7 @@ fn analyze_reachability(store: &Store) -> Result<Reachability, String> {
     let mut route_targets = BTreeSet::<i64>::new();
 
     for (src, dst, kind) in store.graph_edges()? {
-        if kind != "calls" && kind != "route_handler" {
+        if !is_reachability_edge(&kind) {
             continue;
         }
         if kind == "route_handler" && known_ids.contains(&dst) {
@@ -90,11 +90,13 @@ fn analyze_reachability(store: &Store) -> Result<Reachability, String> {
             }
             continue;
         }
-        if kind != "calls" || !known_ids.contains(&src) || !known_ids.contains(&dst) {
+        if !known_ids.contains(&src) || !known_ids.contains(&dst) {
             continue;
         }
         out.entry(src).or_default().push(dst);
-        *incoming_calls.entry(dst).or_default() += 1;
+        if kind == "calls" {
+            *incoming_calls.entry(dst).or_default() += 1;
+        }
     }
 
     for targets in out.values_mut() {
@@ -134,6 +136,10 @@ fn analyze_reachability(store: &Store) -> Result<Reachability, String> {
         reachable,
         incoming_calls,
     })
+}
+
+fn is_reachability_edge(kind: &str) -> bool {
+    matches!(kind, "calls" | "inherits" | "route_handler")
 }
 
 fn reachable_from(roots: &BTreeSet<i64>, out: &BTreeMap<i64, Vec<i64>>) -> BTreeSet<i64> {
@@ -217,6 +223,35 @@ mod tests {
         assert!(names.contains(&"orphan"), "dead symbols: {dead:?}");
         assert!(!names.contains(&"used"), "dead symbols: {dead:?}");
         assert!(!names.contains(&"main"), "dead symbols: {dead:?}");
+    }
+
+    #[test]
+    fn inherited_base_is_reachable_but_orphan_stays_dead() {
+        let store = Store::open_in_memory().unwrap();
+        let main = store
+            .insert_node("function", "src/lib.rs", "main", "rust", 1, 1)
+            .unwrap();
+        let sub = store
+            .insert_node("class", "src/lib.rs", "sub", "rust", 2, 2)
+            .unwrap();
+        let base = store
+            .insert_node("class", "src/lib.rs", "base", "rust", 3, 3)
+            .unwrap();
+        let orphan = store
+            .insert_node("class", "src/lib.rs", "orphan", "rust", 4, 4)
+            .unwrap();
+        store.add_symbol("src/lib.rs::main", main).unwrap();
+        store.add_symbol("src/lib.rs::sub", sub).unwrap();
+        store.add_symbol("src/lib.rs::base", base).unwrap();
+        store.add_symbol("src/lib.rs::orphan", orphan).unwrap();
+        store.add_edge(main, sub, "calls", 1.0).unwrap();
+        store.add_edge(sub, base, "inherits", 1.0).unwrap();
+
+        let dead = dead_code(&store).unwrap();
+        let names: Vec<&str> = dead.iter().map(|s| s.name.as_str()).collect();
+
+        assert!(!names.contains(&"base"), "dead symbols: {dead:?}");
+        assert!(names.contains(&"orphan"), "dead symbols: {dead:?}");
     }
 
     #[test]
