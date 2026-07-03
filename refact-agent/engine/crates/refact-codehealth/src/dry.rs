@@ -26,19 +26,21 @@ pub fn dry_violation(input: &DryInput) -> Vec<Finding> {
         return Vec::new();
     }
 
-    let Some(worst) = input.clones.iter().max_by_key(|clone| {
-        (
-            clone.co_change_count,
-            clone.a_line_count.max(clone.b_line_count),
-        )
-    }) else {
+    let Some(worst) = input
+        .clones
+        .iter()
+        .filter(|clone| clone.a_line_count.max(clone.b_line_count) >= MIN_CLONE_LINES)
+        .max_by_key(|clone| {
+            (
+                clone.co_change_count,
+                clone.a_line_count.max(clone.b_line_count),
+            )
+        })
+    else {
         return Vec::new();
     };
 
     let worst_lines = worst.a_line_count.max(worst.b_line_count);
-    if worst_lines < MIN_CLONE_LINES {
-        return Vec::new();
-    }
 
     let file_is_a = worst.file_a == input.file_path;
     let partner = if file_is_a {
@@ -168,6 +170,27 @@ mod tests {
         assert!(findings[0].detail.contains("partner=active.rs"));
         assert!(findings[0].detail.contains("worst_clone_lines=8"));
         assert!(findings[0].detail.contains("worst_clone_co_change=4"));
+    }
+
+    #[test]
+    fn clone_length_filter_runs_before_worst_clone_ranking() {
+        let input = DryInput {
+            file_path: "a.rs".to_string(),
+            duplication_pct: 0.10,
+            clones: vec![
+                clone_pair("a.rs", 10, 5, "short.rs", 20, 5, 9),
+                clone_pair("a.rs", 30, 12, "eligible.rs", 40, 12, 1),
+            ],
+        };
+
+        let findings = dry_violation(&input);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 30);
+        assert_eq!(findings[0].severity, Severity::Low);
+        assert!(findings[0].detail.contains("partner=eligible.rs"));
+        assert!(findings[0].detail.contains("worst_clone_lines=12"));
+        assert!(findings[0].detail.contains("worst_clone_co_change=1"));
     }
 
     #[test]

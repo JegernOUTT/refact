@@ -115,7 +115,7 @@ pub fn detect_biomarkers(lang: &str, text: &str) -> Vec<Finding> {
     let file_nloc = count_file_nloc(text);
     let mut functions = Vec::new();
     collect_functions(root, bytes, &mut functions);
-    let classes = collect_classes(root, bytes, &functions);
+    let classes = collect_classes(root, bytes);
 
     let mut out = Vec::new();
     for f in &functions {
@@ -385,23 +385,14 @@ fn class_name(node: Node<'_>, bytes: &[u8]) -> String {
     String::new()
 }
 
-fn collect_classes<'a>(
-    root: Node<'a>,
-    bytes: &'a [u8],
-    all_functions: &[FunctionMetric<'a>],
-) -> Vec<ClassMetric<'a>> {
+fn collect_classes<'a>(root: Node<'a>, bytes: &'a [u8]) -> Vec<ClassMetric<'a>> {
     let mut class_nodes = Vec::new();
     collect_class_nodes(root, &mut class_nodes);
     class_nodes
         .into_iter()
         .map(|node| {
-            let methods: Vec<_> = all_functions
-                .iter()
-                .copied()
-                .filter(|f| {
-                    f.node.start_byte() >= node.start_byte() && f.node.end_byte() <= node.end_byte()
-                })
-                .collect();
+            let mut methods = Vec::new();
+            collect_class_methods(node, bytes, &mut methods);
             let (lcom4, field_count) = compute_lcom4(&methods, bytes);
             ClassMetric {
                 name: class_name(node, bytes),
@@ -415,6 +406,31 @@ fn collect_classes<'a>(
             }
         })
         .collect()
+}
+
+fn collect_class_methods<'a>(node: Node<'a>, bytes: &'a [u8], out: &mut Vec<FunctionMetric<'a>>) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_class_methods_from_child(child, bytes, out);
+    }
+}
+
+fn collect_class_methods_from_child<'a>(
+    node: Node<'a>,
+    bytes: &'a [u8],
+    out: &mut Vec<FunctionMetric<'a>>,
+) {
+    if CLASS_KINDS.contains(&node.kind()) && node.is_named() {
+        return;
+    }
+    if FUNCTION_KINDS.contains(&node.kind()) {
+        out.push(function_metric(node, bytes));
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_class_methods_from_child(child, bytes, out);
+    }
 }
 
 fn collect_class_nodes<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
@@ -801,6 +817,19 @@ mod tests {
                 .any(|f| f.biomarker == "low_cohesion" && f.detail.contains("LCOM4=5")),
             "got {findings:?}"
         );
+    }
+
+    #[test]
+    fn class_methods_exclude_nested_class_methods() {
+        let src = "class Outer:\n    def a(self):\n        return 1\n    class Inner:\n        def hidden(self):\n            return self.x\n        def also_hidden(self):\n            return self.y\n    def b(self):\n        return 2\n    def c(self):\n        return 3\n    def d(self):\n        return 4\n";
+        let tree = refact_codegraph_parsers::parse_tree("python", src).unwrap();
+        let classes = collect_classes(tree.root_node(), src.as_bytes());
+        let outer = classes.iter().find(|c| c.name == "Outer").unwrap();
+        let inner = classes.iter().find(|c| c.name == "Inner").unwrap();
+
+        assert_eq!(outer.method_count, 4);
+        assert_eq!(outer.lcom4, 4);
+        assert_eq!(inner.method_count, 2);
     }
 
     #[test]

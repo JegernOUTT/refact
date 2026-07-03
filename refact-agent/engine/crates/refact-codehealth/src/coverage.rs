@@ -44,12 +44,22 @@ pub fn parse_lcov(text: &str) -> CoverageReport {
         let Some(path) = cur.path.take() else {
             return;
         };
+        let lines_total = cur.explicit_lf.unwrap_or(cur.total_lines.len() as u32);
+        let lines_covered = cur
+            .explicit_lh
+            .unwrap_or(cur.covered_lines.len() as u32)
+            .min(lines_total);
+        let branches_total = cur.explicit_brf.unwrap_or(cur.branches_total);
+        let branches_covered = cur
+            .explicit_brh
+            .unwrap_or(cur.branches_covered)
+            .min(branches_total);
         files.push(FileCoverage {
             path,
-            lines_total: cur.explicit_lf.unwrap_or(cur.total_lines.len() as u32),
-            lines_covered: cur.explicit_lh.unwrap_or(cur.covered_lines.len() as u32),
-            branches_total: cur.explicit_brf.unwrap_or(cur.branches_total),
-            branches_covered: cur.explicit_brh.unwrap_or(cur.branches_covered),
+            lines_total,
+            lines_covered,
+            branches_total,
+            branches_covered,
         });
         *cur = Current::default();
     }
@@ -411,6 +421,18 @@ mod tests {
         );
         assert_eq!(report.files[0].branches_total, 4);
         assert_eq!(report.files[0].branches_covered, 1);
+    }
+
+    #[test]
+    fn malformed_lcov_explicit_covered_counts_are_clamped_to_total() {
+        let report = parse_lcov("SF:src/lib.rs\nLF:2\nLH:3\nBRF:1\nBRH:2\nend_of_record\n");
+
+        assert_eq!(report.files[0].lines_total, 2);
+        assert_eq!(report.files[0].lines_covered, 2);
+        assert_eq!(report.files[0].branches_total, 1);
+        assert_eq!(report.files[0].branches_covered, 1);
+        assert_eq!(report.files[0].line_pct(), 100.0);
+        assert_eq!(report.files[0].branch_pct(), 100.0);
     }
 
     #[test]
