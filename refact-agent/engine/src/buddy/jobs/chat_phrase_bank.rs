@@ -1,4 +1,4 @@
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Local, Timelike, Utc};
 
 use crate::app_state::AppState;
 use crate::buddy::actor::redact_sensitive;
@@ -11,7 +11,7 @@ pub struct ChatPhraseBankJob;
 
 const FAILED_RESULT_PREFIX: &str = "failed:";
 const JOB_ID: &str = "chat_phrase_bank";
-const COOLDOWN_SECONDS: u64 = 20 * 60 * 60;
+const COOLDOWN_SECONDS: u64 = 0;
 const PRIORITY: u32 = 4;
 const MAX_EVIDENCE_LINES: usize = 18;
 const MAX_JSON_ARRAY_ITEMS: usize = 12;
@@ -25,8 +25,12 @@ fn refresh_hour(settings: &BuddySettings) -> u32 {
     settings.daily_digest_hour.unwrap_or(18).min(23) as u32
 }
 
-fn should_run_at(ctx: &BuddyJobContext, now: DateTime<Utc>) -> bool {
-    let today = now.date_naive().to_string();
+fn date_key(now: &DateTime<Local>) -> String {
+    now.date_naive().to_string()
+}
+
+fn should_run_at(ctx: &BuddyJobContext, now: DateTime<Local>) -> bool {
+    let today = date_key(&now);
     let failed_today = format!("{FAILED_RESULT_PREFIX}{today}");
     if ctx
         .job_state
@@ -256,19 +260,20 @@ impl BuddyJob for ChatPhraseBankJob {
     }
 
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
-        should_run_at(ctx, Utc::now())
+        should_run_at(ctx, Local::now())
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let now = Utc::now();
+        let key = date_key(&Local::now());
         match build_chat_phrase_bank(gcx, &ctx, now).await {
             Some(chat_phrase_bank) => BuddyJobResult {
                 chat_phrase_bank: Some(chat_phrase_bank),
-                last_result: Some(now.date_naive().to_string()),
+                last_result: Some(key),
                 ..Default::default()
             },
             None => BuddyJobResult {
-                last_result: Some(format!("{FAILED_RESULT_PREFIX}{}", now.date_naive())),
+                last_result: Some(format!("{FAILED_RESULT_PREFIX}{key}")),
                 ..Default::default()
             },
         }
@@ -280,6 +285,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    use chrono::TimeZone;
     use crate::buddy::types::{
         BuddyActivity, BuddyFact, BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse,
         BuddyWorkflowSummary,
@@ -309,7 +315,7 @@ mod tests {
     async fn phrase_bank_runs_once_per_day_at_digest_hour() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
-        let hour = Utc::now().hour() as u8;
+        let hour = Local::now().hour() as u8;
         let mut ctx = test_context(dir.path());
         ctx.settings.daily_digest_hour = Some(hour);
         let job = ChatPhraseBankJob;
@@ -319,8 +325,22 @@ mod tests {
         ctx.settings.daily_digest_hour = Some(hour.saturating_sub(1));
         assert!(job.should_run(gcx.clone(), &ctx).await);
 
-        ctx.job_state.last_result = Some(Utc::now().date_naive().to_string());
+        ctx.job_state.last_result = Some(date_key(&Local::now()));
         assert!(!job.should_run(gcx, &ctx).await);
+    }
+
+    #[test]
+    fn phrase_bank_dedupes_on_local_date_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(dir.path());
+        ctx.settings.daily_digest_hour = Some(18);
+        let now = Local
+            .with_ymd_and_hms(2026, 6, 5, 23, 0, 0)
+            .single()
+            .unwrap();
+        ctx.job_state.last_result = Some(date_key(&now));
+
+        assert!(!should_run_at(&ctx, now));
     }
 
     #[tokio::test]
@@ -437,6 +457,7 @@ mod tests {
             last_outcome: Some("Bearer workflow-secret and token=workflow-secret".to_string()),
             failure_category: None,
             failure_summary: None,
+            ..Default::default()
         });
 
         let bank = build_chat_phrase_bank(gcx, &ctx, Utc::now())
@@ -488,7 +509,7 @@ mod tests {
         let last_result = result.last_result.expect("failed run records backoff");
         assert!(last_result.starts_with(FAILED_RESULT_PREFIX));
         ctx.job_state.last_result = Some(last_result);
-        assert!(!should_run_at(&ctx, Utc::now()));
+        assert!(!should_run_at(&ctx, Local::now()));
     }
 
     #[tokio::test]

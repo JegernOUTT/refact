@@ -62,6 +62,11 @@ pub fn budget_for(intent: SpeechIntent) -> SpeechBudget {
             per_day: 4,
             priority: 4,
         },
+        SpeechIntent::ChatReaction => SpeechBudget {
+            per_hour: 4,
+            per_day: 30,
+            priority: 2,
+        },
     }
 }
 
@@ -127,7 +132,180 @@ pub fn intent_key(intent: SpeechIntent) -> &'static str {
         SpeechIntent::MemoryPulseCommentary => "memory_pulse_commentary",
         SpeechIntent::QuestAccept => "quest_accept",
         SpeechIntent::QuestComplete => "quest_complete",
+        SpeechIntent::ChatReaction => "chat_reaction",
     }
+}
+pub fn parse_intent_key(token: &str) -> Option<SpeechIntent> {
+    match token {
+        "humor" => Some(SpeechIntent::Humor),
+        "suggestion" => Some(SpeechIntent::Suggestion),
+        "insight" => Some(SpeechIntent::Insight),
+        "win" => Some(SpeechIntent::Win),
+        "error_alert" => Some(SpeechIntent::ErrorAlert),
+        "greeting" => Some(SpeechIntent::Greeting),
+        "tour" => Some(SpeechIntent::Tour),
+        "milestone" => Some(SpeechIntent::Milestone),
+        "memory_pulse_commentary" => Some(SpeechIntent::MemoryPulseCommentary),
+        "quest_accept" => Some(SpeechIntent::QuestAccept),
+        "quest_complete" => Some(SpeechIntent::QuestComplete),
+        "chat_reaction" => Some(SpeechIntent::ChatReaction),
+        _ => None,
+    }
+}
+
+pub const ALL_INTENT_KEYS: &[&str] = &[
+    "humor",
+    "suggestion",
+    "insight",
+    "win",
+    "error_alert",
+    "greeting",
+    "tour",
+    "milestone",
+    "memory_pulse_commentary",
+    "quest_accept",
+    "quest_complete",
+    "chat_reaction",
+];
+
+pub fn hour_in_quiet_window(hour: u32, start: u8, end: u8) -> bool {
+    let start = u32::from(start) % 24;
+    let end = u32::from(end) % 24;
+    let hour = hour % 24;
+    if start == end {
+        return false;
+    }
+    if start < end {
+        hour >= start && hour < end
+    } else {
+        hour >= start || hour < end
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeechGateDecision {
+    pub allowed: bool,
+    pub reason: &'static str,
+}
+
+impl SpeechGateDecision {
+    fn allow(reason: &'static str) -> Self {
+        Self {
+            allowed: true,
+            reason,
+        }
+    }
+
+    fn drop(reason: &'static str) -> Self {
+        Self {
+            allowed: false,
+            reason,
+        }
+    }
+}
+
+pub fn gate_speech(
+    settings: &crate::settings::BuddySettings,
+    rotation: &SpeechRotationState,
+    intent: Option<SpeechIntent>,
+    chat_id: Option<&str>,
+    local_hour: u32,
+    auto_quiet_window: Option<(u8, u8)>,
+    now: DateTime<Utc>,
+) -> SpeechGateDecision {
+    if let Some(chat_id) = chat_id {
+        if settings.muted_chat_ids.iter().any(|id| id == chat_id) {
+            return SpeechGateDecision::drop("chat_muted");
+        }
+    }
+    if let Some(intent) = intent {
+        let key = intent_key(intent);
+        if settings.muted_intents.iter().any(|muted| muted == key) {
+            return SpeechGateDecision::drop("intent_muted");
+        }
+    }
+    let critical = matches!(intent, Some(SpeechIntent::ErrorAlert));
+    if !critical {
+        let quiet_window = match settings.quiet_hours_mode {
+            crate::settings::QuietHoursMode::Off => None,
+            crate::settings::QuietHoursMode::Fixed => {
+                Some((settings.quiet_hours_start, settings.quiet_hours_end))
+            }
+            crate::settings::QuietHoursMode::Auto => auto_quiet_window,
+        };
+        if let Some((start, end)) = quiet_window {
+            if hour_in_quiet_window(local_hour, start, end) {
+                return SpeechGateDecision::drop("quiet_hours");
+            }
+        }
+    }
+    if let Some(intent) = intent {
+        let budget = budget_for(intent);
+        let state = rotation.by_intent.get(intent_key(intent));
+        let hour_count = effective_hour_count(state, now);
+        let day_count = effective_day_count(state, now);
+        if hour_count >= budget.per_hour || day_count >= budget.per_day {
+            return SpeechGateDecision::drop("intent_budget");
+        }
+    }
+    SpeechGateDecision::allow("allowed")
+}
+
+pub fn gate_speech_user_initiated(
+    settings: &crate::settings::BuddySettings,
+    intent: Option<SpeechIntent>,
+    chat_id: Option<&str>,
+) -> SpeechGateDecision {
+    if let Some(chat_id) = chat_id {
+        if settings.muted_chat_ids.iter().any(|id| id == chat_id) {
+            return SpeechGateDecision::drop("chat_muted");
+        }
+    }
+    if let Some(intent) = intent {
+        let key = intent_key(intent);
+        if settings.muted_intents.iter().any(|muted| muted == key) {
+            return SpeechGateDecision::drop("intent_muted");
+        }
+    }
+    SpeechGateDecision::allow("user_initiated")
+}
+
+pub fn auto_quiet_window_from_actions(
+    actions: &[crate::user_action::UserAction],
+) -> Option<(u8, u8)> {
+    if actions.len() < 10 {
+        return None;
+    }
+    let mut hours = [0usize; 24];
+    for action in actions {
+        let local = action.ts().with_timezone(&chrono::Local);
+        hours[chrono::Timelike::hour(&local) as usize] += 1;
+    }
+    let active: Vec<usize> = (0..24).filter(|&h| hours[h] > 0).collect();
+    if active.is_empty() || active.len() >= 20 {
+        return None;
+    }
+    let mut best_gap = 0usize;
+    let mut best_last = active[0];
+    let mut best_next = active[0];
+    for (i, &hour) in active.iter().enumerate() {
+        let next = active[(i + 1) % active.len()];
+        let gap = (next + 24 - hour - 1) % 24;
+        if gap > best_gap {
+            best_gap = gap;
+            best_last = hour;
+            best_next = next;
+        }
+    }
+    if best_gap < 3 {
+        return None;
+    }
+    let quiet_start = ((best_last + 2) % 24) as u8;
+    let quiet_end = best_next as u8;
+    if quiet_start == quiet_end {
+        return None;
+    }
+    Some((quiet_start, quiet_end))
 }
 
 fn effective_hour_count(state: Option<&IntentBudgetState>, now: DateTime<Utc>) -> u32 {
@@ -184,6 +362,7 @@ mod tests {
             persistent: false,
             ttl_seconds: 10,
             dedupe_key: None,
+            speech_intent: None,
             created_at: now().to_rfc3339(),
             controls: vec![],
             chat_id: None,
@@ -303,5 +482,276 @@ mod tests {
         assert_eq!(state.hour_count, 1);
         assert_eq!(state.day_count, 6);
         assert_eq!(state.hour_window_start, Some(clock));
+    }
+}
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use crate::settings::{BuddySettings, QuietHoursMode};
+
+    fn clock() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-05-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn quiet_window_handles_wraparound() {
+        assert!(hour_in_quiet_window(23, 22, 8));
+        assert!(hour_in_quiet_window(3, 22, 8));
+        assert!(!hour_in_quiet_window(12, 22, 8));
+        assert!(hour_in_quiet_window(10, 9, 17));
+        assert!(!hour_in_quiet_window(8, 9, 17));
+        assert!(!hour_in_quiet_window(5, 6, 6));
+    }
+
+    #[test]
+    fn gate_blocks_muted_chat_and_intent() {
+        let mut settings = BuddySettings::default();
+        settings.quiet_hours_mode = QuietHoursMode::Off;
+        settings.muted_chat_ids.push("chat-9".to_string());
+        settings.muted_intents.push("humor".to_string());
+        let rotation = SpeechRotationState::default();
+
+        let by_chat = gate_speech(
+            &settings,
+            &rotation,
+            Some(SpeechIntent::Insight),
+            Some("chat-9"),
+            12,
+            None,
+            clock(),
+        );
+        assert!(!by_chat.allowed);
+        assert_eq!(by_chat.reason, "chat_muted");
+
+        let by_intent = gate_speech(
+            &settings,
+            &rotation,
+            Some(SpeechIntent::Humor),
+            None,
+            12,
+            None,
+            clock(),
+        );
+        assert!(!by_intent.allowed);
+        assert_eq!(by_intent.reason, "intent_muted");
+
+        let ok = gate_speech(
+            &settings,
+            &rotation,
+            Some(SpeechIntent::Insight),
+            Some("chat-other"),
+            12,
+            None,
+            clock(),
+        );
+        assert!(ok.allowed);
+    }
+
+    #[test]
+    fn gate_quiet_hours_fixed_blocks_but_exempts_error_alert() {
+        let mut settings = BuddySettings::default();
+        settings.quiet_hours_mode = QuietHoursMode::Fixed;
+        settings.quiet_hours_start = 22;
+        settings.quiet_hours_end = 8;
+        let rotation = SpeechRotationState::default();
+
+        let humor = gate_speech(
+            &settings,
+            &rotation,
+            Some(SpeechIntent::Humor),
+            None,
+            23,
+            None,
+            clock(),
+        );
+        assert!(!humor.allowed);
+        assert_eq!(humor.reason, "quiet_hours");
+
+        let alert = gate_speech(
+            &settings,
+            &rotation,
+            Some(SpeechIntent::ErrorAlert),
+            None,
+            23,
+            None,
+            clock(),
+        );
+        assert!(alert.allowed);
+    }
+
+    #[test]
+    fn gate_auto_mode_uses_derived_window_only() {
+        let settings = BuddySettings::default();
+        let rotation = SpeechRotationState::default();
+
+        let without_data = gate_speech(
+            &settings,
+            &rotation,
+            Some(SpeechIntent::Humor),
+            None,
+            3,
+            None,
+            clock(),
+        );
+        assert!(without_data.allowed);
+
+        let with_window = gate_speech(
+            &settings,
+            &rotation,
+            Some(SpeechIntent::Humor),
+            None,
+            3,
+            Some((22, 8)),
+            clock(),
+        );
+        assert!(!with_window.allowed);
+        assert_eq!(with_window.reason, "quiet_hours");
+    }
+
+    #[test]
+    fn gate_enforces_intent_budget() {
+        let mut settings = BuddySettings::default();
+        settings.quiet_hours_mode = QuietHoursMode::Off;
+        let mut rotation = SpeechRotationState::default();
+        rotation.by_intent.insert(
+            intent_key(SpeechIntent::Win).to_string(),
+            IntentBudgetState {
+                last_emitted_at: Some(clock()),
+                hour_count: 1,
+                day_count: 1,
+                hour_window_start: Some(clock()),
+                day_window_start: Some(clock()),
+            },
+        );
+
+        let decision = gate_speech(
+            &settings,
+            &rotation,
+            Some(SpeechIntent::Win),
+            None,
+            12,
+            None,
+            clock(),
+        );
+        assert!(!decision.allowed);
+        assert_eq!(decision.reason, "intent_budget");
+    }
+
+    #[test]
+    fn auto_quiet_window_derives_from_hour_histogram() {
+        use crate::user_action::UserAction;
+        let base = DateTime::parse_from_rfc3339("2026-05-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut actions = Vec::new();
+        for i in 0..12 {
+            let local_hour = 9 + (i % 6) as i64;
+            let ts_local = chrono::Local::now()
+                .date_naive()
+                .and_hms_opt(local_hour as u32, 0, 0)
+                .unwrap()
+                .and_local_timezone(chrono::Local)
+                .unwrap()
+                .with_timezone(&Utc);
+            actions.push(UserAction::FileOpened {
+                path: format!("f{}", i),
+                ts: ts_local,
+            });
+        }
+        let window = auto_quiet_window_from_actions(&actions).unwrap();
+        assert_eq!(window, (16, 9));
+        assert!(auto_quiet_window_from_actions(&actions[..5]).is_none());
+        let _ = base;
+    }
+
+    #[test]
+    fn auto_quiet_window_handles_midnight_crossing_activity() {
+        use crate::user_action::UserAction;
+        let mut actions = Vec::new();
+        for i in 0..15 {
+            let local_hour = [22u32, 23, 0, 1, 2][i % 5];
+            let ts = chrono::Local::now()
+                .date_naive()
+                .and_hms_opt(local_hour, 0, 0)
+                .unwrap()
+                .and_local_timezone(chrono::Local)
+                .unwrap()
+                .with_timezone(&Utc);
+            actions.push(UserAction::FileOpened {
+                path: format!("f{}", i),
+                ts,
+            });
+        }
+        let window = auto_quiet_window_from_actions(&actions).unwrap();
+        assert_eq!(window, (4, 22));
+        for hour in [22, 23, 0, 1, 2] {
+            assert!(!hour_in_quiet_window(hour, window.0, window.1));
+        }
+        assert!(hour_in_quiet_window(12, window.0, window.1));
+    }
+
+    #[test]
+    fn auto_quiet_window_edge_gaps_table() {
+        use crate::user_action::UserAction;
+        fn actions_at(hours: &[u32], min_len: usize) -> Vec<UserAction> {
+            let mut actions = Vec::new();
+            let mut i = 0usize;
+            while actions.len() < min_len.max(10) {
+                let hour = hours[i % hours.len()];
+                let ts = chrono::Local::now()
+                    .date_naive()
+                    .and_hms_opt(hour, 0, 0)
+                    .unwrap()
+                    .and_local_timezone(chrono::Local)
+                    .unwrap()
+                    .with_timezone(&Utc);
+                actions.push(UserAction::FileOpened {
+                    path: format!("f{}", i),
+                    ts,
+                });
+                i += 1;
+            }
+            actions
+        }
+
+        assert_eq!(
+            auto_quiet_window_from_actions(&actions_at(&[10], 10)),
+            Some((12, 10))
+        );
+        assert_eq!(
+            auto_quiet_window_from_actions(&actions_at(&[10, 11], 10)),
+            Some((13, 10))
+        );
+        assert_eq!(
+            auto_quiet_window_from_actions(&actions_at(&[10, 12], 10)),
+            Some((14, 10))
+        );
+        assert_eq!(
+            auto_quiet_window_from_actions(&actions_at(&[10, 13], 10)),
+            Some((15, 10))
+        );
+
+        let dense: Vec<u32> = (0..24u32).step_by(3).collect();
+        assert_eq!(
+            auto_quiet_window_from_actions(&actions_at(&dense, dense.len() * 2)),
+            None
+        );
+
+        let sparse: Vec<u32> = (0..24u32).step_by(4).collect();
+        assert_eq!(
+            auto_quiet_window_from_actions(&actions_at(&sparse, sparse.len() * 2)),
+            Some((2, 4))
+        );
+    }
+
+    #[test]
+    fn intent_keys_round_trip() {
+        for key in ALL_INTENT_KEYS {
+            let intent = parse_intent_key(key).unwrap();
+            assert_eq!(intent_key(intent), *key);
+        }
+        assert!(parse_intent_key("bogus").is_none());
     }
 }

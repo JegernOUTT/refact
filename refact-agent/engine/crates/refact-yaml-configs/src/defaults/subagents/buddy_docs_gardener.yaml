@@ -9,7 +9,7 @@ subchat:
   context_mode: default
   stateful: false
   max_steps: 8
-  model_type: buddy
+  model_type: light
   n_ctx: 32000
   max_new_tokens: 1500
   temperature: 0.4
@@ -27,7 +27,8 @@ messages:
     Steps:
     1. Inspect the tree, relevant docs, and related code paths.
     2. Identify a focused documentation gap or stale statement.
-    3. Use create_textdoc, update_textdoc, or update_textdoc_regex for a minimal doc improvement.
+    3. Describe the minimal doc improvement (file, stale/missing statement, exact suggested text)
+       in your buddy_runtime_event description so the user can apply it.
     4. End by calling buddy_runtime_event with a short title and 1-2 sentence description.
     If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
   user_template: |
@@ -46,7 +47,4 @@ tools:
   - tree
   - cat
   - regex_search
-  - create_textdoc
-  - update_textdoc
-  - update_textdoc_regex
   - buddy_runtime_event

@@ -13,12 +13,48 @@ use crate::types::BuddyConversationEntry;
 
 const MAX_BUDDY_LEDGER_JSON_BYTES: u64 = 1_024 * 1_024;
 
-#[derive(Default)]
-struct LedgerDiagnostics {
-    invalid_json: u32,
-    missing_id: u32,
-    repaired_id_alias: u32,
-    empty_conversation: u32,
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LedgerDiagnostics {
+    pub invalid_json: u32,
+    pub missing_id: u32,
+    pub repaired_id_alias: u32,
+    pub empty_conversation: u32,
+    pub quarantined: u32,
+}
+
+impl LedgerDiagnostics {
+    pub fn has_corruption(&self) -> bool {
+        self.invalid_json > 0 || self.missing_id > 0 || self.quarantined > 0
+    }
+}
+
+fn quarantine_target(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("ledger.json")
+        .to_string();
+    name.push_str(".corrupt");
+    path.with_file_name(name)
+}
+
+async fn quarantine_ledger_file(path: &Path, reason: &str, diagnostics: &mut LedgerDiagnostics) {
+    let target = quarantine_target(path);
+    match fs::rename(path, &target).await {
+        Ok(()) => {
+            diagnostics.quarantined = diagnostics.quarantined.saturating_add(1);
+            warn!(
+                "buddy: quarantined {} ledger file {:?} -> {:?}",
+                reason, path, target
+            );
+        }
+        Err(err) => {
+            warn!(
+                "buddy: failed to quarantine {} ledger file {:?}: {}",
+                reason, path, err
+            );
+        }
+    }
 }
 
 enum LedgerReadOutcome {
@@ -258,6 +294,15 @@ pub async fn list_all_buddy_conversations(
     project_root: &Path,
     kind_filter: Option<Vec<String>>,
 ) -> Vec<BuddyConversationEntry> {
+    list_all_buddy_conversations_with_diagnostics(project_root, kind_filter)
+        .await
+        .0
+}
+
+pub async fn list_all_buddy_conversations_with_diagnostics(
+    project_root: &Path,
+    kind_filter: Option<Vec<String>>,
+) -> (Vec<BuddyConversationEntry>, LedgerDiagnostics) {
     let mut entries = Vec::new();
     let mut diagnostics = LedgerDiagnostics::default();
 
@@ -272,22 +317,14 @@ pub async fn list_all_buddy_conversations(
                 LedgerReadOutcome::Value(val) => val,
                 LedgerReadOutcome::InvalidJson => {
                     diagnostics.invalid_json = diagnostics.invalid_json.saturating_add(1);
+                    quarantine_ledger_file(&path, "malformed conversation", &mut diagnostics).await;
                     continue;
                 }
                 LedgerReadOutcome::Skipped => continue,
             };
             let Some((id, used_alias)) = conversation_id(&val) else {
                 diagnostics.missing_id = diagnostics.missing_id.saturating_add(1);
-                warn!(
-                    "buddy: deleting conversation file missing chat_id and id: {:?}",
-                    path
-                );
-                if let Err(err) = fs::remove_file(&path).await {
-                    warn!(
-                        "buddy: failed to delete conversation file {:?}: {}",
-                        path, err
-                    );
-                }
+                quarantine_ledger_file(&path, "id-less conversation", &mut diagnostics).await;
                 continue;
             };
             if used_alias {
@@ -350,6 +387,7 @@ pub async fn list_all_buddy_conversations(
                 LedgerReadOutcome::Value(val) => val,
                 LedgerReadOutcome::InvalidJson => {
                     diagnostics.invalid_json = diagnostics.invalid_json.saturating_add(1);
+                    quarantine_ledger_file(&path, "malformed workflow", &mut diagnostics).await;
                     continue;
                 }
                 LedgerReadOutcome::Skipped => continue,
@@ -393,22 +431,19 @@ pub async fn list_all_buddy_conversations(
         entries.retain(|e| filter.iter().any(|f| f == &e.kind));
     }
 
-    if diagnostics.invalid_json > 0
-        || diagnostics.missing_id > 0
-        || diagnostics.repaired_id_alias > 0
-        || diagnostics.empty_conversation > 0
-    {
+    if diagnostics != LedgerDiagnostics::default() {
         warn!(
-            "buddy: ledger diagnostics invalid_json={} missing_id={} repaired_id_alias={} empty_conversation={}",
+            "buddy: ledger diagnostics invalid_json={} missing_id={} repaired_id_alias={} empty_conversation={} quarantined={}",
             diagnostics.invalid_json,
             diagnostics.missing_id,
             diagnostics.repaired_id_alias,
-            diagnostics.empty_conversation
+            diagnostics.empty_conversation,
+            diagnostics.quarantined
         );
     }
 
     entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    entries
+    (entries, diagnostics)
 }
 
 fn conversation_entry_from_value(val: &serde_json::Value, id: String) -> BuddyConversationEntry {
@@ -664,6 +699,48 @@ mod tests {
         assert!(entries.iter().any(|entry| entry.id == "buddy_humor"));
         assert!(!entries.iter().any(|entry| entry.id == "huge"));
         assert!(!entries.iter().any(|entry| entry.id == "huge_workflow"));
+    }
+
+    #[tokio::test]
+    async fn corrupt_ledger_files_are_quarantined_not_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let conv_dir = dir.path().join(".refact/buddy/chats/conversations");
+        tokio::fs::create_dir_all(&conv_dir).await.unwrap();
+        write_valid_conversation(&conv_dir, "chat-good", "2026-01-01T00:00:01Z").await;
+        let malformed_path = conv_dir.join("broken.json");
+        tokio::fs::write(&malformed_path, "{not json")
+            .await
+            .unwrap();
+        let missing_id_path = conv_dir.join("no_id.json");
+        tokio::fs::write(
+            &missing_id_path,
+            serde_json::json!({
+                "title": "orphan",
+                "created_at": "2026-01-01T00:00:00Z",
+                "messages": [{"role": "user", "content": "hi"}]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let (entries, diagnostics) =
+            list_all_buddy_conversations_with_diagnostics(dir.path(), None).await;
+
+        assert!(entries.iter().any(|entry| entry.id == "chat-good"));
+        assert_eq!(diagnostics.invalid_json, 1);
+        assert_eq!(diagnostics.missing_id, 1);
+        assert_eq!(diagnostics.quarantined, 2);
+        assert!(diagnostics.has_corruption());
+        assert!(!malformed_path.exists());
+        assert!(!missing_id_path.exists());
+        assert!(conv_dir.join("broken.json.corrupt").exists());
+        assert!(conv_dir.join("no_id.json.corrupt").exists());
+
+        let (second_entries, second_diagnostics) =
+            list_all_buddy_conversations_with_diagnostics(dir.path(), None).await;
+        assert!(second_entries.iter().any(|entry| entry.id == "chat-good"));
+        assert_eq!(second_diagnostics, LedgerDiagnostics::default());
     }
 
     #[tokio::test]

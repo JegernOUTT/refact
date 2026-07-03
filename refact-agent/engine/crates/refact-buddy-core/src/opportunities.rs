@@ -1107,6 +1107,9 @@ pub fn primary_fact_kind_for_opportunity(
         BuddyOpportunityKind::DiagnosticInvestigation => BuddyFactKind::DiagnosticCluster,
         BuddyOpportunityKind::GitHygiene => BuddyFactKind::UncommittedPressure,
         BuddyOpportunityKind::WorktreeCleanup => BuddyFactKind::WorktreeHygiene,
+        BuddyOpportunityKind::MemoryOpsBatch => BuddyFactKind::MemoryOrphan,
+        BuddyOpportunityKind::JobFinding => BuddyFactKind::DiagnosticCluster,
+        BuddyOpportunityKind::Quest => BuddyFactKind::TaskStuck,
     }
 }
 

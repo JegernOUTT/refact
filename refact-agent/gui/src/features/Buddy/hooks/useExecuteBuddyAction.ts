@@ -7,12 +7,36 @@ import {
   useDismissOpportunityMutation,
 } from "../../../services/refact/buddy";
 import { openBuddyChat, newBuddyChatAction } from "../../Chat/Thread";
-import { setBuddySnapshot } from "../buddySlice";
+import {
+  recordVerdictReaction,
+  setActiveSpeech,
+  setBuddySnapshot,
+} from "../buddySlice";
 import type {
   BuddyAction,
   BuddyOpportunity,
   BuddyOpportunityAcceptResponse,
+  BuddySpeechItem,
 } from "../types";
+
+function actionFeedbackSpeech(
+  id: string,
+  text: string,
+  speechIntent: string,
+): BuddySpeechItem {
+  return {
+    id,
+    text,
+    mood: "happy",
+    scope: "opportunity_action",
+    persistent: false,
+    ttl_seconds: 8,
+    dedupe_key: id,
+    created_at: new Date().toISOString(),
+    controls: [],
+    speech_intent: speechIntent,
+  };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -57,6 +81,7 @@ export function useExecuteBuddyAction() {
       action: BuddyAction,
       opp: BuddyOpportunity | null,
       actionIndex: number,
+      options?: { never?: boolean },
     ) => {
       if (opp == null) {
         if (action.kind === "open_page") {
@@ -68,8 +93,12 @@ export function useExecuteBuddyAction() {
 
       if (action.kind === "dismiss") {
         try {
-          const response = await dismissOpportunity(opp.id).unwrap();
+          const response = await dismissOpportunity({
+            id: opp.id,
+            never: options?.never === true,
+          }).unwrap();
           dispatch(setBuddySnapshot(response.snapshot));
+          dispatch(recordVerdictReaction("dismiss"));
         } catch (error) {
           throw new Error(formatOpportunityActionError(error));
         }
@@ -86,6 +115,7 @@ export function useExecuteBuddyAction() {
         throw new Error(formatOpportunityActionError(error));
       }
       dispatch(setBuddySnapshot(response.snapshot));
+      dispatch(recordVerdictReaction("accept"));
 
       const result = response.action_result;
       switch (result.kind) {
@@ -93,6 +123,7 @@ export function useExecuteBuddyAction() {
           navigateFromBuddyPage(result.navigate_to, dispatch);
           break;
         case "launch_investigation_chat":
+        case "open_chat":
           dispatch(newBuddyChatAction({ chat_id: result.chat_id }));
           dispatch(openBuddyChat({ chat_id: result.chat_id }));
           dispatch(push({ name: "chat" }));
@@ -107,6 +138,35 @@ export function useExecuteBuddyAction() {
             throw new Error(result.error ?? "Marketplace install failed");
           }
           dispatch(push({ name: "marketplace hub" }));
+          break;
+        case "memory_batch_applied":
+          if (result.failed > 0) {
+            throw new Error(
+              `Applied ${result.applied}, ${result.failed} failed (${result.remaining} left)`,
+            );
+          }
+          break;
+        case "config_patch_applied":
+          dispatch(
+            setActiveSpeech(
+              actionFeedbackSpeech(
+                `config-patch-applied-${result.receipt_id}`,
+                `Applied ${result.target_path}. Undo receipt ${result.receipt_id} is available.`,
+                "config_patch_applied",
+              ),
+            ),
+          );
+          break;
+        case "quest_accepted":
+          dispatch(
+            setActiveSpeech(
+              actionFeedbackSpeech(
+                `quest-accepted-${result.quest_id}`,
+                `Quest accepted! Reward: ${result.reward_xp} XP.`,
+                "quest_accept",
+              ),
+            ),
+          );
           break;
       }
     },

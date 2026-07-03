@@ -46,43 +46,55 @@ fn memory_namespace(content: &str) -> Option<String> {
     }
 }
 
-fn detect_orphaned_task_memory_facts(
+async fn detect_orphaned_task_memory_facts(
     task_id: &str,
     board: &TaskBoard,
     memories_dir: &std::path::Path,
     now: DateTime<Utc>,
 ) -> Vec<BuddyFact> {
     let existing_cards: HashSet<&str> = board.cards.iter().map(|card| card.id.as_str()).collect();
-    let entries = match std::fs::read_dir(memories_dir) {
+    let mut entries = match tokio::fs::read_dir(memories_dir).await {
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
     };
-    entries
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("md") {
-                return None;
-            }
-            let namespace = memory_namespace(&std::fs::read_to_string(&path).ok()?)?;
-            let card_id = namespace.strip_prefix("card:")?.trim().to_string();
-            if card_id.is_empty() || existing_cards.contains(card_id.as_str()) {
-                return None;
-            }
-            Some(BuddyFact {
-                kind: BuddyFactKind::MemoryOrphan,
-                key: format!("task_memory:orphan:{}:{}", task_id, card_id),
-                source: "task_health",
-                payload: serde_json::json!({
-                    "task_id": task_id,
-                    "card_id": card_id,
-                    "namespace": namespace,
-                }),
-                seen_at: now,
-                confidence: 0.85,
-            })
-        })
-        .collect()
+    let mut facts = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(content) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        let Some(namespace) = memory_namespace(&content) else {
+            continue;
+        };
+        let Some(card_id) = namespace
+            .strip_prefix("card:")
+            .map(|value| value.trim().to_string())
+        else {
+            continue;
+        };
+        if card_id.is_empty() || existing_cards.contains(card_id.as_str()) {
+            continue;
+        }
+        facts.push(BuddyFact {
+            kind: BuddyFactKind::MemoryOrphan,
+            key: format!("task_memory:orphan:{}:{}", task_id, card_id),
+            source: "task_health",
+            payload: serde_json::json!({
+                "task_id": task_id,
+                "card_id": card_id,
+                "namespace": namespace,
+            }),
+            seen_at: now,
+            confidence: 0.85,
+        });
+    }
+    facts
 }
 
 pub fn detect_task_health_facts(entries: &[TaskHealthEntry], now: DateTime<Utc>) -> Vec<BuddyFact> {
@@ -240,7 +252,8 @@ impl BuddyObserver for TaskHealthObserver {
                     &board,
                     &task_dir.join("memories"),
                     ctx.now,
-                ));
+                )
+                .await);
             }
             let mut latest_heartbeat: Option<chrono::DateTime<Utc>> = None;
             for card in &board.cards {
@@ -290,15 +303,16 @@ impl BuddyObserver for TaskHealthObserver {
 mod tests {
     use super::*;
 
-    #[test]
-    fn detects_orphaned_card_scoped_task_memory() {
+    #[tokio::test]
+    async fn detects_orphaned_card_scoped_task_memory() {
         let temp = tempfile::tempdir().unwrap();
         let memories_dir = temp.path().join(".refact/tasks/task-1/memories");
-        std::fs::create_dir_all(&memories_dir).unwrap();
-        std::fs::write(
+        tokio::fs::create_dir_all(&memories_dir).await.unwrap();
+        tokio::fs::write(
             memories_dir.join("orphan.md"),
             "---\ntitle: Orphan\nnamespace: card:T-404\n---\n\nBody",
         )
+        .await
         .unwrap();
 
         let facts = detect_orphaned_task_memory_facts(
@@ -306,7 +320,8 @@ mod tests {
             &TaskBoard::default(),
             &memories_dir,
             Utc::now(),
-        );
+        )
+        .await;
 
         let fact = facts
             .iter()

@@ -16,6 +16,10 @@ const PRIORITY: u32 = 5;
 const MAX_LOG_LINES: usize = 5;
 const MAX_LOG_BYTES: u64 = 256 * 1024;
 
+fn is_refact_engine_workspace(root: &Path) -> bool {
+    root.join("refact-agent/engine/Cargo.toml").is_file()
+}
+
 fn modified_unix_secs(path: &Path) -> u64 {
     std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
@@ -121,7 +125,10 @@ impl BuddyJob for RefactCompileSnifferJob {
         PRIORITY
     }
 
-    async fn should_run(&self, gcx: AppState, _ctx: &BuddyJobContext) -> bool {
+    async fn should_run(&self, gcx: AppState, ctx: &BuddyJobContext) -> bool {
+        if !is_refact_engine_workspace(&ctx.project_root) {
+            return false;
+        }
         let logs_dir = resolve_log_dir(&gcx.paths.cache_dir);
         tokio::task::spawn_blocking(move || compile_error_evidence(&logs_dir).is_some())
             .await
@@ -132,6 +139,9 @@ impl BuddyJob for RefactCompileSnifferJob {
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
+        if !is_refact_engine_workspace(&ctx.project_root) {
+            return BuddyJobResult::default();
+        }
         let logs_dir = resolve_log_dir(&gcx.paths.cache_dir);
         let evidence = tokio::task::spawn_blocking(move || compile_error_evidence(&logs_dir))
             .await
@@ -188,9 +198,15 @@ mod tests {
         app
     }
 
+    fn write_refact_marker(root: &Path) {
+        std::fs::create_dir_all(root.join("refact-agent/engine")).unwrap();
+        std::fs::write(root.join("refact-agent/engine/Cargo.toml"), "").unwrap();
+    }
+
     #[tokio::test]
     async fn refact_compile_sniffer_should_run_when_recent_compile_errors_exist() {
         let dir = tempfile::tempdir().unwrap();
+        write_refact_marker(dir.path());
         let logs_dir = dir.path().join("logs");
         tokio::fs::create_dir_all(&logs_dir).await.unwrap();
         tokio::fs::write(
@@ -208,6 +224,7 @@ mod tests {
     #[tokio::test]
     async fn refact_compile_sniffer_should_run_on_daemon_worker_tail_failure() {
         let dir = tempfile::tempdir().unwrap();
+        write_refact_marker(dir.path());
         let logs_dir = dir.path().join("daemon").join("logs");
         tokio::fs::create_dir_all(&logs_dir).await.unwrap();
         tokio::fs::write(
@@ -225,6 +242,7 @@ mod tests {
     #[tokio::test]
     async fn refact_compile_sniffer_should_not_run_when_no_errors() {
         let dir = tempfile::tempdir().unwrap();
+        write_refact_marker(dir.path());
         let logs_dir = dir.path().join("logs");
         tokio::fs::create_dir_all(&logs_dir).await.unwrap();
         tokio::fs::write(
@@ -237,6 +255,16 @@ mod tests {
         let ctx = test_context(dir.path());
 
         assert!(!RefactCompileSnifferJob.should_run(gcx, &ctx).await);
+    }
+
+    #[test]
+    fn refact_engine_workspace_requires_engine_cargo_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_refact_engine_workspace(dir.path()));
+
+        write_refact_marker(dir.path());
+
+        assert!(is_refact_engine_workspace(dir.path()));
     }
 
     #[test]

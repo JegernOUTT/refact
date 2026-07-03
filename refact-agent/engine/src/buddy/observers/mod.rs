@@ -25,6 +25,9 @@ pub struct ObserverContext {
 pub trait BuddyObserver: Send + Sync {
     fn id(&self) -> &'static str;
     fn cadence_seconds(&self) -> u64;
+    fn emission_refresh_ttl_seconds(&self) -> u64 {
+        0
+    }
     fn requires_setting(&self, settings: &BuddySettings) -> bool;
     async fn observe(&self, gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact>;
 }

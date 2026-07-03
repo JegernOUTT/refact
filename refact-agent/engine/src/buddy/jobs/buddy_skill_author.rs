@@ -220,10 +220,7 @@ impl BuddyJob for BuddySkillAuthorJob {
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let scan = current_scan(&ctx).await;
         let Some(spec) = build_skill_author_spec(&ctx, &scan) else {
-            return BuddyJobResult {
-                last_result: Some(serialize_scan("", &scan)),
-                ..Default::default()
-            };
+            return BuddyJobResult::default();
         };
         if same_signal(&ctx, &spec.signal_hash) {
             return BuddyJobResult::default();

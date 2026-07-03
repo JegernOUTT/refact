@@ -22,6 +22,7 @@ const CHAT_REACTION_ECHO_NGRAM_MIN_CHARS: usize = 18;
 const CHAT_REACTION_ECHO_LONG_TOKEN_MIN_CHARS: usize = 12;
 const CHAT_REACTION_ECHO_SHORT_PHRASE_WORDS: usize = 2;
 const CHAT_REACTION_ECHO_SHORT_PHRASE_MIN_CHARS: usize = 7;
+static CHAT_REACTION_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 const CHAT_REACTION_ECHO_IDENTIFYING_WORDS: &[&str] = &[
     "account",
@@ -303,6 +304,11 @@ fn record_queued_reaction(
     event: BuddyRuntimeEvent,
     reservation: ChatReactionLimiterReservation,
 ) -> bool {
+    if !svc.gate_chat_reaction_event(&event) {
+        svc.chat_reaction_limiter.rollback(reservation);
+        svc.chat_reaction_debug.record_not_queued(chat_id, signal_type);
+        return false;
+    }
     let stored_event = svc.enqueue_runtime_event_with_stored(event);
     if let Some(stored_event) = stored_event.as_ref() {
         svc.chat_reaction_limiter
@@ -805,6 +811,27 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
     let chat_id = accepted.chat_id.clone();
     tokio::spawn(async move {
         let (candidate, reservation, voice_inputs, phrase_bank) = plan;
+        let permit = match CHAT_REACTION_PERMITS.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let analysis_hash = message_hash(&candidate.analysis_text);
+                let mut svc_guard = app2.buddy.buddy.lock().await;
+                if let Some(svc) = svc_guard.as_mut() {
+                    svc.chat_reaction_limiter.rollback(reservation);
+                    svc.chat_reaction_debug
+                        .record_skipped(&chat_id, ChatReactionSkipReason::RateLimited);
+                }
+                debug!(
+                    target: "buddy.chat_reactions",
+                    chat_id = %chat_id,
+                    reason = %ChatReactionSkipReason::RateLimited.as_str(),
+                    reaction_kind = ?candidate.kind,
+                    analysis_hash = %analysis_hash,
+                    "buddy chat reaction skipped"
+                );
+                return;
+            }
+        };
         let speech = render_chat_reaction_text(
             &app2,
             &candidate.kind,
@@ -869,6 +896,7 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
                 "buddy chat reaction skipped"
             );
         }
+        drop(permit);
     });
 }
 
@@ -957,6 +985,26 @@ pub async fn maybe_enqueue_chat_activity_reaction(app: AppState, activity: ChatA
     };
 
     let (reservation, analysis_text, phrase_bank) = plan;
+    let permit = match CHAT_REACTION_PERMITS.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            let mut svc_guard = app.buddy.buddy.lock().await;
+            if let Some(svc) = svc_guard.as_mut() {
+                svc.chat_reaction_limiter.rollback(reservation);
+                svc.chat_reaction_debug
+                    .record_skipped(&activity.chat_id, ChatReactionSkipReason::RateLimited);
+            }
+            debug!(
+                target: "buddy.chat_reactions",
+                chat_id = %activity.chat_id,
+                reason = %ChatReactionSkipReason::RateLimited.as_str(),
+                reaction_kind = ?ChatReactionKind::Ambient,
+                analysis_hash = %message_hash(&analysis_text),
+                "buddy chat activity reaction skipped"
+            );
+            return;
+        }
+    };
     let speech = phrase_bank
         .as_ref()
         .filter(|bank| super::actor::chat_phrase_bank_is_fresh(bank, Utc::now()))
@@ -1015,6 +1063,7 @@ pub async fn maybe_enqueue_chat_activity_reaction(app: AppState, activity: ChatA
             );
         }
     }
+    drop(permit);
 }
 
 #[cfg(test)]

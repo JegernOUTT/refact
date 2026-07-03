@@ -1,5 +1,4 @@
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -144,32 +143,66 @@ fn system_time_key(time: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-fn push_knowledge_candidate(
-    heap: &mut BinaryHeap<Reverse<KnowledgeCandidate>>,
-    candidate: KnowledgeCandidate,
+const NEWEST_ALWAYS_INCLUDED: usize = 50;
+
+fn sort_newest_first(candidates: &mut [KnowledgeCandidate]) {
+    candidates.sort_by(|a, b| {
+        b.modified_key
+            .cmp(&a.modified_key)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+}
+
+fn select_rotating_chunk(
+    mut all: Vec<KnowledgeCandidate>,
     max_candidates: usize,
-) {
+    rotation: u64,
+) -> Vec<KnowledgeCandidate> {
     if max_candidates == 0 {
-        return;
+        return Vec::new();
     }
-    if heap.len() < max_candidates {
-        heap.push(Reverse(candidate));
-        return;
+    sort_newest_first(&mut all);
+    if all.len() <= max_candidates {
+        return all;
     }
-    let should_replace = heap
-        .peek()
-        .map(|oldest| candidate > oldest.0)
-        .unwrap_or(false);
-    if should_replace {
-        heap.pop();
-        heap.push(Reverse(candidate));
+    let newest_take = (max_candidates / 10).clamp(1, NEWEST_ALWAYS_INCLUDED);
+    let mut out: Vec<KnowledgeCandidate> = all.iter().take(newest_take).cloned().collect();
+    let chunk_size = max_candidates.saturating_sub(out.len()).max(1);
+    all.sort_by(|a, b| a.path.cmp(&b.path));
+    let chunk_count = all.len().div_ceil(chunk_size);
+    let chunk_idx = (rotation % chunk_count as u64) as usize;
+    let start = chunk_idx * chunk_size;
+    let end = (start + chunk_size).min(all.len());
+    for candidate in &all[start..end] {
+        if out.len() >= max_candidates {
+            break;
+        }
+        if !out.iter().any(|existing| existing.path == candidate.path) {
+            out.push(candidate.clone());
+        }
     }
+    if out.len() < max_candidates {
+        sort_newest_first(&mut all);
+        for candidate in &all {
+            if out.len() >= max_candidates {
+                break;
+            }
+            if !out.iter().any(|existing| existing.path == candidate.path) {
+                out.push(candidate.clone());
+            }
+        }
+    }
+    sort_newest_first(&mut out);
+    out
+}
+
+fn hourly_rotation() -> u64 {
+    (Utc::now().timestamp().max(0) as u64) / 3600
 }
 
 fn collect_knowledge_candidates_from_dir(
     dir: &Path,
-    heap: &mut BinaryHeap<Reverse<KnowledgeCandidate>>,
-    max_candidates: usize,
+    all: &mut Vec<KnowledgeCandidate>,
     max_visited_entries: usize,
     stats: &mut KnowledgeScanStats,
 ) {
@@ -209,11 +242,7 @@ fn collect_knowledge_candidates_from_dir(
             }
             stats.matching_files_considered += 1;
             let modified_key = metadata.modified().map(system_time_key).unwrap_or_default();
-            push_knowledge_candidate(
-                heap,
-                KnowledgeCandidate { modified_key, path },
-                max_candidates,
-            );
+            all.push(KnowledgeCandidate { modified_key, path });
         }
     }
 }
@@ -235,29 +264,29 @@ fn collect_knowledge_candidates_from_dirs_with_stats(
     max_candidates: usize,
     max_visited_entries: usize,
 ) -> (Vec<KnowledgeCandidate>, KnowledgeScanStats) {
-    let mut heap = BinaryHeap::new();
+    collect_knowledge_candidates_from_dirs_with_rotation(
+        dirs,
+        max_candidates,
+        max_visited_entries,
+        hourly_rotation(),
+    )
+}
+
+fn collect_knowledge_candidates_from_dirs_with_rotation(
+    dirs: &[PathBuf],
+    max_candidates: usize,
+    max_visited_entries: usize,
+    rotation: u64,
+) -> (Vec<KnowledgeCandidate>, KnowledgeScanStats) {
+    let mut all = Vec::new();
     let mut stats = KnowledgeScanStats::default();
     for dir in dirs {
         if stats.visited_entries >= max_visited_entries {
             break;
         }
-        collect_knowledge_candidates_from_dir(
-            dir,
-            &mut heap,
-            max_candidates,
-            max_visited_entries,
-            &mut stats,
-        );
+        collect_knowledge_candidates_from_dir(dir, &mut all, max_visited_entries, &mut stats);
     }
-    let mut candidates = heap
-        .into_iter()
-        .map(|Reverse(candidate)| candidate)
-        .collect::<Vec<_>>();
-    candidates.sort_by(|a, b| {
-        b.modified_key
-            .cmp(&a.modified_key)
-            .then_with(|| a.path.cmp(&b.path))
-    });
+    let candidates = select_rotating_chunk(all, max_candidates, rotation);
     (candidates, stats)
 }
 
@@ -469,6 +498,7 @@ fn daily_counter_from_job_state(
     if counter.day != day {
         counter.day = day;
         counter.count = 0;
+        counter.last_fact_set_fingerprint = None;
     }
     counter
 }
@@ -865,21 +895,51 @@ mod tests {
             filetime::set_file_mtime(&path, modified).unwrap();
         }
 
-        let candidates = collect_knowledge_candidates_from_dirs(&[dir.path().to_path_buf()], 3);
-        let names = candidates
-            .iter()
-            .map(|candidate| {
-                candidate
-                    .path
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string()
-            })
-            .collect::<Vec<_>>();
+        let (candidates, _) = collect_knowledge_candidates_from_dirs_with_rotation(
+            &[dir.path().to_path_buf()],
+            3,
+            5_000,
+            0,
+        );
 
         assert_eq!(candidates.len(), 3);
-        assert_eq!(names, vec!["memory_4.md", "memory_3.md", "memory_2.md"]);
+        let newest = dir.path().join("memory_4.md");
+        assert_eq!(candidates[0].path, newest, "newest file must lead");
+        assert!(candidates
+            .windows(2)
+            .all(|pair| pair[0].modified_key >= pair[1].modified_key));
+    }
+
+    #[test]
+    fn rotating_chunks_cover_full_corpus_and_keep_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        for idx in 0..30 {
+            let path = dir.path().join(format!("memory_{idx:02}.md"));
+            std::fs::write(&path, format!("# Memory {idx}\n")).unwrap();
+            let modified = filetime::FileTime::from_unix_time(100 + idx as i64, 0);
+            filetime::set_file_mtime(&path, modified).unwrap();
+        }
+
+        let mut covered = std::collections::HashSet::new();
+        for rotation in 0..30 {
+            let (candidates, _) = collect_knowledge_candidates_from_dirs_with_rotation(
+                &[dir.path().to_path_buf()],
+                10,
+                5_000,
+                rotation,
+            );
+            assert!(candidates.len() <= 10);
+            let newest = dir.path().join("memory_29.md");
+            assert!(
+                candidates.iter().any(|candidate| candidate.path == newest),
+                "newest file must always be selected"
+            );
+            for candidate in candidates {
+                covered.insert(candidate.path);
+            }
+        }
+
+        assert_eq!(covered.len(), 30, "rotation must cover the full corpus");
     }
 
     #[test]
@@ -1029,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_garden_transition_emits_nothing_when_unchanged_and_again_when_changed() {
+    fn memory_garden_transition_suppresses_same_day_and_emits_after_day_rollover() {
         let now = DateTime::parse_from_rfc3339("2026-05-02T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -1050,12 +1110,16 @@ mod tests {
         assert!(unchanged.is_empty());
         assert!(unchanged_counter.is_none());
 
-        let changed_entries = vec![orphan_candidate("old-memory"), orphan_candidate("new-memory")];
-        let changed_facts = memory_garden_facts_from_entries(&changed_entries, now);
-        let (changed, changed_counter) =
-            transition_memory_garden_facts(changed_facts, &persisted, now);
+        let next_day = DateTime::parse_from_rfc3339("2026-05-03T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let next_day_facts = memory_garden_facts_from_entries(&entries, next_day);
+        let (next_day_emitted, next_day_counter) =
+            transition_memory_garden_facts(next_day_facts, &persisted, next_day);
 
-        assert!(!changed.is_empty());
-        assert!(changed_counter.is_some());
+        assert!(!next_day_emitted.is_empty());
+        let next_day_counter = next_day_counter.unwrap();
+        assert_eq!(next_day_counter.day, "2026-05-03");
+        assert!(next_day_counter.last_fact_set_fingerprint.is_some());
     }
 }

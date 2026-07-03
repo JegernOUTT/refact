@@ -1174,7 +1174,7 @@ pub async fn load_memory_doc_snapshots_from_knowledge_dirs(
                 continue;
             }
             if !metadata.is_file()
-                || path.extension().and_then(|ext| ext.to_str()) != Some("md")
+                || !is_memory_doc_path(&path)
                 || metadata.len() > MAX_MEMORY_LIFECYCLE_FILE_BYTES
             {
                 continue;
@@ -1242,7 +1242,7 @@ pub async fn propose_supersede_for_near_duplicate(
     let mut hit = None;
     for rec in hits {
         if rec.distance > NEAR_DUPLICATE_MAX_DISTANCE
-            || rec.file_path.extension().and_then(|ext| ext.to_str()) != Some("md")
+            || !is_memory_doc_path(&rec.file_path)
             || !knowledge_dirs
                 .iter()
                 .any(|dir| rec.file_path.starts_with(dir))
@@ -2103,7 +2103,15 @@ async fn apply_create_memory(
     frontmatter.source_id = op.payload.source_id.clone();
     frontmatter.source_content_hash = Some(source_content_hash);
 
-    let path = memories_add(gcx.gcx.clone(), &frontmatter, &content).await?;
+    let outcome =
+        crate::memories::memories_add_dedup(gcx.gcx.clone(), &frontmatter, &content).await?;
+    if !outcome.created() {
+        return Ok(MemoryApplyOutcome::skipped(format!(
+            "duplicate content, touched existing memory {}",
+            outcome.path().display()
+        )));
+    }
+    let path = outcome.path().clone();
     if let Some(supersede_op) = propose_supersede_for_near_duplicate(gcx.gcx.clone(), &path).await {
         let roots = get_project_dirs(gcx.gcx.clone()).await;
         if let Some(project_root) = roots
@@ -2360,37 +2368,31 @@ async fn apply_merge_archive(
             .await
             .map_err(|e| format!("failed to read canonical memory: {e}"))?;
         let (existing_frontmatter, _) = KnowledgeFrontmatter::parse(&existing);
-        frontmatter.id = existing_frontmatter.id.clone();
-        frontmatter.status = existing_frontmatter
-            .status
-            .clone()
-            .or(Some("active".to_string()));
-        frontmatter.created = existing_frontmatter.created.clone();
-        frontmatter.created_at = existing_frontmatter.created_at.clone();
-        frontmatter.source_id = frontmatter
+        let merged_frontmatter = frontmatter;
+        frontmatter = existing_frontmatter.clone();
+        frontmatter.title = merged_frontmatter.title;
+        frontmatter.tags = merged_frontmatter.tags;
+        frontmatter.filenames = merged_frontmatter.filenames;
+        frontmatter.links = merged_frontmatter.links;
+        frontmatter.kind = merged_frontmatter.kind;
+        frontmatter.related_files = merged_frontmatter.related_files;
+        frontmatter.content_hash = merged_frontmatter.content_hash;
+        frontmatter.source_id = op
+            .payload
             .source_id
+            .clone()
             .or(existing_frontmatter.source_id.clone());
-        frontmatter.source_content_hash = frontmatter
+        frontmatter.source_content_hash = op
+            .payload
             .source_content_hash
+            .clone()
             .or(existing_frontmatter.source_content_hash.clone());
-        // Preserve the canonical's original source identity so exact find_memory_by_source
-        // matching keeps working after an in-place merge (do not stamp it as
-        // buddy_memory_lifecycle:*).
-        if existing_frontmatter.source_tool.is_some() {
-            frontmatter.source_tool = existing_frontmatter.source_tool.clone();
-        }
-        frontmatter.source_trajectory_id = frontmatter
-            .source_trajectory_id
-            .take()
-            .or(existing_frontmatter.source_trajectory_id.clone());
-        frontmatter.source_message_range = frontmatter
-            .source_message_range
-            .take()
-            .or(existing_frontmatter.source_message_range.clone());
-        frontmatter.source_chat_id = frontmatter
-            .source_chat_id
-            .take()
-            .or(existing_frontmatter.source_chat_id.clone());
+        frontmatter.review_after = merged_frontmatter.review_after;
+        frontmatter.source_tool = existing_frontmatter
+            .source_tool
+            .clone()
+            .or(merged_frontmatter.source_tool);
+        frontmatter.status = existing_frontmatter.status.or(Some("active".to_string()));
         frontmatter.updated = Some(today_string());
         rewrite_memory_document(&path, frontmatter.clone(), canonical.content.trim(), &[]).await?;
         path
@@ -2523,10 +2525,15 @@ fn reject_unsafe_path(path: &str) -> Result<(), String> {
 }
 
 fn validate_memory_extension(path: &Path) -> Result<(), String> {
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some("md") | Some("mdx") => Ok(()),
-        _ => Err("memory path must be .md or .mdx".to_string()),
+    if is_memory_doc_path(path) {
+        Ok(())
+    } else {
+        Err("memory path must be .md or .mdx".to_string())
     }
+}
+
+fn is_memory_doc_path(path: &std::path::Path) -> bool {
+    matches!(path.extension().and_then(|ext| ext.to_str()), Some("md" | "mdx"))
 }
 
 async fn canonical_existing_file_no_symlink(path: &Path) -> Result<PathBuf, String> {
@@ -3356,6 +3363,14 @@ mod tests {
     }
 
     #[test]
+    fn memory_doc_path_accepts_md_and_mdx_only() {
+        assert!(is_memory_doc_path(Path::new("memory.md")));
+        assert!(is_memory_doc_path(Path::new("memory.mdx")));
+        assert!(!is_memory_doc_path(Path::new("memory.txt")));
+        assert!(validate_memory_extension(Path::new("memory.mdx")).is_ok());
+    }
+
+    #[test]
     fn lifecycle_status_parser_covers_canonical_statuses_and_aliases() {
         let cases = [
             ("proposed", Some("proposed")),
@@ -3917,6 +3932,60 @@ mod tests {
             .await
             .unwrap();
         assert!(found.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn merge_archive_preserves_existing_observation_metadata_and_extra() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = test_gcx_with_workspace(dir.path()).await;
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        let path = knowledge_dir.join("canonical.md");
+        let mut frontmatter = active_frontmatter("canonical", &["old"]);
+        frontmatter.signal_key = Some("signal-1".to_string());
+        frontmatter.occurrences = 7;
+        frontmatter.last_observed = Some("2026-05-01T00:00:00Z".to_string());
+        frontmatter.extra.insert(
+            "unknown_key".to_string(),
+            serde_yaml::Value::String("unknown-value".to_string()),
+        );
+        write_memory_file(&path, frontmatter, "Old body").await;
+
+        let mut op = MemoryLifecycleOp::pending(
+            "op-merge-preserve",
+            MemorySource::MemoryGarden,
+            MemoryOpType::MergeArchive,
+            vec![path.to_string_lossy().to_string()],
+            "merge",
+            0.91,
+            "2026-05-02T00:00:00Z",
+        );
+        op.status = MemoryOpStatus::Approved;
+        op.payload.canonical = Some(MemoryCreatePayload {
+            title: Some("Merged canonical".to_string()),
+            content: "Merged body".to_string(),
+            tags: strings(&["new"]),
+            kind: "domain".to_string(),
+            ..Default::default()
+        });
+
+        apply_memory_lifecycle_op(gcx, &op).await.unwrap();
+
+        let (frontmatter, body) =
+            frontmatter_and_body(&tokio::fs::read_to_string(&path).await.unwrap());
+        assert_eq!(frontmatter.title.as_deref(), Some("Merged canonical"));
+        assert_eq!(frontmatter.tags, strings(&["new"]));
+        assert_eq!(frontmatter.signal_key.as_deref(), Some("signal-1"));
+        assert_eq!(frontmatter.occurrences, 7);
+        assert_eq!(
+            frontmatter.last_observed.as_deref(),
+            Some("2026-05-01T00:00:00Z")
+        );
+        assert_eq!(
+            frontmatter.extra.get("unknown_key"),
+            Some(&serde_yaml::Value::String("unknown-value".to_string()))
+        );
+        assert_eq!(body, "Merged body");
     }
 
     #[tokio::test(flavor = "multi_thread")]

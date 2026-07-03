@@ -25,7 +25,7 @@ export interface BuddySpeechBubbleProps {
   exitKind?: BuddySpeechExitKind;
   media?: React.ReactNode;
   controls?: BuddyControl[];
-  onControlClick?: (control: BuddyControl) => void;
+  onControlClick?: (control: BuddyControl) => void | Promise<void>;
 }
 
 type BubbleVars = React.CSSProperties & {
@@ -37,6 +37,15 @@ type BubbleVars = React.CSSProperties & {
 };
 
 const SING_NOTES = ["♪", "♫", "♪"] as const;
+
+function isDismissControl(control: BuddyControl): boolean {
+  return (
+    control.action === "dismiss" ||
+    control.action === "dismiss_speech" ||
+    control.action === "dismiss_runtime_event" ||
+    control.action === "dismiss_suggestion"
+  );
+}
 
 export const BuddySpeechBubble: React.FC<BuddySpeechBubbleProps> = ({
   text,
@@ -61,9 +70,13 @@ export const BuddySpeechBubble: React.FC<BuddySpeechBubbleProps> = ({
 }) => {
   const hasControls = (controls?.length ?? 0) > 0;
   const [clickedId, setClickedId] = useState<string | null>(null);
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [controlError, setControlError] = useState<string | null>(null);
 
   useEffect(() => {
     setClickedId(null);
+    setPendingId(null);
+    setControlError(null);
   }, [textKey]);
 
   const style: BubbleVars = {
@@ -133,14 +146,38 @@ export const BuddySpeechBubble: React.FC<BuddySpeechBubbleProps> = ({
                   type="button"
                   data-control-style={ctrl.style}
                   data-clicked={String(clickedId === ctrl.id)}
+                  data-pending={String(pendingId === ctrl.id)}
                   data-faded={String(
                     clickedId !== null && clickedId !== ctrl.id,
                   )}
                   className={styles.controlButton}
+                  disabled={pendingId !== null}
+                  aria-label={
+                    controlError && clickedId === ctrl.id
+                      ? controlError
+                      : ctrl.label
+                  }
+                  title={
+                    controlError && clickedId === ctrl.id
+                      ? controlError
+                      : undefined
+                  }
                   onClick={(event) => {
                     event.stopPropagation();
+                    if (pendingId !== null) return;
                     setClickedId(ctrl.id);
-                    onControlClick?.(ctrl);
+                    setControlError(null);
+                    if (!isDismissControl(ctrl)) {
+                      void onControlClick?.(ctrl);
+                      return;
+                    }
+                    setPendingId(ctrl.id);
+                    void Promise.resolve(onControlClick?.(ctrl))
+                      .catch(() => {
+                        setClickedId(null);
+                        setControlError("Could not dismiss. Try again.");
+                      })
+                      .finally(() => setPendingId(null));
                   }}
                 >
                   {ctrl.label}
@@ -148,6 +185,7 @@ export const BuddySpeechBubble: React.FC<BuddySpeechBubbleProps> = ({
               ))}
             </div>
           ) : null}
+          {controlError ? <span title={controlError}>{controlError}</span> : null}
         </div>
       </div>
     </div>

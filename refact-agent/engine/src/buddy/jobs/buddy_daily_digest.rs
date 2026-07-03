@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Local, Timelike, Utc};
 
 use crate::app_state::AppState;
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, BUDDY_DAILY_DIGEST_WORKFLOW_ID};
@@ -10,7 +10,7 @@ use crate::buddy::settings::BuddySettings;
 
 pub struct BuddyDailyDigestJob;
 
-const COOLDOWN_SECONDS: u64 = 20 * 60 * 60;
+const COOLDOWN_SECONDS: u64 = 0;
 const PRIORITY: u32 = 30;
 const TRUSTED_COMMAND_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
@@ -18,8 +18,24 @@ fn digest_hour(settings: &BuddySettings) -> u32 {
     settings.daily_digest_hour.unwrap_or(18).min(23) as u32
 }
 
-fn should_run_at(ctx: &BuddyJobContext, now: DateTime<Utc>) -> bool {
-    now.hour() >= digest_hour(&ctx.settings)
+fn date_key(now: &DateTime<Local>) -> String {
+    now.date_naive().to_string()
+}
+
+fn date_key_recorded(ctx: &BuddyJobContext, key: &str) -> bool {
+    ctx.job_state.last_result.as_deref() == Some(key)
+}
+
+fn result_ran(result: &BuddyJobResult) -> bool {
+    result.activity.is_some()
+        || result.runtime_event.is_some()
+        || result.workflow_failure.is_some()
+        || result.xp > 0
+}
+
+fn should_run_at(ctx: &BuddyJobContext, now: DateTime<Local>) -> bool {
+    let key = date_key(&now);
+    !date_key_recorded(ctx, &key) && now.hour() >= digest_hour(&ctx.settings)
 }
 
 async fn trusted_git_output(project_root: &Path, args: &[&str]) -> Option<String> {
@@ -116,17 +132,22 @@ impl BuddyJob for BuddyDailyDigestJob {
     }
 
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
-        should_run_at(ctx, Utc::now())
+        should_run_at(ctx, Local::now())
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
-        execute_autonomous_spec(
+        let key = date_key(&Local::now());
+        let mut result = execute_autonomous_spec(
             gcx,
             &ctx,
             build_daily_digest_spec(&ctx, Utc::now()).await,
             self.cooldown_seconds(),
         )
-        .await
+        .await;
+        if result_ran(&result) {
+            result.last_result = Some(key);
+        }
+        result
     }
 }
 
@@ -135,6 +156,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    use chrono::TimeZone;
     use crate::buddy::autonomous_workflows::{
         BUDDY_FRIDAY_RETRO_WORKFLOW_ID, BUDDY_IDLE_SUGGESTER_WORKFLOW_ID,
         BUDDY_PR_ISSUE_MATCHMAKER_WORKFLOW_ID,
@@ -174,7 +196,7 @@ mod tests {
     async fn buddy_daily_digest_should_run_at_or_after_configured_hour() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
-        let hour = Utc::now().hour() as u8;
+        let hour = Local::now().hour() as u8;
         let mut ctx = test_context(dir.path());
         let job = BuddyDailyDigestJob;
 
@@ -197,11 +219,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = test_context(dir.path());
         ctx.settings.daily_digest_hour = Some(18);
-        let late_same_day = chrono::DateTime::parse_from_rfc3339("2026-06-05T23:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let late_same_day = Local
+            .with_ymd_and_hms(2026, 6, 5, 23, 0, 0)
+            .single()
+            .unwrap();
 
         assert!(should_run_at(&ctx, late_same_day));
+    }
+
+    #[test]
+    fn buddy_daily_digest_dedupes_on_local_date_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(dir.path());
+        ctx.settings.daily_digest_hour = Some(18);
+        let now = Local
+            .with_ymd_and_hms(2026, 6, 5, 23, 0, 0)
+            .single()
+            .unwrap();
+        ctx.job_state.last_result = Some(date_key(&now));
+
+        assert!(!should_run_at(&ctx, now));
     }
 
     #[tokio::test]

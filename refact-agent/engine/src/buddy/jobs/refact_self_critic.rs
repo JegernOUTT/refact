@@ -12,6 +12,10 @@ pub struct RefactSelfCriticJob;
 const COOLDOWN_SECONDS: u64 = 24 * 60 * 60;
 const PRIORITY: u32 = 24;
 
+fn is_refact_engine_workspace(root: &Path) -> bool {
+    root.join("refact-agent/engine/Cargo.toml").is_file()
+}
+
 fn hash_prompt_tree_at(defaults_dir: &Path) -> String {
     fn collect_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -102,11 +106,14 @@ impl BuddyJob for RefactSelfCriticJob {
         PRIORITY
     }
 
-    async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
-        true
+    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
+        is_refact_engine_workspace(&ctx.project_root)
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
+        if !is_refact_engine_workspace(&ctx.project_root) {
+            return BuddyJobResult::default();
+        }
         execute_autonomous_spec(
             gcx,
             &ctx,
@@ -152,6 +159,8 @@ mod tests {
     #[tokio::test]
     async fn refact_self_critic_runs_on_24h_cooldown() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("refact-agent/engine")).unwrap();
+        std::fs::write(dir.path().join("refact-agent/engine/Cargo.toml"), "").unwrap();
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
         let ctx = test_context(dir.path());
         let job = RefactSelfCriticJob;
@@ -164,6 +173,17 @@ mod tests {
         assert_eq!(spec.project_root, dir.path().to_string_lossy().to_string());
         assert!(spec.evidence.contains("prompt_fingerprint="));
         assert!(!spec.evidence.contains("date="));
+    }
+
+    #[test]
+    fn refact_engine_workspace_requires_engine_cargo_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_refact_engine_workspace(dir.path()));
+
+        std::fs::create_dir_all(dir.path().join("refact-agent/engine")).unwrap();
+        std::fs::write(dir.path().join("refact-agent/engine/Cargo.toml"), "").unwrap();
+
+        assert!(is_refact_engine_workspace(dir.path()));
     }
 
     #[test]

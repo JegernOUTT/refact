@@ -285,6 +285,10 @@ async fn scan_knowledge_dirs(index: &mut KnowledgeIndex, knowledge_dirs: Vec<Pat
         }
 
         let content_slice = text.get(content_start..).unwrap_or("");
+        index.add_signature(
+            refact_buddy_core::memory_dedup::content_signature(content_slice),
+            path_buf.clone(),
+        );
         index.add_from_frontmatter(path_buf, &fm, Some(content_slice));
     }
 }

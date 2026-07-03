@@ -29,6 +29,16 @@ pub const KNOWLEDGE_CONFLICT_WORKFLOW_ID: &str = "buddy_knowledge_conflict_resol
 pub const BEHAVIOR_LEARNER_WORKFLOW_ID: &str = "buddy_behavior_learner";
 pub const USER_HABIT_COACH_WORKFLOW_ID: &str = "buddy_user_habit_coach";
 pub const MODEL_COST_OPTIMIZER_WORKFLOW_ID: &str = "buddy_model_cost_optimizer";
+pub const FINDING_PROPOSING_WORKFLOWS: &[&str] = &[
+    REFACT_SELF_CRITIC_WORKFLOW_ID,
+    BUDDY_REFACTOR_HUNTER_WORKFLOW_ID,
+    DOCS_GARDENER_WORKFLOW_ID,
+    BUDDY_TEST_COVERAGE_WATCHER_WORKFLOW_ID,
+];
+
+pub fn workflow_proposes_findings(workflow_id: &str) -> bool {
+    FINDING_PROPOSING_WORKFLOWS.contains(&workflow_id)
+}
 
 pub const AUTONOMOUS_BUDDY_WORKFLOWS: &[AutonomousWorkflowMeta] = &[
     AutonomousWorkflowMeta {

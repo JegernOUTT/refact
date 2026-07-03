@@ -1,6 +1,8 @@
 pub mod autonomous_chats;
+pub mod buddy_briefing;
 pub mod buddy_daily_digest;
 pub mod buddy_friday_retro;
+pub mod buddy_handbook_distiller;
 pub mod buddy_idle_suggester;
 pub mod buddy_onboarding;
 pub mod buddy_pr_issue_matchmaker;

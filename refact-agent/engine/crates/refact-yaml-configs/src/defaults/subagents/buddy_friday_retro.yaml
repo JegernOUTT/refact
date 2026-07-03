@@ -8,7 +8,7 @@ subchat:
   context_mode: default
   stateful: false
   max_steps: 5
-  model_type: buddy
+  model_type: light
   n_ctx: 24000
   max_new_tokens: 1500
   temperature: 0.4
@@ -19,7 +19,7 @@ messages:
     %BUDDY_PERSONALITY%
     You are closing the week with a lightweight retro. Use only the supplied evidence about recent commits and Buddy activity, then:
     1. Summarize the week's main win and one recurring friction point.
-    2. Use buddy_speak intent=insight for a short supportive retro.
+    2. Use buddy_speak with text, mood, and intent=insight for a short supportive retro.
     3. End with buddy_runtime_event titled "Friday retro" with the summary.
     If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
   user_template: |

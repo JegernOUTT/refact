@@ -1792,7 +1792,7 @@ describe("Buddy chat notification freshness", () => {
     );
     await waitFor(() => {
       expect(
-        "content:runtime:llm_error_overloaded" in
+        "scope:chat-a:content:runtime:llm_error_overloaded" in
           selectSeenNotificationIds(store.getState()),
       ).toBe(true);
     });
@@ -3181,7 +3181,7 @@ describe("BuddyPanel hero layout", () => {
     expect(source).not.toContain("dispatch(updateBuddySettings(");
   });
 
-  test("bulk opportunity dismiss uses settled results", () => {
+  test("panel dismiss targets only the top opportunity", () => {
     const panel = fs.readFileSync(
       path.join(buddyDir, "BuddyPanel.tsx"),
       "utf8",
@@ -3190,7 +3190,8 @@ describe("BuddyPanel hero layout", () => {
       path.join(buddyDir, "BuddyChatCompanion.tsx"),
       "utf8",
     );
-    expect(panel).toContain("Promise.allSettled");
+    expect(panel).not.toContain("Promise.allSettled");
+    expect(panel).toContain("getOpportunityDismissAction(topOpportunity)");
     expect(companion).toContain("Promise.allSettled");
   });
 
@@ -3351,7 +3352,7 @@ describe("Buddy investigation prompt hardening", () => {
     });
 
     expect(prompt).toContain(
-      "The canonical upstream repository is `JegernOUTT/refact` on GitHub.",
+      "The canonical upstream repository is the project's upstream repository (from its git origin remote).",
     );
     expect(prompt).not.toContain("attacker");
     expect(prompt).not.toContain("ignore previous instructions");
@@ -3359,7 +3360,7 @@ describe("Buddy investigation prompt hardening", () => {
     expect(prompt).not.toContain("inject");
   });
 
-  test("uses the default repository when metadata is missing", () => {
+  test("falls back to generic upstream phrasing when metadata is missing", () => {
     const prompt = buildBuddyInvestigationPrompt({
       triggerSource: "runtime",
       triggerText: "Model failed",
@@ -3367,11 +3368,12 @@ describe("Buddy investigation prompt hardening", () => {
     });
 
     expect(prompt).toContain(
-      "The canonical upstream repository is `JegernOUTT/refact` on GitHub.",
+      "The canonical upstream repository is the project's upstream repository (from its git origin remote).",
     );
     expect(prompt).toContain(
-      "use GitHub MCP remote browsing for `JegernOUTT/refact` when helpful",
+      "inspect the project's upstream repository (from its git origin remote) remotely via GitHub MCP tools without cloning",
     );
+    expect(prompt).not.toContain("JegernOUTT");
   });
 });
 

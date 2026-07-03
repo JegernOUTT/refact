@@ -78,7 +78,7 @@ impl BuddyObserver for McpAuthObserver {
     }
 
     fn requires_setting(&self, settings: &BuddySettings) -> bool {
-        settings.observers.mcp_auth && settings.proactive_enabled
+        settings.observers.mcp_auth
     }
 
     async fn observe(&self, gcx: AppState, _ctx: &ObserverContext) -> Vec<BuddyFact> {

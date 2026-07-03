@@ -1,0 +1,39 @@
+.card {
+  display: grid;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+  min-width: 0;
+}
+
+.body {
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.section {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.rowText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statsRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-3);
+}

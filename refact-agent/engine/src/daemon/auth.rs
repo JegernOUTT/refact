@@ -75,7 +75,10 @@ pub(crate) fn origin_is_trusted_ide_webview(origin: &str) -> bool {
         .split_once("://")
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("vscode-webview"))
         .map(|(_, host)| {
-            !host.is_empty() && host.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+            !host.is_empty()
+                && host
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
         })
         .unwrap_or(false)
 }

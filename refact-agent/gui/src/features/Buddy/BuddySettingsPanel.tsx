@@ -1,6 +1,13 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Button,
+  DataTable,
   Field,
   FieldTextarea,
   SegmentedControl,
@@ -8,15 +15,94 @@ import {
   Switch,
   Text,
 } from "../../components/ui";
+import type { DataTableColumn } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   selectBuddySettings,
+  selectBuddyState,
   selectBuddyStorage,
   selectChatReactionDebug,
 } from "./buddySlice";
-import { useUpdateBuddySettingsMutation } from "../../services/refact/buddy";
-import type { AutonomyLevel, BuddySettings, HumorLevel } from "./types";
+import {
+  useGetSpeechDecisionsQuery,
+  useUnmuteBuddyRuleMutation,
+  useUpdateBuddySettingsMutation,
+} from "../../services/refact/buddy";
+import type {
+  AutonomyLevel,
+  BuddySettings,
+  BuddyWorkflowSummary,
+  HumorLevel,
+  QuietHoursMode,
+} from "./types";
 import styles from "./BuddySettingsPanel.module.css";
+
+function formatCount(value: number | undefined): string {
+  const count = value ?? 0;
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
+  return String(count);
+}
+
+function formatWhen(value: string | null | undefined): string {
+  if (!value) return "—";
+  return value.slice(0, 16).replace("T", " ");
+}
+
+function totalTokens(row: BuddyWorkflowSummary): number {
+  return (row.tokens_in ?? 0) + (row.tokens_out ?? 0);
+}
+
+const TELEMETRY_COLUMNS: DataTableColumn<BuddyWorkflowSummary>[] = [
+  {
+    id: "job",
+    header: "Job",
+    cell: (row) => row.workflow_id,
+    sortValue: (row) => row.workflow_id,
+  },
+  {
+    id: "runs",
+    header: "Runs",
+    cell: (row) => formatCount(row.run_count),
+    sortValue: (row) => row.run_count,
+    align: "end",
+  },
+  {
+    id: "llm_calls",
+    header: "LLM calls",
+    cell: (row) => formatCount(row.llm_calls),
+    sortValue: (row) => row.llm_calls ?? 0,
+    align: "end",
+  },
+  {
+    id: "tokens_in",
+    header: "Tokens in",
+    cell: (row) => formatCount(row.tokens_in),
+    sortValue: (row) => row.tokens_in ?? 0,
+    align: "end",
+  },
+  {
+    id: "tokens_out",
+    header: "Tokens out",
+    cell: (row) => formatCount(row.tokens_out),
+    sortValue: (row) => row.tokens_out ?? 0,
+    align: "end",
+  },
+  {
+    id: "outputs",
+    header: "Outputs",
+    cell: (row) => formatCount(row.outputs),
+    sortValue: (row) => row.outputs ?? 0,
+    align: "end",
+  },
+  {
+    id: "last_output",
+    header: "Last output",
+    cell: (row) => formatWhen(row.last_output_at),
+    sortValue: (row) => row.last_output_at ?? "",
+    align: "end",
+  },
+];
 
 const PROMPT_DEBOUNCE_MS = 700;
 
@@ -33,10 +119,36 @@ const HUMOR_OPTIONS: Array<{ value: HumorLevel; label: string }> = [
 ];
 
 const AUTONOMY_OPTIONS: Array<{ value: AutonomyLevel; label: string }> = [
-  { value: "read_only", label: "Read only" },
+  { value: "read_only", label: "Observe" },
   { value: "suggest", label: "Suggest" },
+  { value: "propose", label: "Propose" },
   { value: "safe_auto", label: "Safe auto" },
 ];
+
+const QUIET_HOURS_OPTIONS: Array<{ value: QuietHoursMode; label: string }> = [
+  { value: "off", label: "Off" },
+  { value: "auto", label: "Auto" },
+  { value: "fixed", label: "Fixed" },
+];
+
+const SPEECH_INTENT_KEYS: string[] = [
+  "humor",
+  "suggestion",
+  "insight",
+  "win",
+  "error_alert",
+  "greeting",
+  "tour",
+  "milestone",
+  "memory_pulse_commentary",
+  "quest_accept",
+  "quest_complete",
+  "chat_reaction",
+];
+
+const SPEECH_INTENT_LABELS: Record<string, string> = {
+  chat_reaction: "Chat reactions",
+};
 
 const buildPromptPatch = (value: string): BuddySettingsPatch => {
   if (value.trim() === "") return { clear_personality_prompt: true };
@@ -78,8 +190,39 @@ interface Props {
 export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
   const liveSettings = useAppSelector(selectBuddySettings);
   const storage = useAppSelector(selectBuddyStorage);
+  const buddyState = useAppSelector(selectBuddyState);
+  const telemetryRows = useMemo(
+    () =>
+      [...(buddyState?.workflow_summaries ?? [])].sort(
+        (a, b) => totalTokens(b) - totalTokens(a),
+      ),
+    [buddyState],
+  );
   const chatReactionDebug = useAppSelector(selectChatReactionDebug);
+  const mutedRules = useMemo(() => buddyState?.muted_rules ?? [], [buddyState]);
+  const mutedIntents = useMemo(
+    () => liveSettings?.muted_intents ?? [],
+    [liveSettings],
+  );
+  const { data: speechDecisionsData } = useGetSpeechDecisionsQuery(undefined, {
+    refetchOnMountOrArgChange: true,
+  });
+  const speechDecisions = useMemo(
+    () => [...(speechDecisionsData ?? [])].reverse().slice(0, 20),
+    [speechDecisionsData],
+  );
   const [updateSettingsMutation] = useUpdateBuddySettingsMutation();
+  const [unmuteRuleMutation] = useUnmuteBuddyRuleMutation();
+  const handleUnmute = useCallback(
+    async (ruleKey: string) => {
+      try {
+        await unmuteRuleMutation({ rule_key: ruleKey }).unwrap();
+      } catch {
+        return;
+      }
+    },
+    [unmuteRuleMutation],
+  );
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [promptDraft, setPromptDraft] = useState<string>("");
   const [promptFocused, setPromptFocused] = useState(false);
@@ -208,6 +351,34 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
     if (n >= 0 && n <= 23) {
       void autoSave({ daily_digest_hour: n });
     }
+  };
+
+  const handleQuietHourChange = (
+    key: "quiet_hours_start" | "quiet_hours_end",
+    raw: string,
+  ) => {
+    if (!/^\d{1,2}$/.test(raw)) return;
+    const n = Number(raw);
+    if (n >= 0 && n <= 23) {
+      void autoSave({ [key]: n });
+    }
+  };
+
+  const handleBudgetChange = (raw: string) => {
+    if (raw === "") {
+      void autoSave({ daily_llm_token_budget: null });
+      return;
+    }
+    if (!/^\d{1,9}$/.test(raw)) return;
+    const n = Number(raw);
+    void autoSave({ daily_llm_token_budget: n > 0 ? n : null });
+  };
+
+  const handleIntentMute = (key: string, muted: boolean) => {
+    const next = muted
+      ? [...mutedIntents.filter((k) => k !== key), key]
+      : mutedIntents.filter((k) => k !== key);
+    void autoSave({ muted_intents: next });
   };
 
   const saveLabel =
@@ -454,6 +625,142 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
           </div>
         </div>
 
+        <div
+          className={`${styles.section} rf-enter-rise`}
+          data-testid="buddy-quiet-hours"
+        >
+          <Text size="1" weight="bold" color="gray" className={styles.label}>
+            QUIET HOURS &amp; BUDGET
+          </Text>
+          <div className={`${styles.row} ${styles.segmentedRow}`}>
+            <span className={styles.settingText}>
+              <Text size="2">Quiet hours</Text>
+              <small className={styles.settingDescription}>
+                Auto follows your detected activity pattern
+              </small>
+            </span>
+            <SegmentedControl
+              aria-label="quiet hours mode"
+              className={styles.segmentedControl}
+              name="buddy-quiet-hours-mode"
+              options={QUIET_HOURS_OPTIONS}
+              size="sm"
+              value={liveSettings.quiet_hours_mode ?? "auto"}
+              onValueChange={(value) =>
+                handleSegmented("quiet_hours_mode", value as QuietHoursMode)
+              }
+            />
+          </div>
+          {(liveSettings.quiet_hours_mode ?? "auto") === "fixed" && (
+            <div className={styles.row}>
+              <span className={styles.settingText}>
+                <Text size="2">Quiet from / until</Text>
+              </span>
+              <input
+                type="number"
+                min={0}
+                max={23}
+                className={styles.digestInput}
+                value={liveSettings.quiet_hours_start ?? 22}
+                onChange={(e) =>
+                  handleQuietHourChange("quiet_hours_start", e.target.value)
+                }
+                aria-label="quiet hours start"
+                data-testid="buddy-quiet-start"
+              />
+              <input
+                type="number"
+                min={0}
+                max={23}
+                className={styles.digestInput}
+                value={liveSettings.quiet_hours_end ?? 8}
+                onChange={(e) =>
+                  handleQuietHourChange("quiet_hours_end", e.target.value)
+                }
+                aria-label="quiet hours end"
+                data-testid="buddy-quiet-end"
+              />
+            </div>
+          )}
+          <div className={styles.row}>
+            <span className={styles.settingText}>
+              <Text size="2">Daily LLM token budget</Text>
+              <small className={styles.settingDescription}>
+                Autonomous jobs pause past this; blank = unlimited
+              </small>
+            </span>
+            <input
+              type="number"
+              min={0}
+              className={styles.digestInput}
+              value={liveSettings.daily_llm_token_budget ?? ""}
+              onChange={(e) => handleBudgetChange(e.target.value)}
+              aria-label="daily llm token budget"
+              placeholder="∞"
+              data-testid="buddy-token-budget"
+            />
+          </div>
+        </div>
+
+        <div
+          className={`${styles.sectionWide} rf-enter-rise`}
+          data-testid="buddy-muted-intents"
+        >
+          <div className={styles.sectionHeader}>
+            <Text size="1" weight="bold" color="gray" className={styles.label}>
+              MUTED SPEECH INTENTS
+            </Text>
+            <Text size="1" color="gray">
+              {mutedIntents.length} muted
+            </Text>
+          </div>
+          <div className={styles.observersGrid}>
+            {SPEECH_INTENT_KEYS.map((key) => (
+              <div key={key} className={styles.toggleRow}>
+                <Text size="1" className={styles.toggleLabel}>
+                  {SPEECH_INTENT_LABELS[key] ?? key.replace(/_/g, " ")}
+                </Text>
+                <Switch
+                  checked={mutedIntents.includes(key)}
+                  onCheckedChange={(v) => handleIntentMute(key, v)}
+                  aria-label={`Mute ${key}`}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div
+          className={`${styles.sectionWide} rf-enter-rise`}
+          data-testid="buddy-speech-decisions"
+        >
+          <div className={styles.sectionHeader}>
+            <Text size="1" weight="bold" color="gray" className={styles.label}>
+              WHY DID BUDDY SAY THAT?
+            </Text>
+            <Text size="1" color="gray">
+              last {speechDecisions.length}
+            </Text>
+          </div>
+          {speechDecisions.length === 0 ? (
+            <Text size="1" color="gray">
+              No speech decisions recorded yet.
+            </Text>
+          ) : (
+            <div className={styles.observersGrid}>
+              {speechDecisions.map((decision, idx) => (
+                <div key={`${decision.at}-${idx}`} className={styles.toggleRow}>
+                  <Text size="1" className={styles.toggleLabel}>
+                    {decision.allowed ? "✓" : "✕"} [{decision.reason}]
+                    {decision.intent ? ` ${decision.intent}:` : ""}{" "}
+                    {decision.preview}
+                  </Text>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         <div className={`${styles.sectionWide} rf-enter-rise`}>
           <Field
             label={
@@ -521,6 +828,64 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
               </div>
             ))}
           </div>
+        </div>
+
+        <div
+          className={`${styles.sectionWide} rf-enter-rise`}
+          data-testid="buddy-job-telemetry"
+        >
+          <div className={styles.sectionHeader}>
+            <Text size="1" weight="bold" color="gray" className={styles.label}>
+              JOB TELEMETRY
+            </Text>
+            <Text size="1" color="gray">
+              {telemetryRows.length} jobs
+            </Text>
+          </div>
+          <DataTable
+            columns={TELEMETRY_COLUMNS}
+            rows={telemetryRows}
+            getRowId={(row) => row.workflow_id}
+            enableSorting
+            emptyMessage="No job runs recorded yet"
+          />
+        </div>
+
+        <div
+          className={`${styles.sectionWide} rf-enter-rise`}
+          data-testid="buddy-muted-rules"
+        >
+          <div className={styles.sectionHeader}>
+            <Text size="1" weight="bold" color="gray" className={styles.label}>
+              MUTED RULES
+            </Text>
+            <Text size="1" color="gray">
+              {mutedRules.length} muted
+            </Text>
+          </div>
+          {mutedRules.length === 0 ? (
+            <Text size="1" color="gray">
+              No rules muted. Use “Never” on a card to mute its rule.
+            </Text>
+          ) : (
+            <div className={styles.observersGrid}>
+              {mutedRules.map((ruleKey) => (
+                <div key={ruleKey} className={styles.toggleRow}>
+                  <Text size="1" className={styles.toggleLabel}>
+                    {ruleKey}
+                  </Text>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-label={`Unmute ${ruleKey}`}
+                    onClick={() => void handleUnmute(ruleKey)}
+                  >
+                    Unmute
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div

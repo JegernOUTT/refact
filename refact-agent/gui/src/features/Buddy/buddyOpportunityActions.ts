@@ -31,6 +31,14 @@ export function actionLabel(action: BuddyAction): string {
       return `Install ${humanizeMarketKind(action.market_kind)}`;
     case "create_pulse_report":
       return `Create ${humanizePulseScope(action.scope)} report`;
+    case "apply_memory_batch":
+      return `Apply ${action.count_hint} ops`;
+    case "apply_config_patch":
+      return "Apply patch";
+    case "accept_quest":
+      return "Take quest";
+    case "open_buddy_conversation":
+      return "Open conversation";
     case "dismiss":
       return "Dismiss";
   }

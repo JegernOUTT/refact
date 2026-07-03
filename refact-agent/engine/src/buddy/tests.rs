@@ -44,6 +44,115 @@ fn make_service() -> BuddyService {
     make_service_with_events().0
 }
 
+#[test]
+fn workflow_telemetry_accumulates_and_marks_outputs() {
+    let mut svc = make_service();
+    assert!(!svc.dirty);
+
+    svc.record_workflow_telemetry("refact_error_detective", 3, 1200, 300, true);
+    svc.record_workflow_telemetry("refact_error_detective", 2, 800, 100, false);
+
+    let summary = svc
+        .state
+        .workflow_summaries
+        .iter()
+        .find(|w| w.workflow_id == "refact_error_detective")
+        .expect("summary must exist");
+    assert_eq!(summary.llm_calls, 5);
+    assert_eq!(summary.tokens_in, 2000);
+    assert_eq!(summary.tokens_out, 400);
+    assert_eq!(summary.outputs, 1);
+    assert!(summary.last_output_at.is_some());
+    assert_eq!(summary.run_count, 0);
+    assert!(svc.dirty);
+}
+
+#[test]
+fn workflow_telemetry_noop_does_not_dirty_state() {
+    let mut svc = make_service();
+    svc.record_workflow_telemetry("buddy_voice", 0, 0, 0, false);
+    assert!(!svc.dirty);
+    assert!(svc.state.workflow_summaries.is_empty());
+}
+
+#[test]
+fn sum_llm_usage_counts_assistant_messages_only() {
+    use crate::call_validation::ChatMessage;
+    let mut with_usage = ChatMessage::new("assistant".to_string(), "hi".to_string());
+    with_usage.usage = Some(crate::call_validation::ChatUsage {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        total_tokens: 120,
+        ..Default::default()
+    });
+    let without_usage = ChatMessage::new("assistant".to_string(), "more".to_string());
+    let user = ChatMessage::new("user".to_string(), "question".to_string());
+
+    let (calls, tokens_in, tokens_out) =
+        super::jobs::autonomous_chats::sum_llm_usage(&[user, with_usage, without_usage]);
+
+    assert_eq!(calls, 2);
+    assert_eq!(tokens_in, 100);
+    assert_eq!(tokens_out, 20);
+}
+
+#[tokio::test]
+async fn drafts_persist_and_restore_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    let mut svc = make_service();
+    let draft = svc
+        .create_draft(
+            super::types::DraftKind::Skill,
+            "persisted draft".to_string(),
+            "name: test-skill".to_string(),
+            "explain".to_string(),
+        )
+        .unwrap();
+    assert!(svc.drafts_dirty);
+    super::storage::save_drafts(root, &svc.draft_store.snapshot())
+        .await
+        .unwrap();
+
+    let loaded = super::storage::load_drafts(root).await;
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].id, draft.id);
+    assert_eq!(loaded[0].title, "persisted draft");
+
+    let mut restored_svc = make_service();
+    restored_svc.draft_store.restore(loaded);
+    assert!(restored_svc.draft_store.get(&draft.id).is_some());
+}
+
+#[tokio::test]
+async fn expired_drafts_are_dropped_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    let mut svc = make_service();
+    let draft = svc
+        .create_draft(
+            super::types::DraftKind::Command,
+            "stale".to_string(),
+            "name: stale-cmd".to_string(),
+            String::new(),
+        )
+        .unwrap();
+    let mut snapshot = svc.draft_store.snapshot();
+    snapshot[0].expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
+    super::storage::save_drafts(root, &snapshot).await.unwrap();
+
+    let loaded = super::storage::load_drafts(root).await;
+    assert!(
+        loaded.is_empty(),
+        "expired draft {} must be dropped",
+        draft.id
+    );
+}
+
 fn record_workflow_success(
     state: &mut BuddyState,
     workflow_id: &str,
@@ -71,6 +180,7 @@ fn record_workflow_success(
             failure_category: None,
             failure_summary: None,
             last_outcome: Some("success".to_string()),
+            ..Default::default()
         });
     }
 }
@@ -2159,9 +2269,32 @@ async fn test_tour_speech_has_short_ttl() {
     );
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    {
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut state = crate::buddy::state::default_buddy_state();
+        state.onboarding.greeted = true;
+        let service = crate::buddy::actor::BuddyService::new(
+            std::env::temp_dir().join(format!("buddy-tour-ttl-test-{}", uuid::Uuid::new_v4())),
+            state,
+            crate::buddy::settings::BuddySettings::default(),
+            Vec::new(),
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        let buddy_arc = app.buddy.buddy.clone();
+        *buddy_arc.lock().await = Some(service);
+    }
 
-    let result = job.execute(app, ctx).await;
-    let speech = result.speech.expect("tour should produce speech");
+    let result = job.execute(app.clone(), ctx).await;
+    assert_eq!(result.last_result.as_deref(), Some("completed"));
+
+    let buddy = app.buddy.buddy.lock().await;
+    let service = buddy.as_ref().unwrap();
+    let speech = service
+        .active_speech
+        .as_ref()
+        .expect("tour should emit speech through the arbiter");
 
     assert!(!speech.persistent);
     assert!(speech.ttl_seconds > 0 && speech.ttl_seconds <= 15);
@@ -2394,7 +2527,7 @@ async fn test_ledger_lists_id_only_conversation_and_repairs_alias() {
 }
 
 #[tokio::test]
-async fn test_ledger_missing_id_and_chat_id_is_deleted() {
+async fn test_ledger_missing_id_and_chat_id_is_quarantined() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     super::storage::bootstrap_buddy_storage(root).await.unwrap();
@@ -2409,10 +2542,15 @@ async fn test_ledger_missing_id_and_chat_id_is_deleted() {
         .await
         .unwrap();
 
-    let entries = super::conversation_ledger::list_all_buddy_conversations(root, None).await;
+    let (entries, diagnostics) =
+        super::conversation_ledger::list_all_buddy_conversations_with_diagnostics(root, None).await;
 
     assert!(entries.iter().all(|entry| entry.title != "Missing IDs"));
     assert!(!tokio::fs::try_exists(&path).await.unwrap());
+    let quarantined = root.join(".refact/buddy/chats/conversations/missing_ids.json.corrupt");
+    assert!(tokio::fs::try_exists(&quarantined).await.unwrap());
+    assert_eq!(diagnostics.missing_id, 1);
+    assert_eq!(diagnostics.quarantined, 1);
 }
 
 #[test]
@@ -3543,6 +3681,20 @@ fn buddy_action_round_trip() {
         BuddyAction::CreatePulseReport {
             scope: PulseScope::All,
         },
+        BuddyAction::ApplyMemoryBatch {
+            batch_key: "merge_near_duplicate".to_string(),
+            count_hint: 12,
+        },
+        BuddyAction::ApplyConfigPatch {
+            draft_id: "d5".to_string(),
+            target_path: ".refact/knowledge/handbook/testing.md".to_string(),
+        },
+        BuddyAction::AcceptQuest {
+            suggestion_id: "sugg-1".to_string(),
+        },
+        BuddyAction::OpenBuddyConversation {
+            chat_id: "chat-1".to_string(),
+        },
         BuddyAction::Dismiss,
     ];
     for action in &actions {
@@ -3551,6 +3703,25 @@ fn buddy_action_round_trip() {
         let json2 = serde_json::to_string(&back).expect("re-serialize");
         assert_eq!(json, json2, "round-trip mismatch");
     }
+    let batch_json = serde_json::to_string(&actions[11]).expect("serialize batch");
+    assert!(batch_json.contains("\"kind\":\"apply_memory_batch\""));
+    let kinds: Vec<BuddyOpportunityKind> = vec![
+        BuddyOpportunityKind::MemoryOpsBatch,
+        BuddyOpportunityKind::JobFinding,
+        BuddyOpportunityKind::Quest,
+    ];
+    let tokens: Vec<String> = kinds
+        .iter()
+        .map(|kind| serde_json::to_string(kind).unwrap())
+        .collect();
+    assert_eq!(
+        tokens,
+        vec![
+            "\"memory_ops_batch\"".to_string(),
+            "\"job_finding\"".to_string(),
+            "\"quest\"".to_string()
+        ]
+    );
 }
 
 #[test]
@@ -4036,7 +4207,7 @@ fn humor_level_and_autonomy_serde() {
 
     let settings = BuddySettings::default();
     assert_eq!(settings.humor_level, HumorLevel::Light);
-    assert_eq!(settings.autonomy_level, AutonomyLevel::Suggest);
+    assert_eq!(settings.autonomy_level, AutonomyLevel::Propose);
 }
 
 // =============================================================================
@@ -7876,6 +8047,7 @@ async fn accept_after_dismiss_returns_409() {
     let _ = handle_v1_buddy_opportunity_dismiss(
         axum::extract::State(app.clone()),
         Path("opp-dismiss-then-accept".to_string()),
+        None,
     )
     .await
     .unwrap();
@@ -7890,6 +8062,7 @@ async fn accept_after_dismiss_returns_409() {
     let dismiss_err = handle_v1_buddy_opportunity_dismiss(
         axum::extract::State(app.clone()),
         Path("opp-dismiss-then-accept".to_string()),
+        None,
     )
     .await
     .unwrap_err();
@@ -10998,4 +11171,268 @@ fn limiter_reset_allows_first_post_enable_reaction() {
         ),
         "reset after Buddy re-enable must clear stale cooldown state"
     );
+}
+
+#[test]
+fn set_memory_ops_surfaces_batch_opportunity_cards() {
+    use refact_buddy_core::memory_lifecycle_model::{
+        MemoryLifecycleOp, MemoryOpStatus, MemoryOpType, MemoryOpsRecord, MemoryOpsState,
+        MemorySource,
+    };
+    let mut svc = make_service();
+    let mut ops = Vec::new();
+    for i in 0..3 {
+        let mut op = MemoryLifecycleOp::pending(
+            format!("op-{}", i),
+            MemorySource::MemoryGarden,
+            MemoryOpType::MergeArchive,
+            vec![format!("/k/doc{}.md", i)],
+            "near duplicate cluster",
+            0.9,
+            chrono::Utc::now().to_rfc3339(),
+        );
+        op.requires_approval = true;
+        op.status = MemoryOpStatus::Pending;
+        ops.push(MemoryOpsRecord::Op { op });
+    }
+    svc.set_memory_ops(MemoryOpsState::from_records(ops));
+
+    let batch_cards: Vec<_> = svc
+        .opportunity_queue
+        .iter()
+        .filter(|o| o.kind == BuddyOpportunityKind::MemoryOpsBatch)
+        .collect();
+    assert_eq!(batch_cards.len(), 1);
+    let card = batch_cards[0];
+    assert!(card.summary.contains("Merge 3 near-duplicate memories"));
+    assert_eq!(card.cooldown_key, "memory_ops_batch:merge_near_duplicate");
+    assert!(card.proposed_actions.iter().any(|a| matches!(
+        a,
+        BuddyAction::ApplyMemoryBatch { batch_key, count_hint }
+            if batch_key == "merge_near_duplicate" && *count_hint == 3
+    )));
+
+    svc.set_memory_ops(MemoryOpsState::default());
+    let after: Vec<_> = svc
+        .opportunity_queue
+        .iter()
+        .filter(|o| o.kind == BuddyOpportunityKind::MemoryOpsBatch)
+        .collect();
+    assert_eq!(after.len(), 1, "cooldown prevents duplicate batch cards");
+}
+
+#[test]
+fn never_dismiss_mutes_rule_and_blocks_resurfacing() {
+    let mut svc = make_service();
+    let opp = make_opportunity("opp-mute", "diag:cluster:llm_error:src");
+    assert!(svc.surface_opportunity_with_cooldown(opp.clone(), 0));
+
+    assert!(svc.mute_rule_for_cooldown_key("diag:cluster:llm_error:src"));
+    svc.record_verdict(
+        "diag:cluster:llm_error:src",
+        BuddyOpportunityKind::DiagnosticInvestigation,
+        "dismiss",
+        refact_buddy_core::verdicts::VerdictOutcome::Never,
+    );
+
+    let again = make_opportunity("opp-mute-2", "diag:cluster:other_error:elsewhere");
+    assert!(
+        !svc.surface_opportunity_with_cooldown(again, 0),
+        "muted rule key diag:cluster blocks the whole rule family"
+    );
+    assert!(svc.unmute_rule("diag:cluster"));
+    let third = make_opportunity("opp-mute-3", "diag:cluster:third:x");
+    assert!(svc.surface_opportunity_with_cooldown(third, 0));
+}
+
+#[test]
+fn verdict_decay_multiplies_cooldown_after_dismiss_streak() {
+    let mut svc = make_service();
+    for _ in 0..10 {
+        svc.record_verdict(
+            "task_health:stuck:any",
+            BuddyOpportunityKind::TaskHealth,
+            "dismiss",
+            refact_buddy_core::verdicts::VerdictOutcome::Dismiss,
+        );
+    }
+    let opp = make_opportunity("opp-decay", "task_health:stuck:t99");
+    assert!(svc.surface_opportunity_with_cooldown(opp, 900));
+    let stored = svc.opportunity_queue.get("opp-decay").unwrap();
+    assert_eq!(stored.cooldown_secs, 3600);
+}
+
+#[test]
+fn accept_quest_from_suggestion_activates_and_dismisses() {
+    let mut svc = make_service();
+    let quest = super::types::BuddyQuest {
+        id: "q-1".to_string(),
+        quest_type: "run_workflow".to_string(),
+        title: "Make one productive move".to_string(),
+        description: "Finish one workflow".to_string(),
+        icon: "⚙️".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        accepted_at: chrono::Utc::now().to_rfc3339(),
+        status: "active".to_string(),
+        completed_at: None,
+        progress: 0,
+        goal: 1,
+        baseline: 0,
+        reward_xp: 12,
+        controls: vec![],
+    };
+    svc.state.suggestion_state.push(BuddySuggestion {
+        id: "sugg-quest".to_string(),
+        suggestion_type: "quest_run_workflow".to_string(),
+        title: quest.title.clone(),
+        description: quest.description.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        dismissed: false,
+        controls: vec![],
+        quest: Some(quest),
+    });
+
+    let (suggestion, quest) = svc.accept_quest_from_suggestion("sugg-quest").unwrap();
+    assert_eq!(suggestion.id, "sugg-quest");
+    assert_eq!(quest.id, "q-1");
+    assert_eq!(svc.state.active_quest.as_ref().unwrap().id, "q-1");
+    assert!(
+        svc.state
+            .suggestion_state
+            .iter()
+            .find(|s| s.id == "sugg-quest")
+            .unwrap()
+            .dismissed
+    );
+    assert!(svc.accept_quest_from_suggestion("missing").is_err());
+}
+
+#[test]
+fn speech_arbiter_gates_update_speech_and_records_decisions() {
+    let mut svc = make_service();
+    svc.settings.muted_intents = vec!["humor".to_string()];
+    let mut speech = super::types::BuddySpeechItem {
+        id: "sp-1".to_string(),
+        text: "a tiny joke".to_string(),
+        mood: "happy".to_string(),
+        scope: "global".to_string(),
+        persistent: false,
+        ttl_seconds: 10,
+        dedupe_key: Some("humor-test".to_string()),
+        speech_intent: Some("humor".to_string()),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        controls: vec![],
+        chat_id: None,
+    };
+
+    assert!(!svc.update_speech(speech.clone()));
+    assert!(svc.active_speech.is_none());
+    let last = svc.state.speech_decisions.last().unwrap();
+    assert!(!last.allowed);
+    assert_eq!(last.reason, "intent_muted");
+
+    assert!(
+        !svc.update_speech_user_initiated(speech.clone()),
+        "muted intents apply even to user-initiated speech"
+    );
+
+    speech.speech_intent = Some("insight".to_string());
+    speech.dedupe_key = Some("insight-test".to_string());
+    assert!(svc.update_speech(speech));
+    assert!(svc.active_speech.is_some());
+    let last = svc.state.speech_decisions.last().unwrap();
+    assert!(last.allowed);
+    let rotation = svc
+        .state
+        .speech_rotation
+        .by_intent
+        .get("insight")
+        .expect("emission recorded");
+    assert_eq!(rotation.hour_count, 1);
+}
+
+#[test]
+fn quiet_hours_strip_runtime_event_speech_but_keep_event() {
+    let mut svc = make_service();
+    svc.settings.quiet_hours_mode = crate::buddy::settings::QuietHoursMode::Fixed;
+    let hour = chrono::Timelike::hour(&chrono::Local::now());
+    svc.settings.quiet_hours_start = hour as u8;
+    svc.settings.quiet_hours_end = ((hour + 1) % 24) as u8;
+    let mut event = crate::buddy::actor::make_runtime_event(
+        "speech_humor",
+        "Chat: humor",
+        "chat_reactions",
+        "chat_reaction:c1:humor:abc",
+        "info",
+        None,
+    );
+    event.speech_text = Some("gremlin giggle".to_string());
+    event.chat_id = Some("c1".to_string());
+
+    let stored = svc.enqueue_runtime_event_with_stored(event).unwrap();
+    assert_eq!(stored.speech_text, None);
+    assert_eq!(stored.title, "Chat: humor");
+    let last = svc.state.speech_decisions.last().unwrap();
+    assert_eq!(last.reason, "quiet_hours");
+
+    let mut bug_event = crate::buddy::actor::make_runtime_event(
+        "chat_bug_candidate",
+        "Chat: bug",
+        "chat_reactions",
+        "chat_reaction:c1:bug:def",
+        "info",
+        None,
+    );
+    bug_event.speech_text = Some("possible bug".to_string());
+    let stored_bug = svc.enqueue_runtime_event_with_stored(bug_event).unwrap();
+    assert!(
+        stored_bug.speech_text.is_some(),
+        "error-alert-class speech is quiet-hours exempt"
+    );
+}
+
+#[test]
+fn muted_chat_strips_runtime_event_speech() {
+    let mut svc = make_service();
+    svc.settings.quiet_hours_mode = crate::buddy::settings::QuietHoursMode::Off;
+    svc.settings.muted_chat_ids = vec!["chat-mute".to_string()];
+    let mut event = crate::buddy::actor::make_runtime_event(
+        "speech_insight",
+        "Chat: insight",
+        "chat_reactions",
+        "chat_reaction:chat-mute:insight:xyz",
+        "info",
+        None,
+    );
+    event.speech_text = Some("quiet please".to_string());
+    event.chat_id = Some("chat-mute".to_string());
+
+    let stored = svc.enqueue_runtime_event_with_stored(event).unwrap();
+    assert_eq!(stored.speech_text, None);
+
+    let mut other = crate::buddy::actor::make_runtime_event(
+        "speech_insight",
+        "Chat: insight",
+        "chat_reactions",
+        "chat_reaction:other:insight:xyz",
+        "info",
+        None,
+    );
+    other.speech_text = Some("loud and proud".to_string());
+    other.chat_id = Some("other".to_string());
+    let stored_other = svc.enqueue_runtime_event_with_stored(other).unwrap();
+    assert!(stored_other.speech_text.is_some());
+}
+
+#[test]
+fn llm_spend_tracks_daily_budget() {
+    let mut svc = make_service();
+    svc.settings.daily_llm_token_budget = Some(1000);
+    assert!(!svc.llm_budget_exhausted());
+    svc.record_workflow_telemetry("job_a", 2, 700, 200, true);
+    assert!(!svc.llm_budget_exhausted());
+    svc.record_workflow_telemetry("job_b", 1, 100, 50, false);
+    assert!(svc.llm_budget_exhausted());
+    svc.settings.daily_llm_token_budget = None;
+    assert!(!svc.llm_budget_exhausted());
 }

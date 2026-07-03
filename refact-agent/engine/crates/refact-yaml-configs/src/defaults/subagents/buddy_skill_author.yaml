@@ -9,7 +9,7 @@ subchat:
   context_mode: default
   stateful: false
   max_steps: 6
-  model_type: buddy
+  model_type: light
   n_ctx: 24000
   max_new_tokens: 1200
   temperature: 0.4
@@ -22,7 +22,8 @@ messages:
 
     You turn repeated user workflows into one reusable project skill.
     1. Inspect the candidate cluster evidence and existing skill directory.
-    2. Create at most one concise SKILL.md draft when the pattern is specific and useful.
+    2. When the pattern is specific and useful, create at most one concise skill draft via
+       buddy_create_draft with kind=skill so the user can review and save it; never edit files.
     3. Use buddy_speak only for a helpful short announcement.
     4. End with buddy_runtime_event.
   user_template: |
@@ -34,6 +35,6 @@ messages:
 
 tools:
   - cat
-  - create_textdoc
+  - buddy_create_draft
   - buddy_runtime_event
   - buddy_speak

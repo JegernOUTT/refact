@@ -11,6 +11,7 @@ pub enum SpeechIntent {
     MemoryPulseCommentary,
     QuestAccept,
     QuestComplete,
+    ChatReaction,
 }
 
 impl SpeechIntent {
@@ -27,6 +28,7 @@ impl SpeechIntent {
             SpeechIntent::MemoryPulseCommentary => "speech:memory_pulse_commentary",
             SpeechIntent::QuestAccept => "speech:quest_accept",
             SpeechIntent::QuestComplete => "speech:quest_complete",
+            SpeechIntent::ChatReaction => "speech:chat_reaction",
         }
     }
 
@@ -38,7 +40,8 @@ impl SpeechIntent {
             SpeechIntent::Tour | SpeechIntent::Greeting | SpeechIntent::QuestAccept => "excited",
             SpeechIntent::Suggestion
             | SpeechIntent::Insight
-            | SpeechIntent::MemoryPulseCommentary => "curious",
+            | SpeechIntent::MemoryPulseCommentary
+            | SpeechIntent::ChatReaction => "curious",
         }
     }
 }

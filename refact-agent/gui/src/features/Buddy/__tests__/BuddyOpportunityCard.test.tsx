@@ -213,4 +213,41 @@ describe("BuddyOpportunityCard", () => {
       "Gremlin jammed the gears",
     );
   });
+
+  it("never button dismisses with never flag and quest badge shows", async () => {
+    let dismissBody: unknown;
+    server.use(
+      http.post("*/v1/buddy/opportunities/:id/dismiss", async ({ request }) => {
+        dismissBody = await request.json();
+        return HttpResponse.json({ snapshot: makeSnapshot() });
+      }),
+    );
+    const opportunity = makeOpportunity({
+      kind: "quest",
+      summary: "Make one productive move (+12 XP)",
+      proposed_actions: [
+        { kind: "accept_quest", suggestion_id: "sugg-1" },
+        { kind: "dismiss" },
+      ],
+    });
+    const { user } = render(
+      <BuddyOpportunityCard opportunity={opportunity} />,
+      {
+        preloadedState: CONFIG_STATE,
+      },
+    );
+
+    expect(screen.getByLabelText("Quest")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Take quest" }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Never show this again" }),
+    );
+
+    await waitFor(() => {
+      expect(dismissBody).toEqual({ never: true });
+    });
+  });
 });

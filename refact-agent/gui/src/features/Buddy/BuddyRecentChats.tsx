@@ -133,10 +133,11 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
   const dispatch = useAppDispatch();
   const [filter, setFilter] = useState<FilterKind>("all");
 
-  const { data: allConversations, isLoading } = useGetBuddyConversationsQuery(
+  const { data: conversationsList, isLoading } = useGetBuddyConversationsQuery(
     undefined,
     { refetchOnMountOrArgChange: true },
   );
+  const allConversations = conversationsList?.entries;
   const [createConversation, { isLoading: isCreating }] =
     useCreateBuddyConversationMutation();
 

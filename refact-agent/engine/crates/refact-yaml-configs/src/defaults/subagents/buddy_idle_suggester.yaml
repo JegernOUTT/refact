@@ -8,7 +8,7 @@ subchat:
   context_mode: default
   stateful: false
   max_steps: 3
-  model_type: buddy
+  model_type: light
   n_ctx: 24000
   max_new_tokens: 800
   temperature: 0.4
@@ -19,7 +19,7 @@ messages:
     %BUDDY_PERSONALITY%
     The user has been idle briefly while local changes exist. Keep this tiny and useful:
     1. Inspect only enough context to identify one safe next action.
-    2. Use buddy_speak intent=insight for a short nudge.
+    2. Use buddy_speak with text, mood, and intent=insight for a short nudge.
     3. End with buddy_runtime_event titled "Idle suggestion" with what you suggested.
     If there is nothing safe or useful to suggest, call buddy_runtime_event titled
     "Idle suggestion" with "noted: nothing to suggest" and exit without speaking.

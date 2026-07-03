@@ -173,10 +173,7 @@ impl BuddyJob for BuddyOnboardingJob {
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let scan = current_scan(&ctx).await;
         if scan.candidates.is_empty() {
-            return BuddyJobResult {
-                last_result: Some(serialize_scan("", &scan)),
-                ..Default::default()
-            };
+            return BuddyJobResult::default();
         }
         let spec = build_onboarding_spec(&ctx, &scan);
         if same_signal(&ctx, &spec.signal_hash) {
@@ -196,18 +193,7 @@ mod tests {
     use super::*;
     use crate::buddy::settings::BuddySettings;
     use crate::buddy::types::{BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse};
-    use crate::yaml_configs::customization_types::SubagentConfig;
     use std::path::Path;
-
-    fn subagent_yaml_path(id: &str) -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("crates")
-            .join("refact-yaml-configs")
-            .join("src")
-            .join("defaults")
-            .join("subagents")
-            .join(format!("{id}.yaml"))
-    }
 
     fn test_context(project_root: &Path, last_result: Option<String>) -> BuddyJobContext {
         BuddyJobContext {

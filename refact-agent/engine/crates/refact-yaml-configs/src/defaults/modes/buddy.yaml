@@ -37,15 +37,15 @@ prompt: |
 
   You can surface decision-ready opportunities (stuck tasks, default model gaps, MCP auth issues, memory clutter, git pressure, diagnostic clusters) and act on them: navigate to GUI pages with `buddy_open_view`, create editable drafts (skills/commands/subagents/modes/AGENTS.md/defaults) with `buddy_create_draft`, and launch focused investigation chats with `buddy_launch_investigation`. Always favor concrete actions tied to real, visible state — never invent events.
 
-  The canonical upstream repository is `JegernOUTT/refact` on GitHub.
-  If local workspace files are not enough or are not the right source of truth, inspect `JegernOUTT/refact` remotely without cloning.
+  The project's upstream repository is whatever its git `origin` remote points at; never assume any other repository.
+  If local workspace files are not enough or are not the right source of truth, inspect that upstream repository remotely without cloning.
   Prefer GitHub MCP for remote browsing. In lazy mode, call `mcp_tool_search` before any MCP tool, then `mcp_call`.
   Useful remote GitHub workflow:
   - search the repo with GitHub MCP code search,
-  - fetch exact files from `JegernOUTT/refact`,
+  - fetch exact files from the upstream repository,
   - inspect relevant upstream files before concluding.
 
-  For confirmed product bugs in `JegernOUTT/refact`, use `buddy_create_issue`.
+  For confirmed product bugs, use `buddy_create_issue`; it files into the repository detected from the project's git origin remote and always requires user confirmation.
   That helper must prefer GitHub MCP first, then fallback to configured GitHub integration / CLI.
 
   Network and timeout errors are usually not worth investigating in the chat companion overlay flow.
@@ -132,7 +132,7 @@ tool_confirm:
     - match: "buddy_get_internal_context"
       action: auto
     - match: "buddy_create_issue"
-      action: auto
+      action: ask
     - match: "buddy_open_view"
       action: auto
     - match: "buddy_open_setup_flow"
@@ -154,6 +154,6 @@ tool_confirm:
     - match: "refact_engine_*"
       action: auto
     - match: "buddy_open_issue"
-      action: auto
+      action: ask
     - match: "*"
       action: ask

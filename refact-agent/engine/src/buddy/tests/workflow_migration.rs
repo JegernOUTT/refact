@@ -64,6 +64,28 @@ fn every_workflow_yaml_sets_autonomous_no_confirm_true() {
 }
 
 #[test]
+fn workflow_model_types_follow_cost_policy() {
+    let buddy_class = [
+        "refact_error_detective",
+        "refact_self_critic",
+        "buddy_refactor_hunter",
+        "buddy_dependency_radar",
+    ];
+    for id in workflow_ids() {
+        let config = load_workflow_yaml(id);
+        let model_type = config.subchat.model_type.as_deref().unwrap_or("default");
+        if buddy_class.contains(&id) {
+            assert_eq!(model_type, "buddy", "{id} must stay on the buddy model");
+        } else {
+            assert_eq!(
+                model_type, "light",
+                "{id} must run on the light model per the cost policy"
+            );
+        }
+    }
+}
+
+#[test]
 fn legacy_artifacts_module_no_longer_exists() {
     assert!(!std::path::Path::new("src/buddy/artifacts.rs").exists());
 }

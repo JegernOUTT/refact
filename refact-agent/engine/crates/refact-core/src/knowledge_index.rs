@@ -31,6 +31,8 @@ pub struct KnowledgeIndex {
     by_content: HashMap<String, Vec<KnowledgeCard>>,
     by_path: HashMap<PathBuf, KnowledgeCard>,
     content_by_path: HashMap<PathBuf, String>,
+    by_signature: HashMap<String, Vec<PathBuf>>,
+    by_signal_key: HashMap<String, Vec<PathBuf>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -213,6 +215,58 @@ impl KnowledgeIndex {
         retain_cards_not_at_path(&mut self.by_content, file_path);
         self.by_path.remove(file_path);
         self.content_by_path.remove(file_path);
+        self.by_signature.retain(|_, paths| {
+            paths.retain(|path| path != file_path);
+            !paths.is_empty()
+        });
+        self.by_signal_key.retain(|_, paths| {
+            paths.retain(|path| path != file_path);
+            !paths.is_empty()
+        });
+    }
+
+    pub fn add_signature(&mut self, signature: impl Into<String>, file_path: PathBuf) {
+        let signature = signature.into();
+        if signature.trim().is_empty() {
+            return;
+        }
+        let entry = self.by_signature.entry(signature).or_default();
+        if !entry.contains(&file_path) {
+            entry.push(file_path);
+        }
+    }
+
+    pub fn first_path_for_signature(&self, signature: &str) -> Option<&PathBuf> {
+        self.by_signature
+            .get(signature)
+            .and_then(|paths| paths.first())
+    }
+
+    pub fn add_signal_key(&mut self, signal_key: impl Into<String>, file_path: PathBuf) {
+        let signal_key = normalize_key(&signal_key.into());
+        if signal_key.is_empty() {
+            return;
+        }
+        let entry = self.by_signal_key.entry(signal_key).or_default();
+        if !entry.contains(&file_path) {
+            entry.push(file_path);
+        }
+    }
+
+    pub fn first_path_for_signal_key(&self, signal_key: &str) -> Option<&PathBuf> {
+        self.by_signal_key
+            .get(&normalize_key(signal_key))
+            .and_then(|paths| paths.first())
+    }
+
+    pub fn content_for_path(&self, file_path: &Path) -> Option<&str> {
+        self.content_by_path
+            .get(file_path)
+            .map(|content| content.as_str())
+    }
+
+    pub fn card_for_path(&self, file_path: &Path) -> Option<&KnowledgeCard> {
+        self.by_path.get(file_path)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -348,6 +402,9 @@ impl KnowledgeIndex {
             push_unique(&mut filenames, stem.to_string());
         }
 
+        if let Some(signal_key) = fm.signal_key.as_deref() {
+            self.add_signal_key(signal_key, file_path.clone());
+        }
         self.add_card_with_content(
             KnowledgeCard {
                 id,
@@ -459,6 +516,21 @@ impl KnowledgeIndex {
 
     pub fn lessons_for_pulse(&self, max_items: usize) -> Vec<KnowledgeCard> {
         let mut seen = HashSet::<PathBuf>::new();
+        let mut handbook: Vec<&KnowledgeCard> = Vec::new();
+        for (path, card) in &self.by_path {
+            if path
+                .components()
+                .any(|component| component.as_os_str() == "handbook")
+                && seen.insert(path.clone())
+            {
+                handbook.push(card);
+            }
+        }
+        handbook.sort_by(|a, b| {
+            card_recency(b)
+                .cmp(card_recency(a))
+                .then_with(|| a.title.cmp(&b.title))
+        });
         let mut matched: Vec<&KnowledgeCard> = Vec::new();
         for tag in ["lesson", "convention"] {
             if let Some(cards) = self.by_tag.get(tag) {
@@ -477,7 +549,42 @@ impl KnowledgeIndex {
                 .cmp(card_recency(a))
                 .then_with(|| a.title.cmp(&b.title))
         });
-        matched.into_iter().take(max_items).cloned().collect()
+        handbook
+            .into_iter()
+            .chain(matched)
+            .take(max_items)
+            .cloned()
+            .collect()
+    }
+
+    pub fn tag_clusters(&self, min_docs: usize) -> Vec<(String, Vec<KnowledgeCard>)> {
+        let mut clusters: Vec<(String, Vec<KnowledgeCard>)> = self
+            .by_tag
+            .iter()
+            .filter(|(tag, _)| {
+                tag.len() >= 4
+                    && !tag.starts_with("scope:")
+                    && tag.chars().any(|ch| ch.is_ascii_alphabetic())
+            })
+            .filter_map(|(tag, cards)| {
+                let mut seen = HashSet::<PathBuf>::new();
+                let unique: Vec<KnowledgeCard> = cards
+                    .iter()
+                    .filter(|card| !card_is_task_scoped(card))
+                    .filter(|card| {
+                        !card
+                            .file_path
+                            .components()
+                            .any(|component| component.as_os_str() == "handbook")
+                    })
+                    .filter(|card| seen.insert(card.file_path.clone()))
+                    .cloned()
+                    .collect();
+                (unique.len() >= min_docs).then(|| (tag.clone(), unique))
+            })
+            .collect();
+        clusters.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+        clusters
     }
 
     pub fn memos_by_tag_or_kind_substring(

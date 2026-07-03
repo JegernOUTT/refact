@@ -151,7 +151,7 @@ impl Tool for ToolBuddySay {
         let svc = lock
             .as_mut()
             .ok_or_else(|| "buddy service not initialized".to_string())?;
-        svc.update_speech(speech);
+        svc.update_speech_user_initiated(speech);
 
         Ok((
             false,
@@ -315,7 +315,7 @@ impl Tool for ToolBuddyRenderControls {
         let svc = lock
             .as_mut()
             .ok_or_else(|| "buddy service not initialized".to_string())?;
-        svc.update_speech(speech);
+        svc.update_speech_user_initiated(speech);
 
         Ok((
             false,

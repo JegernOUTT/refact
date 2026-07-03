@@ -230,6 +230,15 @@ impl DraftStore {
     pub fn snapshot(&self) -> Vec<BuddyDraft> {
         self.drafts.values().cloned().collect()
     }
+
+    pub fn restore(&mut self, drafts: Vec<BuddyDraft>) {
+        for draft in drafts {
+            if draft.id.trim().is_empty() {
+                continue;
+            }
+            self.drafts.insert(draft.id.clone(), draft);
+        }
+    }
 }
 
 impl Default for DraftStore {

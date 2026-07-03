@@ -42,6 +42,7 @@ pub struct BuddyJobResult {
     pub runtime_event: Option<BuddyRuntimeEvent>,
     pub chat_phrase_bank: Option<BuddyChatPhraseBank>,
     pub workflow_failure: Option<super::workflows::WorkflowFailureReport>,
+    pub opportunities: Vec<(super::types::BuddyOpportunity, u64)>,
     pub last_result: Option<String>,
     pub xp: u64,
     pub mark_greeted: bool,
@@ -57,6 +58,7 @@ impl Default for BuddyJobResult {
             runtime_event: None,
             chat_phrase_bank: None,
             workflow_failure: None,
+            opportunities: Vec::new(),
             last_result: None,
             xp: 0,
             mark_greeted: false,
@@ -72,6 +74,7 @@ impl BuddyJobResult {
             || self.runtime_event.is_some()
             || self.chat_phrase_bank.is_some()
             || self.workflow_failure.is_some()
+            || !self.opportunities.is_empty()
             || self.xp > 0
     }
 }
@@ -123,9 +126,10 @@ pub(crate) fn speech_runtime_event(
 
 fn speech_runtime_bubble_policy(intent: SpeechIntent) -> BuddyBubblePolicy {
     match intent {
-        SpeechIntent::Humor | SpeechIntent::Insight | SpeechIntent::MemoryPulseCommentary => {
-            BuddyBubblePolicy::Ambient
-        }
+        SpeechIntent::Humor
+        | SpeechIntent::Insight
+        | SpeechIntent::MemoryPulseCommentary
+        | SpeechIntent::ChatReaction => BuddyBubblePolicy::Ambient,
         SpeechIntent::Greeting
         | SpeechIntent::Tour
         | SpeechIntent::Milestone
@@ -146,7 +150,7 @@ fn speech_runtime_priority(intent: SpeechIntent) -> &'static str {
         | SpeechIntent::QuestComplete => "normal",
         SpeechIntent::Insight | SpeechIntent::MemoryPulseCommentary => "normal",
         SpeechIntent::Greeting | SpeechIntent::Tour | SpeechIntent::Suggestion => "low",
-        SpeechIntent::Humor => "low",
+        SpeechIntent::Humor | SpeechIntent::ChatReaction => "low",
     }
 }
 
@@ -158,7 +162,7 @@ fn speech_runtime_scene(intent: SpeechIntent) -> &'static str {
             "insight"
         }
         SpeechIntent::Greeting | SpeechIntent::Tour | SpeechIntent::QuestAccept => "welcome",
-        SpeechIntent::Humor => "playful",
+        SpeechIntent::Humor | SpeechIntent::ChatReaction => "playful",
     }
 }
 
@@ -255,6 +259,11 @@ impl BuddyScheduler {
         ));
         s.jobs.push(Box::new(
             super::jobs::buddy_daily_digest::BuddyDailyDigestJob,
+        ));
+        s.jobs
+            .push(Box::new(super::jobs::buddy_briefing::BuddyBriefingJob));
+        s.jobs.push(Box::new(
+            super::jobs::buddy_handbook_distiller::BuddyHandbookDistillerJob,
         ));
         s.jobs.push(Box::new(
             super::jobs::buddy_friday_retro::BuddyFridayRetroJob,
@@ -464,15 +473,11 @@ impl BuddyScheduler {
                         if let Some(intent) = result.speech_intent {
                             speech.speech_intent = Some(intent.wire_token().to_string());
                         }
-                        svc.update_speech(speech);
-                        if let Some(intent) = result.speech_intent {
-                            super::speech_policy::record_emission(
-                                &mut svc.state.speech_rotation,
-                                intent,
-                                now,
-                            );
-                        }
-                        if result.mark_greeted && super::state::mark_greeted(&mut svc.state) {
+                        let displayed = svc.update_speech(speech);
+                        if displayed
+                            && result.mark_greeted
+                            && super::state::mark_greeted(&mut svc.state)
+                        {
                             svc.dirty = true;
                         }
                         svc.dirty = true;
@@ -486,6 +491,9 @@ impl BuddyScheduler {
                     }
                     if let Some(report) = result.workflow_failure {
                         workflow_failure_write = svc.record_workflow_failure_report(report);
+                    }
+                    for (opportunity, cooldown_secs) in result.opportunities {
+                        svc.surface_opportunity_with_cooldown(opportunity, cooldown_secs);
                     }
                     if result.xp > 0 {
                         svc.grant_xp(result.xp);

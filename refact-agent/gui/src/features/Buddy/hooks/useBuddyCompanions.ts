@@ -59,6 +59,7 @@ export function useBuddyCompanions(
     onKuroFlee,
   } = args;
   const shiroEnabled = stageNumber >= 2;
+  const kuroEnabled = stageNumber >= 1;
   const [shiroState, setShiroState] = useState<ShiroState | null>(null);
   const [kuroState, setKuroState] = useState<KuroState>({
     mode: "away",
@@ -131,6 +132,16 @@ export function useBuddyCompanions(
             })
           : createShiroState(nowMs, context.buddyX, context.buddyY),
       );
+    }, tickMs);
+    return () => window.clearInterval(timer);
+  }, [shiroEnabled, reducedMotion]);
+
+  useEffect(() => {
+    if (!kuroEnabled) return;
+    const tickMs = reducedMotion ? SHIRO_TICK_MS * 2 : SHIRO_TICK_MS;
+    const timer = window.setInterval(() => {
+      const context = contextRef.current;
+      const nowMs = Date.now();
       setKuroState((current) => {
         const dayKey = buddyWorldDayKey(new Date());
         const stepped = stepKuroState(current, {
@@ -150,7 +161,7 @@ export function useBuddyCompanions(
       });
     }, tickMs);
     return () => window.clearInterval(timer);
-  }, [shiroEnabled, reducedMotion, world.season, name, onKuroFlee]);
+  }, [kuroEnabled, reducedMotion, world.season, name, onKuroFlee]);
 
   const companions = useMemo(() => {
     const list: BuddyWorldCompanion[] = [];

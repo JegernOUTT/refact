@@ -69,13 +69,45 @@ function loadSeenNotificationIds(): Record<string, number> {
   }
 }
 
-function persistSeenNotificationIds(seen: Record<string, number>): void {
-  if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(BUDDY_SEEN_STORAGE_KEY, JSON.stringify(seen));
-  } catch {
+const STORAGE_WRITE_THROTTLE_MS = 500;
+const pendingStorageWrites = new Map<string, string>();
+let storageFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushPendingStorageWrites(): void {
+  if (storageFlushTimer !== null) {
+    clearTimeout(storageFlushTimer);
+    storageFlushTimer = null;
+  }
+  if (typeof localStorage === "undefined") {
+    pendingStorageWrites.clear();
     return;
   }
+  for (const [pendingKey, pendingValue] of pendingStorageWrites) {
+    try {
+      localStorage.setItem(pendingKey, pendingValue);
+    } catch {
+      continue;
+    }
+  }
+  pendingStorageWrites.clear();
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", flushPendingStorageWrites);
+}
+
+function throttledStorageWrite(key: string, value: string): void {
+  if (typeof localStorage === "undefined") return;
+  pendingStorageWrites.set(key, value);
+  if (storageFlushTimer !== null) return;
+  storageFlushTimer = setTimeout(() => {
+    storageFlushTimer = null;
+    flushPendingStorageWrites();
+  }, STORAGE_WRITE_THROTTLE_MS);
+}
+
+function persistSeenNotificationIds(seen: Record<string, number>): void {
+  throttledStorageWrite(BUDDY_SEEN_STORAGE_KEY, JSON.stringify(seen));
 }
 
 function pruneSeenNotificationIds(
@@ -166,18 +198,13 @@ function persistChatBubblePolicy(
   snoozedUntil: number | null,
   impressions: BuddyChatBubbleImpression[],
 ): void {
-  if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(
-      BUDDY_CHAT_BUBBLE_POLICY_STORAGE_KEY,
-      JSON.stringify({
-        snoozedUntil,
-        impressions: pruneChatBubbleImpressions(impressions),
-      }),
-    );
-  } catch {
-    return;
-  }
+  throttledStorageWrite(
+    BUDDY_CHAT_BUBBLE_POLICY_STORAGE_KEY,
+    JSON.stringify({
+      snoozedUntil,
+      impressions: pruneChatBubbleImpressions(impressions),
+    }),
+  );
 }
 
 function pruneChatBubbleImpressions(
@@ -554,6 +581,7 @@ export interface BuddySliceState {
   chatBubbleSnoozedUntil: number | null;
   chatBubbleImpressions: BuddyChatBubbleImpression[];
   pendingSettingsRequests: PendingBuddySettingsRequest[];
+  verdictReaction: { kind: "accept" | "dismiss"; at: number } | null;
 }
 
 const EMPTY_BUDDY_ACTIVITIES: BuddyActivityEntry[] = [];
@@ -577,6 +605,7 @@ function initialState(): BuddySliceState {
     chatBubbleSnoozedUntil: initialChatBubblePolicy.snoozedUntil,
     chatBubbleImpressions: initialChatBubblePolicy.impressions,
     pendingSettingsRequests: [],
+    verdictReaction: null,
   };
 }
 
@@ -644,6 +673,12 @@ export const buddySlice = createSlice({
   name: "buddy",
   initialState,
   reducers: {
+    recordVerdictReaction: (
+      state,
+      action: PayloadAction<"accept" | "dismiss">,
+    ) => {
+      state.verdictReaction = { kind: action.payload, at: Date.now() };
+    },
     setBuddySnapshot: (state, action: PayloadAction<BuddySnapshot>) => {
       const raw = action.payload;
       const snapshot = normalizeBuddySnapshot(raw);
@@ -1064,6 +1099,7 @@ export const buddySlice = createSlice({
     selectSeenNotificationIds: (state) => state.seenNotificationIds,
     selectChatBubbleSnoozedUntil: (state) => state.chatBubbleSnoozedUntil,
     selectChatBubbleImpressions: (state) => state.chatBubbleImpressions,
+    selectVerdictReaction: (state) => state.verdictReaction,
   },
 });
 
@@ -1103,6 +1139,7 @@ export const {
   clearExpiredChatBubbleSnooze,
   clearExpiredBuddyNotificationSnooze,
   replaceOpportunities,
+  recordVerdictReaction,
 } = buddySlice.actions;
 
 export const {
@@ -1124,6 +1161,7 @@ export const {
   selectActiveSpeech,
   selectOpportunities,
   selectUnreadOpportunities,
+  selectVerdictReaction,
   selectPulse,
   selectActiveDrafts,
   selectHomeSnoozedUntil,

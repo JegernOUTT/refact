@@ -9,7 +9,7 @@ subchat:
   context_mode: default
   stateful: false
   max_steps: 4
-  model_type: buddy
+  model_type: light
   n_ctx: 24000
   max_new_tokens: 800
   temperature: 0.4

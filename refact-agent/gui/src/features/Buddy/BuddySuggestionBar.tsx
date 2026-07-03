@@ -1,4 +1,4 @@
-import React, { useCallback } from "react";
+import React, { useCallback, useState } from "react";
 import { Flex, Button, Text } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { useDismissBuddySuggestionMutation } from "../../services/refact/buddy";
@@ -20,23 +20,44 @@ const SuggestionCard: React.FC<SuggestionCardProps> = ({ suggestion }) => {
   const [dismissMutation] = useDismissBuddySuggestionMutation();
   const buddy = useBuddyState();
   const palette = PALETTES[buddy.state.paletteIndex] ?? PALETTES[0];
+  const [dismissPending, setDismissPending] = useState(false);
+  const [dismissError, setDismissError] = useState<string | null>(null);
 
   const handleDismiss = useCallback(async () => {
-    await dismissMutation(suggestion.id);
-    dispatch(dismissBuddySuggestion(suggestion.id));
-  }, [dismissMutation, dispatch, suggestion.id]);
+    if (dismissPending) return;
+    setDismissPending(true);
+    setDismissError(null);
+    try {
+      await dismissMutation(suggestion.id).unwrap();
+      dispatch(dismissBuddySuggestion(suggestion.id));
+    } catch {
+      setDismissError("Could not dismiss suggestion. Try again.");
+    } finally {
+      setDismissPending(false);
+    }
+  }, [dismissMutation, dismissPending, dispatch, suggestion.id]);
 
   const handleInvestigate = useCallback(async () => {
-    await dismissMutation(suggestion.id);
-    dispatch(dismissBuddySuggestion(suggestion.id));
-    await dispatch(
-      startBuddyInvestigation({
-        triggerText: `${suggestion.title}: ${suggestion.description}`,
-        triggerSource: "suggestion",
-      }),
-    );
+    if (dismissPending) return;
+    setDismissPending(true);
+    setDismissError(null);
+    try {
+      await dismissMutation(suggestion.id).unwrap();
+      dispatch(dismissBuddySuggestion(suggestion.id));
+      await dispatch(
+        startBuddyInvestigation({
+          triggerText: `${suggestion.title}: ${suggestion.description}`,
+          triggerSource: "suggestion",
+        }),
+      );
+    } catch {
+      setDismissError("Could not dismiss suggestion. Try again.");
+    } finally {
+      setDismissPending(false);
+    }
   }, [
     dismissMutation,
+    dismissPending,
     dispatch,
     suggestion.description,
     suggestion.id,
@@ -115,12 +136,20 @@ const SuggestionCard: React.FC<SuggestionCardProps> = ({ suggestion }) => {
             size="1"
             variant={ctrl.style === "primary" ? "soft" : "ghost"}
             color={ctrl.style === "primary" ? undefined : "gray"}
+            disabled={dismissPending}
+            aria-label={dismissError ?? ctrl.label}
+            title={dismissError ?? undefined}
             onClick={() => void handleControl(ctrl)}
           >
             {ctrl.label}
           </Button>
         ))}
       </Flex>
+      {dismissError && (
+        <Text size="1" color="red">
+          {dismissError}
+        </Text>
+      )}
     </div>
   );
 };

@@ -287,17 +287,16 @@ fn redaction_scan_cap(max_chars: usize) -> usize {
 }
 
 fn cap_text(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
+    if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    if max_chars <= TRUNCATED_MARKER.len() {
-        return refact_core::string_utils::safe_truncate(TRUNCATED_MARKER, max_chars).to_string();
+    let marker_chars = TRUNCATED_MARKER.chars().count();
+    if max_chars <= marker_chars {
+        return TRUNCATED_MARKER.chars().take(max_chars).collect();
     }
-    let keep = max_chars - TRUNCATED_MARKER.len();
-    let prefix = refact_core::string_utils::safe_truncate(text, keep)
-        .trim_end()
-        .to_string();
-    format!("{}{}", prefix, TRUNCATED_MARKER)
+    let keep = max_chars - marker_chars;
+    let prefix: String = text.chars().take(keep).collect();
+    format!("{}{}", prefix.trim_end(), TRUNCATED_MARKER)
 }
 
 fn aws_key_regex() -> &'static Regex {

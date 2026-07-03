@@ -131,16 +131,88 @@ fn coverage_source_candidate(path: &str) -> bool {
         .any(|part| matches!(part, "tests" | "benches" | "examples"))
 }
 
-fn has_tests_dir(path: &Path) -> bool {
-    path.parent()
-        .map(|parent| parent.join("tests").is_dir())
-        .unwrap_or(false)
+fn normalize_rel_path(path: &str) -> String {
+    path.replace('\\', "/").trim_matches('/').to_string()
 }
 
-fn has_cfg_test(path: &Path) -> bool {
-    std::fs::read_to_string(path)
-        .map(|content| content.contains("#[cfg(test)]"))
-        .unwrap_or(false)
+fn crate_src_parts(rel: &str) -> Option<(String, String)> {
+    let rel = normalize_rel_path(rel);
+    if rel == "src" || rel.starts_with("src/") {
+        return Some((String::new(), "src".to_string()));
+    }
+    let (crate_root, _) = rel.split_once("/src/")?;
+    Some((crate_root.to_string(), format!("{crate_root}/src")))
+}
+
+fn join_rel(prefix: &str, suffix: &str) -> String {
+    if prefix.is_empty() {
+        suffix.to_string()
+    } else {
+        format!("{prefix}/{suffix}")
+    }
+}
+
+fn source_has_test_coverage(rel: &str, source_content: &str, existing_paths: &[String]) -> bool {
+    if source_content.contains("#[cfg(test)]") {
+        return true;
+    }
+    let Some((crate_root, src_dir)) = crate_src_parts(rel) else {
+        return false;
+    };
+    let rel = normalize_rel_path(rel);
+    let file_name = Path::new(&rel)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if file_name.is_empty() {
+        return false;
+    }
+    let crate_tests_file = join_rel(&join_rel(&crate_root, "tests"), file_name);
+    let src_tests_rs = join_rel(&src_dir, "tests.rs");
+    let src_tests_dir = format!("{}/", join_rel(&src_dir, "tests"));
+    let parent_tests_dir = Path::new(&rel)
+        .parent()
+        .map(|parent| format!("{}/", join_rel(&normalize_rel_path(parent.to_string_lossy().as_ref()), "tests")));
+
+    existing_paths.iter().map(|path| normalize_rel_path(path)).any(|path| {
+        path == crate_tests_file
+            || path == src_tests_rs
+            || format!("{path}/").starts_with(&src_tests_dir)
+            || parent_tests_dir
+                .as_ref()
+                .is_some_and(|tests_dir| format!("{path}/").starts_with(tests_dir))
+    })
+}
+
+fn coverage_indicator_paths(project_root: &Path, rel: &str) -> Vec<String> {
+    let Some((crate_root, src_dir)) = crate_src_parts(rel) else {
+        return vec![];
+    };
+    let rel = normalize_rel_path(rel);
+    let file_name = Path::new(&rel)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let mut paths = Vec::new();
+    let crate_tests_file = join_rel(&join_rel(&crate_root, "tests"), file_name);
+    if project_root.join(&crate_tests_file).is_file() {
+        paths.push(crate_tests_file);
+    }
+    let src_tests_rs = join_rel(&src_dir, "tests.rs");
+    if project_root.join(&src_tests_rs).is_file() {
+        paths.push(src_tests_rs);
+    }
+    let src_tests_dir = join_rel(&src_dir, "tests");
+    if project_root.join(&src_tests_dir).is_dir() {
+        paths.push(format!("{src_tests_dir}/"));
+    }
+    if let Some(parent) = Path::new(&rel).parent() {
+        let parent_tests_dir = join_rel(&normalize_rel_path(parent.to_string_lossy().as_ref()), "tests");
+        if project_root.join(&parent_tests_dir).is_dir() {
+            paths.push(format!("{parent_tests_dir}/"));
+        }
+    }
+    paths
 }
 
 fn missing_test_candidate(project_root: &Path, rel: &str) -> Option<CoverageCandidate> {
@@ -149,7 +221,8 @@ fn missing_test_candidate(project_root: &Path, rel: &str) -> Option<CoverageCand
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return None;
     }
-    if has_cfg_test(&path) || has_tests_dir(&path) {
+    let source_content = std::fs::read_to_string(&path).unwrap_or_default();
+    if source_has_test_coverage(rel, &source_content, &coverage_indicator_paths(project_root, rel)) {
         return None;
     }
     Some(CoverageCandidate {
@@ -474,6 +547,40 @@ mod tests {
         let paths = modified_rust_files(dir.path());
 
         assert_eq!(paths, vec!["src/feature.rs".to_string()]);
+    }
+
+    #[test]
+    fn source_has_test_coverage_recognizes_supported_rust_test_layouts() {
+        assert!(source_has_test_coverage(
+            "src/feature.rs",
+            "pub fn feature() {}\n#[cfg(test)] mod tests {}\n",
+            &[]
+        ));
+        assert!(source_has_test_coverage(
+            "src/feature.rs",
+            "pub fn feature() {}\n",
+            &["tests/feature.rs".to_string()]
+        ));
+        assert!(source_has_test_coverage(
+            "crates/demo/src/feature.rs",
+            "pub fn feature() {}\n",
+            &["crates/demo/tests/feature.rs".to_string()]
+        ));
+        assert!(source_has_test_coverage(
+            "src/feature.rs",
+            "pub fn feature() {}\n",
+            &["src/tests.rs".to_string()]
+        ));
+        assert!(source_has_test_coverage(
+            "src/feature.rs",
+            "pub fn feature() {}\n",
+            &["src/tests/helper.rs".to_string()]
+        ));
+        assert!(!source_has_test_coverage(
+            "src/feature.rs",
+            "pub fn feature() {}\n",
+            &["tests/other.rs".to_string()]
+        ));
     }
 
     #[test]

@@ -24,7 +24,7 @@ use super::memory_lifecycle::{
 };
 use super::observers::{build_observer_registry, BuddyObserver, ObserverContext};
 use super::opportunities::{primary_fact_kind_for_opportunity, OpportunityDetector, OpportunityQueue};
-use super::policy::{evaluate, PolicyDecision};
+use super::policy::{evaluate_with_mutes, PolicyDecision};
 use super::runtime_queue::RuntimeQueue;
 use super::settings::BuddySettings;
 use super::snapshot::BuddySnapshot;
@@ -38,6 +38,7 @@ use super::voice_service::{SpeechIntent, SpeechIntentWireToken, VoiceCtx, VoiceI
 
 const SUGGESTION_RATE_LIMIT_SECS: u64 = 300;
 const SUGGESTION_EXPIRY_SECS: i64 = 300;
+const QUEST_SUGGESTION_EXPIRY_SECS: i64 = 24 * 3600;
 const PET_DECAY_INTERVAL_SECS: u64 = 15;
 const OBSERVER_CONCURRENCY: usize = 4;
 const MEMORY_OPS_ARCHIVE_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
@@ -60,7 +61,7 @@ pub(crate) async fn observe_buddy_facts_parallel(
     gcx: AppState,
     project_root: std::path::PathBuf,
     now: DateTime<Utc>,
-) -> Vec<BuddyFact> {
+) -> Vec<(u64, Vec<BuddyFact>)> {
     use futures::stream::{FuturesUnordered, StreamExt};
 
     let mut pending = FuturesUnordered::new();
@@ -70,18 +71,21 @@ pub(crate) async fn observe_buddy_facts_parallel(
         let project_root = project_root.clone();
         pending.push(async move {
             let ctx = ObserverContext { project_root, now };
-            tokio::time::timeout(tokio::time::Duration::from_secs(5), obs.observe(gcx, &ctx))
-                .await
-                .unwrap_or_default()
+            let refresh_ttl = obs.emission_refresh_ttl_seconds();
+            let facts =
+                tokio::time::timeout(tokio::time::Duration::from_secs(5), obs.observe(gcx, &ctx))
+                    .await
+                    .unwrap_or_default();
+            (refresh_ttl, facts)
         });
         if pending.len() >= OBSERVER_CONCURRENCY {
-            if let Some(facts) = pending.next().await {
-                all_facts.extend(facts);
+            if let Some(group) = pending.next().await {
+                all_facts.push(group);
             }
         }
     }
-    while let Some(facts) = pending.next().await {
-        all_facts.extend(facts);
+    while let Some(group) = pending.next().await {
+        all_facts.push(group);
     }
     all_facts
 }
@@ -223,11 +227,13 @@ pub struct BuddyService {
     pub humor_service: Arc<tokio::sync::Mutex<HumorService>>,
     pub pulse: BuddyPulse,
     pub draft_store: DraftStore,
+    pub drafts_dirty: bool,
     pub last_observer_tick: HashMap<&'static str, DateTime<Utc>>,
     pub observers: Vec<Arc<dyn BuddyObserver>>,
     pub background_tasks: Vec<JoinHandle<()>>,
     pub chat_reaction_limiter: crate::buddy::chat_reactions::ChatReactionLimiter,
     pub chat_reaction_debug: crate::buddy::chat_reactions::ChatReactionDebugState,
+    pub auto_quiet_window: Option<(u8, u8)>,
     #[cfg(test)]
     pub force_next_runtime_enqueue_drop: bool,
 }
@@ -453,11 +459,13 @@ impl BuddyService {
             humor_service: Arc::new(tokio::sync::Mutex::new(HumorService::new())),
             pulse: BuddyPulse::default(),
             draft_store: DraftStore::new(),
+            drafts_dirty: false,
             last_observer_tick: HashMap::new(),
             observers: build_observer_registry(),
             background_tasks: Vec::new(),
             chat_reaction_limiter: crate::buddy::chat_reactions::ChatReactionLimiter::new(),
             chat_reaction_debug: crate::buddy::chat_reactions::ChatReactionDebugState::new(),
+            auto_quiet_window: None,
             #[cfg(test)]
             force_next_runtime_enqueue_drop: false,
         }
@@ -566,17 +574,140 @@ impl BuddyService {
         mut opp: BuddyOpportunity,
         cooldown_secs: u64,
     ) -> bool {
-        match evaluate(&opp, &self.settings, &self.opportunity_queue) {
+        match evaluate_with_mutes(
+            &opp,
+            &self.settings,
+            &self.opportunity_queue,
+            &self.state.muted_rules,
+        ) {
             PolicyDecision::Drop { reason } => {
                 tracing::debug!("buddy: opportunity dropped by policy: {}", reason);
                 false
             }
             PolicyDecision::Surface { humor_allowed } => {
                 opp.humor_allowed = humor_allowed;
-                self.add_opportunity_with_cooldown(opp, cooldown_secs);
+                let rule_key = refact_buddy_core::verdicts::rule_key_of(&opp.cooldown_key);
+                let multiplier = refact_buddy_core::verdicts::cooldown_multiplier_for_rule(
+                    &self.state.verdicts,
+                    &rule_key,
+                );
+                self.add_opportunity_with_cooldown(opp, cooldown_secs.saturating_mul(multiplier));
                 true
             }
         }
+    }
+
+    pub fn record_verdict(
+        &mut self,
+        cooldown_key: &str,
+        kind: super::types::BuddyOpportunityKind,
+        action_kind: &str,
+        outcome: refact_buddy_core::verdicts::VerdictOutcome,
+    ) {
+        let verdict = refact_buddy_core::verdicts::BuddyVerdict {
+            rule_key: refact_buddy_core::verdicts::rule_key_of(cooldown_key),
+            kind: serde_json::to_value(kind)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            action_kind: action_kind.to_string(),
+            verdict: outcome,
+            at: Utc::now(),
+        };
+        refact_buddy_core::verdicts::record_verdict(&mut self.state.verdicts, verdict);
+        self.dirty = true;
+    }
+
+    pub fn mute_rule_for_cooldown_key(&mut self, cooldown_key: &str) -> bool {
+        let changed =
+            refact_buddy_core::verdicts::mute_rule(&mut self.state.muted_rules, cooldown_key);
+        if changed {
+            self.dirty = true;
+        }
+        changed
+    }
+
+    pub fn unmute_rule(&mut self, rule_key: &str) -> bool {
+        let changed =
+            refact_buddy_core::verdicts::unmute_rule(&mut self.state.muted_rules, rule_key);
+        if changed {
+            self.dirty = true;
+        }
+        changed
+    }
+
+    pub fn set_memory_ops(&mut self, memory_ops: MemoryOpsState) {
+        self.memory_ops = memory_ops;
+        self.surface_memory_batch_opportunities();
+    }
+
+    fn surface_memory_batch_opportunities(&mut self) {
+        let batches =
+            refact_buddy_core::memory_lifecycle_model::memory_op_batches(&self.memory_ops.ops);
+        let now = Utc::now();
+        for batch in batches {
+            if batch.count == 0 {
+                continue;
+            }
+            let label = refact_buddy_core::memory_lifecycle_model::memory_op_batch_label(
+                &batch.batch_key,
+                batch.count,
+            );
+            let summary = if batch.preview.is_empty() {
+                label
+            } else {
+                format!("{} — e.g. {}", label, batch.preview.join("; "))
+            };
+            let opp = BuddyOpportunity {
+                id: Uuid::new_v4().to_string(),
+                kind: super::types::BuddyOpportunityKind::MemoryOpsBatch,
+                summary,
+                priority: super::types::BuddyPriority::Normal,
+                confidence: 0.9,
+                fact_keys: vec![],
+                cooldown_key: format!("memory_ops_batch:{}", batch.batch_key),
+                cooldown_secs: 24 * 60 * 60,
+                status: OpportunityStatus::New,
+                proposed_actions: vec![
+                    super::types::BuddyAction::ApplyMemoryBatch {
+                        batch_key: batch.batch_key.clone(),
+                        count_hint: batch.count,
+                    },
+                    super::types::BuddyAction::Dismiss,
+                ],
+                humor: None,
+                humor_allowed: false,
+                related: super::types::BuddyOpportunityLinks::default(),
+                created_at: now,
+                expires_at: now + chrono::Duration::hours(24),
+                resolved_at: None,
+            };
+            self.surface_opportunity_with_cooldown(opp, 24 * 60 * 60);
+        }
+    }
+
+    pub fn accept_quest_from_suggestion(
+        &mut self,
+        suggestion_id: &str,
+    ) -> Result<(BuddySuggestion, BuddyQuest), String> {
+        let suggestion = self
+            .state
+            .suggestion_state
+            .iter()
+            .find(|suggestion| suggestion.id == suggestion_id)
+            .cloned()
+            .ok_or_else(|| format!("suggestion not found: {}", suggestion_id))?;
+        let quest = suggestion
+            .quest
+            .clone()
+            .ok_or_else(|| format!("suggestion is not a quest: {}", suggestion_id))?;
+        self.dismiss_suggestion(suggestion_id);
+        super::state::activate_quest(&mut self.state, quest.clone());
+        self.dirty = true;
+        let _ = self.events_tx.send(BuddyEvent::StateUpdated {
+            state: self.state.clone(),
+        });
+        Ok((suggestion, quest))
     }
 
     pub fn claim_opportunity_accept(&mut self, id: &str) -> bool {
@@ -640,6 +771,7 @@ impl BuddyService {
         let draft = self
             .draft_store
             .create(kind, title, yaml_or_json, explanation);
+        self.drafts_dirty = true;
         let _ = self.events_tx.send(BuddyEvent::DraftCreated {
             draft: draft.clone(),
         });
@@ -648,6 +780,7 @@ impl BuddyService {
 
     pub fn delete_draft(&mut self, id: &str) -> Option<BuddyDraft> {
         let draft = self.draft_store.delete(id)?;
+        self.drafts_dirty = true;
         let _ = self.events_tx.send(BuddyEvent::DraftRemoved {
             draft_id: id.to_string(),
         });
@@ -656,6 +789,7 @@ impl BuddyService {
 
     pub fn consume_draft(&mut self, id: &str) -> Option<BuddyDraft> {
         let draft = self.draft_store.consume(id)?;
+        self.drafts_dirty = true;
         let _ = self.events_tx.send(BuddyEvent::DraftConsumed {
             draft_id: id.to_string(),
         });
@@ -664,6 +798,9 @@ impl BuddyService {
 
     pub fn expire_drafts(&mut self, now: DateTime<Utc>) -> Vec<String> {
         let expired = self.draft_store.expire_old(now);
+        if !expired.is_empty() {
+            self.drafts_dirty = true;
+        }
         for id in &expired {
             let _ = self.events_tx.send(BuddyEvent::DraftRemoved {
                 draft_id: id.clone(),
@@ -694,18 +831,84 @@ impl BuddyService {
         }
     }
 
-    pub fn update_speech(&mut self, speech: BuddySpeechItem) {
+    pub fn update_speech(&mut self, speech: BuddySpeechItem) -> bool {
+        self.update_speech_gated(speech, false)
+    }
+
+    pub fn update_speech_user_initiated(&mut self, speech: BuddySpeechItem) -> bool {
+        self.update_speech_gated(speech, true)
+    }
+
+    fn update_speech_gated(&mut self, speech: BuddySpeechItem, user_initiated: bool) -> bool {
+        let intent = speech
+            .speech_intent
+            .as_deref()
+            .and_then(super::speech_policy::parse_intent_key);
+        let now = Utc::now();
+        let local_hour = chrono::Timelike::hour(&chrono::Local::now());
+        let decision = if user_initiated {
+            super::speech_policy::gate_speech_user_initiated(
+                &self.settings,
+                intent,
+                speech.chat_id.as_deref(),
+            )
+        } else {
+            super::speech_policy::gate_speech(
+                &self.settings,
+                &self.state.speech_rotation,
+                intent,
+                speech.chat_id.as_deref(),
+                local_hour,
+                self.auto_quiet_window,
+                now,
+            )
+        };
+        self.record_speech_decision(&speech, intent, decision);
+        if !decision.allowed {
+            tracing::debug!("buddy: speech dropped by arbiter: {}", decision.reason);
+            return false;
+        }
+        if let Some(intent) = intent {
+            super::speech_policy::record_emission(&mut self.state.speech_rotation, intent, now);
+            self.dirty = true;
+        }
         if let Some(key) = &speech.dedupe_key {
             if let Some(existing) = &self.active_speech {
                 if existing.dedupe_key.as_deref() == Some(key.as_str()) {
                     self.active_speech = Some(speech.clone());
                     let _ = self.events_tx.send(BuddyEvent::SpeechUpdated { speech });
-                    return;
+                    return true;
                 }
             }
         }
         self.active_speech = Some(speech.clone());
         let _ = self.events_tx.send(BuddyEvent::SpeechUpdated { speech });
+        true
+    }
+
+    fn record_speech_decision(
+        &mut self,
+        speech: &BuddySpeechItem,
+        intent: Option<SpeechIntent>,
+        decision: super::speech_policy::SpeechGateDecision,
+    ) {
+        let record = super::types::SpeechDecisionRecord {
+            at: Utc::now(),
+            intent: intent.map(|i| super::speech_policy::intent_key(i).to_string()),
+            allowed: decision.allowed,
+            reason: decision.reason.to_string(),
+            preview: crate::llm::safe_truncate(&speech.text, 120).to_string(),
+            source: speech
+                .dedupe_key
+                .clone()
+                .unwrap_or_else(|| speech.id.clone()),
+        };
+        self.state.speech_decisions.push(record);
+        let overflow = self.state.speech_decisions.len().saturating_sub(50);
+        if overflow > 0 {
+            self.state.speech_decisions.drain(..overflow);
+        }
+        self.dirty = true;
     }
 
     pub fn send_navigation(&self, page: super::types::BuddyPage) {
@@ -714,6 +917,95 @@ impl BuddyService {
 
     pub fn enqueue_runtime_event(&mut self, event: BuddyRuntimeEvent) {
         let _ = self.enqueue_runtime_event_with_stored(event);
+    }
+
+    fn runtime_event_intent(signal_type: &str) -> Option<SpeechIntent> {
+        if let Some(token) = signal_type.strip_prefix("speech_") {
+            return super::speech_policy::parse_intent_key(token);
+        }
+        if signal_type == "chat_bug_candidate" {
+            return Some(SpeechIntent::ErrorAlert);
+        }
+        None
+    }
+
+    fn gate_runtime_event_speech(&mut self, mut event: BuddyRuntimeEvent) -> BuddyRuntimeEvent {
+        let Some(speech_text) = event.speech_text.clone() else {
+            return event;
+        };
+        let intent = Self::runtime_event_intent(&event.signal_type);
+        let local_hour = chrono::Timelike::hour(&chrono::Local::now());
+        let decision = super::speech_policy::gate_speech(
+            &self.settings,
+            &self.state.speech_rotation,
+            intent,
+            event.chat_id.as_deref(),
+            local_hour,
+            self.auto_quiet_window,
+            Utc::now(),
+        );
+        if !decision.allowed && decision.reason != "intent_budget" {
+            let preview_item = BuddySpeechItem {
+                id: event.id.clone(),
+                text: speech_text,
+                mood: "neutral".to_string(),
+                scope: "global".to_string(),
+                persistent: false,
+                ttl_seconds: 10,
+                dedupe_key: event.dedupe_key.clone(),
+                speech_intent: intent.map(|i| super::speech_policy::intent_key(i).to_string()),
+                created_at: event.created_at.clone(),
+                controls: vec![],
+                chat_id: event.chat_id.clone(),
+            };
+            self.record_speech_decision(&preview_item, intent, decision);
+            event.speech_text = None;
+        }
+        event
+    }
+
+    pub fn gate_chat_reaction_event(&mut self, event: &BuddyRuntimeEvent) -> bool {
+        let Some(speech_text) = event.speech_text.clone() else {
+            return true;
+        };
+        let intent = Self::runtime_event_intent(&event.signal_type);
+        let local_hour = chrono::Timelike::hour(&chrono::Local::now());
+        let now = Utc::now();
+        let decision = super::speech_policy::gate_speech(
+            &self.settings,
+            &self.state.speech_rotation,
+            intent,
+            event.chat_id.as_deref(),
+            local_hour,
+            self.auto_quiet_window,
+            now,
+        );
+        let preview_item = BuddySpeechItem {
+            id: event.id.clone(),
+            text: speech_text,
+            mood: "neutral".to_string(),
+            scope: "global".to_string(),
+            persistent: false,
+            ttl_seconds: 10,
+            dedupe_key: event.dedupe_key.clone(),
+            speech_intent: intent.map(|i| super::speech_policy::intent_key(i).to_string()),
+            created_at: event.created_at.clone(),
+            controls: vec![],
+            chat_id: event.chat_id.clone(),
+        };
+        self.record_speech_decision(&preview_item, intent, decision);
+        if !decision.allowed {
+            tracing::debug!(
+                "buddy: chat reaction speech dropped by arbiter: {}",
+                decision.reason
+            );
+            return false;
+        }
+        if let Some(intent) = intent {
+            super::speech_policy::record_emission(&mut self.state.speech_rotation, intent, now);
+            self.dirty = true;
+        }
+        true
     }
 
     pub fn enqueue_runtime_event_with_stored(
@@ -725,6 +1017,7 @@ impl BuddyService {
             self.force_next_runtime_enqueue_drop = false;
             return None;
         }
+        let event = self.gate_runtime_event_speech(event);
         let event = self.apply_runtime_dismissal_memory(event);
         let dedupe_key = event.dedupe_key.clone();
         let input_id = event.id.clone();
@@ -922,7 +1215,7 @@ impl BuddyService {
             failure_category: None,
             failure_summary: None,
         });
-        self.update_speech(BuddySpeechItem {
+        self.update_speech_user_initiated(BuddySpeechItem {
             id: format!("quest-complete-{}", quest.id),
             text: format!("Quest complete: {title}! Tiny victory dance?"),
             mood: "happy".to_string(),
@@ -1053,6 +1346,7 @@ impl BuddyService {
                     failure_category: None,
                     failure_summary: None,
                     last_outcome: Some("failed".to_string()),
+                    ..Default::default()
                 });
         }
         self.refresh_active_quest();
@@ -1060,6 +1354,54 @@ impl BuddyService {
         let _ = self.events_tx.send(BuddyEvent::StateUpdated {
             state: self.state.clone(),
         });
+    }
+
+    pub fn record_workflow_telemetry(
+        &mut self,
+        workflow_id: &str,
+        llm_calls: u64,
+        tokens_in: u64,
+        tokens_out: u64,
+        produced_output: bool,
+    ) {
+        if llm_calls == 0 && tokens_in == 0 && tokens_out == 0 && !produced_output {
+            return;
+        }
+        let summary = if let Some(idx) = self
+            .state
+            .workflow_summaries
+            .iter()
+            .position(|w| w.workflow_id == workflow_id)
+        {
+            &mut self.state.workflow_summaries[idx]
+        } else {
+            self.state
+                .workflow_summaries
+                .push(super::types::BuddyWorkflowSummary {
+                    workflow_id: workflow_id.to_string(),
+                    ..Default::default()
+                });
+            self.state.workflow_summaries.last_mut().unwrap()
+        };
+        summary.llm_calls = summary.llm_calls.saturating_add(llm_calls);
+        summary.tokens_in = summary.tokens_in.saturating_add(tokens_in);
+        summary.tokens_out = summary.tokens_out.saturating_add(tokens_out);
+        if produced_output {
+            summary.outputs = summary.outputs.saturating_add(1);
+            summary.last_output_at = Some(Utc::now().to_rfc3339());
+        }
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        self.state
+            .llm_spend
+            .record(&today, llm_calls, tokens_in, tokens_out);
+        self.dirty = true;
+    }
+
+    pub fn llm_budget_exhausted(&self) -> bool {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        self.state
+            .llm_spend
+            .is_over_budget(&today, self.settings.daily_llm_token_budget)
     }
 
     pub fn record_workflow_failure_report(
@@ -1120,6 +1462,7 @@ impl BuddyService {
                     failure_category: Some(report.category.as_str().to_string()),
                     failure_summary: Some(summary.clone()),
                     last_outcome: Some(outcome),
+                    ..Default::default()
                 });
         }
         self.refresh_active_quest();
@@ -1261,10 +1604,13 @@ impl BuddyService {
 
     pub fn record_issue_created(&mut self, error_message: String) {
         self.last_issue_at = Some(Instant::now());
+        let now = chrono::Utc::now();
+        self.recent_issue_errors.push((error_message, now));
         self.recent_issue_errors
-            .push((error_message, chrono::Utc::now()));
+            .retain(|(_, ts)| now.signed_duration_since(*ts).num_seconds() < 86400);
         if self.recent_issue_errors.len() > 200 {
-            self.recent_issue_errors.remove(0);
+            let excess = self.recent_issue_errors.len() - 200;
+            self.recent_issue_errors.drain(0..excess);
         }
     }
 
@@ -1402,9 +1748,14 @@ impl BuddyService {
             if s.dismissed {
                 continue;
             }
+            let expiry_secs = if s.quest.is_some() {
+                QUEST_SUGGESTION_EXPIRY_SECS
+            } else {
+                SUGGESTION_EXPIRY_SECS
+            };
             if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&s.created_at) {
                 let age = now.signed_duration_since(created).num_seconds();
-                if age > SUGGESTION_EXPIRY_SECS {
+                if age > expiry_secs {
                     s.dismissed = true;
                     changed = true;
                 }
@@ -1415,8 +1766,13 @@ impl BuddyService {
             if !s.dismissed {
                 return true;
             }
+            let retention_secs = if s.quest.is_some() {
+                QUEST_SUGGESTION_EXPIRY_SECS + 3600
+            } else {
+                3600
+            };
             if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&s.created_at) {
-                now.signed_duration_since(created).num_seconds() < 3600
+                now.signed_duration_since(created).num_seconds() < retention_secs
             } else {
                 false
             }
@@ -1479,10 +1835,44 @@ pub async fn buddy_enqueue_event(gcx: AppState, event: BuddyRuntimeEvent) {
     }
 }
 
+pub async fn resolve_buddy_chat_model(gcx: AppState) -> String {
+    let caps_state = gcx.model.caps.read().await;
+    let Some(caps) = caps_state.caps.as_ref() else {
+        return String::new();
+    };
+    let buddy = caps.defaults.chat_buddy_model.trim();
+    if !buddy.is_empty() && crate::caps::resolve_model(&caps.chat_models, buddy).is_ok() {
+        buddy.to_string()
+    } else {
+        String::new()
+    }
+}
+
 pub async fn buddy_snapshot(gcx: AppState) -> Option<BuddySnapshot> {
     let buddy_arc = gcx.buddy.buddy.clone();
     let lock = buddy_arc.lock().await;
     lock.as_ref().map(|svc| svc.snapshot())
+}
+
+pub async fn buddy_record_workflow_telemetry(
+    gcx: AppState,
+    workflow_id: &str,
+    llm_calls: u64,
+    tokens_in: u64,
+    tokens_out: u64,
+    produced_output: bool,
+) {
+    let buddy_arc = gcx.buddy.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    if let Some(svc) = lock.as_mut() {
+        svc.record_workflow_telemetry(
+            workflow_id,
+            llm_calls,
+            tokens_in,
+            tokens_out,
+            produced_output,
+        );
+    }
 }
 
 pub async fn buddy_update_speech(gcx: AppState, speech: BuddySpeechItem) {
@@ -1490,6 +1880,22 @@ pub async fn buddy_update_speech(gcx: AppState, speech: BuddySpeechItem) {
     let mut lock = buddy_arc.lock().await;
     if let Some(svc) = lock.as_mut() {
         svc.update_speech(speech);
+    }
+}
+
+pub async fn buddy_llm_budget_exhausted(gcx: &AppState) -> bool {
+    let buddy_arc = gcx.buddy.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    lock.as_ref()
+        .map(|svc| svc.llm_budget_exhausted())
+        .unwrap_or(false)
+}
+
+pub async fn buddy_update_speech_user(gcx: AppState, speech: BuddySpeechItem) {
+    let buddy_arc = gcx.buddy.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    if let Some(svc) = lock.as_mut() {
+        svc.update_speech_user_initiated(speech);
     }
 }
 
@@ -1751,6 +2157,7 @@ pub async fn buddy_background_task(gcx: AppState) {
         warn!("buddy: failed to bootstrap storage: {}", e);
         return;
     }
+    super::storage::gc_stale_memory_ops_tmp_files(&project_root).await;
     match super::storage::archive_memory_ops_if_oversized(
         &project_root,
         MEMORY_OPS_ARCHIVE_THRESHOLD_BYTES,
@@ -1768,7 +2175,7 @@ pub async fn buddy_background_task(gcx: AppState) {
     let state = super::state::load_state(&project_root).await;
     let settings = super::settings::load_settings(&project_root).await;
     let recent_diagnostics = load_diagnostics_for_service(&project_root).await;
-    let mut memory_ops = super::storage::load_memory_ops(&project_root).await;
+    let mut memory_ops = super::storage::load_memory_ops_repairing(&project_root).await;
     let before_memory_ops = memory_ops.pending_count + memory_ops.approved_count;
     if before_memory_ops > 5000 {
         match super::storage::compact_memory_ops(&project_root).await {
@@ -1807,7 +2214,10 @@ pub async fn buddy_background_task(gcx: AppState) {
         events_tx,
         Some(queue_tx),
     );
-    service.memory_ops = memory_ops;
+    service.set_memory_ops(memory_ops);
+    service
+        .draft_store
+        .restore(super::storage::load_drafts(&project_root).await);
 
     let buddy_arc = gcx.buddy.buddy.clone();
     *buddy_arc.lock().await = Some(service);
@@ -1920,7 +2330,7 @@ pub async fn buddy_background_task(gcx: AppState) {
                     }
                     let mut buddy = buddy_arc.lock().await;
                     if let Some(svc) = buddy.as_mut() {
-                        svc.memory_ops = memory_ops;
+                        svc.set_memory_ops(memory_ops);
                     }
                 }
                 let new_pulse =
@@ -1933,6 +2343,19 @@ pub async fn buddy_background_task(gcx: AppState) {
                     svc.expire_drafts(now);
                     svc.expire_runtime_events_at(now);
                 }
+            }
+        }
+        {
+            let window = {
+                let actions = {
+                    let ring = gcx.buddy.user_activity.lock().await;
+                    ring.snapshot()
+                };
+                super::speech_policy::auto_quiet_window_from_actions(&actions)
+            };
+            let mut buddy = buddy_arc.lock().await;
+            if let Some(svc) = buddy.as_mut() {
+                svc.auto_quiet_window = window;
             }
         }
         // Observer ticking — each observer respects its own cadence
@@ -1982,7 +2405,12 @@ pub async fn buddy_background_task(gcx: AppState) {
                         for obs in &due_observers {
                             svc.last_observer_tick.insert(obs.id(), now);
                         }
-                        svc.fact_store.ingest_many(all_facts);
+                        for (refresh_ttl_secs, facts) in all_facts {
+                            svc.fact_store.ingest_many_with_refresh_ttl(
+                                facts,
+                                chrono::Duration::seconds(refresh_ttl_secs as i64),
+                            );
+                        }
                         let candidates = OpportunityDetector::new().detect(
                             &svc.fact_store,
                             &svc.pulse,
@@ -1990,7 +2418,12 @@ pub async fn buddy_background_task(gcx: AppState) {
                         );
                         let mut humor_needed: Vec<(BuddyOpportunity, BuddyFactKind, u64)> = vec![];
                         for (opp, cooldown_secs) in candidates {
-                            match evaluate(&opp, &svc.settings, &svc.opportunity_queue) {
+                            match evaluate_with_mutes(
+                                &opp,
+                                &svc.settings,
+                                &svc.opportunity_queue,
+                                &svc.state.muted_rules,
+                            ) {
                                 PolicyDecision::Drop { reason } => {
                                     tracing::debug!("buddy: opp dropped by policy: {}", reason);
                                 }
@@ -2080,6 +2513,25 @@ pub async fn buddy_background_task(gcx: AppState) {
                 }
             }
         }
+        let drafts_to_save = {
+            let mut buddy = buddy_arc.lock().await;
+            buddy.as_mut().and_then(|svc| {
+                if svc.drafts_dirty {
+                    svc.drafts_dirty = false;
+                    Some(svc.draft_store.snapshot())
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(drafts) = drafts_to_save {
+            if let Err(e) = super::storage::save_drafts(&project_root, &drafts).await {
+                warn!("buddy: failed to save drafts: {}", e);
+                if let Some(svc) = buddy_arc.lock().await.as_mut() {
+                    svc.drafts_dirty = true;
+                }
+            }
+        }
 
         // Periodic compaction: ask the writer task to rewrite the JSONL from
         // the in-memory queue every 5 minutes. The append-on-mutation log can
@@ -2099,7 +2551,7 @@ pub async fn buddy_background_task(gcx: AppState) {
                 Ok(memory_ops) => {
                     let mut buddy = buddy_arc.lock().await;
                     if let Some(svc) = buddy.as_mut() {
-                        svc.memory_ops = memory_ops;
+                        svc.set_memory_ops(memory_ops);
                     }
                 }
                 Err(err) => warn!("buddy: failed to compact memory ops queue: {}", err),
@@ -2125,7 +2577,7 @@ pub async fn buddy_background_task(gcx: AppState) {
                         Ok((memory_ops, changed)) => {
                             let mut buddy = buddy_arc.lock().await;
                             if let Some(svc) = buddy.as_mut() {
-                                svc.memory_ops = memory_ops;
+                                svc.set_memory_ops(memory_ops);
                             }
                             if changed > 0 {
                                 info!("buddy: drained {} memory ops", changed);
@@ -2145,6 +2597,16 @@ pub async fn buddy_background_task(gcx: AppState) {
     if let Some(s) = state_opt {
         let _ = super::state::save_state(&project_root, &s).await;
     }
+    let drafts_opt = {
+        let buddy = buddy_arc.lock().await;
+        buddy
+            .as_ref()
+            .filter(|s| s.drafts_dirty)
+            .map(|s| s.draft_store.snapshot())
+    };
+    if let Some(drafts) = drafts_opt {
+        let _ = super::storage::save_drafts(&project_root, &drafts).await;
+    }
 
     // Final compaction on shutdown so the JSONL on disk is canonical, then
     // drop the writer sender (replacing the service slot does that for us)
@@ -2159,16 +2621,27 @@ pub async fn buddy_background_task(gcx: AppState) {
             let _ = tx.send(RuntimeQueueWriteOp::Compact(svc.runtime_queue.clone()));
         }
     }
-    let background_tasks = service
+    let mut background_tasks = service
         .as_mut()
         .map(|svc| svc.take_background_tasks())
         .unwrap_or_default();
-    for handle in background_tasks {
-        let _ = handle.await;
+    let drain = async {
+        for handle in background_tasks.iter_mut() {
+            let _ = handle.await;
+        }
+    };
+    if tokio::time::timeout(std::time::Duration::from_secs(10), drain)
+        .await
+        .is_err()
+    {
+        warn!("buddy: background tasks did not drain within 10s, aborting remaining");
+        for handle in &background_tasks {
+            handle.abort();
+        }
     }
     drop(service);
-    let _ = writer_handle.await;
-    let _ = commit_poller_handle.await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), writer_handle).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), commit_poller_handle).await;
 
     info!("buddy: background task stopped");
 }

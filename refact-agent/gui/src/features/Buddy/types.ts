@@ -668,6 +668,11 @@ export interface BuddyWorkflowSummary {
   last_outcome: string | null;
   failure_category?: string | null;
   failure_summary?: string | null;
+  llm_calls?: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  outputs?: number;
+  last_output_at?: string | null;
 }
 
 export interface BuddySemanticSnapshot {
@@ -777,11 +782,67 @@ export interface BuddyState {
   active_quest?: BuddyQuest | null;
   opportunities: BuddyOpportunity[];
   dismissed_history?: BuddyDismissEntry[];
+  verdicts?: BuddyVerdict[];
+  muted_rules?: string[];
+  speech_decisions?: SpeechDecisionRecord[];
+  llm_spend?: DailyLlmSpend;
+}
+
+export interface SpeechDecisionRecord {
+  at: string;
+  intent?: string | null;
+  allowed: boolean;
+  reason: string;
+  preview: string;
+  source: string;
+}
+
+export interface DailyLlmSpend {
+  day: string;
+  llm_calls: number;
+  tokens_in: number;
+  tokens_out: number;
+}
+
+export type QuietHoursMode = "off" | "auto" | "fixed";
+
+export interface BriefingJobRun {
+  workflow_id: string;
+  run_count: number;
+  outputs: number;
+  tokens_in: number;
+  tokens_out: number;
+  last_outcome?: string | null;
+}
+
+export interface BriefingCard {
+  id: string;
+  summary: string;
+  priority: BuddyPriority;
+  confidence: number;
+  kind: string;
+}
+
+export interface BriefingPulseDelta {
+  tasks_total: number;
+  memory_pending_ops: number;
+  diagnostics_last_hour: number;
+  git_uncommitted_files: number;
+}
+
+export interface BuddyBriefing {
+  date: string;
+  generated_at: string;
+  job_runs: BriefingJobRun[];
+  receipts: BuddyReceipt[];
+  top_cards: BriefingCard[];
+  pulse: BriefingPulseDelta;
+  spend: DailyLlmSpend;
 }
 
 export type HumorLevel = "off" | "light" | "normal";
 
-export type AutonomyLevel = "read_only" | "suggest" | "safe_auto";
+export type AutonomyLevel = "read_only" | "suggest" | "propose" | "safe_auto";
 
 export interface ObserverToggles {
   task_health: boolean;
@@ -837,7 +898,10 @@ export type BuddyOpportunityKind =
   | "integration_fix"
   | "diagnostic_investigation"
   | "git_hygiene"
-  | "worktree_cleanup";
+  | "worktree_cleanup"
+  | "memory_ops_batch"
+  | "job_finding"
+  | "quest";
 
 export type BuddyPriority = "low" | "normal" | "high" | "critical";
 
@@ -931,6 +995,10 @@ export type BuddyAction =
       item_id: string;
     }
   | { kind: "create_pulse_report"; scope: PulseScope }
+  | { kind: "apply_memory_batch"; batch_key: string; count_hint: number }
+  | { kind: "apply_config_patch"; draft_id: string; target_path: string }
+  | { kind: "accept_quest"; suggestion_id: string }
+  | { kind: "open_buddy_conversation"; chat_id: string }
   | { kind: "dismiss" };
 
 export interface BuddyOpportunityLinks {
@@ -977,7 +1045,37 @@ export type BuddyActionResult =
       item_id: string;
       success?: boolean;
       error?: string | null;
-    };
+    }
+  | {
+      kind: "memory_batch_applied";
+      batch_key: string;
+      applied: number;
+      failed: number;
+      remaining: number;
+    }
+  | { kind: "config_patch_applied"; receipt_id: string; target_path: string }
+  | { kind: "quest_accepted"; quest_id: string; reward_xp: number }
+  | { kind: "open_chat"; chat_id: string };
+
+export type BuddyVerdictOutcome = "accept" | "dismiss" | "never" | "undo";
+
+export interface BuddyVerdict {
+  rule_key: string;
+  kind: string;
+  action_kind: string;
+  verdict: BuddyVerdictOutcome;
+  at: string;
+}
+
+export interface BuddyReceipt {
+  id: string;
+  action_kind: string;
+  target_path: string;
+  pre_image?: string | null;
+  created_at: string;
+  undone: boolean;
+  undone_at?: string | null;
+}
 
 export interface BuddyOpportunityAcceptResponse {
   snapshot: BuddySnapshot;
@@ -1131,6 +1229,12 @@ export interface BuddySettings {
   autonomy_level: AutonomyLevel;
   quiet_mode: boolean;
   daily_digest_hour: number | null;
+  quiet_hours_mode?: QuietHoursMode;
+  quiet_hours_start?: number;
+  quiet_hours_end?: number;
+  muted_intents?: string[];
+  muted_chat_ids?: string[];
+  daily_llm_token_budget?: number | null;
   observers: ObserverToggles;
 }
 
@@ -1213,6 +1317,19 @@ export interface BuddyConversationEntry {
   message_count: number;
   icon: string;
   badge: string | null;
+}
+
+export interface BuddyLedgerDiagnostics {
+  invalid_json: number;
+  missing_id: number;
+  repaired_id_alias: number;
+  empty_conversation: number;
+  quarantined: number;
+}
+
+export interface BuddyConversationsList {
+  entries: BuddyConversationEntry[];
+  diagnostics: BuddyLedgerDiagnostics | null;
 }
 
 export interface BuddyThreadMeta {

@@ -1,11 +1,20 @@
 import React, { useCallback, useMemo } from "react";
-import { MessageCircle } from "lucide-react";
-import { Icon, LoadingState, Surface, Text } from "../../components/ui";
+import { AlertTriangle, MessageCircle } from "lucide-react";
+import { Badge, Icon, LoadingState, Surface, Text } from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import { openExistingBuddyChat } from "../Chat/Thread";
 import { useGetBuddyConversationsQuery } from "../../services/refact/buddy";
-import type { BuddyConversationEntry } from "./types";
+import type { BuddyConversationEntry, BuddyLedgerDiagnostics } from "./types";
 import styles from "./AutonomousChats.module.css";
+
+function corruptionCount(
+  diagnostics: BuddyLedgerDiagnostics | null | undefined,
+): number {
+  if (!diagnostics) return 0;
+  return (
+    diagnostics.invalid_json + diagnostics.missing_id + diagnostics.quarantined
+  );
+}
 
 type WorkflowGroup = {
   workflowId: string;
@@ -66,9 +75,12 @@ export const AutonomousChats: React.FC<AutonomousChatsProps> = ({
   );
 
   const groups = useMemo(
-    () => groupAutonomousChatsByWorkflowId(conversations ?? data ?? []),
+    () =>
+      groupAutonomousChatsByWorkflowId(conversations ?? data?.entries ?? []),
     [conversations, data],
   );
+
+  const corrupted = corruptionCount(data?.diagnostics);
 
   const handleOpen = useCallback(
     (entry: BuddyConversationEntry) => {
@@ -83,6 +95,17 @@ export const AutonomousChats: React.FC<AutonomousChatsProps> = ({
         <Text as="strong" size="2" weight="bold">
           Autonomous chats
         </Text>
+        {corrupted > 0 && (
+          <Badge
+            tone="warning"
+            size="xs"
+            data-testid="ledger-corruption-chip"
+            title="Corrupt ledger files were quarantined with a .corrupt suffix"
+          >
+            <Icon icon={AlertTriangle} size="sm" />
+            {corrupted} corrupt file{corrupted === 1 ? "" : "s"} quarantined
+          </Badge>
+        )}
         <Text as="p" size="1" color="gray">
           Workflow-driven Buddy conversations grouped by workflow.
         </Text>

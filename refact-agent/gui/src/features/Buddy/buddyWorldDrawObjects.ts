@@ -1008,6 +1008,39 @@ function drawGearMill(
   fillCircle(args.ctx, x, gearY, 2.2, tone, 0.95);
 }
 
+function drawProposalMailbox(
+  args: DrawBuddyWorldBaseArgs,
+  item: BuddyWorldObject,
+  x: number,
+  y: number,
+  tone: string,
+): void {
+  const materials = objectMaterials(args);
+  const frame = safeFrame(args.frame);
+  const bob =
+    item.state === "attention"
+      ? wave(frame, 26, item.x, 1.2, args.reducedMotion)
+      : 0;
+
+  fillEllipse(args.ctx, x, y + 13, 10, 3, "#1A2E20", 0.3);
+  fillPixelRect(args.ctx, x - 1.2, y + 2, 2.4, 11, materials.woodDark, 0.95);
+  fillPixelRect(args.ctx, x - 7, y - 5 + bob, 14, 8, materials.stone, 0.96);
+  fillPixelRect(
+    args.ctx,
+    x - 7,
+    y - 6.6 + bob,
+    14,
+    2.4,
+    materials.stoneDark,
+    0.95,
+  );
+  fillPixelRect(args.ctx, x + 3.4, y - 3 + bob, 2.6, 3.4, "#FDE68A", 0.9);
+  if (item.state === "attention" || item.state === "active") {
+    fillPixelRect(args.ctx, x - 9.4, y - 9 + bob, 1.8, 6, tone, 0.95);
+    fillPixelRect(args.ctx, x - 9.4, y - 9 + bob, 4.6, 2.2, tone, 0.95);
+  }
+}
+
 function drawSeed(args: DrawBuddyWorldBaseArgs, x: number, y: number): void {
   const frame = safeFrame(args.frame);
   const sway = wave(frame, 40, 0, 1.6, args.reducedMotion);
@@ -1077,6 +1110,9 @@ export function drawWorldObject(
       break;
     case "gear_mill":
       drawGearMill(args, x, y, tone);
+      break;
+    case "proposal_mailbox":
+      drawProposalMailbox(args, item, x, y, tone);
       break;
     case "seed":
       drawSeed(args, x, y);

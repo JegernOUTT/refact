@@ -1,4 +1,4 @@
-use chrono::{Datelike, Utc};
+use chrono::{DateTime, Datelike, Local};
 use std::collections::HashMap;
 
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, BUDDY_REFACTOR_HUNTER_WORKFLOW_ID};
@@ -8,12 +8,27 @@ use crate::app_state::AppState;
 
 pub struct BuddyRefactorHunterJob;
 
-const COOLDOWN_SECONDS: u64 = 7 * 24 * 60 * 60;
+const COOLDOWN_SECONDS: u64 = 0;
 const PRIORITY: u32 = 6;
 
-fn week_key() -> String {
-    let week = Utc::now().iso_week();
+fn week_key_at(now: &DateTime<Local>) -> String {
+    let week = now.iso_week();
     format!("{}-{:02}", week.year(), week.week())
+}
+
+fn week_key() -> String {
+    week_key_at(&Local::now())
+}
+
+fn week_key_recorded(ctx: &BuddyJobContext, key: &str) -> bool {
+    ctx.job_state.last_result.as_deref() == Some(key)
+}
+
+fn result_ran(result: &BuddyJobResult) -> bool {
+    result.activity.is_some()
+        || result.runtime_event.is_some()
+        || result.workflow_failure.is_some()
+        || result.xp > 0
 }
 
 fn top_diagnostic_counts(ctx: &BuddyJobContext) -> String {
@@ -66,24 +81,30 @@ impl BuddyJob for BuddyRefactorHunterJob {
         PRIORITY
     }
 
-    async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
-        true
+    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
+        !week_key_recorded(ctx, &week_key())
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
-        execute_autonomous_spec(
+        let key = week_key();
+        let mut result = execute_autonomous_spec(
             gcx,
             &ctx,
             build_refactor_hunter_spec(&ctx),
             self.cooldown_seconds(),
         )
-        .await
+        .await;
+        if result_ran(&result) {
+            result.last_result = Some(key);
+        }
+        result
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use crate::buddy::settings::BuddySettings;
     use crate::buddy::types::{BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse};
     use std::path::Path;
@@ -109,17 +130,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buddy_refactor_hunter_respects_7d_cooldown() {
+    async fn buddy_refactor_hunter_uses_calendar_week_dedup() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
         let ctx = test_context(dir.path());
         let job = BuddyRefactorHunterJob;
 
-        assert_eq!(job.cooldown_seconds(), 7 * 24 * 60 * 60);
+        assert_eq!(job.cooldown_seconds(), COOLDOWN_SECONDS);
         assert!(job.should_run(gcx, &ctx).await);
         assert_eq!(
             build_refactor_hunter_spec(&ctx).workflow_id,
             BUDDY_REFACTOR_HUNTER_WORKFLOW_ID
         );
+    }
+
+    #[test]
+    fn buddy_refactor_hunter_dedupes_on_local_week_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(dir.path());
+        let now = Local
+            .with_ymd_and_hms(2026, 6, 5, 12, 0, 0)
+            .single()
+            .unwrap();
+        let key = week_key_at(&now);
+        ctx.job_state.last_result = Some(key.clone());
+
+        assert_eq!(key, week_key_at(&now));
+        assert!(week_key_recorded(&ctx, &key));
     }
 }

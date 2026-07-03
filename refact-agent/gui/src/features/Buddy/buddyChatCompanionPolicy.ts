@@ -129,12 +129,37 @@ export function isChatCompanionWorthyRuntimeEvent(
 
 const CONTENT_KEY_TEXT_LIMIT = 200;
 
+export interface ChatCompanionContentScope {
+  workspaceId?: string | null;
+  projectRoot?: string | null;
+  chatId?: string | null;
+}
+
 function normalizedContentText(value: string): string {
   return value
     .trim()
     .toLowerCase()
     .replace(/\s+/g, " ")
     .slice(0, CONTENT_KEY_TEXT_LIMIT);
+}
+
+function contentScopeToken(
+  scope: ChatCompanionContentScope | null | undefined,
+): string | null {
+  const workspaceScope =
+    scope?.workspaceId?.trim() || scope?.projectRoot?.trim();
+  const parts = [workspaceScope, scope?.chatId?.trim()]
+    .map((part) => (part ? normalizedContentText(part) : ""))
+    .filter((part) => part.length > 0);
+  return parts.length > 0 ? parts.join(":") : null;
+}
+
+function scopedContentKey(
+  contentKey: string,
+  scope: ChatCompanionContentScope | null | undefined,
+): string {
+  const scopeToken = contentScopeToken(scope);
+  return scopeToken ? `scope:${scopeToken}:${contentKey}` : contentKey;
 }
 
 /**
@@ -147,6 +172,9 @@ function normalizedContentText(value: string): string {
 export function speechContentKey(speech: {
   dedupe_key?: string;
   speech_intent?: string;
+  workspace_id?: string | null;
+  project_root?: string | null;
+  chat_id?: string | null;
 }): string | null {
   if (
     isAmbientToken(speech.speech_intent) ||
@@ -155,11 +183,20 @@ export function speechContentKey(speech: {
     return null;
   }
   const token = normalizedPolicyToken(speech.dedupe_key);
-  return token ? `content:speech:${token}` : null;
+  return token
+    ? scopedContentKey(`content:speech:${token}`, {
+        workspaceId: speech.workspace_id,
+        projectRoot: speech.project_root,
+        chatId: speech.chat_id,
+      })
+    : null;
 }
 
 export function runtimeEventContentKey(
-  event: BuddyRuntimeEvent,
+  event: BuddyRuntimeEvent & {
+    workspace_id?: string | null;
+    project_root?: string | null;
+  },
   formattedText: string,
 ): string | null {
   if (
@@ -169,10 +206,17 @@ export function runtimeEventContentKey(
     return null;
   }
   const token = normalizedPolicyToken(event.dedupe_key);
-  if (token) return `content:runtime:${token}`;
+  const scope = {
+    workspaceId: event.workspace_id,
+    projectRoot: event.project_root,
+    chatId: event.chat_id,
+  };
+  if (token) return scopedContentKey(`content:runtime:${token}`, scope);
   if (isErrorRuntimeEvent(event)) {
     const text = normalizedContentText(formattedText);
-    return text ? `content:runtime:error:${text}` : null;
+    return text
+      ? scopedContentKey(`content:runtime:error:${text}`, scope)
+      : null;
   }
   return null;
 }
@@ -180,21 +224,41 @@ export function runtimeEventContentKey(
 export function suggestionContentKey(suggestion: {
   suggestion_type: string;
   title: string;
+  workspace_id?: string | null;
+  project_root?: string | null;
+  chat_id?: string | null;
 }): string {
-  return `content:suggestion:${normalizedPolicyToken(
-    suggestion.suggestion_type,
-  )}:${normalizedContentText(suggestion.title)}`;
+  return scopedContentKey(
+    `content:suggestion:${normalizedPolicyToken(
+      suggestion.suggestion_type,
+    )}:${normalizedContentText(suggestion.title)}`,
+    {
+      workspaceId: suggestion.workspace_id,
+      projectRoot: suggestion.project_root,
+      chatId: suggestion.chat_id,
+    },
+  );
 }
 
 export function opportunityContentKey(opportunity: {
   kind: string;
   cooldown_key?: string | null;
+  workspace_id?: string | null;
+  project_root?: string | null;
+  related?: { chat_ids?: readonly string[] };
 }): string | null {
   const key = opportunity.cooldown_key?.trim();
   if (!key) return null;
-  return `content:opportunity:${normalizedContentText(
-    `${opportunity.kind}:${key}`,
-  )}`;
+  return scopedContentKey(
+    `content:opportunity:${normalizedContentText(
+      `${opportunity.kind}:${key}`,
+    )}`,
+    {
+      workspaceId: opportunity.workspace_id,
+      projectRoot: opportunity.project_root,
+      chatId: opportunity.related?.chat_ids?.[0],
+    },
+  );
 }
 
 export type ChatCompanionGateReason =

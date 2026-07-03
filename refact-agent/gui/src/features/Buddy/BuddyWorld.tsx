@@ -103,7 +103,12 @@ interface BuddyWorldProps {
   onDismissSetup: () => void;
   onSpeechControl: (control: BuddyControl) => void;
   now?: Date;
+  pendingCards?: number;
+  onOpenInbox?: () => void;
+  verdictReaction?: { kind: "accept" | "dismiss"; at: number } | null;
 }
+
+const AMBIENT_FRAME_INTERVAL_MS = 33;
 
 const SETUP_MODE_ACTIONS = [
   { mode: "setup", label: "Warm up" },
@@ -399,10 +404,17 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   onDismissSetup,
   onSpeechControl,
   now,
+  pendingCards = 0,
+  onOpenInbox,
+  verdictReaction = null,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const foregroundCanvasRef = useRef<HTMLCanvasElement>(null);
   const animationStartMsRef = useRef<number | null>(null);
+  const lastDrawMsRef = useRef(0);
+  const canvasCssSizeRef = useRef<{ width: number; height: number } | null>(
+    null,
+  );
   const [currentTime, setCurrentTime] = useState(() => now ?? new Date());
   const [reaction, setReaction] = useState<string | null>(null);
   const [careLine, setCareLine] = useState<BuddyWorldSpeechCandidate | null>(
@@ -536,9 +548,19 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         nowPlaying,
         activeQuest,
         semanticState: state,
+        pendingCards,
       }),
-    [activeQuest, currentTime, nowPlaying, pet, pulse, state],
+    [activeQuest, currentTime, nowPlaying, pendingCards, pet, pulse, state],
   );
+
+  useEffect(() => {
+    if (!verdictReaction) return;
+    setReaction(
+      verdictReaction.kind === "accept"
+        ? `${state.name} does a happy spin — change applied!`
+        : `${state.name} shrugs and files that one away.`,
+    );
+  }, [state.name, verdictReaction]);
   const waypoints = useMemo(
     () => buildBuddyWaypoints(world, state.name),
     [world, state.name],
@@ -1331,12 +1353,42 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   ]);
 
   useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      canvasCssSizeRef.current = {
+        width: Math.max(1, Math.round(entry.contentRect.width)),
+        height: Math.max(1, Math.round(entry.contentRect.height)),
+      };
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
     let raf = 0;
     const render = (timestampMs: number) => {
       if (document.hidden) {
         raf = window.requestAnimationFrame(render);
         return;
       }
+      {
+        const { showcaseRun, playSession, playGift, travel } =
+          renderStateRef.current;
+        const interactive = Boolean(
+          showcaseRun ?? playSession ?? playGift ?? travel,
+        );
+        if (
+          !interactive &&
+          timestampMs - lastDrawMsRef.current < AMBIENT_FRAME_INTERVAL_MS
+        ) {
+          raf = window.requestAnimationFrame(render);
+          return;
+        }
+      }
+      lastDrawMsRef.current = timestampMs;
 
       animationStartMsRef.current ??= timestampMs;
       const frame = ((timestampMs - animationStartMsRef.current) / 1000) * 24;
@@ -1360,12 +1412,20 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext("2d");
       if (canvas && ctx) {
-        const rect = canvas.getBoundingClientRect();
-        const cssWidth = Math.max(1, Math.round(rect.width || 720));
-        const cssHeight = Math.max(
-          1,
-          Math.round(rect.height || (compact ? 190 : 260)),
-        );
+        let cached = canvasCssSizeRef.current;
+        if (!cached) {
+          const rect = canvas.getBoundingClientRect();
+          cached = {
+            width: Math.max(1, Math.round(rect.width || 720)),
+            height: Math.max(
+              1,
+              Math.round(rect.height || (compact ? 190 : 260)),
+            ),
+          };
+          canvasCssSizeRef.current = cached;
+        }
+        const cssWidth = cached.width;
+        const cssHeight = cached.height;
         const ratio = window.devicePixelRatio;
         const targetWidth = Math.round(cssWidth * ratio);
         const targetHeight = Math.round(cssHeight * ratio);
@@ -1637,6 +1697,13 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
                   waypoints.findIndex((point) => point.id === item.id),
                 ),
               );
+            }
+            if (item.sprite === "proposal_mailbox" && onOpenInbox) {
+              onOpenInbox();
+              if (!showcaseRun) {
+                setReaction(`${state.name} rummages through the mailbox.`);
+              }
+              return;
             }
             onOpenPage(item.page);
             if (!showcaseRun) {

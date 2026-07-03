@@ -17,8 +17,9 @@ import { BuddyPulseCard } from "./BuddyPulseCard";
 import { BuddyOpportunitiesFeed } from "./BuddyOpportunitiesFeed";
 import { BuddySettingsPanel } from "./BuddySettingsPanel";
 import { BuddyWorld } from "./BuddyWorld";
+import { BuddyErrorBoundary } from "./BuddyErrorBoundary";
 import { BuddySummaryStrip } from "./BuddySummaryStrip";
-import { ArtifactsPanel } from "./ArtifactsPanel";
+import { BuddyBriefingCard } from "./BuddyBriefingCard";
 import { BuddyPersonalityPanel, type NeedRow } from "./BuddyPersonalityPanel";
 import { BuddyActivityPanel } from "./BuddyActivityPanel";
 import {
@@ -38,6 +39,7 @@ import {
   selectRuntimeQueue,
   selectPulse,
   selectUnreadOpportunities,
+  selectVerdictReaction,
   selectHomeSnoozedUntil,
   selectSeenNotificationIds,
   dismissRuntimeEvent,
@@ -264,6 +266,9 @@ export const BuddyHome: React.FC = () => {
   const { state, signal: buddySignal } = buddy;
   const [setupDismissed, setSetupDismissed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const [worldBoundaryKey, setWorldBoundaryKey] = useState(0);
+  const verdictReaction = useAppSelector(selectVerdictReaction);
   const [speechIndex, setSpeechIndex] = useState(0);
   const [recentErrorNow, setRecentErrorNow] = useState(() => Date.now());
   const [isRetryingBuddySnapshot, setIsRetryingBuddySnapshot] = useState(false);
@@ -370,6 +375,10 @@ export const BuddyHome: React.FC = () => {
 
   const handleDismissSetup = useCallback(() => {
     setSetupDismissed(true);
+  }, []);
+
+  const handleResetWorld = useCallback(() => {
+    setWorldBoundaryKey((key) => key + 1);
   }, []);
 
   const handleCare = useCallback(
@@ -506,12 +515,12 @@ export const BuddyHome: React.FC = () => {
           ctrl.action === "dismiss_speech" ||
           ctrl.action === "dismiss_runtime_event")
       ) {
-        dispatch(markBuddyNotificationSeen(heroSpeech.id));
-        dispatch(snoozeHomeNotifications(undefined));
-        dispatch(dismissRuntimeEvent(heroSpeech.runtimeEventId));
         void dismissRuntimeMutation(heroSpeech.runtimeEventId)
           .unwrap()
           .catch(() => undefined);
+        dispatch(markBuddyNotificationSeen(heroSpeech.id));
+        dispatch(snoozeHomeNotifications(undefined));
+        dispatch(dismissRuntimeEvent(heroSpeech.runtimeEventId));
         return;
       }
       if (heroSpeech.source === "opportunity" && heroSpeech.opportunityId) {
@@ -833,25 +842,63 @@ export const BuddyHome: React.FC = () => {
           className={styles.heroCard}
           data-testid="buddy-home-hero"
         >
-          <BuddyWorld
-            homeDoorDisabled
-            palette={palette}
-            stage={stage}
-            state={state}
-            pulse={pulse}
-            pet={pet}
-            nowPlaying={nowPlaying}
-            activeQuest={activeQuest}
-            onCanvasEvent={buddy.handleCanvasEvent}
-            activeSpeech={heroSpeech}
-            setupNeeded={setupNeeded}
-            onRunMode={handleRunMode}
-            onDismissSetup={handleDismissSetup}
-            onCare={(action, toy) => void handleCare(action, toy)}
-            onOpenPage={handleOpenWorldPage}
-            onSpeechControl={(control) => void handleSpeechControl(control)}
-          />
+          <BuddyErrorBoundary key={worldBoundaryKey}>
+            <BuddyWorld
+              homeDoorDisabled
+              palette={palette}
+              stage={stage}
+              state={state}
+              pulse={pulse}
+              pet={pet}
+              nowPlaying={nowPlaying}
+              activeQuest={activeQuest}
+              onCanvasEvent={buddy.handleCanvasEvent}
+              activeSpeech={heroSpeech}
+              setupNeeded={setupNeeded}
+              onRunMode={handleRunMode}
+              onDismissSetup={handleDismissSetup}
+              onCare={(action, toy) => void handleCare(action, toy)}
+              onOpenPage={handleOpenWorldPage}
+              onSpeechControl={(control) => handleSpeechControl(control)}
+              pendingCards={unreadOpportunities.length}
+              onOpenInbox={() => setInboxOpen(true)}
+              verdictReaction={verdictReaction}
+            />
+          </BuddyErrorBoundary>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={handleResetWorld}
+            aria-label="Reset Buddy scene"
+          >
+            Reset scene
+          </Button>
         </Surface>
+
+        {inboxOpen && (
+          <div
+            className={styles.inboxOverlay}
+            data-testid="buddy-proposal-inbox"
+            role="dialog"
+            aria-label="Proposal inbox"
+          >
+            <div className={styles.inboxHeader}>
+              <Text size="2" weight="bold">
+                Proposal inbox
+              </Text>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setInboxOpen(false)}
+                aria-label="Close proposal inbox"
+              >
+                Close
+              </Button>
+            </div>
+            <BuddyOpportunitiesFeed />
+          </div>
+        )}
 
         <BuddySummaryStrip
           name={name}
@@ -913,11 +960,7 @@ export const BuddyHome: React.FC = () => {
           </div>
         )}
 
-        <section
-          className={classNames(styles.artifactsSection, "rf-enter-rise")}
-        >
-          <ArtifactsPanel />
-        </section>
+        <BuddyBriefingCard />
 
         <section className={classNames(styles.mainGrid, "rf-stagger")}>
           <div className={styles.panelColumn}>

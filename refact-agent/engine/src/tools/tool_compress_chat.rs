@@ -452,8 +452,7 @@ pub(crate) fn deterministic_full_sweep(messages: &[ChatMessage]) -> Option<Vec<C
         .filter(|m| (m.role == "tool" || m.role == "diff") && !m.tool_call_id.is_empty())
         .filter(|m| {
             let text = m.content.content_text_only();
-            text.len() > TOOL_OUTPUT_TRUNCATE_LIMIT
-                && !text.starts_with("Tool result compressed:")
+            text.len() > TOOL_OUTPUT_TRUNCATE_LIMIT && !text.starts_with("Tool result compressed:")
         })
         .map(|m| m.tool_call_id.clone())
         .collect();
@@ -628,8 +627,7 @@ mod tests {
 
         let swept = deterministic_full_sweep(&messages).expect("sweep must free space");
         assert!(swept.iter().any(|m| m.role == "tool"
-            && m
-                .content
+            && m.content
                 .content_text_only()
                 .starts_with("Tool result compressed:")));
         assert!(!swept.iter().any(|m| m.role == "context_file"));

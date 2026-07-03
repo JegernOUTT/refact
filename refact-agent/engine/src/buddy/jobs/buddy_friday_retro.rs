@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use chrono::{Datelike, Timelike, Utc, Weekday};
+use chrono::{Datelike, Local, Timelike, Utc, Weekday};
 
 use crate::app_state::AppState;
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, BUDDY_FRIDAY_RETRO_WORKFLOW_ID};
@@ -9,7 +9,7 @@ use crate::buddy::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
 
 pub struct BuddyFridayRetroJob;
 
-const COOLDOWN_SECONDS: u64 = 6 * 24 * 60 * 60;
+const COOLDOWN_SECONDS: u64 = 0;
 const PRIORITY: u32 = 31;
 const TRUSTED_COMMAND_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
@@ -17,8 +17,25 @@ fn digest_hour(ctx: &BuddyJobContext) -> u32 {
     ctx.settings.daily_digest_hour.unwrap_or(18).min(23) as u32
 }
 
-fn should_run_at(ctx: &BuddyJobContext, now: chrono::DateTime<Utc>) -> bool {
-    now.weekday() == Weekday::Fri && now.hour() >= digest_hour(ctx)
+fn week_key_at(now: &chrono::DateTime<Local>) -> String {
+    let week = now.iso_week();
+    format!("{}-{:02}", week.year(), week.week())
+}
+
+fn week_key_recorded(ctx: &BuddyJobContext, key: &str) -> bool {
+    ctx.job_state.last_result.as_deref() == Some(key)
+}
+
+fn result_ran(result: &BuddyJobResult) -> bool {
+    result.activity.is_some()
+        || result.runtime_event.is_some()
+        || result.workflow_failure.is_some()
+        || result.xp > 0
+}
+
+fn should_run_at(ctx: &BuddyJobContext, now: chrono::DateTime<Local>) -> bool {
+    let key = week_key_at(&now);
+    !week_key_recorded(ctx, &key) && now.weekday() == Weekday::Fri && now.hour() >= digest_hour(ctx)
 }
 
 async fn trusted_git_output(project_root: &Path, args: &[&str]) -> Option<String> {
@@ -112,17 +129,22 @@ impl BuddyJob for BuddyFridayRetroJob {
     }
 
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
-        should_run_at(ctx, Utc::now())
+        should_run_at(ctx, Local::now())
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
-        execute_autonomous_spec(
+        let key = week_key_at(&Local::now());
+        let mut result = execute_autonomous_spec(
             gcx,
             &ctx,
             build_friday_retro_spec(&ctx).await,
             self.cooldown_seconds(),
         )
-        .await
+        .await;
+        if result_ran(&result) {
+            result.last_result = Some(key);
+        }
+        result
     }
 }
 
@@ -131,6 +153,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    use chrono::TimeZone;
     use crate::buddy::settings::BuddySettings;
     use crate::buddy::types::{BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse};
 
@@ -158,7 +181,7 @@ mod tests {
     async fn buddy_friday_retro_should_run_on_friday_at_or_after_digest_hour() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
-        let now = Utc::now();
+        let now = Local::now();
         let mut ctx = test_context(dir.path());
         ctx.settings.daily_digest_hour = Some(now.hour() as u8);
         let expected = now.weekday() == Weekday::Fri;
@@ -187,10 +210,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = test_context(dir.path());
         ctx.settings.daily_digest_hour = Some(18);
-        let friday_late = chrono::DateTime::parse_from_rfc3339("2026-06-05T23:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let friday_late = Local
+            .with_ymd_and_hms(2026, 6, 5, 23, 0, 0)
+            .single()
+            .unwrap();
 
         assert!(should_run_at(&ctx, friday_late));
+    }
+
+    #[test]
+    fn buddy_friday_retro_dedupes_on_local_week_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(dir.path());
+        ctx.settings.daily_digest_hour = Some(18);
+        let friday_late = Local
+            .with_ymd_and_hms(2026, 6, 5, 23, 0, 0)
+            .single()
+            .unwrap();
+        ctx.job_state.last_result = Some(week_key_at(&friday_late));
+
+        assert!(!should_run_at(&ctx, friday_late));
     }
 }

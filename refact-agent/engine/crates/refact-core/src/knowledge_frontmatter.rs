@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KnowledgeFrontmatter {
@@ -68,6 +69,14 @@ pub struct KnowledgeFrontmatter {
     pub source_content_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_needed: Option<bool>,
+    #[serde(default)]
+    pub occurrences: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_yaml::Value>,
 }
 
 impl KnowledgeFrontmatter {
@@ -261,6 +270,31 @@ impl KnowledgeFrontmatter {
         if let Some(review_needed) = self.review_needed {
             lines.push(format!("review_needed: {}", review_needed));
         }
+        if self.occurrences > 0 {
+            lines.push(format!("occurrences: {}", self.occurrences));
+        }
+        if let Some(signal_key) = &self.signal_key {
+            lines.push(format!(
+                "signal_key: \"{}\"",
+                signal_key.replace('"', "\\\"")
+            ));
+        }
+        if let Some(last_observed) = &self.last_observed {
+            lines.push(format!("last_observed: \"{}\"", last_observed));
+        }
+        for (key, value) in &self.extra {
+            if let Ok(serialized) = serde_yaml::to_string(value) {
+                let rendered = serialized.trim_end_matches('\n');
+                if !rendered.contains('\n') {
+                    lines.push(format!("{}: {}", key, rendered));
+                } else {
+                    lines.push(format!("{}:", key));
+                    for line in rendered.lines() {
+                        lines.push(format!("  {}", line));
+                    }
+                }
+            }
+        }
         lines.push("---".to_string());
         lines.join("\n")
     }
@@ -289,5 +323,46 @@ impl KnowledgeFrontmatter {
             } else {
                 "code"
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_frontmatter_fields_roundtrip_through_to_yaml() {
+        let doc = "---\ntitle: \"Known\"\ntags: [\"buddy\"]\nunknown_scalar: keep-me\nunknown_list:\n  - alpha\n  - beta\n---\nBody";
+        let (frontmatter, _) = KnowledgeFrontmatter::parse(doc);
+
+        assert_eq!(frontmatter.title.as_deref(), Some("Known"));
+        assert_eq!(frontmatter.tags, vec!["buddy".to_string()]);
+        assert_eq!(
+            frontmatter.extra.get("unknown_scalar"),
+            Some(&serde_yaml::Value::String("keep-me".to_string()))
+        );
+        assert!(matches!(
+            frontmatter.extra.get("unknown_list"),
+            Some(serde_yaml::Value::Sequence(values)) if values.len() == 2
+        ));
+
+        let rendered = frontmatter.to_yaml();
+        let (roundtripped, _) = KnowledgeFrontmatter::parse(&format!("{}\nBody", rendered));
+
+        assert_eq!(roundtripped.title.as_deref(), Some("Known"));
+        assert_eq!(roundtripped.tags, vec!["buddy".to_string()]);
+        assert_eq!(roundtripped.extra, frontmatter.extra);
+    }
+
+    #[test]
+    fn frontmatter_without_extra_serializes_without_artifacts() {
+        let frontmatter = KnowledgeFrontmatter {
+            id: Some("id-1".to_string()),
+            title: Some("Title".to_string()),
+            tags: vec!["buddy".to_string()],
+            ..Default::default()
+        };
+
+        assert_eq!(frontmatter.to_yaml(), "---\nid: \"id-1\"\ntitle: \"Title\"\ntags: [\"buddy\"]\n---");
     }
 }

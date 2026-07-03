@@ -18,15 +18,30 @@ impl Default for HumorLevel {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum QuietHoursMode {
+    Off,
+    Auto,
+    Fixed,
+}
+
+impl Default for QuietHoursMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AutonomyLevel {
     ReadOnly,
     Suggest,
+    Propose,
     SafeAuto,
 }
 
 impl Default for AutonomyLevel {
     fn default() -> Self {
-        Self::Suggest
+        Self::Propose
     }
 }
 
@@ -95,6 +110,18 @@ pub struct BuddySettings {
     #[serde(default = "default_daily_digest_hour")]
     pub daily_digest_hour: Option<u8>,
     #[serde(default)]
+    pub quiet_hours_mode: QuietHoursMode,
+    #[serde(default = "default_quiet_start")]
+    pub quiet_hours_start: u8,
+    #[serde(default = "default_quiet_end")]
+    pub quiet_hours_end: u8,
+    #[serde(default)]
+    pub muted_intents: Vec<String>,
+    #[serde(default)]
+    pub muted_chat_ids: Vec<String>,
+    #[serde(default)]
+    pub daily_llm_token_budget: Option<u64>,
+    #[serde(default)]
     pub observers: ObserverToggles,
 }
 
@@ -104,6 +131,14 @@ fn default_true() -> bool {
 
 fn default_daily_digest_hour() -> Option<u8> {
     Some(18)
+}
+
+fn default_quiet_start() -> u8 {
+    22
+}
+
+fn default_quiet_end() -> u8 {
+    8
 }
 
 impl Default for BuddySettings {
@@ -123,6 +158,12 @@ impl Default for BuddySettings {
             autonomy_level: AutonomyLevel::default(),
             quiet_mode: false,
             daily_digest_hour: Some(18),
+            quiet_hours_mode: QuietHoursMode::default(),
+            quiet_hours_start: default_quiet_start(),
+            quiet_hours_end: default_quiet_end(),
+            muted_intents: Vec::new(),
+            muted_chat_ids: Vec::new(),
+            daily_llm_token_budget: None,
             observers: ObserverToggles::default(),
         }
     }
@@ -141,6 +182,12 @@ mod tests {
         assert!(settings.message_observation_enabled);
         assert!(settings.chat_reactions_enabled);
         assert!(settings.observers.chat_pattern);
+        assert_eq!(settings.quiet_hours_mode, QuietHoursMode::Auto);
+        assert_eq!(settings.quiet_hours_start, 22);
+        assert_eq!(settings.quiet_hours_end, 8);
+        assert!(settings.muted_intents.is_empty());
+        assert!(settings.muted_chat_ids.is_empty());
+        assert_eq!(settings.daily_llm_token_budget, None);
     }
 
     #[test]
@@ -172,6 +219,8 @@ mod tests {
 
         let settings = BuddySettings::default();
         assert_eq!(settings.humor_level, HumorLevel::Light);
-        assert_eq!(settings.autonomy_level, AutonomyLevel::Suggest);
+        assert_eq!(settings.autonomy_level, AutonomyLevel::Propose);
+        let propose_json = serde_json::to_string(&AutonomyLevel::Propose).unwrap();
+        assert_eq!(propose_json, "\"propose\"");
     }
 }

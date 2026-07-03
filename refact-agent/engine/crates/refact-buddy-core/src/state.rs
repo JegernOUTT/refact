@@ -216,6 +216,10 @@ pub fn default_buddy_state() -> BuddyState {
         active_quest: None,
         opportunities: vec![],
         dismissed_history: vec![],
+        verdicts: vec![],
+        muted_rules: vec![],
+        speech_decisions: vec![],
+        llm_spend: crate::types::DailyLlmSpend::default(),
     };
     sync_state(&mut state);
     state
@@ -541,6 +545,7 @@ pub fn sync_state(state: &mut BuddyState) {
         }
     }
     sync_semantic(state);
+    crate::verdicts::migrate_legacy_batch_keys(state);
 }
 
 pub fn reroll_personality(state: &mut BuddyState) {

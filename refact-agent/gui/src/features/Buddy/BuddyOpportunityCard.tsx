@@ -30,7 +30,7 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
     low: styles.priorityLow,
   }[opportunity.priority];
 
-  const handleActionClick = async (idx: number) => {
+  const handleActionClick = async (idx: number, never?: boolean) => {
     if (pendingRef.current || !isActive) return;
     pendingRef.current = true;
     setPendingActionIndex(idx);
@@ -38,7 +38,7 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
     try {
       if (idx < 0 || idx >= opportunity.proposed_actions.length) return;
       const action = opportunity.proposed_actions[idx];
-      await executeAction(action, opportunity, idx);
+      await executeAction(action, opportunity, idx, { never });
     } catch (error) {
       setActionError(formatOpportunityActionError(error));
     } finally {
@@ -46,6 +46,11 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
       setPendingActionIndex(null);
     }
   };
+
+  const dismissIndex = opportunity.proposed_actions.findIndex(
+    (action) => action.kind === "dismiss",
+  );
+  const isQuest = opportunity.kind === "quest";
 
   return (
     <Surface className={styles.card} radius="control" variant="plain">
@@ -57,6 +62,11 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
         >
           {opportunity.priority}
         </Badge>
+        {isQuest && (
+          <Badge tone="accent" size="xs" aria-label="Quest">
+            quest
+          </Badge>
+        )}
         <Text size="2" className={styles.summary}>
           {opportunity.summary}
         </Text>
@@ -83,6 +93,18 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
               {pendingActionIndex === idx ? "Working…" : actionLabel(action)}
             </Button>
           ))}
+          {dismissIndex >= 0 && (
+            <Button
+              size="sm"
+              type="button"
+              variant="ghost"
+              disabled={!isActive || pendingActionIndex !== null}
+              aria-label="Never show this again"
+              onClick={() => void handleActionClick(dismissIndex, true)}
+            >
+              Never
+            </Button>
+          )}
         </div>
       )}
       {actionError && (

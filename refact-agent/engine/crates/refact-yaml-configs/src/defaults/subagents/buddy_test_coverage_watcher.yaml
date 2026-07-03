@@ -9,7 +9,7 @@ subchat:
   context_mode: default
   stateful: false
   max_steps: 8
-  model_type: buddy
+  model_type: light
   n_ctx: 32000
   max_new_tokens: 1200
   temperature: 0.3
@@ -23,7 +23,8 @@ messages:
     You look for focused test coverage gaps in recently changed Rust files.
     1. Inspect the listed files and nearby tests.
     2. Identify the smallest meaningful test addition or test plan.
-    3. Use create_textdoc only for a concise test note when code changes are not safe.
+    3. Describe the smallest meaningful test addition or test plan in your
+       buddy_runtime_event description; never edit files.
     4. End with buddy_runtime_event, and open an issue if follow-up is needed.
   user_template: |
     Workflow: {{workflow_id}}
@@ -36,6 +37,5 @@ tools:
   - tree
   - cat
   - symbol_def
-  - create_textdoc
   - buddy_runtime_event
   - buddy_open_issue

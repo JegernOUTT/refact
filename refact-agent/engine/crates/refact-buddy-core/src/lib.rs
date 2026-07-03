@@ -1,3 +1,4 @@
+pub mod action_policy;
 pub mod autonomous_workflows;
 pub mod chat_reactions;
 pub mod conversation_ledger;
@@ -5,6 +6,7 @@ pub mod diagnostics;
 pub mod drafts;
 pub mod events;
 pub mod facts;
+pub mod memory_dedup;
 pub mod memory_lifecycle_model;
 pub mod opportunities;
 pub mod policy;
@@ -19,6 +21,7 @@ pub mod storage;
 pub mod types;
 pub mod user_action;
 pub mod user_activity;
+pub mod verdicts;
 pub mod voice_service;
 pub mod workflows;
 

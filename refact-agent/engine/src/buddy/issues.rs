@@ -27,7 +27,7 @@ fn extract_tool_text(out: Vec<ContextEnum>, fallback: &str) -> String {
 
 const RATE_LIMIT_SECS: u64 = 3600;
 const DEDUP_SECS: i64 = 86400;
-const TRUSTED_COMMAND_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+const TRUSTED_COMMAND_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 
 fn trusted_issue_binary(binary: &str) -> PathBuf {
     for dir in TRUSTED_COMMAND_PATH.split(':') {

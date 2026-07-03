@@ -11,6 +11,7 @@ use crate::buddy::types::{
 use crate::ext::competitor_import::manifest::{manifest_path_for_scope_root, ImportManifest};
 use crate::ext::competitor_import::types::{ImportReport, ImportReportCounts, ImportStatus};
 use crate::app_state::AppState;
+use crate::integrations::mcp::session_mcp::SessionMCP;
 
 pub async fn build_pulse(
     gcx: AppState,
@@ -56,7 +57,7 @@ async fn build_tasks_pulse(gcx: AppState, fact_store: &FactStore) -> TaskPulse {
 
 async fn build_trajectories_pulse(project_root: &std::path::Path) -> TrajectoryPulse {
     let traj_dir = project_root.join(".refact").join("trajectories");
-    if !traj_dir.exists() {
+    if !tokio::fs::try_exists(&traj_dir).await.unwrap_or(false) {
         return TrajectoryPulse::default();
     }
     let (total, untitled, oldest) =
@@ -78,11 +79,7 @@ async fn build_memory_pulse(project_root: &std::path::Path, fact_store: &FactSto
     );
     pulse.stale_conflicts = unique_fact_payload_ids(&stale_facts, &["memory_ids", "doc_ids"]);
     let knowledge_dir = project_root.join(".refact").join("knowledge");
-    if knowledge_dir.exists() {
-        if let Ok(rd) = std::fs::read_dir(&knowledge_dir) {
-            pulse.total = rd.count() as u32;
-        }
-    }
+    pulse.total = count_markdown_files_recursive(&knowledge_dir).await;
     let memory_ops = crate::buddy::storage::load_memory_ops(project_root).await;
     pulse.pending_ops = memory_ops
         .pending_count
@@ -98,12 +95,39 @@ async fn build_memory_pulse(project_root: &std::path::Path, fact_store: &FactSto
     pulse
 }
 
+async fn count_markdown_files_recursive(root: &Path) -> u32 {
+    let mut total = 0u32;
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let Ok(metadata) = entry.metadata().await else {
+                continue;
+            };
+            if metadata.is_dir() {
+                dirs.push(path);
+            } else if metadata.is_file()
+                && path.extension().and_then(|ext| ext.to_str()) == Some("md")
+            {
+                total = total.saturating_add(1);
+            }
+        }
+    }
+    total
+}
+
 fn unique_fact_payload_ids(facts: &[&crate::buddy::types::BuddyFact], fields: &[&str]) -> u32 {
     let mut ids = HashSet::new();
     for fact in facts {
         for field in fields {
             if let Some(arr) = fact.payload.get(*field).and_then(|v| v.as_array()) {
-                ids.extend(arr.iter().filter_map(|v| v.as_str().map(ToString::to_string)));
+                ids.extend(
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(ToString::to_string)),
+                );
             }
         }
     }
@@ -147,7 +171,18 @@ async fn build_providers_pulse(gcx: AppState) -> ProviderPulse {
 async fn build_mcp_pulse(gcx: AppState, fact_store: &FactStore) -> McpPulse {
     let mut pulse = McpPulse::default();
     let integration_sessions = gcx.integrations.integration_sessions.clone();
-    pulse.total = integration_sessions.lock().await.len() as u32;
+    let sessions = integration_sessions
+        .lock()
+        .await
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for session_arc in sessions {
+        let mut session_locked = session_arc.lock().await;
+        if session_locked.as_any_mut().downcast_mut::<SessionMCP>().is_some() {
+            pulse.total = pulse.total.saturating_add(1);
+        }
+    }
     let failing = fact_store.recent(
         BuddyFactKind::IntegrationFailing,
         chrono::Duration::hours(4),
@@ -497,6 +532,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_pulse_total_counts_markdown_files_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let knowledge_dir = temp.path().join(".refact").join("knowledge");
+        tokio::fs::create_dir_all(knowledge_dir.join("nested"))
+            .await
+            .unwrap();
+        tokio::fs::write(knowledge_dir.join("one.md"), "# One")
+            .await
+            .unwrap();
+        tokio::fs::write(knowledge_dir.join("nested").join("two.md"), "# Two")
+            .await
+            .unwrap();
+        tokio::fs::write(knowledge_dir.join("notes.txt"), "ignore")
+            .await
+            .unwrap();
+
+        let pulse = build_memory_pulse(temp.path(), &FactStore::new()).await;
+
+        assert_eq!(pulse.total, 2);
+    }
+
+    #[tokio::test]
     async fn competitor_import_pulse_merges_global_and_project_reports() {
         let temp = tempfile::tempdir().unwrap();
         let refact_config = temp.path().join("config").join("refact");
@@ -571,8 +628,12 @@ mod tests {
         let refact_config = temp.path().join("config").join("refact");
         let workspace = temp.path().join("workspace");
         let command_path = workspace.join(".claude").join("commands").join("only.md");
-        std::fs::create_dir_all(command_path.parent().unwrap()).unwrap();
-        std::fs::write(&command_path, "Only Claude is present.").unwrap();
+        tokio::fs::create_dir_all(command_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&command_path, "Only Claude is present.")
+            .await
+            .unwrap();
 
         crate::ext::competitor_import::run_project_import_with_paths(&[workspace.clone()]).await;
         let pulse = build_competitor_import_pulse(&refact_config, &[workspace]).await;

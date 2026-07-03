@@ -321,28 +321,6 @@ impl RuntimeQueue {
         removed
     }
 
-    #[allow(dead_code)]
-    pub fn update_progress(&mut self, dedupe_key: &str, progress: u8, title: Option<&str>) {
-        if let Some(e) = self
-            .items
-            .iter_mut()
-            .find(|e| e.dedupe_key.as_deref() == Some(dedupe_key))
-        {
-            e.progress = Some(progress);
-            if let Some(t) = title {
-                e.title = t.to_string();
-            }
-        }
-        if let Some(ref mut np) = self.now_playing {
-            if np.dedupe_key.as_deref() == Some(dedupe_key) {
-                np.progress = Some(progress);
-                if let Some(t) = title {
-                    np.title = t.to_string();
-                }
-            }
-        }
-    }
-
     pub fn complete(&mut self, dedupe_key: &str, status: &str) {
         if let Some(e) = self
             .items

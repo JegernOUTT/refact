@@ -40,7 +40,7 @@ messages:
     5. buddy_memory_create with kind=insight, source_id=refact_self_critic:<topic> for each
        finding. Before creating, buddy_memory_search the same topic; if an equivalent
        insight already exists and nothing changed, skip it instead of duplicating.
-    6. Optionally buddy_speak with intent=insight to surface the single most useful finding.
+    6. Optionally call buddy_speak with text, mood, and intent=insight to surface the single most useful finding.
     7. End with buddy_runtime_event summarizing what you noticed. If there is nothing new to
        add, call buddy_runtime_event with "noted: nothing new today" and exit.
   user_template: |

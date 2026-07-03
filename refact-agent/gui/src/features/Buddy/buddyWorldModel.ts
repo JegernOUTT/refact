@@ -82,6 +82,7 @@ export type BuddyWorldSprite =
   | "market_comet"
   | "stats_totem"
   | "gear_mill"
+  | "proposal_mailbox"
   | "seed";
 
 export type BuddyWorldObjectState =
@@ -182,6 +183,37 @@ const GENERATION_RUNTIME_SIGNALS = new Set([
   "generating",
   "title_generating",
 ]);
+
+const CRITICAL_RUNTIME_PRIORITY_VALUES = [
+  "critical",
+  "urgent",
+  "fatal",
+  "danger",
+] as const;
+
+const CRITICAL_RUNTIME_SIGNALS = new Set([
+  "provider_failed",
+  "provider_failure",
+  "provider_error",
+  "model_failed",
+  "model_failure",
+  "model_error",
+  "generation_failed",
+  "generation_failure",
+  "stream_failed",
+  "stream_failure",
+  "default_model_missing",
+  "model_not_found",
+  "broken_model_reference",
+]);
+
+type RuntimeEventExpiryHints = BuddyRuntimeEvent & {
+  expires?: string | number | null;
+  expires_at?: string | number | null;
+  expiresAt?: string | number | null;
+  expires_ms?: number | null;
+  expiresMs?: number | null;
+};
 
 const PROVIDER_MODEL_STRICT_TOPIC_PATTERNS = [
   /\bproviders?\b/u,
@@ -365,14 +397,69 @@ function addLayer(layers: BuddyWorldLayer[], layer: BuddyWorldLayer): void {
   if (!layers.includes(layer)) layers.push(layer);
 }
 
+function runtimeEventExpiryMs(event: BuddyRuntimeEvent): number | null {
+  const eventWithHints: RuntimeEventExpiryHints = event;
+  const explicitExpiry =
+    eventWithHints.expires ??
+    eventWithHints.expires_at ??
+    eventWithHints.expiresAt ??
+    null;
+  if (typeof explicitExpiry === "number" && Number.isFinite(explicitExpiry)) {
+    return explicitExpiry;
+  }
+  if (typeof explicitExpiry === "string") {
+    const parsedExpiry = Date.parse(explicitExpiry);
+    if (Number.isFinite(parsedExpiry)) return parsedExpiry;
+  }
+
+  const explicitExpiryMs =
+    eventWithHints.expires_ms ?? eventWithHints.expiresMs ?? null;
+  if (typeof explicitExpiryMs === "number" && Number.isFinite(explicitExpiryMs)) {
+    return explicitExpiryMs;
+  }
+
+  if (event.ttl_ms == null || !Number.isFinite(event.ttl_ms)) return null;
+  const createdAtMs = Date.parse(event.created_at);
+  if (!Number.isFinite(createdAtMs)) return null;
+  return createdAtMs + event.ttl_ms;
+}
+
+function isRuntimeEventExpired(event: BuddyRuntimeEvent, nowMs: number): boolean {
+  if (!Number.isFinite(nowMs)) return true;
+  const expiryMs = runtimeEventExpiryMs(event);
+  return expiryMs !== null && nowMs > expiryMs;
+}
+
+function hasCriticalRuntimePriority(event: BuddyRuntimeEvent): boolean {
+  const priority = event.priority.toLowerCase();
+  return CRITICAL_RUNTIME_PRIORITY_VALUES.some(
+    (criticalPriority) =>
+      priority === criticalPriority ||
+      priority.startsWith(`${criticalPriority}:`) ||
+      priority.startsWith(`${criticalPriority}_`) ||
+      priority.startsWith(`${criticalPriority}-`),
+  );
+}
+
+function hasCriticalRuntimeSignal(event: BuddyRuntimeEvent): boolean {
+  const signalType = event.signal_type.toLowerCase();
+  return (
+    CRITICAL_RUNTIME_SIGNALS.has(signalType) ||
+    signalType.endsWith("_failed") ||
+    signalType.endsWith("_failure") ||
+    signalType.endsWith("_error")
+  );
+}
+
 function visibleRuntimeEvent(
   event: BuddyRuntimeEvent | null,
   nowMs: number,
 ): BuddyRuntimeEvent | null {
   if (event === null || event.dismissed === true) return null;
+  if (event.persistent !== true && isRuntimeEventExpired(event, nowMs)) return null;
   if (isActiveRuntime(event) && event.ttl_ms == null) return event;
   if (isBuddyRuntimeEventVisible(event, nowMs)) return event;
-  return hasProviderModelRuntimeTopic(event) ? event : null;
+  return isProviderModelRuntimeProblem(event) ? event : null;
 }
 
 function isActiveRuntime(event: BuddyRuntimeEvent | null): boolean {
@@ -448,8 +535,14 @@ function isProviderModelRuntimeProblem(
   event: BuddyRuntimeEvent | null,
 ): boolean {
   if (event === null) return false;
-  if (isGenerationRuntime(event) && event.status === "failed") return true;
-  return hasProviderModelRuntimeTopic(event);
+  if (!isGenerationRuntime(event) && !hasProviderModelRuntimeTopic(event)) {
+    return false;
+  }
+  return (
+    event.status.toLowerCase() === "failed" ||
+    hasCriticalRuntimePriority(event) ||
+    hasCriticalRuntimeSignal(event)
+  );
 }
 
 function providerWarningCount(pulse: BuddyPulse | null | undefined): number {
@@ -643,10 +736,40 @@ function buildWorldObject(
   return object;
 }
 
+function buildProposalMailbox(
+  pendingCards: number,
+  name: string,
+): BuddyWorldObject {
+  return buildWorldObject(
+    {
+      id: "proposal-mailbox",
+      sprite: "proposal_mailbox",
+      label: "Mailbox",
+      value: `${pendingCards} waiting`,
+      description: `${name} left ${pendingCards} proposal(s) in the mailbox.`,
+      page: { type: "buddy" },
+      tone: pendingCards > 0 ? "warning" : "neutral",
+      x: 12,
+      y: 78,
+      size: 10,
+    },
+    {
+      state: pendingCards > 0 ? "attention" : "calm",
+      intensity: pendingCards > 0 ? 0.7 : 0.3,
+      animation: pendingCards > 0 ? "wobble" : "breathe",
+      interactionX: 17,
+      interactionY: 82,
+      depthScale: 0.95,
+      magicalLabel: "Proposal mailbox",
+    },
+  );
+}
+
 function buildObjects(
   pulse: BuddyPulse | null | undefined,
   visibleRuntime: BuddyRuntimeEvent | null,
   name: string,
+  pendingCards: number,
 ): BuddyWorldObject[] {
   const runtimeActive = isActiveRuntime(visibleRuntime);
   const memoryRuntimeActive = isMemoryRuntimeActive(visibleRuntime);
@@ -678,6 +801,7 @@ function buildObjects(
           magicalLabel: "Sprouting hearth",
         },
       ),
+      ...(pendingCards > 0 ? [buildProposalMailbox(pendingCards, name)] : []),
     ];
   }
 
@@ -956,6 +1080,7 @@ function buildObjects(
         magicalLabel: "Tinker mill",
       },
     ),
+    ...(pendingCards > 0 ? [buildProposalMailbox(pendingCards, name)] : []),
   ];
 }
 
@@ -1284,6 +1409,7 @@ export function buildBuddyWorldState(args: {
   nowPlaying: BuddyRuntimeEvent | null;
   activeQuest: BuddyQuest | null;
   semanticState?: BuddySemanticState;
+  pendingCards?: number;
 }): BuddyWorldState {
   const pulse = normalizeBuddyPulse(args.pulse);
   const phase = phaseFromHour(args.now.getHours());
@@ -1301,7 +1427,12 @@ export function buildBuddyWorldState(args: {
     name,
   );
   const vitalityInfo = vitalityFromPulse(pulse);
-  const objects = buildObjects(pulse, visibleRuntime, name);
+  const objects = buildObjects(
+    pulse,
+    visibleRuntime,
+    name,
+    args.pendingCards ?? 0,
+  );
   const atmosphere = buildAtmosphere({
     phase,
     season,

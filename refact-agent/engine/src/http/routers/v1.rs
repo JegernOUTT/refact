@@ -841,19 +841,6 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/buddy/user_action",
             post(buddy::handle_v1_buddy_user_action),
         )
-        .route("/buddy/artifacts", get(buddy::handle_v1_buddy_artifacts))
-        .route(
-            "/buddy/artifact_approve",
-            post(buddy::handle_v1_buddy_artifact_approve),
-        )
-        .route(
-            "/buddy/artifact_reject",
-            post(buddy::handle_v1_buddy_artifact_reject),
-        )
-        .route(
-            "/buddy/artifacts/decisions",
-            post(buddy::handle_v1_buddy_artifacts_decisions),
-        )
         .route(
             "/buddy/user_activity",
             get(buddy::handle_v1_buddy_user_activity),
@@ -928,6 +915,23 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/buddy/opportunities/:id/dismiss",
             post(buddy_opportunities::handle_v1_buddy_opportunity_dismiss),
+        )
+        .route(
+            "/buddy/actions/undo",
+            post(buddy_opportunities::handle_v1_buddy_action_undo),
+        )
+        .route(
+            "/buddy/receipts",
+            get(buddy_opportunities::handle_v1_buddy_receipts),
+        )
+        .route(
+            "/buddy/rules/unmute",
+            post(buddy_opportunities::handle_v1_buddy_rule_unmute),
+        )
+        .route("/buddy/briefing", get(buddy::handle_v1_buddy_briefing))
+        .route(
+            "/buddy/speech-decisions",
+            get(buddy::handle_v1_buddy_speech_decisions),
         )
         .route("/buddy/pulse", get(buddy_pulse::handle_v1_buddy_pulse))
         .route(

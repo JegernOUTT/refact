@@ -208,7 +208,6 @@ async fn mem_overwrite_or_create_document(
     }
 }
 
-
 pub async fn watcher_init(gcx: Arc<GlobalContext>) {
     let gcx_weak = Arc::downgrade(&gcx);
     let rt = tokio::runtime::Handle::current();

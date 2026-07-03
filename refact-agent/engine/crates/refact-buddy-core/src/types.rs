@@ -214,7 +214,7 @@ pub struct BuddySkillLedger {
     pub locked: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BuddyWorkflowSummary {
     pub workflow_id: String,
     pub last_run: Option<String>,
@@ -224,6 +224,16 @@ pub struct BuddyWorkflowSummary {
     pub failure_category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_summary: Option<String>,
+    #[serde(default)]
+    pub llm_calls: u64,
+    #[serde(default)]
+    pub tokens_in: u64,
+    #[serde(default)]
+    pub tokens_out: u64,
+    #[serde(default)]
+    pub outputs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,6 +350,58 @@ pub struct BuddyState {
     pub opportunities: Vec<BuddyOpportunity>,
     #[serde(default)]
     pub dismissed_history: Vec<DismissEntry>,
+    #[serde(default)]
+    pub verdicts: Vec<crate::verdicts::BuddyVerdict>,
+    #[serde(default)]
+    pub muted_rules: Vec<String>,
+    #[serde(default)]
+    pub speech_decisions: Vec<SpeechDecisionRecord>,
+    #[serde(default)]
+    pub llm_spend: DailyLlmSpend,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeechDecisionRecord {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub intent: Option<String>,
+    pub allowed: bool,
+    pub reason: String,
+    pub preview: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DailyLlmSpend {
+    pub day: String,
+    pub llm_calls: u64,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+}
+
+impl DailyLlmSpend {
+    pub fn total_tokens(&self) -> u64 {
+        self.tokens_in.saturating_add(self.tokens_out)
+    }
+
+    pub fn record(&mut self, day: &str, llm_calls: u64, tokens_in: u64, tokens_out: u64) {
+        if self.day != day {
+            self.day = day.to_string();
+            self.llm_calls = 0;
+            self.tokens_in = 0;
+            self.tokens_out = 0;
+        }
+        self.llm_calls = self.llm_calls.saturating_add(llm_calls);
+        self.tokens_in = self.tokens_in.saturating_add(tokens_in);
+        self.tokens_out = self.tokens_out.saturating_add(tokens_out);
+    }
+
+    pub fn is_over_budget(&self, day: &str, budget: Option<u64>) -> bool {
+        match budget {
+            Some(limit) if self.day == day => self.total_tokens() >= limit,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -489,6 +551,9 @@ pub enum BuddyOpportunityKind {
     DiagnosticInvestigation,
     GitHygiene,
     WorktreeCleanup,
+    MemoryOpsBatch,
+    JobFinding,
+    Quest,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -568,6 +633,20 @@ pub enum BuddyAction {
     },
     CreatePulseReport {
         scope: PulseScope,
+    },
+    ApplyMemoryBatch {
+        batch_key: String,
+        count_hint: u64,
+    },
+    ApplyConfigPatch {
+        draft_id: String,
+        target_path: String,
+    },
+    AcceptQuest {
+        suggestion_id: String,
+    },
+    OpenBuddyConversation {
+        chat_id: String,
     },
     Dismiss,
 }

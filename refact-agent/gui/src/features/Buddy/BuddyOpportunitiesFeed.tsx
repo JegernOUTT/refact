@@ -13,7 +13,7 @@ export const BuddyOpportunitiesFeed: React.FC = () => {
   const { unread } = useBuddyOpportunities();
   const suggestions = useAppSelector(selectBuddySuggestions);
   const activeSuggestions = suggestions.filter(
-    (suggestion) => !suggestion.dismissed,
+    (suggestion) => !suggestion.dismissed && suggestion.quest == null,
   );
   const itemCount = unread.length + activeSuggestions.length;
 

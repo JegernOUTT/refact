@@ -24,8 +24,7 @@ use crate::global_context::GlobalContext;
 use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
 use crate::knowledge_index::KnowledgeCard;
 use crate::memories::{
-    get_global_knowledge_dir, memories_add, normalize_memory_tags,
-    update_memory_document_frontmatter,
+    get_global_knowledge_dir, normalize_memory_tags, update_memory_document_frontmatter,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -505,6 +504,43 @@ async fn create_memory(
     if let Some(path) = find_duplicate_content(gcx.clone(), &content_hash).await {
         return Ok(CreateOutcome::Skipped(path));
     }
+
+    let signal_existing = {
+        let idx = gcx.knowledge_index.lock().await;
+        idx.first_path_for_signal_key(source_id).cloned()
+    };
+    if let Some(existing) = signal_existing {
+        let existing_content = {
+            let idx = gcx.knowledge_index.lock().await;
+            idx.content_for_path(&existing).map(|c| c.to_string())
+        };
+        let is_near_duplicate = existing_content
+            .as_deref()
+            .map(|text| refact_buddy_core::memory_dedup::near_duplicate(&content, text))
+            .unwrap_or(false);
+        if is_near_duplicate
+            && crate::memories::touch_memory_observation(gcx.clone(), &existing)
+                .await
+                .is_ok()
+        {
+            return Ok(CreateOutcome::Skipped(existing));
+        }
+        let now = Local::now().format("%Y-%m-%d").to_string();
+        let refreshed = KnowledgeFrontmatter {
+            title: Some(title.clone()),
+            updated: Some(now),
+            content_hash: Some(content_hash.clone()),
+            ..Default::default()
+        };
+        let outcome = crate::memories::memories_upsert_by_signal_key(
+            gcx.clone(),
+            source_id,
+            &refreshed,
+            &content,
+        )
+        .await?;
+        return Ok(CreateOutcome::Skipped(outcome.path().clone()));
+    }
     let now = Local::now().format("%Y-%m-%d").to_string();
     let frontmatter = KnowledgeFrontmatter {
         id: Some(uuid::Uuid::new_v4().to_string()),
@@ -525,9 +561,16 @@ async fn create_memory(
         source_content_hash: Some(content_hash.clone()),
         source_tool: Some("buddy_memory_create".to_string()),
         source_confidence: Some(confidence),
+        signal_key: Some(source_id.to_string()),
+        occurrences: 1,
+        last_observed: Some(Utc::now().to_rfc3339()),
         ..Default::default()
     };
-    let path = memories_add(gcx.clone(), &frontmatter, &content).await?;
+    let outcome = crate::memories::memories_add_dedup(gcx.clone(), &frontmatter, &content).await?;
+    if !outcome.created() {
+        return Ok(CreateOutcome::Skipped(outcome.path().clone()));
+    }
+    let path = outcome.path().clone();
     let mut op = MemoryLifecycleOp::pending(
         op_id("create", &[source_id, &content_hash]),
         MemorySource::Buddy,

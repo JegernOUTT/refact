@@ -22,7 +22,7 @@ messages:
 
     You are hunting for low-risk refactor wins. Use tree + regex_search to find duplicated code patterns or long functions, then:
     1. Pick 1 high-confidence candidate.
-    2. Optionally use apply_patch to propose a small refactor.
+    2. Describe the proposed refactor precisely (file, symbol, before/after sketch); never edit files.
     3. If you found a generalizable lesson, use buddy_memory_create with kind=lesson.
     4. End with buddy_runtime_event describing the win.
   user_template: |
@@ -37,6 +37,5 @@ tools:
   - cat
   - symbol_def
   - regex_search
-  - apply_patch
   - buddy_runtime_event
   - buddy_memory_create

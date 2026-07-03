@@ -18,6 +18,7 @@ fn path_contains_component(path: &Path, component: &str) -> bool {
 }
 
 use crate::at_commands::at_commands::AtCommandsContext;
+use crate::knowledge_index::KnowledgeIndex;
 use crate::chat::find_trajectory_path;
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
 use crate::files_correction::get_project_dirs;
@@ -183,6 +184,10 @@ pub fn create_frontmatter(
         source_id: None,
         source_content_hash: None,
         review_needed: None,
+        occurrences: 0,
+        signal_key: None,
+        last_observed: None,
+        extra: Default::default(),
     }
 }
 
@@ -648,6 +653,10 @@ pub async fn memories_add(
     {
         let gcx_read = gcx.clone();
         let mut idx = gcx_read.knowledge_index.lock().await;
+        idx.add_signature(
+            refact_buddy_core::memory_dedup::content_signature(content),
+            file_path.clone(),
+        );
         idx.add_from_frontmatter(file_path.clone(), frontmatter, Some(content));
     }
 
@@ -659,6 +668,214 @@ pub async fn memories_add(
     }
 
     Ok(file_path)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryWriteOutcome {
+    Created(PathBuf),
+    DuplicateTouched(PathBuf),
+}
+
+impl MemoryWriteOutcome {
+    pub fn path(&self) -> &PathBuf {
+        match self {
+            MemoryWriteOutcome::Created(path) => path,
+            MemoryWriteOutcome::DuplicateTouched(path) => path,
+        }
+    }
+
+    pub fn created(&self) -> bool {
+        matches!(self, MemoryWriteOutcome::Created(_))
+    }
+}
+
+pub async fn touch_memory_observation(
+    gcx: Arc<GlobalContext>,
+    doc_path: &Path,
+) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    update_memory_document_frontmatter(gcx, doc_path, |frontmatter| {
+        frontmatter.occurrences = frontmatter.occurrences.saturating_add(1).max(2);
+        frontmatter.last_observed = Some(now);
+        Ok(true)
+    })
+    .await
+    .map(|_| ())
+}
+
+const NEAR_DUPLICATE_CANDIDATE_CAP: usize = 64;
+
+async fn evict_stale_index_path(gcx: Arc<GlobalContext>, path: &Path) {
+    warn!(
+        "memories: knowledge index pointed at missing file {}, evicting stale entry",
+        path.display()
+    );
+    let mut idx = gcx.knowledge_index.lock().await;
+    idx.remove_path(path);
+}
+
+async fn find_duplicate_memory(
+    gcx: Arc<GlobalContext>,
+    frontmatter: &KnowledgeFrontmatter,
+    content: &str,
+) -> Option<PathBuf> {
+    loop {
+        let candidate = {
+            let idx = gcx.knowledge_index.lock().await;
+            find_duplicate_in_index(&idx, frontmatter, content)
+        };
+        let path = candidate?;
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Some(path);
+        }
+        evict_stale_index_path(gcx.clone(), &path).await;
+    }
+}
+
+fn find_duplicate_in_index(
+    idx: &KnowledgeIndex,
+    frontmatter: &KnowledgeFrontmatter,
+    content: &str,
+) -> Option<PathBuf> {
+    let signature = refact_buddy_core::memory_dedup::content_signature(content);
+    if let Some(path) = idx.first_path_for_signature(&signature) {
+        return Some(path.clone());
+    }
+
+    let mut seen = HashSet::new();
+    let mut checked = 0usize;
+    for tag in &frontmatter.tags {
+        for card in idx.related_for_tags(std::slice::from_ref(tag), NEAR_DUPLICATE_CANDIDATE_CAP) {
+            if checked >= NEAR_DUPLICATE_CANDIDATE_CAP {
+                return None;
+            }
+            if !seen.insert(card.file_path.clone()) {
+                continue;
+            }
+            let Some(existing_content) = idx.content_for_path(&card.file_path) else {
+                continue;
+            };
+            checked += 1;
+            if refact_buddy_core::memory_dedup::near_duplicate(content, existing_content) {
+                return Some(card.file_path.clone());
+            }
+        }
+    }
+    None
+}
+
+pub async fn memories_add_dedup(
+    gcx: Arc<GlobalContext>,
+    frontmatter: &KnowledgeFrontmatter,
+    content: &str,
+) -> Result<MemoryWriteOutcome, String> {
+    if let Some(existing) = find_duplicate_memory(gcx.clone(), frontmatter, content).await {
+        info!(
+            "memories: duplicate content detected, touching {} instead of creating a new file",
+            existing.display()
+        );
+        match touch_memory_observation(gcx.clone(), &existing).await {
+            Ok(()) => return Ok(MemoryWriteOutcome::DuplicateTouched(existing)),
+            Err(err) => {
+                warn!(
+                    "memories: failed to touch duplicate {}: {}, creating instead",
+                    existing.display(),
+                    err
+                );
+                evict_stale_index_path(gcx.clone(), &existing).await;
+            }
+        }
+    }
+    memories_add(gcx, frontmatter, content)
+        .await
+        .map(MemoryWriteOutcome::Created)
+}
+
+pub async fn memories_upsert_by_signal_key(
+    gcx: Arc<GlobalContext>,
+    signal_key: &str,
+    frontmatter: &KnowledgeFrontmatter,
+    content: &str,
+) -> Result<MemoryWriteOutcome, String> {
+    let signal_key = signal_key.trim();
+    if signal_key.is_empty() {
+        return memories_add_dedup(gcx, frontmatter, content).await;
+    }
+    loop {
+        let existing = {
+            let idx = gcx.knowledge_index.lock().await;
+            idx.first_path_for_signal_key(signal_key).cloned()
+        };
+        let Some(doc_path) = existing else {
+            break;
+        };
+        let existing_text = match fs::read_to_string(&doc_path).await {
+            Ok(text) => text,
+            Err(err) => {
+                warn!(
+                    "memories: failed to read signal doc {}: {}",
+                    doc_path.display(),
+                    err
+                );
+                evict_stale_index_path(gcx.clone(), &doc_path).await;
+                continue;
+            }
+        };
+        let (mut existing_frontmatter, _) = KnowledgeFrontmatter::parse(&existing_text);
+        existing_frontmatter.occurrences =
+            existing_frontmatter.occurrences.saturating_add(1).max(2);
+        existing_frontmatter.last_observed = Some(Utc::now().to_rfc3339());
+        existing_frontmatter.updated = Some(Local::now().format("%Y-%m-%d").to_string());
+        existing_frontmatter.signal_key = Some(signal_key.to_string());
+        if let Some(title) = &frontmatter.title {
+            existing_frontmatter.title = Some(title.clone());
+        }
+        if let Some(kind) = &frontmatter.kind {
+            existing_frontmatter.kind = Some(kind.clone());
+        }
+        for tag in &frontmatter.tags {
+            if !existing_frontmatter.tags.contains(tag) {
+                existing_frontmatter.tags.push(tag.clone());
+            }
+        }
+        for filename in &frontmatter.filenames {
+            if !existing_frontmatter.filenames.contains(filename) {
+                existing_frontmatter.filenames.push(filename.clone());
+            }
+        }
+        existing_frontmatter.content_hash = Some(compute_content_hash_hex(content));
+        rewrite_memory_document(gcx, &doc_path, &existing_frontmatter, content).await?;
+        info!(
+            "memories: upserted signal '{}' in place at {}",
+            signal_key,
+            doc_path.display()
+        );
+        return Ok(MemoryWriteOutcome::DuplicateTouched(doc_path));
+    }
+    let mut stamped = frontmatter.clone();
+    stamped.signal_key = Some(signal_key.to_string());
+    stamped.occurrences = stamped.occurrences.max(1);
+    stamped.last_observed = Some(Utc::now().to_rfc3339());
+    let outcome = memories_add_dedup(gcx.clone(), &stamped, content).await?;
+    if let MemoryWriteOutcome::DuplicateTouched(path) = &outcome {
+        let key = signal_key.to_string();
+        let stamp = update_memory_document_frontmatter(gcx.clone(), path, move |fm| {
+            if fm.signal_key.as_deref() == Some(key.as_str()) {
+                return Ok(false);
+            }
+            fm.signal_key = Some(key);
+            Ok(true)
+        })
+        .await;
+        if let Err(err) = stamp {
+            warn!(
+                "memories: failed to stamp signal key on deduped doc {}: {}",
+                path.display(),
+                err
+            );
+        }
+    }
+    Ok(outcome)
 }
 
 pub async fn load_memories_by_tags(
@@ -1517,6 +1734,10 @@ pub async fn rewrite_memory_document(
         let mut idx = gcx_read.knowledge_index.lock().await;
         idx.remove_path(&path_buf);
         if !frontmatter.is_archived() && !frontmatter.is_deprecated() {
+            idx.add_signature(
+                refact_buddy_core::memory_dedup::content_signature(body),
+                path_buf.clone(),
+            );
             idx.add_from_frontmatter(path_buf.clone(), frontmatter, Some(body));
         }
     }
@@ -1640,6 +1861,29 @@ pub async fn memories_add_enriched(
     params: EnrichmentParams,
 ) -> Result<PathBuf, String> {
     let gcx = ccx.lock().await.global_context.clone();
+
+    let exact_duplicate = {
+        let signature = refact_buddy_core::memory_dedup::content_signature(content);
+        let idx = gcx.knowledge_index.lock().await;
+        idx.first_path_for_signature(&signature).cloned()
+    };
+    if let Some(existing) = exact_duplicate {
+        info!(
+            "memories: enriched save is an exact duplicate of {}, touching instead",
+            existing.display()
+        );
+        match touch_memory_observation(gcx.clone(), &existing).await {
+            Ok(()) => return Ok(existing),
+            Err(err) => {
+                warn!(
+                    "memories: failed to touch enriched duplicate {}: {}, saving normally",
+                    existing.display(),
+                    err
+                );
+                evict_stale_index_path(gcx.clone(), &existing).await;
+            }
+        }
+    }
 
     let entities = extract_entities(content);
     let detected_paths = extract_file_paths(content);
@@ -1818,9 +2062,17 @@ pub async fn memories_add_enriched(
         source_id: None,
         source_content_hash: None,
         review_needed: None,
+        occurrences: 0,
+        signal_key: None,
+        last_observed: None,
+        extra: Default::default(),
     };
 
-    let file_path = memories_add(gcx.clone(), &frontmatter, content).await?;
+    let outcome = memories_add_dedup(gcx.clone(), &frontmatter, content).await?;
+    if !outcome.created() {
+        return Ok(outcome.path().clone());
+    }
+    let file_path = outcome.path().clone();
     let new_doc_id = frontmatter.id.clone().unwrap();
 
     let mut updated_frontmatter = frontmatter.clone();
@@ -1829,8 +2081,9 @@ pub async fn memories_add_enriched(
     {
         warn!("Auto-linking failed for new memory: {}", e);
     } else if updated_frontmatter.links != frontmatter.links {
-        let md_content = format!("{}\n\n{}", updated_frontmatter.to_yaml(), content);
-        if let Err(e) = fs::write(&file_path, &md_content).await {
+        if let Err(e) =
+            rewrite_memory_document(gcx.clone(), &file_path, &updated_frontmatter, content).await
+        {
             warn!("Failed to update memory with auto-links: {}", e);
         } else {
             info!(
@@ -1959,6 +2212,191 @@ mod tests {
         assert!(tags.contains(&"verification:cargo-check".to_string()));
         assert!(tags.contains(&"verification:git-sanity".to_string()));
         assert!(tags.contains(&"entity:save_trajectory_as".to_string()));
+    }
+
+    fn dedup_test_frontmatter(title: &str) -> KnowledgeFrontmatter {
+        let tags = vec!["buddy".to_string(), "diagnostics".to_string()];
+        let empty = Vec::<String>::new();
+        create_frontmatter(Some(title), &tags, &empty, &empty, "insight")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memories_add_dedup_touches_exact_normalized_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let first = memories_add_dedup(
+            gcx.clone(),
+            &dedup_test_frontmatter("Signal insight"),
+            "Signal hash fd0347ef seen 43 times at 2026-07-01T10:00:00Z in chat generation",
+        )
+        .await
+        .unwrap();
+        assert!(first.created());
+
+        let second = memories_add_dedup(
+            gcx.clone(),
+            &dedup_test_frontmatter("Signal insight repeat"),
+            "Signal hash ab99cd11 seen 57 times at 2026-07-02T08:30:00Z in chat generation",
+        )
+        .await
+        .unwrap();
+
+        assert!(!second.created());
+        assert_eq!(second.path(), first.path());
+        let text = tokio::fs::read_to_string(second.path()).await.unwrap();
+        let (frontmatter, _) = KnowledgeFrontmatter::parse(&text);
+        assert!(frontmatter.occurrences >= 2);
+        assert!(frontmatter.last_observed.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memories_add_dedup_touches_near_duplicate_with_shared_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let first = memories_add_dedup(
+            gcx.clone(),
+            &dedup_test_frontmatter("Caps drift"),
+            "Pattern observed: repeated llm_error diagnostics clustered at chat generation, \
+             mostly caps-registry drift where the default model id is no longer served by \
+             the server. Fix is in user config, update default models.",
+        )
+        .await
+        .unwrap();
+        assert!(first.created());
+
+        let second = memories_add_dedup(
+            gcx.clone(),
+            &dedup_test_frontmatter("Caps drift again"),
+            "Pattern observed: repeated llm_error diagnostics clustered at chat generation, \
+             mostly caps-registry drift where the default model id is no longer served by \
+             the server. Fix is in user config, update the default models slot.",
+        )
+        .await
+        .unwrap();
+
+        assert!(!second.created());
+        assert_eq!(second.path(), first.path());
+
+        let distinct = memories_add_dedup(
+            gcx,
+            &dedup_test_frontmatter("Voice cache"),
+            "Voice rendering caches the pulse one-liner for five minutes which replays \
+             identical lines when the pulse is quiet, needs a said-recently ring.",
+        )
+        .await
+        .unwrap();
+        assert!(distinct.created());
+        assert_ne!(distinct.path(), first.path());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memories_add_dedup_recovers_from_stale_index_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+        let content =
+            "Stale hint recovery memo body with enough distinctive tokens to index cleanly.";
+
+        let first = memories_add_dedup(gcx.clone(), &dedup_test_frontmatter("Stale"), content)
+            .await
+            .unwrap();
+        assert!(first.created());
+        tokio::fs::remove_file(first.path()).await.unwrap();
+
+        let second = memories_add_dedup(gcx.clone(), &dedup_test_frontmatter("Stale"), content)
+            .await
+            .unwrap();
+        assert!(second.created());
+        assert!(tokio::fs::try_exists(second.path()).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memories_upsert_signal_key_survives_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let first = memories_upsert_by_signal_key(
+            gcx.clone(),
+            "diag:signal:stale00",
+            &dedup_test_frontmatter("Stale signal"),
+            "Original signal body that will disappear from disk before the next upsert.",
+        )
+        .await
+        .unwrap();
+        assert!(first.created());
+        tokio::fs::remove_file(first.path()).await.unwrap();
+
+        let second = memories_upsert_by_signal_key(
+            gcx.clone(),
+            "diag:signal:stale00",
+            &dedup_test_frontmatter("Stale signal refreshed"),
+            "Replacement body recreated after the original file vanished from disk.",
+        )
+        .await
+        .unwrap();
+        assert!(second.created());
+        let text = tokio::fs::read_to_string(second.path()).await.unwrap();
+        assert!(text.contains("signal_key: \"diag:signal:stale00\""));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memories_upsert_by_signal_key_rewrites_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let first = memories_upsert_by_signal_key(
+            gcx.clone(),
+            "diag:signal:fd0347ef",
+            &dedup_test_frontmatter("Detective finding"),
+            "First investigation body with initial conclusions about the failure cluster.",
+        )
+        .await
+        .unwrap();
+        assert!(first.created());
+
+        let second = memories_upsert_by_signal_key(
+            gcx.clone(),
+            "diag:signal:fd0347ef",
+            &dedup_test_frontmatter("Detective finding refreshed"),
+            "Updated investigation body superseding stale conclusions with fresh evidence.",
+        )
+        .await
+        .unwrap();
+
+        assert!(!second.created());
+        assert_eq!(second.path(), first.path());
+        let text = tokio::fs::read_to_string(second.path()).await.unwrap();
+        let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
+        assert_eq!(frontmatter.occurrences, 2);
+        assert_eq!(
+            frontmatter.signal_key.as_deref(),
+            Some("diag:signal:fd0347ef")
+        );
+        assert!(text[content_start..].contains("Updated investigation body"));
+        assert!(!text[content_start..].contains("First investigation body"));
+
+        let files = std::fs::read_dir(dir.path().join(crate::file_filter::KNOWLEDGE_FOLDER_NAME))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
+            .count();
+        assert_eq!(files, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

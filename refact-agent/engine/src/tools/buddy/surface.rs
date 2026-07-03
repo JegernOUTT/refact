@@ -211,7 +211,7 @@ impl Tool for ToolBuddySpeak {
                 "Buddy service not initialized; speech ignored",
             );
         };
-        svc.update_speech(BuddySpeechItem {
+        svc.update_speech_user_initiated(BuddySpeechItem {
             id: Uuid::new_v4().to_string(),
             text: text.clone(),
             mood,

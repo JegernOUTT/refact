@@ -11,6 +11,8 @@ import type {
   BuddyActivityEntry,
   BuddyConversationMeta,
   BuddyConversationEntry,
+  BuddyConversationsList,
+  BuddyLedgerDiagnostics,
   BuddyCareRequest,
   BuddyCareResponse,
   BuddyQuestAcceptResponse,
@@ -20,6 +22,9 @@ import type {
   BuddyPulse,
   BuddyDraft,
   BuddyOpportunityAcceptResponse,
+  BuddyReceipt,
+  BuddyBriefing,
+  SpeechDecisionRecord,
 } from "../../features/Buddy/types";
 import {
   addDraft,
@@ -61,6 +66,12 @@ const BUDDY_SETTINGS_PATCH_KEYS = [
   "autonomy_level",
   "quiet_mode",
   "daily_digest_hour",
+  "quiet_hours_mode",
+  "quiet_hours_start",
+  "quiet_hours_end",
+  "muted_intents",
+  "muted_chat_ids",
+  "daily_llm_token_budget",
   "observers",
   "clear_personality_prompt",
   "palette_index",
@@ -125,6 +136,28 @@ function getBuddySettingsRollbackPatch(
   if (keys.includes("daily_digest_hour")) {
     patch.daily_digest_hour = settings.daily_digest_hour;
   }
+  if (keys.includes("quiet_hours_mode")) {
+    patch.quiet_hours_mode = settings.quiet_hours_mode;
+  }
+  if (keys.includes("quiet_hours_start")) {
+    patch.quiet_hours_start = settings.quiet_hours_start;
+  }
+  if (keys.includes("quiet_hours_end")) {
+    patch.quiet_hours_end = settings.quiet_hours_end;
+  }
+  if (keys.includes("muted_intents")) {
+    patch.muted_intents = settings.muted_intents
+      ? [...settings.muted_intents]
+      : undefined;
+  }
+  if (keys.includes("muted_chat_ids")) {
+    patch.muted_chat_ids = settings.muted_chat_ids
+      ? [...settings.muted_chat_ids]
+      : undefined;
+  }
+  if (keys.includes("daily_llm_token_budget")) {
+    patch.daily_llm_token_budget = settings.daily_llm_token_budget;
+  }
   if (keys.includes("observers")) patch.observers = { ...settings.observers };
   return patch;
 }
@@ -163,52 +196,6 @@ export type UserActivityResponse = {
   actions: UserActionEntry[];
   time_of_day_pattern: string;
 };
-
-export type ArtifactStatus =
-  | "Pending"
-  | "Approved"
-  | "Applied"
-  | "Rejected"
-  | "Failed"
-  | "Skipped"
-  | "pending"
-  | "approved"
-  | "applied"
-  | "rejected"
-  | "failed"
-  | "skipped";
-
-export type Artifact = {
-  op_id: string;
-  status: ArtifactStatus;
-  op_type: string;
-  title?: string;
-  payload?: { title?: string | null };
-  created_at: string;
-  applied_at?: string | null;
-  rejected_at?: string | null;
-  confidence?: number;
-  requires_approval?: boolean;
-  evidence?: string;
-  source?: string;
-};
-
-export type ArtifactsPage = {
-  ops: Artifact[];
-  total_matching: number;
-  pending_count: number;
-  approved_count: number;
-  applied_count: number;
-  rejected_count: number;
-  failed_count: number;
-  skipped_count: number;
-  limit: number;
-  offset: number;
-};
-
-export type ArtifactDecision = { op_id: string; accept: boolean };
-
-export type ArtifactsDecisionsResponse = { decided: number; failed: number };
 
 export type UserActionPayload =
   | { type: "file_opened"; path: string; ts: string }
@@ -367,6 +354,39 @@ export async function fetchBuddyInvestigationContextRequest(
   return parseBuddyResponse<BuddyInvestigationContextResponse>(response);
 }
 
+function isLedgerDiagnostics(value: unknown): value is BuddyLedgerDiagnostics {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.invalid_json === "number" &&
+    typeof record.missing_id === "number" &&
+    typeof record.quarantined === "number"
+  );
+}
+
+export function normalizeConversationsPayload(
+  data: unknown,
+): BuddyConversationsList {
+  if (Array.isArray(data)) {
+    return {
+      entries: data as BuddyConversationEntry[],
+      diagnostics: null,
+    };
+  }
+  if (data && typeof data === "object") {
+    const record = data as Record<string, unknown>;
+    if (Array.isArray(record.entries)) {
+      return {
+        entries: record.entries as BuddyConversationEntry[],
+        diagnostics: isLedgerDiagnostics(record.diagnostics)
+          ? record.diagnostics
+          : null,
+      };
+    }
+  }
+  return { entries: [], diagnostics: null };
+}
+
 export const buddyApi = createApi({
   reducerPath: "buddyApi",
   tagTypes: [
@@ -374,7 +394,8 @@ export const buddyApi = createApi({
     "BuddyOpportunities",
     "BuddyPulse",
     "BuddyDrafts",
-    "BuddyArtifacts",
+    "BuddyReceipts",
+    "BuddyBriefing",
   ],
   baseQuery: fetchBaseQuery({
     prepareHeaders: (headers, { getState }) => {
@@ -499,7 +520,7 @@ export const buddyApi = createApi({
       },
     }),
     getBuddyConversations: builder.query<
-      BuddyConversationEntry[],
+      BuddyConversationsList,
       { kind?: string } | undefined
     >({
       queryFn: async (args, api, _opts, baseQuery) => {
@@ -512,7 +533,7 @@ export const buddyApi = createApi({
         );
         const result = await baseQuery(url);
         if (result.error) return { error: result.error };
-        return { data: result.data as BuddyConversationEntry[] };
+        return { data: normalizeConversationsPayload(result.data) };
       },
     }),
     createBuddyConversation: builder.mutation<
@@ -664,9 +685,11 @@ export const buddyApi = createApi({
     }),
     dismissOpportunity: builder.mutation<
       BuddyOpportunityDismissResponse,
-      string
+      string | { id: string; never?: boolean }
     >({
-      queryFn: async (id, api, _opts, baseQuery) => {
+      queryFn: async (arg, api, _opts, baseQuery) => {
+        const { id, never } =
+          typeof arg === "string" ? { id: arg, never: false } : arg;
         const state = api.getState() as BuddyApiState;
         const result = await baseQuery({
           url: buddyUrlFromState(
@@ -674,6 +697,7 @@ export const buddyApi = createApi({
             `/v1/buddy/opportunities/${encodeURIComponent(id)}/dismiss`,
           ),
           method: "POST",
+          body: { never: never === true },
         });
         if (result.error) return { error: result.error };
         return { data: result.data as BuddyOpportunityDismissResponse };
@@ -907,35 +931,81 @@ export const buddyApi = createApi({
         }
       },
     }),
-    getBuddyArtifacts: builder.query<
-      ArtifactsPage,
-      { status?: string; limit?: number; offset?: number } | undefined
+    getBuddyBriefing: builder.query<
+      BuddyBriefing | null,
+      { date?: string } | undefined
     >({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
         const result = await baseQuery(
-          buddyUrlFromState(state, "/v1/buddy/artifacts", args),
+          buddyUrlFromState(
+            state,
+            "/v1/buddy/briefing",
+            args?.date ? { date: args.date } : undefined,
+          ),
         );
         if (result.error) return { error: result.error };
-        return { data: result.data as ArtifactsPage };
+        const data = result.data as { briefing: BuddyBriefing | null };
+        return { data: data.briefing };
       },
-      providesTags: ["BuddyArtifacts"],
+      providesTags: ["BuddyBriefing"],
     }),
-    decideBuddyArtifacts: builder.mutation<
-      ArtifactsDecisionsResponse,
-      { decisions: ArtifactDecision[] }
+    getSpeechDecisions: builder.query<SpeechDecisionRecord[], undefined>({
+      queryFn: async (_args, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const result = await baseQuery(
+          buddyUrlFromState(state, "/v1/buddy/speech-decisions"),
+        );
+        if (result.error) return { error: result.error };
+        const data = result.data as { decisions: SpeechDecisionRecord[] };
+        return { data: data.decisions };
+      },
+    }),
+    getBuddyReceipts: builder.query<BuddyReceipt[], undefined>({
+      queryFn: async (_args, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const result = await baseQuery(
+          buddyUrlFromState(state, "/v1/buddy/receipts"),
+        );
+        if (result.error) return { error: result.error };
+        const data = result.data as { receipts: BuddyReceipt[] };
+        return { data: data.receipts };
+      },
+      providesTags: ["BuddyReceipts"],
+    }),
+    undoBuddyAction: builder.mutation<
+      { receipt: BuddyReceipt },
+      { receipt_id: string }
     >({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
         const result = await baseQuery({
-          url: buddyUrlFromState(state, "/v1/buddy/artifacts/decisions"),
+          url: buddyUrlFromState(state, "/v1/buddy/actions/undo"),
           method: "POST",
           body,
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as ArtifactsDecisionsResponse };
+        return { data: result.data as { receipt: BuddyReceipt } };
       },
-      invalidatesTags: ["BuddyArtifacts"],
+      invalidatesTags: ["BuddyReceipts", "BuddySnapshot"],
+    }),
+    unmuteBuddyRule: builder.mutation<
+      { changed: boolean; snapshot: BuddySnapshot },
+      { rule_key: string }
+    >({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const result = await baseQuery({
+          url: buddyUrlFromState(state, "/v1/buddy/rules/unmute"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return {
+          data: result.data as { changed: boolean; snapshot: BuddySnapshot },
+        };
+      },
+      invalidatesTags: ["BuddySnapshot", "BuddyOpportunities"],
     }),
   }),
 });
@@ -971,6 +1041,9 @@ export const {
   usePostUserActionMutation,
   useGetUserActivityQuery,
   useReportFrontendErrorMutation,
-  useGetBuddyArtifactsQuery,
-  useDecideBuddyArtifactsMutation,
+  useGetBuddyReceiptsQuery,
+  useUndoBuddyActionMutation,
+  useUnmuteBuddyRuleMutation,
+  useGetBuddyBriefingQuery,
+  useGetSpeechDecisionsQuery,
 } = buddyApi;

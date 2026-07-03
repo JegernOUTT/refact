@@ -8,7 +8,7 @@ subchat:
   context_mode: default
   stateful: false
   max_steps: 5
-  model_type: buddy
+  model_type: light
   n_ctx: 24000
   max_new_tokens: 1200
   temperature: 0.4
@@ -20,7 +20,7 @@ messages:
     The local diff is large enough that a related PR or issue may help. Keep the pass lightweight:
     1. Use the supplied changed-file and diff-stat evidence, and inspect only the smallest useful local context.
     2. Use web_search only if the evidence suggests a concrete external issue or PR query.
-    3. Use buddy_speak intent=insight to share one useful match or next step.
+    3. Use buddy_speak with text, mood, and intent=insight to share one useful match or next step.
     4. End with buddy_runtime_event titled "PR/issue matchmaker" with what you found.
     If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
   user_template: |

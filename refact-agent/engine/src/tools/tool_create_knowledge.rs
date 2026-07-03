@@ -12,6 +12,7 @@ use crate::tools::tools_description::{
 };
 use crate::memories::{memories_add_enriched, EnrichmentParams};
 use crate::knowledge_index::format_related_memories_section;
+use refact_core::string_utils::redact_sensitive;
 
 pub struct ToolCreateKnowledge {
     pub config_path: String,
@@ -49,6 +50,7 @@ impl Tool for ToolCreateKnowledge {
             Some(v) => return Err(format!("argument `content` is not a string: {:?}", v)),
             None => return Err("argument `content` is missing".to_string()),
         };
+        let content = redact_sensitive(&content);
 
         let user_tags: Vec<String> = match args.get("tags") {
             Some(Value::String(s)) => s

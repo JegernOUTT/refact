@@ -576,6 +576,96 @@ pub struct MemoryLifecycleOpCounts {
     pub conflict_candidates: u32,
 }
 
+pub const MEMORY_OP_EXACT_DUPLICATE_EVIDENCE: &str = "exact content_hash duplicate";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryBatchSummary {
+    pub batch_key: String,
+    pub count: u64,
+    pub preview: Vec<String>,
+}
+
+pub const MEMORY_BATCH_KEYS: &[&str] = &[
+    "merge_exact_duplicate",
+    "merge_near_duplicate",
+    "archive",
+    "review",
+    "delete",
+    "create",
+    "digest",
+    "maintenance",
+];
+
+pub fn memory_op_batch_key(op: &MemoryLifecycleOp) -> &'static str {
+    match op.op_type {
+        MemoryOpType::MergeArchive => {
+            if op.evidence.starts_with(MEMORY_OP_EXACT_DUPLICATE_EVIDENCE) {
+                "merge_exact_duplicate"
+            } else {
+                "merge_near_duplicate"
+            }
+        }
+        MemoryOpType::ArchiveCandidate | MemoryOpType::Archive => "archive",
+        MemoryOpType::MarkReviewNeeded | MemoryOpType::MarkStale => "review",
+        MemoryOpType::DeleteCandidate => "delete",
+        MemoryOpType::CreateMemory => "create",
+        MemoryOpType::PromoteDigest => "digest",
+        MemoryOpType::UpdateMemory
+        | MemoryOpType::Retag
+        | MemoryOpType::RepairLinks
+        | MemoryOpType::Refresh => "maintenance",
+    }
+}
+
+pub fn memory_op_batch_label(batch_key: &str, count: u64) -> String {
+    match batch_key {
+        "merge_exact_duplicate" => format!("Merge {} exact-duplicate memories", count),
+        "merge_near_duplicate" => format!("Merge {} near-duplicate memories", count),
+        "archive" => format!("Archive {} stale memories", count),
+        "review" => format!("Review {} flagged memories", count),
+        "delete" => format!("Delete {} memory candidates", count),
+        "create" => format!("Save {} proposed memories", count),
+        "digest" => format!("Promote {} digests", count),
+        _ => format!("Apply {} memory maintenance ops", count),
+    }
+}
+
+pub fn memory_op_awaits_approval(op: &MemoryLifecycleOp) -> bool {
+    op.status == MemoryOpStatus::Pending && op.requires_approval
+}
+
+pub fn memory_op_batches(ops: &[MemoryLifecycleOp]) -> Vec<MemoryBatchSummary> {
+    let mut grouped: std::collections::BTreeMap<&'static str, (u64, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for op in ops {
+        if !memory_op_awaits_approval(op) {
+            continue;
+        }
+        let key = memory_op_batch_key(op);
+        let entry = grouped.entry(key).or_default();
+        entry.0 += 1;
+        if entry.1.len() < 5 {
+            let title = op
+                .payload
+                .title
+                .clone()
+                .or_else(|| op.target_paths.first().cloned())
+                .unwrap_or_else(|| op.evidence.chars().take(80).collect());
+            if !title.is_empty() {
+                entry.1.push(title);
+            }
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(batch_key, (count, preview))| MemoryBatchSummary {
+            batch_key: batch_key.to_string(),
+            count,
+            preview,
+        })
+        .collect()
+}
+
 pub fn memory_lifecycle_op_counts(ops: &[MemoryLifecycleOp]) -> MemoryLifecycleOpCounts {
     let mut counts = MemoryLifecycleOpCounts::default();
     for op in ops {
@@ -919,5 +1009,136 @@ pub fn hash_field(h: &mut Sha256, name: &str, value: &str) {
 pub fn hash_list(h: &mut Sha256, name: &str, values: &[String]) {
     for value in values {
         hash_field(h, name, value);
+    }
+}
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    fn op(op_type: MemoryOpType, evidence: &str, status: MemoryOpStatus) -> MemoryLifecycleOp {
+        let mut op = MemoryLifecycleOp::pending(
+            uuid_like(evidence),
+            MemorySource::MemoryGarden,
+            op_type,
+            vec![format!("/k/{}.md", evidence.len())],
+            evidence,
+            0.9,
+            "2026-07-01T00:00:00Z",
+        );
+        op.requires_approval = true;
+        op.status = status;
+        op
+    }
+
+    fn uuid_like(seed: &str) -> String {
+        format!("op-{}", compute_content_hash(seed))
+    }
+
+    #[test]
+    fn every_op_type_batch_key_is_registered() {
+        let op_types = [
+            MemoryOpType::MergeArchive,
+            MemoryOpType::ArchiveCandidate,
+            MemoryOpType::Archive,
+            MemoryOpType::MarkReviewNeeded,
+            MemoryOpType::MarkStale,
+            MemoryOpType::DeleteCandidate,
+            MemoryOpType::CreateMemory,
+            MemoryOpType::PromoteDigest,
+            MemoryOpType::UpdateMemory,
+            MemoryOpType::Retag,
+            MemoryOpType::RepairLinks,
+            MemoryOpType::Refresh,
+        ];
+        for op_type in op_types {
+            let sample = op(op_type, "registered batch key", MemoryOpStatus::Pending);
+            let key = memory_op_batch_key(&sample);
+            assert!(
+                MEMORY_BATCH_KEYS.contains(&key),
+                "batch key {} for {:?} missing from MEMORY_BATCH_KEYS",
+                key,
+                op_type
+            );
+        }
+        let exact = op(
+            MemoryOpType::MergeArchive,
+            &format!("{}: canonical=a", MEMORY_OP_EXACT_DUPLICATE_EVIDENCE),
+            MemoryOpStatus::Pending,
+        );
+        assert!(MEMORY_BATCH_KEYS.contains(&memory_op_batch_key(&exact)));
+    }
+
+    #[test]
+    fn batch_key_classifies_merge_variants() {
+        let exact = op(
+            MemoryOpType::MergeArchive,
+            &format!("{}: canonical=a", MEMORY_OP_EXACT_DUPLICATE_EVIDENCE),
+            MemoryOpStatus::Pending,
+        );
+        let near = op(
+            MemoryOpType::MergeArchive,
+            "near duplicate: canonical=a",
+            MemoryOpStatus::Pending,
+        );
+        assert_eq!(memory_op_batch_key(&exact), "merge_exact_duplicate");
+        assert_eq!(memory_op_batch_key(&near), "merge_near_duplicate");
+    }
+
+    #[test]
+    fn batches_group_pending_approval_ops_with_preview() {
+        let mut ops = vec![
+            op(
+                MemoryOpType::MergeArchive,
+                "near duplicate 1",
+                MemoryOpStatus::Pending,
+            ),
+            op(
+                MemoryOpType::MergeArchive,
+                "near duplicate 2",
+                MemoryOpStatus::Pending,
+            ),
+            op(MemoryOpType::Archive, "stale doc", MemoryOpStatus::Pending),
+            op(
+                MemoryOpType::MergeArchive,
+                "already done",
+                MemoryOpStatus::Applied,
+            ),
+        ];
+        ops[0].payload.title = Some("First dup".to_string());
+
+        let batches = memory_op_batches(&ops);
+
+        let merge = batches
+            .iter()
+            .find(|b| b.batch_key == "merge_near_duplicate")
+            .unwrap();
+        assert_eq!(merge.count, 2);
+        assert_eq!(merge.preview[0], "First dup");
+        let archive = batches.iter().find(|b| b.batch_key == "archive").unwrap();
+        assert_eq!(archive.count, 1);
+        assert!(!batches.iter().any(|b| b.count == 0));
+    }
+
+    #[test]
+    fn non_approval_ops_do_not_batch() {
+        let mut auto = op(
+            MemoryOpType::CreateMemory,
+            "high confidence create",
+            MemoryOpStatus::Pending,
+        );
+        auto.requires_approval = false;
+        assert!(memory_op_batches(&[auto]).is_empty());
+    }
+
+    #[test]
+    fn batch_labels_are_human_readable() {
+        assert_eq!(
+            memory_op_batch_label("merge_near_duplicate", 312),
+            "Merge 312 near-duplicate memories"
+        );
+        assert_eq!(
+            memory_op_batch_label("archive", 7),
+            "Archive 7 stale memories"
+        );
     }
 }

@@ -511,6 +511,61 @@ describe("buddy UI polish", () => {
     expect(screen.queryByText("Invalid Date")).not.toBeInTheDocument();
   });
 
+  it("BuddySettingsPanel_renders_job_telemetry_table", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    const snapshot = makeSnapshot();
+    snapshot.state.workflow_summaries = [
+      {
+        workflow_id: "refact_error_detective",
+        last_run: "2026-07-01T10:00:00Z",
+        run_count: 12,
+        last_outcome: "success",
+        llm_calls: 48,
+        tokens_in: 125_000,
+        tokens_out: 9_400,
+        outputs: 11,
+        last_output_at: "2026-07-01T10:05:00Z",
+      },
+      {
+        workflow_id: "buddy_voice",
+        last_run: null,
+        run_count: 0,
+        last_outcome: null,
+        llm_calls: 3,
+        tokens_in: 1_500,
+        tokens_out: 120,
+        outputs: 3,
+        last_output_at: "2026-07-01T09:00:00Z",
+      },
+    ];
+    store.dispatch(setBuddySnapshot(snapshot));
+
+    render(<BuddySettingsPanel />, {
+      preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
+    });
+
+    const section = await screen.findByTestId("buddy-job-telemetry");
+    expect(section).toHaveTextContent("JOB TELEMETRY");
+    expect(section).toHaveTextContent("2 jobs");
+    expect(section).toHaveTextContent("refact_error_detective");
+    expect(section).toHaveTextContent("125.0K");
+    expect(section).toHaveTextContent("9.4K");
+    expect(section).toHaveTextContent("buddy_voice");
+    expect(section).toHaveTextContent("2026-07-01 10:05");
+  });
+
+  it("BuddySettingsPanel_shows_empty_telemetry_placeholder", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+
+    render(<BuddySettingsPanel />, {
+      preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
+    });
+
+    const section = await screen.findByTestId("buddy-job-telemetry");
+    expect(section).toHaveTextContent("No job runs recorded yet");
+  });
+
   it("BuddySettingsPanel_shows_chat_observation_and_reactions_as_independent", async () => {
     const store = setUpStore({ ...CONFIG_STATE });
     const snapshot = makeSnapshot();

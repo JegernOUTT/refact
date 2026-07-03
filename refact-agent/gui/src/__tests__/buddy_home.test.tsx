@@ -3751,13 +3751,13 @@ describe("BuddySettingsPanel_renders_all_settings", () => {
       screen.getByRole("switch", { name: /humor enabled/i }),
     ).toBeInTheDocument();
 
-    expect(screen.getByRole("radio", { name: /off/i })).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("radio", { name: /off/i }).length,
+    ).toBeGreaterThanOrEqual(1);
     expect(screen.getByRole("radio", { name: /light/i })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /normal/i })).toBeInTheDocument();
 
-    expect(
-      screen.getByRole("radio", { name: /read only/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /observe/i })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /suggest/i })).toBeInTheDocument();
     expect(
       screen.getByRole("radio", { name: /safe auto/i }),
@@ -3816,7 +3816,10 @@ describe("BuddySettingsPanel_segmented_controls_accessible_state", () => {
     render(<BuddySettingsPanel />, { store });
 
     const lightBtn = screen.getByRole("radio", { name: /light/i });
-    const offBtn = screen.getByRole("radio", { name: /off/i });
+    const humorGroup = lightBtn.closest('[role="radiogroup"]');
+    const offBtn = within(humorGroup as HTMLElement).getByRole("radio", {
+      name: /off/i,
+    });
     const normalBtn = screen.getByRole("radio", { name: /normal/i });
 
     expect(lightBtn).toBeChecked();
@@ -3831,7 +3834,7 @@ describe("BuddySettingsPanel_segmented_controls_accessible_state", () => {
     render(<BuddySettingsPanel />, { store });
 
     const suggestBtn = screen.getByRole("radio", { name: /suggest/i });
-    const readOnlyBtn = screen.getByRole("radio", { name: /read only/i });
+    const readOnlyBtn = screen.getByRole("radio", { name: /observe/i });
     const safeAutoBtn = screen.getByRole("radio", { name: /safe auto/i });
 
     expect(suggestBtn).toBeChecked();

@@ -79,6 +79,34 @@ impl FactStore {
         }
     }
 
+    pub fn ingest_with_refresh_ttl(&mut self, fact: BuddyFact, refresh_ttl: Duration) -> bool {
+        if refresh_ttl > Duration::zero() {
+            if let Some(existing) = self.ring.iter_mut().find(|f| f.key == fact.key) {
+                if fact.seen_at.signed_duration_since(existing.seen_at) < refresh_ttl {
+                    existing.payload = fact.payload;
+                    existing.confidence = fact.confidence;
+                    return false;
+                }
+            }
+        }
+        self.ingest(fact);
+        true
+    }
+
+    pub fn ingest_many_with_refresh_ttl(
+        &mut self,
+        facts: Vec<BuddyFact>,
+        refresh_ttl: Duration,
+    ) -> usize {
+        let mut accepted = 0usize;
+        for fact in facts {
+            if self.ingest_with_refresh_ttl(fact, refresh_ttl) {
+                accepted += 1;
+            }
+        }
+        accepted
+    }
+
     /// Return references to all facts of `kind` seen within `within` of now.
     pub fn recent(&self, kind: BuddyFactKind, within: Duration) -> Vec<&BuddyFact> {
         self.recent_at(kind, within, Utc::now())
@@ -111,5 +139,75 @@ impl FactStore {
 impl Default for FactStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fact(key: &str, seen_at: DateTime<Utc>, count: u64) -> BuddyFact {
+        BuddyFact {
+            kind: BuddyFactKind::DiagnosticCluster,
+            key: key.to_string(),
+            source: "test",
+            payload: serde_json::json!({ "count": count }),
+            seen_at,
+            confidence: 0.9,
+        }
+    }
+
+    #[test]
+    fn refresh_ttl_suppresses_reemission_but_updates_payload() {
+        let mut store = FactStore::new();
+        let t0 = Utc::now();
+        let ttl = Duration::minutes(30);
+
+        assert!(store.ingest_with_refresh_ttl(fact("diag:x", t0, 3), ttl));
+        assert!(!store.ingest_with_refresh_ttl(fact("diag:x", t0 + Duration::minutes(1), 5), ttl));
+        assert!(!store.ingest_with_refresh_ttl(fact("diag:x", t0 + Duration::minutes(29), 9), ttl));
+
+        let stored = store.iter().find(|f| f.key == "diag:x").unwrap();
+        assert_eq!(stored.seen_at, t0);
+        assert_eq!(stored.payload["count"], 9);
+
+        assert!(store.ingest_with_refresh_ttl(fact("diag:x", t0 + Duration::minutes(31), 11), ttl));
+        let stored = store.iter().find(|f| f.key == "diag:x").unwrap();
+        assert_eq!(stored.seen_at, t0 + Duration::minutes(31));
+        assert_eq!(stored.payload["count"], 11);
+    }
+
+    #[test]
+    fn zero_ttl_keeps_legacy_refresh_behavior() {
+        let mut store = FactStore::new();
+        let t0 = Utc::now();
+
+        assert!(store.ingest_with_refresh_ttl(fact("diag:y", t0, 1), Duration::zero()));
+        assert!(store.ingest_with_refresh_ttl(
+            fact("diag:y", t0 + Duration::seconds(1), 2),
+            Duration::zero()
+        ));
+        let stored = store.iter().find(|f| f.key == "diag:y").unwrap();
+        assert_eq!(stored.payload["count"], 2);
+    }
+
+    #[test]
+    fn ttl_gate_tracks_distinct_keys_independently() {
+        let mut store = FactStore::new();
+        let t0 = Utc::now();
+        let ttl = Duration::minutes(30);
+
+        assert!(store.ingest_with_refresh_ttl(fact("diag:a", t0, 1), ttl));
+        assert!(store.ingest_with_refresh_ttl(fact("diag:b", t0 + Duration::minutes(1), 1), ttl));
+        assert_eq!(
+            store.ingest_many_with_refresh_ttl(
+                vec![
+                    fact("diag:a", t0 + Duration::minutes(2), 2),
+                    fact("diag:c", t0 + Duration::minutes(2), 1),
+                ],
+                ttl,
+            ),
+            1
+        );
     }
 }

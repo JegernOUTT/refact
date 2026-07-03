@@ -214,6 +214,22 @@ pub async fn compact_runtime_queue(
         .map_err(|e| format!("Failed to rename {:?} to {:?}: {}", tmp, path, e))
 }
 
+pub async fn atomic_write_text(path: &Path, content: &str) -> Result<(), String> {
+    let tmp_path = path.with_extension("write.tmp");
+    fs::write(&tmp_path, content)
+        .await
+        .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)
+            .await
+            .map_err(|e| format!("Failed to remove existing file: {}", e))?;
+    }
+    fs::rename(&tmp_path, path)
+        .await
+        .map_err(|e| format!("Failed to rename: {}", e))
+}
+
 pub async fn atomic_write_json<T: Serialize>(path: &Path, data: &T) -> Result<(), String> {
     let tmp_path = path.with_extension("json.tmp");
     let json = serde_json::to_string(data).map_err(|e| e.to_string())?;

@@ -53,6 +53,7 @@ impl SpeechIntentWireToken for SpeechIntent {
             SpeechIntent::MemoryPulseCommentary => "memory_pulse_commentary",
             SpeechIntent::QuestAccept => "quest_accept",
             SpeechIntent::QuestComplete => "quest_complete",
+            SpeechIntent::ChatReaction => "chat_reaction",
         }
     }
 }
@@ -775,13 +776,27 @@ async fn render_via_subchat(gcx: AppState, request: VoiceRenderRequest) -> Optio
     ];
 
     match crate::subchat::run_subchat(gcx.gcx.clone(), messages, config).await {
-        Ok(result) => result
-            .messages
-            .last()
-            .and_then(|message| match &message.content {
-                ChatContent::SimpleText(text) => Some(text.clone()),
-                _ => None,
-            }),
+        Ok(result) => {
+            let (llm_calls, tokens_in, tokens_out) =
+                crate::buddy::jobs::autonomous_chats::sum_llm_usage(&result.messages);
+            let rendered = result
+                .messages
+                .last()
+                .and_then(|message| match &message.content {
+                    ChatContent::SimpleText(text) => Some(text.clone()),
+                    _ => None,
+                });
+            crate::buddy::actor::buddy_record_workflow_telemetry(
+                gcx.clone(),
+                "buddy_voice",
+                llm_calls,
+                tokens_in,
+                tokens_out,
+                rendered.is_some(),
+            )
+            .await;
+            rendered
+        }
         Err(e) => {
             debug!("buddy voice: subchat failed: {}", e);
             None

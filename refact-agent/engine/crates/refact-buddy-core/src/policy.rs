@@ -17,9 +17,23 @@ pub fn evaluate(
     settings: &BuddySettings,
     queue: &OpportunityQueue,
 ) -> PolicyDecision {
+    evaluate_with_mutes(opp, settings, queue, &[])
+}
+
+pub fn evaluate_with_mutes(
+    opp: &BuddyOpportunity,
+    settings: &BuddySettings,
+    queue: &OpportunityQueue,
+    muted_rules: &[String],
+) -> PolicyDecision {
     if !settings.proactive_enabled {
         return PolicyDecision::Drop {
             reason: "proactive_disabled",
+        };
+    }
+    if crate::verdicts::is_rule_muted(muted_rules, &opp.cooldown_key) {
+        return PolicyDecision::Drop {
+            reason: "rule_muted",
         };
     }
     if settings.quiet_mode && opp.priority < BuddyPriority::Critical {

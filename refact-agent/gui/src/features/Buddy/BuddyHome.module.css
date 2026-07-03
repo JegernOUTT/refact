@@ -150,13 +150,29 @@
   min-width: 0;
 }
 
-.artifactsSection {
-  min-width: 0;
-  overflow: hidden;
+.inboxOverlay {
+  position: fixed;
+  top: var(--rf-space-6);
+  right: var(--rf-space-4);
+  width: min(380px, calc(100vw - 2 * var(--rf-space-4)));
+  max-height: calc(100vh - 2 * var(--rf-space-6));
+  overflow-y: auto;
+  z-index: var(--rf-z-overlay, 40);
+  display: grid;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+  background: var(--rf-surface-glass);
+  border: 1px solid var(--rf-color-border-subtle, var(--gray-a5));
+  border-radius: var(--rf-radius-card, 12px);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay, 12px));
 }
 
-.artifactsSection > * {
-  min-width: 0;
+.inboxHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
 }
 
 .draftPanel {

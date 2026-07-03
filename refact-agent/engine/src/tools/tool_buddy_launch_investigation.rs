@@ -123,7 +123,14 @@ impl Tool for ToolBuddyLaunchInvestigation {
         }
         let user_text = msg_parts.join("\n\n");
 
-        let chat_facade = ccx.lock().await.app.chat.facade.clone();
+        let (app, chat_facade) = {
+            let ccx_locked = ccx.lock().await;
+            (
+                ccx_locked.app.clone(),
+                ccx_locked.app.chat.facade.clone(),
+            )
+        };
+        let model = crate::buddy::actor::resolve_buddy_chat_model(app).await;
         let chat_id = Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().to_rfc3339();
 
@@ -147,7 +154,7 @@ impl Tool for ToolBuddyLaunchInvestigation {
             goal_verification_blocked_until_ms: None,
             chat_id: chat_id.clone(),
             title: "Investigation".to_string(),
-            model: String::new(),
+            model,
             mode: "buddy".to_string(),
             tool_use: "agent".to_string(),
             messages: vec![initial_message],

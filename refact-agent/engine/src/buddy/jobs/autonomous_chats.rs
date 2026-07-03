@@ -28,7 +28,7 @@ use crate::buddy::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
 use crate::buddy::settings::load_settings;
 use crate::buddy::types::{BuddyActivity, BuddyFact, BuddyFactKind, BuddyRuntimeEvent, BuddyThreadMeta};
 use crate::buddy::workflows::{WorkflowFailureCategory, WorkflowFailureReport};
-use crate::call_validation::ChatMessage;
+use crate::call_validation::{ChatMessage, ChatMeta};
 use crate::app_state::AppState;
 use crate::stats::event::LlmCallEvent;
 
@@ -256,9 +256,10 @@ pub fn same_signal(ctx: &BuddyJobContext, hash: &str) -> bool {
 fn same_signal_or_failed_backoff(ctx: &BuddyJobContext, hash: &str, cooldown_seconds: u64) -> bool {
     parse_last_autonomous_result(ctx.job_state.last_result.as_deref())
         .map(|last| {
+            if last.status.as_deref() == Some("failed") {
+                return failure_backoff_active(&last, cooldown_seconds);
+            }
             last.signal_hash == hash
-                && (last.status.as_deref() != Some("failed")
-                    || failure_backoff_active(&last, cooldown_seconds))
         })
         .unwrap_or(false)
 }
@@ -581,7 +582,9 @@ async fn autonomous_runtime_event(
     let description = description.or(Some(fallback_description));
     event.description = description.clone();
     event.ttl_ms = Some(30_000);
-    event.speech_text = Some(description.as_deref().unwrap_or(title.as_str()).to_string());
+    if spec.workflow_id != refact_buddy_core::autonomous_workflows::BUDDY_DAILY_DIGEST_WORKFLOW_ID {
+        event.speech_text = Some(description.as_deref().unwrap_or(title.as_str()).to_string());
+    }
     event.scene = Some("insight".to_string());
     event.duration_hint = Some(12);
     event.chat_id = Some(chat_id.to_string());
@@ -620,6 +623,39 @@ fn last_assistant_text(messages: &[ChatMessage]) -> String {
         .unwrap_or_default()
 }
 
+fn assistant_tool_call_succeeded(messages: &[ChatMessage], tool_name: &str) -> bool {
+    let mut call_ids = HashSet::new();
+    for message in messages {
+        if message.role != "assistant" {
+            continue;
+        }
+        if let Some(tool_calls) = &message.tool_calls {
+            for tool_call in tool_calls {
+                if tool_call.function.name == tool_name {
+                    call_ids.insert(tool_call.id.as_str());
+                }
+            }
+        }
+    }
+    messages.iter().any(|message| {
+        matches!(message.role.as_str(), "tool" | "diff")
+            && message.tool_failed != Some(true)
+            && call_ids.contains(message.tool_call_id.as_str())
+    })
+}
+
+fn autonomous_subchat_successful(messages: &[ChatMessage]) -> bool {
+    let Some(last_assistant) = messages.iter().rev().find(|message| message.role == "assistant") else {
+        return false;
+    };
+    if !last_assistant.content.content_text_only().trim().is_empty() {
+        return true;
+    }
+    ["buddy_runtime_event", "buddy_create_draft", "buddy_memory_create"]
+        .iter()
+        .any(|tool_name| assistant_tool_call_succeeded(messages, tool_name))
+}
+
 fn autonomous_failure_result(
     ctx: &BuddyJobContext,
     spec: &AutonomousBuddyChatSpec,
@@ -632,8 +668,7 @@ fn autonomous_failure_result(
     let consecutive_failures = previous
         .as_ref()
         .filter(|last| {
-            last.signal_hash == spec.signal_hash
-                && last.status.as_deref() == Some("failed")
+            last.status.as_deref() == Some("failed")
                 && last.failure_category.as_ref() == Some(&category)
         })
         .and_then(|last| last.consecutive_failures)
@@ -695,6 +730,13 @@ pub(crate) async fn execute_autonomous_spec(
     if same_signal_or_failed_backoff(ctx, &spec.signal_hash, cooldown_seconds) {
         return preserve_last_result(ctx);
     }
+    if crate::buddy::actor::buddy_llm_budget_exhausted(&gcx).await {
+        tracing::info!(
+            "buddy: autonomous job {} skipped, daily LLM token budget exhausted",
+            spec.workflow_id
+        );
+        return preserve_last_result(ctx);
+    }
     let chat_id = match run_autonomous_buddy_chat(gcx.clone(), spec.clone()).await {
         Ok(chat_id) => chat_id,
         Err(err) => {
@@ -719,8 +761,45 @@ async fn autonomous_success_result(
         runtime_event: Some(runtime_event),
         last_result: Some(serialize_last_autonomous_result(&last)),
         xp: AUTONOMOUS_SUCCESS_XP,
+        opportunities: job_finding_opportunities(&spec, &chat_id),
         ..Default::default()
     }
+}
+
+pub(crate) fn job_finding_opportunities(
+    spec: &AutonomousBuddyChatSpec,
+    chat_id: &str,
+) -> Vec<(crate::buddy::types::BuddyOpportunity, u64)> {
+    if !refact_buddy_core::autonomous_workflows::workflow_proposes_findings(&spec.workflow_id) {
+        return Vec::new();
+    }
+    let now = Utc::now();
+    let hash_prefix: String = spec.signal_hash.chars().take(16).collect();
+    let mut opp = crate::buddy::types::BuddyOpportunity {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: crate::buddy::types::BuddyOpportunityKind::JobFinding,
+        summary: format!("{} finished — review findings", spec.title),
+        priority: crate::buddy::types::BuddyPriority::Normal,
+        confidence: 0.7,
+        fact_keys: vec![],
+        cooldown_key: format!("job_finding:{}:{}", spec.workflow_id, hash_prefix),
+        cooldown_secs: 24 * 60 * 60,
+        status: crate::buddy::types::OpportunityStatus::New,
+        proposed_actions: vec![
+            crate::buddy::types::BuddyAction::OpenBuddyConversation {
+                chat_id: chat_id.to_string(),
+            },
+            crate::buddy::types::BuddyAction::Dismiss,
+        ],
+        humor: None,
+        humor_allowed: false,
+        related: crate::buddy::types::BuddyOpportunityLinks::default(),
+        created_at: now,
+        expires_at: now + chrono::Duration::hours(48),
+        resolved_at: None,
+    };
+    opp.related.chat_ids = vec![chat_id.to_string()];
+    vec![(opp, 24 * 60 * 60)]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2035,6 +2114,23 @@ async fn pick_available_buddy_mode(gcx: AppState) -> String {
     }
 }
 
+pub fn sum_llm_usage(messages: &[ChatMessage]) -> (u64, u64, u64) {
+    let mut llm_calls = 0u64;
+    let mut tokens_in = 0u64;
+    let mut tokens_out = 0u64;
+    for msg in messages {
+        if msg.role != "assistant" {
+            continue;
+        }
+        llm_calls += 1;
+        if let Some(usage) = &msg.usage {
+            tokens_in = tokens_in.saturating_add(usage.prompt_tokens as u64);
+            tokens_out = tokens_out.saturating_add(usage.completion_tokens as u64);
+        }
+    }
+    (llm_calls, tokens_in, tokens_out)
+}
+
 pub async fn run_autonomous_buddy_chat(
     gcx: AppState,
     spec: AutonomousBuddyChatSpec,
@@ -2078,6 +2174,20 @@ pub async fn run_autonomous_buddy_chat(
     });
 
     let result = crate::subchat::run_subchat(gcx.gcx.clone(), messages, config).await?;
+    let (llm_calls, tokens_in, tokens_out) = sum_llm_usage(&result.messages);
+    let success = autonomous_subchat_successful(&result.messages);
+    crate::buddy::actor::buddy_record_workflow_telemetry(
+        gcx.clone(),
+        &spec.workflow_id,
+        llm_calls,
+        tokens_in,
+        tokens_out,
+        success,
+    )
+    .await;
+    if !success {
+        return Err("autonomous buddy subchat completed without a successful report".to_string());
+    }
     let chat_id = result
         .chat_id
         .clone()
@@ -2112,7 +2222,7 @@ async fn build_autonomous_messages(
         tracing::warn!(workflow_id = %spec.workflow_id, "autonomous subagent config has no tools");
     }
 
-    let system_prompt = subagent_config.messages.system_prompt.ok_or_else(|| {
+    let mut system_prompt = subagent_config.messages.system_prompt.ok_or_else(|| {
         format!(
             "messages.system_prompt not defined for subagent '{}'",
             spec.workflow_id
@@ -2126,6 +2236,23 @@ async fn build_autonomous_messages(
     })?;
 
     let max_steps = subagent_config.subchat.max_steps.unwrap_or(1).max(1);
+    if system_prompt.contains("%BUDDY_PERSONALITY%") {
+        system_prompt = crate::chat::prompts::system_prompt_add_extra_instructions(
+            gcx,
+            system_prompt,
+            subagent_config.tools.iter().cloned().collect::<HashSet<_>>(),
+            &ChatMeta::default(),
+            &None,
+            "buddy",
+        )
+        .await;
+        if system_prompt.contains("%BUDDY_PERSONALITY%") {
+            system_prompt = system_prompt.replace(
+                "%BUDDY_PERSONALITY%",
+                "You are the project buddy assistant.",
+            );
+        }
+    }
     let user_prompt = render_autonomous_template(&user_template, spec);
     let messages = vec![
         ChatMessage::new("system".to_string(), system_prompt),
@@ -2335,6 +2462,29 @@ async fn execute_autonomous_job(
     execute_built_autonomous_job(gcx, ctx, definition, spec).await
 }
 
+const SIGNAL_KNOWN_FRESHNESS_DAYS: i64 = 7;
+
+async fn signal_already_known(gcx: &AppState, memory_key: &str) -> Option<std::path::PathBuf> {
+    let existing = {
+        let idx = gcx.gcx.knowledge_index.lock().await;
+        let path = idx.first_path_for_signal_key(memory_key)?.clone();
+        let card = idx.card_for_path(&path)?;
+        let freshness = card
+            .updated
+            .as_deref()
+            .or(card.created.as_deref())
+            .or(card.created_at.as_deref())
+            .map(|value| value.to_string());
+        (path, freshness)
+    };
+    let (path, freshness) = existing;
+    let freshness = freshness?;
+    let date_part = freshness.get(..10)?;
+    let observed = chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d").ok()?;
+    let age_days = (Utc::now().date_naive() - observed).num_days();
+    (age_days < SIGNAL_KNOWN_FRESHNESS_DAYS).then_some(path)
+}
+
 async fn execute_built_autonomous_job(
     gcx: AppState,
     ctx: &BuddyJobContext,
@@ -2343,6 +2493,30 @@ async fn execute_built_autonomous_job(
 ) -> BuddyJobResult {
     if same_signal_or_failed_backoff(ctx, &spec.signal_hash, definition.cooldown_seconds) {
         return preserve_last_result(ctx);
+    }
+    if crate::buddy::actor::buddy_llm_budget_exhausted(&gcx).await {
+        tracing::info!(
+            "buddy: autonomous job {} skipped, daily LLM token budget exhausted",
+            definition.meta.id
+        );
+        return preserve_last_result(ctx);
+    }
+
+    if let Some(memory_key) = spec.diagnostic_memory_key() {
+        if let Some(existing) = signal_already_known(&gcx, &memory_key).await {
+            tracing::info!(
+                "buddy: autonomous job {} skipped, signal '{}' already covered by {}",
+                definition.meta.id,
+                memory_key,
+                existing.display()
+            );
+            if let Err(err) =
+                crate::memories::touch_memory_observation(gcx.gcx.clone(), &existing).await
+            {
+                tracing::debug!("buddy: failed to touch known signal memory: {}", err);
+            }
+            return preserve_last_result(ctx);
+        }
     }
 
     let signal_hash = spec.signal_hash.clone();
@@ -2390,6 +2564,7 @@ async fn execute_built_autonomous_job(
         ),
     );
     runtime_event.chat_id = Some(chat_id.clone());
+    let opportunities = job_finding_opportunities(&spec, &chat_id);
     BuddyJobResult {
         activity: Some(activity),
         runtime_event: Some(runtime_event),
@@ -2397,6 +2572,7 @@ async fn execute_built_autonomous_job(
             &AutonomousLastResult::new(signal_hash, chat_id),
         )),
         xp: AUTONOMOUS_SUCCESS_XP,
+        opportunities,
         ..Default::default()
     }
 }
@@ -2481,8 +2657,14 @@ fn stable_diagnostic_signal(evidence: &DiagnosticEvidence) -> String {
             bucket(evidence.high_or_critical_count)
         ),
     ];
-    let mut summaries = evidence.summaries.clone();
+    let mut summaries: Vec<String> = evidence
+        .summaries
+        .iter()
+        .map(|summary| refact_buddy_core::memory_dedup::normalize_memory_text(summary))
+        .filter(|summary| !summary.is_empty())
+        .collect();
     summaries.sort();
+    summaries.dedup();
     parts.extend(summaries);
     parts.join("|")
 }
@@ -3639,7 +3821,7 @@ mod tests {
     use crate::buddy::scheduler::BuddyJobContext;
     use crate::buddy::settings::{save_settings, BuddySettings};
     use crate::buddy::types::{BuddyFact, BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse};
-    use crate::call_validation::ChatContent;
+    use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
     use crate::stats::event::LlmCallEvent;
 
     fn create_symlink_dir_for_test(target: &Path, link: &Path) -> bool {
@@ -4039,6 +4221,67 @@ mod tests {
         assert!(same_signal(&ctx, "same"));
         assert!(!same_signal(&ctx, "different"));
         assert!(!same_signal(&malformed_ctx, "same"));
+    }
+
+    #[test]
+    fn failed_last_result_backoff_ignores_signal_hash_drift_when_category_matches() {
+        let result = AutonomousLastResult {
+            signal_hash: "old-signal".to_string(),
+            chat_id: "failed:buddy_dependency_radar:broken_model_reference".to_string(),
+            completed_at: Utc::now().to_rfc3339(),
+            status: Some("failed".to_string()),
+            failure_category: Some(WorkflowFailureCategory::ToolFailed),
+            consecutive_failures: Some(2),
+        };
+        let ctx = context_with_last_result(Some(serialize_last_autonomous_result(&result)));
+
+        assert!(same_signal_or_failed_backoff(&ctx, "new-signal", 60));
+    }
+
+    fn assistant_message(text: &str) -> ChatMessage {
+        ChatMessage::new("assistant".to_string(), text.to_string())
+    }
+
+    fn assistant_tool_call(tool_call_id: &str, tool_name: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(String::new()),
+            tool_calls: Some(vec![ChatToolCall {
+                id: tool_call_id.to_string(),
+                index: Some(0),
+                function: ChatToolFunction {
+                    name: tool_name.to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            }]),
+            ..Default::default()
+        }
+    }
+
+    fn tool_result(tool_call_id: &str, failed: bool) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText("ok".to_string()),
+            tool_call_id: tool_call_id.to_string(),
+            tool_failed: Some(failed),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn autonomous_subchat_success_requires_report_or_successful_buddy_tool() {
+        assert!(!autonomous_subchat_successful(&[]));
+        assert!(autonomous_subchat_successful(&[assistant_message("Report ready")]));
+        assert!(!autonomous_subchat_successful(&[
+            assistant_tool_call("call-1", "buddy_runtime_event"),
+            tool_result("call-1", true),
+        ]));
+        assert!(autonomous_subchat_successful(&[
+            assistant_tool_call("call-1", "buddy_runtime_event"),
+            tool_result("call-1", false),
+        ]));
     }
 
     #[test]

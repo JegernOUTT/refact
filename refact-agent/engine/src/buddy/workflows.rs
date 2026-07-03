@@ -167,6 +167,7 @@ where
                                 last_outcome: Some("success".to_string()),
                                 failure_category: None,
                                 failure_summary: None,
+                                ..Default::default()
                             },
                         );
                     }

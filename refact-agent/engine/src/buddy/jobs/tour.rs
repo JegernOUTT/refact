@@ -2,7 +2,7 @@ use crate::app_state::AppState;
 
 use super::super::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
 use super::super::types::BuddySpeechItem;
-use crate::buddy::voice_service::{SpeechIntent, VoiceCtx, voice_service};
+use crate::buddy::voice_service::{SpeechIntent, SpeechIntentWireToken, VoiceCtx, voice_service};
 
 pub struct TourJob;
 
@@ -35,6 +35,16 @@ fn normalize_tour_speech(
     fallback
 }
 
+async fn emit_tour_speech(gcx: &AppState, mut speech: BuddySpeechItem) -> bool {
+    speech.speech_intent = Some(SpeechIntent::Tour.wire_token().to_string());
+    let buddy_arc = gcx.buddy.buddy.clone();
+    let mut buddy = buddy_arc.lock().await;
+    let Some(svc) = buddy.as_mut() else {
+        return false;
+    };
+    svc.update_speech(speech)
+}
+
 #[async_trait::async_trait]
 impl BuddyJob for TourJob {
     fn id(&self) -> &str {
@@ -45,6 +55,10 @@ impl BuddyJob for TourJob {
     }
     fn priority(&self) -> u32 {
         1
+    }
+
+    fn records_empty_result(&self) -> bool {
+        false
     }
 
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
@@ -69,13 +83,15 @@ impl BuddyJob for TourJob {
             };
             let voice_speech = voice_service()
                 .await
-                .render_speech(gcx, voice_ctx, SpeechIntent::Tour)
+                .render_speech(gcx.clone(), voice_ctx, SpeechIntent::Tour)
                 .await;
             speech = normalize_tour_speech(speech, voice_speech);
         }
+        if !emit_tour_speech(&gcx, speech).await {
+            return BuddyJobResult::default();
+        }
         BuddyJobResult {
-            speech: Some(speech),
-            speech_intent: Some(SpeechIntent::Tour),
+            last_result: Some("completed".to_string()),
             ..Default::default()
         }
     }
@@ -84,6 +100,58 @@ impl BuddyJob for TourJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buddy::scheduler::BuddyJobContext;
+    use crate::buddy::settings::{BuddySettings, QuietHoursMode};
+    use crate::buddy::types::{BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse};
+
+    fn test_context() -> BuddyJobContext {
+        BuddyJobContext {
+            identity_name: "Pixel".to_string(),
+            personality: Default::default(),
+            onboarding: BuddyOnboarding {
+                greeted: true,
+                tour_completed: false,
+                ..Default::default()
+            },
+            recent_diagnostics: vec![],
+            project_root: std::path::PathBuf::from("/tmp/project"),
+            job_state: BuddyJobState::default(),
+            workflow_summaries: vec![],
+            total_workflow_runs: 0,
+            suggestion_state: vec![],
+            pet: BuddyPetState::default(),
+            active_quest: None,
+            settings: BuddySettings::default(),
+            pulse: BuddyPulse::default(),
+            facts: vec![],
+            recent_activities: vec![],
+        }
+    }
+
+    async fn make_gcx_with_quiet_buddy() -> AppState {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut settings = BuddySettings::default();
+        settings.quiet_hours_mode = QuietHoursMode::Fixed;
+        let hour = chrono::Timelike::hour(&chrono::Local::now());
+        settings.quiet_hours_start = hour as u8;
+        settings.quiet_hours_end = ((hour + 1) % 24) as u8;
+        let mut state = crate::buddy::state::default_buddy_state();
+        state.onboarding.greeted = true;
+        let service = crate::buddy::actor::BuddyService::new(
+            std::env::temp_dir().join(format!("buddy-tour-drop-test-{}", uuid::Uuid::new_v4())),
+            state,
+            settings,
+            Vec::new(),
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        let app = AppState::from_gcx(gcx).await;
+        let buddy_arc = app.buddy.buddy.clone();
+        *buddy_arc.lock().await = Some(service);
+        app
+    }
 
     #[test]
     fn tour_speech_preserves_fallback_fields_after_voice_render() {
@@ -144,5 +212,22 @@ mod tests {
         assert_eq!(normalized.text, "fallback");
         assert_eq!(normalized.mood, fallback.mood);
         assert_eq!(normalized.id, fallback.id);
+    }
+
+    #[tokio::test]
+    async fn dropped_tour_speech_does_not_return_recordable_completion() {
+        let gcx = make_gcx_with_quiet_buddy().await;
+        let job = TourJob;
+
+        let result = job.execute(gcx.clone(), test_context()).await;
+
+        assert!(result.last_result.is_none());
+        assert!(result.speech.is_none());
+        assert!(result.speech_intent.is_none());
+        assert!(!job.records_empty_result());
+        let buddy = gcx.buddy.buddy.lock().await;
+        let service = buddy.as_ref().unwrap();
+        assert!(service.active_speech.is_none());
+        assert!(service.state.job_cooldowns.get("tour").is_none());
     }
 }

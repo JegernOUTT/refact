@@ -216,8 +216,33 @@ impl BuddyJob for QuestPromptJob {
             kind,
             chrono::Utc::now().timestamp()
         );
+        let now = chrono::Utc::now();
+        let quest_opportunity = super::super::types::BuddyOpportunity {
+            id: format!("quest-opp-{}-{}", kind, now.timestamp()),
+            kind: super::super::types::BuddyOpportunityKind::Quest,
+            summary: format!("{} (+{} XP)", quest.title, quest.reward_xp),
+            priority: super::super::types::BuddyPriority::Normal,
+            confidence: 1.0,
+            fact_keys: vec![],
+            cooldown_key: format!("quest:{}", kind),
+            cooldown_secs: self.cooldown_seconds(),
+            status: super::super::types::OpportunityStatus::New,
+            proposed_actions: vec![
+                super::super::types::BuddyAction::AcceptQuest {
+                    suggestion_id: suggestion_id.clone(),
+                },
+                super::super::types::BuddyAction::Dismiss,
+            ],
+            humor: None,
+            humor_allowed: false,
+            related: super::super::types::BuddyOpportunityLinks::default(),
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(24),
+            resolved_at: None,
+        };
 
         BuddyJobResult {
+            opportunities: vec![(quest_opportunity, self.cooldown_seconds())],
             speech_intent: Some(SpeechIntent::QuestAccept),
             runtime_event: Some(super::super::scheduler::speech_runtime_event(
                 self.id(),

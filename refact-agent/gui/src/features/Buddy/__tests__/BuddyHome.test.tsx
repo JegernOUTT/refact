@@ -10,7 +10,6 @@ import {
   setBuddySnapshot,
 } from "../buddySlice";
 import { BuddyHome } from "../BuddyHome";
-import type { Artifact, ArtifactsPage } from "../../../services/refact/buddy";
 import type {
   BuddyActivityEntry,
   BuddyConversationEntry,
@@ -163,27 +162,6 @@ function makeConversation(
   };
 }
 
-function makeArtifactsPage(ops: Artifact[] = []): ArtifactsPage {
-  return {
-    ops,
-    total_matching: ops.length,
-    pending_count: ops.filter((op) => op.status.toLowerCase() === "pending")
-      .length,
-    approved_count: ops.filter((op) => op.status.toLowerCase() === "approved")
-      .length,
-    applied_count: ops.filter((op) => op.status.toLowerCase() === "applied")
-      .length,
-    rejected_count: ops.filter((op) => op.status.toLowerCase() === "rejected")
-      .length,
-    failed_count: ops.filter((op) => op.status.toLowerCase() === "failed")
-      .length,
-    skipped_count: ops.filter((op) => op.status.toLowerCase() === "skipped")
-      .length,
-    limit: 50,
-    offset: 0,
-  };
-}
-
 function makeSnapshot(overrides?: Partial<BuddySnapshot>): BuddySnapshot {
   const settings = overrides?.settings ?? makeSettings();
   const opportunity = makeOpportunity();
@@ -296,9 +274,6 @@ function installBuddyHomeHandlers(settings = makeSettings()) {
         },
       }),
     ),
-    http.get("*/v1/buddy/artifacts", () =>
-      HttpResponse.json(makeArtifactsPage()),
-    ),
     http.post("*/v1/buddy/settings", async ({ request }) => {
       const patch = (await request.json()) as Partial<BuddySettings>;
       return HttpResponse.json({ ...settings, ...patch });
@@ -309,21 +284,6 @@ function installBuddyHomeHandlers(settings = makeSettings()) {
 describe("BuddyHome", () => {
   it("renders major enabled home regions from store and RTK Query data", async () => {
     installBuddyHomeHandlers();
-    server.use(
-      http.get("*/v1/buddy/artifacts", () =>
-        HttpResponse.json(
-          makeArtifactsPage([
-            {
-              op_id: "op-home-1",
-              title: "Remember home context",
-              op_type: "create_memory",
-              status: "pending",
-              created_at: "2026-05-15T00:00:00Z",
-            },
-          ]),
-        ),
-      ),
-    );
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
 
@@ -345,9 +305,6 @@ describe("BuddyHome", () => {
     expect(screen.getByTestId("buddy-activity-panel")).toBeInTheDocument();
     expect(screen.getByText("Task coach noticed pattern")).toBeInTheDocument();
     expect(screen.getByTestId("buddy-recent-errors-panel")).toBeInTheDocument();
-    expect(
-      await screen.findByTestId("buddy-artifacts-panel"),
-    ).toBeInTheDocument();
     expect(screen.getByText("Model unavailable")).toBeInTheDocument();
     expect(await screen.findByText("Recent Buddy chat")).toBeInTheDocument();
   });

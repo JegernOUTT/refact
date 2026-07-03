@@ -162,8 +162,10 @@ pub fn post_process_provider(
     include_disabled_models: bool,
     experimental: bool,
 ) {
+    let catalog_models: std::collections::HashSet<String> =
+        provider.running_models.iter().cloned().collect();
     add_running_models(provider);
-    populate_model_records(provider, experimental);
+    populate_model_records(provider, experimental, Some(&catalog_models));
     apply_models_dict_patch(provider);
     add_name_and_id_to_model_records(provider);
     if !include_disabled_models {
@@ -554,9 +556,14 @@ fn augment_completion_model_from_preset(
     }
 }
 
-fn populate_model_records(provider: &mut CapsProvider, experimental: bool) {
+fn populate_model_records(
+    provider: &mut CapsProvider,
+    experimental: bool,
+    catalog_models: Option<&std::collections::HashSet<String>>,
+) {
     let completion_presets = get_completion_presets();
     let embedding_presets = get_embedding_presets();
+    let had_declared_chat_models = !provider.chat_models.is_empty();
 
     for model_name in &provider.running_models {
         if provider.supports_completion {
@@ -584,6 +591,17 @@ fn populate_model_records(provider: &mut CapsProvider, experimental: bool) {
         }
 
         if !provider.chat_models.contains_key(model_name) {
+            let backfilled_default = catalog_models
+                .map(|catalog| !catalog.contains(model_name))
+                .unwrap_or(false);
+            if backfilled_default && had_declared_chat_models {
+                tracing::warn!(
+                    "provider {}: configured default model '{}' is not in the provider's model list, leaving it unresolved",
+                    provider.name,
+                    model_name
+                );
+                continue;
+            }
             let placeholder = ChatModelRecord {
                 base: BaseModelRecord {
                     enabled: true,
@@ -819,7 +837,7 @@ mod tests {
             },
             ..Default::default()
         };
-        populate_model_records(&mut provider, false);
+        populate_model_records(&mut provider, false, None);
         assert!(
             !provider.embedding_model.base.tokenizer.is_empty(),
             "tokenizer should have been filled from embedding presets"
@@ -904,7 +922,7 @@ mod tests {
             },
             ..Default::default()
         };
-        populate_model_records(&mut provider, false);
+        populate_model_records(&mut provider, false, None);
         assert_eq!(
             provider.embedding_model.base.tokenizer, "hf://Xenova/text-embedding-ada-002",
             "tokenizer should always be filled even for user-configured models"
@@ -931,7 +949,7 @@ mod tests {
             running_models: vec!["qwen2.5/coder/1.5b/base".to_string()],
             ..Default::default()
         };
-        populate_model_records(&mut provider, false);
+        populate_model_records(&mut provider, false, None);
         assert!(
             provider.completion_models.is_empty(),
             "supports_completion=false should prevent completion model population"
@@ -1102,7 +1120,7 @@ extra_headers:
             running_models: vec!["claude-proxy".to_string()],
             ..Default::default()
         };
-        populate_model_records(&mut provider, false);
+        populate_model_records(&mut provider, false, None);
         post_process_provider(&mut provider, false, false);
 
         let mut caps = CodeAssistantCaps::default();

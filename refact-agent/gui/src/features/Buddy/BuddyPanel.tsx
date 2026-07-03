@@ -139,37 +139,15 @@ export const BuddyPanel: React.FC = () => {
           setOpportunityError(null);
           try {
             if (action.kind === "dismiss") {
-              const results = await Promise.allSettled(
-                activeOpportunities.map(async (opp) => {
-                  const dismissAction = getOpportunityDismissAction(opp);
-                  await executeOpportunityAction(
-                    dismissAction.action,
-                    opp,
-                    dismissAction.actionIndex,
-                  );
-                  return opp.id;
-                }),
+              const dismissAction = getOpportunityDismissAction(topOpportunity);
+              await executeOpportunityAction(
+                dismissAction.action,
+                topOpportunity,
+                dismissAction.actionIndex,
               );
-              const dismissedIds = results.flatMap((result) =>
-                result.status === "fulfilled" ? [result.value] : [],
+              setDismissedOpportunityIds((prev) =>
+                new Set(prev).add(`opportunity-${topOpportunity.id}`),
               );
-              if (dismissedIds.length > 0) {
-                setDismissedOpportunityIds((prev) => {
-                  const next = new Set(prev);
-                  for (const oppId of dismissedIds) {
-                    next.add(`opportunity-${oppId}`);
-                  }
-                  return next;
-                });
-              }
-              const failed = results.find(
-                (result) => result.status === "rejected",
-              );
-              if (failed) {
-                setOpportunityError(
-                  formatOpportunityActionError(failed.reason),
-                );
-              }
               setOpportunityIndex(0);
               return;
             }

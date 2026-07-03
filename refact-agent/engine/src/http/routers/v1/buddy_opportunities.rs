@@ -18,6 +18,8 @@ use crate::buddy::types::{
     BuddyAction, BuddyDraft, BuddyFactKind, BuddyPulse, CustomizationKind, DefaultsKind, DraftKind,
     InvestigationContext, MarketKind, OpportunityStatus, PulseScope,
 };
+use refact_buddy_core::action_policy::{action_execution, action_kind_str, ActionExecution};
+use refact_buddy_core::verdicts::VerdictOutcome;
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::ext::config_dirs::get_ext_dirs;
@@ -39,6 +41,22 @@ pub struct OpportunitiesQuery {
 pub struct AcceptRequest {
     #[serde(default)]
     pub action_index: usize,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct DismissRequest {
+    #[serde(default)]
+    pub never: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UndoRequest {
+    pub receipt_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UnmuteRequest {
+    pub rule_key: String,
 }
 
 pub(crate) struct ActionOutcome {
@@ -133,7 +151,7 @@ pub async fn handle_v1_buddy_opportunity_accept(
     let req = body.map(|b| b.0).unwrap_or_default();
 
     let buddy_arc = gcx.buddy.clone();
-    let action = {
+    let (action, cooldown_key, opp_kind) = {
         let mut lock = buddy_arc.lock().await;
         let svc = lock.as_mut().ok_or_else(|| {
             ScratchError::new(
@@ -169,13 +187,22 @@ pub async fn handle_v1_buddy_opportunity_accept(
                 )
             })?
             .clone();
+        if matches!(
+            action_execution(svc.settings.autonomy_level, &action),
+            ActionExecution::Deny
+        ) {
+            return Err(ScratchError::new(
+                StatusCode::FORBIDDEN,
+                "action denied by autonomy level".to_string(),
+            ));
+        }
         if !svc.claim_opportunity_accept(&id) {
             return Err(ScratchError::new(
                 StatusCode::CONFLICT,
                 format!("opportunity already in progress: {}", id),
             ));
         }
-        action
+        (action, opp.cooldown_key.clone(), opp.kind)
     };
 
     let outcome = match dispatch_action(app.clone(), &id, &action).await {
@@ -201,6 +228,12 @@ pub async fn handle_v1_buddy_opportunity_accept(
             format!("opportunity not found: {}", id),
         ));
     }
+    let verdict = if matches!(action, BuddyAction::Dismiss) {
+        VerdictOutcome::Dismiss
+    } else {
+        VerdictOutcome::Accept
+    };
+    svc.record_verdict(&cooldown_key, opp_kind, action_kind_str(&action), verdict);
     let snap = serde_json::to_value(svc.snapshot())
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -208,6 +241,90 @@ pub async fn handle_v1_buddy_opportunity_accept(
         "snapshot": snap,
         "action_result": outcome.result
     })))
+}
+
+pub async fn handle_v1_buddy_action_undo(
+    State(app): State<AppState>,
+    axum::extract::Json(req): axum::extract::Json<UndoRequest>,
+) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let project_root = {
+        let buddy_arc = app.gcx.buddy.clone();
+        let lock = buddy_arc.lock().await;
+        let svc = lock.as_ref().ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "buddy not initialized".into(),
+            )
+        })?;
+        let action = BuddyAction::ApplyConfigPatch {
+            draft_id: String::new(),
+            target_path: String::new(),
+        };
+        if !matches!(
+            action_execution(svc.settings.autonomy_level, &action),
+            ActionExecution::Execute
+        ) {
+            return Err(ScratchError::new(
+                StatusCode::FORBIDDEN,
+                "action denied by autonomy level".to_string(),
+            ));
+        }
+        svc.project_root.clone()
+    };
+    let receipt = crate::buddy::receipts::undo_receipt(&project_root, &req.receipt_id)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+    let buddy_arc = app.gcx.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    if let Some(svc) = lock.as_mut() {
+        svc.record_verdict(
+            &format!("action:{}", receipt.action_kind),
+            crate::buddy::types::BuddyOpportunityKind::JobFinding,
+            &receipt.action_kind,
+            VerdictOutcome::Undo,
+        );
+    }
+    Ok(axum::Json(serde_json::json!({ "receipt": receipt })))
+}
+
+pub async fn handle_v1_buddy_receipts(
+    State(app): State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let project_root = buddy_project_root(&app).await?;
+    let receipts = crate::buddy::receipts::load_receipts(&project_root).await;
+    Ok(axum::Json(serde_json::json!({ "receipts": receipts })))
+}
+
+pub async fn handle_v1_buddy_rule_unmute(
+    State(app): State<AppState>,
+    axum::extract::Json(req): axum::extract::Json<UnmuteRequest>,
+) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let buddy_arc = app.gcx.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    let svc = lock.as_mut().ok_or_else(|| {
+        ScratchError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "buddy not initialized".into(),
+        )
+    })?;
+    let changed = svc.unmute_rule(&req.rule_key);
+    let snap = serde_json::to_value(svc.snapshot())
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(axum::Json(
+        serde_json::json!({ "changed": changed, "snapshot": snap }),
+    ))
+}
+
+async fn buddy_project_root(app: &AppState) -> Result<PathBuf, ScratchError> {
+    let buddy_arc = app.gcx.buddy.clone();
+    let lock = buddy_arc.lock().await;
+    let svc = lock.as_ref().ok_or_else(|| {
+        ScratchError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "buddy not initialized".into(),
+        )
+    })?;
+    Ok(svc.project_root.clone())
 }
 
 async fn clear_accept_claim(gcx: Arc<GlobalContext>, id: &str) {
@@ -443,6 +560,168 @@ pub(crate) async fn dispatch_action(
                 status: OpportunityStatus::Accepted,
             })
         }
+        BuddyAction::ApplyMemoryBatch { batch_key, .. } => {
+            let (autonomy, project_root) = {
+                let buddy_arc = app.gcx.buddy.clone();
+                let lock = buddy_arc.lock().await;
+                let svc = lock.as_ref().ok_or_else(|| {
+                    ScratchError::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "buddy not initialized".into(),
+                    )
+                })?;
+                (svc.settings.autonomy_level, svc.project_root.clone())
+            };
+            if matches!(action_execution(autonomy, action), ActionExecution::Deny) {
+                return Err(ScratchError::new(
+                    StatusCode::FORBIDDEN,
+                    "action denied by autonomy level".to_string(),
+                ));
+            }
+            let (memory_ops, applied, failed, remaining) =
+                crate::buddy::storage::apply_memory_batch(
+                    &project_root,
+                    app.clone(),
+                    batch_key,
+                    500,
+                )
+                .await
+                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            {
+                let buddy_arc = app.gcx.buddy.clone();
+                let mut lock = buddy_arc.lock().await;
+                if let Some(svc) = lock.as_mut() {
+                    svc.set_memory_ops(memory_ops);
+                }
+            }
+            Ok(ActionOutcome {
+                result: serde_json::json!({
+                    "kind": "memory_batch_applied",
+                    "batch_key": batch_key,
+                    "applied": applied,
+                    "failed": failed,
+                    "remaining": remaining
+                }),
+                status: OpportunityStatus::Completed,
+            })
+        }
+        BuddyAction::ApplyConfigPatch {
+            draft_id,
+            target_path,
+        } => {
+            let (autonomy, project_root, draft) = {
+                let buddy_arc = app.gcx.buddy.clone();
+                let lock = buddy_arc.lock().await;
+                let svc = lock.as_ref().ok_or_else(|| {
+                    ScratchError::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "buddy not initialized".into(),
+                    )
+                })?;
+                (
+                    svc.settings.autonomy_level,
+                    svc.project_root.clone(),
+                    svc.draft_store.get(draft_id).cloned(),
+                )
+            };
+            let draft = draft.ok_or_else(|| {
+                ScratchError::new(StatusCode::NOT_FOUND, "draft_not_found".to_string())
+            })?;
+            match action_execution(autonomy, action) {
+                ActionExecution::Execute => {
+                    let receipt = crate::buddy::receipts::apply_config_patch(
+                        &project_root,
+                        target_path,
+                        &draft.yaml_or_json,
+                    )
+                    .await
+                    .map_err(|e| ScratchError::new(StatusCode::FORBIDDEN, e))?;
+                    Ok(ActionOutcome {
+                        result: serde_json::json!({
+                            "kind": "config_patch_applied",
+                            "receipt_id": receipt.id,
+                            "target_path": receipt.target_path
+                        }),
+                        status: OpportunityStatus::Completed,
+                    })
+                }
+                ActionExecution::Prefill => Ok(ActionOutcome {
+                    result: serde_json::json!({
+                        "kind": "draft",
+                        "draft_kind": serde_json::to_value(draft.kind).unwrap_or_default(),
+                        "draft_id": draft.id,
+                        "target_path": target_path
+                    }),
+                    status: OpportunityStatus::Accepted,
+                }),
+                _ => Err(ScratchError::new(
+                    StatusCode::FORBIDDEN,
+                    "action denied by autonomy level".to_string(),
+                )),
+            }
+        }
+        BuddyAction::AcceptQuest { suggestion_id } => {
+            let (quest, persona, identity_name, pulse) = {
+                let buddy_arc = app.gcx.buddy.clone();
+                let mut lock = buddy_arc.lock().await;
+                let svc = lock.as_mut().ok_or_else(|| {
+                    ScratchError::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "buddy not initialized".into(),
+                    )
+                })?;
+                let (_, quest) = svc
+                    .accept_quest_from_suggestion(suggestion_id)
+                    .map_err(|e| {
+                        let status = if e.contains("not a quest") {
+                            StatusCode::BAD_REQUEST
+                        } else {
+                            StatusCode::NOT_FOUND
+                        };
+                        ScratchError::new(status, e)
+                    })?;
+                (
+                    quest,
+                    svc.state.personality.clone(),
+                    svc.state.identity.name.clone(),
+                    svc.pulse.clone(),
+                )
+            };
+            let fallback_text = format!(
+                "Quest accepted: {}. I’ll keep score from here.",
+                quest.title
+            );
+            let mut speech = crate::buddy::actor::render_buddy_speech(
+                app.clone(),
+                persona,
+                identity_name,
+                pulse,
+                Some(quest.quest_type.clone()),
+                fallback_text.clone(),
+                crate::buddy::voice_service::SpeechIntent::QuestAccept,
+                fallback_text,
+            )
+            .await;
+            speech.id = format!("quest-accept-{}", quest.id);
+            speech.ttl_seconds = 12;
+            speech.dedupe_key = Some(format!("quest_accept_{}", quest.quest_type));
+            crate::buddy::actor::buddy_update_speech_user(app.clone(), speech).await;
+            Ok(ActionOutcome {
+                result: serde_json::json!({
+                    "kind": "quest_accepted",
+                    "quest_id": quest.id,
+                    "reward_xp": quest.reward_xp
+                }),
+                status: OpportunityStatus::Completed,
+            })
+        }
+        BuddyAction::OpenBuddyConversation { chat_id } => Ok(ActionOutcome {
+            result: serde_json::json!({
+                "kind": "open_chat",
+                "chat_id": chat_id
+            }),
+            status: OpportunityStatus::Accepted,
+        }),
         BuddyAction::Dismiss => Ok(ActionOutcome {
             result: serde_json::json!({ "kind": "dismiss" }),
             status: OpportunityStatus::Dismissed,
@@ -931,8 +1210,14 @@ pub(crate) async fn enrich_investigation_context(app: &AppState, ctx: &mut Inves
         ctx.config_summary = config_summary;
     }
 
-    ctx.log_excerpt = cap_text_to_chars(&ctx.log_excerpt, 4000);
-    ctx.config_summary = cap_text_to_chars(&ctx.config_summary, 1000);
+    ctx.log_excerpt = cap_text_to_chars(
+        &crate::buddy::actor::redact_sensitive(&ctx.log_excerpt),
+        4000,
+    );
+    ctx.config_summary = cap_text_to_chars(
+        &crate::buddy::actor::redact_sensitive(&ctx.config_summary),
+        1000,
+    );
 }
 
 fn memory_key_instruction(memory_key: &str) -> String {
@@ -1109,13 +1394,17 @@ async fn create_investigation_chat(
     let chat_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
+    let model = crate::buddy::actor::resolve_buddy_chat_model(
+        crate::app_state::AppState::from_gcx(gcx.clone()).await,
+    )
+    .await;
     let snapshot = TrajectorySnapshot {
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,
         chat_id: chat_id.clone(),
         title: "Investigation".to_string(),
-        model: String::new(),
+        model,
         mode: "buddy".to_string(),
         tool_use: "agent".to_string(),
         messages: vec![
@@ -1188,7 +1477,9 @@ async fn create_investigation_chat(
 pub async fn handle_v1_buddy_opportunity_dismiss(
     State(app): State<AppState>,
     Path(id): Path<String>,
+    body: Option<axum::extract::Json<DismissRequest>>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let req = body.map(|b| b.0).unwrap_or_default();
     let gcx = app.gcx.clone();
     let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
@@ -1217,6 +1508,13 @@ pub async fn handle_v1_buddy_opportunity_dismiss(
         ));
     }
     svc.resolve_opportunity(&id, OpportunityStatus::Dismissed);
+    let verdict = if req.never {
+        svc.mute_rule_for_cooldown_key(&opp.cooldown_key);
+        VerdictOutcome::Never
+    } else {
+        VerdictOutcome::Dismiss
+    };
+    svc.record_verdict(&opp.cooldown_key, opp.kind, "dismiss", verdict);
     let snap = serde_json::to_value(svc.snapshot())
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(axum::Json(serde_json::json!({ "snapshot": snap })))

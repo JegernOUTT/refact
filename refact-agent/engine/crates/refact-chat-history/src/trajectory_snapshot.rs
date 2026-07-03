@@ -43,6 +43,7 @@ pub struct TrajectorySnapshot {
     pub claude_code_identity: Option<ClaudeCodeIdentity>,
     pub reactive_compact_attempts: Option<usize>,
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting_for_card_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalSnapshot>,
@@ -219,5 +220,44 @@ mod tests {
         assert!(value.get("goal").is_none());
         let decoded: TrajectorySnapshot = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.goal, None);
+    }
+
+    #[test]
+    fn trajectory_snapshot_missing_waiting_for_card_ids_defaults_empty() {
+        // Trajectories written before waiting_for_card_ids existed (and current
+        // files, which omit the field when empty) must still deserialize.
+        let snapshot = snapshot();
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("waiting_for_card_ids");
+
+        let decoded: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+        assert!(decoded.waiting_for_card_ids.is_empty());
+    }
+
+    #[test]
+    fn trajectory_snapshot_empty_waiting_for_card_ids_not_serialized() {
+        let snapshot = snapshot();
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+
+        assert!(value.get("waiting_for_card_ids").is_none());
+    }
+
+    #[test]
+    fn trajectory_snapshot_waiting_for_card_ids_roundtrip() {
+        let mut snapshot = snapshot();
+        snapshot.waiting_for_card_ids = vec!["T-1".to_string(), "T-2".to_string()];
+
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let decoded: TrajectorySnapshot = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(
+            decoded.waiting_for_card_ids,
+            vec!["T-1".to_string(), "T-2".to_string()]
+        );
     }
 }

@@ -163,6 +163,73 @@ describe("buddyChatCompanionPolicy", () => {
     ).toBe("content:speech:quest_prompt_start");
   });
 
+  it("scopes speech content keys so different workspaces do not cross-suppress", () => {
+    const firstWorkspaceKey = speechContentKey({
+      dedupe_key: "Quest Prompt-Start",
+      workspace_id: "workspace-a",
+    });
+    const secondWorkspaceKey = speechContentKey({
+      dedupe_key: "Quest Prompt-Start",
+      workspace_id: "workspace-b",
+    });
+    const seenNotificationIds: Record<string, number> = {};
+
+    expect(firstWorkspaceKey).toBe(
+      "scope:workspace-a:content:speech:quest_prompt_start",
+    );
+    expect(secondWorkspaceKey).toBe(
+      "scope:workspace-b:content:speech:quest_prompt_start",
+    );
+    expect(firstWorkspaceKey).not.toBe(secondWorkspaceKey);
+
+    if (firstWorkspaceKey != null) {
+      seenNotificationIds[firstWorkspaceKey] = Date.now();
+    }
+
+    expect(
+      secondWorkspaceKey != null && secondWorkspaceKey in seenNotificationIds,
+    ).toBe(false);
+  });
+
+  it("keeps same-scope speech content keys stable so repeated content suppresses", () => {
+    const firstKey = speechContentKey({
+      dedupe_key: "Quest Prompt-Start",
+      workspace_id: "workspace-a",
+    });
+    const repeatedKey = speechContentKey({
+      dedupe_key: "Quest Prompt-Start",
+      workspace_id: "workspace-a",
+    });
+    const seenNotificationIds: Record<string, number> = {};
+
+    expect(firstKey).toBe(repeatedKey);
+
+    if (firstKey != null) {
+      seenNotificationIds[firstKey] = Date.now();
+    }
+
+    expect(repeatedKey != null && repeatedKey in seenNotificationIds).toBe(
+      true,
+    );
+  });
+
+  it("includes chat scope with workspace scope when available", () => {
+    expect(
+      speechContentKey({
+        dedupe_key: "Quest Prompt-Start",
+        workspace_id: "workspace-a",
+        chat_id: "chat-1",
+      }),
+    ).toBe("scope:workspace-a:chat-1:content:speech:quest_prompt_start");
+    expect(
+      speechContentKey({
+        dedupe_key: "Quest Prompt-Start",
+        workspace_id: "workspace-a",
+        chat_id: "chat-2",
+      }),
+    ).toBe("scope:workspace-a:chat-2:content:speech:quest_prompt_start");
+  });
+
   it("builds runtime, suggestion, and opportunity content keys", () => {
     expect(
       runtimeEventContentKey(

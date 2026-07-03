@@ -1,5 +1,6 @@
 pub mod actor;
 pub mod autonomous_workflows;
+pub mod briefing;
 pub mod chat_reactions;
 pub mod conversation_ledger;
 pub mod diagnostics;
@@ -15,6 +16,7 @@ pub mod opportunities;
 pub mod policy;
 pub mod pulse;
 pub mod pulse_inject;
+pub mod receipts;
 pub mod runtime_queue;
 pub mod scheduler;
 pub mod settings;

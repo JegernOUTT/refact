@@ -3,6 +3,7 @@ import type {
   BuddyAction,
   BuddyPage,
   BuddyRuntimeEvent,
+  BuddySettings,
 } from "../features/Buddy/types";
 
 function roundTrip<T>(value: T): unknown {
@@ -60,6 +61,14 @@ function assertBuddyAction(action: BuddyAction): string {
       return action.market_kind + action.item_id;
     case "create_pulse_report":
       return action.scope;
+    case "apply_memory_batch":
+      return action.batch_key + String(action.count_hint);
+    case "apply_config_patch":
+      return action.draft_id + action.target_path;
+    case "accept_quest":
+      return action.suggestion_id;
+    case "open_buddy_conversation":
+      return action.chat_id;
     case "dismiss":
       return action.kind;
     default: {
@@ -68,6 +77,55 @@ function assertBuddyAction(action: BuddyAction): string {
     }
   }
 }
+
+const RUST_ALL_INTENT_KEYS: string[] = [
+  "humor",
+  "suggestion",
+  "insight",
+  "win",
+  "error_alert",
+  "greeting",
+  "tour",
+  "milestone",
+  "memory_pulse_commentary",
+  "quest_accept",
+  "quest_complete",
+  "chat_reaction",
+];
+
+const RUST_DEFAULT_BUDDY_SETTINGS: BuddySettings = {
+  enabled: true,
+  auto_diagnostics: true,
+  auto_issue_creation: false,
+  personality_prompt: null,
+  autonomous_chats_enabled: true,
+  proactive_enabled: true,
+  message_observation_enabled: true,
+  chat_reactions_enabled: true,
+  housekeeping_enabled: true,
+  humor_enabled: true,
+  humor_level: "light",
+  autonomy_level: "propose",
+  quiet_mode: false,
+  daily_digest_hour: 18,
+  quiet_hours_mode: "auto",
+  quiet_hours_start: 22,
+  quiet_hours_end: 8,
+  muted_intents: [],
+  muted_chat_ids: [],
+  daily_llm_token_budget: null,
+  observers: {
+    task_health: true,
+    trajectory_clutter: true,
+    chat_pattern: true,
+    customization_drift: true,
+    memory_garden: true,
+    mcp_auth: true,
+    git_pressure: true,
+    diagnostic_cluster: true,
+    provider_health: true,
+  },
+};
 
 describe("Buddy schema contract", () => {
   test("BuddyPage fixtures round-trip through canonical discriminants", () => {
@@ -139,6 +197,18 @@ describe("Buddy schema contract", () => {
         item_id: "item-1",
       },
       { kind: "create_pulse_report", scope: "all" },
+      {
+        kind: "apply_memory_batch",
+        batch_key: "merge_near_duplicate",
+        count_hint: 12,
+      },
+      {
+        kind: "apply_config_patch",
+        draft_id: "d5",
+        target_path: ".refact/knowledge/handbook/testing.md",
+      },
+      { kind: "accept_quest", suggestion_id: "sugg-1" },
+      { kind: "open_buddy_conversation", chat_id: "chat-1" },
       { kind: "dismiss" },
     ];
 
@@ -183,5 +253,37 @@ describe("Buddy schema contract", () => {
     expect(event.speech_text).toBeNull();
     expect(event.scene).toBeNull();
     expect(event.duration_hint).toBeNull();
+  });
+
+  test("settings default fixture matches Rust Default impl", () => {
+    const settings = roundTrip(RUST_DEFAULT_BUDDY_SETTINGS) as BuddySettings;
+
+    expect(settings.enabled).toBe(true);
+    expect(settings.chat_reactions_enabled).toBe(true);
+    expect(settings.message_observation_enabled).toBe(true);
+    expect(settings.autonomy_level).toBe("propose");
+    expect(settings.quiet_hours_mode).toBe("auto");
+    expect(settings.quiet_hours_start).toBe(22);
+    expect(settings.quiet_hours_end).toBe(8);
+    expect(settings.muted_intents).toEqual([]);
+    expect(settings.muted_chat_ids).toEqual([]);
+    expect(settings.daily_llm_token_budget).toBeNull();
+  });
+
+  test("speech intent keys fixture matches Rust ALL_INTENT_KEYS", () => {
+    expect(RUST_ALL_INTENT_KEYS).toEqual([
+      "humor",
+      "suggestion",
+      "insight",
+      "win",
+      "error_alert",
+      "greeting",
+      "tour",
+      "milestone",
+      "memory_pulse_commentary",
+      "quest_accept",
+      "quest_complete",
+      "chat_reaction",
+    ]);
   });
 });

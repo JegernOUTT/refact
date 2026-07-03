@@ -40,6 +40,30 @@ pub(crate) fn diagnostic_source_bucket(diag: &DiagnosticContext) -> String {
     bucket
 }
 
+fn is_frontend_diagnostic(ctx: &DiagnosticContext) -> bool {
+    if ctx.tool_name.as_deref() == Some("frontend") {
+        return true;
+    }
+    if matches!(
+        ctx.error_type.as_str(),
+        "window_error"
+            | "ui_error_state"
+            | "react_error_boundary"
+            | "react_root_render"
+            | "react_recoverable"
+            | "artifact_iframe"
+            | "mermaid_render"
+            | "unhandledrejection"
+            | "possible_renderer_crash"
+            | "console_error"
+    ) {
+        return true;
+    }
+    ctx.source_file
+        .as_deref()
+        .is_some_and(|source_file| source_file.starts_with("frontend/"))
+}
+
 pub fn detect_diagnostic_cluster_facts(
     diagnostics: &[DiagnosticContext],
     now: DateTime<Utc>,
@@ -64,7 +88,7 @@ pub fn detect_diagnostic_cluster_facts(
                 .push(diag);
         }
 
-        if ts_utc >= window_5min && diag.tool_name.as_deref() == Some("frontend") {
+        if ts_utc >= window_5min && is_frontend_diagnostic(diag) {
             frontend_diagnostics.push(diag);
         }
     }
@@ -153,6 +177,10 @@ impl BuddyObserver for DiagnosticClusterObserver {
         60
     }
 
+    fn emission_refresh_ttl_seconds(&self) -> u64 {
+        1800
+    }
+
     fn requires_setting(&self, settings: &BuddySettings) -> bool {
         settings.observers.diagnostic_cluster
     }
@@ -196,6 +224,41 @@ mod tests {
         let mut diag = diagnostic(error_type, tool_name, now);
         diag.model_id = Some(model_id.to_string());
         diag
+    }
+
+    #[test]
+    fn frontend_diagnostic_predicate_matches_frontend_shapes() {
+        let now = Utc::now();
+        let frontend_error_types = [
+            "window_error",
+            "ui_error_state",
+            "react_error_boundary",
+            "react_root_render",
+            "react_recoverable",
+            "artifact_iframe",
+            "mermaid_render",
+            "unhandledrejection",
+            "possible_renderer_crash",
+            "console_error",
+        ];
+
+        for error_type in frontend_error_types {
+            let mut diag = diagnostic(error_type, "not_frontend", now);
+            diag.source_file = Some("not_frontend/file".to_string());
+            assert!(is_frontend_diagnostic(&diag));
+        }
+
+        let mut tool_diag = diagnostic("provider_error", "frontend", now);
+        tool_diag.source_file = Some("not_frontend/file".to_string());
+        assert!(is_frontend_diagnostic(&tool_diag));
+
+        let mut source_diag = diagnostic("provider_error", "not_frontend", now);
+        source_diag.source_file = Some("frontend/window_error".to_string());
+        assert!(is_frontend_diagnostic(&source_diag));
+
+        let mut negative = diagnostic("provider_error", "not_frontend", now);
+        negative.source_file = Some("backend/frontend/window_error".to_string());
+        assert!(!is_frontend_diagnostic(&negative));
     }
 
     #[test]
