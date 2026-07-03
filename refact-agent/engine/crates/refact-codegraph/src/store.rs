@@ -839,8 +839,12 @@ impl Store {
         Self::dirty_paths_on(&self.conn)
     }
 
+    pub fn dirty_path_count(&self) -> Result<usize, String> {
+        Ok(self.scalar_i64("SELECT COUNT(*) FROM dirty_paths")? as usize)
+    }
+
     pub fn has_dirty_paths(&self) -> Result<bool, String> {
-        Ok(self.scalar_i64("SELECT COUNT(*) FROM dirty_paths")? > 0)
+        Ok(self.dirty_path_count()? > 0)
     }
 
     fn mark_path_dirty_on(conn: &Connection, path: &str) -> Result<(), String> {

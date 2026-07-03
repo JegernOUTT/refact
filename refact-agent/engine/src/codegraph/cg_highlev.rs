@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use tracing::{error, info, warn};
@@ -14,6 +14,8 @@ const CODEGRAPH_DB_FILE: &str = "codegraph.sqlite";
 const DRAIN_BATCH: usize = 512;
 const DRAIN_CONCURRENCY: usize = 8;
 const PROGRESS_REPORT_GRANULARITY: usize = 100;
+const CONNECT_EVERY_BATCHES: u32 = 8;
+const CONNECT_EVERY_SECS: u64 = 30;
 
 fn progress_bucket(remaining: usize) -> usize {
     (remaining + PROGRESS_REPORT_GRANULARITY - 1) / PROGRESS_REPORT_GRANULARITY
@@ -25,6 +27,10 @@ fn should_report_unprocessed(remaining: usize, reported_unprocessed: &mut usize)
     }
     *reported_unprocessed = remaining;
     true
+}
+
+fn should_connect_usages(batches_since: u32, elapsed: Duration) -> bool {
+    batches_since >= CONNECT_EVERY_BATCHES || elapsed >= Duration::from_secs(CONNECT_EVERY_SECS)
 }
 
 fn completion_message(counts: &Counts) -> String {
@@ -125,6 +131,39 @@ pub(crate) async fn process_index_batch(
     }
 }
 
+async fn connect_usages(gcx: &Arc<GlobalContext>, service: &Arc<CodeGraphService>) {
+    if let Err(err) = service.connect_usages().await {
+        error!("codegraph: connect_usages failed: {err}");
+        *gcx.codegraph_error.lock().unwrap() = err;
+    } else {
+        *gcx.codegraph_error.lock().unwrap() = String::new();
+    }
+}
+
+async fn maybe_periodic_connect_usages(
+    gcx: &Arc<GlobalContext>,
+    service: &Arc<CodeGraphService>,
+    batches_since_connect: u32,
+    elapsed: Duration,
+) -> bool {
+    if !should_connect_usages(batches_since_connect, elapsed) {
+        return false;
+    }
+    let dirty_count = match service.dirty_usage_path_count().await {
+        Ok(dirty_count) => dirty_count,
+        Err(err) => {
+            error!("codegraph: dirty usage check failed: {err}");
+            return false;
+        }
+    };
+    if dirty_count == 0 && batches_since_connect < CONNECT_EVERY_BATCHES {
+        return false;
+    }
+    connect_usages(gcx, service).await;
+    info!("codegraph: periodic connect_usages ({dirty_count} dirty)");
+    true
+}
+
 pub async fn codegraph_db_path(gcx: Arc<GlobalContext>) -> PathBuf {
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     if let Some(root) = project_dirs.first() {
@@ -175,6 +214,8 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
     }
 
     let mut reported_unprocessed = 0;
+    let mut batches_since_connect: u32 = 0;
+    let mut last_connect = Instant::now();
 
     loop {
         if gcx.shutdown_flag.load(Ordering::Relaxed) {
@@ -191,12 +232,9 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
             reported_unprocessed = 0;
             match service.has_dirty_usage_paths().await {
                 Ok(true) => {
-                    if let Err(err) = service.connect_usages().await {
-                        error!("codegraph: connect_usages failed: {err}");
-                        *gcx.codegraph_error.lock().unwrap() = err;
-                    } else {
-                        *gcx.codegraph_error.lock().unwrap() = String::new();
-                    }
+                    connect_usages(&gcx, &service).await;
+                    batches_since_connect = 0;
+                    last_connect = Instant::now();
                 }
                 Ok(false) => {}
                 Err(err) => error!("codegraph: dirty usage check failed: {err}"),
@@ -227,6 +265,21 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
         }
 
         process_index_batch(gcx.clone(), service.clone(), batch).await;
+        batches_since_connect = batches_since_connect.saturating_add(1);
+        if gcx.shutdown_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        if maybe_periodic_connect_usages(
+            &gcx,
+            &service,
+            batches_since_connect,
+            last_connect.elapsed(),
+        )
+        .await
+        {
+            batches_since_connect = 0;
+            last_connect = Instant::now();
+        }
     }
 }
 
@@ -279,6 +332,30 @@ mod tests {
 
         reported = 0;
         assert!(should_report_unprocessed(40, &mut reported));
+    }
+
+    #[test]
+    fn connect_cadence_uses_batch_or_elapsed_thresholds() {
+        assert!(!should_connect_usages(
+            CONNECT_EVERY_BATCHES - 1,
+            Duration::from_secs(CONNECT_EVERY_SECS - 1)
+        ));
+        assert!(should_connect_usages(
+            CONNECT_EVERY_BATCHES,
+            Duration::from_secs(0)
+        ));
+        assert!(should_connect_usages(
+            CONNECT_EVERY_BATCHES + 1,
+            Duration::from_secs(0)
+        ));
+        assert!(should_connect_usages(
+            0,
+            Duration::from_secs(CONNECT_EVERY_SECS)
+        ));
+        assert!(should_connect_usages(
+            0,
+            Duration::from_secs(CONNECT_EVERY_SECS + 1)
+        ));
     }
 
     #[test]

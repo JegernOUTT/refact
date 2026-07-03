@@ -383,6 +383,10 @@ impl CodeGraphService {
         self.with_read_store(|store| store.has_dirty_paths()).await
     }
 
+    pub async fn dirty_usage_path_count(&self) -> Result<usize, String> {
+        self.with_read_store(|store| store.dirty_path_count()).await
+    }
+
     pub async fn doc_usages(&self, cpath: &str) -> Result<Vec<(usize, String)>, String> {
         self.with_read_store(|store| store.doc_usages(cpath)).await
     }
