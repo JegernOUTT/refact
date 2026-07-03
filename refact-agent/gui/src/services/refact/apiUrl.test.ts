@@ -48,6 +48,25 @@ describe("sanitizeEngineBaseUrl", () => {
     ).toBe("https://example.com/proxy");
   });
 
+  test("strips stale v1 code-intel endpoint paths back to the engine base", () => {
+    const endpoints = [
+      "overview",
+      "graph",
+      "communities",
+      "dead-code",
+      "pr-blast",
+      "security-scan",
+    ];
+
+    for (const endpoint of endpoints) {
+      expect(
+        sanitizeEngineBaseUrl(
+          `https://example.com/proxy/v1/code-intel/${endpoint}`,
+        ),
+      ).toBe("https://example.com/proxy");
+    }
+  });
+
   test("rejects unsupported browser schemes and invalid non-empty values", () => {
     expect(sanitizeEngineBaseUrl("http2://127.0.0.1:8001")).toBeNull();
     expect(sanitizeEngineBaseUrl("ws://127.0.0.1:8001")).toBeNull();

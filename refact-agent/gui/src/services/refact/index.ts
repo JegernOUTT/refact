@@ -15,6 +15,7 @@ export * from "./links";
 export * from "./integrations";
 export * from "./knowledge";
 export * from "./knowledgeGraphApi";
+export * from "./codeIntel";
 export * from "./ragStatus";
 export * from "./trajectories";
 export * from "./trajectory";

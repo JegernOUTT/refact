@@ -1446,6 +1446,101 @@ export type RelinkMemoriesResponse = {
   links_added: number;
 };
 
+export type CodeIntelDetail = {
+  detail: string;
+};
+
+export type CodeIntelResponse<T> = T | CodeIntelDetail;
+
+export type CodeIntelScoreEntry = {
+  symbol: string;
+  score: number;
+};
+
+export type CodeIntelFileScoreEntry = {
+  path: string;
+  score: number;
+};
+
+export type CodeIntelFileCentrality = {
+  top_pagerank: CodeIntelFileScoreEntry[];
+  top_betweenness: CodeIntelFileScoreEntry[];
+};
+
+export type CodeIntelCounts = {
+  nodes: number;
+  edges: number;
+  files: number;
+};
+
+export type CodeIntelOverview = {
+  counts: CodeIntelCounts;
+  scc_count: number;
+  largest_scc: number;
+  component_count: number;
+  top_pagerank: CodeIntelScoreEntry[];
+  top_betweenness: CodeIntelScoreEntry[];
+  file_centrality: CodeIntelFileCentrality;
+  community_count: number;
+  dead_code_count: number;
+};
+
+export type CodeIntelGraphNode = {
+  id: number;
+  name: string;
+  path: string;
+  kind?: string;
+};
+
+export type CodeIntelGraphEdge = {
+  source: number;
+  target: number;
+  kind: string;
+};
+
+export type CodeIntelGraph = {
+  nodes: CodeIntelGraphNode[];
+  edges: CodeIntelGraphEdge[];
+};
+
+export type CodeIntelCommunity = {
+  id: number;
+  label: string;
+  member_count: number;
+  cohesion: number;
+};
+
+export type CodeIntelDeadSymbol = {
+  name: string;
+  path: string;
+  reason: string;
+  confidence: number;
+};
+
+export type BlastImpact = {
+  path: string;
+  symbol: string;
+  distance: number;
+  via: string;
+};
+
+export type BlastReport = {
+  changed_files: string[];
+  directly_impacted: BlastImpact[];
+  transitively_impacted: BlastImpact[];
+  impacted_file_count: number;
+  risk_score: number;
+};
+
+export type Severity = "Low" | "Medium" | "High" | "Critical";
+
+export type SecurityFinding = {
+  rule: string;
+  severity: Severity;
+  line: number;
+  snippet: string;
+};
+
 export type VecDbStatus = {
   files_unprocessed: number;
   files_total: number;
