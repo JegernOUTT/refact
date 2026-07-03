@@ -54,6 +54,9 @@ describe("sanitizeEngineBaseUrl", () => {
       "graph",
       "communities",
       "dead-code",
+      "health",
+      "git-risk",
+      "duplication",
       "pr-blast",
       "security-scan",
     ];

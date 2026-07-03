@@ -36,13 +36,21 @@ import {
 } from "../StatsDashboard/utils/formatters";
 import styles from "./CodeIntelWorkspace.module.css";
 import { CodeGraphView } from "./CodeGraphView";
+import { CommunitiesTab } from "./tabs/CommunitiesTab";
+import { DeadCodeTab } from "./tabs/DeadCodeTab";
+import { DuplicationTab } from "./tabs/DuplicationTab";
+import { HealthTab } from "./tabs/HealthTab";
+import { RiskTab } from "./tabs/RiskTab";
 import { ToolsTab } from "./ToolsTab";
 
 type CodeIntelTab =
   | "overview"
   | "graph"
+  | "communities"
+  | "dead-code"
   | "health"
   | "risk"
+  | "duplication"
   | "security"
   | "tools";
 
@@ -60,8 +68,11 @@ type RankingItem = {
 const TAB_ORDER: CodeIntelTab[] = [
   "overview",
   "graph",
+  "communities",
+  "dead-code",
   "health",
   "risk",
+  "duplication",
   "security",
   "tools",
 ];
@@ -301,26 +312,6 @@ function PlaceholderTab({ title, description, icon }: PlaceholderProps) {
   );
 }
 
-function HealthTabPlaceholder() {
-  return (
-    <PlaceholderTab
-      icon={ListTree}
-      title="Health metrics coming soon"
-      description="Code health, duplication, and trend panels will land in the follow-up stats card."
-    />
-  );
-}
-
-function RiskTabPlaceholder() {
-  return (
-    <PlaceholderTab
-      icon={GitBranch}
-      title="Risk analysis coming soon"
-      description="Git risk, blast radius, and ownership summaries will fill this tab next."
-    />
-  );
-}
-
 function SecurityTabPlaceholder() {
   return (
     <PlaceholderTab
@@ -369,8 +360,11 @@ export const CodeIntelWorkspace: React.FC<CodeIntelWorkspaceProps> = ({
           >
             <Tabs.Trigger value="overview">Overview</Tabs.Trigger>
             <Tabs.Trigger value="graph">Graph</Tabs.Trigger>
+            <Tabs.Trigger value="communities">Communities</Tabs.Trigger>
+            <Tabs.Trigger value="dead-code">Dead Code</Tabs.Trigger>
             <Tabs.Trigger value="health">Health</Tabs.Trigger>
             <Tabs.Trigger value="risk">Risk</Tabs.Trigger>
+            <Tabs.Trigger value="duplication">Duplication</Tabs.Trigger>
             <Tabs.Trigger value="security">Security</Tabs.Trigger>
             <Tabs.Trigger value="tools">Tools</Tabs.Trigger>
           </Tabs.List>
@@ -381,11 +375,20 @@ export const CodeIntelWorkspace: React.FC<CodeIntelWorkspaceProps> = ({
           <Tabs.Content value="graph" className={styles.tabContent}>
             <CodeGraphView />
           </Tabs.Content>
+          <Tabs.Content value="communities" className={styles.tabContent}>
+            <CommunitiesTab />
+          </Tabs.Content>
+          <Tabs.Content value="dead-code" className={styles.tabContent}>
+            <DeadCodeTab />
+          </Tabs.Content>
           <Tabs.Content value="health" className={styles.tabContent}>
-            <HealthTabPlaceholder />
+            <HealthTab />
           </Tabs.Content>
           <Tabs.Content value="risk" className={styles.tabContent}>
-            <RiskTabPlaceholder />
+            <RiskTab />
+          </Tabs.Content>
+          <Tabs.Content value="duplication" className={styles.tabContent}>
+            <DuplicationTab />
           </Tabs.Content>
           <Tabs.Content value="security" className={styles.tabContent}>
             <SecurityTabPlaceholder />

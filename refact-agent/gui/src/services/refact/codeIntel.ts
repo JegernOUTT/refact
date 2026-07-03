@@ -6,13 +6,22 @@ import type {
   BlastReport,
   CodeIntelCommunity,
   CodeIntelDeadSymbol,
+  CodeIntelDuplication,
+  CodeIntelGitRisk,
   CodeIntelGraph,
+  CodeIntelHealth,
   CodeIntelOverview,
   CodeIntelResponse,
   SecurityFinding,
 } from "./types";
 
 export type CodeIntelGraphQuery = { limit?: number } | undefined;
+export type CodeIntelListQuery =
+  | {
+      path?: string;
+      limit?: number;
+    }
+  | undefined;
 
 export type PrBlastRequest = {
   changed_files: string[];
@@ -109,6 +118,51 @@ export const codeIntelApi = createApi({
         };
       },
     }),
+    getCodeIntelHealth: builder.query<
+      CodeIntelResponse<CodeIntelHealth>,
+      CodeIntelListQuery
+    >({
+      queryFn: async (args, api, _extraOptions, baseQuery) => {
+        const state = (api.getState as () => RootState)();
+        const url = buildApiUrlFromState(state, "/v1/code-intel/health", {
+          path: args?.path,
+          limit: args?.limit,
+        });
+        const result = await baseQuery(url);
+        if (result.error) return { error: result.error };
+        return { data: result.data as CodeIntelResponse<CodeIntelHealth> };
+      },
+    }),
+    getCodeIntelGitRisk: builder.query<
+      CodeIntelResponse<CodeIntelGitRisk>,
+      CodeIntelListQuery
+    >({
+      queryFn: async (args, api, _extraOptions, baseQuery) => {
+        const state = (api.getState as () => RootState)();
+        const url = buildApiUrlFromState(state, "/v1/code-intel/git-risk", {
+          path: args?.path,
+          limit: args?.limit,
+        });
+        const result = await baseQuery(url);
+        if (result.error) return { error: result.error };
+        return { data: result.data as CodeIntelResponse<CodeIntelGitRisk> };
+      },
+    }),
+    getCodeIntelDuplication: builder.query<
+      CodeIntelResponse<CodeIntelDuplication>,
+      CodeIntelListQuery
+    >({
+      queryFn: async (args, api, _extraOptions, baseQuery) => {
+        const state = (api.getState as () => RootState)();
+        const url = buildApiUrlFromState(state, "/v1/code-intel/duplication", {
+          path: args?.path,
+          limit: args?.limit,
+        });
+        const result = await baseQuery(url);
+        if (result.error) return { error: result.error };
+        return { data: result.data as CodeIntelResponse<CodeIntelDuplication> };
+      },
+    }),
     prBlast: builder.mutation<CodeIntelResponse<BlastReport>, PrBlastRequest>({
       queryFn: async (args, api, _extraOptions, baseQuery) => {
         const state = (api.getState as () => RootState)();
@@ -147,6 +201,9 @@ export const {
   useGetCodeIntelGraphQuery,
   useGetCodeIntelCommunitiesQuery,
   useGetCodeIntelDeadCodeQuery,
+  useGetCodeIntelHealthQuery,
+  useGetCodeIntelGitRiskQuery,
+  useGetCodeIntelDuplicationQuery,
   usePrBlastMutation,
   useSecurityScanMutation,
 } = codeIntelApi;

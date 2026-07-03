@@ -37,7 +37,9 @@ function firstRequest(fetchMock: ReturnType<typeof vi.fn<FetchLike>>): Request {
 }
 
 function requestPath(url: string): string {
-  return url.startsWith("http") ? new URL(url).pathname : url;
+  if (!url.startsWith("http")) return url;
+  const parsed = new URL(url);
+  return `${parsed.pathname}${parsed.search}`;
 }
 
 afterEach(() => {
@@ -75,6 +77,105 @@ describe("Code Intel RTK Query API", () => {
       nodes: [{ id: 1, name: "main", path: "src/main.rs" }],
       edges: [],
     });
+  });
+
+  test("getCodeIntelHealth uses list query parameters", async () => {
+    const fetchMock = vi.fn<FetchLike>();
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        aggregate: {
+          file_count: 0,
+          function_count: 0,
+          avg_score: 10,
+          grade: "A",
+          max_complexity: 0,
+          avg_maintainability: 100,
+          avg_duplication_pct: 0,
+          biomarker_count: 0,
+          refactoring_count: 0,
+        },
+        files: [],
+      }),
+    );
+    const store = createTestStore({
+      host: "ide",
+      lspPort: 8123,
+      apiKey: null,
+    });
+
+    const request = store.dispatch(
+      codeIntelApi.endpoints.getCodeIntelHealth.initiate({
+        path: "src/lib.rs",
+        limit: 5,
+      }),
+    );
+    await request;
+
+    const fetchRequest = firstRequest(fetchMock);
+    expect(fetchRequest.url).toBe(
+      "http://127.0.0.1:8123/v1/code-intel/health?path=src%2Flib.rs&limit=5",
+    );
+    expect(fetchRequest.method).toBe("GET");
+  });
+
+  test("getCodeIntelGitRisk and duplication target their endpoints", async () => {
+    const fetchMock = vi.fn<FetchLike>();
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          commits_analyzed: 0,
+          agent_authored_pct: 0,
+          hotspots: [],
+          ownership: [],
+          co_change: [],
+          coupling: [],
+          reviewers: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          aggregate: {
+            file_count: 0,
+            clone_pair_count: 0,
+            duplication_pct: 0,
+            duplication_percent: 0,
+          },
+          clones: [],
+          dry_violations: [],
+          test_smells: [],
+        }),
+      );
+    const store = createTestStore({
+      host: "web",
+      dev: true,
+      apiKey: null,
+    });
+
+    await store.dispatch(
+      codeIntelApi.endpoints.getCodeIntelGitRisk.initiate({ limit: 7 }),
+    );
+    await store.dispatch(
+      codeIntelApi.endpoints.getCodeIntelDuplication.initiate({ limit: 8 }),
+    );
+
+    const [riskInput, riskInit] = fetchMock.mock.calls[0];
+    const [duplicationInput, duplicationInit] = fetchMock.mock.calls[1];
+    const riskRequest =
+      riskInput instanceof Request
+        ? riskInput
+        : new Request(riskInput, riskInit);
+    const duplicationRequest =
+      duplicationInput instanceof Request
+        ? duplicationInput
+        : new Request(duplicationInput, duplicationInit);
+    expect(requestPath(riskRequest.url)).toBe(
+      "/v1/code-intel/git-risk?limit=7",
+    );
+    expect(requestPath(duplicationRequest.url)).toBe(
+      "/v1/code-intel/duplication?limit=8",
+    );
   });
 
   test("prBlast posts changed files to a relative engine URL", async () => {
