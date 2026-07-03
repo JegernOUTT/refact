@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -38,7 +38,6 @@ pub(crate) struct PrBlastIndexState {
 #[derive(Default)]
 struct GitMiningCache {
     history: HashMap<GitCacheKey, (Instant, refact_git_intel::GitIntel)>,
-    messages: HashMap<GitCacheKey, (Instant, Vec<String>)>,
 }
 
 pub(crate) struct CloneAnalysis {
@@ -169,8 +168,8 @@ pub(crate) fn cached_mine_history(
     repo_path: &Path,
     max_commits: usize,
 ) -> Result<refact_git_intel::GitIntel, String> {
-    cached_mine_history_with(repo_path, max_commits, |path, head, max| {
-        refact_git_intel::mine_history_at(path, head, max)
+    cached_mine_history_with(repo_path, max_commits, |path, _head, base, max| {
+        refact_git_intel::mine_history_incremental(path, base, max)
     })
 }
 
@@ -180,62 +179,41 @@ fn cached_mine_history_with<F>(
     mine: F,
 ) -> Result<refact_git_intel::GitIntel, String>
 where
-    F: FnOnce(&Path, Option<Oid>, usize) -> Result<refact_git_intel::GitIntel, String>,
+    F: FnOnce(
+        &Path,
+        Option<Oid>,
+        Option<refact_git_intel::GitIntel>,
+        usize,
+    ) -> Result<refact_git_intel::GitIntel, String>,
 {
     let head = git_head_oid(repo_path)?;
     let key = (repo_path.to_path_buf(), head.clone(), max_commits);
     let now = Instant::now();
-    if let Some(intel) = {
+    let base = {
         let cache = git_cache().lock().unwrap();
-        cache
+        if let Some(intel) = cache
             .history
             .get(&key)
             .filter(|(created, _)| now.duration_since(*created) <= GIT_CACHE_TTL)
             .map(|(_, intel)| intel.clone())
-    } {
-        return Ok(intel);
-    }
-    let intel = mine(repo_path, head.clone(), max_commits)?;
+        {
+            return Ok(intel);
+        }
+        cache
+            .history
+            .iter()
+            .filter(|((cached_path, _, cached_max), _)| {
+                cached_path == repo_path && *cached_max == max_commits
+            })
+            .max_by_key(|(_, (created, _))| *created)
+            .map(|(_, (_, intel))| intel.clone())
+    };
+    let intel = mine(repo_path, head.clone(), base, max_commits)?;
     if git_head_unchanged(repo_path, &head) {
         let mut cache = git_cache().lock().unwrap();
-        cache.history.insert(key, (now, intel.clone()));
+        cache.history.insert(key, (Instant::now(), intel.clone()));
     }
     Ok(intel)
-}
-
-fn cached_commit_messages(repo_path: &Path, max: usize) -> Result<Vec<String>, String> {
-    cached_commit_messages_with(repo_path, max, |path, head, max| {
-        refact_git_intel::collect_commit_messages_at(path, head, max)
-    })
-}
-
-fn cached_commit_messages_with<F>(
-    repo_path: &Path,
-    max: usize,
-    collect: F,
-) -> Result<Vec<String>, String>
-where
-    F: FnOnce(&Path, Option<Oid>, usize) -> Result<Vec<String>, String>,
-{
-    let head = git_head_oid(repo_path)?;
-    let key = (repo_path.to_path_buf(), head.clone(), max);
-    let now = Instant::now();
-    if let Some(messages) = {
-        let cache = git_cache().lock().unwrap();
-        cache
-            .messages
-            .get(&key)
-            .filter(|(created, _)| now.duration_since(*created) <= GIT_CACHE_TTL)
-            .map(|(_, messages)| messages.clone())
-    } {
-        return Ok(messages);
-    }
-    let messages = collect(repo_path, head.clone(), max)?;
-    if git_head_unchanged(repo_path, &head) {
-        let mut cache = git_cache().lock().unwrap();
-        cache.messages.insert(key, (now, messages.clone()));
-    }
-    Ok(messages)
 }
 
 pub(crate) fn pr_blast_index_state(
@@ -1043,6 +1021,482 @@ pub struct ToolCodeWhy {
     pub config_path: String,
 }
 
+const CODE_WHY_HISTORY_COMMITS: usize = 2000;
+const CODE_WHY_SIGNIFICANT_COMMITS: usize = 500;
+const CODE_WHY_SOURCE_LIMIT: usize = 800;
+const CODE_WHY_MATCH_LIMIT: usize = 20;
+const CODE_WHY_RELATED_PER_MATCH: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeWhySource {
+    kind: String,
+    text: String,
+    reference: String,
+    priority: u8,
+    order: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CodeWhyCandidate {
+    decision: refact_codewiki::Decision,
+    source_rank: u8,
+    source_ref: String,
+}
+
+#[derive(Debug, Clone)]
+struct CodeWhyDecision {
+    decision: refact_codewiki::Decision,
+    source_rank: u8,
+    source_ref: String,
+}
+
+#[derive(Debug, Clone)]
+struct ScoredCodeWhyDecision {
+    item: CodeWhyDecision,
+    confidence: f64,
+    verification: refact_codewiki::Verification,
+}
+
+fn code_why_priority(kind: &str) -> u8 {
+    match kind {
+        "adr" => 0,
+        "changelog" => 1,
+        "pr" => 2,
+        _ => 3,
+    }
+}
+
+fn short_oid(oid: Option<&String>, fallback: usize) -> String {
+    oid.map(|oid| oid.chars().take(12).collect::<String>())
+        .filter(|oid| !oid.is_empty())
+        .unwrap_or_else(|| format!("commit:{fallback}"))
+}
+
+fn path_ref(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn merge_commit_has_body(message: &str) -> bool {
+    let mut lines = message.lines();
+    let first = lines.next().unwrap_or("").trim();
+    if !(first.starts_with("Merge pull request") || first.starts_with("Merge branch")) {
+        return false;
+    }
+    lines.any(|line| !line.trim().is_empty())
+}
+
+fn commit_prose_text(message: &str) -> String {
+    message
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn git_code_why_sources(intel: &refact_git_intel::GitIntel) -> Vec<CodeWhySource> {
+    let mut sources = Vec::new();
+    let mut order = 0usize;
+    let significant: HashSet<usize> = intel
+        .significant_commits(CODE_WHY_SIGNIFICANT_COMMITS)
+        .into_iter()
+        .collect();
+
+    for (idx, commit) in intel.commit_records.iter().enumerate() {
+        if merge_commit_has_body(&commit.message) {
+            sources.push(CodeWhySource {
+                kind: "pr".to_string(),
+                text: commit.message.clone(),
+                reference: short_oid(commit.oid.as_ref(), idx),
+                priority: code_why_priority("pr"),
+                order,
+            });
+            order += 1;
+        }
+        if !significant.contains(&idx) {
+            continue;
+        }
+        if commit.message.trim().is_empty() {
+            continue;
+        }
+        sources.push(CodeWhySource {
+            kind: "commit".to_string(),
+            text: commit_prose_text(&commit.message),
+            reference: short_oid(commit.oid.as_ref(), idx),
+            priority: code_why_priority("commit"),
+            order,
+        });
+        order += 1;
+    }
+
+    sources
+}
+
+fn glob_relative_files(repo_path: &Path, pattern: &str) -> BTreeSet<PathBuf> {
+    let mut out = BTreeSet::new();
+    let full_pattern = repo_path.join(pattern).to_string_lossy().to_string();
+    let Ok(paths) = glob::glob(&full_pattern) else {
+        return out;
+    };
+    for path in paths.flatten() {
+        if !path.is_file() {
+            continue;
+        }
+        if let Ok(relative) = path.strip_prefix(repo_path) {
+            out.insert(relative.to_path_buf());
+        }
+    }
+    out
+}
+
+fn code_why_file_kinds(repo_path: &Path) -> Vec<(PathBuf, &'static str)> {
+    let mut by_path: BTreeMap<PathBuf, &'static str> = BTreeMap::new();
+    for pattern in [
+        "docs/**/adr/**/*.md",
+        "docs/adr*/*.md",
+        "ADR-*.md",
+        "docs/decisions/**",
+    ] {
+        for path in glob_relative_files(repo_path, pattern) {
+            by_path.insert(path, "adr");
+        }
+    }
+    for pattern in ["CHANGELOG*.md", "docs/CHANGELOG*.md"] {
+        for path in glob_relative_files(repo_path, pattern) {
+            by_path.entry(path).or_insert("changelog");
+        }
+    }
+    by_path.into_iter().collect()
+}
+
+async fn file_code_why_sources(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    repo_path: &Path,
+) -> Vec<CodeWhySource> {
+    let mut sources = Vec::new();
+    for (order, (relative, kind)) in code_why_file_kinds(repo_path).into_iter().enumerate() {
+        let absolute = repo_path.join(&relative);
+        let Ok(text) =
+            crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx.clone(), &absolute)
+                .await
+        else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        sources.push(CodeWhySource {
+            kind: kind.to_string(),
+            text,
+            reference: path_ref(&relative),
+            priority: code_why_priority(kind),
+            order: usize::MAX / 2 + order,
+        });
+    }
+    sources
+}
+
+fn cap_code_why_sources(mut sources: Vec<CodeWhySource>) -> Vec<CodeWhySource> {
+    sources.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| left.order.cmp(&right.order))
+            .then_with(|| left.reference.cmp(&right.reference))
+    });
+    sources.truncate(CODE_WHY_SOURCE_LIMIT);
+    sources
+}
+
+async fn assemble_code_why_sources(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    repo_path: &Path,
+    intel: &refact_git_intel::GitIntel,
+) -> Vec<CodeWhySource> {
+    let mut sources = git_code_why_sources(intel);
+    sources.extend(file_code_why_sources(gcx, repo_path).await);
+    cap_code_why_sources(sources)
+}
+
+fn code_why_candidates(sources: &[CodeWhySource]) -> Vec<CodeWhyCandidate> {
+    let mut out = Vec::new();
+    for source in sources {
+        let decision_source = refact_codewiki::DecisionSource {
+            kind: source.kind.clone(),
+            text: source.text.clone(),
+        };
+        for extracted in refact_codewiki::sources::extract_all(&[decision_source]) {
+            out.push(CodeWhyCandidate {
+                decision: refact_codewiki::Decision {
+                    statement: extracted.statement,
+                    evidence: extracted.evidence,
+                    source_kind: extracted.source_kind,
+                    status: extracted.status,
+                    provenance: extracted.provenance,
+                    corroboration_count: 1,
+                },
+                source_rank: extracted.source_rank,
+                source_ref: source.reference.clone(),
+            });
+        }
+    }
+    out
+}
+
+fn better_code_why_candidate(left: &CodeWhyCandidate, right: &CodeWhyCandidate) -> bool {
+    left.source_rank > right.source_rank
+        || (left.source_rank == right.source_rank && left.source_ref < right.source_ref)
+}
+
+fn representative_candidate<'a>(
+    decision: &refact_codewiki::Decision,
+    candidates: &'a [CodeWhyCandidate],
+) -> Option<&'a CodeWhyCandidate> {
+    let mut best = None;
+    for candidate in candidates {
+        if !refact_codewiki::semantic_match::is_duplicate_decision_text(
+            &decision.statement,
+            &candidate.decision.statement,
+        ) {
+            continue;
+        }
+        if best
+            .map(|existing| better_code_why_candidate(candidate, existing))
+            .unwrap_or(true)
+        {
+            best = Some(candidate);
+        }
+    }
+    best
+}
+
+fn corroborated_code_why_decisions(candidates: &[CodeWhyCandidate]) -> Vec<CodeWhyDecision> {
+    let mut decisions: Vec<refact_codewiki::Decision> = candidates
+        .iter()
+        .map(|candidate| candidate.decision.clone())
+        .collect();
+    refact_codewiki::corroborate(&mut decisions);
+    decisions
+        .into_iter()
+        .map(|decision| {
+            let (source_rank, source_ref) = representative_candidate(&decision, candidates)
+                .map(|candidate| (candidate.source_rank, candidate.source_ref.clone()))
+                .unwrap_or_else(|| {
+                    (
+                        source_rank_for_kind(&decision.source_kind),
+                        decision.source_kind.clone(),
+                    )
+                });
+            CodeWhyDecision {
+                decision,
+                source_rank,
+                source_ref,
+            }
+        })
+        .collect()
+}
+
+fn source_rank_for_kind(kind: &str) -> u8 {
+    match kind {
+        "adr" => refact_codewiki::sources::SOURCE_RANK_ADR,
+        "pr" => refact_codewiki::sources::SOURCE_RANK_PR,
+        "commit" => refact_codewiki::sources::SOURCE_RANK_COMMIT,
+        "changelog" => refact_codewiki::sources::SOURCE_RANK_CHANGELOG,
+        "code_comment" => refact_codewiki::sources::SOURCE_RANK_CODE_COMMENT,
+        _ => refact_codewiki::sources::SOURCE_RANK_COMMENT,
+    }
+}
+
+fn verification_for_status(
+    status: refact_codewiki::DecisionStatus,
+) -> refact_codewiki::Verification {
+    match status {
+        refact_codewiki::DecisionStatus::Verified => refact_codewiki::Verification::Exact,
+        refact_codewiki::DecisionStatus::Fuzzy => refact_codewiki::Verification::Fuzzy,
+        refact_codewiki::DecisionStatus::Unverified => refact_codewiki::Verification::Unverified,
+    }
+}
+
+fn score_code_why_decision(decision: CodeWhyDecision) -> ScoredCodeWhyDecision {
+    let verification = verification_for_status(decision.decision.status);
+    let confidence = refact_codewiki::gate::compute_confidence(
+        decision.source_rank,
+        decision.decision.corroboration_count,
+        (decision.decision.provenance, verification),
+    );
+    ScoredCodeWhyDecision {
+        item: decision,
+        confidence,
+        verification,
+    }
+}
+
+fn sort_scored_code_why_decisions(decisions: &mut [ScoredCodeWhyDecision]) {
+    decisions.sort_by(|left, right| {
+        right
+            .confidence
+            .total_cmp(&left.confidence)
+            .then_with(|| left.item.source_ref.cmp(&right.item.source_ref))
+            .then_with(|| {
+                left.item
+                    .decision
+                    .statement
+                    .cmp(&right.item.decision.statement)
+            })
+    });
+}
+
+fn provenance_tag(
+    provenance: refact_codewiki::Provenance,
+    verification: refact_codewiki::Verification,
+) -> &'static str {
+    match (provenance, verification) {
+        (refact_codewiki::Provenance::Verbatim, _) => "verbatim",
+        (refact_codewiki::Provenance::Paraphrase, refact_codewiki::Verification::Unverified) => {
+            "paraphrase-unverified"
+        }
+        (refact_codewiki::Provenance::Paraphrase, _) => "paraphrase-verified",
+    }
+}
+
+fn related_decision_graph(
+    matched: &[ScoredCodeWhyDecision],
+    all: &[CodeWhyDecision],
+) -> Option<refact_codewiki::DecisionGraph> {
+    let mut included = BTreeSet::new();
+    for matched_item in matched.iter().take(5) {
+        let Some(self_idx) = all.iter().position(|candidate| {
+            candidate.decision.statement == matched_item.item.decision.statement
+                && candidate.source_ref == matched_item.item.source_ref
+        }) else {
+            continue;
+        };
+        let mut hits: Vec<refact_codewiki::semantic_match::SearchHit> = all
+            .iter()
+            .enumerate()
+            .map(
+                |(idx, candidate)| refact_codewiki::semantic_match::SearchHit {
+                    page_id: refact_codewiki::semantic_match::decision_page_id(&idx.to_string()),
+                    score: refact_codewiki::evolution::text_similarity(
+                        &matched_item.item.decision.statement,
+                        &candidate.decision.statement,
+                    ),
+                },
+            )
+            .collect();
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.page_id.cmp(&right.page_id))
+        });
+        let exclude_ids = HashSet::from([self_idx.to_string()]);
+        let related = refact_codewiki::semantic_match::find_related_decisions(
+            &hits,
+            refact_codewiki::evolution::RELATED_TAU,
+            refact_codewiki::semantic_match::DEFAULT_DEDUP_TAU,
+            &exclude_ids,
+            CODE_WHY_RELATED_PER_MATCH,
+        );
+        if related.is_empty() {
+            continue;
+        }
+        included.insert(self_idx);
+        for (id, _) in related {
+            if let Ok(idx) = id.parse::<usize>() {
+                included.insert(idx);
+            }
+        }
+    }
+    if included.len() < 2 {
+        return None;
+    }
+    let decisions = included
+        .into_iter()
+        .filter_map(|idx| all.get(idx).map(|item| item.decision.clone()))
+        .collect::<Vec<_>>();
+    let graph = refact_codewiki::build_decision_graph(decisions);
+    (!graph.edges.is_empty()).then_some(graph)
+}
+
+fn relation_label(relation: refact_codewiki::Relation) -> &'static str {
+    match relation {
+        refact_codewiki::Relation::Supersedes => "supersedes",
+        refact_codewiki::Relation::Refines => "refines",
+        refact_codewiki::Relation::RelatesTo => "relates",
+        refact_codewiki::Relation::ConflictsWith => "conflicts",
+    }
+}
+
+fn code_why_output(
+    query: &str,
+    sources: &[CodeWhySource],
+    commits_analyzed: u32,
+) -> Option<String> {
+    let candidates = code_why_candidates(sources);
+    let decisions = corroborated_code_why_decisions(&candidates);
+    let needle = query.to_lowercase();
+    let mut all_scored: Vec<ScoredCodeWhyDecision> =
+        decisions.into_iter().map(score_code_why_decision).collect();
+    sort_scored_code_why_decisions(&mut all_scored);
+    let mut matched: Vec<ScoredCodeWhyDecision> = all_scored
+        .iter()
+        .filter(|scored| {
+            scored
+                .item
+                .decision
+                .statement
+                .to_lowercase()
+                .contains(&needle)
+        })
+        .cloned()
+        .collect();
+    matched.truncate(CODE_WHY_MATCH_LIMIT);
+    if matched.is_empty() {
+        return None;
+    }
+
+    let mut msg = format!(
+        "Decisions matching `{query}` from {} sources ({} commits analyzed):\n",
+        sources.len(),
+        commits_analyzed
+    );
+    for scored in &matched {
+        let d = &scored.item.decision;
+        let tag = provenance_tag(d.provenance, scored.verification);
+        msg.push_str(&format!(
+            "  [{}] conf={:.2} corr={} src={}:{} — {}\n",
+            tag,
+            scored.confidence,
+            d.corroboration_count,
+            d.source_kind,
+            scored.item.source_ref,
+            d.statement
+        ));
+    }
+    let all_decisions: Vec<CodeWhyDecision> = all_scored
+        .iter()
+        .map(|scored| scored.item.clone())
+        .collect();
+    if let Some(graph) = related_decision_graph(&matched, &all_decisions) {
+        msg.push_str("\nRelated decision graph:\n");
+        for (from, to, relation) in graph.edges.iter().take(12) {
+            let Some(from_decision) = graph.decisions.get(*from) else {
+                continue;
+            };
+            let Some(to_decision) = graph.decisions.get(*to) else {
+                continue;
+            };
+            msg.push_str(&format!(
+                "  {} {} {}\n",
+                from_decision.statement,
+                relation_label(*relation),
+                to_decision.statement
+            ));
+        }
+    }
+    Some(msg)
+}
+
 #[async_trait]
 impl Tool for ToolCodeWhy {
     async fn tool_execute(
@@ -1053,95 +1507,22 @@ impl Tool for ToolCodeWhy {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let query = string_arg(args, "query")?;
         let gcx = ccx.lock().await.app.gcx.clone();
-        let dir = project_dir(gcx)
+        let dir = project_dir(gcx.clone())
             .await
             .ok_or_else(|| "no project directory available".to_string())?;
-        let messages = cached_commit_messages(&dir, 2000)?;
-        let sources: Vec<refact_codewiki::DecisionSource> = messages
-            .into_iter()
-            .map(|text| refact_codewiki::DecisionSource {
-                kind: "commit".to_string(),
-                text,
-            })
-            .collect();
-        let decisions = refact_codewiki::sources::extract_all(&sources);
-        let mut corr_by_statement: HashMap<String, u32> = HashMap::new();
-        for d in &decisions {
-            *corr_by_statement
-                .entry(refact_codewiki::gate::normalize_text(&d.statement))
-                .or_insert(0) += 1;
-        }
-        let needle = query.to_lowercase();
-        let mut matched: Vec<_> = decisions
-            .into_iter()
-            .filter(|d| d.statement.to_lowercase().contains(&needle))
-            .collect();
-        matched.sort_by(|a, b| b.source_rank.cmp(&a.source_rank));
-        let mut deduped: Vec<refact_codewiki::sources::ExtractedDecision> = Vec::new();
-        for d in matched {
-            let mut hits: Vec<refact_codewiki::semantic_match::SearchHit> = deduped
-                .iter()
-                .enumerate()
-                .map(|(i, k)| refact_codewiki::semantic_match::SearchHit {
-                    page_id: refact_codewiki::semantic_match::decision_page_id(&i.to_string()),
-                    score: refact_codewiki::gate::decision_similarity(&d.statement, &k.statement),
-                })
-                .collect();
-            hits.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            match refact_codewiki::semantic_match::find_duplicate_decision(
-                &hits,
-                refact_codewiki::semantic_match::DEFAULT_DEDUP_TAU,
-                &std::collections::HashSet::new(),
-            ) {
-                Some(_) => {}
-                None => {
-                    deduped.push(d);
-                }
-            }
-        }
-        let mut matched = deduped;
-        matched.truncate(20);
-        if matched.is_empty() {
+        let intel = cached_mine_history(&dir, CODE_WHY_HISTORY_COMMITS)?;
+        let sources = assemble_code_why_sources(gcx, &dir, &intel).await;
+        let Some(msg) = code_why_output(&query, &sources, intel.commits_analyzed) else {
             return Ok((
                 false,
                 tool_message(
                     tool_call_id,
                     format!(
-                        "No evidence-backed decisions found in commit history matching `{query}`."
+                        "No evidence-backed decisions found in commit prose, ADRs, changelogs, or merge PRs matching `{query}`."
                     ),
                 ),
             ));
-        }
-        let mut msg = format!("Decisions matching `{query}` (evidence-ranked, grounded):\n");
-        for d in &matched {
-            let verdict = refact_codewiki::gate::verify_quote(&d.statement, &d.evidence, 0.6);
-            let verification = match verdict {
-                refact_codewiki::gate::Verdict::Exact => refact_codewiki::gate::Verification::Exact,
-                refact_codewiki::gate::Verdict::Fuzzy => refact_codewiki::gate::Verification::Fuzzy,
-                refact_codewiki::gate::Verdict::Unverified => {
-                    refact_codewiki::gate::Verification::Unverified
-                }
-            };
-            let corr = corr_by_statement
-                .get(&refact_codewiki::gate::normalize_text(&d.statement))
-                .copied()
-                .unwrap_or(1);
-            let confidence =
-                refact_codewiki::gate::compute_confidence(d.source_rank, corr, verification);
-            let grounded = match verdict {
-                refact_codewiki::gate::Verdict::Exact => "grounded",
-                refact_codewiki::gate::Verdict::Fuzzy => "partial",
-                refact_codewiki::gate::Verdict::Unverified => "ungrounded",
-            };
-            msg.push_str(&format!(
-                "  [{:?} rank={} src={} conf={:.2} {}] {}\n",
-                d.status, d.source_rank, d.source_kind, confidence, grounded, d.statement
-            ));
-        }
+        };
         Ok((false, tool_message(tool_call_id, msg)))
     }
 
@@ -1155,7 +1536,7 @@ impl Tool for ToolCodeWhy {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Explain why the code is the way it is: mines evidence-backed decisions from commit history matching a query.".to_string(),
+            description: "Explain why the code is the way it is: mines evidence-backed decisions from significant commit prose, merge PR bodies, ADRs, and changelogs matching a query.".to_string(),
             input_schema: json_schema_from_params(
                 &[("query", "string", "Topic or keyword to find decisions about.")],
                 &["query"],
@@ -1764,7 +2145,11 @@ mod tests {
 
     fn commit_file(repo: &Repository, path: &str, contents: &str, msg: &str) -> git2::Oid {
         let workdir = repo.workdir().unwrap();
-        std::fs::write(workdir.join(path), contents).unwrap();
+        let full_path = workdir.join(path);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(full_path, contents).unwrap();
         let mut index = repo.index().unwrap();
         index.add_path(Path::new(path)).unwrap();
         index.write().unwrap();
@@ -1805,7 +2190,7 @@ mod tests {
         let key = (repo_path.to_path_buf(), Some(main_oid), max);
         assert_eq!(git_head_oid(repo_path).unwrap(), Some(main_oid));
 
-        let history = cached_mine_history_with(repo_path, max, |path, _head, max| {
+        let history = cached_mine_history_with(repo_path, max, |path, _head, _base, max| {
             let repo = Repository::open(path).unwrap();
             repo.set_head("refs/heads/side").unwrap();
             refact_git_intel::mine_history(path, max)
@@ -1814,20 +2199,150 @@ mod tests {
 
         assert_eq!(history.commit_records[0].message, "side branch history");
         assert!(git_cache().lock().unwrap().history.get(&key).is_none());
+    }
 
-        Repository::open(repo_path)
-            .unwrap()
-            .set_head("refs/heads/main")
-            .unwrap();
-        let messages = cached_commit_messages_with(repo_path, max, |path, _head, max| {
-            let repo = Repository::open(path).unwrap();
-            repo.set_head("refs/heads/side").unwrap();
-            refact_git_intel::collect_commit_messages(path, max)
+    #[test]
+    fn code_why_assembles_multi_kind_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_file(
+            &repo,
+            "src/a.rs",
+            "a\n",
+            "introduce codegraph index because symbol search needs persisted edges",
+        );
+        commit_file(
+            &repo,
+            "src/b.rs",
+            "b\n",
+            "switch to codegraph instead of ast maps because cross-file search needs edges",
+        );
+        commit_file(
+            &repo,
+            "src/c.rs",
+            "c\n",
+            "replace codegraph queue polling because incremental indexing needs lower latency",
+        );
+        commit_file(
+            &repo,
+            "src/d.rs",
+            "d\n",
+            "Merge branch feature/codegraph\n\n## Why\nSwitch codegraph traversal to sqlite because graph queries need persistence.",
+        );
+        let adr_path = dir.path().join("docs/adr/001-codegraph.md");
+        std::fs::create_dir_all(adr_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &adr_path,
+            "# Use codegraph for symbol search\n\n## Decision\nUse codegraph because symbol search needs relationships.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("CHANGELOG.md"),
+            "## Unreleased\n\n### Changed\n- switch codegraph results to evidence-ranked output\n",
+        )
+        .unwrap();
+
+        let intel = refact_git_intel::mine_history(dir.path(), 20).unwrap();
+        let mut sources = git_code_why_sources(&intel);
+        for (order, (relative, kind)) in code_why_file_kinds(dir.path()).into_iter().enumerate() {
+            sources.push(CodeWhySource {
+                kind: kind.to_string(),
+                text: std::fs::read_to_string(dir.path().join(&relative)).unwrap(),
+                reference: path_ref(&relative),
+                priority: code_why_priority(kind),
+                order: usize::MAX / 2 + order,
+            });
+        }
+        let sources = cap_code_why_sources(sources);
+        let kinds: BTreeSet<String> = sources.iter().map(|source| source.kind.clone()).collect();
+
+        assert!(kinds.contains("commit"));
+        assert!(kinds.contains("pr"));
+        assert!(kinds.contains("adr"));
+        assert!(kinds.contains("changelog"));
+        assert_eq!(
+            sources.first().map(|source| source.kind.as_str()),
+            Some("adr")
+        );
+    }
+
+    #[test]
+    fn code_why_finds_prose_decision_end_to_end() {
+        let statement =
+            "switch codegraph storage to sqlite instead of memory because graph queries need persistence";
+        let sources = vec![
+            CodeWhySource {
+                kind: "adr".to_string(),
+                text: format!("# {statement}\n\n## Decision\n{statement}\n"),
+                reference: "docs/adr/001-codegraph.md".to_string(),
+                priority: code_why_priority("adr"),
+                order: 0,
+            },
+            CodeWhySource {
+                kind: "commit".to_string(),
+                text: statement.to_string(),
+                reference: "abcdef123456".to_string(),
+                priority: code_why_priority("commit"),
+                order: 1,
+            },
+        ];
+
+        let output = code_why_output("codegraph", &sources, 2).unwrap();
+
+        assert!(output.contains(statement));
+        assert!(output.contains("[verbatim"));
+        assert!(output.contains("corr=2"));
+        assert!(output.contains("src=adr:docs/adr/001-codegraph.md"));
+    }
+
+    #[test]
+    fn cached_mine_history_incremental_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_file(
+            &repo,
+            "src/a.rs",
+            "a\n",
+            "introduce codegraph history because decisions need provenance",
+        );
+
+        let first = cached_mine_history_with(dir.path(), 20, |path, _head, base, max| {
+            assert!(base.is_none());
+            refact_git_intel::mine_history_incremental(path, base, max)
+        })
+        .unwrap();
+        let first_head = first.last_commit_id.clone();
+        commit_file(
+            &repo,
+            "src/b.rs",
+            "b\n",
+            "switch codegraph history to incremental because repeated mining is expensive",
+        );
+
+        let second = cached_mine_history_with(dir.path(), 20, |path, _head, base, max| {
+            let base = base.expect("previous cached history is reused as incremental base");
+            assert_eq!(base.last_commit_id, first_head);
+            refact_git_intel::mine_history_incremental(path, Some(base), max)
         })
         .unwrap();
 
-        assert_eq!(messages[0], "side branch history");
-        assert!(git_cache().lock().unwrap().messages.get(&key).is_none());
+        assert_eq!(second.commits_analyzed, first.commits_analyzed + 1);
+        assert_ne!(second.last_commit_id, first.last_commit_id);
+    }
+
+    #[test]
+    #[ignore]
+    fn code_why_real_repo_smoke() {
+        let repo_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .unwrap();
+        let intel = refact_git_intel::mine_history(repo_path, CODE_WHY_HISTORY_COMMITS).unwrap();
+        let sources = git_code_why_sources(&intel);
+        let output = code_why_output("codegraph", &sources, intel.commits_analyzed).unwrap();
+
+        assert!(output.contains("codegraph"));
+        println!("{}", output.lines().take(8).collect::<Vec<_>>().join("\n"));
     }
 
     #[test]
