@@ -1,6 +1,5 @@
 package com.smallcloud.refactai.panes.sharedchat
 
-import com.intellij.ProjectTopics
 import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.DataContext
@@ -398,7 +397,7 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
                 }
             })
 
-        project.messageBus.connect(this).subscribe(ProjectTopics.PROJECT_ROOTS, object : ModuleRootListener {
+        project.messageBus.connect(this).subscribe(ModuleRootListener.TOPIC, object : ModuleRootListener {
             override fun rootsChanged(event: ModuleRootEvent) {
                 this@SharedChatPane.sendCurrentProjectInfo()
                 this@SharedChatPane.sendUserConfig()
@@ -588,7 +587,11 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
     }
 
     private fun handleOpenFile(fileName: String, line: Int?) {
-        val validatedPath = validateAndSanitizePath(fileName, "handleOpenFile") ?: return
+        val validatedPath = validateAndSanitizePath(
+            fileName,
+            "handleOpenFile",
+            PathScope.PROJECT_OR_REFACT_CONFIG
+        ) ?: return
         val file = File(validatedPath)
         invokeLater {
             val vf = VfsUtil.findFileByIoFile(file, true) ?: return@invokeLater

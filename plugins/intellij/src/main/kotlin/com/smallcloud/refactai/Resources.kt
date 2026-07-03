@@ -1,47 +1,47 @@
 package com.smallcloud.refactai
 
-import com.intellij.ide.plugins.IdeaPluginDescriptor
-import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.util.IconLoader
 import com.intellij.openapi.util.SystemInfo
 import com.intellij.util.IconUtil
 import java.io.File
+import java.nio.file.Path
 import javax.swing.Icon
 import javax.swing.UIManager
 
+private const val REFACT_PLUGIN_ID = "com.smallcloud.codify"
+private const val FALLBACK_PLUGIN_VERSION = "8.2.3"
 
-fun getThisPlugin(): IdeaPluginDescriptor? {
-    val thisPluginById = PluginManagerCore.getPlugin(PluginId.getId("com.smallcloud.codify"))
-    if (thisPluginById != null) {
-        return thisPluginById
-    }
-    return null
+data class RefactPluginInfo(
+    val pluginId: PluginId,
+    val version: String,
+    val pluginPath: Path?
+)
+
+fun getThisPlugin(): RefactPluginInfo? {
+    return RefactPluginInfo(
+        pluginId = PluginId.getId(REFACT_PLUGIN_ID),
+        version = getVersion(),
+        pluginPath = getHomePath()?.toPath()
+    )
 }
 
+private fun getHomePath(): File? {
+    val location = Resources::class.java.protectionDomain?.codeSource?.location ?: return null
+    val file = runCatching { File(location.toURI()) }.getOrNull() ?: return null
+    if (!file.isFile) return file
 
-private fun getHomePath(): File {
-    return getThisPlugin()?.pluginPath?.toFile()
-        ?: throw IllegalStateException("Plugin not found")
+    val jarDir = file.parentFile ?: return null
+    return if (jarDir.name == "lib") jarDir.parentFile ?: jarDir else jarDir
 }
 
 private fun getVersion(): String {
-    val thisPlugin = getThisPlugin()
-    if (thisPlugin != null) {
-        return thisPlugin.version
-    }
-    return ""
+    return Resources::class.java.`package`?.implementationVersion?.takeIf { it.isNotBlank() }
+        ?: FALLBACK_PLUGIN_VERSION
 }
 
-
-private fun getPluginId(): PluginId {
-    val thisPlugin = getThisPlugin()
-    if (thisPlugin != null) {
-        return thisPlugin.pluginId
-    }
-    return PluginId.getId("com.smallcloud.codify")
-}
+private fun getPluginId(): PluginId = PluginId.getId(REFACT_PLUGIN_ID)
 
 private fun getArch(): String {
     val arch = SystemInfo.OS_ARCH

@@ -9,7 +9,6 @@ import com.intellij.openapi.editor.Caret
 import com.intellij.openapi.editor.event.CaretEvent
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.ex.EditorEx
-import com.intellij.util.ObjectUtils
 import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.util.messages.MessageBus
 import com.intellij.util.xmlb.annotations.Transient
@@ -133,11 +132,10 @@ class ModeProvider(
                 val modeProvider = ModeProvider(editor)
                 providersToTs[hashId] = currentTimeMillis()
                 editor.caretModel.addCaretListener(GlobalCaretListener())
-                ObjectUtils.consumeIfCast(editor, EditorEx::class.java) {
+                (editor as? EditorEx)?.let {
                     try {
                         it.addFocusListener(GlobalFocusListener(), modeProvider)
-                    } catch (e: UnsupportedOperationException) {
-                        // nothing
+                    } catch (_: UnsupportedOperationException) {
                     }
                 }
                 modeProvider

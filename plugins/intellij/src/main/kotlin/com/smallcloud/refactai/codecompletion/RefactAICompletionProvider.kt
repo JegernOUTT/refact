@@ -4,7 +4,6 @@ package com.smallcloud.refactai.codecompletion
 
 import com.intellij.codeInsight.inline.completion.*
 import com.intellij.codeInsight.inline.completion.elements.InlineCompletionElement
-import com.intellij.codeInsight.inline.completion.elements.InlineCompletionElementManipulator
 import com.intellij.codeInsight.inline.completion.elements.InlineCompletionGrayTextElement
 import com.intellij.codeInsight.inline.completion.elements.InlineCompletionSkipTextElement
 import com.intellij.codeInsight.inline.completion.suggestion.InlineCompletionSingleSuggestion
@@ -13,14 +12,11 @@ import com.intellij.codeInsight.inline.completion.suggestion.InlineCompletionSug
 import com.intellij.codeInsight.inline.completion.suggestion.InlineCompletionSuggestionUpdateManager.UpdateResult.Invalidated
 import com.intellij.codeInsight.inline.completion.suggestion.InlineCompletionVariant
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.runReadAction
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.util.Key
 import com.intellij.ui.components.JBLabel
-import com.intellij.util.application
 import com.smallcloud.refactai.Resources
 import com.smallcloud.refactai.io.ConnectionStatus
 import com.smallcloud.refactai.io.streamedInferenceFetch
@@ -45,7 +41,6 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as InferenceGlobalContext
 
-val EditorRefactLastCompletionIsMultilineKey = Key.create<Boolean>("refact.lastCompletion.isMultiline")
 
 private class Default : InlineCompletionSuggestionUpdateManager.Adapter {
     override fun onDocumentChange(
@@ -72,8 +67,11 @@ private class Default : InlineCompletionSuggestionUpdateManager.Adapter {
         val newFirstElementIndex = elements.indexOfFirst { it.text.isNotEmpty() }
         if (newFirstElementIndex < 0) return null
         val firstElement = elements[newFirstElementIndex]
-        val manipulator = InlineCompletionElementManipulator.getApplicable(firstElement) ?: return null
-        val newFirstElement = manipulator.truncateFirstSymbol(firstElement)
+        val newText = firstElement.text.drop(1)
+        val newFirstElement = when (firstElement) {
+            is InlineCompletionSkipTextElement -> InlineCompletionSkipTextElement(newText)
+            else -> InlineCompletionGrayTextElement(newText)
+        }.takeIf { it.text.isNotEmpty() }
         return listOfNotNull(newFirstElement) + elements.drop(newFirstElementIndex + 1)
     }
 
@@ -96,13 +94,6 @@ private class InsertHandler : DefaultInlineCompletionInsertHandler() {
         elements: List<InlineCompletionElement>
     ) {
         super.afterInsertion(environment, elements)
-        application.invokeLater { // Very important to make it in another EDT call
-            InlineCompletion.getHandlerOrNull(environment.editor)?.invokeEvent(
-                RefactAIContinuousEvent(
-                    environment.editor, environment.editor.caretModel.offset
-                )
-            )
-        }
     }
 }
 
@@ -181,8 +172,8 @@ class RefactAICompletionProvider : DebouncedInlineCompletionProvider() {
             pos = offset - editor.document.getLineStartOffset(logicalPos.line)
         }
         val force = request.event is InlineCompletionEvent.DirectCall
-        val state = runReadAction {
-                EditorTextState(
+        val state = ApplicationManager.getApplication().runReadAction<EditorTextState> {
+            EditorTextState(
                 editor,
                 editor.document.modificationStamp,
                 editor.caretModel.offset
@@ -249,7 +240,6 @@ class RefactAICompletionProvider : DebouncedInlineCompletionProvider() {
                         send(it)
                         delay(2)
                     }
-                    EditorRefactLastCompletionIsMultilineKey[request.editor] = completion.multiline
                 }
             }
             awaitClose()
@@ -289,20 +279,10 @@ class RefactAICompletionProvider : DebouncedInlineCompletionProvider() {
         completionData: Completion,
         editorState: EditorTextState
     ): List<InlineCompletionElement> {
-        return if (completionData.completion.startsWith(editorState.currentLine)) {
-            listOf(
-                InlineCompletionGrayTextElementCustom(
-                    completionData.completion.substring(editorState.currentLine.length)
-                )
-            )
-        } else {
-            listOf(
-                InlineCompletionGrayTextElementCustom(
-                    completionData.completion,
-                    (editorState.offsetByCurrentLine)
-                )
-            )
-        }
+        if (!completionData.completion.startsWith(editorState.currentLine)) return emptyList()
+        val text = completionData.completion.substring(editorState.currentLine.length)
+        if (text.isEmpty()) return emptyList()
+        return listOf(InlineCompletionGrayTextElement(text))
     }
 
     override fun isEnabled(event: InlineCompletionEvent): Boolean {

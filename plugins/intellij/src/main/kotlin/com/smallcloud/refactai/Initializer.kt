@@ -8,6 +8,7 @@ import com.intellij.openapi.application.invokeLater
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.ProjectActivity
+import com.smallcloud.refactai.code_lens.CodeLensInlayService
 import com.smallcloud.refactai.io.NotificationSSEClient
 import com.smallcloud.refactai.lsp.LSPActiveDocNotifierService
 import com.smallcloud.refactai.lsp.LSPProcessHolder.Companion.initialize
@@ -42,6 +43,7 @@ class Initializer : ProjectActivity, Disposable {
             preWarmResources()
         }
         getLSPProcessHolder(project).ensureStartedIfNeeded("project-activity")
+        project.getService(CodeLensInlayService::class.java).refreshAllEditors()
         project.getService(LSPActiveDocNotifierService::class.java)
         getLSPProcessHolder(project).ensureStartedIfNeeded("active-doc-notifier")
         project.getService(NotificationSSEClient::class.java).start()

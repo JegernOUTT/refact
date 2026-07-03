@@ -1,14 +1,11 @@
 package com.smallcloud.refactai.code_lens
 
-import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.components.service
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.LogicalPosition
-import com.intellij.openapi.project.DumbAwareAction
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.openapi.wm.ToolWindowManager
-import com.smallcloud.refactai.Resources
 import com.smallcloud.refactai.panes.RefactAIToolboxPaneFactory
 import com.smallcloud.refactai.struct.ChatMessage
 import java.util.concurrent.atomic.AtomicBoolean
@@ -21,10 +18,8 @@ class CodeLensAction(
     private val messages: Array<ChatMessage>,
     private val sendImmediately: Boolean,
     private val openNewTab: Boolean
-) : DumbAwareAction(Resources.Icons.LOGO_RED_16x16) {
-    override fun actionPerformed(p0: AnActionEvent) {
-        actionPerformed()
-    }
+) {
+    private val isActionRunning = AtomicBoolean(false)
 
     private fun replaceVariablesInText(
         text: String,
@@ -45,51 +40,58 @@ class CodeLensAction(
         cursor: Int?,
         text: String
     ): Array<ChatMessage> {
-        val formattedMessages = messages.map { message ->
+        return messages.map { message ->
             if (message.role == "user") {
-                message.copy(
-                    content = replaceVariablesInText(message.content, relativePath, cursor, text)
-                )
+                message.copy(content = replaceVariablesInText(message.content, relativePath, cursor, text))
             } else {
                 message
             }
         }.toTypedArray()
-        return formattedMessages
     }
 
     private fun formatMessages(): Array<ChatMessage> {
-        val pos1 = LogicalPosition(line1, 0)
+        val lineCount = editor.document.lineCount
+        if (lineCount == 0) return emptyArray()
+        val safeLine1 = line1.coerceIn(0, lineCount - 1)
+        val safeLine2 = line2.coerceIn(safeLine1, lineCount - 1)
+        val pos1 = LogicalPosition(safeLine1, 0)
         val text = editor.document.text.slice(
-            editor.logicalPositionToOffset(pos1) until editor.document.getLineEndOffset(line2)
+            editor.logicalPositionToOffset(pos1) until editor.document.getLineEndOffset(safeLine2)
         )
-        val filePath = editor.virtualFile.toNioPath()
-        val relativePath = editor.project?.let {
-            ProjectRootManager.getInstance(it).contentRoots.map { root ->
-                filePath.relativeTo(root.toNioPath())
-            }.minBy { it.toString().length }
+        val file = FileDocumentManager.getInstance().getFile(editor.document)
+        val filePath = file?.toNioPath() ?: return formatMultipleMessagesForCodeLens(messages, "", safeLine1, text)
+        val relativePath = editor.project?.let { project ->
+            ProjectRootManager.getInstance(project).contentRoots.mapNotNull { root ->
+                runCatching { filePath.relativeTo(root.toNioPath()) }.getOrNull()
+            }.minByOrNull { it.toString().length }
         }
 
-        val formattedMessages = formatMultipleMessagesForCodeLens(messages, relativePath?.toString() ?: filePath.toString(), line1, text);
-
-        return formattedMessages
+        return formatMultipleMessagesForCodeLens(
+            messages,
+            relativePath?.toString() ?: filePath.toString(),
+            safeLine1,
+            text
+        )
     }
 
-    private val isActionRunning = AtomicBoolean(false)
-
     fun actionPerformed() {
-        val chat = editor.project?.let { ToolWindowManager.getInstance(it).getToolWindow("Refact") }
+        val project = editor.project ?: return
+        val chat = ToolWindowManager.getInstance(project).getToolWindow("Refact")
 
         chat?.activate {
             RefactAIToolboxPaneFactory.chat?.requestFocus()
             RefactAIToolboxPaneFactory.chat?.executeCodeLensCommand(formatMessages(), sendImmediately, openNewTab)
         }
 
-        // If content is empty, then it's "Open Chat" instruction, selecting range of code in active tab
         if (messages.isEmpty() && isActionRunning.compareAndSet(false, true)) {
             ApplicationManager.getApplication().invokeLater {
                 try {
-                    val intendedStart = editor.document.getLineStartOffset(line1)
-                    val intendedEnd = editor.document.getLineEndOffset(line2)
+                    val lineCount = editor.document.lineCount
+                    if (lineCount == 0) return@invokeLater
+                    val safeLine1 = line1.coerceIn(0, lineCount - 1)
+                    val safeLine2 = line2.coerceIn(safeLine1, lineCount - 1)
+                    val intendedStart = editor.document.getLineStartOffset(safeLine1)
+                    val intendedEnd = editor.document.getLineEndOffset(safeLine2)
                     editor.selectionModel.setSelection(intendedStart, intendedEnd)
                 } finally {
                     isActionRunning.set(false)

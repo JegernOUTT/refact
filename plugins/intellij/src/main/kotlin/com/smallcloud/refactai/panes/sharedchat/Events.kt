@@ -55,10 +55,8 @@ class EventNames {
         @SerializedName("chatThread/new")
         NEW_CHAT("chatThread/new"),
 
-        // codelens
         @SerializedName("textarea/replace")
         CODE_LENS_EXEC("textarea/replace"),
-        // logout, open external url, setup host
 
         @SerializedName("ide/toolEditResponse")
         IDE_TOOL_EDIT_RESPONSE("ide/toolEditResponse"),
@@ -401,6 +399,7 @@ class Events {
     }
 
     object NewChat : ToChat<Unit>(EventNames.ToChat.NEW_CHAT, Unit)
+
     data class CodeLensCommandPayload(
         val value: String = "",
         @SerializedName("send_immediately") val sendImmediately: Boolean = false,
@@ -415,14 +414,10 @@ class Events {
             return messages.contentEquals(other.messages)
         }
 
-        override fun hashCode(): Int {
-            return messages.contentHashCode()
-        }
+        override fun hashCode(): Int = messages.contentHashCode()
     }
 
     class CodeLensCommand(payload: CodeLensCommandPayload) : ToChat<Payload>(EventNames.ToChat.CODE_LENS_EXEC, payload)
-
-
 
     class Config {
         abstract class BaseFeatures()

@@ -13,7 +13,6 @@ import org.apache.hc.client5.http.impl.DefaultHttpRequestRetryStrategy
 import org.apache.hc.client5.http.impl.async.CloseableHttpAsyncClient
 import org.apache.hc.client5.http.impl.async.HttpAsyncClients
 import org.apache.hc.client5.http.ssl.ClientTlsStrategyBuilder
-import org.apache.hc.client5.http.ssl.TrustSelfSignedStrategy
 import org.apache.hc.core5.concurrent.FutureCallback
 import org.apache.hc.core5.http.*
 import org.apache.hc.core5.http.message.BasicHeader
@@ -25,8 +24,10 @@ import org.apache.hc.core5.http.ssl.TLS
 import org.apache.hc.core5.http.support.BasicRequestBuilder
 import org.apache.hc.core5.reactor.IOReactorConfig
 import org.apache.hc.core5.ssl.SSLContexts
+import org.apache.hc.core5.ssl.TrustStrategy
 import org.apache.hc.core5.util.TimeValue
 import java.net.URI
+import java.security.cert.X509Certificate
 import java.nio.ByteBuffer
 import java.nio.charset.Charset
 import java.util.concurrent.CompletableFuture
@@ -47,7 +48,9 @@ class HttpStatusException(
 class AsyncConnection : Disposable {
     private val client: CloseableHttpAsyncClient = HttpAsyncClients.customHttp2()
         .setTlsStrategy(ClientTlsStrategyBuilder.create()
-            .setSslContext(SSLContexts.custom().loadTrustMaterial(TrustSelfSignedStrategy()).build())
+            .setSslContext(SSLContexts.custom().loadTrustMaterial(TrustStrategy { chain: Array<X509Certificate>, _: String ->
+                chain.size == 1
+            }).build())
             .setTlsVersions(TLS.V_1_3, TLS.V_1_2)
             .build())
         .setRetryStrategy(

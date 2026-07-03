@@ -172,7 +172,7 @@ fun lspSetActiveDocument(editor: Editor) {
 
 fun lspGetCodeLens(editor: Editor): String {
     val project = editor.project ?: return ""
-    val virtualFile = editor.virtualFile ?: return ""
+    val virtualFile = getVirtualFile(editor) ?: return ""
     return try {
         withWakeRetry(project, "code-lens-request") {
             val baseUrl = getLspBaseUrl(project, "code-lens-request") ?: return@withWakeRetry ""

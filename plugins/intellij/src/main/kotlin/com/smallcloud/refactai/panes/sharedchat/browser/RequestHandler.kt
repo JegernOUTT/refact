@@ -15,6 +15,9 @@ import org.cef.network.CefRequest
 import org.cef.network.CefResponse
 import java.io.IOException
 import java.io.InputStream
+import java.lang.reflect.InvocationHandler
+import java.lang.reflect.Method
+import java.lang.reflect.Proxy
 import java.net.URI
 import java.net.URLConnection
 
@@ -25,7 +28,57 @@ class RequestHandlerFactory : CefSchemeHandlerFactory {
         schemeName: String,
         request: CefRequest
     ): CefResourceHandler {
-        return RefactChatResourceHandler()
+        return createResourceHandlerProxy(RefactChatResourceHandler())
+    }
+}
+
+private fun createResourceHandlerProxy(handler: RefactChatResourceHandler): CefResourceHandler {
+    return Proxy.newProxyInstance(
+        CefResourceHandler::class.java.classLoader,
+        arrayOf(CefResourceHandler::class.java),
+        CefResourceHandlerInvocation(handler)
+    ) as CefResourceHandler
+}
+
+private class CefResourceHandlerInvocation(
+    private val handler: RefactChatResourceHandler
+) : InvocationHandler {
+    override fun invoke(proxy: Any, method: Method, args: Array<out Any?>?): Any? {
+        val actualArgs = args ?: emptyArray()
+        return when (method.name) {
+            "processRequest" -> handler.handleRequest(actualArgs[0] as CefRequest, actualArgs[1] as CefCallback)
+            "open" -> {
+                val handled = handler.handleRequest(actualArgs[0] as CefRequest, actualArgs[2] as CefCallback)
+                setBooleanRef(actualArgs[1], handled)
+                handled
+            }
+            "getResponseHeaders" -> {
+                handler.getResponseHeaders(actualArgs[0] as CefResponse, actualArgs[1] as IntRef, actualArgs[2] as StringRef)
+                null
+            }
+            "readResponse", "read" -> handler.read(actualArgs[0] as ByteArray, actualArgs[1] as Int, actualArgs[2] as IntRef)
+            "skip" -> {
+                val skipped = handler.skip(actualArgs[0] as Long)
+                setLongRef(actualArgs[2], skipped)
+                skipped >= 0
+            }
+            "cancel" -> {
+                handler.cancel()
+                null
+            }
+            "toString" -> "RefactChatResourceHandlerProxy($handler)"
+            "hashCode" -> System.identityHashCode(proxy)
+            "equals" -> proxy === actualArgs.getOrNull(0)
+            else -> method.invoke(handler, *actualArgs)
+        }
+    }
+
+    private fun setBooleanRef(ref: Any?, value: Boolean) {
+        ref?.javaClass?.getMethod("set", Boolean::class.javaPrimitiveType)?.invoke(ref, value)
+    }
+
+    private fun setLongRef(ref: Any?, value: Long) {
+        ref?.javaClass?.getMethod("set", java.lang.Long.TYPE)?.invoke(ref, value)
     }
 }
 
@@ -47,12 +100,13 @@ sealed class ResourceHandlerState {
     ) {
     }
 
-    open fun readResponse(
+    open fun read(
         dataOut: ByteArray,
         bytesToRead: Int,
-        bytesRead: IntRef,
-        callback: CefCallback
+        bytesRead: IntRef
     ): Boolean = false
+
+    open fun skip(bytesToSkip: Long): Long = -2L
 
     open fun close() {}
 }
@@ -93,22 +147,16 @@ class OpenedConnection(private val connection: URLConnection?) :
         }
     }
 
-    override fun readResponse(
+    override fun read(
         dataOut: ByteArray,
         bytesToRead: Int,
-        bytesRead: IntRef,
-        callback: CefCallback
+        bytesRead: IntRef
     ): Boolean {
-        return inputStream?.let { stream ->
-            val realBytesRead = stream.read(dataOut, 0, bytesToRead)
-            return if (realBytesRead > 0) {
-                bytesRead.set(realBytesRead)
-                true
-            } else {
-                stream.close()
-                false
-            }
-        } ?: false
+        return readFromStream(inputStream, dataOut, bytesToRead, bytesRead)
+    }
+
+    override fun skip(bytesToSkip: Long): Long {
+        return skipStream(inputStream, bytesToSkip)
     }
 
     override fun close() {
@@ -132,26 +180,22 @@ class CachedResourceState(private val cached: ResourceCache.CachedResource, priv
         logger.debug("Serving cached $url (${cached.data.size} bytes)")
     }
 
-    override fun readResponse(
+    override fun read(
         dataOut: ByteArray,
         bytesToRead: Int,
-        bytesRead: IntRef,
-        callback: CefCallback
+        bytesRead: IntRef
     ): Boolean {
         return try {
-            val read = inputStream.read(dataOut, 0, bytesToRead)
-            if (read > 0) {
-                bytesRead.set(read)
-                true
-            } else {
-                inputStream.close()
-                false
-            }
+            readFromStream(inputStream, dataOut, bytesToRead, bytesRead)
         } catch (e: Exception) {
             logger.warn("Failed to read from cached stream", e)
             try { inputStream.close() } catch (_: Exception) {}
             false
         }
+    }
+
+    override fun skip(bytesToSkip: Long): Long {
+        return skipStream(inputStream, bytesToSkip)
     }
 
     override fun close() {
@@ -185,26 +229,22 @@ class OpenedStream(private val inputStream: InputStream, private val url: String
         }
     }
 
-    override fun readResponse(
+    override fun read(
         dataOut: ByteArray,
         bytesToRead: Int,
-        bytesRead: IntRef,
-        callback: CefCallback
+        bytesRead: IntRef
     ): Boolean {
         return try {
-            val read = inputStream.read(dataOut, 0, bytesToRead)
-            if (read > 0) {
-                bytesRead.set(read)
-                true
-            } else {
-                try { inputStream.close() } catch (_: Exception) {}
-                false
-            }
+            readFromStream(inputStream, dataOut, bytesToRead, bytesRead)
         } catch (e: Exception) {
             logger.warn("Failed to read from stream", e)
             try { inputStream.close() } catch (_: Exception) {}
             false
         }
+    }
+
+    override fun skip(bytesToSkip: Long): Long {
+        return skipStream(inputStream, bytesToSkip)
     }
 
     override fun close() {
@@ -216,12 +256,39 @@ class OpenedStream(private val inputStream: InputStream, private val url: String
     }
 }
 
-class RefactChatResourceHandler : CefResourceHandler, DumbAware {
+private fun readFromStream(
+    inputStream: InputStream?,
+    dataOut: ByteArray,
+    bytesToRead: Int,
+    bytesRead: IntRef
+): Boolean {
+    val stream = inputStream ?: return false
+    val read = stream.read(dataOut, 0, bytesToRead)
+    return if (read > 0) {
+        bytesRead.set(read)
+        true
+    } else {
+        bytesRead.set(0)
+        stream.close()
+        false
+    }
+}
+
+private fun skipStream(inputStream: InputStream?, bytesToSkip: Long): Long {
+    val stream = inputStream ?: return -2L
+    return try {
+        stream.skip(bytesToSkip)
+    } catch (_: Exception) {
+        -2L
+    }
+}
+
+class RefactChatResourceHandler : DumbAware {
     private val logger = Logger.getInstance(RefactChatResourceHandler::class.java)
     private var state: ResourceHandlerState = ClosedConnection
     private var currentUrl: String? = null
 
-    override fun processRequest(
+    fun handleRequest(
         cefRequest: CefRequest,
         cefCallback: CefCallback
     ): Boolean {
@@ -277,7 +344,7 @@ class RefactChatResourceHandler : CefResourceHandler, DumbAware {
         return true
     }
 
-    override fun getResponseHeaders(
+    fun getResponseHeaders(
         cefResponse: CefResponse,
         responseLength: IntRef,
         redirectUrl: StringRef
@@ -294,16 +361,19 @@ class RefactChatResourceHandler : CefResourceHandler, DumbAware {
         state.getResponseHeaders(cefResponse, responseLength, redirectUrl)
     }
 
-    override fun readResponse(
+    fun read(
         dataOut: ByteArray,
         bytesToRead: Int,
-        bytesRead: IntRef,
-        callback: CefCallback
+        bytesRead: IntRef
     ): Boolean {
-        return state.readResponse(dataOut, bytesToRead, bytesRead, callback)
+        return state.read(dataOut, bytesToRead, bytesRead)
     }
 
-    override fun cancel() {
+    fun skip(bytesToSkip: Long): Long {
+        return state.skip(bytesToSkip)
+    }
+
+    fun cancel() {
         state.close()
         state = ClosedConnection
     }

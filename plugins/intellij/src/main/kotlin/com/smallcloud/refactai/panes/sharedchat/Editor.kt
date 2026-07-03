@@ -13,7 +13,6 @@ import com.intellij.psi.PsiDocumentManager
 import com.intellij.util.application
 import com.smallcloud.refactai.lsp.LSPProcessHolder
 import com.smallcloud.refactai.lsp.LSPBackendConnectionStatus
-import com.smallcloud.refactai.panes.sharedchat.browser.getActionKeybinding
 import com.smallcloud.refactai.settings.AppSettingsState
 import java.io.File
 import java.net.URI
@@ -142,7 +141,7 @@ class Editor (val project: Project) {
         }
         val lspPort = if (rawPort > 0) rawPort else 0
         val urls = backendConfigUrls(backendReady, lspHolder?.baseUrlOrNull(), lspHolder?.browserUrlOrNull())
-        val keyBindings = Events.Config.KeyBindings(getActionKeybinding("ForceCompletionAction"))
+        val keyBindings = Events.Config.KeyBindings("")
 
         return Events.Config.UpdatePayload(
             features = features,

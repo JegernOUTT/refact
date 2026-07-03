@@ -45,12 +45,9 @@
     <extensions defaultExtensionNs="com.intellij">
         <applicationService serviceImplementation="com.smallcloud.refactai.PluginState"/>
         <postStartupActivity implementation="com.smallcloud.refactai.Initializer"/>
-        <config.codeVisionGroupSettingProvider implementation="com.smallcloud.refactai.code_lens.RefactOpenChatSettingProvider"/>
-        <config.codeVisionGroupSettingProvider implementation="com.smallcloud.refactai.code_lens.RefactOpenProblemsSettingProvider"/>
-        <config.codeVisionGroupSettingProvider implementation="com.smallcloud.refactai.code_lens.RefactOpenExplainSettingProvider"/>
         <editorFactoryDocumentListener implementation="com.smallcloud.refactai.listeners.DocumentListener"/>
-        <editorFactoryDocumentListener implementation="com.smallcloud.refactai.codecompletion.RefactInlineCompletionDocumentListener"/>
         <editorFactoryDocumentListener implementation="com.smallcloud.refactai.listeners.LSPDocumentListener"/>
+        <editorFactoryListener implementation="com.smallcloud.refactai.code_lens.CodeLensEditorFactoryListener"/>
         <statusBarWidgetFactory id="Refact AI Status Bar"
                                 implementation="com.smallcloud.refactai.status_bar.SMCStatusBarWidgetFactory"/>
         <notificationGroup id="Refact AI Notification Group" displayType="BALLOON"/>
@@ -61,9 +58,7 @@
                                  displayName="Refact.ai"/>
         <errorHandler implementation="com.smallcloud.refactai.PluginErrorReportSubmitter"/>
 
-        <actionPromoter implementation="com.smallcloud.refactai.listeners.InlineActionsPromoter"/>
         <actionPromoter implementation="com.smallcloud.refactai.listeners.AcceptActionsPromoter"/>
-        <actionPromoter implementation="com.smallcloud.refactai.listeners.ForceCompletionActionPromoter"/>
         <actionPromoter implementation="com.smallcloud.refactai.panes.sharedchat.ChatPaneInvokeActionPromoter"/>
         <inline.completion.provider implementation="com.smallcloud.refactai.codecompletion.RefactAICompletionProvider" order="first"/>
         <toolWindow id="Refact" anchor="right"
@@ -71,17 +66,16 @@
                     factoryClass="com.smallcloud.refactai.panes.RefactAIToolboxPaneFactory"/>
 
         <applicationService serviceImplementation="com.smallcloud.refactai.settings.AppSettingsState"/>
-        
+
         <editorFactoryListener implementation="com.smallcloud.refactai.listeners.LastEditorGetterListener"/>
 
         <applicationService serviceImplementation="com.smallcloud.refactai.io.InferenceGlobalContext"/>
         <applicationService serviceImplementation="com.smallcloud.refactai.UpdateChecker"/>
         <projectService serviceImplementation="com.smallcloud.refactai.lsp.LSPProcessHolder"/>
-        <projectService serviceImplementation="com.smallcloud.refactai.lsp.LSPActiveDocNotifierService" />
-        <projectService serviceImplementation="com.smallcloud.refactai.code_lens.CodeLensInvalidatorService" />
-        <projectService serviceImplementation="com.smallcloud.refactai.io.NotificationSSEClient" />
-        <codeInsight.codeVisionProviderFactory implementation="com.smallcloud.refactai.code_lens.RefactCodeVisionProviderFactory"/>
-    </extensions>
+        <projectService serviceImplementation="com.smallcloud.refactai.lsp.LSPActiveDocNotifierService"/>
+        <projectService serviceImplementation="com.smallcloud.refactai.code_lens.CodeLensInlayService"/>
+        <projectService serviceImplementation="com.smallcloud.refactai.io.NotificationSSEClient"/>
+        </extensions>
     <actions>
         <action class="com.smallcloud.refactai.listeners.TabPressedAction"
                 id="InsertInlineCompletionAction"
@@ -96,14 +90,7 @@
                 text="Cancel Inline Completion"
                 description="Refact AI Cancel Inline Completion">
             <keyboard-shortcut first-keystroke="ESCAPE" keymap="$default"/>
-        </action>
-        <action class="com.smallcloud.refactai.listeners.ForceCompletionAction"
-                id="ForceCompletionAction"
-                text="Run Code Completion Manually"
-                description="Refact AI Make A Manual Trigger Completion">
-            <keyboard-shortcut first-keystroke="alt SLASH" keymap="$default"/>
-        </action>
-<!--        For display shortcut on the pane, action must be with mask "Activate${id.filterNot { it.isWhitespace() }}ToolWindow"-->
+        </action><!--        For display shortcut on the pane, action must be with mask "Activate${id.filterNot { it.isWhitespace() }}ToolWindow"-->
         <action id="ActivateRefactChatToolWindow"
                 text="Open Chat"
                 class="com.smallcloud.refactai.panes.sharedchat.ChatPaneInvokeAction">
