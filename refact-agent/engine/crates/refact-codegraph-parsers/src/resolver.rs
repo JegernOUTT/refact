@@ -2,8 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub const CONFIDENCE_EXACT: f32 = 1.0;
 pub const CONFIDENCE_ALIAS: f32 = 0.8;
-pub const CONFIDENCE_FUZZY_UNIQUE: f32 = 0.5;
-pub const CONFIDENCE_FUZZY_AMBIGUOUS: f32 = 0.3;
+pub const CONFIDENCE_FUZZY_UNIQUE: f32 = 0.6;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ResolutionTier {
@@ -40,6 +39,15 @@ fn last_segment(name: &str) -> Option<String> {
 
 fn first_segment(name: &str) -> Option<String> {
     split_segments(name).first().map(|s| s.to_string())
+}
+
+fn file_prefix(name: &str) -> Option<&str> {
+    let (prefix, _) = name.split_once("::")?;
+    if prefix.contains('/') || prefix.contains('\\') || prefix.contains('.') {
+        Some(prefix)
+    } else {
+        None
+    }
 }
 
 impl Resolver {
@@ -119,19 +127,27 @@ impl Resolver {
     fn resolve_fuzzy(&self, name: &str) -> Option<Resolution> {
         let last = last_segment(name)?;
         let candidates = self.by_last_segment.get(&last)?;
-        match candidates.len() {
-            0 => None,
-            1 => Some(Resolution {
-                target: candidates.iter().next().unwrap().clone(),
-                confidence: CONFIDENCE_FUZZY_UNIQUE,
-                tier: ResolutionTier::Fuzzy,
-            }),
-            _ => Some(Resolution {
-                target: candidates.iter().next().unwrap().clone(),
-                confidence: CONFIDENCE_FUZZY_AMBIGUOUS,
-                tier: ResolutionTier::Fuzzy,
-            }),
-        }
+        let target = match candidates.len() {
+            0 => return None,
+            1 => candidates.iter().next()?.clone(),
+            _ => {
+                let prefix = file_prefix(name)?;
+                let mut same_file = candidates
+                    .iter()
+                    .filter(|candidate| candidate.starts_with(prefix))
+                    .filter(|candidate| candidate[prefix.len()..].starts_with("::"));
+                let target = same_file.next()?.clone();
+                if same_file.next().is_some() {
+                    return None;
+                }
+                target
+            }
+        };
+        Some(Resolution {
+            target,
+            confidence: CONFIDENCE_FUZZY_UNIQUE,
+            tier: ResolutionTier::Fuzzy,
+        })
     }
 }
 
@@ -186,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_last_segment_resolves_unique_candidate() {
+    fn globally_unique_bare_name_resolves_cross_file() {
         let r = resolver_with_symbols(&["app::services::user::create_user"]);
         let res = r.resolve("create_user").unwrap();
         assert_eq!(res.tier, ResolutionTier::Fuzzy);
@@ -195,12 +211,18 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_ambiguous_last_segment_lowers_confidence() {
-        let r = resolver_with_symbols(&["a::handler::run", "b::worker::run"]);
-        let res = r.resolve("run").unwrap();
+    fn ambiguous_bare_name_resolves_to_none() {
+        let r = resolver_with_symbols(&["a/x.rs::new", "b/y.rs::new"]);
+        assert!(r.resolve("new").is_none());
+    }
+
+    #[test]
+    fn same_file_candidate_wins_over_ambiguity() {
+        let r = resolver_with_symbols(&["a/x.rs::Factory::new", "b/y.rs::Builder::new"]);
+        let res = r.resolve("b/y.rs::new").unwrap();
         assert_eq!(res.tier, ResolutionTier::Fuzzy);
-        assert_eq!(res.confidence, CONFIDENCE_FUZZY_AMBIGUOUS);
-        assert!(res.target == "a::handler::run" || res.target == "b::worker::run");
+        assert_eq!(res.confidence, CONFIDENCE_FUZZY_UNIQUE);
+        assert_eq!(res.target, "b/y.rs::Builder::new");
     }
 
     #[test]

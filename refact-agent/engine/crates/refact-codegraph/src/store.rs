@@ -1667,7 +1667,7 @@ mod tests {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(schema::SCHEMA_SQL).unwrap();
             conn.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', '1')",
+                "INSERT INTO meta(key, value) VALUES('schema_version', '6')",
                 [],
             )
             .unwrap();
@@ -1922,6 +1922,34 @@ fn helper() {}
             cross, 1,
             "run (b.rs) -> helper (a.rs) cross-file calls edge"
         );
+    }
+
+    #[test]
+    fn connect_usages_skips_ambiguous_cross_file_calls() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .index_file_graph("src/a.rs", "pub fn helper() {}\n", "rust")
+            .unwrap();
+        store
+            .index_file_graph("src/c.rs", "pub fn helper() {}\n", "rust")
+            .unwrap();
+        store
+            .index_file_graph("src/b.rs", "fn run() { helper(); }\n", "rust")
+            .unwrap();
+
+        store.connect_usages().unwrap();
+
+        let calls_from_b: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges e \
+                 JOIN nodes sn ON sn.id = e.src \
+                 WHERE e.kind = 'calls' AND sn.path = 'src/b.rs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(calls_from_b, 0);
     }
 
     #[test]
