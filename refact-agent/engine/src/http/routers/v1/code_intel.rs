@@ -120,6 +120,20 @@ pub struct PrBlastRequest {
     max_depth: Option<usize>,
 }
 
+#[derive(Serialize)]
+struct PrBlastResponse {
+    changed_files: Vec<String>,
+    directly_impacted: Vec<refact_codegraph::pr_blast::BlastImpact>,
+    transitively_impacted: Vec<refact_codegraph::pr_blast::BlastImpact>,
+    impacted_file_count: usize,
+    risk_score: f64,
+    suggested_reviewers: Vec<crate::tools::tool_codegraph::SuggestedReviewer>,
+    index_state: crate::tools::tool_codegraph::PrBlastIndexState,
+    partial: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct SecurityScanRequest {
     path: Option<String>,
@@ -1066,11 +1080,34 @@ pub async fn handle_v1_code_intel_pr_blast(
         .max_depth
         .unwrap_or(DEFAULT_PR_BLAST_DEPTH)
         .clamp(1, MAX_PR_BLAST_DEPTH);
+    let readiness = service.index_readiness().await.map_err(store_error)?;
+    let index_state = crate::tools::tool_codegraph::pr_blast_index_state(&readiness);
+    let warning = crate::tools::tool_codegraph::pr_blast_partial_warning(&index_state);
     let report = service
         .pr_blast(&request.changed_files, max_depth)
         .await
         .map_err(store_error)?;
-    json_response(&report)
+    let repo_dir = crate::tools::tool_codegraph::project_dir(app.gcx.clone()).await;
+    let intel = repo_dir.as_deref().and_then(|dir| {
+        crate::tools::tool_codegraph::cached_mine_history(dir, GIT_HISTORY_MAX_COMMITS).ok()
+    });
+    let suggested_reviewers = crate::tools::tool_codegraph::pr_blast_suggested_reviewers(
+        &report,
+        repo_dir.as_deref(),
+        intel.as_ref(),
+    );
+    let partial = !index_state.cross_file_ready;
+    json_response(&PrBlastResponse {
+        changed_files: report.changed_files,
+        directly_impacted: report.directly_impacted,
+        transitively_impacted: report.transitively_impacted,
+        impacted_file_count: report.impacted_file_count,
+        risk_score: report.risk_score,
+        suggested_reviewers,
+        index_state,
+        partial,
+        warning,
+    })
 }
 
 pub async fn handle_v1_code_intel_security_scan(
@@ -1140,6 +1177,17 @@ mod tests {
     use crate::http::routers::make_refact_http_server;
 
     fn commit_file(repo: &Repository, path: &str, contents: &str, msg: &str) {
+        commit_file_as(repo, path, contents, msg, "Tester", "tester@example.com");
+    }
+
+    fn commit_file_as(
+        repo: &Repository,
+        path: &str,
+        contents: &str,
+        msg: &str,
+        name: &str,
+        email: &str,
+    ) {
         let workdir = repo.workdir().unwrap();
         let full_path = workdir.join(path);
         if let Some(parent) = full_path.parent() {
@@ -1152,7 +1200,7 @@ mod tests {
         let tree_oid = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_oid).unwrap();
         let time = Time::new(1_700_000_000, 0);
-        let sig = Signature::new("Tester", "tester@example.com", &time).unwrap();
+        let sig = Signature::new(name, email, &time).unwrap();
         let parents = repo
             .head()
             .ok()
@@ -1202,6 +1250,96 @@ mod tests {
         *gcx.codegraph.lock().await = Some(codegraph);
         let app = AppState::from_gcx(gcx).await;
         (make_refact_http_server(app), caller_path)
+    }
+
+    async fn router_with_pr_blast_codegraph() -> (axum::Router, tempfile::TempDir) {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_file_as(
+            &repo,
+            "src/core.rs",
+            "pub fn core() {}\n",
+            "introduce core",
+            "Caller Owner",
+            "aaa-owner@example.com",
+        );
+        commit_file_as(
+            &repo,
+            "src/caller.rs",
+            "fn caller() { core(); }\n",
+            "introduce caller",
+            "Other Caller Owner",
+            "zzz-caller@example.com",
+        );
+        commit_file_as(
+            &repo,
+            "src/caller.rs",
+            "fn caller() { core(); }\n// touched\n",
+            "update caller",
+            "Caller Owner",
+            "aaa-owner@example.com",
+        );
+        commit_file_as(
+            &repo,
+            "src/base.py",
+            "class Base:\n    pass\n",
+            "introduce base",
+            "Base Owner",
+            "zzz-base@example.com",
+        );
+        commit_file_as(
+            &repo,
+            "src/derived.py",
+            "class Derived(Base):\n    pass\n",
+            "introduce derived",
+            "Derived Owner",
+            "aaa-owner@example.com",
+        );
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        codegraph
+            .index_file("src/core.rs", "pub fn core() {}\n", "rust")
+            .await
+            .unwrap();
+        codegraph
+            .index_file("src/caller.rs", "fn caller() { core(); }\n", "rust")
+            .await
+            .unwrap();
+        codegraph
+            .index_file("src/base.py", "class Base:\n    pass\n", "python")
+            .await
+            .unwrap();
+        codegraph
+            .index_file(
+                "src/derived.py",
+                "class Derived(Base):\n    pass\n",
+                "python",
+            )
+            .await
+            .unwrap();
+        codegraph.connect_usages().await.unwrap();
+        *gcx.codegraph.lock().await = Some(codegraph);
+        let app = AppState::from_gcx(gcx).await;
+        (make_refact_http_server(app), dir)
+    }
+
+    async fn router_with_partial_pr_blast_codegraph() -> axum::Router {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        codegraph
+            .index_file("src/core.rs", "pub fn core() {}\n", "rust")
+            .await
+            .unwrap();
+        codegraph
+            .index_file("src/caller.rs", "fn caller() { core(); }\n", "rust")
+            .await
+            .unwrap();
+        codegraph.connect_usages().await.unwrap();
+        codegraph.enqueue_files(&["src/pending.rs".to_string()]);
+        *gcx.codegraph.lock().await = Some(codegraph);
+        let app = AppState::from_gcx(gcx).await;
+        make_refact_http_server(app)
     }
 
     async fn router_with_git_risk_codegraph() -> (axum::Router, tempfile::TempDir) {
@@ -1481,6 +1619,79 @@ mod tests {
                 |impact| impact["path"].as_str() == Some(caller_path.as_str())
                     && impact["symbol"].as_str() == Some("caller")
             ));
+    }
+
+    #[tokio::test]
+    async fn code_intel_pr_blast_returns_reviewers_kind_and_ready_state() {
+        let (router, _dir) = router_with_pr_blast_codegraph().await;
+
+        let (status, json) = post_json(
+            router,
+            "/v1/code-intel/pr-blast",
+            serde_json::json!({"changed_files": ["src/core.rs"], "max_depth": 2}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["partial"], false);
+        assert_eq!(json["index_state"]["queued"], 0);
+        assert_eq!(json["index_state"]["cross_file_ready"], true);
+        assert!(json["index_state"]["cross_file_edges"].as_i64().unwrap() > 0);
+        assert_eq!(
+            json["suggested_reviewers"][0]["author"],
+            "aaa-owner@example.com"
+        );
+        assert!(json["directly_impacted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|impact| impact["path"].as_str() == Some("src/caller.rs")
+                && impact["symbol"].as_str() == Some("caller")
+                && impact["via"].as_str() == Some("calls")
+                && impact["kind"].as_str() == Some("behavioral")));
+    }
+
+    #[tokio::test]
+    async fn code_intel_pr_blast_returns_structural_inherits_kind() {
+        let (router, _dir) = router_with_pr_blast_codegraph().await;
+
+        let (status, json) = post_json(
+            router,
+            "/v1/code-intel/pr-blast",
+            serde_json::json!({"changed_files": ["src/base.py"], "max_depth": 2}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["directly_impacted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|impact| impact["path"].as_str() == Some("src/derived.py")
+                && impact["symbol"].as_str() == Some("Derived")
+                && impact["via"].as_str() == Some("inherits")
+                && impact["kind"].as_str() == Some("structural")));
+    }
+
+    #[tokio::test]
+    async fn code_intel_pr_blast_reports_partial_index_state() {
+        let router = router_with_partial_pr_blast_codegraph().await;
+
+        let (status, json) = post_json(
+            router,
+            "/v1/code-intel/pr-blast",
+            serde_json::json!({"changed_files": ["src/core.rs"], "max_depth": 2}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["partial"], true);
+        assert_eq!(json["index_state"]["queued"], 1);
+        assert_eq!(json["index_state"]["cross_file_ready"], false);
+        assert!(json["warning"]
+            .as_str()
+            .unwrap()
+            .starts_with("⚠ index still building (1 files queued"));
     }
 
     fn commit_files_together(repo: &Repository, files: &[(&str, &str)], msg: &str) {

@@ -13,6 +13,14 @@ pub struct BlastImpact {
     pub symbol: String,
     pub distance: usize,
     pub via: String,
+    pub kind: ImpactKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImpactKind {
+    Behavioral,
+    Structural,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -90,10 +98,10 @@ pub fn blast_radius(
 
     for start in starts {
         seen.entry(graph[start]).or_insert(0);
-        queue.push_back((start, 0usize));
+        queue.push_back((start, 0usize, None::<String>));
     }
 
-    while let Some((node, depth)) = queue.pop_front() {
+    while let Some((node, depth, first_via)) = queue.pop_front() {
         if depth >= max_depth {
             continue;
         }
@@ -121,8 +129,9 @@ pub fn blast_radius(
                 .then_with(|| a.3.cmp(&b.3))
         });
 
-        for (via, path, symbol, source_id, source) in incoming {
+        for (edge_via, path, symbol, source_id, source) in incoming {
             let next_depth = depth + 1;
+            let candidate_via = first_via.clone().unwrap_or_else(|| edge_via.clone());
             let should_visit = match seen.get(&source_id) {
                 Some(&known_depth) => next_depth < known_depth,
                 None => true,
@@ -131,7 +140,7 @@ pub fn blast_radius(
             if should_visit {
                 seen.insert(source_id, next_depth);
                 if next_depth < max_depth {
-                    queue.push_back((source, next_depth));
+                    queue.push_back((source, next_depth, Some(candidate_via.clone())));
                 }
             }
 
@@ -143,7 +152,8 @@ pub fn blast_radius(
                 path,
                 symbol,
                 distance: next_depth,
-                via,
+                kind: impact_kind(&candidate_via),
+                via: candidate_via,
             };
             let replace = best_impacts
                 .get(&source_id)
@@ -180,24 +190,15 @@ pub fn blast_radius(
     })
 }
 
-pub fn reviewers_for_blast(report: &BlastReport) -> Vec<String> {
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for impact in report
-        .directly_impacted
-        .iter()
-        .chain(report.transitively_impacted.iter())
-    {
-        *counts.entry(impact.path.clone()).or_insert(0) += 1;
-    }
-
-    let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    ranked.truncate(10);
-    ranked.into_iter().map(|(path, _)| path).collect()
-}
-
 fn is_blast_edge(kind: &str) -> bool {
     matches!(kind, "calls" | "inherits" | "route_handler")
+}
+
+fn impact_kind(kind: &str) -> ImpactKind {
+    match kind {
+        "inherits" => ImpactKind::Structural,
+        _ => ImpactKind::Behavioral,
+    }
 }
 
 fn impact_cmp(a: &BlastImpact, b: &BlastImpact) -> std::cmp::Ordering {
@@ -254,7 +255,8 @@ mod tests {
                 .any(|impact| impact.path == "src/b.rs"
                     && impact.symbol == "b"
                     && impact.distance == 1
-                    && impact.via == "calls"),
+                    && impact.via == "calls"
+                    && impact.kind == ImpactKind::Behavioral),
             "direct impacts: {:?}",
             report.directly_impacted
         );
@@ -265,7 +267,8 @@ mod tests {
                 .any(|impact| impact.path == "src/a.rs"
                     && impact.symbol == "a"
                     && impact.distance == 2
-                    && impact.via == "calls"),
+                    && impact.via == "calls"
+                    && impact.kind == ImpactKind::Behavioral),
             "transitive impacts: {:?}",
             report.transitively_impacted
         );
@@ -306,9 +309,59 @@ mod tests {
 
         assert_eq!(report.directly_impacted.len(), 2);
         assert_eq!(report.impacted_file_count, 1);
-        assert_eq!(
-            reviewers_for_blast(&report),
-            vec!["src/caller.rs".to_string()]
-        );
+    }
+
+    #[test]
+    fn inherits_impacts_are_structural_and_serialize_snake_case() {
+        let store = Store::open_in_memory().unwrap();
+        let base = store
+            .insert_node("class", "src/base.py", "Base", "python", 1, 1)
+            .unwrap();
+        let derived = store
+            .insert_node("class", "src/derived.py", "Derived", "python", 1, 1)
+            .unwrap();
+        store.add_symbol("src/base.py::Base", base).unwrap();
+        store
+            .add_symbol("src/derived.py::Derived", derived)
+            .unwrap();
+        store.add_edge(derived, base, "inherits", 1.0).unwrap();
+
+        let report = blast_radius(&store, &["src/base.py".to_string()], 1).unwrap();
+
+        assert_eq!(report.directly_impacted.len(), 1);
+        let impact = &report.directly_impacted[0];
+        assert_eq!(impact.via, "inherits");
+        assert_eq!(impact.kind, ImpactKind::Structural);
+        let json = serde_json::to_value(impact).unwrap();
+        assert_eq!(json["kind"], "structural");
+    }
+
+    #[test]
+    fn transitive_kind_uses_first_edge_on_shortest_path() {
+        let store = Store::open_in_memory().unwrap();
+        let changed = store
+            .insert_node("function", "src/changed.rs", "changed", "rust", 1, 1)
+            .unwrap();
+        let middle = store
+            .insert_node("function", "src/middle.rs", "middle", "rust", 1, 1)
+            .unwrap();
+        let root = store
+            .insert_node("class", "src/root.rs", "Root", "rust", 1, 1)
+            .unwrap();
+        store
+            .add_symbol("src/changed.rs::changed", changed)
+            .unwrap();
+        store.add_symbol("src/middle.rs::middle", middle).unwrap();
+        store.add_symbol("src/root.rs::Root", root).unwrap();
+        store.add_edge(middle, changed, "calls", 1.0).unwrap();
+        store.add_edge(root, middle, "inherits", 1.0).unwrap();
+
+        let report = blast_radius(&store, &["src/changed.rs".to_string()], 2).unwrap();
+
+        assert!(report.transitively_impacted.iter().any(|impact| {
+            impact.path == "src/root.rs"
+                && impact.via == "calls"
+                && impact.kind == ImpactKind::Behavioral
+        }));
     }
 }

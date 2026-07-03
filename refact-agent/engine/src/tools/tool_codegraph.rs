@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use git2::{Oid, Repository};
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
@@ -16,8 +17,23 @@ use crate::tools::tools_description::{
 };
 
 const GIT_CACHE_TTL: Duration = Duration::from_secs(30);
+const PR_BLAST_REVIEWER_LIMIT: usize = 3;
+const PR_BLAST_BOT_AUTHOR_PATTERNS: [&str; 3] = ["[bot]", "agent@", "noreply"];
 
 type GitCacheKey = (PathBuf, Option<Oid>, usize);
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct SuggestedReviewer {
+    pub(crate) author: String,
+    pub(crate) score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct PrBlastIndexState {
+    pub(crate) queued: usize,
+    pub(crate) cross_file_edges: i64,
+    pub(crate) cross_file_ready: bool,
+}
 
 #[derive(Default)]
 struct GitMiningCache {
@@ -220,6 +236,81 @@ where
         cache.messages.insert(key, (now, messages.clone()));
     }
     Ok(messages)
+}
+
+pub(crate) fn pr_blast_index_state(
+    readiness: &refact_codegraph::IndexReadiness,
+) -> PrBlastIndexState {
+    PrBlastIndexState {
+        queued: readiness.queued,
+        cross_file_edges: readiness.cross_file_edges,
+        cross_file_ready: readiness.cross_file_ready,
+    }
+}
+
+pub(crate) fn pr_blast_partial_warning(state: &PrBlastIndexState) -> Option<String> {
+    (!state.cross_file_ready).then(|| {
+        format!(
+            "⚠ index still building ({} files queued, {} cross-file edges) — impact may be under-reported",
+            state.queued, state.cross_file_edges
+        )
+    })
+}
+
+pub(crate) fn pr_blast_suggested_reviewers(
+    report: &refact_codegraph::pr_blast::BlastReport,
+    repo_root: Option<&Path>,
+    intel: Option<&refact_git_intel::GitIntel>,
+) -> Vec<SuggestedReviewer> {
+    let (Some(repo_root), Some(intel)) = (repo_root, intel) else {
+        return Vec::new();
+    };
+    let repo_root = repo_root.to_string_lossy();
+    let mut paths = BTreeSet::new();
+    for path in &report.changed_files {
+        paths.insert(refact_git_intel::paths::repo_relative_or_basename(
+            path, &repo_root,
+        ));
+    }
+    for impact in report
+        .directly_impacted
+        .iter()
+        .chain(report.transitively_impacted.iter())
+    {
+        paths.insert(refact_git_intel::paths::repo_relative_or_basename(
+            &impact.path,
+            &repo_root,
+        ));
+    }
+
+    let mut scores: HashMap<String, f64> = HashMap::new();
+    for path in paths {
+        for owner in intel.ownership(&path) {
+            if owner.share <= 0.0 || pr_blast_is_bot_author(&owner.author) {
+                continue;
+            }
+            *scores.entry(owner.author).or_insert(0.0) += owner.share;
+        }
+    }
+
+    let mut reviewers: Vec<SuggestedReviewer> = scores
+        .into_iter()
+        .map(|(author, score)| SuggestedReviewer { author, score })
+        .collect();
+    reviewers.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.author.cmp(&b.author))
+    });
+    reviewers.truncate(PR_BLAST_REVIEWER_LIMIT);
+    reviewers
+}
+
+pub(crate) fn pr_blast_is_bot_author(author: &str) -> bool {
+    let author = author.to_ascii_lowercase();
+    PR_BLAST_BOT_AUTHOR_PATTERNS
+        .iter()
+        .any(|pattern| author.contains(pattern))
 }
 
 pub(crate) async fn cached_cross_file_clones(
@@ -1352,14 +1443,33 @@ impl Tool for ToolPrBlast {
             .await
             .clone()
             .ok_or_else(|| "codegraph is not available".to_string())?;
+        let readiness = service.index_readiness().await?;
+        let index_state = pr_blast_index_state(&readiness);
+        let warning = pr_blast_partial_warning(&index_state);
         let report = service.pr_blast(&changed_files, max_depth).await?;
-        let reviewers = refact_codegraph::pr_blast::reviewers_for_blast(&report);
+        let repo_dir = project_dir(gcx.clone()).await;
+        let intel = repo_dir
+            .as_deref()
+            .and_then(|dir| cached_mine_history(dir, 1000).ok());
+        let reviewers = pr_blast_suggested_reviewers(&report, repo_dir.as_deref(), intel.as_ref());
 
-        let mut msg = format!(
+        let mut msg = String::new();
+        if let Some(warning) = warning {
+            msg.push_str(&warning);
+            msg.push('\n');
+        }
+        msg.push_str(&format!(
             "PR blast radius (max depth {}) for {} changed files:\n",
             max_depth,
             report.changed_files.len()
-        );
+        ));
+        msg.push_str(&format!(
+            "Index state: queued={} cross_file_edges={} cross_file_ready={} partial={}\n",
+            index_state.queued,
+            index_state.cross_file_edges,
+            index_state.cross_file_ready,
+            !index_state.cross_file_ready
+        ));
         for path in &report.changed_files {
             msg.push_str(&format!("  changed: {}\n", path));
         }
@@ -1402,9 +1512,12 @@ impl Tool for ToolPrBlast {
             }
         }
         if !reviewers.is_empty() {
-            msg.push_str("\nSuggested reviewer paths:\n");
+            msg.push_str("\nSuggested reviewers (git ownership):\n");
             for reviewer in reviewers {
-                msg.push_str(&format!("  {}\n", reviewer));
+                msg.push_str(&format!(
+                    "  {} (score {:.2})\n",
+                    reviewer.author, reviewer.score
+                ));
             }
         }
         Ok((false, tool_message(tool_call_id, msg)))
@@ -1420,7 +1533,7 @@ impl Tool for ToolPrBlast {
             },
             experimental: false,
             allow_parallel: true,
-            description: "PR blast-radius analysis: given changed files, walks reverse codegraph dependencies to list directly and transitively impacted symbols, impacted file count, risk score, and reviewer path suggestions.".to_string(),
+            description: "PR blast-radius analysis: given changed files, walks reverse codegraph dependencies to list directly and transitively impacted symbols, impacted file count, risk score, reviewer suggestions from git ownership, structural/behavioral impact classification, and index readiness. Bot authors matching [bot], agent@, or noreply are excluded.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1457,9 +1570,20 @@ fn severity_label(severity: refact_codegraph::security_scan::Severity) -> &'stat
 
 fn push_blast_impact(msg: &mut String, impact: &refact_codegraph::pr_blast::BlastImpact) {
     msg.push_str(&format!(
-        "  d{} {} @ {} via {}\n",
-        impact.distance, impact.symbol, impact.path, impact.via
+        "  d{} {} @ {} via {} ({})\n",
+        impact.distance,
+        impact.symbol,
+        impact.path,
+        impact.via,
+        blast_impact_kind_label(impact.kind)
     ));
+}
+
+fn blast_impact_kind_label(kind: refact_codegraph::pr_blast::ImpactKind) -> &'static str {
+    match kind {
+        refact_codegraph::pr_blast::ImpactKind::Behavioral => "behavioral",
+        refact_codegraph::pr_blast::ImpactKind::Structural => "structural",
+    }
 }
 
 pub struct ToolCodeMap {
@@ -1704,6 +1828,68 @@ mod tests {
 
         assert_eq!(messages[0], "side branch history");
         assert!(git_cache().lock().unwrap().messages.get(&key).is_none());
+    }
+
+    #[test]
+    fn pr_blast_reviewers_are_ownership_based_stable_and_bot_filtered() {
+        let report = refact_codegraph::pr_blast::BlastReport {
+            changed_files: vec!["/repo/src/core.rs".to_string()],
+            directly_impacted: vec![refact_codegraph::pr_blast::BlastImpact {
+                path: "src/caller.rs".to_string(),
+                symbol: "caller".to_string(),
+                distance: 1,
+                via: "calls".to_string(),
+                kind: refact_codegraph::pr_blast::ImpactKind::Behavioral,
+            }],
+            transitively_impacted: Vec::new(),
+            impacted_file_count: 1,
+            risk_score: 0.1,
+        };
+        let mut intel = refact_git_intel::GitIntel::default();
+        intel.file_authors.insert(
+            "src/core.rs".to_string(),
+            HashMap::from([
+                ("b@example.com".to_string(), 1),
+                ("a@example.com".to_string(), 1),
+                ("builder[bot]@users.noreply.github.com".to_string(), 10),
+            ]),
+        );
+        intel.file_authors.insert(
+            "src/caller.rs".to_string(),
+            HashMap::from([
+                ("b@example.com".to_string(), 1),
+                ("a@example.com".to_string(), 1),
+                ("review-agent@example.com".to_string(), 10),
+            ]),
+        );
+
+        let reviewers =
+            pr_blast_suggested_reviewers(&report, Some(Path::new("/repo")), Some(&intel));
+
+        assert_eq!(reviewers.len(), 2);
+        assert_eq!(reviewers[0].author, "a@example.com");
+        assert_eq!(reviewers[1].author, "b@example.com");
+        assert!((reviewers[0].score - reviewers[1].score).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pr_blast_reviewers_are_empty_without_repo_or_intel() {
+        let report = refact_codegraph::pr_blast::BlastReport {
+            changed_files: vec!["src/core.rs".to_string()],
+            directly_impacted: Vec::new(),
+            transitively_impacted: Vec::new(),
+            impacted_file_count: 0,
+            risk_score: 0.0,
+        };
+        let intel = refact_git_intel::GitIntel::default();
+
+        assert!(pr_blast_suggested_reviewers(&report, None, Some(&intel)).is_empty());
+        assert!(pr_blast_suggested_reviewers(&report, Some(Path::new("/repo")), None).is_empty());
+        assert!(pr_blast_is_bot_author("robot[bot]@example.com"));
+        assert!(pr_blast_is_bot_author("review-agent@example.com"));
+        assert!(pr_blast_is_bot_author(
+            "123+noreply@users.noreply.github.com"
+        ));
     }
 
     fn shared_clone_body(name: &str) -> String {
