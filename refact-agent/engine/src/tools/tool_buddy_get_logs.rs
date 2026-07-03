@@ -20,7 +20,7 @@ static REDACT_PATTERNS: &[&str] = &[
     r"token[=:]\s*[^\s,]+",
 ];
 
-fn redact_sensitive(line: &str) -> String {
+pub(crate) fn redact_sensitive(line: &str) -> String {
     // Use the shared Buddy secret redactor first (covers ghp_/glpat-/Authorization/password/
     // aws keys/etc.), then apply the local log-specific patterns on top so nothing regresses.
     let mut result = crate::buddy::actor::redact_sensitive(line);
@@ -237,7 +237,7 @@ pub fn resolve_log_dir(cache_dir: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-async fn read_bounded_log_tail(log_path: &std::path::Path) -> Result<String, String> {
+pub(crate) async fn read_bounded_log_tail(log_path: &std::path::Path) -> Result<String, String> {
     let mut file = tokio::fs::File::open(log_path)
         .await
         .map_err(|e| format!("failed to read log file {:?}: {}", log_path, e))?;

@@ -10,9 +10,8 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 
-import { selectHost, type Config } from "../../features/Config/configSlice";
+import { selectHost } from "../../features/Config/configSlice";
 import { useAppSelector, useEventsBusForIDE } from "../../hooks";
-import { useOpenUrl } from "../../hooks/useOpenUrl";
 import { Icon, IconButton, Menu, Tooltip } from "../ui";
 import styles from "./Toolbar.module.css";
 
@@ -22,6 +21,7 @@ export type DropdownNavigationOptions =
   | "knowledge graph"
   | "code intel"
   | "general settings"
+  | "bug report"
   | "";
 
 type DropdownProps = {
@@ -30,17 +30,11 @@ type DropdownProps = {
   useGhostTrigger?: boolean;
 };
 
-function linkForBugReports(_host: Config["host"]): string {
-  return "https://github.com/JegernOUTT/refact/issues";
-}
-
 export const Dropdown: React.FC<DropdownProps> = ({
   handleNavigation,
   triggerClassName,
 }: DropdownProps) => {
   const host = useAppSelector(selectHost);
-  const bugUrl = linkForBugReports(host);
-  const openUrl = useOpenUrl();
   const { openPrivacyFile } = useEventsBusForIDE();
 
   const refactProductType = useMemo(() => {
@@ -82,12 +76,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
           <Icon icon={FileText} size="sm" /> Edit privacy.yaml
         </Menu.Item>
         <Menu.Separator />
-        <Menu.Item
-          onSelect={(event) => {
-            event.preventDefault();
-            openUrl(bugUrl);
-          }}
-        >
+        <Menu.Item onSelect={() => handleNavigation("bug report")}>
           <Icon icon={Bug} size="sm" /> Report a bug
         </Menu.Item>
         <Menu.Item onSelect={() => handleNavigation("stats")}>

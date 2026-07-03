@@ -53,6 +53,7 @@ import { CodeIntelWorkspace } from "./CodeIntel";
 
 import { StatsDashboard } from "./StatsDashboard";
 import { RefactDaemonPage } from "./RefactDaemon";
+import { BugReportPage, installWebuiConsoleCapture } from "./BugReport";
 import { Dashboard } from "./Dashboard";
 import { SettingsHub, isSettingsPage } from "./Settings";
 import { BuddyHome } from "./Buddy/BuddyHome";
@@ -228,6 +229,10 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       cancelAnimationFrame(rafId);
     };
   }, [checkIdeRootLayout, config.host]);
+
+  useEffect(() => {
+    return installWebuiConsoleCapture();
+  }, []);
 
   useEffect(() => {
     const onError = (event: ErrorEvent) => {
@@ -443,7 +448,8 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     if (
       desiredPage.name === "knowledge graph" ||
       desiredPage.name === "code intel" ||
-      desiredPage.name === "refact daemon"
+      desiredPage.name === "refact daemon" ||
+      desiredPage.name === "bug report"
     ) {
       return {
         type: "dashboard",
@@ -637,6 +643,10 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
             {!pageSwitching && renderedPage.name === "refact daemon" && (
               <RefactDaemonPage backFromDaemon={goBack} />
+            )}
+
+            {!pageSwitching && renderedPage.name === "bug report" && (
+              <BugReportPage onBack={goBack} />
             )}
 
             {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}

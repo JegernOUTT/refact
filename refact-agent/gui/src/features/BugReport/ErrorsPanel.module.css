@@ -1,0 +1,126 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--rf-hairline);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-hairline);
+}
+
+.title {
+  font-size: var(--rf-text-2);
+  font-weight: 600;
+  color: var(--rf-color-fg);
+}
+
+.subtitle {
+  font-size: var(--rf-text-1);
+  color: var(--rf-color-faint);
+}
+
+.list {
+  overflow-y: auto;
+  max-height: 240px;
+  display: flex;
+  flex-direction: column;
+}
+
+.item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border: none;
+  border-left: 2px solid var(--rf-color-danger);
+  border-bottom: 1px solid var(--rf-hairline);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.item:hover {
+  background: var(--rf-surface-1);
+}
+
+.item:hover .jumpHint {
+  opacity: 1;
+}
+
+.itemMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.sourceChip {
+  font-size: var(--rf-text-1);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0 var(--rf-space-1);
+  border-radius: var(--rf-radius-chip);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-muted);
+}
+
+.source-engine {
+  color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+}
+
+.source-daemon {
+  color: var(--rf-color-info);
+}
+
+.source-webui {
+  color: var(--rf-color-success);
+}
+
+.levelError {
+  font-size: var(--rf-text-1);
+  font-weight: 700;
+  color: var(--rf-color-danger);
+}
+
+.levelWarn {
+  font-size: var(--rf-text-1);
+  font-weight: 700;
+  color: var(--rf-color-warning);
+}
+
+.ago {
+  margin-left: auto;
+  font-size: var(--rf-text-1);
+  font-family: var(--rf-font-mono);
+  color: var(--rf-color-faint);
+}
+
+.message {
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  color: var(--rf-color-muted);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.jumpHint {
+  font-size: var(--rf-text-1);
+  color: var(--rf-color-accent);
+  opacity: 0;
+  transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
+}

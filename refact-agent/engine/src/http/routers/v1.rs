@@ -126,6 +126,7 @@ pub mod buddy_drafts;
 pub mod buddy_frontend_error;
 pub mod buddy_opportunities;
 pub mod buddy_pulse;
+pub mod bug_report;
 pub mod caps;
 pub mod chat_based_handlers;
 mod chat_modes;
@@ -254,6 +255,22 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/code-lens", post(handle_v1_code_lens))
         .route("/caps", get(handle_v1_caps))
         .route("/build_info", get(crate::http::routers::info::handle_info))
+        .route(
+            "/bug-report/context",
+            get(bug_report::handle_v1_bug_report_context),
+        )
+        .route(
+            "/bug-report/logs",
+            get(bug_report::handle_v1_bug_report_logs),
+        )
+        .route(
+            "/bug-report/errors",
+            get(bug_report::handle_v1_bug_report_errors),
+        )
+        .route(
+            "/bug-report/bundle",
+            post(bug_report::handle_v1_bug_report_bundle),
+        )
         .route("/model-capabilities", get(handle_v1_model_capabilities))
         .route("/model-supported", get(handle_v1_model_supported))
         .route("/tools", get(handle_v1_get_tools))

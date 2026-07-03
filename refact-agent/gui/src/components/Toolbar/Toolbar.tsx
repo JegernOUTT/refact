@@ -204,6 +204,8 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         dispatch(push({ name: "knowledge graph" }));
       } else if (to === "code intel") {
         dispatch(push({ name: "code intel" }));
+      } else if (to === "bug report") {
+        dispatch(push({ name: "bug report" }));
       } else if (to === "chat") {
         dispatch(popBackTo({ name: "history" }));
         dispatch(push({ name: "chat" }));

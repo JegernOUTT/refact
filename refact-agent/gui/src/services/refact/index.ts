@@ -17,6 +17,7 @@ export * from "./knowledge";
 export * from "./knowledgeGraphApi";
 export * from "./codeIntel";
 export * from "./ragStatus";
+export * from "./bugReport";
 export * from "./trajectories";
 export * from "./trajectory";
 export * from "./chatSubscription";

@@ -71,6 +71,10 @@ export interface RefactDaemonPage {
   name: "refact daemon";
 }
 
+export interface BugReportPage {
+  name: "bug report";
+}
+
 export interface ExtensionsPage {
   name: "extensions";
   tab?: "skills" | "commands" | "hooks";
@@ -134,6 +138,7 @@ export type Page =
   | DefaultModelsPage
   | StatsDashboardPage
   | RefactDaemonPage
+  | BugReportPage
   | ExtensionsPage
   | MCPMarketplacePage
   | SkillsMarketplacePage
