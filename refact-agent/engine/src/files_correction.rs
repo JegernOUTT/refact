@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::path::{Path, PathBuf};
 use tracing::info;
+use refact_codegraph::QueuedPath;
 
 use crate::global_context::GlobalContext;
 use crate::files_in_workspace::{detect_vcs_for_a_file_path, CacheCorrection};
@@ -141,6 +142,19 @@ pub fn normalize_path_for_unscoped_root_selection(
 ) -> Option<PathBuf> {
     map_registered_worktree_path(path, mappings)
         .or_else(|| Some(canonicalize_normalized_path(path.to_path_buf())))
+}
+
+pub fn resolve_codegraph_queue_path(
+    path: &Path,
+    mappings: &[RegisteredWorktreePathMapping],
+) -> QueuedPath {
+    let read_path = canonicalize_normalized_path(path.to_path_buf());
+    let store_path =
+        map_registered_worktree_path(&read_path, mappings).unwrap_or_else(|| read_path.clone());
+    QueuedPath::new(
+        store_path.to_string_lossy().to_string(),
+        read_path.to_string_lossy().to_string(),
+    )
 }
 
 fn dedupe_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
