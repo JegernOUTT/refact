@@ -36,6 +36,7 @@ struct DetailResponse<'a> {
 #[derive(Serialize)]
 struct ScoreEntry {
     symbol: String,
+    path: String,
     score: f64,
 }
 
@@ -61,6 +62,7 @@ struct CodeIntelCounts {
 #[derive(Serialize)]
 struct OverviewResponse {
     counts: CodeIntelCounts,
+    index_state: crate::tools::tool_codegraph::PrBlastIndexState,
     scc_count: usize,
     largest_scc: usize,
     component_count: usize,
@@ -94,6 +96,7 @@ struct GraphEdgeResponse {
 
 #[derive(Serialize)]
 struct GraphResponse {
+    index_state: crate::tools::tool_codegraph::PrBlastIndexState,
     nodes: Vec<GraphNodeResponse>,
     edges: Vec<GraphEdgeResponse>,
 }
@@ -104,6 +107,7 @@ struct CommunityResponse {
     label: String,
     member_count: usize,
     cohesion: f64,
+    index_state: crate::tools::tool_codegraph::PrBlastIndexState,
 }
 
 #[derive(Serialize)]
@@ -112,6 +116,7 @@ struct DeadCodeResponse {
     path: String,
     reason: String,
     confidence: f64,
+    index_state: crate::tools::tool_codegraph::PrBlastIndexState,
 }
 
 #[derive(Deserialize)]
@@ -334,11 +339,24 @@ async fn codegraph_service(app: &AppState) -> Option<Arc<refact_codegraph::CodeG
     app.gcx.codegraph.lock().await.clone()
 }
 
-fn score_entries(entries: Vec<(String, f64)>) -> Vec<ScoreEntry> {
+fn score_entries(entries: Vec<refact_codegraph::analytics::SymbolScore>) -> Vec<ScoreEntry> {
     entries
         .into_iter()
-        .map(|(symbol, score)| ScoreEntry { symbol, score })
+        .map(|entry| ScoreEntry {
+            symbol: entry.symbol,
+            path: entry.path,
+            score: entry.score,
+        })
         .collect()
+}
+
+async fn codegraph_index_state(
+    service: &refact_codegraph::CodeGraphService,
+) -> Result<crate::tools::tool_codegraph::PrBlastIndexState, ScratchError> {
+    let readiness = service.index_readiness().await.map_err(store_error)?;
+    Ok(crate::tools::tool_codegraph::pr_blast_index_state(
+        &readiness,
+    ))
 }
 
 fn file_score_entries(entries: Vec<(String, f64)>) -> Vec<FileScoreEntry> {
@@ -512,24 +530,24 @@ pub async fn handle_v1_code_intel_overview(
         return codegraph_off_response();
     };
 
-    let counts = service.counts().await.map_err(store_error)?;
-    let overview = service
-        .overview(OVERVIEW_TOP_N)
+    let index_state = codegraph_index_state(&service).await?;
+    let cached = service
+        .cached_graph_analytics()
         .await
         .map_err(store_error)?;
-    let file_centrality = service
-        .per_file_centrality(FILE_CENTRALITY_TOP_N)
-        .await
-        .map_err(store_error)?;
-    let communities = service.communities().await.map_err(store_error)?;
-    let dead_code = service.dead_code().await.map_err(store_error)?;
+    let overview = cached.analytics.overview.truncated(OVERVIEW_TOP_N);
+    let file_centrality = cached
+        .analytics
+        .file_centrality
+        .truncated(FILE_CENTRALITY_TOP_N);
 
     json_response(&OverviewResponse {
         counts: CodeIntelCounts {
             nodes: usize_to_i64(overview.node_count),
             edges: usize_to_i64(overview.edge_count),
-            files: counts.files,
+            files: cached.counts.files,
         },
+        index_state,
         scc_count: overview.scc_count,
         largest_scc: overview.largest_scc,
         component_count: overview.component_count,
@@ -539,8 +557,8 @@ pub async fn handle_v1_code_intel_overview(
             top_pagerank: file_score_entries(file_centrality.top_pagerank),
             top_betweenness: file_score_entries(file_centrality.top_betweenness),
         },
-        community_count: communities.len(),
-        dead_code_count: dead_code.len(),
+        community_count: cached.communities.len(),
+        dead_code_count: cached.dead_code.len(),
     })
 }
 
@@ -556,6 +574,7 @@ pub async fn handle_v1_code_intel_graph(
         .unwrap_or(DEFAULT_GRAPH_LIMIT)
         .clamp(1, MAX_GRAPH_LIMIT);
 
+    let index_state = codegraph_index_state(&service).await?;
     let cached = service
         .cached_graph_analytics()
         .await
@@ -594,6 +613,7 @@ pub async fn handle_v1_code_intel_graph(
     });
 
     json_response(&GraphResponse {
+        index_state,
         nodes: response_nodes,
         edges: response_edges,
     })
@@ -643,7 +663,12 @@ pub async fn handle_v1_code_intel_communities(
     let Some(service) = codegraph_service(&app).await else {
         return codegraph_off_response();
     };
-    let mut communities = service.communities().await.map_err(store_error)?;
+    let index_state = codegraph_index_state(&service).await?;
+    let mut communities = service
+        .cached_graph_analytics()
+        .await
+        .map_err(store_error)?
+        .communities;
     communities.sort_by(|a, b| {
         b.members
             .len()
@@ -657,6 +682,7 @@ pub async fn handle_v1_code_intel_communities(
             label: community.label,
             member_count: community.members.len(),
             cohesion: community.cohesion,
+            index_state: index_state.clone(),
         })
         .collect::<Vec<_>>();
     json_response(&response)
@@ -668,16 +694,19 @@ pub async fn handle_v1_code_intel_dead_code(
     let Some(service) = codegraph_service(&app).await else {
         return codegraph_off_response();
     };
+    let index_state = codegraph_index_state(&service).await?;
     let response = service
-        .dead_code()
+        .cached_graph_analytics()
         .await
         .map_err(store_error)?
+        .dead_code
         .into_iter()
         .map(|dead| DeadCodeResponse {
             name: dead.name,
             path: dead.path,
             reason: dead.reason,
             confidence: dead.confidence,
+            index_state: index_state.clone(),
         })
         .collect::<Vec<_>>();
     json_response(&response)
@@ -1342,6 +1371,24 @@ mod tests {
         make_refact_http_server(app)
     }
 
+    async fn router_with_partial_codegraph() -> axum::Router {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        codegraph
+            .index_file(
+                "src/lib.rs",
+                "fn main() { helper(); }\nfn helper() {}\nfn orphan() {}\n",
+                "rust",
+            )
+            .await
+            .unwrap();
+        codegraph.connect_usages().await.unwrap();
+        codegraph.enqueue_files(&["src/pending.rs".to_string()]);
+        *gcx.codegraph.lock().await = Some(codegraph);
+        let app = AppState::from_gcx(gcx).await;
+        make_refact_http_server(app)
+    }
+
     async fn router_with_git_risk_codegraph() -> (axum::Router, tempfile::TempDir) {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let dir = tempfile::tempdir().unwrap();
@@ -1507,8 +1554,12 @@ mod tests {
             .unwrap()
             .iter()
             .any(|entry| {
-                entry["symbol"].as_str() == Some("helper") && entry["score"].is_number()
+                entry["symbol"].as_str() == Some("helper")
+                    && entry["path"].as_str() == Some("src/lib.rs")
+                    && entry["score"].is_number()
             }));
+        assert_eq!(json["index_state"]["queued"], 0);
+        assert_eq!(json["index_state"]["cross_file_ready"], true);
         assert!(json["file_centrality"]["top_pagerank"].is_array());
         assert!(json["community_count"].is_number());
         assert!(json["dead_code_count"].is_number());
@@ -1526,7 +1577,39 @@ mod tests {
         assert!(nodes[0]["id"].is_i64());
         assert!(nodes[0]["name"].is_string());
         assert_eq!(nodes[0]["path"], "src/lib.rs");
+        assert_eq!(json["index_state"]["queued"], 0);
+        assert_eq!(json["index_state"]["cross_file_ready"], true);
         assert!(json["edges"].is_array());
+    }
+
+    #[tokio::test]
+    async fn all_four_endpoints_report_index_state() {
+        let router = router_with_partial_codegraph().await;
+
+        let (overview_status, overview) = get_json(router.clone(), "/v1/code-intel/overview").await;
+        let (graph_status, graph) = get_json(router.clone(), "/v1/code-intel/graph").await;
+        let (communities_status, communities) =
+            get_json(router.clone(), "/v1/code-intel/communities").await;
+        let (dead_status, dead_code) = get_json(router, "/v1/code-intel/dead-code").await;
+
+        assert_eq!(overview_status, StatusCode::OK);
+        assert_eq!(graph_status, StatusCode::OK);
+        assert_eq!(communities_status, StatusCode::OK);
+        assert_eq!(dead_status, StatusCode::OK);
+        assert_eq!(overview["index_state"]["queued"], 1);
+        assert_eq!(overview["index_state"]["cross_file_ready"], false);
+        assert_eq!(graph["index_state"]["queued"], 1);
+        assert_eq!(graph["index_state"]["cross_file_ready"], false);
+        let communities = communities.as_array().unwrap();
+        assert!(!communities.is_empty());
+        assert!(communities.iter().all(|entry| {
+            entry["index_state"]["queued"] == 1 && entry["index_state"]["cross_file_ready"] == false
+        }));
+        let dead_code = dead_code.as_array().unwrap();
+        assert!(!dead_code.is_empty());
+        assert!(dead_code.iter().all(|entry| {
+            entry["index_state"]["queued"] == 1 && entry["index_state"]["cross_file_ready"] == false
+        }));
     }
 
     #[tokio::test]

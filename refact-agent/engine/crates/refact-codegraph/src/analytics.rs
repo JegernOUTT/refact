@@ -155,14 +155,21 @@ fn betweenness_centrality_for_sources(
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SymbolScore {
+    pub symbol: String,
+    pub path: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphOverview {
     pub node_count: usize,
     pub edge_count: usize,
     pub scc_count: usize,
     pub largest_scc: usize,
     pub component_count: usize,
-    pub top_pagerank: Vec<(String, f64)>,
-    pub top_betweenness: Vec<(String, f64)>,
+    pub top_pagerank: Vec<SymbolScore>,
+    pub top_betweenness: Vec<SymbolScore>,
 }
 
 impl GraphOverview {
@@ -235,20 +242,29 @@ pub fn compute_graph_analytics_from_data(data: &GraphData) -> GraphAnalytics {
     let largest_scc = sccs.iter().map(|c| c.len()).max().unwrap_or(0);
     let component_count = connected_components(&g);
 
-    let rank_symbols = |m: &HashMap<NodeIndex, f64>| -> Vec<(String, f64)> {
-        let mut scored: Vec<(String, f64)> = m
+    let rank_symbols = |m: &HashMap<NodeIndex, f64>| -> Vec<SymbolScore> {
+        let mut scored: Vec<(i64, SymbolScore)> = m
             .iter()
             .map(|(ni, score)| {
                 let node_id = g[*ni];
-                (names.get(&node_id).cloned().unwrap_or_default(), *score)
+                (
+                    node_id,
+                    SymbolScore {
+                        symbol: names.get(&node_id).cloned().unwrap_or_default(),
+                        path: paths.get(&node_id).cloned().unwrap_or_default(),
+                        score: *score,
+                    },
+                )
             })
             .collect();
         scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.1.score
+                .total_cmp(&a.1.score)
+                .then_with(|| a.1.symbol.cmp(&b.1.symbol))
+                .then_with(|| a.1.path.cmp(&b.1.path))
                 .then_with(|| a.0.cmp(&b.0))
         });
-        scored
+        scored.into_iter().map(|(_, score)| score).collect()
     };
 
     let rank_nodes = |m: &HashMap<NodeIndex, f64>| -> Vec<(i64, f64)> {
@@ -338,7 +354,7 @@ fn helper() {}
         assert!(overview.edge_count >= 4, "got {}", overview.edge_count);
         let top = &overview.top_pagerank[0];
         assert_eq!(
-            top.0, "helper",
+            top.symbol, "helper",
             "most-called symbol should rank first: {:?}",
             overview.top_pagerank
         );
@@ -366,7 +382,7 @@ fn y() { x(); }
         let overview = compute_overview(&store, 10).unwrap();
         assert!(!overview.top_betweenness.is_empty());
         assert_eq!(
-            overview.top_betweenness[0].0, "b",
+            overview.top_betweenness[0].symbol, "b",
             "b is the bridge between a and c: {:?}",
             overview.top_betweenness
         );
@@ -380,6 +396,29 @@ fn y() { x(); }
         assert_eq!(overview.edge_count, 0);
         assert_eq!(overview.scc_count, 0);
         assert!(overview.top_pagerank.is_empty());
+    }
+
+    #[test]
+    fn score_entries_carry_paths() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .index_file_graph("src/a.rs", "pub fn helper() {}\n", "rust")
+            .unwrap();
+        store
+            .index_file_graph("src/b.rs", "fn run() { helper(); }\n", "rust")
+            .unwrap();
+        store.connect_usages().unwrap();
+
+        let overview = compute_overview(&store, 10).unwrap();
+
+        assert!(overview
+            .top_pagerank
+            .iter()
+            .any(|entry| entry.symbol == "helper" && entry.path == "src/a.rs"));
+        assert!(overview
+            .top_pagerank
+            .iter()
+            .all(|entry| !entry.path.is_empty()));
     }
 
     #[test]

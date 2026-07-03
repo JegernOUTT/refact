@@ -267,7 +267,7 @@ fn modularity(graph: &LouvainGraph, partition: &[usize]) -> f64 {
         .sum()
 }
 
-fn cohesion_for(
+pub(crate) fn cohesion_for(
     members: &[i64],
     id_to_pos: &HashMap<i64, usize>,
     adj: &[BTreeMap<usize, f64>],
@@ -281,23 +281,21 @@ fn cohesion_for(
     }
 
     let mut internal = 0.0;
-    let mut external = 0.0;
     for &i in &member_pos {
         for (&j, &w) in &adj[i] {
-            if member_pos.contains(&j) {
-                if i <= j {
-                    internal += w;
-                }
-            } else {
-                external += w;
+            if member_pos.contains(&j) && i < j {
+                internal += w;
             }
         }
     }
-    let total = internal + external;
-    if total == 0.0 {
+    let possible = member_pos
+        .len()
+        .saturating_mul(member_pos.len().saturating_sub(1)) as f64
+        / 2.0;
+    if possible == 0.0 {
         0.0
     } else {
-        (internal / total).clamp(0.0, 1.0)
+        (internal / possible).clamp(0.0, 1.0)
     }
 }
 
@@ -467,5 +465,22 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         assert!(detect_communities(&store).unwrap().is_empty());
         assert!(execution_flows(&store, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn community_cohesion_below_one_for_loose_community() {
+        let mut adj = vec![BTreeMap::new(); 4];
+        for (a, b) in [(0usize, 1usize), (1, 2), (2, 3)] {
+            adj[a].insert(b, 1.0);
+            adj[b].insert(a, 1.0);
+        }
+        let id_to_pos = (1_i64..=4_i64)
+            .enumerate()
+            .map(|(pos, id)| (id, pos))
+            .collect::<HashMap<_, _>>();
+
+        let cohesion = cohesion_for(&[1, 2, 3, 4], &id_to_pos, &adj);
+
+        assert!((cohesion - 0.5).abs() < f64::EPSILON, "{cohesion}");
     }
 }

@@ -55,9 +55,11 @@ pub fn lang_from_path(path: &str) -> &'static str {
 #[derive(Debug, Clone)]
 pub struct CachedGraphAnalytics {
     pub generation: u64,
+    pub counts: Counts,
     pub data: analytics::GraphData,
     pub analytics: analytics::GraphAnalytics,
     pub communities: Vec<communities::Community>,
+    pub dead_code: Vec<dead_code::DeadSymbol>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -564,14 +566,18 @@ impl CodeGraphService {
     ) -> Result<CachedGraphAnalytics, String> {
         self.with_read_store(|store| {
             store.read_snapshot(|store| {
+                let counts = store.counts()?;
                 let data = analytics::GraphData::from_store(store)?;
                 let analytics = analytics::compute_graph_analytics_from_data(&data);
                 let communities = communities::detect_communities_from_data(&data)?;
+                let dead_code = dead_code::dead_code(store)?;
                 Ok(CachedGraphAnalytics {
                     generation,
+                    counts,
                     data,
                     analytics,
                     communities,
+                    dead_code,
                 })
             })
         })
@@ -629,7 +635,7 @@ impl CodeGraphService {
     }
 
     pub async fn dead_code(&self) -> Result<Vec<dead_code::DeadSymbol>, String> {
-        self.with_read_store(dead_code::dead_code).await
+        Ok(self.cached_graph_analytics().await?.dead_code)
     }
 
     pub async fn security_scan(
@@ -908,7 +914,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overview_reuses_cached_graph_analytics_until_index_changes() {
+    async fn overview_served_from_cache_second_call_analytics() {
         let service = CodeGraphService::open_in_memory().unwrap();
         service
             .index_file("src/a.rs", "pub fn helper() {}\n", "rust")

@@ -235,6 +235,14 @@ pub(crate) fn pr_blast_partial_warning(state: &PrBlastIndexState) -> Option<Stri
     })
 }
 
+fn symbol_score_label(entry: &refact_codegraph::analytics::SymbolScore) -> String {
+    if entry.path.is_empty() {
+        entry.symbol.clone()
+    } else {
+        format!("{} ({})", entry.symbol, entry.path)
+    }
+}
+
 pub(crate) fn pr_blast_suggested_reviewers(
     report: &refact_codegraph::pr_blast::BlastReport,
     repo_root: Option<&Path>,
@@ -434,22 +442,49 @@ impl Tool for ToolCodegraphOverview {
             .await
             .clone()
             .ok_or_else(|| "codegraph is not available".to_string())?;
+        let readiness = service.index_readiness().await?;
+        let index_state = pr_blast_index_state(&readiness);
         let cached = service.cached_graph_analytics().await?;
         let overview = cached.analytics.overview.truncated(15);
-        let mut msg = format!(
-            "Code graph overview:\n  nodes: {}\n  edges: {}\n  connected components: {}\n  strongly-connected components: {} (largest {})\n\nMost central symbols (PageRank):\n",
+        let mut msg = String::new();
+        if let Some(warning) = pr_blast_partial_warning(&index_state) {
+            msg.push_str(&warning);
+            msg.push('\n');
+        }
+        msg.push_str(&format!(
+            "Code graph overview:\n  nodes: {}\n  edges: {}\n  connected components: {}\n  strongly-connected components: {} (largest {})\n",
             overview.node_count,
             overview.edge_count,
             overview.component_count,
             overview.scc_count,
             overview.largest_scc
-        );
-        for (name, score) in &overview.top_pagerank {
-            msg.push_str(&format!("  {:.4}  {}\n", score, name));
+        ));
+        msg.push_str(&format!(
+            "Index state: queued={} cross_file_edges={} cross_file_ready={} partial={}\n",
+            index_state.queued,
+            index_state.cross_file_edges,
+            index_state.cross_file_ready,
+            !index_state.cross_file_ready
+        ));
+        msg.push_str("\nMost central symbols (PageRank):\n");
+        for entry in &overview.top_pagerank {
+            msg.push_str(&format!(
+                "  {:.4}  {}\n",
+                entry.score,
+                symbol_score_label(entry)
+            ));
         }
         msg.push_str("\nKey connectors (betweenness centrality):\n");
-        for (name, score) in overview.top_betweenness.iter().filter(|(_, s)| *s > 0.0) {
-            msg.push_str(&format!("  {:.2}  {}\n", score, name));
+        for entry in overview
+            .top_betweenness
+            .iter()
+            .filter(|entry| entry.score > 0.0)
+        {
+            msg.push_str(&format!(
+                "  {:.2}  {}\n",
+                entry.score,
+                symbol_score_label(entry)
+            ));
         }
         let mut communities = cached.communities.clone();
         communities.sort_by(|a, b| b.members.len().cmp(&a.members.len()));
@@ -475,20 +510,19 @@ impl Tool for ToolCodegraphOverview {
                 }
             }
         }
-        if let Ok(mut dead) = service.dead_code().await {
-            dead.sort_by(|a, b| {
-                b.confidence
-                    .partial_cmp(&a.confidence)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            if !dead.is_empty() {
-                msg.push_str(&format!("\nLikely dead code ({}):\n", dead.len()));
-                for d in dead.iter().take(15) {
-                    msg.push_str(&format!(
-                        "  {} @ {} ({}, confidence {:.2})\n",
-                        d.name, d.path, d.reason, d.confidence
-                    ));
-                }
+        let mut dead = cached.dead_code.clone();
+        dead.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if !dead.is_empty() {
+            msg.push_str(&format!("\nLikely dead code ({}):\n", dead.len()));
+            for d in dead.iter().take(15) {
+                msg.push_str(&format!(
+                    "  {} @ {} ({}, confidence {:.2})\n",
+                    d.name, d.path, d.reason, d.confidence
+                ));
             }
         }
         let all_files = service.all_files_with_text().await.unwrap_or_default();
