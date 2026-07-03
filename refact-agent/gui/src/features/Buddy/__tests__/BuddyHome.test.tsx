@@ -287,7 +287,7 @@ describe("BuddyHome", () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
 
-    render(<BuddyHome />, { store });
+    const { user } = render(<BuddyHome />, { store });
 
     expect(await screen.findByTestId("buddy-home-content")).toBeInTheDocument();
     expect(screen.getByTestId("buddy-home-hero")).toBeInTheDocument();
@@ -297,16 +297,34 @@ describe("BuddyHome", () => {
     expect(
       screen.getByRole("button", { name: "Run Setup" }),
     ).toBeInTheDocument();
-    expect(await screen.findByTestId("buddy-pulse-card")).toBeInTheDocument();
+
+    // Opportunities is the default tab; the other panels each live behind a tab.
     expect(screen.getByTestId("buddy-opportunities-feed")).toBeInTheDocument();
     expect(screen.getByText("Model config is broken")).toBeInTheDocument();
-    expect(screen.getByTestId("buddy-personality-panel")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Personality" }));
+    expect(
+      await screen.findByTestId("buddy-personality-panel"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Helper Sprite")).toBeInTheDocument();
-    expect(screen.getByTestId("buddy-activity-panel")).toBeInTheDocument();
-    expect(screen.getByText("Task coach noticed pattern")).toBeInTheDocument();
-    expect(screen.getByTestId("buddy-recent-errors-panel")).toBeInTheDocument();
-    expect(screen.getByText("Model unavailable")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Recent chats" }));
     expect(await screen.findByText("Recent Buddy chat")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(
+      await screen.findByTestId("buddy-activity-panel"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Task coach noticed pattern")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Pulse" }));
+    expect(await screen.findByTestId("buddy-pulse-card")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+    expect(
+      await screen.findByTestId("buddy-recent-errors-panel"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Model unavailable")).toBeInTheDocument();
   });
 
   it("shows disabled state and enables Buddy through the settings mutation", async () => {
@@ -350,7 +368,7 @@ describe("BuddyHome", () => {
     expect(screen.getByText("Loading Buddy")).toBeInTheDocument();
   });
 
-  it("toggles the settings section from the settings gear", async () => {
+  it("opens the settings panel from the first (settings) tab", async () => {
     installBuddyHomeHandlers();
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
@@ -358,16 +376,17 @@ describe("BuddyHome", () => {
     const { user } = render(<BuddyHome />, { store });
 
     expect(await screen.findByTestId("buddy-home-content")).toBeInTheDocument();
+    // Settings is the first tab but the default tab is Opportunities, so the
+    // settings panel is not mounted until the tab is selected.
     expect(
-      screen.queryByTestId("buddy-home-settings-section"),
+      screen.queryByTestId("buddy-settings-panel"),
     ).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Settings" }));
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
 
     expect(
-      await screen.findByTestId("buddy-home-settings-section"),
+      await screen.findByTestId("buddy-settings-panel"),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("buddy-settings-panel")).toBeInTheDocument();
   });
 
   it("resets workspace-scoped Buddy state while preserving seen notifications", () => {
@@ -415,7 +434,10 @@ describe("BuddyHome", () => {
       ),
     );
 
-    render(<BuddyHome />, { store });
+    const { user } = render(<BuddyHome />, { store });
+
+    await screen.findByTestId("buddy-home-content");
+    await user.click(screen.getByRole("tab", { name: "Pulse" }));
 
     expect(await screen.findByTestId("buddy-pulse-card")).toHaveTextContent(
       "50 docs · 5 orphan · 1 conflict · 6 pending · 7 applied · 1 failed · 10 candidates",

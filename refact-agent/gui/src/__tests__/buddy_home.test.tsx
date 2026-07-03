@@ -837,6 +837,7 @@ describe("BuddyHome_renders_all_sections", () => {
     );
 
     const { user } = render(<BuddyHome />, { store });
+    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
     const errorsPanel = await screen.findByTestId("buddy-recent-errors-panel");
     expect(within(errorsPanel).getByText("×3")).toBeInTheDocument();
     expect(dismissedIds).toHaveLength(0);
@@ -918,7 +919,8 @@ describe("BuddyHome_renders_all_sections", () => {
       ),
     );
 
-    render(<BuddyHome />, { store });
+    const { user } = render(<BuddyHome />, { store });
+    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
     const errorsPanel = await screen.findByTestId("buddy-recent-errors-panel");
     expect(
       within(errorsPanel).getByText("Model Unavailable"),
@@ -967,6 +969,7 @@ describe("BuddyHome_renders_all_sections", () => {
       );
 
       render(<BuddyHome />, { store });
+      fireEvent.mouseDown(screen.getByRole("tab", { name: "Recent errors" }));
       const errorsPanel = await screen.findByTestId(
         "buddy-recent-errors-panel",
       );
@@ -1019,6 +1022,7 @@ describe("BuddyHome_renders_all_sections", () => {
       );
 
       render(<BuddyHome />, { store });
+      fireEvent.mouseDown(screen.getByRole("tab", { name: "Recent errors" }));
       const errorsPanel = await screen.findByTestId(
         "buddy-recent-errors-panel",
       );
@@ -1157,7 +1161,7 @@ describe("BuddyHome_renders_all_sections", () => {
     const { user } = render(<BuddyHome />, { store });
 
     await screen.findByTestId("buddy-home-content");
-    await user.click(screen.getByRole("button", { name: "Settings" }));
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
 
     const settingsSection = await screen.findByTestId(
       "buddy-home-settings-section",
@@ -3509,7 +3513,7 @@ describe("BuddySettingsPanel_autosave", () => {
     const { user } = render(<BuddyHome />, { store });
 
     await screen.findByTestId("buddy-home-content");
-    await user.click(screen.getByRole("button", { name: "Settings" }));
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
     await user.click(screen.getByRole("switch", { name: /buddy enabled/i }));
 
     await waitFor(() => {
@@ -4385,7 +4389,8 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
     server.use(...commonHandlers);
 
-    render(<BuddyHome />, { store });
+    const { user } = render(<BuddyHome />, { store });
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
     const panel = await screen.findByTestId("buddy-activity-panel");
     expect(panel.className).not.toContain("panelScroll");
     expect(panel.className).toContain("glass");
@@ -4397,7 +4402,8 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
     server.use(...commonHandlers);
 
-    render(<BuddyHome />, { store });
+    const { user } = render(<BuddyHome />, { store });
+    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
     const panel = await screen.findByTestId("buddy-recent-errors-panel");
     expect(panel.className).not.toContain("panelScroll");
     expect(panel.className).toContain("glass");
@@ -4409,23 +4415,20 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
     server.use(...commonHandlers);
 
-    render(<BuddyHome />, { store });
+    const { user } = render(<BuddyHome />, { store });
+    await user.click(screen.getByRole("tab", { name: "Recent chats" }));
     const panel = await screen.findByTestId("buddy-recent-chats");
     expect(panel.className).not.toContain("panelScroll");
     expect(panel.className).toContain("glass");
   });
 
-  it("main grid bounds redesigned panel rows", async () => {
+  it("tab panels bound the redesigned panel rows", async () => {
     const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
-    const mainGridBlock = readCssBlock(css, ".mainGrid");
-    const panelSlotBlock = readCssBlock(css, ".panelSlot");
+    const tabPanelBlock = readCssBlock(css, ".tabPanel");
 
-    expect(mainGridBlock).toContain("repeat(3, minmax(0, 1fr))");
-    expect(mainGridBlock).toContain("align-items: start");
-    expect(panelSlotBlock).toContain("overflow: hidden");
-    expect(panelSlotBlock).toContain("min-height: 0");
-    expect(css).toContain("height: clamp(300px, 34vh, 360px)");
-    expect(css).toContain("height: clamp(230px, 27vh, 290px)");
+    expect(tabPanelBlock).toContain("overflow: hidden");
+    expect(tabPanelBlock).toContain("min-height: 0");
+    expect(tabPanelBlock).toContain("height: clamp(320px, 52vh, 560px)");
     expect(css).not.toContain("max-height: 860px");
   });
 
@@ -4476,10 +4479,6 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
 
   it("stacked media keeps redesigned panels bounded", async () => {
     const homeCss = await readGuiSource("features/Buddy/BuddyHome.module.css");
-    const homeWideStackBlock = readCssMediaBlock(
-      homeCss,
-      "(max-width: 1100px)",
-    );
     const homeIdeStackBlock = readCssMediaBlock(homeCss, "(max-width: 720px)");
     const activityCss = await readGuiSource(
       "features/Buddy/BuddyActivityPanel.module.css",
@@ -4488,11 +4487,7 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
       "features/Buddy/BuddyRecentErrorsPanel.module.css",
     );
 
-    expect(homeWideStackBlock).toContain("repeat(2, minmax(0, 1fr))");
-    expect(homeIdeStackBlock).toContain(
-      "grid-template-columns: minmax(0, 1fr)",
-    );
-    expect(homeIdeStackBlock).toContain("height: min(420px, 70vh)");
+    expect(homeIdeStackBlock).toContain("height: min(460px, 70vh)");
     expect(homeIdeStackBlock).not.toContain("overflow-y: visible");
     expect(activityCss).not.toContain("overflow-y: visible");
     expect(recentErrorsCss).not.toContain("overflow-y: visible");

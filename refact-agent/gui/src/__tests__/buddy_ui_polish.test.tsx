@@ -407,7 +407,7 @@ describe("buddy UI polish", () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
 
-    render(<BuddyHome />, {
+    const { user } = render(<BuddyHome />, {
       preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
     });
 
@@ -416,12 +416,23 @@ describe("buddy UI polish", () => {
       expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
       expect(screen.getByTestId("buddy-world-character")).toBeInTheDocument();
       expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
-      expect(screen.getByTestId("buddy-personality-panel")).toBeInTheDocument();
-      expect(screen.getByTestId("buddy-activity-panel")).toBeInTheDocument();
-      expect(
-        screen.getByTestId("buddy-recent-errors-panel"),
-      ).toBeInTheDocument();
     });
+
+    // The former grid panels are now individual tabs after Buddy's world.
+    await user.click(screen.getByRole("tab", { name: "Personality" }));
+    expect(
+      await screen.findByTestId("buddy-personality-panel"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(
+      await screen.findByTestId("buddy-activity-panel"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+    expect(
+      await screen.findByTestId("buddy-recent-errors-panel"),
+    ).toBeInTheDocument();
   });
 
   it("BuddyDashboardScene_renders_shared_canvas_scene", async () => {

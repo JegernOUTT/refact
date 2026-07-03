@@ -57,6 +57,13 @@
   letter-spacing: 0.02em;
 }
 
+/* Reserves the same slot the settings gear used to occupy so the centered
+ * title stays balanced now that the gear lives in the first tab. */
+.topBarSpacer {
+  flex: 0 0 auto;
+  width: var(--rf-control-h);
+}
+
 /* Hero — the world canvas owns the full card width; identity moved to the
  * summary strip below so no column steals horizontal space from the scene. */
 .heroCard {
@@ -97,44 +104,26 @@
   white-space: nowrap;
 }
 
-.mainGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  align-items: start;
-  gap: var(--rf-space-3);
+/* Panels now live in tabs (reusing the shared kit Tabs strip). Each data
+ * panel gets a bounded slot so its internal scroll list keeps working; the
+ * Settings tab is a tall form that grows naturally with the page scroll. */
+.tabs {
   min-width: 0;
 }
 
-.panelColumn {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-3);
+.tabsList {
   min-width: 0;
-  min-height: 0;
 }
 
-.panelSlot {
+.tabContent {
+  min-width: 0;
+}
+
+.tabPanel {
+  height: clamp(320px, 52vh, 560px);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-}
-
-.panelSlotOpportunities,
-.panelSlotChats,
-.panelSlotActivity {
-  height: clamp(300px, 34vh, 360px);
-}
-
-.panelSlotPersonality {
-  height: clamp(300px, 34vh, 360px);
-}
-
-.panelSlotPulse {
-  height: clamp(230px, 27vh, 290px);
-}
-
-.panelSlotErrors {
-  height: clamp(270px, 31vh, 330px);
 }
 
 .settingsSection {
@@ -252,12 +241,6 @@
   padding: var(--rf-panel-pad);
 }
 
-@media (max-width: 1100px) {
-  .mainGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
 @media (max-width: 720px) {
   .contentPadded,
   .homeContent {
@@ -269,12 +252,8 @@
     min-height: 220px;
   }
 
-  .mainGrid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .panelSlot {
-    height: min(420px, 70vh);
+  .tabPanel {
+    height: min(460px, 70vh);
   }
 
   .draftMeta {
@@ -283,8 +262,7 @@
 }
 
 @media (max-width: 520px) {
-  .homeContent,
-  .mainGrid {
+  .homeContent {
     gap: var(--rf-space-2);
   }
 

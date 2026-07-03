@@ -6,6 +6,7 @@ import {
   IconButton,
   LoadingState,
   Surface,
+  Tabs,
   Text,
 } from "../../components/ui";
 import { ArrowLeft, Settings, Wrench } from "lucide-react";
@@ -114,6 +115,35 @@ const DRAFT_KIND_LABELS: Record<DraftKind, string> = {
 };
 
 const REVIEWABLE_DRAFT_KINDS: DraftKind[] = ["agents_md", "pulse_report"];
+
+type BuddyHomeTab =
+  | "settings"
+  | "opportunities"
+  | "personality"
+  | "chats"
+  | "activity"
+  | "pulse"
+  | "errors";
+
+const BUDDY_HOME_TAB_ORDER: BuddyHomeTab[] = [
+  "settings",
+  "opportunities",
+  "personality",
+  "chats",
+  "activity",
+  "pulse",
+  "errors",
+];
+
+const BUDDY_HOME_TAB_LABELS: Record<BuddyHomeTab, string> = {
+  settings: "Settings",
+  opportunities: "Opportunities",
+  personality: "Personality",
+  chats: "Recent chats",
+  activity: "Activity",
+  pulse: "Pulse",
+  errors: "Recent errors",
+};
 
 type ClipboardWriter = {
   clipboard?: {
@@ -266,6 +296,7 @@ export const BuddyHome: React.FC = () => {
   const { state, signal: buddySignal } = buddy;
   const [setupDismissed, setSetupDismissed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [activeTab, setActiveTab] = useState<BuddyHomeTab>("opportunities");
   const [inboxOpen, setInboxOpen] = useState(false);
   const [worldBoundaryKey, setWorldBoundaryKey] = useState(0);
   const verdictReaction = useAppSelector(selectVerdictReaction);
@@ -821,13 +852,7 @@ export const BuddyHome: React.FC = () => {
         <Text size="2" weight="bold" className={styles.topTitle}>
           {name}
         </Text>
-        <IconButton
-          variant="ghost"
-          size="sm"
-          aria-label="Settings"
-          icon={Settings}
-          onClick={() => setShowSettings((v) => !v)}
-        />
+        <span className={styles.topBarSpacer} aria-hidden />
       </div>
 
       <main
@@ -940,20 +965,6 @@ export const BuddyHome: React.FC = () => {
           ))}
         </Surface>
 
-        {showSettings && (
-          <div
-            className={classNames(
-              styles.settingsSection,
-              "rf-expand-grid",
-              "rf-enter-rise",
-            )}
-            data-state="open"
-            data-testid="buddy-home-settings-section"
-          >
-            <BuddySettingsPanel onClose={() => setShowSettings(false)} />
-          </div>
-        )}
-
         {draftId && (
           <div className={classNames(styles.draftSection, "rf-enter-rise")}>
             <BuddyHomeDraftReview draftId={draftId} />
@@ -962,22 +973,40 @@ export const BuddyHome: React.FC = () => {
 
         <BuddyBriefingCard />
 
-        <section className={classNames(styles.mainGrid, "rf-stagger")}>
-          <div className={styles.panelColumn}>
+        <Tabs
+          value={activeTab}
+          onValueChange={(value) => setActiveTab(value as BuddyHomeTab)}
+          className={styles.tabs}
+        >
+          <Tabs.List
+            activeIndex={BUDDY_HOME_TAB_ORDER.indexOf(activeTab)}
+            itemCount={BUDDY_HOME_TAB_ORDER.length}
+            className={styles.tabsList}
+          >
+            {BUDDY_HOME_TAB_ORDER.map((tab) => (
+              <Tabs.Trigger key={tab} value={tab}>
+                {BUDDY_HOME_TAB_LABELS[tab]}
+              </Tabs.Trigger>
+            ))}
+          </Tabs.List>
+
+          <Tabs.Content value="settings" className={styles.tabContent}>
             <div
-              className={classNames(
-                styles.panelSlot,
-                styles.panelSlotOpportunities,
-              )}
+              className={styles.settingsSection}
+              data-testid="buddy-home-settings-section"
             >
+              <BuddySettingsPanel />
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content value="opportunities" className={styles.tabContent}>
+            <div className={styles.tabPanel}>
               <BuddyOpportunitiesFeed />
             </div>
-            <div
-              className={classNames(
-                styles.panelSlot,
-                styles.panelSlotPersonality,
-              )}
-            >
+          </Tabs.Content>
+
+          <Tabs.Content value="personality" className={styles.tabContent}>
+            <div className={styles.tabPanel}>
               <BuddyPersonalityPanel
                 personality={personality}
                 needRows={needRows}
@@ -992,39 +1021,39 @@ export const BuddyHome: React.FC = () => {
                 onPromptChange={(prompt) => void handlePromptChange(prompt)}
               />
             </div>
-          </div>
-          <div className={styles.panelColumn}>
-            <div
-              className={classNames(styles.panelSlot, styles.panelSlotChats)}
-            >
+          </Tabs.Content>
+
+          <Tabs.Content value="chats" className={styles.tabContent}>
+            <div className={styles.tabPanel}>
               <BuddyRecentChats title="Recent chats" />
             </div>
-            <div
-              className={classNames(styles.panelSlot, styles.panelSlotActivity)}
-            >
+          </Tabs.Content>
+
+          <Tabs.Content value="activity" className={styles.tabContent}>
+            <div className={styles.tabPanel}>
               <BuddyActivityPanel
                 activities={activities}
                 onOpenChat={handleOpenActivityChat}
               />
             </div>
-          </div>
-          <div className={styles.panelColumn}>
-            <div
-              className={classNames(styles.panelSlot, styles.panelSlotPulse)}
-            >
+          </Tabs.Content>
+
+          <Tabs.Content value="pulse" className={styles.tabContent}>
+            <div className={styles.tabPanel}>
               <BuddyPulseCard />
             </div>
-            <div
-              className={classNames(styles.panelSlot, styles.panelSlotErrors)}
-            >
+          </Tabs.Content>
+
+          <Tabs.Content value="errors" className={styles.tabContent}>
+            <div className={styles.tabPanel}>
               <BuddyRecentErrorsPanel
                 recentErrors={recentErrors}
                 onInvestigate={handleInvestigateError}
                 onDismiss={handleDismissError}
               />
             </div>
-          </div>
-        </section>
+          </Tabs.Content>
+        </Tabs>
       </main>
     </div>
   );
