@@ -80,7 +80,7 @@ async fn index_or_remove_path(
     if let Err(err) =
         crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &store_path_buf).await
     {
-        if path_is_genuinely_absent(&read_path_buf) {
+        if path_is_genuinely_absent(&store_path_buf) {
             return remove_missing_path(service, &store_path, err).await;
         }
         warn!("codegraph: read {read_path} failed for {store_path}, keeping existing index: {err}");
@@ -94,7 +94,7 @@ async fn index_or_remove_path(
                 .await
                 .map_err(|err| format!("codegraph: index {store_path} failed: {err}"))
         }
-        Err(err) if path_is_genuinely_absent(&read_path_buf) => {
+        Err(err) if path_is_genuinely_absent(&store_path_buf) => {
             remove_missing_path(service, &store_path, err).await
         }
         Err(err) => {
@@ -409,5 +409,95 @@ mod tests {
             service.all_files_with_text().await.unwrap(),
             vec![(file, "fn indexed() {}\n".to_string())]
         );
+    }
+
+    #[tokio::test]
+    async fn missing_read_path_preserves_live_store_path_index() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_privacy(&gcx, Vec::new());
+        let service = Arc::new(CodeGraphService::open_in_memory().unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let store_path = temp.path().join("source").join("src").join("lib.rs");
+        let read_path = temp.path().join("worktree").join("src").join("lib.rs");
+        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(read_path.parent().unwrap()).unwrap();
+        std::fs::write(&store_path, "fn source_live() {}\n").unwrap();
+        let store_path = store_path.to_string_lossy().to_string();
+        let read_path = read_path.to_string_lossy().to_string();
+        service
+            .index_file(&store_path, "fn indexed_old() {}\n", "rust")
+            .await
+            .unwrap();
+
+        index_or_remove_path(
+            gcx,
+            service.clone(),
+            QueuedPath::new(store_path.clone(), read_path),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(service.all_paths().await.unwrap(), vec![store_path.clone()]);
+        assert_eq!(
+            service.all_files_with_text().await.unwrap(),
+            vec![(store_path, "fn indexed_old() {}\n".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_read_path_indexes_under_store_path_key() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_privacy(&gcx, Vec::new());
+        let service = Arc::new(CodeGraphService::open_in_memory().unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let store_path = temp.path().join("source").join("src").join("lib.rs");
+        let read_path = temp.path().join("worktree").join("src").join("lib.rs");
+        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(read_path.parent().unwrap()).unwrap();
+        std::fs::write(&store_path, "fn source() {}\n").unwrap();
+        std::fs::write(&read_path, "fn worktree() {}\n").unwrap();
+        let store_path = store_path.to_string_lossy().to_string();
+        let read_path = read_path.to_string_lossy().to_string();
+
+        index_or_remove_path(
+            gcx,
+            service.clone(),
+            QueuedPath::new(store_path.clone(), read_path),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            service.all_files_with_text().await.unwrap(),
+            vec![(store_path, "fn worktree() {}\n".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_store_path_removes_existing_index() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_privacy(&gcx, Vec::new());
+        let service = Arc::new(CodeGraphService::open_in_memory().unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("src").join("gone.rs");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "fn gone() {}\n").unwrap();
+        let path = path.to_string_lossy().to_string();
+        service
+            .index_file(&path, "fn indexed() {}\n", "rust")
+            .await
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        index_or_remove_path(
+            gcx,
+            service.clone(),
+            QueuedPath::new(path.clone(), path.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert!(service.all_paths().await.unwrap().is_empty());
+        assert!(service.all_files_with_text().await.unwrap().is_empty());
     }
 }

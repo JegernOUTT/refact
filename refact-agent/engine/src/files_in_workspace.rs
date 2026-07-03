@@ -214,6 +214,30 @@ pub enum DebouncedFileEventKind {
     Remove,
 }
 
+fn debounced_file_event_kind_for_path(
+    is_remove_event: bool,
+    read_path: &PathBuf,
+    store_path: &PathBuf,
+    roots: &[PathBuf],
+    global_config_roots: &[PathBuf],
+) -> Option<DebouncedFileEventKind> {
+    if is_remove_event {
+        return store_path
+            .extension()
+            .is_some()
+            .then_some(DebouncedFileEventKind::Remove);
+    }
+    if read_path.exists()
+        && event_path_is_valid_file(read_path, store_path, roots, global_config_roots)
+    {
+        Some(DebouncedFileEventKind::Upsert)
+    } else if !read_path.exists() && store_path.extension().is_some() {
+        Some(DebouncedFileEventKind::Remove)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DebouncedFileEvent {
     read_path: PathBuf,
@@ -1858,6 +1882,7 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
             crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path());
         let global_config_roots = vec![gcx.config_dir.clone()];
         let debounce_now = Instant::now();
+        let is_remove_event = matches!(&event.kind, EventKind::Remove(_));
         for p in &event.paths {
             if path_is_refact_internal(p) {
                 continue;
@@ -1876,27 +1901,14 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
             ) {
                 continue;
             }
-            if read_path.exists()
-                && event_path_is_valid_file(
-                    &read_path,
-                    &store_path,
-                    &blocklist_roots,
-                    &global_config_roots,
-                )
-            {
-                schedule_debounced_file_event(
-                    gcx.clone(),
-                    queue_path,
-                    DebouncedFileEventKind::Upsert,
-                    debounce_now,
-                );
-            } else if !read_path.exists() && store_path.extension().is_some() {
-                schedule_debounced_file_event(
-                    gcx.clone(),
-                    queue_path,
-                    DebouncedFileEventKind::Remove,
-                    debounce_now,
-                );
+            if let Some(kind) = debounced_file_event_kind_for_path(
+                is_remove_event,
+                &read_path,
+                &store_path,
+                &blocklist_roots,
+                &global_config_roots,
+            ) {
+                schedule_debounced_file_event(gcx.clone(), queue_path, kind, debounce_now);
             }
         }
     }
@@ -2745,6 +2757,50 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn debounced_worktree_remove_flushes_source_store_remove() {
+        let source_temp = tempfile::Builder::new()
+            .prefix("refact-src-")
+            .tempdir()
+            .unwrap();
+        let source = source_temp.path().join("source");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        allow_all_privacy(&gcx);
+        let source_file = source.join("src").join("lib.rs");
+        write_file(&source_file, "fn source() {}\n");
+        let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
+        let worktree_file = worktree.join("src").join("lib.rs");
+        write_file(&worktree_file, "fn worktree() {}\n");
+        write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![worktree.clone()];
+        *gcx.documents_state.workspace_files.lock().unwrap() = vec![normalized(&source_file)];
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        let source_key = normalized(&source_file).to_string_lossy().to_string();
+        service
+            .index_file(&source_key, "fn indexed() {}\n", "rust")
+            .await
+            .unwrap();
+        *gcx.codegraph.lock().await = Some(service.clone());
+
+        std::fs::remove_file(&worktree_file).unwrap();
+        let event = notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::File))
+            .add_path(worktree_file.clone());
+        file_watcher_event(event, Arc::downgrade(&gcx)).await;
+        tokio::time::sleep(FILE_EVENT_DEBOUNCE_WINDOW + Duration::from_millis(80)).await;
+
+        assert_eq!(service.counts().await.unwrap().files, 0);
+        assert_eq!(
+            service.drain_batch_entries(10),
+            vec![QueuedPath::new(
+                source_key,
+                normalized(&worktree_file).to_string_lossy().to_string(),
+            )]
+        );
+        let workspace_files = gcx.documents_state.workspace_files.lock().unwrap().clone();
+        assert!(!workspace_files.contains(&normalized(&source_file)));
+        assert!(source_file.exists());
+    }
+
     #[test]
     fn debounced_file_event_preserves_worktree_read_path_under_source_key() {
         let temp = tempfile::Builder::new()
@@ -2778,6 +2834,40 @@ mod tests {
         assert_eq!(event.read_path, normalized(&worktree_file));
     }
 
+    #[tokio::test]
+    async fn worktree_remove_event_preserves_remove_kind_when_source_exists() {
+        let source_temp = tempfile::Builder::new()
+            .prefix("refact-src-")
+            .tempdir()
+            .unwrap();
+        let source = source_temp.path().join("source");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        allow_all_privacy(&gcx);
+        let source_file = source.join("src").join("lib.rs");
+        write_file(&source_file, "fn source() {}\n");
+        let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
+        let worktree_file = worktree.join("src").join("lib.rs");
+        write_file(&worktree_file, "fn worktree() {}\n");
+        write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![worktree.clone()];
+
+        let event = notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::File))
+            .add_path(worktree_file.clone());
+        file_watcher_event(event, Arc::downgrade(&gcx)).await;
+
+        let event = gcx
+            .documents_state
+            .file_event_debounce
+            .lock()
+            .unwrap()
+            .get(&normalized(&source_file))
+            .cloned()
+            .expect("remove event should be keyed by canonical source path");
+        assert_eq!(event.kind, DebouncedFileEventKind::Remove);
+        assert_eq!(event.read_path, normalized(&worktree_file));
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
+        gcx.documents_state.file_event_debounce_notify.notify_one();
+    }
     #[tokio::test]
     async fn debounced_file_event_worker_is_bounded_and_flushes_pending_on_shutdown() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
