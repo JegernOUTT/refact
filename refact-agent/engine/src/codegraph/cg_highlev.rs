@@ -115,6 +115,7 @@ pub(crate) async fn process_index_batch(
     service: Arc<CodeGraphService>,
     batch: Vec<QueuedPath>,
 ) {
+    let batch_len = batch.len();
     let mut results = stream::iter(batch)
         .map(|path| {
             let gcx = gcx.clone();
@@ -129,6 +130,7 @@ pub(crate) async fn process_index_batch(
             *gcx.codegraph_error.lock().unwrap() = err;
         }
     }
+    service.record_index_completions(batch_len);
 }
 
 async fn connect_usages(gcx: &Arc<GlobalContext>, service: &Arc<CodeGraphService>) {

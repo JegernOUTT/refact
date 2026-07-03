@@ -101,6 +101,8 @@ mod tests {
         let codegraph = status.codegraph.expect("codegraph status must be present");
         assert_eq!(codegraph.state, "turned_off");
         assert_eq!(codegraph.queued, 0);
+        assert_eq!(codegraph.throughput_files_per_min, 0.0);
+        assert_eq!(codegraph.eta_seconds, None);
         assert_eq!(codegraph.error, "");
         assert_eq!(status.codegraph_error, "");
 
@@ -113,6 +115,8 @@ mod tests {
         let codegraph = status.codegraph.expect("codegraph status must be present");
         assert_eq!(codegraph.state, "indexing");
         assert_eq!(codegraph.queued, 1);
+        assert_eq!(codegraph.throughput_files_per_min, 0.0);
+        assert_eq!(codegraph.eta_seconds, None);
         assert_eq!(codegraph.error, "");
 
         service.drain_batch(10);
@@ -127,6 +131,8 @@ mod tests {
         let codegraph = status.codegraph.expect("codegraph status must be present");
         assert_eq!(codegraph.state, "working");
         assert_eq!(codegraph.queued, 0);
+        assert_eq!(codegraph.throughput_files_per_min, 0.0);
+        assert_eq!(codegraph.eta_seconds, None);
         assert_eq!(codegraph.counts.files, 1);
         assert_eq!(codegraph.error, "");
 
@@ -162,6 +168,31 @@ mod tests {
         assert_eq!(codegraph.state, "error");
         assert_eq!(codegraph.error, "open failed");
         assert_eq!(codegraph.queued, 0);
+        assert_eq!(codegraph.throughput_files_per_min, 0.0);
+        assert_eq!(codegraph.eta_seconds, None);
         assert_eq!(codegraph.counts, refact_codegraph::Counts::default());
+    }
+
+    #[tokio::test]
+    async fn throughput_and_eta_fields_present() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let service = Arc::new(CodeGraphService::open_in_memory().unwrap());
+        service.enqueue_files(&[
+            "src/a.rs".to_string(),
+            "src/b.rs".to_string(),
+            "src/c.rs".to_string(),
+        ]);
+        service.record_index_completions(6);
+        *gcx.codegraph.lock().await = Some(service);
+
+        let status = get_rag_status(gcx).await;
+        let codegraph = status.codegraph.expect("codegraph status must be present");
+
+        assert_eq!(codegraph.queued, 3);
+        assert!(codegraph.throughput_files_per_min > 0.0);
+        assert!(codegraph.eta_seconds.is_some());
+        let json = serde_json::to_value(&codegraph).unwrap();
+        assert!(json.get("throughput_files_per_min").is_some());
+        assert!(json.get("eta_seconds").is_some());
     }
 }

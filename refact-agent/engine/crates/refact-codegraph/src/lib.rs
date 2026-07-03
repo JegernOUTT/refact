@@ -64,6 +64,7 @@ pub struct CodeGraphService {
     store: AMutex<Store>,
     read_store: Option<AMutex<Store>>,
     queue: StdMutex<PendingQueue>,
+    throughput: StdMutex<ThroughputWindow>,
     queue_notify: Notify,
     db_path: PathBuf,
     initial_index_done: AtomicBool,
@@ -205,6 +206,47 @@ struct PendingQueue {
     entries: HashMap<String, QueuedPath>,
 }
 
+const THROUGHPUT_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Default)]
+struct ThroughputWindow {
+    completions: VecDeque<(Instant, usize)>,
+}
+
+impl ThroughputWindow {
+    fn record(&mut self, now: Instant, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.completions.push_back((now, count));
+        self.prune(now);
+    }
+
+    fn files_per_min(&mut self, now: Instant) -> f64 {
+        self.prune(now);
+        let count = self
+            .completions
+            .iter()
+            .map(|(_, count)| *count)
+            .sum::<usize>();
+        if count == 0 {
+            0.0
+        } else {
+            count as f64 / (THROUGHPUT_WINDOW.as_secs_f64() / 60.0)
+        }
+    }
+
+    fn prune(&mut self, now: Instant) {
+        while self
+            .completions
+            .front()
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) > THROUGHPUT_WINDOW)
+        {
+            self.completions.pop_front();
+        }
+    }
+}
+
 impl CodeGraphService {
     pub fn open(db_path: PathBuf) -> Result<Self, String> {
         let store = Store::open(&db_path)?;
@@ -213,6 +255,7 @@ impl CodeGraphService {
             store: AMutex::new(store),
             read_store: Some(AMutex::new(read_store)),
             queue: StdMutex::new(PendingQueue::default()),
+            throughput: StdMutex::new(ThroughputWindow::default()),
             queue_notify: Notify::new(),
             db_path,
             initial_index_done: AtomicBool::new(false),
@@ -228,6 +271,7 @@ impl CodeGraphService {
             store: AMutex::new(store),
             read_store: None,
             queue: StdMutex::new(PendingQueue::default()),
+            throughput: StdMutex::new(ThroughputWindow::default()),
             queue_notify: Notify::new(),
             db_path: PathBuf::from(":memory:"),
             initial_index_done: AtomicBool::new(true),
@@ -317,6 +361,20 @@ impl CodeGraphService {
 
     pub fn queue_len(&self) -> usize {
         self.queue.lock().unwrap().entries.len()
+    }
+
+    pub fn record_index_completions(&self, count: usize) {
+        self.throughput
+            .lock()
+            .unwrap()
+            .record(Instant::now(), count);
+    }
+
+    pub fn throughput_files_per_min(&self) -> f64 {
+        self.throughput
+            .lock()
+            .unwrap()
+            .files_per_min(Instant::now())
     }
 
     pub async fn wait_for_enqueue(&self) {

@@ -878,6 +878,82 @@ pub async fn retrieve_files_in_workspace_folders(
     (all_files, vcs_folders)
 }
 
+fn git_root_at_or_above_dir_cached(
+    mut dir: PathBuf,
+    cache: &mut HashMap<PathBuf, Option<PathBuf>>,
+) -> Option<PathBuf> {
+    let mut visited = Vec::new();
+    loop {
+        if let Some(root) = cache.get(&dir).cloned() {
+            for visited_dir in visited {
+                cache.insert(visited_dir, root.clone());
+            }
+            return root;
+        }
+        visited.push(dir.clone());
+        if dir.join(".git").exists() {
+            let root = Some(dir.clone());
+            for visited_dir in visited {
+                cache.insert(visited_dir, root.clone());
+            }
+            return root;
+        }
+        if !dir.pop() {
+            for visited_dir in visited {
+                cache.insert(visited_dir, None);
+            }
+            return None;
+        }
+    }
+}
+
+fn matching_workspace_folder(path: &Path, workspace_folders: &[PathBuf]) -> Option<usize> {
+    workspace_folders
+        .iter()
+        .enumerate()
+        .filter(|(_, folder)| path.starts_with(folder))
+        .max_by_key(|(_, folder)| folder.components().count())
+        .map(|(idx, _)| idx)
+}
+
+fn order_workspace_files_for_initial_enqueue(
+    files: Vec<PathBuf>,
+    workspace_folders: &[PathBuf],
+) -> Vec<PathBuf> {
+    let workspace_folders = workspace_folders
+        .iter()
+        .map(|folder| canonical_path(folder.to_string_lossy()))
+        .collect::<Vec<_>>();
+    let mut git_root_cache = HashMap::new();
+    let workspace_git_roots = workspace_folders
+        .iter()
+        .map(|folder| git_root_at_or_above_dir_cached(folder.clone(), &mut git_root_cache))
+        .collect::<Vec<_>>();
+    let mut primary = Vec::new();
+    let mut nested = Vec::new();
+
+    for file in files {
+        let workspace_idx = matching_workspace_folder(&file, &workspace_folders);
+        let is_nested = workspace_idx
+            .and_then(|idx| workspace_git_roots.get(idx).and_then(|root| root.as_ref()))
+            .and_then(|workspace_root| {
+                let file_dir = file.parent().unwrap_or(file.as_path()).to_path_buf();
+                git_root_at_or_above_dir_cached(file_dir, &mut git_root_cache)
+                    .map(|file_root| (workspace_root.clone(), file_root))
+            })
+            .is_some_and(|(workspace_root, file_root)| {
+                file_root != workspace_root && file_root.starts_with(&workspace_root)
+            });
+        if is_nested {
+            nested.push(file);
+        } else {
+            primary.push(file);
+        }
+    }
+    primary.extend(nested);
+    primary
+}
+
 pub fn is_path_to_enqueue_valid(path: &PathBuf) -> Result<(), String> {
     let extension = path.extension().unwrap_or_default();
     if !SOURCE_FILE_EXTENSIONS.contains(&extension.to_str().unwrap_or_default()) {
@@ -1034,13 +1110,14 @@ pub async fn enqueue_all_files_from_workspace_folders(
         crate::files_blocklist::reload_global_indexing_only(gcx.clone()).await;
     let global_config_roots = vec![gcx.config_dir.clone()];
     let (all_files, vcs_folders) = retrieve_files_in_workspace_folders(
-        folders,
+        folders.clone(),
         &mut indexing_everywhere,
         false,
         false,
         &global_config_roots,
     )
     .await;
+    let all_files = order_workspace_files_for_initial_enqueue(all_files, &folders);
     info!(
         "enqueue_all_files_from_workspace_folders found {} files => workspace_files",
         all_files.len()
@@ -2177,6 +2254,104 @@ mod tests {
             },
             loaded_ts,
         });
+    }
+
+    fn path_counts(paths: &[PathBuf]) -> HashMap<PathBuf, usize> {
+        let mut counts = HashMap::new();
+        for path in paths {
+            *counts.entry(path.clone()).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    #[test]
+    fn tiering_is_permutation_nothing_dropped() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".git")).unwrap();
+        std::fs::create_dir_all(temp.path().join("competitors").join("one").join(".git")).unwrap();
+        std::fs::create_dir_all(temp.path().join("vendor").join("two").join(".git")).unwrap();
+        let primary_a = temp.path().join("src").join("a.rs");
+        let nested_a = temp
+            .path()
+            .join("competitors")
+            .join("one")
+            .join("src")
+            .join("a.rs");
+        let primary_b = temp.path().join("src").join("b.rs");
+        let nested_b = temp
+            .path()
+            .join("vendor")
+            .join("two")
+            .join("src")
+            .join("b.rs");
+        write_file(&primary_a, "fn a() {}\n");
+        write_file(&nested_a, "fn nested_a() {}\n");
+        write_file(&primary_b, "fn b() {}\n");
+        write_file(&nested_b, "fn nested_b() {}\n");
+        let files = vec![
+            normalized(&primary_a),
+            normalized(&nested_a),
+            normalized(&primary_b),
+            normalized(&nested_b),
+        ];
+
+        let ordered =
+            order_workspace_files_for_initial_enqueue(files.clone(), &[normalized(temp.path())]);
+
+        assert_eq!(path_counts(&ordered), path_counts(&files));
+        assert_eq!(
+            ordered,
+            vec![
+                normalized(&primary_a),
+                normalized(&primary_b),
+                normalized(&nested_a),
+                normalized(&nested_b),
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_git_detection() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".git")).unwrap();
+        std::fs::create_dir_all(temp.path().join("nested_a").join(".git")).unwrap();
+        std::fs::create_dir_all(temp.path().join("nested_b").join(".git")).unwrap();
+        let primary = temp.path().join("src").join("main.rs");
+        let nested_a = temp.path().join("nested_a").join("lib.rs");
+        let nested_b = temp.path().join("nested_b").join("lib.rs");
+        write_file(&primary, "fn main() {}\n");
+        write_file(&nested_a, "fn nested_a() {}\n");
+        write_file(&nested_b, "fn nested_b() {}\n");
+        let files = vec![
+            normalized(&nested_a),
+            normalized(&primary),
+            normalized(&nested_b),
+        ];
+
+        let ordered =
+            order_workspace_files_for_initial_enqueue(files.clone(), &[normalized(temp.path())]);
+
+        assert_eq!(
+            ordered,
+            vec![
+                normalized(&primary),
+                normalized(&nested_a),
+                normalized(&nested_b),
+            ]
+        );
+
+        let no_git = tempfile::tempdir().unwrap();
+        let plain = no_git.path().join("plain.rs");
+        let nested = no_git.path().join("nested").join("lib.rs");
+        std::fs::create_dir_all(no_git.path().join("nested").join(".git")).unwrap();
+        write_file(&plain, "fn plain() {}\n");
+        write_file(&nested, "fn nested() {}\n");
+        let files = vec![normalized(&nested), normalized(&plain)];
+
+        let ordered =
+            order_workspace_files_for_initial_enqueue(files.clone(), &[normalized(no_git.path())]);
+
+        assert_eq!(ordered, files);
     }
 
     #[tokio::test]
