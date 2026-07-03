@@ -52,6 +52,12 @@ import { diff_paste_back } from "./chatTab";
 import { execFile } from "child_process";
 import * as estate from './estate';
 import { animation_start } from "./interactiveDiff";
+import {
+    REFACT_DIFF_SCHEME,
+    buildRefactDiffBeforeUri,
+    closeRefactDiffTabsForUri,
+    disposeRefactDiffBeforeUri,
+} from "./nativeDiff";
 import { backendConfigForStatus, effectiveLspPortForStatus, type RefactBackendConfig } from "./backendStatus";
 import { webviewEndpointConfig } from "./sidebarConfig";
 
@@ -66,6 +72,8 @@ type QueuedWebviewMessage = {
     message: unknown;
     durable: boolean;
 };
+
+type ToolEditRef = { chatId: string; toolCallId?: string };
 
 export async function open_chat_tab(
     question: string,
@@ -740,7 +748,9 @@ export class PanelWebview implements vscode.WebviewViewProvider {
             return this.createNewFileWithContent(filePath, toolEdit.file_after);
         }
 
-        return this.addDiffToFile(filePath, toolEdit.file_after);
+        const pending = this.tool_edit_in_progress;
+        this.tool_edit_in_progress = null;
+        return this.addDiffToFile(filePath, toolEdit.file_after, pending);
     }
 
 
@@ -785,7 +795,6 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         const disposables: vscode.Disposable[] = [];
         const saveDisposable = vscode.workspace.onDidSaveTextDocument((savedDoc) => {
             if (savedDoc.uri.toString() === document.uri.toString()) {
-                // Send message to webview that file was saved
                 this.toolEditChange(document.uri.fsPath, true);
                 disposables.forEach(d => d.dispose());
             }
@@ -816,25 +825,114 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         }
     }
 
-    async addDiffToFile(fileName: string, content: string) {
+    async addDiffToFile(fileName: string, content: string, pending: ToolEditRef | null) {
         const uri = this.filePathToUri(fileName);
         if (!uri) {
-            this.toolEditChange(fileName, false);
+            this.sendToolEditDecision(pending, false);
             return;
         }
         const document = await vscode.workspace.openTextDocument(uri);
-        await vscode.window.showTextDocument(document);
 
-        const start = new vscode.Position(0, 0);
-        const end = new vscode.Position(document.lineCount, 0);
-        const range = new vscode.Range(start, end);
-
-
-        return diff_paste_back(
-            document,
-            range,
-            content
+        const originalContent = document.getText();
+        const fullRange = new vscode.Range(
+            new vscode.Position(0, 0),
+            new vscode.Position(document.lineCount, 0),
         );
+        const stageEdit = new vscode.WorkspaceEdit();
+        stageEdit.replace(uri, fullRange, content);
+        const staged = await vscode.workspace.applyEdit(stageEdit);
+        if (!staged) {
+            this.sendToolEditDecision(pending, false);
+            return;
+        }
+
+        const shortName = basename(fileName);
+        const beforeUri = buildRefactDiffBeforeUri(shortName, originalContent);
+        const title = `${shortName}: Original \u2194 Refact changes (save to apply)`;
+        await vscode.commands.executeCommand(
+            "vscode.diff",
+            beforeUri,
+            uri,
+            title,
+            { preview: false } as vscode.TextDocumentShowOptions,
+        );
+
+        this.watchNativeDiffDecision(uri, originalContent, beforeUri, pending);
+    }
+
+    private sendToolEditDecision(pending: ToolEditRef | null, accepted: boolean) {
+        if (!pending) {
+            return;
+        }
+        const action = ideToolCallResponse({
+            chatId: pending.chatId,
+            toolCallId: pending.toolCallId ?? "",
+            accepted,
+        });
+        this.postMessageToChat(action);
+    }
+
+    private async revertStagedEdit(uri: vscode.Uri, originalContent: string) {
+        const openDoc = vscode.workspace.textDocuments.find(
+            (doc) => doc.uri.toString() === uri.toString(),
+        );
+        if (!openDoc || !openDoc.isDirty || openDoc.getText() === originalContent) {
+            return;
+        }
+        const revertEdit = new vscode.WorkspaceEdit();
+        const fullRange = new vscode.Range(
+            new vscode.Position(0, 0),
+            new vscode.Position(openDoc.lineCount, 0),
+        );
+        revertEdit.replace(uri, fullRange, originalContent);
+        await vscode.workspace.applyEdit(revertEdit);
+    }
+
+    private watchNativeDiffDecision(
+        uri: vscode.Uri,
+        originalContent: string,
+        beforeUri: vscode.Uri,
+        pending: ToolEditRef | null,
+    ) {
+        let decided = false;
+        const disposables: vscode.Disposable[] = [];
+        const finish = (accepted: boolean) => {
+            if (decided) {
+                return;
+            }
+            decided = true;
+            disposables.forEach((d) => d.dispose());
+            this.sendToolEditDecision(pending, accepted);
+            disposeRefactDiffBeforeUri(beforeUri);
+        };
+
+        const saveDisposable = vscode.workspace.onDidSaveTextDocument((savedDoc) => {
+            if (savedDoc.uri.toString() === uri.toString()) {
+                finish(true);
+                void closeRefactDiffTabsForUri(uri);
+            }
+        });
+        disposables.push(saveDisposable);
+
+        const tabDisposable = vscode.window.tabGroups.onDidChangeTabs((event) => {
+            if (decided) {
+                return;
+            }
+            for (const tab of event.closed) {
+                const input = tab.input;
+                if (
+                    input instanceof vscode.TabInputTextDiff &&
+                    input.original.scheme === REFACT_DIFF_SCHEME &&
+                    input.modified.fsPath === uri.fsPath
+                ) {
+                    void this.revertStagedEdit(uri, originalContent).then(() => finish(false));
+                    return;
+                }
+            }
+        });
+        disposables.push(tabDisposable);
+
+        this._disposables.push(...disposables);
     }
 
     // this isn't called

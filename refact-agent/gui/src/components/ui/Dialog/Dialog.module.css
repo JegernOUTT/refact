@@ -10,7 +10,11 @@
     --rf-overlay-max-width,
     var(--rf-overlay-dialog-w)
   );
-  --rf-overlay-ideal-height: var(--rf-overlay-max-height, auto);
+  --rf-overlay-viewport-max-height: calc(100dvh - var(--rf-space-5));
+  --rf-overlay-ideal-height: var(
+    --rf-overlay-max-height,
+    var(--rf-overlay-viewport-max-height)
+  );
 
   position: fixed;
   top: 50%;
@@ -25,7 +29,7 @@
   );
   max-height: min(
     var(--rf-overlay-ideal-height),
-    calc(100dvh - var(--rf-space-5))
+    var(--rf-overlay-viewport-max-height)
   );
   overflow-y: auto;
   color: var(--rf-color-fg);

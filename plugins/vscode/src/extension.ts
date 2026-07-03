@@ -19,6 +19,7 @@ import { fileURLToPath } from 'url';
 import { ChatTab } from './chatTab';
 import { FimDebugData } from 'refact-chat-js/dist/events/index.js';
 import { code_lens_execute } from './codeLens';
+import { registerRefactDiffContentProvider } from './nativeDiff';
 
 
 declare global {
@@ -284,6 +285,8 @@ export function activate(context: vscode.ExtensionContext)
         {webviewOptions: {retainContextWhenHidden: true}}
     );
     context.subscriptions.push(view);
+
+    registerRefactDiffContentProvider(context);
 
     let settingsCommand = vscode.commands.registerCommand('refactaicmd.openSettings', () => {
         vscode.commands.executeCommand( 'workbench.action.openSettings', '@ext:smallcloud.codify' );

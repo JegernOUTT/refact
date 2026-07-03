@@ -28,4 +28,14 @@ describe("Dialog", () => {
       /\.content[\s\S]*z-index:\s*var\(--rf-z-modal, 700\)/,
     );
   });
+
+  it("clamps height to the viewport without an invalid min(auto) fallback", () => {
+    expect(dialogCss).not.toContain("var(--rf-overlay-max-height, auto)");
+    expect(dialogCss).toContain(
+      "--rf-overlay-viewport-max-height: calc(100dvh - var(--rf-space-5))",
+    );
+    expect(dialogCss).toMatch(
+      /max-height:\s*min\(\s*var\(--rf-overlay-ideal-height\),\s*var\(--rf-overlay-viewport-max-height\)/,
+    );
+  });
 });

@@ -83,6 +83,7 @@
   display: flex;
   min-width: 0;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--rf-space-2);
 }
 
@@ -93,10 +94,6 @@
 .PatchActionRow {
   width: 100%;
   justify-content: space-between;
-}
-
-.PrimaryActions {
-  flex-wrap: wrap;
 }
 
 .CacheGuardScroll {
@@ -133,11 +130,4 @@
   .ToolConfirmationCard.ToolConfirmationCard,
 :global(.radix-themes[data-host="jetbrains"]) .CacheGuardScroll {
   backdrop-filter: none;
-}
-
-@media (max-width: calc(var(--rf-sidebar-w-min) + var(--rf-space-6))) {
-  .PatchActionRow {
-    align-items: flex-start;
-    flex-direction: column;
-  }
 }

@@ -1,14 +1,22 @@
 package com.smallcloud.refactai.panes.sharedchat
 
+import com.intellij.diff.DiffContentFactory
+import com.intellij.diff.DiffManager
+import com.intellij.diff.chains.SimpleDiffRequestChain
+import com.intellij.diff.editor.ChainDiffVirtualFile
+import com.intellij.diff.requests.SimpleDiffRequest
+import com.intellij.diff.util.DiffUserDataKeys
+import com.intellij.icons.AllIcons
 import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.Disposable
-import com.intellij.openapi.actionSystem.DataContext
+import com.intellij.openapi.actionSystem.AnAction
+import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.invokeLater
 import com.intellij.openapi.components.service
+import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.diagnostic.Logger
-import com.intellij.openapi.editor.Caret
 import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.editor.LogicalPosition
 import com.intellij.openapi.editor.colors.EditorColorsListener
@@ -25,6 +33,8 @@ import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.StandardFileSystems
 import com.intellij.openapi.vfs.VfsUtil
+import com.intellij.openapi.util.Key
+import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.testFramework.LightVirtualFile
 import com.intellij.util.Alarm
@@ -54,7 +64,11 @@ import java.awt.event.ComponentEvent
 import java.awt.event.HierarchyEvent
 import java.beans.PropertyChangeListener
 import java.io.File
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.JPanel
+
+private val REFACT_DIFF_ID_KEY: Key<String> = Key.create("refact.diff.requestId")
 
 class SharedChatPane(val project: Project) : JPanel(), Disposable {
     private val paneScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -742,8 +756,8 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
     private fun showPatch(
         fileName: String,
         fileText: String,
-        onTab: ((com.intellij.openapi.editor.Editor, Caret?, DataContext) -> Unit)? = null,
-        onEsc: ((com.intellij.openapi.editor.Editor, Caret?, DataContext) -> Unit)? = null
+        onAccept: (() -> Unit)? = null,
+        onReject: (() -> Unit)? = null
     ) {
         logger.warn("showPatch: item.fileNameEdit = $fileName")
         this.handleAnimationStop(fileName)
@@ -752,21 +766,113 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
             val file = LocalFileSystem.getInstance().refreshAndFindFileByPath(fileName)
             if (file == null) {
                 logger.warn("showPatch: item.fileNameEdit = $fileName is null")
+                onReject?.invoke()
                 return@invokeLater
             }
+            showNativeDiff(file, fileText, onAccept, onReject)
+        }
+    }
 
-            val fileDescriptor = OpenFileDescriptor(project, file)
-            val editor = FileEditorManager.getInstance(project).openTextEditor(fileDescriptor, true)
-            editor?.selectionModel?.setSelection(0, editor.document.textLength)
-            if (editor != null && (onTab == null || onEsc == null)) {
-                ModeProvider.getOrCreateModeProvider(editor)
-                    .getDiffMode()
-                    .actionPerformed(editor, fileText)
-            } else if(editor != null && onTab != null && onEsc != null) {
-                ModeProvider
-                    .getOrCreateModeProvider(editor)
-                    .addSideEffects(onTab, onEsc)
-                    .actionPerformed(editor, fileText)
+    private fun showNativeDiff(
+        file: VirtualFile,
+        fileAfter: String,
+        onAccept: (() -> Unit)?,
+        onReject: (() -> Unit)?
+    ) {
+        val proposed = StringUtil.convertLineSeparators(fileAfter)
+        val factory = DiffContentFactory.getInstance()
+        val currentContent = factory.create(project, file)
+        val proposedDocument = EditorFactory.getInstance().createDocument(proposed).apply {
+            setReadOnly(true)
+        }
+        val proposedContent = factory.create(project, proposedDocument, file)
+
+        val request = SimpleDiffRequest(
+            "Refact: ${file.name}",
+            currentContent,
+            proposedContent,
+            "Current",
+            "Refact changes (apply to accept)"
+        )
+
+        val diffId = UUID.randomUUID().toString()
+        request.putUserData(REFACT_DIFF_ID_KEY, diffId)
+
+        val decided = AtomicBoolean(false)
+        val connection = project.messageBus.connect(this)
+
+        fun finish(accepted: Boolean) {
+            if (!decided.compareAndSet(false, true)) return
+            ApplicationManager.getApplication().invokeLater { connection.disconnect() }
+            if (accepted && applyProposedContent(file, proposed)) {
+                onAccept?.invoke()
+            } else {
+                onReject?.invoke()
+            }
+            closeDiffById(diffId)
+        }
+
+        connection.subscribe(
+            FileEditorManagerListener.FILE_EDITOR_MANAGER,
+            object : FileEditorManagerListener {
+                override fun fileClosed(source: FileEditorManager, closedFile: VirtualFile) {
+                    if (isRefactDiffFile(closedFile, diffId)) {
+                        finish(false)
+                    }
+                }
+            }
+        )
+
+        val applyAction = object : AnAction(
+            "Apply Refact Changes",
+            "Apply the proposed changes to the file",
+            AllIcons.Actions.Checked
+        ) {
+            override fun actionPerformed(e: AnActionEvent) = finish(true)
+        }
+        val rejectAction = object : AnAction(
+            "Reject Refact Changes",
+            "Discard the proposed changes",
+            AllIcons.Actions.Cancel
+        ) {
+            override fun actionPerformed(e: AnActionEvent) = finish(false)
+        }
+        request.putUserData(DiffUserDataKeys.CONTEXT_ACTIONS, listOf(applyAction, rejectAction))
+
+        DiffManager.getInstance().showDiff(project, request)
+    }
+
+    private fun applyProposedContent(file: VirtualFile, content: String): Boolean {
+        var applied = false
+        try {
+            WriteCommandAction.runWriteCommandAction(project) {
+                val document = FileDocumentManager.getInstance().getDocument(file)
+                if (document == null) {
+                    logger.warn("applyProposedContent: no document for ${file.path}")
+                    return@runWriteCommandAction
+                }
+                document.setText(content)
+                FileDocumentManager.getInstance().saveDocument(document)
+                applied = true
+            }
+        } catch (e: Throwable) {
+            logger.warn("applyProposedContent failed for ${file.path}", e)
+        }
+        return applied
+    }
+
+    private fun isRefactDiffFile(file: VirtualFile, diffId: String): Boolean {
+        return file is ChainDiffVirtualFile && file.chain.requests
+            .filterIsInstance<SimpleDiffRequestChain.DiffRequestProducerWrapper>()
+            .any { it.request.getUserData(REFACT_DIFF_ID_KEY) == diffId }
+    }
+
+    private fun closeDiffById(diffId: String) {
+        ApplicationManager.getApplication().invokeLater {
+            val manager = FileEditorManager.getInstance(project)
+            val diffFile = manager.openFiles.firstOrNull { isRefactDiffFile(it, diffId) }
+            if (diffFile != null) {
+                manager.closeFile(diffFile)
             }
         }
     }
@@ -857,8 +963,8 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
                 showPatch(
                     path,
                     payload.edit.fileAfter,
-                    { _, _, _ -> handleFileAction(toolCall.id, payload.chatId, true) },
-                    { _, _, _ -> handleFileAction(toolCall.id, payload.chatId, false) }
+                    { handleFileAction(toolCall.id, payload.chatId, true) },
+                    { handleFileAction(toolCall.id, payload.chatId, false) }
                 )
             }
             is TextDocToolCall.ReplaceTextDocToolCall -> {
@@ -869,8 +975,8 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
                 showPatch(
                     path,
                     payload.edit.fileAfter,
-                    { _, _, _ -> handleFileAction(toolCall.id, payload.chatId, true) },
-                    { _, _, _ -> handleFileAction(toolCall.id, payload.chatId, false) }
+                    { handleFileAction(toolCall.id, payload.chatId, true) },
+                    { handleFileAction(toolCall.id, payload.chatId, false) }
                 )
             }
             is TextDocToolCall.UpdateRegexTextDocToolCall -> {
@@ -881,8 +987,8 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
                 showPatch(
                     path,
                     payload.edit.fileAfter,
-                    { _, _, _ -> handleFileAction(toolCall.id, payload.chatId, true) },
-                    { _, _, _ -> handleFileAction(toolCall.id, payload.chatId, false) }
+                    { handleFileAction(toolCall.id, payload.chatId, true) },
+                    { handleFileAction(toolCall.id, payload.chatId, false) }
                 )
             }
             else -> {}

@@ -3,7 +3,11 @@
     --rf-overlay-max-width,
     var(--rf-overlay-popover-max)
   );
-  --rf-overlay-ideal-height: var(--rf-overlay-max-height, auto);
+  --rf-overlay-viewport-max-height: calc(100dvh - var(--rf-space-5));
+  --rf-overlay-ideal-height: var(
+    --rf-overlay-max-height,
+    var(--rf-overlay-viewport-max-height)
+  );
 
   z-index: var(--rf-z-popover);
   width: min(
@@ -16,7 +20,7 @@
   );
   max-height: min(
     var(--rf-overlay-ideal-height),
-    calc(100dvh - var(--rf-space-5))
+    var(--rf-overlay-viewport-max-height)
   );
   overflow-y: auto;
   padding: var(--rf-space-3);
