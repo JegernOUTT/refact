@@ -12,13 +12,14 @@ pub mod incremental;
 pub mod paths;
 pub mod provenance;
 
+pub use incremental::mine_history_incremental;
 pub use provenance::{classify_commit, AgentProvenance};
 
 const MAX_FILES_PER_COMMIT_FOR_COCHANGE: usize = 200;
 const MAX_FILES_PER_COMMIT_FOR_ENTROPY: usize = 30;
 const TEMPORAL_HALFLIFE_DAYS: f64 = 180.0;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GitIntel {
     pub file_churn: HashMap<String, u32>,
     #[serde(default)]
@@ -27,6 +28,20 @@ pub struct GitIntel {
     pub co_change: HashMap<(String, String), u32>,
     pub commits_analyzed: u32,
     pub commit_records: Vec<CommitRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_commit_id: Option<String>,
+    #[serde(default)]
+    pub author_commit_counts: HashMap<String, u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommitRisk {
+    pub commit_id: String,
+    pub summary: String,
+    pub author: String,
+    pub ts: i64,
+    pub risk: f64,
+    pub inputs: change_risk::RiskInputs,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -290,6 +305,10 @@ fn mine_history_from_revwalk(
         let commit = repo
             .find_commit(oid)
             .map_err(|e| format!("git find_commit: {e}"))?;
+        let oid_string = oid.to_string();
+        if intel.last_commit_id.is_none() {
+            intel.last_commit_id = Some(oid_string.clone());
+        }
         let author = commit.author().email().unwrap_or("unknown").to_string();
         let committer = commit.committer().email().unwrap_or("unknown").to_string();
         let ts = commit.time().seconds();
@@ -299,6 +318,11 @@ fn mine_history_from_revwalk(
         let is_fix_commit = is_fix_commit_message(&message);
 
         intel.commits_analyzed = intel.commits_analyzed.saturating_add(1);
+        let author_count = intel
+            .author_commit_counts
+            .entry(author.clone())
+            .or_default();
+        *author_count = author_count.saturating_add(1);
         for f in &files {
             let churn = intel.file_churn.entry(f.clone()).or_default();
             *churn = churn.saturating_add(1);
@@ -324,7 +348,7 @@ fn mine_history_from_revwalk(
             }
         }
         intel.commit_records.push(CommitRecord {
-            oid: Some(oid.to_string()),
+            oid: Some(oid_string),
             ts,
             author,
             committer,
@@ -609,6 +633,109 @@ impl GitIntel {
             .collect()
     }
 
+    pub fn recent_commit_risks(&self, last_n: usize) -> Vec<CommitRisk> {
+        let inputs_by_idx = self.commit_risk_inputs();
+        let mut newest: Vec<usize> = (0..self.commit_records.len()).collect();
+        newest.sort_by(|left, right| {
+            compare_commits_newest(&self.commit_records[*left], &self.commit_records[*right])
+        });
+        newest.truncate(last_n);
+
+        let mut risks: Vec<CommitRisk> = newest
+            .into_iter()
+            .map(|idx| {
+                let commit = &self.commit_records[idx];
+                let inputs = inputs_by_idx[idx];
+                CommitRisk {
+                    commit_id: commit.oid.clone().unwrap_or_default(),
+                    summary: commit
+                        .message
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
+                    author: commit.author.clone(),
+                    ts: commit.ts,
+                    risk: change_risk::score_change(&inputs),
+                    inputs,
+                }
+            })
+            .collect();
+        risks.sort_by(|left, right| {
+            right
+                .risk
+                .total_cmp(&left.risk)
+                .then_with(|| right.ts.cmp(&left.ts))
+                .then_with(|| left.commit_id.cmp(&right.commit_id))
+        });
+        risks
+    }
+
+    fn commit_risk_inputs(&self) -> Vec<change_risk::RiskInputs> {
+        let features_by_idx: HashMap<usize, ChangeFeatures> =
+            self.commit_features().into_iter().collect();
+        let mut chronological: Vec<usize> = (0..self.commit_records.len()).collect();
+        chronological.sort_by(|left, right| {
+            compare_commits_oldest(&self.commit_records[*left], &self.commit_records[*right])
+        });
+
+        let mut record_author_counts: HashMap<String, u32> = HashMap::new();
+        for commit in &self.commit_records {
+            let count = record_author_counts
+                .entry(commit.author.clone())
+                .or_default();
+            *count = count.saturating_add(1);
+        }
+        let mut author_counts: HashMap<String, u32> = self
+            .author_commit_counts
+            .iter()
+            .filter_map(|(author, total)| {
+                let known = record_author_counts.get(author).copied().unwrap_or(0);
+                total
+                    .checked_sub(known)
+                    .filter(|seed| *seed > 0)
+                    .map(|seed| (author.clone(), seed))
+            })
+            .collect();
+        let mut out = vec![
+            change_risk::RiskInputs {
+                la: 0.0,
+                ld: 0.0,
+                nf: 0.0,
+                nd: 0.0,
+                ns: 0.0,
+                entropy: 0.0,
+                exp: 0.0,
+            };
+            self.commit_records.len()
+        ];
+
+        for idx in chronological {
+            let commit = &self.commit_records[idx];
+            let features = features_by_idx
+                .get(&idx)
+                .cloned()
+                .unwrap_or(ChangeFeatures {
+                    la: 0,
+                    ld: 0,
+                    nf: 0,
+                    entropy: 0.0,
+                });
+            let exp = *author_counts.get(&commit.author).unwrap_or(&0) as f64;
+            out[idx] = change_risk::from_change_features(
+                &features,
+                distinct_directories(commit) as f64,
+                distinct_subsystems(commit) as f64,
+                exp,
+            );
+            let count = author_counts.entry(commit.author.clone()).or_default();
+            *count = count.saturating_add(1);
+        }
+
+        out
+    }
+
     pub fn ownership_risk(&self, file: &str) -> bool {
         let owners = self.ownership(file);
         let total: u64 = owners.iter().map(|o| u64::from(o.commits)).sum();
@@ -707,6 +834,41 @@ impl GitIntel {
             .count();
         agent_count as f64 / self.commit_records.len() as f64
     }
+}
+
+fn compare_commits_newest(left: &CommitRecord, right: &CommitRecord) -> std::cmp::Ordering {
+    right
+        .ts
+        .cmp(&left.ts)
+        .then_with(|| left.oid.cmp(&right.oid))
+        .then_with(|| left.author.cmp(&right.author))
+        .then_with(|| left.message.cmp(&right.message))
+}
+
+fn compare_commits_oldest(left: &CommitRecord, right: &CommitRecord) -> std::cmp::Ordering {
+    left.ts
+        .cmp(&right.ts)
+        .then_with(|| left.oid.cmp(&right.oid))
+        .then_with(|| left.author.cmp(&right.author))
+        .then_with(|| left.message.cmp(&right.message))
+}
+
+fn distinct_directories(commit: &CommitRecord) -> usize {
+    commit
+        .files
+        .iter()
+        .map(|(path, _, _)| path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("."))
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn distinct_subsystems(commit: &CommitRecord) -> usize {
+    commit
+        .files
+        .iter()
+        .map(|(path, _, _)| path.split_once('/').map(|(top, _)| top).unwrap_or("."))
+        .collect::<HashSet<_>>()
+        .len()
 }
 
 #[cfg(test)]
@@ -1180,6 +1342,53 @@ mod tests {
         let expected =
             -((4.0_f64 / 6.0) * (4.0_f64 / 6.0).log2() + (2.0_f64 / 6.0) * (2.0_f64 / 6.0).log2());
         assert!((features[0].1.entropy - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn commit_risks_scores_and_sorts() {
+        let mut intel = GitIntel::default();
+        for i in 0..20 {
+            intel.commit_records.push(CommitRecord {
+                oid: Some(format!("dominant-{i}")),
+                ts: i,
+                author: "dominant@x.com".into(),
+                committer: "dominant@x.com".into(),
+                message: format!("dominant prior {i}"),
+                files: vec![("core/stable.rs".into(), 1, 0)],
+            });
+        }
+        intel.commit_records.push(CommitRecord {
+            oid: Some("tiny".into()),
+            ts: 100,
+            author: "dominant@x.com".into(),
+            committer: "dominant@x.com".into(),
+            message: "tiny dominant".into(),
+            files: vec![("core/stable.rs".into(), 1, 0)],
+        });
+        intel.commit_records.push(CommitRecord {
+            oid: Some("large".into()),
+            ts: 101,
+            author: "new@x.com".into(),
+            committer: "new@x.com".into(),
+            message: "large scattered".into(),
+            files: vec![
+                ("api/http/router.rs".into(), 400, 30),
+                ("engine/core/mod.rs".into(), 300, 40),
+                ("gui/src/app.tsx".into(), 250, 20),
+                ("docs/guide.md".into(), 100, 10),
+            ],
+        });
+
+        let risks = intel.recent_commit_risks(2);
+
+        assert_eq!(risks.len(), 2);
+        assert_eq!(risks[0].commit_id, "large");
+        assert_eq!(risks[1].commit_id, "tiny");
+        assert!(risks[0].risk > risks[1].risk);
+        assert_eq!(risks[0].inputs.exp, 0.0);
+        assert_eq!(risks[1].inputs.exp, 20.0);
+        assert_eq!(risks[0].inputs.nd, 4.0);
+        assert_eq!(risks[0].inputs.ns, 4.0);
     }
 
     #[test]

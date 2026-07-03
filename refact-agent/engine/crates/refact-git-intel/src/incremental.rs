@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::{push_head_or_empty, CommitRecord, GitIntel};
-use git2::{Commit, Repository, Sort};
+use crate::{mine_history, push_head_or_empty, CommitRecord, GitIntel};
+use git2::{Commit, Oid, Repository, Sort};
 use serde::{Deserialize, Serialize};
 
 const MAX_FILES_PER_COMMIT_FOR_COCHANGE: usize = 200;
@@ -82,14 +82,7 @@ pub fn mine_incremental(repo_path: &Path, cfg: &IncrementalConfig) -> Result<Git
 
 pub fn newest_commit_ts(repo_path: &Path) -> Result<Option<i64>, String> {
     let repo = Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
-    let head = match repo.head() {
-        Ok(head) => head,
-        Err(e) if crate::is_empty_head_error(&e) => {
-            return Ok(None);
-        }
-        Err(e) => return Err(format!("git head: {e}")),
-    };
-    let Some(oid) = head.target() else {
+    let Some(oid) = head_oid(&repo)? else {
         return Ok(None);
     };
     let commit = repo
@@ -98,7 +91,58 @@ pub fn newest_commit_ts(repo_path: &Path) -> Result<Option<i64>, String> {
     Ok(Some(commit.time().seconds()))
 }
 
+pub fn mine_history_incremental(
+    dir: &Path,
+    base: Option<GitIntel>,
+    max_commits: usize,
+) -> Result<GitIntel, String> {
+    let Some(mut base) = base else {
+        return mine_history(dir, max_commits);
+    };
+
+    let repo = Repository::open(dir).map_err(|e| format!("git open: {e}"))?;
+    let Some(head_oid) = head_oid(&repo)? else {
+        return Ok(GitIntel::default());
+    };
+    let head_id = head_oid.to_string();
+    let Some(base_id) = base.last_commit_id.clone() else {
+        return mine_history(dir, max_commits);
+    };
+    if head_id == base_id {
+        return Ok(base);
+    }
+    let Ok(base_oid) = Oid::from_str(&base_id) else {
+        return mine_history(dir, max_commits);
+    };
+    if repo.find_commit(base_oid).is_err() {
+        return mine_history(dir, max_commits);
+    }
+    let reachable = repo
+        .graph_descendant_of(head_oid, base_oid)
+        .unwrap_or(false);
+    if !reachable {
+        return mine_history(dir, max_commits);
+    }
+
+    let mut revwalk = repo.revwalk().map_err(|e| format!("git revwalk: {e}"))?;
+    revwalk
+        .push(head_oid)
+        .map_err(|e| format!("git push: {e}"))?;
+    revwalk
+        .hide(base_oid)
+        .map_err(|e| format!("git hide: {e}"))?;
+    revwalk
+        .set_sorting(Sort::TIME)
+        .map_err(|e| format!("git sort: {e}"))?;
+    let delta = mine_from_revwalk(&repo, revwalk, max_commits, true)?;
+    merge_intel(&mut base, &delta);
+    base.last_commit_id = Some(head_id);
+    Ok(base)
+}
+
 pub fn merge_intel(base: &mut GitIntel, delta: &GitIntel) {
+    ensure_author_commit_counts(base);
+
     for (path, churn) in &delta.file_churn {
         *base.file_churn.entry(path.clone()).or_default() += churn;
     }
@@ -114,16 +158,77 @@ pub fn merge_intel(base: &mut GitIntel, delta: &GitIntel) {
         *base.co_change.entry(pair.clone()).or_default() += count;
     }
 
+    for (author, count) in author_counts_for(delta) {
+        *base.author_commit_counts.entry(author).or_default() += count;
+    }
+
     base.commits_analyzed = base.commits_analyzed.saturating_add(delta.commits_analyzed);
     base.commit_records
         .extend(delta.commit_records.iter().cloned());
     base.commit_records.sort_by(|a, b| {
         b.ts.cmp(&a.ts)
+            .then_with(|| a.oid.cmp(&b.oid))
             .then_with(|| a.author.cmp(&b.author))
             .then_with(|| a.committer.cmp(&b.committer))
             .then_with(|| a.message.cmp(&b.message))
             .then_with(|| a.files.cmp(&b.files))
     });
+    if delta.last_commit_id.is_some() {
+        base.last_commit_id = delta.last_commit_id.clone();
+    }
+}
+
+fn ensure_author_commit_counts(intel: &mut GitIntel) {
+    if intel.author_commit_counts.is_empty() && !intel.commit_records.is_empty() {
+        intel.author_commit_counts = author_counts_for(intel);
+    }
+}
+
+fn author_counts_for(intel: &GitIntel) -> HashMap<String, u32> {
+    if !intel.author_commit_counts.is_empty() {
+        return intel.author_commit_counts.clone();
+    }
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for commit in &intel.commit_records {
+        let count = counts.entry(commit.author.clone()).or_default();
+        *count = count.saturating_add(1);
+    }
+    counts
+}
+
+fn head_oid(repo: &Repository) -> Result<Option<Oid>, String> {
+    let head = match repo.head() {
+        Ok(head) => head,
+        Err(e) if crate::is_empty_head_error(&e) => return Ok(None),
+        Err(e) => return Err(format!("git head: {e}")),
+    };
+    Ok(head.target())
+}
+
+fn mine_from_revwalk(
+    repo: &Repository,
+    revwalk: git2::Revwalk,
+    max_commits: usize,
+    include_co_change: bool,
+) -> Result<GitIntel, String> {
+    let mut intel = GitIntel::default();
+    for (i, oid) in revwalk.enumerate() {
+        if i >= max_commits {
+            break;
+        }
+        let oid = oid.map_err(|e| format!("git oid: {e}"))?;
+        let commit = repo
+            .find_commit(oid)
+            .map_err(|e| format!("git find_commit: {e}"))?;
+        collect_commit(
+            repo,
+            &commit,
+            oid.to_string(),
+            &mut intel,
+            include_co_change,
+        );
+    }
+    Ok(intel)
 }
 
 fn collect_commit(
@@ -140,7 +245,14 @@ fn collect_commit(
     let file_stats = changed_files_with_stats(repo, commit);
     let files: Vec<String> = file_stats.iter().map(|(path, _, _)| path.clone()).collect();
 
-    intel.commits_analyzed += 1;
+    if intel.last_commit_id.is_none() {
+        intel.last_commit_id = Some(oid.clone());
+    }
+    intel.commits_analyzed = intel.commits_analyzed.saturating_add(1);
+    *intel
+        .author_commit_counts
+        .entry(author.clone())
+        .or_default() += 1;
     for f in &files {
         *intel.file_churn.entry(f.clone()).or_default() += 1;
         *intel
@@ -319,6 +431,16 @@ mod tests {
         dir
     }
 
+    fn assert_same_mining_result(left: &GitIntel, right: &GitIntel) {
+        assert_eq!(left.file_churn, right.file_churn);
+        assert_eq!(left.file_authors, right.file_authors);
+        assert_eq!(left.co_change, right.co_change);
+        assert_eq!(left.commits_analyzed, right.commits_analyzed);
+        assert_eq!(left.commit_records, right.commit_records);
+        assert_eq!(left.last_commit_id, right.last_commit_id);
+        assert_eq!(left.author_commit_counts, right.author_commit_counts);
+    }
+
     #[test]
     fn since_ts_excludes_that_commit() {
         let dir = fixture_repo();
@@ -433,6 +555,136 @@ mod tests {
         assert_eq!(base.file_churn.get("b.rs"), Some(&1));
         assert_eq!(base.file_churn.get("c.rs"), Some(&4));
         assert_eq!(base.commits_analyzed, 5);
+    }
+
+    #[test]
+    fn incremental_noop_when_head_unchanged() {
+        let dir = fixture_repo();
+        let base = mine_history(dir.path(), 100).unwrap();
+
+        let incremental = mine_history_incremental(dir.path(), Some(base.clone()), 100).unwrap();
+
+        assert_eq!(incremental, base);
+    }
+
+    #[test]
+    fn incremental_merges_new_commits() {
+        let dir = TempRepo::new();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_files_at(
+            &repo,
+            &[("a.rs", "1\n"), ("b.rs", "1\n")],
+            "first",
+            "Alice",
+            "alice@x.com",
+            1_700_000_000,
+        );
+        commit_files_at(
+            &repo,
+            &[("a.rs", "2\n"), ("b.rs", "2\n")],
+            "second",
+            "Alice",
+            "alice@x.com",
+            1_700_000_100,
+        );
+        let base = mine_history(dir.path(), 100).unwrap();
+
+        commit_files_at(
+            &repo,
+            &[("a.rs", "3\n"), ("c.rs", "1\n")],
+            "third",
+            "Bob",
+            "bob@x.com",
+            1_700_000_200,
+        );
+        commit_files_at(
+            &repo,
+            &[("d.rs", "1\n"), ("c.rs", "2\n")],
+            "fourth",
+            "Cara",
+            "cara@x.com",
+            1_700_000_300,
+        );
+
+        let incremental = mine_history_incremental(dir.path(), Some(base), 100).unwrap();
+        let full = mine_history(dir.path(), 100).unwrap();
+
+        assert_same_mining_result(&incremental, &full);
+    }
+
+    #[test]
+    fn incremental_falls_back_on_unreachable_base() {
+        let dir = fixture_repo();
+        let mut base = mine_history(dir.path(), 100).unwrap();
+        base.last_commit_id = Some("1111111111111111111111111111111111111111".into());
+
+        let incremental = mine_history_incremental(dir.path(), Some(base), 100).unwrap();
+        let full = mine_history(dir.path(), 100).unwrap();
+
+        assert_same_mining_result(&incremental, &full);
+    }
+
+    #[test]
+    fn merge_intel_field_audit() {
+        let mut base = GitIntel {
+            file_churn: HashMap::from([("base.rs".into(), 1)]),
+            file_authors: HashMap::from([(
+                "base.rs".into(),
+                HashMap::from([("base@x.com".into(), 1)]),
+            )]),
+            co_change: HashMap::from([(("base.rs".into(), "old.rs".into()), 1)]),
+            commits_analyzed: 1,
+            commit_records: vec![CommitRecord {
+                oid: Some("base".into()),
+                ts: 1,
+                author: "base@x.com".into(),
+                committer: "base@x.com".into(),
+                message: "base".into(),
+                files: vec![("base.rs".into(), 1, 0)],
+            }],
+            last_commit_id: Some("base".into()),
+            author_commit_counts: HashMap::from([("base@x.com".into(), 1)]),
+        };
+        let delta = GitIntel {
+            file_churn: HashMap::from([("delta.rs".into(), 2)]),
+            file_authors: HashMap::from([(
+                "delta.rs".into(),
+                HashMap::from([("delta@x.com".into(), 2)]),
+            )]),
+            co_change: HashMap::from([(("delta.rs".into(), "other.rs".into()), 3)]),
+            commits_analyzed: 2,
+            commit_records: vec![CommitRecord {
+                oid: Some("delta".into()),
+                ts: 2,
+                author: "delta@x.com".into(),
+                committer: "delta@x.com".into(),
+                message: "delta".into(),
+                files: vec![("delta.rs".into(), 2, 1)],
+            }],
+            last_commit_id: Some("delta".into()),
+            author_commit_counts: HashMap::from([("delta@x.com".into(), 2)]),
+        };
+
+        merge_intel(&mut base, &delta);
+
+        assert_eq!(base.file_churn.get("delta.rs"), Some(&2));
+        assert_eq!(
+            base.file_authors
+                .get("delta.rs")
+                .and_then(|authors| authors.get("delta@x.com")),
+            Some(&2)
+        );
+        assert_eq!(
+            base.co_change.get(&("delta.rs".into(), "other.rs".into())),
+            Some(&3)
+        );
+        assert_eq!(base.commits_analyzed, 3);
+        assert!(base
+            .commit_records
+            .iter()
+            .any(|record| record.oid.as_deref() == Some("delta")));
+        assert_eq!(base.last_commit_id.as_deref(), Some("delta"));
+        assert_eq!(base.author_commit_counts.get("delta@x.com"), Some(&2));
     }
 
     #[test]
