@@ -364,6 +364,37 @@ fn cat_resolved_path_key(path: &str) -> String {
     refact_core::chat_types::normalize_file_name(path.to_string())
 }
 
+fn rebuild_cat_seen_by_path(
+    resolved_paths: &[CatResolvedPath],
+    seen_by_path: &mut HashMap<String, Vec<usize>>,
+) {
+    seen_by_path.clear();
+    for (index, resolved_path) in resolved_paths.iter().enumerate() {
+        seen_by_path
+            .entry(cat_resolved_path_key(&resolved_path.path))
+            .or_default()
+            .push(index);
+    }
+}
+
+fn remove_cat_resolved_paths(
+    resolved_paths: &mut Vec<CatResolvedPath>,
+    seen_by_path: &mut HashMap<String, Vec<usize>>,
+    indices_to_remove: HashSet<usize>,
+) {
+    if indices_to_remove.is_empty() {
+        return;
+    }
+
+    let mut index = 0;
+    resolved_paths.retain(|_| {
+        let keep = !indices_to_remove.contains(&index);
+        index += 1;
+        keep
+    });
+    rebuild_cat_seen_by_path(resolved_paths, seen_by_path);
+}
+
 fn push_cat_resolved_path(
     resolved_paths: &mut Vec<CatResolvedPath>,
     seen_by_path: &mut HashMap<String, Vec<usize>>,
@@ -378,6 +409,21 @@ fn push_cat_resolved_path(
             return;
         }
 
+        if incoming.source == CatResolvedSource::ExplicitFile && !has_explicit {
+            let indices_to_remove = indices
+                .iter()
+                .copied()
+                .filter(|index| {
+                    resolved_paths[*index].source == CatResolvedSource::DirectoryExpansion
+                })
+                .collect::<HashSet<_>>();
+            remove_cat_resolved_paths(resolved_paths, seen_by_path, indices_to_remove);
+            let index = resolved_paths.len();
+            resolved_paths.push(incoming);
+            seen_by_path.entry(key).or_default().push(index);
+            return;
+        }
+
         for index in &indices {
             let existing = &mut resolved_paths[*index];
             if existing.line_range == incoming.line_range {
@@ -386,17 +432,6 @@ fn push_cat_resolved_path(
                 {
                     existing.source = CatResolvedSource::ExplicitFile;
                 }
-                return;
-            }
-        }
-
-        if incoming.source == CatResolvedSource::ExplicitFile && !has_explicit {
-            if let Some(index) = indices.iter().copied().find(|index| {
-                resolved_paths[*index].source == CatResolvedSource::DirectoryExpansion
-            }) {
-                let existing = &mut resolved_paths[index];
-                existing.line_range = incoming.line_range;
-                existing.source = CatResolvedSource::ExplicitFile;
                 return;
             }
         }
@@ -935,6 +970,31 @@ mod tests {
         assert_eq!(
             context_file_ranges(&results),
             vec![(normalized(&file), 3, 5), (normalized(&other), 1, 4)]
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_cat_later_explicit_file_range_moves_after_directory_expansion() {
+        let temp = tempfile::Builder::new()
+            .prefix("refact-tool-cat-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path().join("src");
+        let file = dir.join("a.rs");
+        let other = dir.join("z.rs");
+        write_lines(&file, 8);
+        write_lines(&other, 4);
+        let ccx = ccx_for_root(temp.path()).await;
+
+        let results = run_cat(
+            ccx,
+            format!("{},{}:3-5", dir.to_string_lossy(), file.to_string_lossy()),
+        )
+        .await;
+
+        assert_eq!(
+            context_file_ranges(&results),
+            vec![(normalized(&other), 1, 4), (normalized(&file), 3, 5)]
         );
     }
 }
