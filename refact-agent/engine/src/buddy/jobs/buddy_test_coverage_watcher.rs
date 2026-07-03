@@ -170,18 +170,27 @@ fn source_has_test_coverage(rel: &str, source_content: &str, existing_paths: &[S
     let crate_tests_file = join_rel(&join_rel(&crate_root, "tests"), file_name);
     let src_tests_rs = join_rel(&src_dir, "tests.rs");
     let src_tests_dir = format!("{}/", join_rel(&src_dir, "tests"));
-    let parent_tests_dir = Path::new(&rel)
-        .parent()
-        .map(|parent| format!("{}/", join_rel(&normalize_rel_path(parent.to_string_lossy().as_ref()), "tests")));
+    let parent_tests_dir = Path::new(&rel).parent().map(|parent| {
+        format!(
+            "{}/",
+            join_rel(
+                &normalize_rel_path(parent.to_string_lossy().as_ref()),
+                "tests"
+            )
+        )
+    });
 
-    existing_paths.iter().map(|path| normalize_rel_path(path)).any(|path| {
-        path == crate_tests_file
-            || path == src_tests_rs
-            || format!("{path}/").starts_with(&src_tests_dir)
-            || parent_tests_dir
-                .as_ref()
-                .is_some_and(|tests_dir| format!("{path}/").starts_with(tests_dir))
-    })
+    existing_paths
+        .iter()
+        .map(|path| normalize_rel_path(path))
+        .any(|path| {
+            path == crate_tests_file
+                || path == src_tests_rs
+                || format!("{path}/").starts_with(&src_tests_dir)
+                || parent_tests_dir
+                    .as_ref()
+                    .is_some_and(|tests_dir| format!("{path}/").starts_with(tests_dir))
+        })
 }
 
 fn coverage_indicator_paths(project_root: &Path, rel: &str) -> Vec<String> {
@@ -207,7 +216,10 @@ fn coverage_indicator_paths(project_root: &Path, rel: &str) -> Vec<String> {
         paths.push(format!("{src_tests_dir}/"));
     }
     if let Some(parent) = Path::new(&rel).parent() {
-        let parent_tests_dir = join_rel(&normalize_rel_path(parent.to_string_lossy().as_ref()), "tests");
+        let parent_tests_dir = join_rel(
+            &normalize_rel_path(parent.to_string_lossy().as_ref()),
+            "tests",
+        );
         if project_root.join(&parent_tests_dir).is_dir() {
             paths.push(format!("{parent_tests_dir}/"));
         }
@@ -222,7 +234,11 @@ fn missing_test_candidate(project_root: &Path, rel: &str) -> Option<CoverageCand
         return None;
     }
     let source_content = std::fs::read_to_string(&path).unwrap_or_default();
-    if source_has_test_coverage(rel, &source_content, &coverage_indicator_paths(project_root, rel)) {
+    if source_has_test_coverage(
+        rel,
+        &source_content,
+        &coverage_indicator_paths(project_root, rel),
+    ) {
         return None;
     }
     Some(CoverageCandidate {

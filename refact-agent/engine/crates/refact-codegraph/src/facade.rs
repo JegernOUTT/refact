@@ -120,8 +120,38 @@ pub fn type_hierarchy(store: &Store, subtree_of: &str) -> Result<String, String>
         all_nodes.insert(parent.clone());
     }
 
+    let mut parents: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (child, parent) in &pairs {
+        parents
+            .entry(child.clone())
+            .or_default()
+            .insert(parent.clone());
+    }
+
     let roots: Vec<String> = if !subtree_of.is_empty() {
-        vec![subtree_of.to_string()]
+        let mut focus_roots = BTreeSet::new();
+        fn collect_roots(
+            node: &str,
+            parents: &BTreeMap<String, BTreeSet<String>>,
+            roots: &mut BTreeSet<String>,
+            seen: &mut BTreeSet<String>,
+        ) {
+            if !seen.insert(node.to_string()) {
+                return;
+            }
+            match parents.get(node) {
+                Some(parent_nodes) if !parent_nodes.is_empty() => {
+                    for parent in parent_nodes {
+                        collect_roots(parent, parents, roots, seen);
+                    }
+                }
+                _ => {
+                    roots.insert(node.to_string());
+                }
+            }
+        }
+        collect_roots(subtree_of, &parents, &mut focus_roots, &mut BTreeSet::new());
+        focus_roots.into_iter().collect()
     } else {
         all_nodes
             .iter()

@@ -645,15 +645,23 @@ fn assistant_tool_call_succeeded(messages: &[ChatMessage], tool_name: &str) -> b
 }
 
 fn autonomous_subchat_successful(messages: &[ChatMessage]) -> bool {
-    let Some(last_assistant) = messages.iter().rev().find(|message| message.role == "assistant") else {
+    let Some(last_assistant) = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+    else {
         return false;
     };
     if !last_assistant.content.content_text_only().trim().is_empty() {
         return true;
     }
-    ["buddy_runtime_event", "buddy_create_draft", "buddy_memory_create"]
-        .iter()
-        .any(|tool_name| assistant_tool_call_succeeded(messages, tool_name))
+    [
+        "buddy_runtime_event",
+        "buddy_create_draft",
+        "buddy_memory_create",
+    ]
+    .iter()
+    .any(|tool_name| assistant_tool_call_succeeded(messages, tool_name))
 }
 
 fn autonomous_failure_result(
@@ -2240,7 +2248,11 @@ async fn build_autonomous_messages(
         system_prompt = crate::chat::prompts::system_prompt_add_extra_instructions(
             gcx,
             system_prompt,
-            subagent_config.tools.iter().cloned().collect::<HashSet<_>>(),
+            subagent_config
+                .tools
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>(),
             &ChatMeta::default(),
             &None,
             "buddy",
@@ -4273,7 +4285,9 @@ mod tests {
     #[test]
     fn autonomous_subchat_success_requires_report_or_successful_buddy_tool() {
         assert!(!autonomous_subchat_successful(&[]));
-        assert!(autonomous_subchat_successful(&[assistant_message("Report ready")]));
+        assert!(autonomous_subchat_successful(&[assistant_message(
+            "Report ready"
+        )]));
         assert!(!autonomous_subchat_successful(&[
             assistant_tool_call("call-1", "buddy_runtime_event"),
             tool_result("call-1", true),

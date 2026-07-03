@@ -37,6 +37,7 @@ mod tool_deep_research;
 pub mod tool_delegate;
 mod tool_get_goal;
 mod tool_get_plan;
+pub mod tool_goal_pursuit_controls;
 mod tool_handoff_to_mode;
 mod tool_knowledge;
 mod tool_mcp_search;
@@ -61,7 +62,6 @@ mod tool_tree;
 mod tool_update_goal;
 pub mod tool_update_plan;
 mod tool_validate_goal;
-pub mod tool_goal_pursuit_controls;
 mod tool_web;
 mod tool_web_search;
 

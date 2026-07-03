@@ -52,11 +52,22 @@ pub async fn handle_v1_code_lens(
     let cpath_str = cpath.to_string_lossy().to_string();
 
     let codegraph_opt = global_context.codegraph.lock().await.clone();
-    let defs: Vec<Arc<AstDefinition>> = match codegraph_opt {
-        Some(service) => service
-            .doc_defs(&cpath_str)
-            .await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?,
+    let (defs, doc_usages): (Vec<Arc<AstDefinition>>, Vec<(usize, String)>) = match codegraph_opt {
+        Some(service) => {
+            let defs = service
+                .doc_defs(&cpath_str)
+                .await
+                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let doc_usages = if post.debug {
+                service
+                    .doc_usages(&cpath_str)
+                    .await
+                    .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
+            } else {
+                Vec::new()
+            };
+            (defs, doc_usages)
+        }
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::OK)
@@ -67,7 +78,7 @@ pub async fn handle_v1_code_lens(
         }
     };
 
-    let output = build_code_lens_output(&defs, post.debug);
+    let output = build_code_lens_output(&defs, &doc_usages, post.debug);
 
     let response = CodeLensResponse {
         success: 1,
@@ -80,7 +91,11 @@ pub async fn handle_v1_code_lens(
         .unwrap())
 }
 
-fn build_code_lens_output(defs: &[Arc<AstDefinition>], debug: bool) -> Vec<CodeLensOutput> {
+fn build_code_lens_output(
+    defs: &[Arc<AstDefinition>],
+    doc_usages: &[(usize, String)],
+    debug: bool,
+) -> Vec<CodeLensOutput> {
     let mut output: Vec<CodeLensOutput> = Vec::new();
     for def in defs.iter() {
         if let Some(last) = def.official_path.last() {
@@ -116,32 +131,25 @@ fn build_code_lens_output(defs: &[Arc<AstDefinition>], debug: bool) -> Vec<CodeL
                 line2,
                 debug_string: Some(format!("{entity_char}({})", def.path_drop0())),
             });
-            for u in def.usages.iter() {
-                let resolved = u
-                    .resolved_as
-                    .rsplit("::")
-                    .take(2)
-                    .collect::<Vec<&str>>()
-                    .iter()
-                    .rev()
-                    .cloned()
-                    .collect::<Vec<&str>>()
-                    .join("::");
-                let txt = if resolved != "" {
-                    format!("↗{}", resolved)
-                } else {
-                    format!(
-                        "❌{}",
-                        u.targets_for_guesswork.get(0).unwrap_or(&"".to_string())
-                    )
-                };
-                output.push(CodeLensOutput {
-                    spath: "".to_string(),
-                    line1: u.uline + 1,
-                    line2: u.uline + 1,
-                    debug_string: Some(txt),
-                });
-            }
+        }
+    }
+    if debug {
+        for (line, resolved_as) in doc_usages {
+            let resolved = resolved_as
+                .rsplit("::")
+                .take(2)
+                .collect::<Vec<&str>>()
+                .iter()
+                .rev()
+                .cloned()
+                .collect::<Vec<&str>>()
+                .join("::");
+            output.push(CodeLensOutput {
+                spath: "".to_string(),
+                line1: *line,
+                line2: *line,
+                debug_string: Some(format!("↗{}", resolved)),
+            });
         }
     }
     output
@@ -174,7 +182,8 @@ mod tests {
         store.connect_usages().unwrap();
 
         let defs = refact_codegraph::facade::doc_defs(&store, "src/widget.rs").unwrap();
-        let output = build_code_lens_output(&defs, true);
+        let usages = store.doc_usages("src/widget.rs").unwrap();
+        let output = build_code_lens_output(&defs, &usages, true);
 
         assert!(output.iter().any(|lens| {
             lens.line1 == 2 && lens.debug_string.as_deref() == Some("↗src/widget.rs::helper")

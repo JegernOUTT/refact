@@ -101,6 +101,8 @@ mod tests {
         let codegraph = status.codegraph.expect("codegraph status must be present");
         assert_eq!(codegraph.state, "turned_off");
         assert_eq!(codegraph.queued, 0);
+        assert_eq!(codegraph.cross_file_edges, 0);
+        assert!(!codegraph.cross_file_ready);
         assert_eq!(codegraph.throughput_files_per_min, 0.0);
         assert_eq!(codegraph.eta_seconds, None);
         assert_eq!(codegraph.error, "");
@@ -115,16 +117,22 @@ mod tests {
         let codegraph = status.codegraph.expect("codegraph status must be present");
         assert_eq!(codegraph.state, "indexing");
         assert_eq!(codegraph.queued, 1);
+        assert!(!codegraph.cross_file_ready);
         assert_eq!(codegraph.throughput_files_per_min, 0.0);
         assert_eq!(codegraph.eta_seconds, None);
         assert_eq!(codegraph.error, "");
 
         service.drain_batch(10);
         service
-            .index_file("src/main.rs", "fn main() {}", "rust")
+            .index_file(
+                "src/main.rs",
+                "fn main() { helper(); }\nfn helper() {}",
+                "rust",
+            )
             .await
             .unwrap();
         service.connect_usages().await.unwrap();
+        service.mark_initial_index_done();
 
         let status = get_rag_status(gcx.clone()).await;
         assert_eq!(status.codegraph_alive, "working");
@@ -134,6 +142,8 @@ mod tests {
         assert_eq!(codegraph.throughput_files_per_min, 0.0);
         assert_eq!(codegraph.eta_seconds, None);
         assert_eq!(codegraph.counts.files, 1);
+        assert_eq!(codegraph.cross_file_edges, 0);
+        assert!(codegraph.cross_file_ready);
         assert_eq!(codegraph.error, "");
 
         *gcx.codegraph_error.lock().unwrap() = "store unavailable".to_string();
@@ -168,6 +178,8 @@ mod tests {
         assert_eq!(codegraph.state, "error");
         assert_eq!(codegraph.error, "open failed");
         assert_eq!(codegraph.queued, 0);
+        assert_eq!(codegraph.cross_file_edges, 0);
+        assert!(!codegraph.cross_file_ready);
         assert_eq!(codegraph.throughput_files_per_min, 0.0);
         assert_eq!(codegraph.eta_seconds, None);
         assert_eq!(codegraph.counts, refact_codegraph::Counts::default());

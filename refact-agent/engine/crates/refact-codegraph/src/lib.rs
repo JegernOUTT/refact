@@ -60,6 +60,15 @@ pub struct CachedGraphAnalytics {
     pub communities: Vec<communities::Community>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexReadiness {
+    pub queued: usize,
+    pub dirty_paths: i64,
+    pub pending_refs: i64,
+    pub cross_file_edges: i64,
+    pub cross_file_ready: bool,
+}
+
 pub struct CodeGraphService {
     store: AMutex<Store>,
     read_store: Option<AMutex<Store>>,
@@ -394,6 +403,10 @@ impl CodeGraphService {
         }
     }
 
+    pub fn graph_generation(&self) -> u64 {
+        self.graph_generation.load(Ordering::Acquire)
+    }
+
     fn bump_graph_generation(&self) {
         self.graph_generation.fetch_add(1, Ordering::AcqRel);
     }
@@ -439,6 +452,35 @@ impl CodeGraphService {
 
     pub async fn has_dirty_usage_paths(&self) -> Result<bool, String> {
         self.with_read_store(|store| store.has_dirty_paths()).await
+    }
+
+    pub async fn index_readiness(&self) -> Result<IndexReadiness, String> {
+        let queued = self.queue_len();
+        let (dirty_paths, pending_refs, cross_file_edges) = self
+            .with_read_store(|store| {
+                Ok((
+                    store.dirty_path_count()? as i64,
+                    store.pending_ref_count()?,
+                    store.cross_file_edge_count()?,
+                ))
+            })
+            .await?;
+        Ok(IndexReadiness {
+            queued,
+            dirty_paths,
+            pending_refs,
+            cross_file_edges,
+            cross_file_ready: queued == 0 && dirty_paths == 0,
+        })
+    }
+
+    pub async fn meta_get(&self, key: &str) -> Result<Option<String>, String> {
+        self.with_read_store(|store| store.meta_get(key)).await
+    }
+
+    pub async fn meta_set(&self, key: &str, value: &str) -> Result<(), String> {
+        let store = self.store.lock().await;
+        store.meta_set(key, value)
     }
 
     pub async fn dirty_usage_path_count(&self) -> Result<usize, String> {
@@ -900,6 +942,72 @@ mod tests {
         assert_eq!(
             resolve_indexed_paths(&["missing.rs".to_string()], &indexed),
             vec!["missing.rs".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn index_readiness_reports_cross_file_state() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+
+        service
+            .index_file("src/a.rs", "pub fn helper() {}\n", "rust")
+            .await
+            .unwrap();
+        let dirty = service.index_readiness().await.unwrap();
+        assert_eq!(dirty.queued, 0);
+        assert!(dirty.dirty_paths > 0);
+        assert!(dirty.pending_refs >= 0);
+        assert_eq!(dirty.cross_file_edges, 0);
+        assert!(!dirty.cross_file_ready);
+
+        service
+            .index_file("src/b.rs", "fn run() { helper(); }\n", "rust")
+            .await
+            .unwrap();
+        service.connect_usages().await.unwrap();
+        service.enqueue_files(&["src/c.rs".to_string()]);
+
+        let queued = service.index_readiness().await.unwrap();
+        assert_eq!(queued.queued, 1);
+        assert_eq!(queued.dirty_paths, 0);
+        assert!(queued.cross_file_edges > 0);
+        assert!(!queued.cross_file_ready);
+
+        service.drain_batch(1);
+        let ready = service.index_readiness().await.unwrap();
+        assert_eq!(ready.queued, 0);
+        assert_eq!(ready.dirty_paths, 0);
+        assert!(ready.cross_file_edges > 0);
+        assert!(ready.cross_file_ready);
+    }
+
+    #[tokio::test]
+    async fn meta_kv_roundtrip_and_reserved_key_untouched() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        let schema_version = service.meta_get("schema_version").await.unwrap();
+
+        assert_eq!(service.meta_get("user_snapshot").await.unwrap(), None);
+        service
+            .meta_set("user_snapshot", "generation=1")
+            .await
+            .unwrap();
+        assert_eq!(
+            service.meta_get("user_snapshot").await.unwrap(),
+            Some("generation=1".to_string())
+        );
+        service
+            .meta_set("user_snapshot", "generation=2")
+            .await
+            .unwrap();
+        assert_eq!(
+            service.meta_get("user_snapshot").await.unwrap(),
+            Some("generation=2".to_string())
+        );
+
+        assert!(service.meta_set("schema_version", "999").await.is_err());
+        assert_eq!(
+            service.meta_get("schema_version").await.unwrap(),
+            schema_version
         );
     }
 

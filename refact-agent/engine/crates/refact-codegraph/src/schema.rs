@@ -70,11 +70,3 @@ CREATE TABLE IF NOT EXISTS file_hashes (
 
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_code USING fts5(path UNINDEXED, text);
 "#;
-
-#[cfg(feature = "code_embeddings")]
-pub const VEC_CODE_SQL: &str = r#"
-CREATE VIRTUAL TABLE IF NOT EXISTS vec_code USING vec0(
-    node_id INTEGER PRIMARY KEY,
-    embedding FLOAT[1]
-);
-"#;

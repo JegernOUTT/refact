@@ -62,7 +62,7 @@ fn frog_suite_resolves_intra_file_calls() {
         .map(|(_, name)| name)
         .collect();
     assert!(
-        usages.iter().any(|n| n == "bounce_off_banks"),
+        usages.iter().any(|n| n.ends_with("::bounce_off_banks")),
         "Frog::jump/swim should call bounce_off_banks; got {usages:?}"
     );
 }
@@ -136,11 +136,11 @@ fn frog_suite_resolves_cross_file_calls() {
         .map(|(_, name)| name)
         .collect();
     assert!(
-        usages.iter().any(|n| n == "draw_hello_frog"),
+        usages.iter().any(|n| n.ends_with("::draw_hello_frog")),
         "main_loop should call draw_hello_frog; got {usages:?}"
     );
     assert!(
-        usages.iter().any(|n| n == "jump"),
+        usages.iter().any(|n| n.ends_with("::jump")),
         "main_loop should call Frog::jump across files; got {usages:?}"
     );
 }

@@ -19,6 +19,3 @@ petgraph = "0.6"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-
-[features]
-code_embeddings = []

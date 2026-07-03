@@ -179,7 +179,11 @@ async fn build_mcp_pulse(gcx: AppState, fact_store: &FactStore) -> McpPulse {
         .collect::<Vec<_>>();
     for session_arc in sessions {
         let mut session_locked = session_arc.lock().await;
-        if session_locked.as_any_mut().downcast_mut::<SessionMCP>().is_some() {
+        if session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .is_some()
+        {
             pulse.total = pulse.total.saturating_add(1);
         }
     }

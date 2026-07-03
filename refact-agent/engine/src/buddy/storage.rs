@@ -1663,7 +1663,8 @@ mod tests {
         let survivor = test_op("op-survivor", "stays", MemoryOpStatus::Pending);
         write_memory_ops_records_for_test(root, vec![survivor.clone()]).await;
 
-        let vanished = test_op("op-vanished", "compacted away", MemoryOpStatus::Pending).normalized();
+        let vanished =
+            test_op("op-vanished", "compacted away", MemoryOpStatus::Pending).normalized();
         let mut updated = vanished.clone();
         updated.status = MemoryOpStatus::Applied;
         let state = merge_processed_ops_and_rewrite(root, vec![(vanished, updated)])
@@ -1719,7 +1720,9 @@ mod tests {
         let root_a = root.to_path_buf();
         let gcx_a = gcx.clone();
         let batch = tokio::spawn(async move {
-            apply_memory_batch(&root_a, gcx_a, "review", 100).await.unwrap()
+            apply_memory_batch(&root_a, gcx_a, "review", 100)
+                .await
+                .unwrap()
         });
         let root_b = root.to_path_buf();
         let gcx_b = gcx.clone();

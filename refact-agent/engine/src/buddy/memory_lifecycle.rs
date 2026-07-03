@@ -2533,7 +2533,10 @@ fn validate_memory_extension(path: &Path) -> Result<(), String> {
 }
 
 fn is_memory_doc_path(path: &std::path::Path) -> bool {
-    matches!(path.extension().and_then(|ext| ext.to_str()), Some("md" | "mdx"))
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("md" | "mdx")
+    )
 }
 
 async fn canonical_existing_file_no_symlink(path: &Path) -> Result<PathBuf, String> {

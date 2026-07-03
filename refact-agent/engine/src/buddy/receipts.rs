@@ -305,8 +305,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let rel = ".refact/buddy/legacy.json";
-        fs::create_dir_all(root.join(".refact/buddy")).await.unwrap();
-        fs::write(root.join(rel), "{\"patched\":true}\n").await.unwrap();
+        fs::create_dir_all(root.join(".refact/buddy"))
+            .await
+            .unwrap();
+        fs::write(root.join(rel), "{\"patched\":true}\n")
+            .await
+            .unwrap();
         let legacy = BuddyReceipt {
             id: "legacy-receipt".to_string(),
             action_kind: "apply_config_patch".to_string(),
@@ -331,7 +335,9 @@ mod tests {
     async fn apply_rejects_symlink_into_buddy_internal_state() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        fs::create_dir_all(root.join(".refact/buddy")).await.unwrap();
+        fs::create_dir_all(root.join(".refact/buddy"))
+            .await
+            .unwrap();
         tokio::fs::symlink(root.join(".refact/buddy"), root.join(".refact/knowledge"))
             .await
             .unwrap();
@@ -367,7 +373,9 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        fs::create_dir_all(root.join(".refact/buddy")).await.unwrap();
+        fs::create_dir_all(root.join(".refact/buddy"))
+            .await
+            .unwrap();
         tokio::fs::symlink(outside.path(), root.join(".refact/escape"))
             .await
             .unwrap();

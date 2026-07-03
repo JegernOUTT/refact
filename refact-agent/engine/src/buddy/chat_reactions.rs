@@ -306,7 +306,8 @@ fn record_queued_reaction(
 ) -> bool {
     if !svc.gate_chat_reaction_event(&event) {
         svc.chat_reaction_limiter.rollback(reservation);
-        svc.chat_reaction_debug.record_not_queued(chat_id, signal_type);
+        svc.chat_reaction_debug
+            .record_not_queued(chat_id, signal_type);
         return false;
     }
     let stored_event = svc.enqueue_runtime_event_with_stored(event);

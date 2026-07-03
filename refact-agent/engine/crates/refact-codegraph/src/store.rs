@@ -376,6 +376,31 @@ impl Store {
             .map_err(|e| format!("codegraph schema_version parse: {e}"))
     }
 
+    pub fn meta_get(&self, key: &str) -> Result<Option<String>, String> {
+        self.conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("codegraph meta_get {key:?}: {e}"))
+    }
+
+    pub fn meta_set(&self, key: &str, value: &str) -> Result<(), String> {
+        if key == "schema_version" {
+            return Err("codegraph meta key `schema_version` is reserved".to_string());
+        }
+        self.conn
+            .execute(
+                "INSERT INTO meta(key, value) VALUES(?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map_err(|e| format!("codegraph meta_set {key:?}: {e}"))?;
+        Ok(())
+    }
+
     pub fn insert_node(
         &self,
         kind: &str,
@@ -847,6 +872,19 @@ impl Store {
         Ok(self.dirty_path_count()? > 0)
     }
 
+    pub fn pending_ref_count(&self) -> Result<i64, String> {
+        self.scalar_i64("SELECT COUNT(*) FROM pending_refs")
+    }
+
+    pub fn cross_file_edge_count(&self) -> Result<i64, String> {
+        self.scalar_i64(
+            "SELECT COUNT(*) FROM edges e \
+             JOIN nodes sn ON sn.id = e.src \
+             JOIN nodes dn ON dn.id = e.dst \
+             WHERE e.kind != 'defined_in' AND sn.path != dn.path",
+        )
+    }
+
     fn mark_path_dirty_on(conn: &Connection, path: &str) -> Result<(), String> {
         conn.execute(
             "INSERT OR IGNORE INTO dirty_paths(path) VALUES(?1)",
@@ -1070,9 +1108,10 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT e.line, dn.name FROM edges e \
+                "SELECT e.line, COALESCE(s.double_colon_path, dn.name) FROM edges e \
                  JOIN nodes sn ON sn.id = e.src \
                  JOIN nodes dn ON dn.id = e.dst \
+                 LEFT JOIN symbols s ON s.node_id = dn.id \
                  WHERE sn.path = ?1 AND e.kind != 'defined_in' ORDER BY e.line",
             )
             .map_err(|e| format!("codegraph doc_usages prepare: {e}"))?;
@@ -2171,7 +2210,7 @@ func main() {
         assert!(
             usages
                 .iter()
-                .any(|(line, name)| *line == 2 && name == "callee"),
+                .any(|(line, name)| *line == 2 && name.ends_with("::callee")),
             "expected callee usage at line 2, got {:?}",
             usages
         );

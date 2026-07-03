@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use async_trait::async_trait;
+use refact_core::ast_types::{AstDefinition, SymbolType};
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 
@@ -15,6 +16,37 @@ use regex::Regex;
 
 pub struct ToolAstDefinition {
     pub config_path: String,
+}
+
+fn is_type_definition(def: &AstDefinition) -> bool {
+    def.symbol_type == SymbolType::StructDeclaration || !def.this_is_a_class.is_empty()
+}
+
+async fn type_hierarchy_sections(
+    service: &Arc<crate::codegraph::CodeGraphService>,
+    defs: &[Arc<AstDefinition>],
+) -> Result<Vec<String>, String> {
+    let mut seen = BTreeSet::new();
+    let mut sections = Vec::new();
+    for def in defs {
+        if !is_type_definition(def) {
+            continue;
+        }
+        let name = def.name();
+        if name.is_empty() || !seen.insert(name.clone()) {
+            continue;
+        }
+        let hierarchy = service.type_hierarchy(&name).await?;
+        if hierarchy.trim().is_empty() {
+            continue;
+        }
+        sections.push(format!(
+            "Inheritance for `{}`:\n{}",
+            name,
+            hierarchy.trim_end()
+        ));
+    }
+    Ok(sections)
 }
 
 pub async fn compute_related_memories_section(
@@ -128,6 +160,12 @@ async fn symbol_def_via_codegraph(
                 symbol_path, short_path, cf.line1, cf.line2
             ));
         }
+        let hierarchy_sections = type_hierarchy_sections(&service, &defs).await?;
+        if !hierarchy_sections.is_empty() {
+            tool_message.push_str("Inheritance:\n");
+            tool_message.push_str(&hierarchy_sections.join("\n\n"));
+            tool_message.push('\n');
+        }
         if defs.len() > DEFS_LIMIT {
             tool_message.push_str(&format!(
                 "⚠️ {} more definitions not shown (limit: {}). 💡 Use more specific symbol name\n",
@@ -218,5 +256,37 @@ impl Tool for ToolAstDefinition {
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec!["codegraph".to_string()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn symbol_def_hierarchy_sections_include_type_chain() {
+        let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        service
+            .index_file("src/base.py", "class A:\n    pass\n", "python")
+            .await
+            .unwrap();
+        service
+            .index_file("src/mid.py", "class B(A):\n    pass\n", "python")
+            .await
+            .unwrap();
+        service
+            .index_file("src/leaf.py", "class C(B):\n    pass\n", "python")
+            .await
+            .unwrap();
+        service.connect_usages().await.unwrap();
+
+        let defs = service.definitions("B").await.unwrap();
+        let sections = type_hierarchy_sections(&service, &defs).await.unwrap();
+        let rendered = sections.join("\n");
+
+        assert!(rendered.contains("Inheritance for `B`"));
+        assert!(rendered.contains("A"));
+        assert!(rendered.contains("B"));
+        assert!(rendered.contains("C"));
     }
 }

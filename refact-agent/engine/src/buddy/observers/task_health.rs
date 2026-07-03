@@ -247,13 +247,15 @@ impl BuddyObserver for TaskHealthObserver {
             if let Ok(task_dir) =
                 crate::tasks::storage::find_task_dir(gcx.gcx.clone(), &meta.id).await
             {
-                memory_facts.extend(detect_orphaned_task_memory_facts(
-                    &meta.id,
-                    &board,
-                    &task_dir.join("memories"),
-                    ctx.now,
-                )
-                .await);
+                memory_facts.extend(
+                    detect_orphaned_task_memory_facts(
+                        &meta.id,
+                        &board,
+                        &task_dir.join("memories"),
+                        ctx.now,
+                    )
+                    .await,
+                );
             }
             let mut latest_heartbeat: Option<chrono::DateTime<Utc>> = None;
             for card in &board.cards {

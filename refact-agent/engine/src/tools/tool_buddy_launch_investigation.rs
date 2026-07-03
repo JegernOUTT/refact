@@ -125,10 +125,7 @@ impl Tool for ToolBuddyLaunchInvestigation {
 
         let (app, chat_facade) = {
             let ccx_locked = ccx.lock().await;
-            (
-                ccx_locked.app.clone(),
-                ccx_locked.app.chat.facade.clone(),
-            )
+            (ccx_locked.app.clone(), ccx_locked.app.chat.facade.clone())
         };
         let model = crate::buddy::actor::resolve_buddy_chat_model(app).await;
         let chat_id = Uuid::new_v4().to_string();
