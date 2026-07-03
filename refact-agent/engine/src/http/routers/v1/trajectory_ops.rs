@@ -9,8 +9,8 @@ use uuid::Uuid;
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
 use crate::chat::trajectory_ops::{
-    CompressOptions, HandoffOptions, TransformStats, compress_in_place, handoff_select,
-    sanitize_messages_for_new_thread,
+    CompressOptions, HandoffOptions, TransformStats, compress_in_place,
+    demote_goal_ownership_for_branch, handoff_select, sanitize_messages_for_new_thread,
 };
 use crate::call_validation::ChatMessage;
 use crate::integrations::browser_runtime::find_runtime_by_chat_id;
@@ -83,6 +83,17 @@ async fn persist_live_source_goal_transfer(
         {
             let mut session = session_arc.lock().await;
             session.replace_messages(transferred_goal.source_messages.clone());
+            if let Some(target_chat_id) = transferred_goal
+                .source_goal
+                .as_ref()
+                .and_then(|goal| goal.transferred_to.clone())
+            {
+                session.goal_ledger_append(refact_chat_api::GoalLedgerOp::TransferredOut {
+                    target_chat_id,
+                });
+            }
+            session.set_goal_projection(transferred_goal.source_goal.clone());
+            session.emit_goal_status();
         }
         crate::chat::trajectories::try_save_trajectory(
             AppState::from_gcx(gcx.clone()).await,
@@ -423,13 +434,16 @@ pub async fn handle_handoff_apply(
             .await
             .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let selected_messages = sanitize_messages_for_new_thread(&selected_messages);
+    let mut selected_messages = sanitize_messages_for_new_thread(&selected_messages);
+    demote_goal_ownership_for_branch(&mut selected_messages);
 
     let new_chat_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     let mut snapshot = TrajectorySnapshot {
         goal: None,
+        goal_ledger: Vec::new(),
+        goal_verification_blocked_until_ms: None,
         chat_id: new_chat_id.clone(),
         title: thread.title.clone(),
         model: thread.model.clone(),
@@ -618,7 +632,15 @@ pub async fn handle_mode_transition_apply(
         .or_else(|| Some(chat_id.clone()));
 
     let mut snapshot = TrajectorySnapshot {
+        goal_verification_blocked_until_ms: None,
         goal: transferred_goal.target_goal.clone(),
+        goal_ledger: transferred_goal
+            .target_goal
+            .as_ref()
+            .map(|target| {
+                refact_chat_api::seed_transferred_goal_ledger(target, &chat_id, epoch_ms_now())
+            })
+            .unwrap_or_default(),
         chat_id: new_chat_id.clone(),
         title: String::new(),
         model: thread.model.clone(),
@@ -785,7 +807,19 @@ pub async fn handle_planner_from_transition(
     let root_chat_id = Some(new_chat_id.clone());
 
     let mut snapshot = TrajectorySnapshot {
+        goal_verification_blocked_until_ms: None,
         goal: transferred_goal.target_goal.clone(),
+        goal_ledger: transferred_goal
+            .target_goal
+            .as_ref()
+            .map(|target| {
+                refact_chat_api::seed_transferred_goal_ledger(
+                    target,
+                    &req.source_chat_id,
+                    epoch_ms_now(),
+                )
+            })
+            .unwrap_or_default(),
         chat_id: new_chat_id.clone(),
         title: String::new(),
         model: thread.model.clone(),
@@ -891,6 +925,8 @@ mod tests {
     fn transition_identity_snapshot(link_type: &str) -> TrajectorySnapshot {
         let mut snapshot = TrajectorySnapshot {
             goal: None,
+            goal_ledger: Vec::new(),
+            goal_verification_blocked_until_ms: None,
             chat_id: "transition-identity".to_string(),
             title: String::new(),
             model: "gpt-4".to_string(),
@@ -965,6 +1001,7 @@ mod tests {
             max_turns: Some(7),
             max_minutes: Some(11),
             max_tokens: Some(13_000),
+            max_cost_cents: None,
             cooldown_ms: 1_234,
             no_progress_token_threshold: 55,
             no_progress_turns: Some(3),
@@ -978,6 +1015,7 @@ mod tests {
             started_at_ms: 42,
             no_progress_turns: 2,
             last_nudge_at_ms: 77,
+            cost_used_cents: 0,
         };
         goal.attempts.push(GoalAttempt {
             at_ms: 100,
@@ -985,12 +1023,13 @@ mod tests {
             verdict: "retry".to_string(),
             gaps: vec!["missing verification".to_string()],
             verifier_reply: "Run tests".to_string(),
+            criteria_verdicts: Vec::new(),
         });
         (session, budget)
     }
 
     #[tokio::test]
-    async fn http_mode_transition_goal_transfer_deactivates_source_and_resets_target_budget() {
+    async fn http_mode_transition_goal_transfer_deactivates_source_and_preserves_progress() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             dir.path().join("cache"),
@@ -1034,11 +1073,11 @@ mod tests {
         );
         assert_eq!(target_goal.transferred_to, None);
         assert_eq!(target_goal.budget, budget);
-        assert_eq!(target_goal.progress.started_at_ms, at_ms);
-        assert_eq!(target_goal.progress.turns_used, 0);
-        assert_eq!(target_goal.progress.tokens_used, 0);
-        assert_eq!(target_goal.progress.no_progress_turns, 0);
-        assert_eq!(target_goal.progress.last_nudge_at_ms, 0);
+        assert_eq!(target_goal.progress.started_at_ms, 42);
+        assert_eq!(target_goal.progress.turns_used, 4);
+        assert_eq!(target_goal.progress.tokens_used, 9_999);
+        assert_eq!(target_goal.progress.no_progress_turns, 2);
+        assert_eq!(target_goal.progress.last_nudge_at_ms, 77);
         assert_eq!(target_goal.attempts.len(), 1);
         assert_eq!(target_messages[0].role, "goal");
         assert_eq!(target_messages[1].role, "event");
@@ -1103,6 +1142,90 @@ mod tests {
             target_messages[0].content.content_text_only(),
             original_content
         );
+    }
+
+    #[test]
+    fn http_mode_transition_goal_transfer_only_active_goals_transfer() {
+        for status in [
+            GoalStatus::Paused,
+            GoalStatus::Stopped,
+            GoalStatus::Completed,
+            GoalStatus::BudgetExhausted,
+            GoalStatus::NoProgress,
+            GoalStatus::Verifying,
+            GoalStatus::Transferred,
+        ] {
+            let (mut session, _) = source_session_with_active_goal("gate-source");
+            session.goal.as_mut().unwrap().status = status;
+            let mut target_messages = vec![plan_message("Target plan")];
+
+            let transferred_goal = transfer_goal_into_transition_messages(
+                &session.messages,
+                session.goal.as_ref(),
+                &[],
+                "gate-source",
+                "gate-target",
+                "task_agent",
+                &mut target_messages,
+                1,
+            );
+
+            assert!(
+                !transferred_goal.transferred(),
+                "status {status:?} must not transfer"
+            );
+            assert!(transferred_goal.target_goal.is_none());
+            assert_eq!(target_messages.len(), 1);
+        }
+
+        let (session, _) = source_session_with_active_goal("gate-source-active");
+        let mut target_messages = vec![plan_message("Target plan")];
+        let transferred_goal = transfer_goal_into_transition_messages(
+            &session.messages,
+            session.goal.as_ref(),
+            &[],
+            "gate-source-active",
+            "gate-target",
+            "task_agent",
+            &mut target_messages,
+            1,
+        );
+        assert!(transferred_goal.transferred());
+    }
+
+    #[test]
+    fn http_mode_transition_goal_transfer_respects_live_stop_over_pinned_meta() {
+        let (mut session, _) = source_session_with_active_goal("gate-live-stop");
+        {
+            let index = session
+                .messages
+                .iter()
+                .position(|message| message.role == "goal")
+                .unwrap();
+            let meta = session.messages[index]
+                .extra
+                .get_mut("goal")
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            meta.insert("status".to_string(), json!("active"));
+            meta.insert("active".to_string(), json!(true));
+        }
+        session.goal.as_mut().unwrap().status = GoalStatus::Stopped;
+        let mut target_messages = vec![plan_message("Target plan")];
+
+        let transferred_goal = transfer_goal_into_transition_messages(
+            &session.messages,
+            session.goal.as_ref(),
+            &[],
+            "gate-live-stop",
+            "gate-target",
+            "task_agent",
+            &mut target_messages,
+            1,
+        );
+
+        assert!(!transferred_goal.transferred());
     }
 
     #[test]
@@ -1200,6 +1323,8 @@ mod tests {
         }
         let snapshot = TrajectorySnapshot {
             goal: None,
+            goal_ledger: Vec::new(),
+            goal_verification_blocked_until_ms: None,
             chat_id: "transition-chat".to_string(),
             title: String::new(),
             model: "gpt-4".to_string(),

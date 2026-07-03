@@ -936,6 +936,8 @@ pub async fn handle_v1_buddy_conversations_create(
 
     let snapshot = TrajectorySnapshot {
         goal: None,
+        goal_ledger: Vec::new(),
+        goal_verification_blocked_until_ms: None,
         chat_id: chat_id.clone(),
         title: title.clone(),
         model: String::new(),

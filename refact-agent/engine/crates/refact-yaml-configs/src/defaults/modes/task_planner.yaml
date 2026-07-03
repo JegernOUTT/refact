@@ -412,6 +412,8 @@ tools:
   - update_goal
   - get_goal
   - validate_goal
+  - pause_goal
+  - snooze_goal
   - compress_chat_probe
   - compress_chat_apply
   - task_mem_search

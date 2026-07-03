@@ -4,10 +4,16 @@ use uuid::Uuid;
 pub mod chat_local_types;
 pub mod code_lens;
 pub mod diagnostics;
+pub mod goal_ledger;
 pub mod goal_role;
 pub mod internal_roles;
 pub mod notification_event;
 pub mod plan_role;
+
+pub use goal_ledger::{
+    goal_budget_exhaustion_status, reduce_goal_ledger, seed_transferred_goal_ledger,
+    status_changed_since, GoalLedgerEntry, GoalLedgerOp, GoalLedgerState,
+};
 
 pub use chat_local_types::{
     max_queue_size, session_cleanup_interval, session_idle_timeout, stream_heartbeat,
@@ -26,6 +32,10 @@ fn default_true() -> bool {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+pub(crate) fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -153,9 +163,10 @@ pub enum CompressionReason {
     InsufficientSavings,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalStatus {
+    #[default]
     Active,
     Verifying,
     Paused,
@@ -174,6 +185,8 @@ pub struct GoalBudget {
     pub max_minutes: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_cents: Option<u64>,
     #[serde(default = "default_goal_budget_cooldown_ms")]
     pub cooldown_ms: u64,
     #[serde(default = "default_goal_no_progress_token_threshold")]
@@ -185,8 +198,10 @@ pub struct GoalBudget {
 }
 
 fn default_goal_budget_cooldown_ms() -> u64 {
-    1_500
+    30_000
 }
+
+const LEGACY_GOAL_BUDGET_COOLDOWN_MS: u64 = 1_500;
 
 fn default_goal_no_progress_token_threshold() -> u64 {
     50
@@ -198,6 +213,7 @@ impl Default for GoalBudget {
             max_turns: None,
             max_minutes: None,
             max_tokens: None,
+            max_cost_cents: None,
             cooldown_ms: default_goal_budget_cooldown_ms(),
             no_progress_token_threshold: default_goal_no_progress_token_threshold(),
             no_progress_turns: None,
@@ -212,6 +228,7 @@ impl GoalBudget {
             max_turns: Some(10),
             max_minutes: Some(15),
             max_tokens: Some(200_000),
+            max_cost_cents: None,
             cooldown_ms: default_goal_budget_cooldown_ms(),
             no_progress_token_threshold: default_goal_no_progress_token_threshold(),
             no_progress_turns: Some(2),
@@ -219,7 +236,7 @@ impl GoalBudget {
         }
     }
 
-    pub fn migrate_legacy_default_hard_limits(self) -> Self {
+    pub fn migrate_legacy_default_hard_limits(mut self) -> Self {
         if self.explicit {
             return self;
         }
@@ -228,14 +245,22 @@ impl GoalBudget {
             && self.max_tokens == Some(200_000)
             && self.no_progress_turns == Some(2)
         {
-            Self {
+            self = Self {
                 cooldown_ms: self.cooldown_ms,
                 no_progress_token_threshold: self.no_progress_token_threshold,
                 ..Default::default()
-            }
-        } else {
-            self
+            };
         }
+        if self.cooldown_ms == LEGACY_GOAL_BUDGET_COOLDOWN_MS
+            && self.max_turns.is_none()
+            && self.max_minutes.is_none()
+            && self.max_tokens.is_none()
+            && self.max_cost_cents.is_none()
+            && self.no_progress_turns.is_none()
+        {
+            self.cooldown_ms = default_goal_budget_cooldown_ms();
+        }
+        self
     }
 }
 
@@ -246,15 +271,35 @@ pub struct GoalProgress {
     pub started_at_ms: u64,
     pub no_progress_turns: u32,
     pub last_nudge_at_ms: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub cost_used_cents: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct GoalAttempt {
     pub at_ms: u64,
     pub trigger: String,
     pub verdict: String,
     pub gaps: Vec<String>,
     pub verifier_reply: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub criteria_verdicts: Vec<CriterionVerdict>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GoalCriterion {
+    pub id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct CriterionVerdict {
+    pub id: String,
+    pub met: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -264,7 +309,7 @@ pub struct GoalEvent {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct GoalSnapshot {
     pub content: String,
     pub version: u32,
@@ -274,6 +319,12 @@ pub struct GoalSnapshot {
     pub progress: GoalProgress,
     pub attempts: Vec<GoalAttempt>,
     pub events: Vec<GoalEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub criteria: Vec<GoalCriterion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     pub transferred_from: Option<String>,
     pub transferred_to: Option<String>,
 }
@@ -744,6 +795,8 @@ pub enum ChatCommand {
     SetGoal {
         content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        criteria: Option<Vec<GoalCriterion>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         budget: Option<GoalBudget>,
     },
     SetGoalBudget {
@@ -1033,6 +1086,7 @@ mod tests {
             max_turns: Some(10),
             max_minutes: Some(15),
             max_tokens: Some(200_000),
+            max_cost_cents: None,
             cooldown_ms: 1_500,
             no_progress_token_threshold: 50,
             no_progress_turns: Some(2),
@@ -1053,6 +1107,7 @@ mod tests {
                 started_at_ms: 10,
                 no_progress_turns: 1,
                 last_nudge_at_ms: 20,
+                cost_used_cents: 0,
             },
             attempts: vec![GoalAttempt {
                 at_ms: 30,
@@ -1060,12 +1115,16 @@ mod tests {
                 verdict: "needs_work".to_string(),
                 gaps: vec!["tests".to_string()],
                 verifier_reply: "Run tests".to_string(),
+                criteria_verdicts: Vec::new(),
             }],
             events: vec![GoalEvent {
                 at_ms: 40,
                 kind: "delta".to_string(),
                 text: "Added verification".to_string(),
             }],
+            criteria: Vec::new(),
+            snoozed_until_ms: None,
+            stop_reason: None,
             transferred_from: Some("source-chat".to_string()),
             transferred_to: Some("target-chat".to_string()),
         }
@@ -1113,7 +1172,7 @@ mod tests {
         assert!(json["budget"].get("max_turns").is_none());
         assert!(json["budget"].get("max_minutes").is_none());
         assert!(json["budget"].get("max_tokens").is_none());
-        assert_eq!(json["budget"]["cooldown_ms"], 1500);
+        assert_eq!(json["budget"]["cooldown_ms"], 30_000);
         assert_eq!(json["budget"]["no_progress_token_threshold"], 50);
         assert!(json["budget"].get("no_progress_turns").is_none());
         assert_eq!(json["progress"]["turns_used"], 3);
@@ -1132,7 +1191,7 @@ mod tests {
         assert!(json.get("max_turns").is_none());
         assert!(json.get("max_minutes").is_none());
         assert!(json.get("max_tokens").is_none());
-        assert_eq!(json["cooldown_ms"], 1_500);
+        assert_eq!(json["cooldown_ms"], 30_000);
         assert_eq!(json["no_progress_token_threshold"], 50);
         assert!(json.get("no_progress_turns").is_none());
         assert!(json.get("explicit").is_none());
@@ -1174,6 +1233,59 @@ mod tests {
         budget.explicit = true;
 
         assert_eq!(budget.clone().migrate_legacy_default_hard_limits(), budget);
+    }
+
+    #[test]
+    fn test_goal_budget_legacy_cooldown_migrates_for_implicit_budgets_only() {
+        let implicit = GoalBudget {
+            cooldown_ms: 1_500,
+            ..Default::default()
+        };
+        assert_eq!(
+            implicit.migrate_legacy_default_hard_limits().cooldown_ms,
+            30_000
+        );
+
+        let finite = GoalBudget {
+            cooldown_ms: 1_500,
+            max_turns: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(
+            finite.migrate_legacy_default_hard_limits().cooldown_ms,
+            1_500
+        );
+
+        let legacy_tuple = GoalBudget::legacy_default_hard_limits();
+        let legacy_tuple = GoalBudget {
+            cooldown_ms: 1_500,
+            ..legacy_tuple
+        };
+        assert_eq!(
+            legacy_tuple
+                .migrate_legacy_default_hard_limits()
+                .cooldown_ms,
+            30_000
+        );
+
+        let custom = GoalBudget {
+            cooldown_ms: 1_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            custom.migrate_legacy_default_hard_limits().cooldown_ms,
+            1_000
+        );
+
+        let explicit = GoalBudget {
+            cooldown_ms: 1_500,
+            explicit: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            explicit.migrate_legacy_default_hard_limits().cooldown_ms,
+            1_500
+        );
     }
 
     #[test]
@@ -1745,7 +1857,9 @@ mod tests {
         let cmd: ChatCommand =
             serde_json::from_str(r#"{"type":"set_goal","content":"ship"}"#).unwrap();
         match cmd {
-            ChatCommand::SetGoal { content, budget } => {
+            ChatCommand::SetGoal {
+                content, budget, ..
+            } => {
                 assert_eq!(content, "ship");
                 assert_eq!(budget, None);
             }
@@ -1754,6 +1868,7 @@ mod tests {
 
         let budget = finite_goal_budget();
         let cmd = ChatCommand::SetGoal {
+            criteria: None,
             content: "ship".to_string(),
             budget: Some(budget.clone()),
         };
@@ -1768,6 +1883,7 @@ mod tests {
             max_turns: Some(4),
             max_minutes: None,
             max_tokens: None,
+            max_cost_cents: None,
             cooldown_ms: 1_500,
             no_progress_token_threshold: 50,
             no_progress_turns: None,

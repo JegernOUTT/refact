@@ -172,6 +172,8 @@ pub async fn get_or_create_session_with_trajectory(
             loaded.waiting_for_card_ids,
             loaded.goal,
         );
+        session.goal_ledger = loaded.goal_ledger;
+        session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
         if transition_identity_repaired {
             session.increment_version();
         }

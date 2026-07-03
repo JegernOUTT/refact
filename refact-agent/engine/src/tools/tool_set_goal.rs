@@ -11,9 +11,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::goal_role::{self, GoalInstallReport};
 use crate::chat::internal_roles::{self, EventSubkind};
 use crate::chat::types::ChatSession;
-use crate::tools::tools_description::{
-    json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
-};
+use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::yaml_configs::customization_registry::map_legacy_mode_to_id;
 
 pub struct ToolSetGoal {
@@ -33,10 +31,26 @@ impl Tool for ToolSetGoal {
             experimental: false,
             allow_parallel: false,
             description: "Install the chat's single active goal. Fails if a goal already exists — use `update_goal` to evolve it.".to_string(),
-            input_schema: json_schema_from_params(
-                &[("content", "string", "Full goal body. Required.")],
-                &["content"],
-            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Full goal body. Required."},
+                    "criteria": {
+                        "type": "array",
+                        "description": "Optional structured success criteria the verifier checks one by one.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "description": "Short stable id, e.g. C1."},
+                                "text": {"type": "string", "description": "The criterion itself."},
+                                "verify_hint": {"type": "string", "description": "Optional hint on how to verify it."}
+                            },
+                            "required": ["id", "text"]
+                        }
+                    }
+                },
+                "required": ["content"],
+            }),
             output_schema: None,
             annotations: None,
         }
@@ -52,6 +66,11 @@ impl Tool for ToolSetGoal {
         if content.trim().is_empty() {
             return Err("argument `content` must be non-empty".to_string());
         }
+        let criteria: Vec<refact_chat_api::GoalCriterion> = match args.get("criteria") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(value) => serde_json::from_value(value.clone())
+                .map_err(|error| format!("argument `criteria` is malformed: {error}"))?,
+        };
 
         let (gcx, chat_id) = {
             let cgcx = ccx.lock().await;
@@ -69,7 +88,7 @@ impl Tool for ToolSetGoal {
                 return Err("goal already exists; use update_goal".to_string());
             }
             let current_mode = map_legacy_mode_to_id(&session.thread.mode).to_string();
-            let report = queue_goal_side_effect(&mut session, &current_mode, &content);
+            let report = queue_goal_side_effect(&mut session, &current_mode, &content, &criteria);
             session.queue_post_tool_side_effect(internal_roles::event(
                 EventSubkind::SystemNotice,
                 "tool.set_goal",
@@ -96,15 +115,23 @@ impl Tool for ToolSetGoal {
     }
 }
 
-fn queue_goal_side_effect(session: &mut ChatSession, mode: &str, body: &str) -> GoalInstallReport {
-    session.queue_post_tool_side_effect(internal_roles::goal(
-        mode,
-        1,
-        body,
-        None,
-        true,
-        GoalBudget::default(),
-    ));
+fn queue_goal_side_effect(
+    session: &mut ChatSession,
+    mode: &str,
+    body: &str,
+    criteria: &[refact_chat_api::GoalCriterion],
+) -> GoalInstallReport {
+    let mut message = internal_roles::goal(mode, 1, body, None, true, GoalBudget::default());
+    if !criteria.is_empty() {
+        if let Some(meta) = message
+            .extra
+            .get_mut("goal")
+            .and_then(|value| value.as_object_mut())
+        {
+            meta.insert("criteria".to_string(), json!(criteria));
+        }
+    }
+    session.queue_post_tool_side_effect(message);
     GoalInstallReport {
         version: 1,
         supersedes: None,

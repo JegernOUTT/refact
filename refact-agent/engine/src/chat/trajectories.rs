@@ -24,7 +24,7 @@ use crate::yaml_configs::customization_registry::get_subagent_config;
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeMeta;
 
-use refact_chat_api::{GoalSnapshot, GoalStatus};
+use refact_chat_api::{GoalLedgerEntry, GoalSnapshot, GoalStatus};
 
 pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     #[cfg(windows)]
@@ -271,6 +271,8 @@ pub struct LoadedTrajectory {
     pub messages: Vec<ChatMessage>,
     pub thread: ThreadParams,
     pub goal: Option<GoalSnapshot>,
+    pub goal_ledger: Vec<GoalLedgerEntry>,
+    pub goal_verification_blocked_until_ms: Option<u64>,
     pub created_at: String,
     pub updated_at: String,
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -323,6 +325,8 @@ fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot
     snapshot.wake_up_at = session.wake_up_at;
     snapshot.waiting_for_card_ids = session.waiting_for_card_ids.clone();
     snapshot.goal = session.goal.clone();
+    snapshot.goal_ledger = session.goal_ledger.clone();
+    snapshot.goal_verification_blocked_until_ms = session.goal_verification_blocked_until_ms;
     snapshot
 }
 
@@ -337,12 +341,20 @@ fn clamp_goal_snapshot_for_load(mut goal: GoalSnapshot) -> GoalSnapshot {
     if let Some(no_progress_turns) = goal.budget.no_progress_turns.filter(|limit| *limit > 0) {
         goal.progress.no_progress_turns = goal.progress.no_progress_turns.min(no_progress_turns);
     }
+    if goal.status == GoalStatus::Verifying {
+        goal.status = if goal.active {
+            GoalStatus::Active
+        } else {
+            GoalStatus::Paused
+        };
+    }
     if matches!(
         goal.status,
         GoalStatus::BudgetExhausted | GoalStatus::NoProgress
     ) && goal
         .goal_budget_exhaustion_status_at(epoch_ms_now())
         .is_none()
+        && !goal_budget_has_hard_limits_for_load(&goal.budget)
     {
         goal.status = if goal.active {
             GoalStatus::Active
@@ -351,6 +363,14 @@ fn clamp_goal_snapshot_for_load(mut goal: GoalSnapshot) -> GoalSnapshot {
         };
     }
     goal
+}
+
+fn goal_budget_has_hard_limits_for_load(budget: &refact_chat_api::GoalBudget) -> bool {
+    budget.max_turns.is_some_and(|limit| limit > 0)
+        || budget.max_minutes.is_some_and(|limit| limit > 0)
+        || budget.max_tokens.is_some_and(|limit| limit > 0)
+        || budget.max_cost_cents.is_some_and(|limit| limit > 0)
+        || budget.no_progress_turns.is_some_and(|limit| limit > 0)
 }
 
 fn epoch_ms_now() -> u64 {
@@ -1652,8 +1672,38 @@ async fn load_trajectory_candidate(
         .get("goal")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .map(clamp_goal_snapshot_for_load);
-    let goal = super::session::goal_snapshot_from_messages(&messages, persisted_goal.as_ref())
-        .or(persisted_goal);
+    let goal_ledger: Vec<GoalLedgerEntry> = t
+        .get("goal_ledger")
+        .and_then(|v| v.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| match serde_json::from_value(entry.clone()) {
+                    Ok(parsed) => Some(parsed),
+                    Err(error) => {
+                        tracing::warn!("skipping unrecognized goal_ledger entry: {error}");
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let ledger_prior = refact_chat_api::reduce_goal_ledger(&goal_ledger).map(|state| {
+        let mut seed = persisted_goal.clone().unwrap_or_else(|| GoalSnapshot {
+            version: state.version,
+            budget: state.budget.clone(),
+            ..Default::default()
+        });
+        state.apply_to_snapshot(&mut seed);
+        seed
+    });
+    let goal_prior = persisted_goal.or(ledger_prior);
+    let goal = super::session::goal_snapshot_from_messages(&messages, goal_prior.as_ref())
+        .or(goal_prior)
+        .map(clamp_goal_snapshot_for_load);
+    let goal_verification_blocked_until_ms = t
+        .get("goal_verification_blocked_until_ms")
+        .and_then(|v| v.as_u64());
 
     let parent_id = t
         .get("parent_id")
@@ -1817,6 +1867,8 @@ async fn load_trajectory_candidate(
         .to_string();
 
     Some(LoadedTrajectory {
+        goal_ledger,
+        goal_verification_blocked_until_ms,
         source_path: traj_path,
         messages,
         thread,
@@ -2063,6 +2115,8 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
 
     let snapshot = TrajectorySnapshot {
         goal: None,
+        goal_ledger: Vec::new(),
+        goal_verification_blocked_until_ms: None,
         chat_id: chat_id.to_string(),
         title: String::new(),
         model: String::new(),
@@ -2119,6 +2173,8 @@ pub async fn save_trajectory_as(
     }
     let snapshot = TrajectorySnapshot {
         goal: None,
+        goal_ledger: Vec::new(),
+        goal_verification_blocked_until_ms: None,
         chat_id: thread.id.clone(),
         title: thread.title.clone(),
         model: thread.model.clone(),
@@ -2256,6 +2312,12 @@ pub async fn save_trajectory_snapshot(
     }
     if let Some(ref goal) = snapshot.goal {
         trajectory["goal"] = serde_json::to_value(goal).unwrap_or_default();
+    }
+    if !snapshot.goal_ledger.is_empty() {
+        trajectory["goal_ledger"] = serde_json::to_value(&snapshot.goal_ledger).unwrap_or_default();
+    }
+    if let Some(blocked_until_ms) = snapshot.goal_verification_blocked_until_ms {
+        trajectory["goal_verification_blocked_until_ms"] = json!(blocked_until_ms);
     }
     if let Some(ref worktree) = snapshot.worktree {
         trajectory["worktree"] = serde_json::to_value(worktree).unwrap_or_default();
@@ -2726,6 +2788,8 @@ fn apply_external_delete_to_session(session: &mut ChatSession, chat_id: &str) {
     session.created_at = chrono::Utc::now().to_rfc3339();
     session.wake_up_at = None;
     session.waiting_for_card_ids.clear();
+    session.goal_ledger.clear();
+    session.goal_verification_blocked_until_ms = None;
     session.set_goal_projection(None);
     session.reset_compaction_runtime_state();
     session.external_reload_pending = None;
@@ -2741,6 +2805,8 @@ fn apply_loaded_external_update_to_session(
     session.messages = loaded.messages;
     session.thread = loaded.thread;
     session.reset_compaction_runtime_state();
+    session.goal_ledger = loaded.goal_ledger;
+    session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
     session.set_goal_projection(loaded.goal);
     session.created_at = loaded.created_at;
     session.wake_up_at = loaded.wake_up_at;
@@ -5673,6 +5739,8 @@ mod tests {
     fn test_snapshot(chat_id: &str, title: &str, messages: Vec<ChatMessage>) -> TrajectorySnapshot {
         TrajectorySnapshot {
             goal: None,
+            goal_ledger: Vec::new(),
+            goal_verification_blocked_until_ms: None,
             chat_id: chat_id.to_string(),
             title: title.to_string(),
             model: "model".to_string(),
@@ -12540,6 +12608,9 @@ mod tests {
             background_completion_burst: BurstGuard::new(),
             background_agents: std::collections::HashMap::new(),
             goal_stopped_by_abort: false,
+            goal_ledger: Vec::new(),
+            goal_turn_evidence: false,
+            goal_verification_blocked_until_ms: None,
         };
 
         let snapshot = trajectory_snapshot_from_session(&session);
@@ -12636,6 +12707,9 @@ mod tests {
             background_completion_burst: BurstGuard::new(),
             background_agents: std::collections::HashMap::new(),
             goal_stopped_by_abort: false,
+            goal_ledger: Vec::new(),
+            goal_turn_evidence: false,
+            goal_verification_blocked_until_ms: None,
         };
 
         let snapshot = trajectory_snapshot_from_session(&session);
@@ -12821,6 +12895,7 @@ mod tests {
             started_at_ms: 123,
             no_progress_turns: 1,
             last_nudge_at_ms: 456,
+            cost_used_cents: 0,
         };
         session.refresh_goal_runtime_mirror();
 
@@ -12848,6 +12923,9 @@ mod tests {
             },
             attempts: Vec::new(),
             events: Vec::new(),
+            criteria: Vec::new(),
+            snoozed_until_ms: None,
+            stop_reason: None,
             transferred_from: None,
             transferred_to: None,
         };
@@ -12856,6 +12934,72 @@ mod tests {
 
         assert_eq!(loaded.budget, GoalBudget::default());
         assert_eq!(loaded.status, GoalStatus::Active);
+    }
+
+    #[test]
+    fn clamp_goal_snapshot_for_load_heals_stale_verifying() {
+        let goal = GoalSnapshot {
+            content: "ship it".to_string(),
+            version: 1,
+            active: true,
+            status: GoalStatus::Verifying,
+            budget: GoalBudget::default(),
+            progress: GoalProgress::default(),
+            attempts: Vec::new(),
+            events: Vec::new(),
+            criteria: Vec::new(),
+            snoozed_until_ms: None,
+            stop_reason: None,
+            transferred_from: None,
+            transferred_to: None,
+        };
+        assert_eq!(
+            clamp_goal_snapshot_for_load(goal).status,
+            GoalStatus::Active
+        );
+
+        let inactive = GoalSnapshot {
+            content: "ship it".to_string(),
+            version: 1,
+            active: false,
+            status: GoalStatus::Verifying,
+            budget: GoalBudget::default(),
+            progress: GoalProgress::default(),
+            attempts: Vec::new(),
+            events: Vec::new(),
+            criteria: Vec::new(),
+            snoozed_until_ms: None,
+            stop_reason: None,
+            transferred_from: None,
+            transferred_to: None,
+        };
+        assert_eq!(
+            clamp_goal_snapshot_for_load(inactive).status,
+            GoalStatus::Paused
+        );
+    }
+
+    #[test]
+    fn clamp_goal_snapshot_for_load_keeps_stopped_goals_stopped() {
+        let goal = GoalSnapshot {
+            content: "ship it".to_string(),
+            version: 1,
+            active: true,
+            status: GoalStatus::Stopped,
+            budget: GoalBudget::default(),
+            progress: GoalProgress::default(),
+            attempts: Vec::new(),
+            events: Vec::new(),
+            criteria: Vec::new(),
+            snoozed_until_ms: None,
+            stop_reason: None,
+            transferred_from: None,
+            transferred_to: None,
+        };
+        assert_eq!(
+            clamp_goal_snapshot_for_load(goal).status,
+            GoalStatus::Stopped
+        );
     }
 
     #[test]
@@ -12876,6 +13020,9 @@ mod tests {
             },
             attempts: Vec::new(),
             events: Vec::new(),
+            criteria: Vec::new(),
+            snoozed_until_ms: None,
+            stop_reason: None,
             transferred_from: None,
             transferred_to: None,
         };
@@ -12919,6 +13066,7 @@ mod tests {
             started_at_ms: 111,
             no_progress_turns: 1,
             last_nudge_at_ms: 222,
+            cost_used_cents: 0,
         };
         session.refresh_goal_runtime_mirror();
 
@@ -12999,6 +13147,48 @@ mod tests {
 
         let loaded = load_trajectory_for_chat(gcx, "legacy-wake").await.unwrap();
         assert!(loaded.wake_up_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn goal_ledger_round_trips_and_replay_wins_over_missing_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        {
+            *app.workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let mut session = ChatSession::new("goal-ledger-roundtrip".to_string());
+        session.thread.title = "Ledger Roundtrip".to_string();
+        session.created_at = "2024-01-01T00:00:00Z".to_string();
+        session.install_goal("agent", "ship the card", true, GoalBudget::default());
+        session.goal_record_progress_with_cost(50, false, 2);
+        session.goal_set_status_reason(GoalStatus::Stopped, "goal_control");
+        session.goal_verification_blocked_until_ms = Some(4_242);
+
+        let mut snapshot = trajectory_snapshot_from_session(&session);
+        assert!(!snapshot.goal_ledger.is_empty());
+        snapshot.goal = None;
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, "goal-ledger-roundtrip")
+            .await
+            .unwrap();
+        assert!(!loaded.goal_ledger.is_empty());
+        let loaded_goal = loaded.goal.expect("goal restored from ledger replay");
+        assert_eq!(loaded_goal.status, GoalStatus::Stopped);
+        assert_eq!(loaded_goal.stop_reason.as_deref(), Some("goal_control"));
+        assert_eq!(loaded_goal.progress.turns_used, 1);
+        assert_eq!(loaded_goal.progress.tokens_used, 50);
+        assert_eq!(loaded_goal.progress.cost_used_cents, 2);
+        assert_eq!(loaded_goal.progress.no_progress_turns, 1);
+        assert_eq!(loaded.goal_verification_blocked_until_ms, Some(4_242));
     }
 
     #[tokio::test]
@@ -13306,6 +13496,8 @@ mod tests {
         let chat_id = "wt-roundtrip".to_string();
         let snapshot = TrajectorySnapshot {
             goal: None,
+            goal_ledger: Vec::new(),
+            goal_verification_blocked_until_ms: None,
             chat_id: chat_id.clone(),
             title: "Worktree Chat".to_string(),
             model: "model".to_string(),

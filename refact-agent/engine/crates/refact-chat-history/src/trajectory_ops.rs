@@ -14,6 +14,32 @@ pub fn is_ui_only_message(msg: &ChatMessage) -> bool {
     msg.extra.get(UI_ONLY_MARKER).and_then(|v| v.as_bool()) == Some(true)
 }
 
+pub fn demote_goal_ownership_for_branch(msgs: &mut [ChatMessage]) {
+    for msg in msgs.iter_mut() {
+        if msg.role != "goal" {
+            continue;
+        }
+        let Some(goal_meta) = msg
+            .extra
+            .get_mut("goal")
+            .and_then(|value| value.as_object_mut())
+        else {
+            continue;
+        };
+        goal_meta.insert("active".to_string(), serde_json::Value::Bool(false));
+        let demote_status = matches!(
+            goal_meta.get("status").and_then(|value| value.as_str()),
+            None | Some("active") | Some("verifying")
+        );
+        if demote_status {
+            goal_meta.insert(
+                "status".to_string(),
+                serde_json::Value::String("paused".to_string()),
+            );
+        }
+    }
+}
+
 pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
     let extra = if is_ui_only_message(m) {
         m.extra.clone()
@@ -1138,6 +1164,50 @@ mod tests {
             content: ChatContent::SimpleText(content.to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn demote_goal_ownership_for_branch_deactivates_active_goal() {
+        let mut active = ChatMessage {
+            role: "goal".to_string(),
+            content: ChatContent::SimpleText("goal body".to_string()),
+            ..Default::default()
+        };
+        active.extra.insert(
+            "goal".to_string(),
+            serde_json::json!({"mode": "agent", "version": 1, "active": true, "status": "active"}),
+        );
+        let mut stopped = ChatMessage {
+            role: "goal".to_string(),
+            content: ChatContent::SimpleText("old goal".to_string()),
+            ..Default::default()
+        };
+        stopped.extra.insert(
+            "goal".to_string(),
+            serde_json::json!({"mode": "agent", "version": 1, "active": true, "status": "stopped"}),
+        );
+        let mut no_status = ChatMessage {
+            role: "goal".to_string(),
+            content: ChatContent::SimpleText("plain install".to_string()),
+            ..Default::default()
+        };
+        no_status.extra.insert(
+            "goal".to_string(),
+            serde_json::json!({"mode": "agent", "version": 1, "active": true}),
+        );
+
+        let mut msgs = vec![active, stopped, no_status];
+        demote_goal_ownership_for_branch(&mut msgs);
+
+        assert_eq!(msgs[0].extra["goal"]["active"], serde_json::json!(false));
+        assert_eq!(msgs[0].extra["goal"]["status"], serde_json::json!("paused"));
+        assert_eq!(msgs[1].extra["goal"]["active"], serde_json::json!(false));
+        assert_eq!(
+            msgs[1].extra["goal"]["status"],
+            serde_json::json!("stopped")
+        );
+        assert_eq!(msgs[2].extra["goal"]["active"], serde_json::json!(false));
+        assert_eq!(msgs[2].extra["goal"]["status"], serde_json::json!("paused"));
     }
 
     fn make_tool_msg(tool_call_id: &str, content: &str) -> ChatMessage {

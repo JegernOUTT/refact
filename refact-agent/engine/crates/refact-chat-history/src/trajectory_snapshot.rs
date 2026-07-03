@@ -1,6 +1,6 @@
 use refact_chat_api::{
-    BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix, GoalSnapshot, TaskMeta, ThreadParams,
-    WorktreeMeta,
+    BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix, GoalLedgerEntry, GoalSnapshot,
+    TaskMeta, ThreadParams, WorktreeMeta,
 };
 use refact_core::chat_types::ChatMessage;
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,25 @@ pub struct TrajectorySnapshot {
     pub waiting_for_card_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalSnapshot>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "tolerant_goal_ledger"
+    )]
+    pub goal_ledger: Vec<GoalLedgerEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_verification_blocked_until_ms: Option<u64>,
+}
+
+fn tolerant_goal_ledger<'de, D>(deserializer: D) -> Result<Vec<GoalLedgerEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer).unwrap_or_default();
+    Ok(raw
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value(entry).ok())
+        .collect())
 }
 
 impl TrajectorySnapshot {
@@ -95,6 +114,8 @@ impl TrajectorySnapshot {
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
             goal: None,
+            goal_ledger: Vec::new(),
+            goal_verification_blocked_until_ms: None,
         }
     }
 }
@@ -102,7 +123,7 @@ impl TrajectorySnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refact_chat_api::{GoalBudget, GoalProgress, GoalStatus};
+    use refact_chat_api::{GoalBudget, GoalLedgerOp, GoalProgress, GoalStatus};
 
     fn goal_snapshot() -> GoalSnapshot {
         GoalSnapshot {
@@ -117,9 +138,13 @@ mod tests {
                 started_at_ms: 123,
                 no_progress_turns: 0,
                 last_nudge_at_ms: 456,
+                cost_used_cents: 0,
             },
             attempts: Vec::new(),
             events: Vec::new(),
+            criteria: Vec::new(),
+            snoozed_until_ms: None,
+            stop_reason: None,
             transferred_from: None,
             transferred_to: None,
         }
@@ -152,6 +177,37 @@ mod tests {
         let decoded: TrajectorySnapshot = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded.goal, Some(goal));
+    }
+
+    #[test]
+    fn tolerant_goal_ledger_skips_unknown_ops_and_keeps_known() {
+        let mut snapshot = snapshot();
+        snapshot.goal_ledger = vec![GoalLedgerEntry {
+            seq: 1,
+            at_ms: 1_000,
+            op: GoalLedgerOp::NudgeRecorded,
+        }];
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        value["goal_ledger"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"seq": 2, "at_ms": 2_000, "op": "from_the_future", "x": 1}));
+
+        let decoded: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+
+        assert_eq!(decoded.goal_ledger.len(), 1);
+        assert_eq!(decoded.goal_ledger[0].seq, 1);
+    }
+
+    #[test]
+    fn goal_verification_blocked_until_ms_roundtrips() {
+        let mut snapshot = snapshot();
+        snapshot.goal_verification_blocked_until_ms = Some(4_242);
+
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let decoded: TrajectorySnapshot = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.goal_verification_blocked_until_ms, Some(4_242));
     }
 
     #[test]

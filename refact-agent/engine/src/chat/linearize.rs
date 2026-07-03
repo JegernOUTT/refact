@@ -100,8 +100,38 @@ fn is_visual_compression_report(msg: &ChatMessage) -> bool {
     msg.role == COMPRESSION_REPORT_ROLE
 }
 
+const WIRE_SUPPRESSED_PURSUIT_KINDS: &[&str] = &[
+    "pursuit_quiescent",
+    "budget_exhausted",
+    "no_progress",
+    "stopped",
+    "paused",
+    "snoozed",
+    "resumed",
+];
+
+fn is_wire_suppressed_goal_pursuit(msg: &ChatMessage) -> bool {
+    if msg.role != "event" {
+        return false;
+    }
+    let Some(event) = msg.extra.get("event") else {
+        return false;
+    };
+    if event.get("subkind").and_then(|value| value.as_str()) != Some("goal_pursuit") {
+        return false;
+    }
+    event
+        .get("payload")
+        .and_then(|payload| payload.get("kind"))
+        .and_then(|kind| kind.as_str())
+        .is_some_and(|kind| WIRE_SUPPRESSED_PURSUIT_KINDS.contains(&kind))
+}
+
 fn is_linearization_only_message(msg: &ChatMessage) -> bool {
-    msg.role == "summarization" || is_legacy_range_summary(msg) || is_visual_compression_report(msg)
+    msg.role == "summarization"
+        || is_legacy_range_summary(msg)
+        || is_visual_compression_report(msg)
+        || is_wire_suppressed_goal_pursuit(msg)
 }
 
 fn legacy_summary_ranges(messages: &[ChatMessage]) -> Vec<(usize, usize, String)> {
@@ -670,6 +700,44 @@ mod tests {
         assert_eq!(result[0].content.content_text_only(), "before");
         assert_eq!(result[1].content.content_text_only(), "hidden event");
         assert_eq!(result[2].content.content_text_only(), "after");
+    }
+
+    #[test]
+    fn linearize_drops_archival_goal_pursuit_events_but_keeps_nudges() {
+        fn pursuit_event(kind: &str) -> ChatMessage {
+            crate::chat::internal_roles::event(
+                crate::chat::internal_roles::EventSubkind::GoalPursuit,
+                "chat.goal_monitor",
+                serde_json::json!({"kind": kind, "at_ms": 1}),
+                format!("pursuit {kind}"),
+            )
+        }
+
+        let messages = vec![
+            user("before"),
+            pursuit_event("nudge"),
+            pursuit_event("pursuit_quiescent"),
+            pursuit_event("stopped"),
+            pursuit_event("snoozed"),
+            pursuit_event("verification_gaps"),
+            user("after"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+        let contents: Vec<String> = result
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect();
+
+        assert!(contents.iter().any(|text| text == "pursuit nudge"));
+        assert!(contents
+            .iter()
+            .any(|text| text == "pursuit verification_gaps"));
+        assert!(!contents
+            .iter()
+            .any(|text| text == "pursuit pursuit_quiescent"));
+        assert!(!contents.iter().any(|text| text == "pursuit stopped"));
+        assert!(!contents.iter().any(|text| text == "pursuit snoozed"));
     }
 
     #[test]

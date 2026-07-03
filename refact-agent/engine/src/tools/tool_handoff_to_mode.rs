@@ -236,6 +236,7 @@ async fn replace_live_source_messages_if_present(
     gcx: Arc<crate::global_context::GlobalContext>,
     chat_id: &str,
     messages: Vec<ChatMessage>,
+    source_goal: Option<refact_chat_api::GoalSnapshot>,
 ) {
     let session_arc = {
         let sessions = gcx.chat_sessions.read().await;
@@ -244,6 +245,17 @@ async fn replace_live_source_messages_if_present(
     if let Some(session_arc) = session_arc {
         let mut session = session_arc.lock().await;
         session.replace_messages(messages);
+        if source_goal.is_some() {
+            if let Some(target_chat_id) = source_goal
+                .as_ref()
+                .and_then(|goal| goal.transferred_to.clone())
+            {
+                session.goal_ledger_append(refact_chat_api::GoalLedgerOp::TransferredOut {
+                    target_chat_id,
+                });
+            }
+            session.set_goal_projection(source_goal);
+        }
         session.emit_goal_status();
     }
 }
@@ -525,6 +537,7 @@ impl Tool for ToolHandoffToMode {
                 gcx.clone(),
                 &chat_id,
                 transferred_goal.source_messages.clone(),
+                transferred_goal.source_goal.clone(),
             )
             .await;
             chat_facade.maybe_save_session(&chat_id).await?;
@@ -544,7 +557,15 @@ impl Tool for ToolHandoffToMode {
 
         let snapshot_task_meta = task_meta.clone();
         let snapshot = TrajectorySnapshot {
+            goal_verification_blocked_until_ms: None,
             goal: transferred_goal.target_goal.clone(),
+            goal_ledger: transferred_goal
+                .target_goal
+                .as_ref()
+                .map(|target| {
+                    refact_chat_api::seed_transferred_goal_ledger(target, &chat_id, epoch_ms_now())
+                })
+                .unwrap_or_default(),
             chat_id: new_chat_id.clone(),
             title: String::new(),
             model: thread.model.clone(),
@@ -1166,6 +1187,8 @@ mod tests {
             app.gcx.clone(),
             TrajectorySnapshot {
                 goal: None,
+                goal_ledger: Vec::new(),
+                goal_verification_blocked_until_ms: None,
                 chat_id: planner_chat_id.clone(),
                 title: "Persisted planner controller".to_string(),
                 model: "model".to_string(),

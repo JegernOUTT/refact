@@ -2959,6 +2959,7 @@ mod tests {
                 max_turns: Some(10),
                 max_minutes: Some(1),
                 max_tokens: Some(1_000),
+                max_cost_cents: None,
                 cooldown_ms: 1_500,
                 no_progress_token_threshold: 10,
                 no_progress_turns: Some(2),

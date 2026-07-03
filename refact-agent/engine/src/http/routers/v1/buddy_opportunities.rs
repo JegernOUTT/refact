@@ -1111,6 +1111,8 @@ async fn create_investigation_chat(
 
     let snapshot = TrajectorySnapshot {
         goal: None,
+        goal_ledger: Vec::new(),
+        goal_verification_blocked_until_ms: None,
         chat_id: chat_id.clone(),
         title: "Investigation".to_string(),
         model: String::new(),

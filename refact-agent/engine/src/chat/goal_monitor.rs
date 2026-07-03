@@ -20,7 +20,7 @@ const GOAL_MONITOR_SOURCE: &str = "chat.goal_monitor";
 /// After this many consecutive no-progress nudges an active goal whose no-progress
 /// budget is unlimited stops being nudged (goes quiescent) and resumes on the next
 /// user message instead of looping forever.
-const QUIESCENCE_NUDGES: u32 = 3;
+pub(crate) const QUIESCENCE_NUDGES: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalNudgeTrigger {
@@ -63,6 +63,7 @@ pub enum GoalNudgeSkip {
     NoGoal,
     InactiveGoal,
     NonActiveGoalStatus,
+    Snoozed,
     Cooldown,
     Aborted,
     Closed,
@@ -251,6 +252,12 @@ pub fn try_apply_goal_nudge(
     if goal.status != GoalStatus::Active {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::NonActiveGoalStatus);
     }
+    if goal
+        .snoozed_until_ms
+        .is_some_and(|until_ms| now_ms < until_ms)
+    {
+        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Snoozed);
+    }
     if let Some(status) = goal.goal_budget_exhaustion_status_at(now_ms) {
         apply_goal_terminal_status(session, status, trigger, now_ms);
         return GoalNudgeOutcome::BudgetExhausted(status);
@@ -289,7 +296,10 @@ pub fn try_apply_goal_nudge(
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::QueueRejected);
     }
 
-    session.add_message(goal_nudge_event(trigger, reason, now_ms));
+    if !session.coalesce_tail_goal_nudge_event(now_ms) {
+        let context = session.goal.as_ref().map(nudge_context).unwrap_or_default();
+        session.add_message(goal_nudge_event(trigger, reason, now_ms, &context));
+    }
     session.goal_record_nudge(now_ms);
     GoalNudgeOutcome::Nudged(reason)
 }
@@ -384,7 +394,17 @@ fn goal_nudge_event(
     trigger: GoalNudgeTrigger,
     reason: GoalNudgeReason,
     at_ms: u64,
+    context: &str,
 ) -> crate::call_validation::ChatMessage {
+    let mut content = format!(
+        "Goal pursuit nudge: continue the active goal ({}, {}).",
+        trigger.as_str(),
+        reason.as_str()
+    );
+    if !context.is_empty() {
+        content.push('\n');
+        content.push_str(context);
+    }
     internal_roles::event(
         EventSubkind::GoalPursuit,
         GOAL_MONITOR_SOURCE,
@@ -395,12 +415,37 @@ fn goal_nudge_event(
             "at_ms": at_ms,
             "account_progress": true,
         }),
-        format!(
-            "Goal pursuit nudge: continue the active goal ({}, {}).",
-            trigger.as_str(),
-            reason.as_str()
-        ),
+        content,
     )
+}
+
+fn nudge_context(goal: &GoalSnapshot) -> String {
+    let mut lines = Vec::new();
+    let goal_text = goal.content.trim();
+    if !goal_text.is_empty() {
+        let mut short: String = goal_text.chars().take(400).collect();
+        if goal_text.chars().count() > 400 {
+            short.push('…');
+        }
+        lines.push(format!("Goal: {short}"));
+    }
+    if let Some(gaps) = goal
+        .attempts
+        .last()
+        .filter(|attempt| attempt.verdict != "met" && !attempt.gaps.is_empty())
+        .map(|attempt| attempt.gaps.join("; "))
+    {
+        lines.push(format!("Remaining gaps: {gaps}"));
+    }
+    let turns = match goal.budget.max_turns.filter(|limit| *limit > 0) {
+        Some(limit) => format!("{}/{}", goal.progress.turns_used, limit),
+        None => goal.progress.turns_used.to_string(),
+    };
+    lines.push(format!(
+        "Progress: turns {}, no-progress turns {}. If nothing remains, call validate_goal or finish; to wait, call snooze_goal or pause_goal.",
+        turns, goal.progress.no_progress_turns
+    ));
+    lines.join("\n")
 }
 
 fn goal_is_quiescent(session: &ChatSession) -> bool {
@@ -415,25 +460,30 @@ pub fn mark_goal_blocked_on_context_limit(session: &mut ChatSession) -> bool {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    {
-        let Some(goal) = session.goal.as_mut() else {
+    let has_finite_limit = {
+        let Some(goal) = session.goal.as_ref() else {
             return false;
         };
         if !goal.active || !matches!(goal.status, GoalStatus::Active) {
             return false;
         }
-        let floor = goal
-            .budget
-            .no_progress_turns
-            .filter(|limit| *limit > 0)
-            .map(|limit| limit.max(QUIESCENCE_NUDGES))
-            .unwrap_or(QUIESCENCE_NUDGES);
-        if goal.progress.no_progress_turns < floor {
-            goal.progress.no_progress_turns = floor;
+        goal.budget.no_progress_turns.is_some_and(|limit| limit > 0)
+    };
+    while session.goal.as_ref().is_some_and(|goal| {
+        matches!(goal.status, GoalStatus::Active)
+            && goal.progress.no_progress_turns < QUIESCENCE_NUDGES
+    }) {
+        if !session.goal_note_no_progress_turn() {
+            break;
         }
-        if goal.budget.no_progress_turns.is_some_and(|limit| limit > 0) {
-            goal.status = GoalStatus::NoProgress;
-        }
+    }
+    if has_finite_limit
+        && session
+            .goal
+            .as_ref()
+            .is_some_and(|goal| goal.status == GoalStatus::Active)
+    {
+        session.goal_set_status_reason(GoalStatus::NoProgress, "context_limit");
     }
     record_quiescent_event_if_needed(session, GoalNudgeTrigger::Monitor, now_ms);
     session.mark_persisted_runtime_changed();
@@ -572,6 +622,7 @@ mod tests {
                 max_turns: Some(10),
                 max_minutes: Some(60),
                 max_tokens: Some(10_000),
+                max_cost_cents: None,
                 cooldown_ms: 1_000,
                 no_progress_token_threshold: 50,
                 no_progress_turns: Some(2),
@@ -598,6 +649,7 @@ mod tests {
                 max_turns: None,
                 max_minutes: None,
                 max_tokens: None,
+                max_cost_cents: None,
                 cooldown_ms: 1_000,
                 no_progress_token_threshold: 50,
                 no_progress_turns: None,
@@ -807,6 +859,12 @@ mod tests {
         assert!(goal.progress.no_progress_turns >= QUIESCENCE_NUDGES);
         assert_eq!(goal.status, GoalStatus::Active);
         assert!(goal_is_quiescent(&session));
+        let replayed = refact_chat_api::reduce_goal_ledger(&session.goal_ledger).unwrap();
+        assert_eq!(replayed.status, GoalStatus::Active);
+        assert_eq!(
+            replayed.progress.no_progress_turns,
+            session.goal.as_ref().unwrap().progress.no_progress_turns
+        );
     }
 
     #[test]
@@ -817,6 +875,37 @@ mod tests {
             session.goal.as_ref().unwrap().status,
             GoalStatus::NoProgress
         );
+        let replayed = refact_chat_api::reduce_goal_ledger(&session.goal_ledger).unwrap();
+        assert_eq!(replayed.status, GoalStatus::NoProgress);
+    }
+
+    #[test]
+    fn context_limit_block_large_limit_appends_cas_visible_status_change() {
+        let mut session = ChatSession::new("goal-monitor-large-limit".to_string());
+        session.install_goal(
+            "agent",
+            "ship the thing",
+            true,
+            GoalBudget {
+                max_turns: None,
+                max_minutes: None,
+                max_tokens: None,
+                max_cost_cents: None,
+                cooldown_ms: 1_000,
+                no_progress_token_threshold: 50,
+                no_progress_turns: Some(10),
+                explicit: false,
+            },
+        );
+        let epoch = session.goal_ledger_last_seq();
+        assert!(mark_goal_blocked_on_context_limit(&mut session));
+        assert_eq!(
+            session.goal.as_ref().unwrap().status,
+            GoalStatus::NoProgress
+        );
+        assert!(session.goal_status_changed_since(epoch));
+        let replayed = refact_chat_api::reduce_goal_ledger(&session.goal_ledger).unwrap();
+        assert_eq!(replayed.status, GoalStatus::NoProgress);
     }
 
     #[test]
@@ -940,6 +1029,112 @@ mod tests {
             })
             .count();
         assert_eq!(nudge_events, 1);
+    }
+
+    #[test]
+    fn goal_monitor_consecutive_nudges_coalesce_into_single_event() {
+        let (mut session, now) = old_idle_session();
+        assert_eq!(
+            apply_monitor(&mut session, 10_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+
+        session.command_queue.clear();
+        session.last_activity = now - Duration::from_secs(10);
+        assert_eq!(
+            apply_monitor(&mut session, 20_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+
+        let nudge_events = session
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "event"
+                    && event_payload(message).get("kind") == Some(&json!("nudge"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(nudge_events.len(), 1);
+        let payload = event_payload(nudge_events[0]);
+        assert_eq!(payload["count"], json!(2));
+        assert_eq!(payload["last_at_ms"], json!(20_000));
+        assert_eq!(payload["at_ms"], json!(10_000));
+        assert_eq!(
+            session.goal.as_ref().unwrap().progress.last_nudge_at_ms,
+            20_000
+        );
+    }
+
+    #[test]
+    fn goal_monitor_nudge_after_assistant_reply_adds_new_event() {
+        let (mut session, now) = old_idle_session();
+        assert_eq!(
+            apply_monitor(&mut session, 10_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+        session.add_message(ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("Idle.".to_string()),
+            ..Default::default()
+        });
+
+        session.command_queue.clear();
+        session.last_activity = now - Duration::from_secs(10);
+        assert_eq!(
+            apply_monitor(&mut session, 20_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+
+        let nudge_events = session
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "event"
+                    && event_payload(message).get("kind") == Some(&json!("nudge"))
+            })
+            .count();
+        assert_eq!(nudge_events, 2);
+    }
+
+    #[test]
+    fn goal_monitor_snoozed_goal_skips_until_expiry() {
+        let (mut session, now) = old_idle_session();
+        assert!(session.goal_set_snooze(Some(15_000)));
+
+        assert_eq!(
+            apply_monitor(&mut session, 10_000, now),
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Snoozed)
+        );
+        assert!(session.command_queue.is_empty());
+
+        session.last_activity = now - Duration::from_secs(10);
+        assert_eq!(
+            apply_monitor(&mut session, 20_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+    }
+
+    #[test]
+    fn goal_monitor_nudge_content_carries_goal_context() {
+        let (mut session, now) = old_idle_session();
+        session.goal.as_mut().unwrap().attempts.push(GoalAttempt {
+            at_ms: 1,
+            trigger: "finish".to_string(),
+            verdict: "unmet".to_string(),
+            gaps: vec!["docs missing".to_string()],
+            verifier_reply: String::new(),
+            criteria_verdicts: Vec::new(),
+        });
+
+        assert_eq!(
+            apply_monitor(&mut session, 10_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+
+        let content = session.messages.last().unwrap().content.content_text_only();
+        assert!(content.contains("Goal: ship the thing"));
+        assert!(content.contains("Remaining gaps: docs missing"));
+        assert!(content.contains("snooze_goal"));
     }
 
     #[test]

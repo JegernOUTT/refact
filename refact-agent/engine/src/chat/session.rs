@@ -104,6 +104,30 @@ fn message_affects_goal_projection(message: &ChatMessage) -> bool {
     message.role == GOAL_ROLE || is_goal_projection_event(message)
 }
 
+const GOAL_EVIDENCE_EXEMPT_TOOLS: &[&str] =
+    &["sleep", "get_goal", "get_plan", "pause_goal", "snooze_goal"];
+
+fn tool_result_counts_as_goal_evidence(message: &ChatMessage, history: &[ChatMessage]) -> bool {
+    if message.tool_failed == Some(true) {
+        return false;
+    }
+    if message.tool_call_id.is_empty() {
+        return true;
+    }
+    let resolved_name = history.iter().rev().find_map(|prior| {
+        prior
+            .tool_calls
+            .as_ref()?
+            .iter()
+            .find(|call| call.id == message.tool_call_id)
+            .map(|call| call.function.name.clone())
+    });
+    match resolved_name {
+        Some(name) => !GOAL_EVIDENCE_EXEMPT_TOOLS.contains(&name.as_str()),
+        None => true,
+    }
+}
+
 fn goal_runtime_projection(
     goal: Option<&GoalSnapshot>,
 ) -> (bool, Option<GoalStatus>, u32, u64, u32) {
@@ -169,6 +193,34 @@ fn goal_events_from_messages(messages: &[ChatMessage]) -> Vec<GoalEvent> {
         .collect()
 }
 
+const MAX_GOAL_SNAPSHOT_EVENTS: usize = 100;
+
+fn merge_goal_events(derived: Vec<GoalEvent>, extras: Option<Vec<GoalEvent>>) -> Vec<GoalEvent> {
+    let mut merged = derived;
+    for event in extras.unwrap_or_default() {
+        let already_present = merged.iter().any(|existing| {
+            existing.kind == event.kind
+                && existing.at_ms == event.at_ms
+                && existing.text == event.text
+        });
+        if !already_present {
+            merged.push(event);
+        }
+    }
+    if merged.len() > MAX_GOAL_SNAPSHOT_EVENTS {
+        merged.drain(..merged.len() - MAX_GOAL_SNAPSHOT_EVENTS);
+    }
+    merged
+}
+
+fn goal_budget_has_hard_limits(budget: &GoalBudget) -> bool {
+    budget.max_turns.is_some_and(|limit| limit > 0)
+        || budget.max_minutes.is_some_and(|limit| limit > 0)
+        || budget.max_tokens.is_some_and(|limit| limit > 0)
+        || budget.max_cost_cents.is_some_and(|limit| limit > 0)
+        || budget.no_progress_turns.is_some_and(|limit| limit > 0)
+}
+
 pub(crate) fn goal_snapshot_from_messages(
     messages: &[ChatMessage],
     existing: Option<&GoalSnapshot>,
@@ -184,16 +236,19 @@ pub(crate) fn goal_snapshot_from_messages(
     let meta = base.extra.get("goal");
     let prior = existing.filter(|goal| goal.version == version);
     let has_prior = prior.is_some();
-    let active = meta
-        .and_then(|meta| meta.get("active"))
-        .and_then(|value| value.as_bool())
-        .or_else(|| prior.map(|goal| goal.active))
+    let active = prior
+        .map(|goal| goal.active)
+        .or_else(|| {
+            meta.and_then(|meta| meta.get("active"))
+                .and_then(|value| value.as_bool())
+        })
         .unwrap_or(true);
     let meta_status = meta
         .and_then(|meta| meta.get("status"))
         .and_then(|value| serde_json::from_value(value.clone()).ok());
-    let status = meta_status
-        .or_else(|| prior.map(|goal| goal.status))
+    let status = prior
+        .map(|goal| goal.status)
+        .or(meta_status)
         .unwrap_or(if active {
             GoalStatus::Active
         } else {
@@ -205,18 +260,20 @@ pub(crate) fn goal_snapshot_from_messages(
         .or_else(|| prior.map(|goal| goal.budget.clone()))
         .unwrap_or_default();
     let budget = budget.migrate_legacy_default_hard_limits();
-    let progress = meta
-        .and_then(|meta| meta.get("progress"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .or_else(|| prior.map(|goal| goal.progress.clone()))
+    let progress = prior
+        .map(|goal| goal.progress.clone())
+        .or_else(|| {
+            meta.and_then(|meta| meta.get("progress"))
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+        })
         .unwrap_or_default();
     let derived_events = goal_events_from_messages(messages);
-    let events = meta
-        .and_then(|meta| meta.get("events"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .or_else(|| prior.map(|goal| goal.events.clone()))
-        .filter(|events: &Vec<GoalEvent>| !events.is_empty())
-        .unwrap_or(derived_events);
+    let extra_events: Option<Vec<GoalEvent>> =
+        prior.map(|goal| goal.events.clone()).or_else(|| {
+            meta.and_then(|meta| meta.get("events"))
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+        });
+    let events = merge_goal_events(derived_events, extra_events);
     let mut snapshot = GoalSnapshot {
         content: synthesized_goal_content(messages, base),
         version,
@@ -224,31 +281,44 @@ pub(crate) fn goal_snapshot_from_messages(
         status,
         budget,
         progress,
-        attempts: meta
-            .and_then(|meta| meta.get("attempts"))
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
-            .or_else(|| prior.map(|goal| goal.attempts.clone()))
+        attempts: prior
+            .map(|goal| goal.attempts.clone())
+            .or_else(|| {
+                meta.and_then(|meta| meta.get("attempts"))
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+            })
             .unwrap_or_default(),
         events,
-        transferred_from: meta
-            .and_then(|meta| meta.get("transferred_from"))
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-            .or_else(|| prior.and_then(|goal| goal.transferred_from.clone())),
-        transferred_to: meta
-            .and_then(|meta| meta.get("transferred_to"))
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-            .or_else(|| prior.and_then(|goal| goal.transferred_to.clone())),
+        criteria: prior
+            .map(|goal| goal.criteria.clone())
+            .or_else(|| {
+                meta.and_then(|meta| meta.get("criteria"))
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+            })
+            .unwrap_or_default(),
+        snoozed_until_ms: prior.and_then(|goal| goal.snoozed_until_ms),
+        stop_reason: prior.and_then(|goal| goal.stop_reason.clone()),
+        transferred_from: prior
+            .and_then(|goal| goal.transferred_from.clone())
+            .or_else(|| {
+                meta.and_then(|meta| meta.get("transferred_from"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            }),
+        transferred_to: prior
+            .and_then(|goal| goal.transferred_to.clone())
+            .or_else(|| {
+                meta.and_then(|meta| meta.get("transferred_to"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            }),
     };
-    if (meta_status.is_some() || !has_prior)
+    if !has_prior
         && matches!(
             snapshot.status,
             GoalStatus::BudgetExhausted | GoalStatus::NoProgress
         )
-        && snapshot
-            .goal_budget_exhaustion_status_at(epoch_ms_now())
-            .is_none()
+        && !goal_budget_has_hard_limits(&snapshot.budget)
     {
         snapshot.status = if snapshot.active {
             GoalStatus::Active
@@ -396,6 +466,9 @@ impl ChatSession {
             background_completion_burst: BurstGuard::new(),
             background_agents: HashMap::new(),
             goal_stopped_by_abort: false,
+            goal_ledger: Vec::new(),
+            goal_turn_evidence: false,
+            goal_verification_blocked_until_ms: None,
         }
     }
 
@@ -488,6 +561,9 @@ impl ChatSession {
             background_completion_burst: BurstGuard::new(),
             background_agents: HashMap::new(),
             goal_stopped_by_abort: false,
+            goal_ledger: Vec::new(),
+            goal_turn_evidence: false,
+            goal_verification_blocked_until_ms: None,
         }
     }
 
@@ -534,10 +610,24 @@ impl ChatSession {
     }
 
     pub fn goal_record_progress(&mut self, tokens: u64, made_progress: bool) -> bool {
+        self.goal_record_progress_with_cost(tokens, made_progress, 0)
+    }
+
+    pub fn goal_record_progress_with_cost(
+        &mut self,
+        tokens: u64,
+        made_progress: bool,
+        cost_cents: u64,
+    ) -> bool {
         let Some(goal) = self.goal.as_mut() else {
             return false;
         };
-        goal.goal_record_progress(tokens, made_progress);
+        goal.goal_record_progress(tokens, made_progress, cost_cents);
+        self.goal_ledger_append(GoalLedgerOp::ProgressRecorded {
+            tokens,
+            made_progress,
+            cost_cents,
+        });
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
@@ -547,9 +637,17 @@ impl ChatSession {
         let Some(goal) = self.goal.as_ref() else {
             return false;
         };
+        let evidence = std::mem::take(&mut self.goal_turn_evidence);
         let made_progress =
-            usage.completion_tokens as u64 >= goal.budget.no_progress_token_threshold;
-        self.goal_record_progress(usage.total_tokens as u64, made_progress)
+            evidence || usage.completion_tokens as u64 >= goal.budget.no_progress_token_threshold;
+        let cost_cents = usage
+            .metering_usd
+            .as_ref()
+            .map(|metering| metering.total_usd)
+            .filter(|usd| usd.is_finite() && *usd > 0.0)
+            .map(|usd| (usd * 100.0).round() as u64)
+            .unwrap_or(0);
+        self.goal_record_progress_with_cost(usage.total_tokens as u64, made_progress, cost_cents)
     }
 
     pub fn goal_record_verifier_attempt(&mut self, tokens: u64) -> bool {
@@ -557,6 +655,7 @@ impl ChatSession {
             return false;
         };
         goal.goal_record_verifier_attempt(tokens);
+        self.goal_ledger_append(GoalLedgerOp::VerifierAttemptRecorded { tokens });
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
@@ -567,6 +666,7 @@ impl ChatSession {
             return false;
         };
         goal.goal_note_no_progress_turn();
+        self.goal_ledger_append(GoalLedgerOp::NoProgressNoted);
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
@@ -577,8 +677,62 @@ impl ChatSession {
             return false;
         };
         goal.goal_record_nudge(at_ms);
+        let tail_is_nudge = matches!(
+            self.goal_ledger.last().map(|entry| &entry.op),
+            Some(GoalLedgerOp::NudgeRecorded)
+        );
+        if tail_is_nudge {
+            if let Some(entry) = self.goal_ledger.last_mut() {
+                entry.at_ms = at_ms;
+            }
+        } else {
+            self.goal_ledger_append_at(GoalLedgerOp::NudgeRecorded, at_ms);
+        }
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
+        true
+    }
+
+    pub(crate) fn coalesce_tail_goal_nudge_event(&mut self, at_ms: u64) -> bool {
+        let is_tail_nudge = self.messages.last().is_some_and(|message| {
+            goal_event_subkind(message) == Some("goal_pursuit")
+                && message
+                    .extra
+                    .get("event")
+                    .and_then(|event| event.get("payload"))
+                    .and_then(|payload| payload.get("kind"))
+                    .and_then(|value| value.as_str())
+                    == Some("nudge")
+        });
+        if !is_tail_nudge {
+            return false;
+        }
+        let message = {
+            let Some(last) = self.messages.last_mut() else {
+                return false;
+            };
+            let Some(payload) = last
+                .extra
+                .get_mut("event")
+                .and_then(|event| event.get_mut("payload"))
+                .and_then(|payload| payload.as_object_mut())
+            else {
+                return false;
+            };
+            let count = payload
+                .get("count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(1);
+            payload.insert("count".to_string(), json!(count + 1));
+            payload.insert("last_at_ms".to_string(), json!(at_ms));
+            last.clone()
+        };
+        self.emit(ChatEvent::MessageUpdated {
+            message_id: message.message_id.clone(),
+            message,
+        });
+        self.increment_version();
+        self.touch();
         true
     }
 
@@ -586,17 +740,34 @@ impl ChatSession {
         let Some(goal) = self.goal.as_mut() else {
             return false;
         };
-        let before = (goal.progress.no_progress_turns, goal.status);
+        let before = (
+            goal.progress.no_progress_turns,
+            goal.status,
+            goal.snoozed_until_ms,
+        );
         goal.goal_reset_no_progress();
-        if before == (goal.progress.no_progress_turns, goal.status) {
+        if before
+            == (
+                goal.progress.no_progress_turns,
+                goal.status,
+                goal.snoozed_until_ms,
+            )
+        {
             return false;
         }
+        self.goal_ledger_append(GoalLedgerOp::ProgressReset {
+            reason: "user_message".to_string(),
+        });
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
     }
 
     pub fn goal_set_status(&mut self, status: GoalStatus) -> bool {
+        self.goal_set_status_reason(status, "")
+    }
+
+    pub fn goal_set_status_reason(&mut self, status: GoalStatus, reason: &str) -> bool {
         let Some(goal) = self.goal.as_mut() else {
             return false;
         };
@@ -604,10 +775,54 @@ impl ChatSession {
             self.emit_goal_status();
             return true;
         }
+        let from = goal.status;
         goal.status = status;
+        if status == GoalStatus::Stopped {
+            goal.stop_reason = (!reason.is_empty()).then(|| reason.to_string());
+        } else if matches!(status, GoalStatus::Active | GoalStatus::Verifying) {
+            goal.stop_reason = None;
+        }
+        self.goal_ledger_append(GoalLedgerOp::StatusChanged {
+            from,
+            to: status,
+            reason: reason.to_string(),
+        });
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
+    }
+
+    pub fn goal_set_snooze(&mut self, until_ms: Option<u64>) -> bool {
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        goal.snoozed_until_ms = until_ms;
+        self.goal_ledger_append(GoalLedgerOp::SnoozeSet { until_ms });
+        self.mark_persisted_runtime_changed();
+        self.emit_goal_status();
+        true
+    }
+
+    pub(crate) fn goal_ledger_append(&mut self, op: GoalLedgerOp) -> u64 {
+        self.goal_ledger_append_at(op, epoch_ms_now())
+    }
+
+    pub(crate) fn goal_ledger_append_at(&mut self, op: GoalLedgerOp, at_ms: u64) -> u64 {
+        let seq = self
+            .goal_ledger
+            .last()
+            .map(|entry| entry.seq + 1)
+            .unwrap_or(1);
+        self.goal_ledger.push(GoalLedgerEntry { seq, at_ms, op });
+        seq
+    }
+
+    pub(crate) fn goal_ledger_last_seq(&self) -> u64 {
+        self.goal_ledger.last().map(|entry| entry.seq).unwrap_or(0)
+    }
+
+    pub(crate) fn goal_status_changed_since(&self, seq: u64) -> bool {
+        refact_chat_api::status_changed_since(&self.goal_ledger, seq)
     }
 
     pub fn stop_goal_on_manual_abort(&mut self) -> bool {
@@ -624,7 +839,7 @@ impl ChatSession {
         if !should_stop {
             return false;
         }
-        self.goal_set_status(GoalStatus::Stopped);
+        self.goal_set_status_reason(GoalStatus::Stopped, "manual_abort");
         self.goal_stopped_by_abort = true;
         self.add_message(event(
             EventSubkind::GoalPursuit,
@@ -665,7 +880,8 @@ impl ChatSession {
         let Some(goal) = self.goal.as_mut() else {
             return false;
         };
-        goal.goal_push_attempt(attempt);
+        goal.goal_push_attempt(attempt.clone());
+        self.goal_ledger_append(GoalLedgerOp::AttemptPushed { attempt });
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
@@ -675,7 +891,8 @@ impl ChatSession {
         let Some(goal) = self.goal.as_mut() else {
             return false;
         };
-        goal.goal_push_event(event);
+        goal.goal_push_event(event.clone());
+        self.goal_ledger_append(GoalLedgerOp::EventPushed { event });
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
@@ -685,6 +902,27 @@ impl ChatSession {
         let existing = self.goal.clone();
         self.goal = goal_snapshot_from_messages(&self.messages, existing.as_ref());
         self.refresh_goal_runtime_mirror();
+        self.ensure_goal_ledger_installed();
+    }
+
+    pub(crate) fn ensure_goal_ledger_installed(&mut self) {
+        let Some(goal) = self.goal.as_ref() else {
+            return;
+        };
+        let version = goal.version;
+        let already_installed = self.goal_ledger.iter().any(|entry| {
+            matches!(&entry.op, GoalLedgerOp::Installed { version: installed, .. } if *installed == version)
+        });
+        if already_installed {
+            return;
+        }
+        let (active, budget, criteria) = (goal.active, goal.budget.clone(), goal.criteria.clone());
+        self.goal_ledger_append(GoalLedgerOp::Installed {
+            version,
+            active,
+            budget,
+            criteria,
+        });
     }
 
     pub(crate) fn runtime_update_event(
@@ -988,6 +1226,12 @@ impl ChatSession {
             message.message_id = Uuid::new_v4().to_string();
         }
         let affects_goal = message_affects_goal_projection(&message);
+        if message.role == "tool"
+            && self.goal.is_some()
+            && tool_result_counts_as_goal_evidence(&message, &self.messages)
+        {
+            self.goal_turn_evidence = true;
+        }
         let index = self.messages.len();
         self.messages.push(message.clone());
         if affects_goal {
@@ -1134,8 +1378,41 @@ impl ChatSession {
         active: bool,
         budget: GoalBudget,
     ) -> crate::chat::goal_role::GoalInstallReport {
+        self.install_goal_with_criteria(mode, body, active, budget, Vec::new())
+    }
+
+    pub fn install_goal_with_criteria(
+        &mut self,
+        mode: &str,
+        body: &str,
+        active: bool,
+        budget: GoalBudget,
+        criteria: Vec<GoalCriterion>,
+    ) -> crate::chat::goal_role::GoalInstallReport {
         let report = crate::chat::goal_role::install_goal(self, mode, body, active, budget);
+        if !criteria.is_empty() {
+            if let Some(message) = self
+                .messages
+                .iter_mut()
+                .rev()
+                .find(|message| message.role == GOAL_ROLE)
+            {
+                if let Some(meta) = message
+                    .extra
+                    .get_mut("goal")
+                    .and_then(|value| value.as_object_mut())
+                {
+                    meta.insert("criteria".to_string(), json!(criteria));
+                }
+            }
+        }
         self.rebuild_goal_projection_from_messages();
+        if !criteria.is_empty() {
+            if let Some(goal) = self.goal.as_mut() {
+                goal.criteria = criteria.clone();
+            }
+            self.goal_ledger_append(GoalLedgerOp::CriteriaSet { criteria });
+        }
         self.goal_stopped_by_abort = false;
         self.emit_goal_status();
         report
@@ -2045,6 +2322,7 @@ mod tests {
                 max_turns: Some(5),
                 max_minutes: Some(2),
                 max_tokens: Some(100),
+                max_cost_cents: None,
                 cooldown_ms: 1_500,
                 no_progress_token_threshold: 10,
                 no_progress_turns: Some(2),
@@ -2065,6 +2343,9 @@ mod tests {
                 },
                 attempts: Vec::new(),
                 events: Vec::new(),
+                criteria: Vec::new(),
+                snoozed_until_ms: None,
+                stop_reason: None,
                 transferred_from: None,
                 transferred_to: None,
             }
@@ -2349,6 +2630,7 @@ mod tests {
                 verdict: "needs_work".to_string(),
                 gaps: vec!["tests".to_string()],
                 verifier_reply: "run tests".to_string(),
+                criteria_verdicts: Vec::new(),
             });
             session.goal_push_event(GoalEvent {
                 at_ms: 11,
@@ -2361,6 +2643,392 @@ mod tests {
             assert_eq!(goal.events.len(), 1);
             assert_eq!(goal.attempts[0].gaps, vec!["tests".to_string()]);
             assert_eq!(goal.events[0].text, "keep going");
+        }
+    }
+
+    mod goal_projection {
+        use super::*;
+
+        fn pursuit_event(at_ms: u64) -> ChatMessage {
+            event(
+                EventSubkind::GoalPursuit,
+                "chat.goal_monitor",
+                json!({
+                    "kind": "nudge",
+                    "trigger": "monitor",
+                    "reason": "idle",
+                    "at_ms": at_ms,
+                    "account_progress": true,
+                }),
+                "Goal pursuit nudge: continue the active goal (monitor, idle).".to_string(),
+            )
+        }
+
+        fn install(session: &mut ChatSession) {
+            session.install_goal("agent", "ship it", true, GoalBudget::default());
+        }
+
+        fn pin_transfer_style_meta(session: &mut ChatSession) {
+            let index = session
+                .messages
+                .iter()
+                .position(|message| message.role == GOAL_ROLE)
+                .unwrap();
+            let meta = session.messages[index]
+                .extra
+                .get_mut("goal")
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            meta.insert("status".to_string(), json!("active"));
+            meta.insert("active".to_string(), json!(true));
+            meta.insert(
+                "progress".to_string(),
+                json!({
+                    "turns_used": 0,
+                    "tokens_used": 0,
+                    "started_at_ms": 111,
+                    "no_progress_turns": 0,
+                    "last_nudge_at_ms": 0,
+                }),
+            );
+            meta.insert("attempts".to_string(), json!([]));
+            meta.insert(
+                "events".to_string(),
+                json!([{
+                    "at_ms": 1,
+                    "kind": "goal_pursuit",
+                    "text": "Goal ownership transferred from a to b.",
+                }]),
+            );
+        }
+
+        #[test]
+        fn rebuild_preserves_live_stop_over_pinned_meta() {
+            let mut session = make_session();
+            install(&mut session);
+            pin_transfer_style_meta(&mut session);
+            session.goal_set_status(GoalStatus::Stopped);
+
+            session.add_message(pursuit_event(2_000));
+
+            assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+            assert_eq!(session.goal.as_ref().unwrap().status, GoalStatus::Stopped);
+        }
+
+        #[test]
+        fn rebuild_preserves_live_progress_counters_over_pinned_meta() {
+            let mut session = make_session();
+            install(&mut session);
+            pin_transfer_style_meta(&mut session);
+            session.goal_record_nudge(5_000);
+            session.goal_note_no_progress_turn();
+            session.goal_note_no_progress_turn();
+
+            session.add_message(pursuit_event(6_000));
+
+            let goal = session.goal.as_ref().unwrap();
+            assert_eq!(goal.progress.no_progress_turns, 2);
+            assert_eq!(goal.progress.last_nudge_at_ms, 5_000);
+        }
+
+        #[test]
+        fn stopped_goal_survives_reload_with_persisted_snapshot() {
+            let mut session = make_session();
+            install(&mut session);
+            pin_transfer_style_meta(&mut session);
+            session.goal_set_status(GoalStatus::Stopped);
+            let persisted = session.goal.clone();
+
+            let reloaded =
+                goal_snapshot_from_messages(&session.messages, persisted.as_ref()).unwrap();
+
+            assert_eq!(reloaded.status, GoalStatus::Stopped);
+        }
+
+        #[test]
+        fn fresh_load_seeds_from_pinned_meta_without_prior() {
+            let mut session = make_session();
+            install(&mut session);
+            pin_transfer_style_meta(&mut session);
+
+            let seeded = goal_snapshot_from_messages(&session.messages, None).unwrap();
+
+            assert!(seeded.active);
+            assert_eq!(seeded.status, GoalStatus::Active);
+            assert_eq!(seeded.progress.started_at_ms, 111);
+            assert_eq!(seeded.events.len(), 1);
+        }
+
+        #[test]
+        fn goal_events_union_accumulates_new_messages_and_dedups() {
+            let mut session = make_session();
+            install(&mut session);
+            session.add_message(pursuit_event(1_000));
+            assert_eq!(session.goal.as_ref().unwrap().events.len(), 1);
+
+            session.add_message(pursuit_event(2_000));
+            assert_eq!(session.goal.as_ref().unwrap().events.len(), 2);
+
+            session.rebuild_goal_projection_from_messages();
+            assert_eq!(session.goal.as_ref().unwrap().events.len(), 2);
+        }
+
+        #[test]
+        fn coalesce_tail_goal_nudge_event_updates_payload_in_place() {
+            let mut session = make_session();
+            install(&mut session);
+            session.add_message(pursuit_event(1_000));
+            let messages_before = session.messages.len();
+
+            assert!(session.coalesce_tail_goal_nudge_event(3_000));
+
+            assert_eq!(session.messages.len(), messages_before);
+            let payload = session.messages.last().unwrap().extra["event"]["payload"].clone();
+            assert_eq!(payload["count"], json!(2));
+            assert_eq!(payload["last_at_ms"], json!(3_000));
+            assert_eq!(payload["at_ms"], json!(1_000));
+
+            assert!(session.coalesce_tail_goal_nudge_event(4_000));
+            let payload = session.messages.last().unwrap().extra["event"]["payload"].clone();
+            assert_eq!(payload["count"], json!(3));
+        }
+
+        #[test]
+        fn coalesce_requires_tail_nudge_event() {
+            let mut session = make_session();
+            install(&mut session);
+            assert!(!session.coalesce_tail_goal_nudge_event(1_000));
+
+            session.add_message(pursuit_event(1_000));
+            session.add_message(ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Idle.".to_string()),
+                ..Default::default()
+            });
+
+            assert!(!session.coalesce_tail_goal_nudge_event(2_000));
+        }
+    }
+
+    mod goal_ledger {
+        use super::*;
+        use refact_chat_api::{reduce_goal_ledger, GoalLedgerOp};
+
+        fn install(session: &mut ChatSession) {
+            session.install_goal("agent", "ship it", true, GoalBudget::default());
+        }
+
+        #[test]
+        fn ledger_records_mutations_and_replay_matches_projection() {
+            let mut session = make_session();
+            install(&mut session);
+            session.goal_record_progress_with_cost(120, true, 7);
+            session.goal_note_no_progress_turn();
+            session.goal_set_status_reason(GoalStatus::Stopped, "user stop");
+
+            let state = reduce_goal_ledger(&session.goal_ledger).expect("ledger state");
+            let goal = session.goal.as_ref().unwrap();
+
+            assert_eq!(state.status, goal.status);
+            assert_eq!(state.status, GoalStatus::Stopped);
+            assert_eq!(state.stop_reason.as_deref(), Some("user stop"));
+            assert_eq!(goal.stop_reason.as_deref(), Some("user stop"));
+            assert_eq!(state.progress.turns_used, goal.progress.turns_used);
+            assert_eq!(state.progress.tokens_used, 120);
+            assert_eq!(state.progress.cost_used_cents, 7);
+            assert_eq!(
+                state.progress.no_progress_turns,
+                goal.progress.no_progress_turns
+            );
+        }
+
+        #[test]
+        fn ledger_auto_installs_when_goal_message_arrives_without_helper() {
+            let mut session = make_session();
+            session.add_message(crate::chat::internal_roles::goal(
+                "agent",
+                1,
+                "ship it",
+                None,
+                true,
+                GoalBudget::default(),
+            ));
+
+            assert!(session.goal.is_some());
+            assert!(session
+                .goal_ledger
+                .iter()
+                .any(|entry| matches!(entry.op, GoalLedgerOp::Installed { version: 1, .. })));
+        }
+
+        #[test]
+        fn ledger_status_changed_since_guards_verification_epoch() {
+            let mut session = make_session();
+            install(&mut session);
+            session.goal_set_status(GoalStatus::Verifying);
+            let epoch = session.goal_ledger_last_seq();
+
+            assert!(!session.goal_status_changed_since(epoch));
+            session.goal_record_nudge(5_000);
+            assert!(!session.goal_status_changed_since(epoch));
+
+            session.goal_set_status_reason(GoalStatus::Stopped, "goal_control");
+            assert!(session.goal_status_changed_since(epoch));
+        }
+
+        #[test]
+        fn evidence_marks_turn_as_progress_despite_tiny_completion() {
+            let mut session = make_session();
+            install(&mut session);
+            session.add_message(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("edited file".to_string()),
+                tool_call_id: "call-1".to_string(),
+                ..Default::default()
+            });
+            assert!(session.goal_turn_evidence);
+
+            session.goal_record_progress_from_usage(&ChatUsage {
+                prompt_tokens: 10,
+                completion_tokens: 3,
+                total_tokens: 13,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                metering_usd: None,
+            });
+
+            let goal = session.goal.as_ref().unwrap();
+            assert_eq!(goal.progress.no_progress_turns, 0);
+            assert!(!session.goal_turn_evidence);
+        }
+
+        #[test]
+        fn exempt_or_failed_tool_results_do_not_mark_evidence() {
+            let mut session = make_session();
+            install(&mut session);
+            let tool_call = |id: &str, name: &str| crate::call_validation::ChatToolCall {
+                id: id.to_string(),
+                index: None,
+                function: crate::call_validation::ChatToolFunction {
+                    arguments: "{}".to_string(),
+                    name: name.to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            };
+            session.add_message(ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText(String::new()),
+                tool_calls: Some(vec![
+                    tool_call("call-sleep", "sleep"),
+                    tool_call("call-edit", "patch"),
+                ]),
+                ..Default::default()
+            });
+
+            session.add_message(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("slept".to_string()),
+                tool_call_id: "call-sleep".to_string(),
+                ..Default::default()
+            });
+            assert!(!session.goal_turn_evidence);
+
+            session.add_message(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("boom".to_string()),
+                tool_call_id: "call-edit".to_string(),
+                tool_failed: Some(true),
+                ..Default::default()
+            });
+            assert!(!session.goal_turn_evidence);
+
+            session.add_message(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("edited".to_string()),
+                tool_call_id: "call-edit".to_string(),
+                ..Default::default()
+            });
+            assert!(session.goal_turn_evidence);
+        }
+
+        #[test]
+        fn repeated_nudges_coalesce_ledger_tail() {
+            let mut session = make_session();
+            install(&mut session);
+            let before = session.goal_ledger.len();
+            assert!(session.goal_record_nudge(1_000));
+            assert!(session.goal_record_nudge(2_000));
+            assert!(session.goal_record_nudge(3_000));
+            assert_eq!(session.goal_ledger.len(), before + 1);
+            let entry = session.goal_ledger.last().unwrap();
+            assert!(matches!(entry.op, GoalLedgerOp::NudgeRecorded));
+            assert_eq!(entry.at_ms, 3_000);
+            assert_eq!(
+                session.goal.as_ref().unwrap().progress.last_nudge_at_ms,
+                3_000
+            );
+        }
+
+        #[test]
+        fn no_evidence_and_tiny_completion_counts_no_progress() {
+            let mut session = make_session();
+            install(&mut session);
+
+            session.goal_record_progress_from_usage(&ChatUsage {
+                prompt_tokens: 10,
+                completion_tokens: 3,
+                total_tokens: 13,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                metering_usd: None,
+            });
+
+            assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 1);
+        }
+
+        #[test]
+        fn max_cost_budget_exhausts_via_cost_accounting() {
+            let mut session = make_session();
+            session.install_goal(
+                "agent",
+                "ship it",
+                true,
+                GoalBudget {
+                    max_cost_cents: Some(10),
+                    ..Default::default()
+                },
+            );
+
+            session.goal_record_progress_with_cost(5, true, 12);
+
+            assert_eq!(session.goal_status, Some(GoalStatus::BudgetExhausted));
+        }
+
+        #[test]
+        fn criteria_install_reaches_projection_and_ledger() {
+            let mut session = make_session();
+            session.install_goal_with_criteria(
+                "agent",
+                "ship it",
+                true,
+                GoalBudget::default(),
+                vec![GoalCriterion {
+                    id: "C1".to_string(),
+                    text: "tests pass".to_string(),
+                    verify_hint: None,
+                }],
+            );
+
+            let goal = session.goal.as_ref().unwrap();
+            assert_eq!(goal.criteria.len(), 1);
+            assert_eq!(goal.criteria[0].id, "C1");
+            let state = reduce_goal_ledger(&session.goal_ledger).unwrap();
+            assert_eq!(state.criteria.len(), 1);
+
+            session.rebuild_goal_projection_from_messages();
+            assert_eq!(session.goal.as_ref().unwrap().criteria.len(), 1);
         }
     }
 
@@ -2420,6 +3088,7 @@ mod tests {
             max_turns: Some(7),
             max_minutes: Some(8),
             max_tokens: Some(9),
+            max_cost_cents: None,
             cooldown_ms: 10,
             no_progress_token_threshold: 11,
             no_progress_turns: Some(12),
@@ -2471,9 +3140,13 @@ mod tests {
                 started_at_ms: 55,
                 no_progress_turns: 1,
                 last_nudge_at_ms: 77,
+                cost_used_cents: 0,
             },
             attempts: Vec::new(),
             events: Vec::new(),
+            criteria: Vec::new(),
+            snoozed_until_ms: None,
+            stop_reason: None,
             transferred_from: None,
             transferred_to: None,
         };
@@ -2569,6 +3242,7 @@ mod tests {
                 max_turns: Some(3),
                 max_minutes: None,
                 max_tokens: None,
+                max_cost_cents: None,
                 cooldown_ms: 1_500,
                 no_progress_token_threshold: 50,
                 no_progress_turns: None,

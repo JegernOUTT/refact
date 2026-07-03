@@ -23,6 +23,7 @@ use refact_tool_api::ToolDesc;
 const GOAL_VERIFIER_SOURCE: &str = "chat.goal_verifier";
 const INCONCLUSIVE_GAP: &str = "verification inconclusive; continue";
 const GOAL_VERIFIER_MAX_TOKENS: usize = 1024;
+const GOAL_VERIFIER_BLOCKED_BACKOFF_MS: u64 = 300_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoalVerdict {
@@ -49,6 +50,8 @@ pub enum GoalVerificationApplyOutcome {
     Finalized,
     Rearmed,
     Continued,
+    Stalled,
+    Superseded,
     NoGoal,
 }
 
@@ -58,6 +61,8 @@ pub enum GoalCompletionGateOutcome {
     Finalized,
     Rearmed,
     BudgetExhausted(GoalStatus),
+    VerificationUnavailable,
+    VerificationStalled,
     Aborted,
 }
 
@@ -106,9 +111,18 @@ pub async fn verify_goal_before_completion(
     session_arc: Arc<AMutex<ChatSession>>,
     trigger: &str,
 ) -> GoalCompletionGateOutcome {
-    let begin = {
+    let (begin, epoch) = {
         let mut session = session_arc.lock().await;
-        begin_goal_verification_if_needed(&mut session)
+        let now_ms = epoch_ms_now();
+        if session
+            .goal_verification_blocked_until_ms
+            .is_some_and(|until| now_ms < until)
+            && should_verify_goal_on_done(&session)
+        {
+            return GoalCompletionGateOutcome::VerificationUnavailable;
+        }
+        let begin = begin_goal_verification_if_needed(&mut session);
+        (begin, session.goal_ledger_last_seq())
     };
     match begin {
         GoalVerificationBegin::Started => {}
@@ -140,11 +154,8 @@ pub async fn verify_goal_before_completion(
                 abort_goal_verification(session_arc.clone()).await;
                 return GoalCompletionGateOutcome::Aborted;
             }
-            GoalVerifierReply {
-                verdict: GoalVerdict::Unmet(vec![INCONCLUSIVE_GAP.to_string()]),
-                verifier_reply: format!("verification failed: {error}"),
-                tokens: 0,
-            }
+            let mut session = session_arc.lock().await;
+            return handle_verifier_failure(&mut session, trigger, &error);
         }
     };
 
@@ -158,12 +169,35 @@ pub async fn verify_goal_before_completion(
     }
 
     let mut session = session_arc.lock().await;
-    match apply_goal_verdict(&mut session, trigger, reply) {
+    match apply_goal_verdict(&mut session, trigger, reply, Some(epoch)) {
         GoalVerificationApplyOutcome::Finalized => GoalCompletionGateOutcome::Finalized,
         GoalVerificationApplyOutcome::Rearmed => GoalCompletionGateOutcome::Rearmed,
         GoalVerificationApplyOutcome::Continued => GoalCompletionGateOutcome::Rearmed,
+        GoalVerificationApplyOutcome::Stalled => GoalCompletionGateOutcome::VerificationStalled,
+        GoalVerificationApplyOutcome::Superseded => GoalCompletionGateOutcome::Rearmed,
         GoalVerificationApplyOutcome::NoGoal => GoalCompletionGateOutcome::Passthrough,
     }
+}
+
+pub fn handle_verifier_failure(
+    session: &mut ChatSession,
+    trigger: &str,
+    error: &str,
+) -> GoalCompletionGateOutcome {
+    let at_ms = epoch_ms_now();
+    if session.goal_status == Some(GoalStatus::Verifying) {
+        session.goal_set_status(GoalStatus::Active);
+    }
+    session.goal_verification_blocked_until_ms =
+        Some(at_ms.saturating_add(GOAL_VERIFIER_BLOCKED_BACKOFF_MS));
+    let reason = crate::llm::safe_truncate(error, 200);
+    session.add_message(internal_roles::event(
+        EventSubkind::GoalPursuit,
+        GOAL_VERIFIER_SOURCE,
+        json!({"kind": "verification_blocked", "trigger": trigger, "at_ms": at_ms}),
+        format!("Goal verification unavailable: {reason}"),
+    ));
+    GoalCompletionGateOutcome::VerificationUnavailable
 }
 
 fn apply_goal_budget_exhausted_terminal(
@@ -234,12 +268,31 @@ async fn abort_goal_verification(session_arc: Arc<AMutex<ChatSession>>) {
     session.set_runtime_state(SessionState::Idle, None);
 }
 
-pub fn goal_verification_message(goal_text: &str) -> ChatMessage {
+pub fn goal_verification_message(goal_text: &str, criteria: &[GoalCriterion]) -> ChatMessage {
+    let criteria_block = if criteria.is_empty() {
+        String::new()
+    } else {
+        let list = criteria
+            .iter()
+            .map(|criterion| {
+                let hint = criterion
+                    .verify_hint
+                    .as_deref()
+                    .map(|hint| format!(" (verify: {hint})"))
+                    .unwrap_or_default();
+                format!("- [{}] {}{}", criterion.id, criterion.text, hint)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n\nStructured criteria:\n{list}\n\nFor EACH criterion also output a line `CRITERION <id>: MET` or `CRITERION <id>: UNMET — <short note>`."
+        )
+    };
     ChatMessage {
         message_id: Uuid::new_v4().to_string(),
         role: "user".to_string(),
         content: ChatContent::SimpleText(format!(
-            "[goal verification]\n\nSynthesized goal:\n{goal_text}\n\nAcceptance criteria:\nUse every explicit criterion in the synthesized goal above.\n\nJudge ONLY whether the work so far FULLY satisfies the goal and every criterion. Respond EXACTLY: first line `GOAL: MET` or `GOAL: UNMET`; if UNMET, a bullet list of unmet requirements; call NO tools."
+            "[goal verification]\n\nSynthesized goal:\n{goal_text}\n\nAcceptance criteria:\nUse every explicit criterion in the synthesized goal above.{criteria_block}\n\nJudge ONLY whether the work so far FULLY satisfies the goal and every criterion. Respond EXACTLY: first line `GOAL: MET` or `GOAL: UNMET`; if UNMET, a bullet list of unmet requirements; call NO tools."
         )),
         extra: serde_json::Map::from_iter([(
             "goal_verification".to_string(),
@@ -281,6 +334,29 @@ pub fn parse_goal_verdict(answer: &str, tool_called: bool) -> GoalVerdict {
 
 fn inconclusive_verdict() -> GoalVerdict {
     GoalVerdict::Unmet(vec![INCONCLUSIVE_GAP.to_string()])
+}
+
+pub fn parse_criteria_verdicts(answer: &str) -> Vec<CriterionVerdict> {
+    answer
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("CRITERION ")?;
+            let (id, verdict) = rest.split_once(':')?;
+            let verdict = verdict.trim();
+            let (met, note) = if let Some(note) = verdict.strip_prefix("UNMET") {
+                (false, note)
+            } else if let Some(note) = verdict.strip_prefix("MET") {
+                (true, note)
+            } else {
+                return None;
+            };
+            Some(CriterionVerdict {
+                id: id.trim().trim_matches(['[', ']']).to_string(),
+                met,
+                note: note.trim_start_matches(['—', '-', ':', ' ']).to_string(),
+            })
+        })
+        .collect()
 }
 
 struct GoalVerifierCollector;
@@ -331,10 +407,11 @@ fn goal_verifier_prepare_inputs_from_parts(
     mut thread: ThreadParams,
     mut messages: Vec<ChatMessage>,
     goal_text: String,
+    criteria: Vec<GoalCriterion>,
     chat_id: String,
     tools: Vec<ToolDesc>,
 ) -> GoalVerifierPrepareInputs {
-    messages.push(goal_verification_message(&goal_text));
+    messages.push(goal_verification_message(&goal_text, &criteria));
     thread.max_tokens = Some(GOAL_VERIFIER_MAX_TOKENS);
     thread.temperature = Some(0.0);
     let sampling_parameters = verifier_sampling_parameters(&thread);
@@ -367,6 +444,11 @@ fn goal_verifier_prepare_inputs(
         session.thread.clone(),
         session.messages.clone(),
         goal_text_for_verifier(session)?,
+        session
+            .goal
+            .as_ref()
+            .map(|goal| goal.criteria.clone())
+            .unwrap_or_default(),
         session.chat_id.clone(),
         tools,
     ))
@@ -382,13 +464,18 @@ pub async fn run_goal_verifier(
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> Result<GoalVerifierReply, String> {
     let gcx = app.gcx.clone();
-    let (thread, messages, goal_text, chat_id, abort_notify) = {
+    let (thread, messages, goal_text, criteria, chat_id, abort_notify) = {
         let session = session_arc.lock().await;
         let goal_text = goal_text_for_verifier(&session)?;
         (
             session.thread.clone(),
             session.messages.clone(),
             goal_text,
+            session
+                .goal
+                .as_ref()
+                .map(|goal| goal.criteria.clone())
+                .unwrap_or_default(),
             session.chat_id.clone(),
             session.abort_notify.clone(),
         )
@@ -410,6 +497,7 @@ pub async fn run_goal_verifier(
         thread,
         messages,
         goal_text,
+        criteria,
         chat_id,
         tools_for_gen.tools,
     );
@@ -515,9 +603,15 @@ pub fn apply_goal_verdict(
     session: &mut ChatSession,
     trigger: &str,
     reply: GoalVerifierReply,
+    epoch: Option<u64>,
 ) -> GoalVerificationApplyOutcome {
     if session.goal.is_none() {
         return GoalVerificationApplyOutcome::NoGoal;
+    }
+    if let Some(epoch) = epoch {
+        if session.goal_status_changed_since(epoch) {
+            return GoalVerificationApplyOutcome::Superseded;
+        }
     }
     let held_status = match session.goal_status {
         Some(status @ (GoalStatus::Paused | GoalStatus::Stopped)) => Some(status),
@@ -526,6 +620,7 @@ pub fn apply_goal_verdict(
 
     let at_ms = epoch_ms_now();
     session.goal_record_verifier_attempt(reply.tokens);
+    let rearm_candidate = held_status.is_none() && trigger != "validate_goal";
     let (verdict_text, gaps, event_kind, event_text) = match &reply.verdict {
         GoalVerdict::Met => (
             "met".to_string(),
@@ -540,17 +635,23 @@ pub fn apply_goal_verdict(
             format!("Goal verification found gaps:\n{}", gaps.join("\n")),
         ),
     };
+    let criteria_verdicts = parse_criteria_verdicts(&reply.verifier_reply);
     session.goal_push_attempt(GoalAttempt {
         at_ms,
         trigger: trigger.to_string(),
         verdict: verdict_text,
         gaps: gaps.clone(),
         verifier_reply: reply.verifier_reply,
+        criteria_verdicts,
     });
+    let mut payload = json!({"kind": event_kind, "at_ms": at_ms, "gaps": gaps});
+    if event_kind == "verification_gaps" && rearm_candidate {
+        payload["account_progress"] = json!(true);
+    }
     let event = internal_roles::event(
         EventSubkind::GoalPursuit,
         GOAL_VERIFIER_SOURCE,
-        json!({"kind": event_kind, "at_ms": at_ms, "gaps": gaps}),
+        payload,
         event_text,
     );
     if trigger == "validate_goal" {
@@ -577,9 +678,16 @@ pub fn apply_goal_verdict(
                 GoalVerificationApplyOutcome::Continued
             } else {
                 session.goal_set_status(GoalStatus::Active);
+                session.goal_note_no_progress_turn();
                 if trigger == "validate_goal" {
-                    session.goal_note_no_progress_turn();
                     GoalVerificationApplyOutcome::Continued
+                } else if session.goal_status != Some(GoalStatus::Active)
+                    || session.goal.as_ref().is_some_and(|goal| {
+                        goal.progress.no_progress_turns
+                            >= crate::chat::goal_monitor::QUIESCENCE_NUDGES
+                    })
+                {
+                    GoalVerificationApplyOutcome::Stalled
                 } else {
                     session.set_runtime_state(SessionState::Idle, None);
                     let _ = session.enqueue_priority_command(CommandRequest {
@@ -622,6 +730,7 @@ mod tests {
             max_turns: Some(3),
             max_minutes: None,
             max_tokens: None,
+            max_cost_cents: None,
             cooldown_ms: 1_500,
             no_progress_token_threshold: 50,
             no_progress_turns: Some(2),
@@ -664,6 +773,7 @@ mod tests {
                 verifier_reply: "GOAL: MET".to_string(),
                 tokens: 7,
             },
+            None,
         );
         let mut states = Vec::new();
         while let Ok(raw) = rx.try_recv() {
@@ -702,7 +812,7 @@ mod tests {
 
     #[test]
     fn goal_verification_message_contains_required_contract() {
-        let message = goal_verification_message("Do the thing");
+        let message = goal_verification_message("Do the thing", &[]);
         let text = message.content.content_text_only();
         assert_eq!(message.role, "user");
         assert!(text.contains("[goal verification]"));
@@ -947,6 +1057,7 @@ mod tests {
                 verifier_reply: "GOAL: MET".to_string(),
                 tokens: 11,
             },
+            None,
         );
 
         assert_eq!(outcome, GoalVerificationApplyOutcome::Finalized);
@@ -979,6 +1090,7 @@ mod tests {
                 verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                 tokens: 13,
             },
+            None,
         );
 
         assert_eq!(outcome, GoalVerificationApplyOutcome::Rearmed);
@@ -1012,6 +1124,7 @@ mod tests {
                 verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                 tokens: 13,
             },
+            None,
         );
 
         assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
@@ -1021,6 +1134,162 @@ mod tests {
             .command_queue
             .iter()
             .any(|request| matches!(request.command, ChatCommand::Regenerate {})));
+    }
+
+    #[test]
+    fn apply_goal_verdict_unmet_counts_no_progress_and_stalls_at_cap() {
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+
+        apply_goal_verdict(
+            &mut session,
+            "finish",
+            GoalVerifierReply {
+                verdict: GoalVerdict::Unmet(vec!["missing".to_string()]),
+                verifier_reply: "GOAL: UNMET\n- missing".to_string(),
+                tokens: 5,
+            },
+            None,
+        );
+        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 1);
+
+        session.command_queue.clear();
+        session.goal.as_mut().unwrap().progress.no_progress_turns = 2;
+        session.goal_set_status(GoalStatus::Verifying);
+
+        let outcome = apply_goal_verdict(
+            &mut session,
+            "finish",
+            GoalVerifierReply {
+                verdict: GoalVerdict::Unmet(vec!["still missing".to_string()]),
+                verifier_reply: "GOAL: UNMET\n- still missing".to_string(),
+                tokens: 5,
+            },
+            None,
+        );
+
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Stalled);
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 3);
+        assert!(session.command_queue.is_empty());
+    }
+
+    #[test]
+    fn verifier_failure_returns_unavailable_without_fabricated_unmet() {
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+
+        let outcome = handle_verifier_failure(&mut session, "finish", "model not found");
+
+        assert_eq!(outcome, GoalCompletionGateOutcome::VerificationUnavailable);
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        let goal = session.goal.as_ref().unwrap();
+        assert!(goal.attempts.is_empty());
+        assert!(session.command_queue.is_empty());
+        let blocked_events = session
+            .messages
+            .iter()
+            .filter(|message| {
+                message
+                    .extra
+                    .get("event")
+                    .and_then(|event| event.get("payload"))
+                    .and_then(|payload| payload.get("kind"))
+                    .and_then(|kind| kind.as_str())
+                    == Some("verification_blocked")
+            })
+            .count();
+        assert_eq!(blocked_events, 1);
+        assert!(goal
+            .events
+            .iter()
+            .any(|event| event.text.contains("Goal verification unavailable")));
+    }
+
+    #[test]
+    fn verifier_failure_preserves_stop_requested_during_verification() {
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+        session.goal_set_status(GoalStatus::Stopped);
+
+        let outcome = handle_verifier_failure(&mut session, "finish", "network error");
+
+        assert_eq!(outcome, GoalCompletionGateOutcome::VerificationUnavailable);
+        assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+        assert!(session.command_queue.is_empty());
+        assert!(session.goal_verification_blocked_until_ms.is_some());
+    }
+
+    #[test]
+    fn apply_goal_verdict_discards_verdict_when_status_changed_after_epoch() {
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+        let epoch = session.goal_ledger_last_seq();
+        session.goal_set_status_reason(GoalStatus::Stopped, "goal_control");
+        let attempts_before = session.goal.as_ref().unwrap().attempts.len();
+
+        let outcome = apply_goal_verdict(
+            &mut session,
+            "finish",
+            GoalVerifierReply {
+                verdict: GoalVerdict::Unmet(vec!["missing".to_string()]),
+                verifier_reply: "GOAL: UNMET\n- missing".to_string(),
+                tokens: 5,
+            },
+            Some(epoch),
+        );
+
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Superseded);
+        assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+        assert_eq!(
+            session.goal.as_ref().unwrap().attempts.len(),
+            attempts_before
+        );
+        assert!(session.command_queue.is_empty());
+    }
+
+    #[test]
+    fn parse_criteria_verdicts_extracts_met_and_unmet_lines() {
+        let verdicts = parse_criteria_verdicts(
+            "GOAL: UNMET\n- docs missing\nCRITERION C1: MET\nCRITERION C2: UNMET — docs not updated\nnoise line",
+        );
+
+        assert_eq!(verdicts.len(), 2);
+        assert_eq!(verdicts[0].id, "C1");
+        assert!(verdicts[0].met);
+        assert_eq!(verdicts[1].id, "C2");
+        assert!(!verdicts[1].met);
+        assert_eq!(verdicts[1].note, "docs not updated");
+    }
+
+    #[test]
+    fn goal_verification_message_lists_structured_criteria() {
+        let criteria = vec![
+            GoalCriterion {
+                id: "C1".to_string(),
+                text: "tests pass".to_string(),
+                verify_hint: Some("cargo test".to_string()),
+            },
+            GoalCriterion {
+                id: "C2".to_string(),
+                text: "docs updated".to_string(),
+                verify_hint: None,
+            },
+        ];
+
+        let message = goal_verification_message("ship it", &criteria);
+        let text = message.content.content_text_only();
+
+        assert!(text.contains("Structured criteria:"));
+        assert!(text.contains("- [C1] tests pass (verify: cargo test)"));
+        assert!(text.contains("- [C2] docs updated"));
+        assert!(text.contains("CRITERION <id>: MET"));
+
+        let plain = goal_verification_message("ship it", &[]);
+        assert!(!plain
+            .content
+            .content_text_only()
+            .contains("Structured criteria:"));
     }
 
     #[test]
@@ -1037,6 +1306,7 @@ mod tests {
                 verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                 tokens: 13,
             },
+            None,
         );
 
         assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
@@ -1063,6 +1333,7 @@ mod tests {
                 verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                 tokens: 13,
             },
+            None,
         );
 
         assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
@@ -1085,6 +1356,7 @@ mod tests {
                 verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                 tokens: 13,
             },
+            None,
         );
 
         assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
@@ -1115,6 +1387,7 @@ mod tests {
                 verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                 tokens: 13,
             },
+            None,
         );
 
         assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
@@ -1140,6 +1413,7 @@ mod tests {
                 verifier_reply: "GOAL: MET".to_string(),
                 tokens: 11,
             },
+            None,
         );
 
         assert_eq!(outcome, GoalVerificationApplyOutcome::Finalized);
@@ -1165,6 +1439,7 @@ mod tests {
                     verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                     tokens: 0,
                 },
+                None,
             );
             assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
         }

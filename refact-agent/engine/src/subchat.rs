@@ -1234,6 +1234,76 @@ mod progress_collector_tests {
     }
 }
 
+#[cfg(test)]
+mod convert_results_tests {
+    use super::*;
+
+    #[test]
+    fn empty_results_error_instead_of_masking_failure() {
+        let messages = vec![ChatMessage::new(
+            "user".to_string(),
+            "review this".to_string(),
+        )];
+        let result = convert_results_to_messages(vec![], messages);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_content_without_tool_calls_errors() {
+        let messages = vec![ChatMessage::new(
+            "user".to_string(),
+            "review this".to_string(),
+        )];
+        let choice = ChoiceFinal {
+            content: "  ".to_string(),
+            finish_reason: Some("length".to_string()),
+            ..Default::default()
+        };
+        let error = convert_results_to_messages(vec![choice], messages).unwrap_err();
+        assert!(error.contains("no visible content"));
+        assert!(error.contains("length"));
+    }
+
+    #[test]
+    fn empty_choice_is_skipped_when_another_has_content() {
+        let messages = vec![ChatMessage::new(
+            "user".to_string(),
+            "review this".to_string(),
+        )];
+        let empty = ChoiceFinal {
+            content: String::new(),
+            ..Default::default()
+        };
+        let full = ChoiceFinal {
+            content: "all good".to_string(),
+            ..Default::default()
+        };
+        let result = convert_results_to_messages(vec![empty, full], messages).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0][1].content.content_text_only(), "all good");
+    }
+
+    #[test]
+    fn choices_extend_original_messages() {
+        let messages = vec![ChatMessage::new(
+            "user".to_string(),
+            "review this".to_string(),
+        )];
+        let choice = ChoiceFinal {
+            content: "all good".to_string(),
+            ..Default::default()
+        };
+
+        let result = convert_results_to_messages(vec![choice], messages).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 2);
+        assert_eq!(result[0][0].role, "user");
+        assert_eq!(result[0][1].role, "assistant");
+        assert_eq!(result[0][1].content.content_text_only(), "all good");
+    }
+}
+
 fn is_aborted(abort_flag: &Option<Arc<AtomicBool>>) -> bool {
     abort_flag
         .as_ref()
@@ -1923,9 +1993,14 @@ async fn subchat_stream(
             &mut collector,
         )
         .await
-        .map(|o| match o {
-            crate::chat::stream_core::LlmStreamOutcome::Choices(c) => c,
-            crate::chat::stream_core::LlmStreamOutcome::PausedForCacheGuard => vec![],
+        .and_then(|o| match o {
+            crate::chat::stream_core::LlmStreamOutcome::Choices(c) => Ok(c),
+            crate::chat::stream_core::LlmStreamOutcome::PausedForCacheGuard => {
+                Err(crate::chat::stream_core::LlmStreamError {
+                    message: "subchat generation paused by cache guard; retry".to_string(),
+                    partial_output_emitted: false,
+                })
+            }
         });
         let duration_ms = call_start.elapsed().as_millis() as u64;
         let call_ts_end = chrono::Utc::now().to_rfc3339();
@@ -2076,10 +2151,11 @@ fn convert_results_to_messages(
     original_messages: Vec<ChatMessage>,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
     if results.is_empty() {
-        return Ok(vec![original_messages]);
+        return Err("subchat model returned no output (empty choices)".to_string());
     }
 
     let mut all_choices = vec![];
+    let mut skipped_empty_finish_reason: Option<String> = None;
     for result in results {
         let tool_calls: Option<Vec<_>> = if result.tool_calls_raw.is_empty() {
             None
@@ -2095,6 +2171,16 @@ fn convert_results_to_messages(
                 Some(parsed)
             }
         };
+
+        if tool_calls.is_none() && result.content.trim().is_empty() {
+            skipped_empty_finish_reason = Some(
+                result
+                    .finish_reason
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            );
+            continue;
+        }
 
         let msg = ChatMessage {
             message_id: uuid::Uuid::new_v4().to_string(),
@@ -2121,6 +2207,13 @@ fn convert_results_to_messages(
         let mut extended = original_messages.clone();
         extended.push(msg);
         all_choices.push(extended);
+    }
+
+    if all_choices.is_empty() {
+        return Err(format!(
+            "subchat produced no visible content (finish_reason: {})",
+            skipped_empty_finish_reason.unwrap_or_else(|| "unknown".to_string())
+        ));
     }
 
     Ok(all_choices)

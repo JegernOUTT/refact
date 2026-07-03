@@ -60,6 +60,7 @@ mod tool_tree;
 mod tool_update_goal;
 pub mod tool_update_plan;
 mod tool_validate_goal;
+pub mod tool_goal_pursuit_controls;
 mod tool_web;
 mod tool_web_search;
 

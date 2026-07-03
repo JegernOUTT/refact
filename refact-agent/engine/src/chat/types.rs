@@ -15,9 +15,10 @@ pub use refact_chat_api::chat_local_types::{
 pub use refact_chat_api::{
     ActiveCommandContext, BackgroundAgentSummary, BrowserMeta, BrowserSnapshot, BrowserTabInfo,
     BuddyThreadMeta, ChatCommand, ChatEvent, CommandRequest, CompressionPhase, CompressionReason,
-    DeltaOp, DiffBox, EventEnvelope, GoalAttempt, GoalBudget, GoalEvent, GoalProgress,
-    GoalSnapshot, GoalStatus, PauseReason, QueuedItem, RuntimeState, SessionState, TaskMeta,
-    ThreadParams, TimelineEntry, ToolDecisionItem, WindowBounds, WorktreeMeta,
+    CriterionVerdict, DeltaOp, DiffBox, EventEnvelope, GoalAttempt, GoalBudget, GoalCriterion,
+    GoalEvent, GoalLedgerEntry, GoalLedgerOp, GoalProgress, GoalSnapshot, GoalStatus, PauseReason,
+    QueuedItem, RuntimeState, SessionState, TaskMeta, ThreadParams, TimelineEntry,
+    ToolDecisionItem, WindowBounds, WorktreeMeta,
 };
 
 fn epoch_ms_now() -> u64 {
@@ -41,7 +42,7 @@ pub trait GoalSnapshotBudgetExt {
     fn goal_can_pursue(&self) -> bool;
     fn goal_nudge_ready_at(&self, now_ms: u64) -> bool;
     fn goal_nudge_ready_at_with_backoff(&self, now_ms: u64) -> bool;
-    fn goal_record_progress(&mut self, tokens: u64, made_progress: bool);
+    fn goal_record_progress(&mut self, tokens: u64, made_progress: bool, cost_cents: u64);
     fn goal_record_verifier_attempt(&mut self, tokens: u64);
     fn goal_note_no_progress_turn(&mut self);
     fn goal_record_nudge(&mut self, at_ms: u64);
@@ -52,31 +53,7 @@ pub trait GoalSnapshotBudgetExt {
 
 impl GoalSnapshotBudgetExt for GoalSnapshot {
     fn goal_budget_exhaustion_status_at(&self, now_ms: u64) -> Option<GoalStatus> {
-        if let Some(no_progress_turns) = self.budget.no_progress_turns {
-            if no_progress_turns > 0 && self.progress.no_progress_turns >= no_progress_turns {
-                return Some(GoalStatus::NoProgress);
-            }
-        }
-        if let Some(max_turns) = self.budget.max_turns {
-            if max_turns > 0 && self.progress.turns_used >= max_turns {
-                return Some(GoalStatus::BudgetExhausted);
-            }
-        }
-        if let Some(max_tokens) = self.budget.max_tokens {
-            if max_tokens > 0 && self.progress.tokens_used >= max_tokens {
-                return Some(GoalStatus::BudgetExhausted);
-            }
-        }
-        if let Some(max_minutes) = self.budget.max_minutes {
-            let max_ms = u64::from(max_minutes).saturating_mul(60_000);
-            if max_minutes > 0
-                && self.progress.started_at_ms > 0
-                && now_ms.saturating_sub(self.progress.started_at_ms) >= max_ms
-            {
-                return Some(GoalStatus::BudgetExhausted);
-            }
-        }
-        None
+        refact_chat_api::goal_budget_exhaustion_status(&self.budget, &self.progress, now_ms)
     }
 
     fn goal_budget_exhausted_at(&self, now_ms: u64) -> bool {
@@ -124,12 +101,13 @@ impl GoalSnapshotBudgetExt for GoalSnapshot {
                 .saturating_add(effective_cooldown_ms)
     }
 
-    fn goal_record_progress(&mut self, tokens: u64, made_progress: bool) {
+    fn goal_record_progress(&mut self, tokens: u64, made_progress: bool, cost_cents: u64) {
         if self.progress.started_at_ms == 0 {
             self.progress.started_at_ms = epoch_ms_now();
         }
         self.progress.turns_used = self.progress.turns_used.saturating_add(1);
         self.progress.tokens_used = self.progress.tokens_used.saturating_add(tokens);
+        self.progress.cost_used_cents = self.progress.cost_used_cents.saturating_add(cost_cents);
         if made_progress {
             self.progress.no_progress_turns = 0;
         } else {
@@ -191,6 +169,7 @@ impl GoalSnapshotBudgetExt for GoalSnapshot {
 
     fn goal_reset_no_progress(&mut self) {
         self.progress.no_progress_turns = 0;
+        self.snoozed_until_ms = None;
         if matches!(
             self.status,
             GoalStatus::BudgetExhausted | GoalStatus::NoProgress
@@ -346,4 +325,7 @@ pub struct ChatSession {
     /// every `ChatEvent::Snapshot` carries the current agent set instead of an empty list.
     pub background_agents: HashMap<String, BackgroundAgentSummary>,
     pub goal_stopped_by_abort: bool,
+    pub goal_ledger: Vec<GoalLedgerEntry>,
+    pub goal_turn_evidence: bool,
+    pub goal_verification_blocked_until_ms: Option<u64>,
 }

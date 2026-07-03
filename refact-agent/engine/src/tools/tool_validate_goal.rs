@@ -11,7 +11,7 @@ use crate::chat::goal_verifier::{
     apply_goal_verdict, begin_goal_verification_if_needed, run_goal_verifier,
     GoalVerificationApplyOutcome, GoalVerificationBegin, GoalVerdict,
 };
-use crate::chat::types::{ChatSession, GoalStatus};
+use crate::chat::types::ChatSession;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 pub struct ToolValidateGoal {
@@ -58,9 +58,10 @@ impl Tool for ToolValidateGoal {
         }
         .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
 
-        let begin = {
+        let (begin, epoch) = {
             let mut session = session_arc.lock().await;
-            begin_validate_goal(&mut session)
+            let begin = begin_validate_goal(&mut session);
+            (begin, session.goal_ledger_last_seq())
         };
         match begin {
             GoalVerificationBegin::Started => {}
@@ -75,7 +76,7 @@ impl Tool for ToolValidateGoal {
         let reply = match run_goal_verifier(app, session_arc.clone()).await {
             Ok(reply) => reply,
             Err(error) => {
-                reset_after_verifier_error(session_arc.clone()).await;
+                reset_after_verifier_error(session_arc.clone(), &error).await;
                 return tool_message(
                     tool_call_id,
                     format!("Goal validation could not run: {error}"),
@@ -87,7 +88,7 @@ impl Tool for ToolValidateGoal {
         let verifier_reply = reply.verifier_reply.clone();
         let outcome = {
             let mut session = session_arc.lock().await;
-            apply_goal_verdict(&mut session, "validate_goal", reply)
+            apply_goal_verdict(&mut session, "validate_goal", reply, Some(epoch))
         };
         let content = validation_content(outcome, &verdict, &verifier_reply);
         let extra = validation_extra(outcome, &verdict);
@@ -103,11 +104,10 @@ fn budget_exhausted_message() -> String {
     "Goal budget exhausted — cannot validate; the goal has hit its configured budget. Adjust the budget (set_goal_budget) or stop the goal.".to_string()
 }
 
-async fn reset_after_verifier_error(session_arc: Arc<AMutex<ChatSession>>) {
+async fn reset_after_verifier_error(session_arc: Arc<AMutex<ChatSession>>, error: &str) {
     let mut session = session_arc.lock().await;
-    if session.goal_status == Some(GoalStatus::Verifying) {
-        session.goal_set_status(GoalStatus::Active);
-    }
+    let _ =
+        crate::chat::goal_verifier::handle_verifier_failure(&mut session, "validate_goal", error);
 }
 
 fn validation_content(
@@ -119,7 +119,12 @@ fn validation_content(
         GoalVerificationApplyOutcome::Finalized => {
             format!("GOAL MET — goal marked complete; pursuit disabled.\n\n{verifier_reply}")
         }
-        GoalVerificationApplyOutcome::Rearmed | GoalVerificationApplyOutcome::Continued => {
+        GoalVerificationApplyOutcome::Superseded => {
+            "Goal state changed during validation; verdict discarded.".to_string()
+        }
+        GoalVerificationApplyOutcome::Rearmed
+        | GoalVerificationApplyOutcome::Continued
+        | GoalVerificationApplyOutcome::Stalled => {
             let gaps = match verdict {
                 GoalVerdict::Unmet(gaps) => gaps.as_slice(),
                 GoalVerdict::Met => &[],
@@ -141,7 +146,9 @@ fn validation_extra(
     let marker = match (outcome, verdict) {
         (GoalVerificationApplyOutcome::Finalized, GoalVerdict::Met) => Some("met"),
         (
-            GoalVerificationApplyOutcome::Rearmed | GoalVerificationApplyOutcome::Continued,
+            GoalVerificationApplyOutcome::Rearmed
+            | GoalVerificationApplyOutcome::Continued
+            | GoalVerificationApplyOutcome::Stalled,
             GoalVerdict::Unmet(_),
         ) => Some("unmet"),
         _ => None,
@@ -189,7 +196,7 @@ mod tests {
 
     use crate::app_state::AppState;
     use crate::chat::goal_verifier::GoalVerifierReply;
-    use crate::chat::types::SessionState;
+    use crate::chat::types::{GoalStatus, SessionState};
     use crate::tools::tools_list::get_tools_for_mode;
 
     const CHAT_ID: &str = "validate-goal-chat";
@@ -257,6 +264,7 @@ mod tests {
             max_turns: Some(1),
             max_minutes: None,
             max_tokens: None,
+            max_cost_cents: None,
             cooldown_ms: 1_500,
             no_progress_token_threshold: 50,
             no_progress_turns: Some(1),
@@ -417,11 +425,12 @@ mod tests {
         session.goal_set_status(GoalStatus::Verifying);
         let session_arc = Arc::new(AMutex::new(session));
 
-        reset_after_verifier_error(session_arc.clone()).await;
+        reset_after_verifier_error(session_arc.clone(), "verifier model unavailable").await;
 
         let session = session_arc.lock().await;
         assert_eq!(session.goal_status, Some(GoalStatus::Active));
         assert_eq!(session.runtime.state, SessionState::ExecutingTools);
+        assert!(session.goal_verification_blocked_until_ms.is_some());
     }
 
     #[test]
@@ -453,7 +462,7 @@ mod tests {
         let verdict = reply.verdict.clone();
         let verifier_reply = reply.verifier_reply.clone();
 
-        let outcome = apply_goal_verdict(&mut session, "validate_goal", reply);
+        let outcome = apply_goal_verdict(&mut session, "validate_goal", reply, None);
         let content = validation_content(outcome, &verdict, &verifier_reply);
 
         assert_eq!(outcome, GoalVerificationApplyOutcome::Finalized);
@@ -488,7 +497,7 @@ mod tests {
         let verdict = reply.verdict.clone();
         let verifier_reply = reply.verifier_reply.clone();
 
-        let outcome = apply_goal_verdict(&mut session, "validate_goal", reply);
+        let outcome = apply_goal_verdict(&mut session, "validate_goal", reply, None);
         let content = validation_content(outcome, &verdict, &verifier_reply);
 
         assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);

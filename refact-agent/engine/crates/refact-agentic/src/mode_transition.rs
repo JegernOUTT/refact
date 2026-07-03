@@ -1003,13 +1003,17 @@ fn goal_snapshot_for_transfer(
     let base = current_base_goal_message(messages)?;
     let version = goal_version(base)?;
     let meta = goal_meta(base);
-    let active = meta
-        .and_then(|meta| meta.get("active"))
-        .and_then(|value| value.as_bool())
-        .or_else(|| existing.map(|goal| goal.active))
+    let existing = existing.filter(|goal| goal.version == version);
+    let active = existing
+        .map(|goal| goal.active)
+        .or_else(|| {
+            meta.and_then(|meta| meta.get("active"))
+                .and_then(|value| value.as_bool())
+        })
         .unwrap_or(true);
-    let status = goal_meta_value::<GoalStatus>(meta, "status")
-        .or_else(|| existing.map(|goal| goal.status))
+    let status = existing
+        .map(|goal| goal.status)
+        .or_else(|| goal_meta_value::<GoalStatus>(meta, "status"))
         .unwrap_or(if active {
             GoalStatus::Active
         } else {
@@ -1019,15 +1023,18 @@ fn goal_snapshot_for_transfer(
         .or_else(|| existing.map(|goal| goal.budget.clone()))
         .unwrap_or_default()
         .migrate_legacy_default_hard_limits();
-    let progress = goal_meta_value::<GoalProgress>(meta, "progress")
-        .or_else(|| existing.map(|goal| goal.progress.clone()))
+    let progress = existing
+        .map(|goal| goal.progress.clone())
+        .or_else(|| goal_meta_value::<GoalProgress>(meta, "progress"))
         .unwrap_or_default();
-    let attempts = goal_meta_value(meta, "attempts")
-        .or_else(|| existing.map(|goal| goal.attempts.clone()))
+    let attempts = existing
+        .map(|goal| goal.attempts.clone())
+        .or_else(|| goal_meta_value(meta, "attempts"))
         .unwrap_or_default();
     let meta_events: Option<Vec<GoalEvent>> = goal_meta_value(meta, "events");
-    let events = meta_events
-        .or_else(|| existing.map(|goal| goal.events.clone()))
+    let events = existing
+        .map(|goal| goal.events.clone())
+        .or(meta_events)
         .filter(|events| !events.is_empty())
         .unwrap_or_else(|| goal_events_from_messages(messages));
     Some(GoalSnapshot {
@@ -1039,10 +1046,18 @@ fn goal_snapshot_for_transfer(
         progress,
         attempts,
         events,
-        transferred_from: goal_meta_string(meta, "transferred_from")
-            .or_else(|| existing.and_then(|goal| goal.transferred_from.clone())),
-        transferred_to: goal_meta_string(meta, "transferred_to")
-            .or_else(|| existing.and_then(|goal| goal.transferred_to.clone())),
+        criteria: existing
+            .map(|goal| goal.criteria.clone())
+            .or_else(|| goal_meta_value(meta, "criteria"))
+            .unwrap_or_default(),
+        snoozed_until_ms: existing.and_then(|goal| goal.snoozed_until_ms),
+        stop_reason: existing.and_then(|goal| goal.stop_reason.clone()),
+        transferred_from: existing
+            .and_then(|goal| goal.transferred_from.clone())
+            .or_else(|| goal_meta_string(meta, "transferred_from")),
+        transferred_to: existing
+            .and_then(|goal| goal.transferred_to.clone())
+            .or_else(|| goal_meta_string(meta, "transferred_to")),
     })
 }
 
@@ -1172,7 +1187,7 @@ pub fn transfer_goal_ownership(
             ..Default::default()
         };
     };
-    if !source_snapshot.active || source_snapshot.status == GoalStatus::Transferred {
+    if !source_snapshot.active || source_snapshot.status != GoalStatus::Active {
         return GoalTransferResult {
             source_messages: source_messages.to_vec(),
             ..Default::default()
@@ -1190,10 +1205,10 @@ pub fn transfer_goal_ownership(
     target_goal.version = target_goal_version(source_snapshot.version, target_existing_messages);
     target_goal.active = true;
     target_goal.status = GoalStatus::Active;
-    target_goal.progress = GoalProgress {
-        started_at_ms: at_ms,
-        ..Default::default()
-    };
+    target_goal.progress = source_snapshot.progress.clone();
+    if target_goal.progress.started_at_ms == 0 {
+        target_goal.progress.started_at_ms = at_ms;
+    }
     target_goal.transferred_from = Some(source_chat_id.to_string());
     target_goal.transferred_to = None;
     target_goal.events.push(transfer_goal_event);

@@ -218,11 +218,7 @@ async fn execute_code_review(
         parent_worktree,
     )
     .await?;
-    let review_response = result
-        .messages
-        .last()
-        .cloned()
-        .ok_or("No response from code review")?;
+    let review_response = validate_review_response(&result.messages)?;
 
     let filenames: Vec<String> = important_paths
         .iter()
@@ -247,6 +243,28 @@ async fn execute_code_review(
     let metering = result.metering;
 
     Ok((review_content, metering))
+}
+
+fn validate_review_response(messages: &[ChatMessage]) -> Result<ChatMessage, String> {
+    let last = messages.last().ok_or("No response from code review")?;
+    if last.role != "assistant" {
+        return Err(format!(
+            "code review subagent did not produce a final answer (last message role: {})",
+            last.role
+        ));
+    }
+    let text = last.content.content_text_only();
+    if text.trim().is_empty() {
+        let hint = last
+            .finish_reason
+            .as_deref()
+            .map(|reason| format!(" (finish_reason: {reason})"))
+            .unwrap_or_default();
+        return Err(format!(
+            "code review subagent returned an empty review{hint}"
+        ));
+    }
+    Ok(last.clone())
 }
 
 #[async_trait]
@@ -377,5 +395,52 @@ impl Tool for ToolCodeReview {
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_review_response_rejects_empty_history() {
+        assert!(validate_review_response(&[]).is_err());
+    }
+
+    #[test]
+    fn validate_review_response_rejects_non_assistant_tail() {
+        let prompt_only = vec![ChatMessage::new(
+            "user".to_string(),
+            "review this".to_string(),
+        )];
+        let error = validate_review_response(&prompt_only).unwrap_err();
+        assert!(error.contains("last message role: user"));
+    }
+
+    #[test]
+    fn validate_review_response_rejects_empty_assistant_reply_with_finish_reason_hint() {
+        let empty_reply = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("   ".to_string()),
+            finish_reason: Some("length".to_string()),
+            ..Default::default()
+        }];
+        let error = validate_review_response(&empty_reply).unwrap_err();
+        assert!(error.contains("empty review"));
+        assert!(error.contains("finish_reason: length"));
+    }
+
+    #[test]
+    fn validate_review_response_accepts_fresh_assistant_reply() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "review this".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Looks good".to_string()),
+                ..Default::default()
+            },
+        ];
+        let reply = validate_review_response(&messages).unwrap();
+        assert_eq!(reply.content.content_text_only(), "Looks good");
     }
 }

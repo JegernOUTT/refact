@@ -1533,6 +1533,11 @@ pub async fn process_tool_calls_once(
                 return ToolStepOutcome::Stop;
             }
             GoalCompletionGateOutcome::BudgetExhausted(_) => {}
+            GoalCompletionGateOutcome::VerificationUnavailable
+            | GoalCompletionGateOutcome::VerificationStalled => {
+                let mut session = session_arc.lock().await;
+                session.set_runtime_state(SessionState::Completed, None);
+            }
             GoalCompletionGateOutcome::Aborted => return ToolStepOutcome::Stop,
         }
     }

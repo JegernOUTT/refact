@@ -669,6 +669,7 @@ fn handle_set_goal_command(
     session: &mut ChatSession,
     content: String,
     budget: Option<GoalBudget>,
+    criteria: Option<Vec<GoalCriterion>>,
 ) -> Result<serde_json::Value, String> {
     if content.trim().is_empty() {
         return Err("argument `content` must be non-empty".to_string());
@@ -686,7 +687,13 @@ fn handle_set_goal_command(
         }
         None => GoalBudget::default(),
     };
-    let report = session.install_goal(&current_mode, &content, true, budget);
+    let report = session.install_goal_with_criteria(
+        &current_mode,
+        &content,
+        true,
+        budget,
+        criteria.unwrap_or_default(),
+    );
     session.add_message(internal_roles::event(
         EventSubkind::SystemNotice,
         "chat.command.set_goal",
@@ -730,22 +737,28 @@ fn handle_set_goal_budget_command(
     goal_meta.insert("budget".to_string(), serialized_budget.clone());
 
     session.rebuild_goal_projection_from_messages();
-    if let Some(goal) = session.goal.as_mut() {
+    session.goal_ledger_append(GoalLedgerOp::BudgetSet {
+        budget: budget.clone(),
+    });
+    let budget_status_change = session.goal.as_ref().and_then(|goal| {
         match goal.goal_budget_exhaustion_status_at(epoch_ms_now()) {
-            Some(status) if goal.active => goal.status = status,
+            Some(status) if goal.active && goal.status != status => Some(status),
             None if matches!(
                 goal.status,
                 GoalStatus::BudgetExhausted | GoalStatus::NoProgress
             ) =>
             {
-                goal.status = if goal.active {
+                Some(if goal.active {
                     GoalStatus::Active
                 } else {
                     GoalStatus::Paused
-                };
+                })
             }
-            _ => {}
+            _ => None,
         }
+    });
+    if let Some(status) = budget_status_change {
+        session.goal_set_status_reason(status, "budget_set");
     }
     session.mark_persisted_runtime_changed();
     session.emit_goal_status();
@@ -774,6 +787,18 @@ fn handle_update_goal_command(
     Ok(update_goal_result(seq, truncation))
 }
 
+fn purge_goal_generated_commands(session: &mut ChatSession) -> usize {
+    let before = session.command_queue.len();
+    session.command_queue.retain(|request| {
+        !(matches!(request.command, ChatCommand::Regenerate {})
+            && (request.client_request_id.starts_with("goal-nudge-")
+                || request
+                    .client_request_id
+                    .starts_with("goal-verifier-regenerate-")))
+    });
+    before - session.command_queue.len()
+}
+
 fn handle_goal_control_command(
     session: &mut ChatSession,
     action: String,
@@ -788,8 +813,27 @@ fn handle_goal_control_command(
         "stop" => GoalStatus::Stopped,
         _ => return Err("goal_control action must be pause, resume, or stop".to_string()),
     };
+    if normalized == "resume"
+        && !matches!(
+            session.goal_status,
+            Some(GoalStatus::Paused | GoalStatus::Stopped)
+        )
+    {
+        return Err("goal_control resume requires a paused or stopped goal".to_string());
+    }
     session.clear_goal_stopped_by_abort_marker();
-    session.goal_set_status(status);
+    if matches!(status, GoalStatus::Paused | GoalStatus::Stopped) {
+        purge_goal_generated_commands(session);
+    }
+    session.goal_set_status_reason(status, "goal_control");
+    if status == GoalStatus::Stopped {
+        session.add_message(internal_roles::event(
+            EventSubkind::GoalPursuit,
+            "chat.command.goal_control",
+            serde_json::json!({"kind": "stopped", "trigger": "goal_control", "at_ms": epoch_ms_now()}),
+            "Goal pursuit stopped by user.".to_string(),
+        ));
+    }
     Ok(serde_json::json!({
         "action": normalized,
         "status": status,
@@ -1062,10 +1106,14 @@ pub async fn process_command_queue(
         };
 
         match request.command {
-            ChatCommand::SetGoal { content, budget } => {
+            ChatCommand::SetGoal {
+                content,
+                budget,
+                criteria,
+            } => {
                 let result = {
                     let mut session = session_arc.lock().await;
-                    handle_set_goal_command(&mut session, content, budget)
+                    handle_set_goal_command(&mut session, content, budget, criteria)
                 };
                 match result {
                     Ok(_) => maybe_save_trajectory(app.clone(), session_arc.clone()).await,
@@ -1801,6 +1849,7 @@ pub async fn process_command_queue(
                         );
                         continue;
                     }
+                    crate::chat::trajectory_ops::demote_goal_ownership_for_branch(&mut msgs);
                     let root = source_session
                         .thread
                         .root_chat_id
@@ -2313,6 +2362,11 @@ async fn handle_tool_decisions(
                     return;
                 }
                 GoalCompletionGateOutcome::BudgetExhausted(_) => {}
+                GoalCompletionGateOutcome::VerificationUnavailable
+                | GoalCompletionGateOutcome::VerificationStalled => {
+                    let mut session = session_arc.lock().await;
+                    session.set_runtime_state(SessionState::Completed, None);
+                }
                 GoalCompletionGateOutcome::Aborted => {
                     maybe_save_trajectory(app.clone(), session_arc.clone()).await;
                     return;
@@ -3517,7 +3571,7 @@ mod tests {
         let mut rx = session.subscribe();
 
         let result =
-            handle_set_goal_command(&mut session, "Ship the pond".to_string(), None).unwrap();
+            handle_set_goal_command(&mut session, "Ship the pond".to_string(), None, None).unwrap();
 
         assert_eq!(result, json!({"version": 1, "supersedes": null}));
         let goal = session.goal.as_ref().unwrap();
@@ -3547,6 +3601,7 @@ mod tests {
             max_turns: Some(3),
             max_minutes: Some(4),
             max_tokens: Some(5),
+            max_cost_cents: None,
             cooldown_ms: 1_500,
             no_progress_token_threshold: 50,
             no_progress_turns: Some(6),
@@ -3557,6 +3612,7 @@ mod tests {
             &mut session,
             "Ship the pond".to_string(),
             Some(budget.clone()),
+            None,
         )
         .unwrap();
 
@@ -3578,9 +3634,10 @@ mod tests {
     #[test]
     fn goal_budget_set_goal_command_rejects_when_exists() {
         let mut session = ChatSession::new("goal-command".to_string());
-        handle_set_goal_command(&mut session, "First".to_string(), None).unwrap();
+        handle_set_goal_command(&mut session, "First".to_string(), None, None).unwrap();
 
-        let error = handle_set_goal_command(&mut session, "Second".to_string(), None).unwrap_err();
+        let error =
+            handle_set_goal_command(&mut session, "Second".to_string(), None, None).unwrap_err();
 
         assert_eq!(error, "goal already exists; use update_goal");
         assert_eq!(session.goal.as_ref().unwrap().content, "First");
@@ -3589,11 +3646,12 @@ mod tests {
     #[test]
     fn goal_budget_set_goal_budget_command_replaces_budget_and_projection() {
         let mut session = ChatSession::new("goal-command".to_string());
-        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
+        handle_set_goal_command(&mut session, "Base".to_string(), None, None).unwrap();
         let budget = GoalBudget {
             max_turns: Some(2),
             max_minutes: None,
             max_tokens: Some(1_000),
+            max_cost_cents: None,
             cooldown_ms: 2_000,
             no_progress_token_threshold: 25,
             no_progress_turns: None,
@@ -3615,7 +3673,7 @@ mod tests {
     #[test]
     fn goal_budget_set_goal_budget_legacy_quad_is_stamped_explicit() {
         let mut session = ChatSession::new("goal-command".to_string());
-        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
+        handle_set_goal_command(&mut session, "Base".to_string(), None, None).unwrap();
 
         handle_set_goal_budget_command(&mut session, GoalBudget::legacy_default_hard_limits())
             .unwrap();
@@ -3650,9 +3708,10 @@ mod tests {
     #[test]
     fn goal_budget_set_goal_budget_command_exhausts_when_already_over_limit() {
         let mut session = ChatSession::new("goal-command".to_string());
-        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
+        handle_set_goal_command(&mut session, "Base".to_string(), None, None).unwrap();
         session.goal.as_mut().unwrap().progress.turns_used = 3;
         session.refresh_goal_runtime_mirror();
+        let epoch = session.goal_ledger_last_seq();
 
         handle_set_goal_budget_command(
             &mut session,
@@ -3660,6 +3719,7 @@ mod tests {
                 max_turns: Some(2),
                 max_minutes: None,
                 max_tokens: None,
+                max_cost_cents: None,
                 cooldown_ms: 1_500,
                 no_progress_token_threshold: 50,
                 no_progress_turns: None,
@@ -3673,6 +3733,14 @@ mod tests {
             GoalStatus::BudgetExhausted
         );
         assert_eq!(session.goal_status, Some(GoalStatus::BudgetExhausted));
+        assert!(session.goal_status_changed_since(epoch));
+        assert!(matches!(
+            session.goal_ledger.last().map(|entry| &entry.op),
+            Some(GoalLedgerOp::StatusChanged {
+                to: GoalStatus::BudgetExhausted,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -3682,12 +3750,13 @@ mod tests {
             max_turns: Some(1),
             max_minutes: None,
             max_tokens: None,
+            max_cost_cents: None,
             cooldown_ms: 1_500,
             no_progress_token_threshold: 50,
             no_progress_turns: None,
             explicit: false,
         };
-        handle_set_goal_command(&mut session, "Base".to_string(), Some(budget)).unwrap();
+        handle_set_goal_command(&mut session, "Base".to_string(), Some(budget), None).unwrap();
         session.goal.as_mut().unwrap().progress.turns_used = 1;
         session.goal_set_status(GoalStatus::BudgetExhausted);
         session.messages[0].extra["goal"]["progress"] =
@@ -3727,7 +3796,7 @@ mod tests {
     #[test]
     fn goal_budget_update_goal_command_appends_delta_and_emits_runtime() {
         let mut session = ChatSession::new("goal-command".to_string());
-        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
+        handle_set_goal_command(&mut session, "Base".to_string(), None, None).unwrap();
         let mut rx = session.subscribe();
 
         let result = handle_update_goal_command(&mut session, "Add tests".to_string()).unwrap();
@@ -3751,7 +3820,7 @@ mod tests {
     #[test]
     fn goal_budget_goal_control_command_transitions_status() {
         let mut session = ChatSession::new("goal-command".to_string());
-        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
+        handle_set_goal_command(&mut session, "Base".to_string(), None, None).unwrap();
 
         let paused = handle_goal_control_command(&mut session, "pause".to_string()).unwrap();
         assert_eq!(paused, json!({"action": "pause", "status": "paused"}));
@@ -3772,7 +3841,7 @@ mod tests {
     #[test]
     fn explicit_goal_control_stop_is_not_reactivated_by_next_user_turn() {
         let mut session = ChatSession::new("goal-command".to_string());
-        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
+        handle_set_goal_command(&mut session, "Base".to_string(), None, None).unwrap();
 
         handle_goal_control_command(&mut session, "stop".to_string()).unwrap();
         assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
@@ -3783,9 +3852,83 @@ mod tests {
     }
 
     #[test]
+    fn goal_control_resume_requires_paused_or_stopped() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        handle_set_goal_command(&mut session, "Base".to_string(), None, None).unwrap();
+
+        let error = handle_goal_control_command(&mut session, "resume".to_string()).unwrap_err();
+        assert!(error.contains("paused or stopped"));
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+
+        session.goal_set_status(GoalStatus::Completed);
+        assert!(handle_goal_control_command(&mut session, "resume".to_string()).is_err());
+        assert_eq!(session.goal_status, Some(GoalStatus::Completed));
+
+        session.goal_set_status(GoalStatus::Stopped);
+        handle_goal_control_command(&mut session, "resume".to_string()).unwrap();
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+    }
+
+    #[test]
+    fn goal_control_stop_purges_goal_generated_regenerates_and_records_event() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        handle_set_goal_command(&mut session, "Base".to_string(), None, None).unwrap();
+        session.command_queue.push_back(CommandRequest {
+            client_request_id: "goal-nudge-1".to_string(),
+            priority: true,
+            command: ChatCommand::Regenerate {},
+        });
+        session.command_queue.push_back(CommandRequest {
+            client_request_id: "goal-verifier-regenerate-1".to_string(),
+            priority: true,
+            command: ChatCommand::Regenerate {},
+        });
+        session.command_queue.push_back(CommandRequest {
+            client_request_id: "user-regenerate".to_string(),
+            priority: false,
+            command: ChatCommand::Regenerate {},
+        });
+
+        handle_goal_control_command(&mut session, "stop".to_string()).unwrap();
+
+        assert_eq!(session.command_queue.len(), 1);
+        assert_eq!(
+            session.command_queue.front().unwrap().client_request_id,
+            "user-regenerate"
+        );
+        assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+        let stop_events = session
+            .messages
+            .iter()
+            .filter(|message| {
+                message
+                    .extra
+                    .get("event")
+                    .and_then(|event| event.get("payload"))
+                    .and_then(|payload| payload.get("trigger"))
+                    .and_then(|trigger| trigger.as_str())
+                    == Some("goal_control")
+            })
+            .count();
+        assert_eq!(stop_events, 1);
+    }
+
+    #[test]
+    fn goal_control_stop_survives_projection_rebuild() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        handle_set_goal_command(&mut session, "Base".to_string(), None, None).unwrap();
+
+        handle_goal_control_command(&mut session, "stop".to_string()).unwrap();
+        session.rebuild_goal_projection_from_messages();
+
+        assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+        assert!(!session.goal_can_pursue());
+    }
+
+    #[test]
     fn manual_abort_stop_is_reactivated_by_next_user_turn() {
         let mut session = ChatSession::new("goal-command".to_string());
-        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
+        handle_set_goal_command(&mut session, "Base".to_string(), None, None).unwrap();
 
         assert!(session.stop_goal_on_manual_abort());
         assert_eq!(session.goal_status, Some(GoalStatus::Stopped));

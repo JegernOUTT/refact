@@ -241,6 +241,8 @@ tools:
   - update_goal
   - get_goal
   - validate_goal
+  - pause_goal
+  - snooze_goal
   - process_start
   - process_list
   - process_read
