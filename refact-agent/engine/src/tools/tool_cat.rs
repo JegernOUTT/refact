@@ -37,16 +37,30 @@ pub struct ToolCat {
 const CAT_MAX_IMAGES_CNT: usize = 1;
 const CAT_MAX_LINES: usize = 2000;
 
+type CatLineRange = (usize, usize);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatPathRequest {
+    path: String,
+    line_range: Option<CatLineRange>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatResolvedSource {
+    ExplicitFile,
+    DirectoryExpansion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatResolvedPath {
+    path: String,
+    line_range: Option<CatLineRange>,
+    source: CatResolvedSource,
+}
+
 fn parse_cat_args(
     args: &HashMap<String, Value>,
-) -> Result<
-    (
-        Vec<String>,
-        HashMap<String, Option<(usize, usize)>>,
-        Vec<String>,
-    ),
-    String,
-> {
+) -> Result<(Vec<CatPathRequest>, Vec<String>), String> {
     fn try_parse_line_range(s: &str) -> Result<Option<(usize, usize)>, String> {
         let s = s.trim();
 
@@ -86,7 +100,6 @@ fn parse_cat_args(
     };
 
     let mut paths = Vec::new();
-    let mut path_line_ranges = HashMap::new();
 
     for path_str in raw_paths {
         let (file_path, range) = if let Some(colon_pos) = path_str.rfind(':') {
@@ -99,8 +112,10 @@ fn parse_cat_args(
         } else {
             (path_str, None)
         };
-        path_line_ranges.insert(file_path.clone(), range);
-        paths.push(file_path);
+        paths.push(CatPathRequest {
+            path: file_path,
+            line_range: range,
+        });
     }
 
     let symbols = match args.get("symbols") {
@@ -118,7 +133,7 @@ fn parse_cat_args(
         None => vec![],
     };
 
-    Ok((paths, path_line_ranges, symbols))
+    Ok((paths, symbols))
 }
 
 #[async_trait]
@@ -147,7 +162,7 @@ impl Tool for ToolCat {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let mut corrections = false;
-        let (paths, path_line_ranges, symbols) = parse_cat_args(args)?;
+        let (paths, symbols) = parse_cat_args(args)?;
         let (
             filenames_present,
             symbols_not_found,
@@ -155,13 +170,7 @@ impl Tool for ToolCat {
             context_enums,
             multimodal,
             scope_notices,
-        ) = paths_and_symbols_to_cat_with_path_ranges(
-            ccx.clone(),
-            paths,
-            path_line_ranges,
-            symbols,
-        )
-        .await;
+        ) = paths_and_symbols_to_cat_with_path_ranges(ccx.clone(), paths, symbols).await;
 
         let mut content = format_scope_notices(&scope_notices);
         if !filenames_present.is_empty() {
@@ -351,10 +360,92 @@ async fn load_image(path: &String, f_type: &String) -> Result<MultimodalElement,
     MultimodalElement::new(f_type.clone(), m_content)
 }
 
-pub async fn paths_and_symbols_to_cat_with_path_ranges(
+fn cat_resolved_path_key(path: &str) -> String {
+    refact_core::chat_types::normalize_file_name(path.to_string())
+}
+
+fn push_cat_resolved_path(
+    resolved_paths: &mut Vec<CatResolvedPath>,
+    seen_by_path: &mut HashMap<String, Vec<usize>>,
+    incoming: CatResolvedPath,
+) {
+    let key = cat_resolved_path_key(&incoming.path);
+    if let Some(indices) = seen_by_path.get(&key).cloned() {
+        let has_explicit = indices
+            .iter()
+            .any(|index| resolved_paths[*index].source == CatResolvedSource::ExplicitFile);
+        if incoming.source == CatResolvedSource::DirectoryExpansion && has_explicit {
+            return;
+        }
+
+        for index in &indices {
+            let existing = &mut resolved_paths[*index];
+            if existing.line_range == incoming.line_range {
+                if existing.source == CatResolvedSource::DirectoryExpansion
+                    && incoming.source == CatResolvedSource::ExplicitFile
+                {
+                    existing.source = CatResolvedSource::ExplicitFile;
+                }
+                return;
+            }
+        }
+
+        if incoming.source == CatResolvedSource::ExplicitFile && !has_explicit {
+            if let Some(index) = indices.iter().copied().find(|index| {
+                resolved_paths[*index].source == CatResolvedSource::DirectoryExpansion
+            }) {
+                let existing = &mut resolved_paths[index];
+                existing.line_range = incoming.line_range;
+                existing.source = CatResolvedSource::ExplicitFile;
+                return;
+            }
+        }
+
+        if let Some(incoming_range) = incoming.line_range {
+            for index in &indices {
+                let existing = &mut resolved_paths[*index];
+                if existing.line_range.is_none() {
+                    existing.line_range = Some(incoming_range);
+                    if incoming.source == CatResolvedSource::ExplicitFile {
+                        existing.source = CatResolvedSource::ExplicitFile;
+                    }
+                    return;
+                }
+            }
+        } else if indices
+            .iter()
+            .any(|index| resolved_paths[*index].line_range.is_some())
+        {
+            return;
+        }
+    }
+
+    let index = resolved_paths.len();
+    resolved_paths.push(incoming);
+    seen_by_path.entry(key).or_default().push(index);
+}
+
+fn push_cat_resolved_file(
+    resolved_paths: &mut Vec<CatResolvedPath>,
+    seen_by_path: &mut HashMap<String, Vec<usize>>,
+    path: String,
+    line_range: Option<CatLineRange>,
+    source: CatResolvedSource,
+) {
+    push_cat_resolved_path(
+        resolved_paths,
+        seen_by_path,
+        CatResolvedPath {
+            path,
+            line_range,
+            source,
+        },
+    );
+}
+
+async fn paths_and_symbols_to_cat_with_path_ranges(
     ccx: Arc<AMutex<AtCommandsContext>>,
-    paths: Vec<String>,
-    path_line_ranges: HashMap<String, Option<(usize, usize)>>,
+    paths: Vec<CatPathRequest>,
     arg_symbols: Vec<String>,
 ) -> (
     Vec<String>,
@@ -374,10 +465,12 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
     };
     let mut not_found_messages = vec![];
     let mut scope_notices = vec![];
-    let mut corrected_paths = vec![];
-    let mut corrected_path_to_original = HashMap::new();
+    let mut resolved_paths = vec![];
+    let mut seen_by_path = HashMap::new();
 
-    for p in paths {
+    for request in paths {
+        let line_range = request.line_range;
+        let p = request.path;
         if execution_scope
             .as_ref()
             .map(|scope| scope.is_enforced())
@@ -399,16 +492,26 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
                             Ok(files_in_dir) => {
                                 for file in files_in_dir {
                                     let file_str = file.to_string_lossy().to_string();
-                                    corrected_paths.push(file_str.clone());
-                                    corrected_path_to_original.insert(file_str, p.clone());
+                                    push_cat_resolved_file(
+                                        &mut resolved_paths,
+                                        &mut seen_by_path,
+                                        file_str,
+                                        line_range,
+                                        CatResolvedSource::DirectoryExpansion,
+                                    );
                                 }
                             }
                             Err(e) => not_found_messages.push(e),
                         }
                     } else if resolved.path.is_file() {
                         let file_str = resolved.path.to_string_lossy().to_string();
-                        corrected_paths.push(file_str.clone());
-                        corrected_path_to_original.insert(file_str, p.clone());
+                        push_cat_resolved_file(
+                            &mut resolved_paths,
+                            &mut seen_by_path,
+                            file_str,
+                            line_range,
+                            CatResolvedSource::ExplicitFile,
+                        );
                     } else {
                         not_found_messages.push(format!(
                             "Path '{}' is not a file or directory",
@@ -450,8 +553,13 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
                     continue;
                 }
             };
-            corrected_paths.push(file_path.clone());
-            corrected_path_to_original.insert(file_path, path.clone());
+            push_cat_resolved_file(
+                &mut resolved_paths,
+                &mut seen_by_path,
+                file_path,
+                line_range,
+                CatResolvedSource::ExplicitFile,
+            );
         } else {
             let candidate = match return_one_candidate_or_a_good_error(
                 gcx.clone(),
@@ -474,17 +582,16 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
             let files_in_dir = ls_files(&indexing_everywhere, &path_buf, false).unwrap_or(vec![]);
             for file in files_in_dir {
                 let file_str = file.to_string_lossy().to_string();
-                corrected_paths.push(file_str.clone());
-                corrected_path_to_original.insert(file_str, path.clone());
+                push_cat_resolved_file(
+                    &mut resolved_paths,
+                    &mut seen_by_path,
+                    file_str,
+                    line_range,
+                    CatResolvedSource::DirectoryExpansion,
+                );
             }
         }
     }
-
-    let unique_paths = corrected_paths
-        .into_iter()
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
 
     let mut context_enums = vec![];
     let mut symbols_found = HashSet::<String>::new();
@@ -494,9 +601,9 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
 
     let codegraph_opt = gcx.codegraph.lock().await.clone();
     if let Some(service) = &codegraph_opt {
-        for p in unique_paths.iter() {
-            let original_path = corrected_path_to_original.get(p).unwrap_or(p);
-            let line_range = path_line_ranges.get(original_path).cloned().flatten();
+        for request in resolved_paths.iter() {
+            let p = &request.path;
+            let line_range = request.line_range;
 
             let doc_syms = service.doc_defs(p).await.unwrap_or_default();
             // s.name() means the last part of the path
@@ -568,12 +675,12 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
         .collect::<Vec<_>>();
 
     let mut image_counter = 0;
-    for p in unique_paths
+    for request in resolved_paths
         .iter()
-        .filter(|x| !filenames_got_symbols_for.contains(x))
+        .filter(|request| !filenames_got_symbols_for.contains(&request.path))
     {
-        let original_path = corrected_path_to_original.get(p).unwrap_or(p);
-        let line_range = path_line_ranges.get(original_path).cloned().flatten();
+        let p = &request.path;
+        let line_range = request.line_range;
 
         let path_buf = PathBuf::from(p);
         if let Err(e) = check_file_privacy_for_send(gcx.clone(), &path_buf).await {
@@ -589,7 +696,7 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
             image_counter += 1;
             if image_counter > CAT_MAX_IMAGES_CNT {
                 if image_counter == CAT_MAX_IMAGES_CNT + 1 {
-                    not_found_messages.push(format!("⚠️ showing 1 of {} images (limit: 1). 💡 Call cat() separately for each image", unique_paths.iter().filter(|x| get_file_type(&PathBuf::from(*x)).starts_with("image/")).count()));
+                    not_found_messages.push(format!("⚠️ showing 1 of {} images (limit: 1). 💡 Call cat() separately for each image", resolved_paths.iter().filter(|request| get_file_type(&PathBuf::from(&request.path)).starts_with("image/")).count()));
                 }
                 continue;
             }
@@ -666,4 +773,168 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
         multimodal,
         scope_notices,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::AppState;
+    use crate::privacy::{FilePrivacySettings, PrivacySettings};
+
+    async fn ccx_for_root(root: &std::path::Path) -> Arc<AMutex<AtCommandsContext>> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![canonical_path(root.to_string_lossy())];
+        *gcx.privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
+            privacy_rules: FilePrivacySettings {
+                only_send_to_servers_I_control: vec![],
+                blocked: vec![],
+            },
+            loaded_ts: u64::MAX / 2,
+        });
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "test-chat".to_string(),
+                None,
+                "test-model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ))
+    }
+
+    fn cat_args(paths: String) -> HashMap<String, Value> {
+        HashMap::from_iter([("paths".to_string(), Value::String(paths))])
+    }
+
+    fn normalized(path: &std::path::Path) -> String {
+        refact_core::chat_types::normalize_file_name(path.to_string_lossy().to_string())
+    }
+
+    fn context_file_ranges(results: &[ContextEnum]) -> Vec<(String, usize, usize)> {
+        results
+            .iter()
+            .filter_map(|item| match item {
+                ContextEnum::ContextFile(file) => {
+                    Some((file.file_name.clone(), file.line1, file.line2))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn tool_text(results: &[ContextEnum]) -> String {
+        results
+            .iter()
+            .filter_map(|item| match item {
+                ContextEnum::ChatMessage(message) => match &message.content {
+                    ChatContent::SimpleText(text) => Some(text.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn write_lines(path: &std::path::Path, lines: usize) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let content = (1..=lines)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, format!("{content}\n")).unwrap();
+    }
+
+    async fn run_cat(ccx: Arc<AMutex<AtCommandsContext>>, paths: String) -> Vec<ContextEnum> {
+        let mut tool = ToolCat {
+            config_path: String::new(),
+        };
+        let (_, results) = tool
+            .tool_execute(ccx, &"cat-call".to_string(), &cat_args(paths))
+            .await
+            .unwrap();
+        results
+    }
+
+    #[tokio::test]
+    async fn tool_cat_duplicate_path_keeps_explicit_range_before_unbounded() {
+        let temp = tempfile::Builder::new()
+            .prefix("refact-tool-cat-")
+            .tempdir()
+            .unwrap();
+        let file = temp.path().join("f.rs");
+        write_lines(&file, 8);
+        let ccx = ccx_for_root(temp.path()).await;
+
+        let results = run_cat(
+            ccx,
+            format!("{}:2-4,{}", file.to_string_lossy(), file.to_string_lossy()),
+        )
+        .await;
+
+        assert_eq!(
+            context_file_ranges(&results),
+            vec![(normalized(&file), 2, 4)],
+            "{}",
+            tool_text(&results)
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_cat_duplicate_explicit_ranges_remain_distinct_and_ordered() {
+        let temp = tempfile::Builder::new()
+            .prefix("refact-tool-cat-")
+            .tempdir()
+            .unwrap();
+        let file = temp.path().join("f.rs");
+        write_lines(&file, 8);
+        let ccx = ccx_for_root(temp.path()).await;
+
+        let results = run_cat(
+            ccx,
+            format!(
+                "{}:2-3,{}:6-7",
+                file.to_string_lossy(),
+                file.to_string_lossy()
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            context_file_ranges(&results),
+            vec![(normalized(&file), 2, 3), (normalized(&file), 6, 7)]
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_cat_explicit_file_range_wins_over_directory_expansion() {
+        let temp = tempfile::Builder::new()
+            .prefix("refact-tool-cat-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path().join("src");
+        let other = dir.join("a.rs");
+        let file = dir.join("z.rs");
+        write_lines(&other, 4);
+        write_lines(&file, 8);
+        let ccx = ccx_for_root(temp.path()).await;
+
+        let results = run_cat(
+            ccx,
+            format!("{}:3-5,{}", file.to_string_lossy(), dir.to_string_lossy()),
+        )
+        .await;
+
+        assert_eq!(
+            context_file_ranges(&results),
+            vec![(normalized(&file), 3, 5), (normalized(&other), 1, 4)]
+        );
+    }
 }
