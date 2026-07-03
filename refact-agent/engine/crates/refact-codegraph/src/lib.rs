@@ -12,7 +12,7 @@ pub mod symbols_fmt;
 
 pub use retrieval::CodeHit;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
@@ -70,6 +70,50 @@ pub struct CodeGraphService {
     graph_generation: AtomicU64,
     analytics_cache: AMutex<Option<CachedGraphAnalytics>>,
     analytics_rebuild_count: AtomicUsize,
+}
+
+fn normalize_indexed_path(path: &str) -> String {
+    let mut normalized = path.trim().replace('\\', "/");
+    while let Some(stripped) = normalized.strip_prefix("./") {
+        normalized = stripped.to_string();
+    }
+    normalized
+}
+
+fn matches_indexed_path(requested: &str, indexed: &str) -> bool {
+    requested == indexed
+        || requested.ends_with(&format!("/{indexed}"))
+        || indexed.ends_with(&format!("/{requested}"))
+}
+
+fn resolve_indexed_paths(requested: &[String], indexed: &[String]) -> Vec<String> {
+    requested
+        .iter()
+        .map(|path| {
+            let normalized = normalize_indexed_path(path);
+            if let Some(indexed_path) = indexed
+                .iter()
+                .find(|indexed_path| normalize_indexed_path(indexed_path) == normalized)
+            {
+                return indexed_path.clone();
+            }
+
+            let candidates = indexed
+                .iter()
+                .filter(|indexed_path| {
+                    let indexed_normalized = normalize_indexed_path(indexed_path);
+                    matches_indexed_path(&normalized, &indexed_normalized)
+                })
+                .collect::<Vec<_>>();
+            if candidates.len() == 1 {
+                candidates[0].clone()
+            } else {
+                normalized
+            }
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 enum AnalyticsRebuildPause {
@@ -460,8 +504,12 @@ impl CodeGraphService {
         changed_files: &[String],
         max_depth: usize,
     ) -> Result<pr_blast::BlastReport, String> {
-        self.with_read_store(|store| pr_blast::blast_radius(store, changed_files, max_depth))
-            .await
+        self.with_read_store(|store| {
+            let indexed_paths = store.all_paths()?;
+            let changed_files = resolve_indexed_paths(changed_files, &indexed_paths);
+            pr_blast::blast_radius(store, &changed_files, max_depth)
+        })
+        .await
     }
 
     pub async fn type_hierarchy(&self, subtree_of: &str) -> Result<String, String> {
@@ -636,6 +684,56 @@ mod tests {
 
         assert_eq!(service.analytics_rebuild_count(), 2);
         assert_ne!(first.node_count, third.node_count);
+    }
+
+    #[tokio::test]
+    async fn pr_blast_resolves_noncanonical_changed_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let indexed_core = repo.join("src/core.rs").to_string_lossy().to_string();
+        let indexed_caller = repo.join("src/caller.rs").to_string_lossy().to_string();
+        let service = CodeGraphService::open_in_memory().unwrap();
+        service
+            .index_file(&indexed_core, "pub fn core() {}\n", "rust")
+            .await
+            .unwrap();
+        service
+            .index_file(&indexed_caller, "fn caller() { core(); }\n", "rust")
+            .await
+            .unwrap();
+        service.connect_usages().await.unwrap();
+
+        let report = service
+            .pr_blast(&[" .\\src\\core.rs ".to_string()], 2)
+            .await
+            .unwrap();
+
+        assert_eq!(report.changed_files, vec![indexed_core]);
+        assert!(report
+            .directly_impacted
+            .iter()
+            .any(|impact| impact.path == indexed_caller && impact.symbol == "caller"));
+    }
+
+    #[tokio::test]
+    async fn pr_blast_keeps_unresolvable_changed_paths_empty() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        service
+            .index_file("src/core.rs", "pub fn core() {}\n", "rust")
+            .await
+            .unwrap();
+        service.connect_usages().await.unwrap();
+
+        let report = service
+            .pr_blast(&["missing.rs".to_string()], 2)
+            .await
+            .unwrap();
+
+        assert_eq!(report.changed_files, vec!["missing.rs".to_string()]);
+        assert!(report.directly_impacted.is_empty());
+        assert!(report.transitively_impacted.is_empty());
+        assert_eq!(report.risk_score, 0.0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

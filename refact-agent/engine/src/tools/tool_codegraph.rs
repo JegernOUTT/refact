@@ -107,39 +107,6 @@ fn optional_usize_arg(
     }
 }
 
-fn normalize_indexed_path(path: &str) -> String {
-    path.replace('\\', "/").trim_start_matches("./").to_string()
-}
-
-fn resolve_indexed_paths(requested: Vec<String>, indexed: &[String]) -> Vec<String> {
-    requested
-        .into_iter()
-        .map(|path| {
-            let normalized = normalize_indexed_path(&path);
-            if let Some(indexed_path) = indexed.iter().find(|indexed_path| {
-                indexed_path.as_str() == path || normalize_indexed_path(indexed_path) == normalized
-            }) {
-                return indexed_path.clone();
-            }
-
-            let suffix = format!("/{normalized}");
-            let candidates = indexed
-                .iter()
-                .filter(|indexed_path| {
-                    let indexed_normalized = normalize_indexed_path(indexed_path);
-                    indexed_normalized.ends_with(&suffix)
-                        || normalized.ends_with(&indexed_normalized)
-                })
-                .collect::<Vec<_>>();
-            if candidates.len() == 1 {
-                candidates[0].clone()
-            } else {
-                path
-            }
-        })
-        .collect()
-}
-
 async fn project_dir(gcx: Arc<crate::global_context::GlobalContext>) -> Option<PathBuf> {
     crate::files_correction::get_project_dirs(gcx)
         .await
@@ -1280,8 +1247,6 @@ impl Tool for ToolPrBlast {
             .await
             .clone()
             .ok_or_else(|| "codegraph is not available".to_string())?;
-        let indexed_paths = service.all_paths().await?;
-        let changed_files = resolve_indexed_paths(changed_files, &indexed_paths);
         let report = service.pr_blast(&changed_files, max_depth).await?;
         let reviewers = refact_codegraph::pr_blast::reviewers_for_blast(&report);
 

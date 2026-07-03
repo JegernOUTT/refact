@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -219,10 +219,14 @@ pub async fn handle_v1_code_intel_graph(
         .unwrap_or(DEFAULT_GRAPH_LIMIT)
         .clamp(1, MAX_GRAPH_LIMIT);
 
-    let overview = service.overview(limit).await.map_err(store_error)?;
-    let nodes = service.graph_nodes().await.map_err(store_error)?;
-    let edges = service.graph_edges().await.map_err(store_error)?;
-    let selected = select_graph_node_ids(&nodes, &overview, limit);
+    let cached = service
+        .cached_graph_analytics()
+        .await
+        .map_err(store_error)?;
+    let nodes = cached.data.nodes;
+    let edges = cached.data.edges;
+    let node_centrality = cached.analytics.node_centrality.truncated(limit);
+    let selected = select_graph_node_ids(&nodes, &node_centrality, limit);
 
     let mut response_nodes = nodes
         .into_iter()
@@ -260,23 +264,23 @@ pub async fn handle_v1_code_intel_graph(
 
 fn select_graph_node_ids(
     nodes: &[refact_codegraph::analytics::GraphNode],
-    overview: &refact_codegraph::analytics::GraphOverview,
+    node_centrality: &refact_codegraph::analytics::NodeCentrality,
     limit: usize,
 ) -> BTreeSet<i64> {
-    let mut rank_by_name = HashMap::new();
-    for (index, (name, _)) in overview.top_pagerank.iter().enumerate() {
-        rank_by_name.entry(name.clone()).or_insert(index);
+    let mut rank_by_id = std::collections::HashMap::new();
+    for (index, (id, _)) in node_centrality.top_pagerank.iter().enumerate() {
+        rank_by_id.entry(*id).or_insert(index);
     }
-    let offset = overview.top_pagerank.len();
-    for (index, (name, _)) in overview.top_betweenness.iter().enumerate() {
-        rank_by_name.entry(name.clone()).or_insert(offset + index);
+    let offset = node_centrality.top_pagerank.len();
+    for (index, (id, _)) in node_centrality.top_betweenness.iter().enumerate() {
+        rank_by_id.entry(*id).or_insert(offset + index);
     }
 
     let mut ranked = nodes
         .iter()
         .map(|(id, name, path)| {
             (
-                rank_by_name.get(name).copied().unwrap_or(usize::MAX),
+                rank_by_id.get(id).copied().unwrap_or(usize::MAX),
                 *id,
                 name.as_str(),
                 path.as_str(),
@@ -443,6 +447,34 @@ mod tests {
         make_refact_http_server(app)
     }
 
+    async fn router_with_absolute_codegraph() -> (axum::Router, String) {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let core_path = repo.join("src/core.rs").to_string_lossy().to_string();
+        let caller_path = repo.join("src/caller.rs").to_string_lossy().to_string();
+        let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        codegraph
+            .index_file(&core_path, "pub fn core() {}\n", "rust")
+            .await
+            .unwrap();
+        codegraph
+            .index_file(&caller_path, "fn caller() { core(); }\n", "rust")
+            .await
+            .unwrap();
+        codegraph.connect_usages().await.unwrap();
+        *gcx.codegraph.lock().await = Some(codegraph);
+        let app = AppState::from_gcx(gcx).await;
+        (make_refact_http_server(app), caller_path)
+    }
+
+    async fn router_without_codegraph() -> axum::Router {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        make_refact_http_server(app)
+    }
+
     async fn get_json(router: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
         let response = router
             .oneshot(
@@ -460,28 +492,82 @@ mod tests {
         (status, json)
     }
 
-    #[tokio::test]
-    async fn code_intel_overview_off_returns_detail() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-        let router = make_refact_http_server(app);
+    async fn post_json(
+        router: axum::Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body()).await.unwrap();
+        let json = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
 
-        let (status, json) = get_json(router, "/v1/code-intel/overview").await;
+    async fn assert_get_off_detail(uri: &str) {
+        let router = router_without_codegraph().await;
+
+        let (status, json) = get_json(router, uri).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json, serde_json::json!({"detail": "codegraph turned off"}));
+    }
+
+    async fn assert_post_off_detail(uri: &str, body: serde_json::Value) {
+        let router = router_without_codegraph().await;
+
+        let (status, json) = post_json(router, uri, body).await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json, serde_json::json!({"detail": "codegraph turned off"}));
     }
 
     #[tokio::test]
+    async fn code_intel_overview_off_returns_detail() {
+        assert_get_off_detail("/v1/code-intel/overview").await;
+    }
+
+    #[tokio::test]
     async fn code_intel_graph_off_returns_detail() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx).await;
-        let router = make_refact_http_server(app);
+        assert_get_off_detail("/v1/code-intel/graph").await;
+    }
 
-        let (status, json) = get_json(router, "/v1/code-intel/graph").await;
+    #[tokio::test]
+    async fn code_intel_communities_off_returns_detail() {
+        assert_get_off_detail("/v1/code-intel/communities").await;
+    }
 
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json, serde_json::json!({"detail": "codegraph turned off"}));
+    #[tokio::test]
+    async fn code_intel_dead_code_off_returns_detail() {
+        assert_get_off_detail("/v1/code-intel/dead-code").await;
+    }
+
+    #[tokio::test]
+    async fn code_intel_pr_blast_off_returns_detail() {
+        assert_post_off_detail(
+            "/v1/code-intel/pr-blast",
+            serde_json::json!({"changed_files": ["src/lib.rs"]}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn code_intel_security_scan_off_returns_detail() {
+        assert_post_off_detail(
+            "/v1/code-intel/security-scan",
+            serde_json::json!({"lang": "rust", "text": "fn main() {}"}),
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -519,5 +605,45 @@ mod tests {
         assert!(nodes[0]["name"].is_string());
         assert_eq!(nodes[0]["path"], "src/lib.rs");
         assert!(json["edges"].is_array());
+    }
+
+    #[test]
+    fn code_intel_graph_selection_uses_node_ids_for_duplicate_names() {
+        let nodes = vec![
+            (1, "render".to_string(), "src/a.rs".to_string()),
+            (2, "render".to_string(), "src/b.rs".to_string()),
+            (3, "helper".to_string(), "src/c.rs".to_string()),
+        ];
+        let centrality = refact_codegraph::analytics::NodeCentrality {
+            top_pagerank: vec![(2, 10.0), (3, 9.0), (1, 1.0)],
+            top_betweenness: Vec::new(),
+        };
+
+        let selected = select_graph_node_ids(&nodes, &centrality, 1);
+
+        assert_eq!(selected, BTreeSet::from([2]));
+    }
+
+    #[tokio::test]
+    async fn code_intel_pr_blast_resolves_noncanonical_path() {
+        let (router, caller_path) = router_with_absolute_codegraph().await;
+
+        let (status, json) = post_json(
+            router,
+            "/v1/code-intel/pr-blast",
+            serde_json::json!({"changed_files": [" .\\src\\core.rs "], "max_depth": 2}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["impacted_file_count"], 1);
+        assert!(json["directly_impacted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |impact| impact["path"].as_str() == Some(caller_path.as_str())
+                    && impact["symbol"].as_str() == Some("caller")
+            ));
     }
 }

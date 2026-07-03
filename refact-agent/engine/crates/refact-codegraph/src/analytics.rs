@@ -190,9 +190,25 @@ impl FileCentrality {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeCentrality {
+    pub top_pagerank: Vec<(i64, f64)>,
+    pub top_betweenness: Vec<(i64, f64)>,
+}
+
+impl NodeCentrality {
+    pub fn truncated(&self, top_n: usize) -> Self {
+        let mut centrality = self.clone();
+        centrality.top_pagerank.truncate(top_n);
+        centrality.top_betweenness.truncate(top_n);
+        centrality
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphAnalytics {
     pub overview: GraphOverview,
     pub file_centrality: FileCentrality,
+    pub node_centrality: NodeCentrality,
 }
 
 pub fn compute_graph_analytics(store: &Store) -> Result<GraphAnalytics, String> {
@@ -235,6 +251,16 @@ pub fn compute_graph_analytics_from_data(data: &GraphData) -> GraphAnalytics {
         scored
     };
 
+    let rank_nodes = |m: &HashMap<NodeIndex, f64>| -> Vec<(i64, f64)> {
+        let mut scored: Vec<(i64, f64)> = m.iter().map(|(ni, score)| (g[*ni], *score)).collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored
+    };
+
     let rank_files = |m: &HashMap<NodeIndex, f64>| -> Vec<(String, f64)> {
         let mut by_path: HashMap<String, f64> = HashMap::new();
         for (ni, score) in m {
@@ -269,6 +295,10 @@ pub fn compute_graph_analytics_from_data(data: &GraphData) -> GraphAnalytics {
         file_centrality: FileCentrality {
             top_pagerank: rank_files(&pr),
             top_betweenness: rank_files(&bc),
+        },
+        node_centrality: NodeCentrality {
+            top_pagerank: rank_nodes(&pr),
+            top_betweenness: rank_nodes(&bc),
         },
     }
 }
