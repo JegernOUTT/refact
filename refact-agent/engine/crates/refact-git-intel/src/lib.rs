@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use git2::{Commit, ErrorClass, ErrorCode, Oid, Repository, Revwalk};
 use serde::{Deserialize, Serialize};
@@ -135,6 +136,21 @@ fn temporal_weight(now_ts: i64, ts: i64) -> f64 {
         .clamp(0.0, 1.0)
 }
 
+fn current_unix_ts() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or(0)
+}
+
+fn saturating_usize_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn saturating_sum_u32(values: impl Iterator<Item = u32>) -> u32 {
+    values.fold(0_u32, |total, value| total.saturating_add(value))
+}
+
 fn window_secs(days: i64) -> Option<i64> {
     if days < 0 {
         return None;
@@ -242,21 +258,24 @@ fn mine_history_from_revwalk(
         let file_stats = changed_files_with_stats(repo, &commit);
         let files: Vec<String> = file_stats.iter().map(|(path, _, _)| path.clone()).collect();
 
-        intel.commits_analyzed += 1;
+        intel.commits_analyzed = intel.commits_analyzed.saturating_add(1);
         for f in &files {
-            *intel.file_churn.entry(f.clone()).or_default() += 1;
-            *intel
+            let churn = intel.file_churn.entry(f.clone()).or_default();
+            *churn = churn.saturating_add(1);
+            let author_count = intel
                 .file_authors
                 .entry(f.clone())
                 .or_default()
                 .entry(author.clone())
-                .or_default() += 1;
+                .or_default();
+            *author_count = author_count.saturating_add(1);
         }
         if files.len() <= MAX_FILES_PER_COMMIT_FOR_COCHANGE {
             for a in 0..files.len() {
                 for b in (a + 1)..files.len() {
                     let key = (files[a].clone(), files[b].clone());
-                    *intel.co_change.entry(key).or_default() += 1;
+                    let count = intel.co_change.entry(key).or_default();
+                    *count = count.saturating_add(1);
                 }
             }
         }
@@ -291,7 +310,7 @@ impl GitIntel {
         let Some(authors) = self.file_authors.get(file) else {
             return vec![];
         };
-        let total: u32 = authors.values().sum();
+        let total: u64 = authors.values().map(|commits| u64::from(*commits)).sum();
         let mut v: Vec<Ownership> = authors
             .iter()
             .map(|(author, commits)| Ownership {
@@ -320,7 +339,7 @@ impl GitIntel {
             .iter()
             .filter(|commit| commit_in_window(commit, now_ts, window_secs))
             .filter(|commit| commit.files.iter().any(|(path, _, _)| path == file))
-            .count() as u32
+            .fold(0_u32, |total, _| total.saturating_add(1))
     }
 
     pub fn lines_in_window(&self, file: &str, now_ts: i64, days: i64) -> (u32, u32) {
@@ -361,10 +380,11 @@ impl GitIntel {
             .filter(|commit| commit_in_window(commit, now_ts, window_secs))
         {
             if commit.files.iter().any(|(path, _, _)| path == file) {
-                *counts.entry(commit.author.clone()).or_default() += 1;
+                let count = counts.entry(commit.author.clone()).or_default();
+                *count = count.saturating_add(1);
             }
         }
-        let total: u32 = counts.values().sum();
+        let total: u64 = counts.values().map(|count| u64::from(*count)).sum();
         if total == 0 {
             return (String::new(), 0.0);
         }
@@ -383,7 +403,8 @@ impl GitIntel {
             .filter(|commit| commit_in_window(commit, now_ts, window_secs))
             .map(|commit| commit.author.clone())
             .collect::<HashSet<_>>()
-            .len() as u32
+            .len()
+            .min(u32::MAX as usize) as u32
     }
 
     pub fn churn_percentile(&self, file: &str) -> f64 {
@@ -468,7 +489,8 @@ impl GitIntel {
         for commit in &self.commit_records {
             let weight = temporal_weight(now_ts, commit.ts);
             for (path, added, deleted) in &commit.files {
-                let lines = ((*added + *deleted) as f64 / 100.0).min(3.0);
+                let lines =
+                    (u64::from(*added).saturating_add(u64::from(*deleted)) as f64 / 100.0).min(3.0);
                 *scores.entry(path.clone()).or_default() += weight * lines;
             }
         }
@@ -479,7 +501,10 @@ impl GitIntel {
     }
 
     pub fn change_entropy(&self) -> HashMap<String, f64> {
-        let now_ts = self.commit_records.iter().map(|c| c.ts).max().unwrap_or(0);
+        self.change_entropy_at(current_unix_ts())
+    }
+
+    pub fn change_entropy_at(&self, now_ts: i64) -> HashMap<String, f64> {
         let mut out = HashMap::new();
         for commit in &self.commit_records {
             let n = commit.files.len();
@@ -499,14 +524,18 @@ impl GitIntel {
             .iter()
             .enumerate()
             .map(|(idx, commit)| {
-                let la: u32 = commit.files.iter().map(|(_, added, _)| *added).sum();
-                let ld: u32 = commit.files.iter().map(|(_, _, deleted)| *deleted).sum();
-                let churns: Vec<u32> = commit
+                let la = saturating_sum_u32(commit.files.iter().map(|(_, added, _)| *added));
+                let ld = saturating_sum_u32(commit.files.iter().map(|(_, _, deleted)| *deleted));
+                let churns: Vec<u64> = commit
                     .files
                     .iter()
-                    .map(|(_, added, deleted)| *added + *deleted)
+                    .map(|(_, added, deleted)| {
+                        u64::from(*added).saturating_add(u64::from(*deleted))
+                    })
                     .collect();
-                let total: u32 = churns.iter().sum();
+                let total = churns
+                    .iter()
+                    .fold(0_u64, |total, churn| total.saturating_add(*churn));
                 let entropy = if total == 0 {
                     0.0
                 } else {
@@ -524,7 +553,7 @@ impl GitIntel {
                     ChangeFeatures {
                         la,
                         ld,
-                        nf: commit.files.len() as u32,
+                        nf: saturating_usize_to_u32(commit.files.len()),
                         entropy,
                     },
                 )
@@ -534,7 +563,7 @@ impl GitIntel {
 
     pub fn ownership_risk(&self, file: &str) -> bool {
         let owners = self.ownership(file);
-        let total: u32 = owners.iter().map(|o| o.commits).sum();
+        let total: u64 = owners.iter().map(|o| u64::from(o.commits)).sum();
         if total < 5 {
             return false;
         }
@@ -553,10 +582,12 @@ impl GitIntel {
     }
 
     pub fn churn_risk(&self, file: &str) -> f64 {
-        let mut churn_by_file: HashMap<String, u32> = HashMap::new();
+        let mut churn_by_file: HashMap<String, u64> = HashMap::new();
         for commit in &self.commit_records {
             for (path, added, deleted) in &commit.files {
-                *churn_by_file.entry(path.clone()).or_default() += added + deleted;
+                let churn = u64::from(*added).saturating_add(u64::from(*deleted));
+                let total = churn_by_file.entry(path.clone()).or_default();
+                *total = total.saturating_add(churn);
             }
         }
         let mut max_relative: f64 = 0.0;
@@ -986,9 +1017,47 @@ mod tests {
                 files: (0..31).map(|i| (format!("l{i}.rs"), 1, 0)).collect(),
             },
         ];
-        let entropy = intel.change_entropy();
+        let entropy = intel.change_entropy_at(100);
         assert!((entropy["a.rs"] - 0.5).abs() < 1e-9);
         assert!(!entropy.contains_key("l0.rs"));
+    }
+
+    #[test]
+    fn change_entropy_uses_injected_now_not_latest_commit_timestamp() {
+        let now = 1_700_000_000;
+        let day = 86_400;
+        let past = CommitRecord {
+            oid: None,
+            ts: now - 180 * day,
+            author: "a@x.com".into(),
+            committer: "a@x.com".into(),
+            message: "past".into(),
+            files: vec![(("past_a.rs").into(), 1, 0), (("past_b.rs").into(), 1, 0)],
+        };
+        let future = CommitRecord {
+            oid: None,
+            ts: now + 365 * day,
+            author: "a@x.com".into(),
+            committer: "a@x.com".into(),
+            message: "future".into(),
+            files: vec![
+                (("future_a.rs").into(), 1, 0),
+                (("future_b.rs").into(), 1, 0),
+            ],
+        };
+        let mut with_future = GitIntel::default();
+        with_future.commit_records = vec![past.clone(), future];
+        let mut without_future = GitIntel::default();
+        without_future.commit_records = vec![past];
+
+        let entropy_with_future = with_future.change_entropy_at(now);
+        let entropy_without_future = without_future.change_entropy_at(now);
+
+        assert!(
+            (entropy_with_future["past_a.rs"] - entropy_without_future["past_a.rs"]).abs() < 1e-9
+        );
+        assert!((entropy_with_future["past_a.rs"] - 0.25).abs() < 1e-9);
+        assert!((entropy_with_future["future_a.rs"] - 0.5).abs() < 1e-9);
     }
 
     #[test]
@@ -1010,6 +1079,33 @@ mod tests {
         let expected =
             -((4.0_f64 / 6.0) * (4.0_f64 / 6.0).log2() + (2.0_f64 / 6.0) * (2.0_f64 / 6.0).log2());
         assert!((features[0].1.entropy - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn line_aggregations_saturate_large_values() {
+        let mut intel = GitIntel::default();
+        intel.file_churn.insert("huge.rs".into(), 1);
+        intel.file_churn.insert("other.rs".into(), 1);
+        intel.commit_records.push(CommitRecord {
+            oid: None,
+            ts: 1,
+            author: "a@x.com".into(),
+            committer: "a@x.com".into(),
+            message: "huge".into(),
+            files: vec![
+                ("huge.rs".into(), u32::MAX, 1),
+                ("other.rs".into(), 1, u32::MAX),
+            ],
+        });
+
+        let hotspots = intel.temporal_hotspots(1, 2);
+        let features = intel.commit_features();
+
+        assert_eq!(hotspots[0].1, 3.0);
+        assert_eq!(features[0].1.la, u32::MAX);
+        assert_eq!(features[0].1.ld, u32::MAX);
+        assert!(features[0].1.entropy.is_finite());
+        assert_eq!(intel.churn_risk("huge.rs"), 1.0);
     }
 
     #[test]
@@ -1097,9 +1193,27 @@ mod tests {
     #[test]
     fn provenance_classifies_tiers_and_agent_percentage() {
         assert_eq!(
+            classify_commit("Claude", "claude@example.com", "change"),
+            None
+        );
+        assert_eq!(
+            classify_commit("claude@example.com", "human@x.com", "change"),
+            None
+        );
+        assert_eq!(
             classify_commit("copilot-swe-agent@github.com", "human@x.com", "change")
                 .unwrap()
                 .tier,
+            1
+        );
+        assert_eq!(
+            classify_commit(
+                "claude-code[bot]@users.noreply.github.com",
+                "human@x.com",
+                "change"
+            )
+            .unwrap()
+            .tier,
             1
         );
         assert_eq!(

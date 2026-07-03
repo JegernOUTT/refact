@@ -15,7 +15,9 @@ const KNOWN_AGENTS: &[&str] = &[
     "codegen-sh",
     "openhands-ai",
     "sweep-ai",
-    "claude",
+    "claude-code",
+    "claude_code",
+    "claude[bot]",
 ];
 
 const AGENT_DOMAINS: &[&str] = &[
