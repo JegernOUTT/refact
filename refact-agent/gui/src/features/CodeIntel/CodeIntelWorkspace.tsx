@@ -36,8 +36,15 @@ import {
 } from "../StatsDashboard/utils/formatters";
 import styles from "./CodeIntelWorkspace.module.css";
 import { CodeGraphView } from "./CodeGraphView";
+import { ToolsTab } from "./ToolsTab";
 
-type CodeIntelTab = "overview" | "graph" | "health" | "risk" | "security";
+type CodeIntelTab =
+  | "overview"
+  | "graph"
+  | "health"
+  | "risk"
+  | "security"
+  | "tools";
 
 type CodeIntelWorkspaceProps = {
   host: Config["host"];
@@ -56,6 +63,7 @@ const TAB_ORDER: CodeIntelTab[] = [
   "health",
   "risk",
   "security",
+  "tools",
 ];
 
 function isCodeIntelDetail(
@@ -364,6 +372,7 @@ export const CodeIntelWorkspace: React.FC<CodeIntelWorkspaceProps> = ({
             <Tabs.Trigger value="health">Health</Tabs.Trigger>
             <Tabs.Trigger value="risk">Risk</Tabs.Trigger>
             <Tabs.Trigger value="security">Security</Tabs.Trigger>
+            <Tabs.Trigger value="tools">Tools</Tabs.Trigger>
           </Tabs.List>
 
           <Tabs.Content value="overview" className={styles.tabContent}>
@@ -380,6 +389,9 @@ export const CodeIntelWorkspace: React.FC<CodeIntelWorkspaceProps> = ({
           </Tabs.Content>
           <Tabs.Content value="security" className={styles.tabContent}>
             <SecurityTabPlaceholder />
+          </Tabs.Content>
+          <Tabs.Content value="tools" className={styles.tabContent}>
+            <ToolsTab />
           </Tabs.Content>
         </Tabs>
       </div>

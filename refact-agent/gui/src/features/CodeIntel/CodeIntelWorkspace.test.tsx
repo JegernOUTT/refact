@@ -3,10 +3,16 @@ import userEvent from "@testing-library/user-event";
 
 import { push, pagesSlice } from "../Pages/pagesSlice";
 import type {
+  BlastReport,
   CodeIntelOverview,
   CodeIntelResponse,
+  SecurityFinding,
 } from "../../services/refact/types";
-import { render, screen, within } from "../../utils/test-utils";
+import type {
+  PrBlastRequest,
+  SecurityScanRequest,
+} from "../../services/refact/codeIntel";
+import { render, screen, waitFor, within } from "../../utils/test-utils";
 import { CodeIntelWorkspace } from "./CodeIntelWorkspace";
 
 const graphViewMock = vi.hoisted(() => ({
@@ -39,6 +45,49 @@ const overviewFixture: CodeIntelOverview = {
   dead_code_count: 7,
 };
 
+const blastFixture: BlastReport & { suggested_reviewers: string[] } = {
+  changed_files: ["src/main.rs", "src/router.ts"],
+  directly_impacted: [
+    {
+      path: "src/app.rs",
+      symbol: "renderApp",
+      distance: 1,
+      via: "calls",
+    },
+  ],
+  transitively_impacted: [
+    {
+      path: "src/state.ts",
+      symbol: "createStore",
+      distance: 2,
+      via: "imports",
+    },
+  ],
+  impacted_file_count: 2,
+  risk_score: 0.62,
+  suggested_reviewers: ["src/app.rs"],
+};
+
+const securityFixture: SecurityFinding[] = [
+  {
+    rule: "dangerous-eval",
+    severity: "Critical",
+    line: 12,
+    snippet: "eval(userInput)",
+  },
+];
+
+type MockPrBlastTrigger = (request: PrBlastRequest) => {
+  unwrap: () => Promise<CodeIntelResponse<BlastReport>>;
+};
+
+type MockSecurityScanTrigger = (request: SecurityScanRequest) => {
+  unwrap: () => Promise<CodeIntelResponse<SecurityFinding[]>>;
+};
+
+let mockPrBlastTrigger: ReturnType<typeof vi.fn<MockPrBlastTrigger>>;
+let mockSecurityScanTrigger: ReturnType<typeof vi.fn<MockSecurityScanTrigger>>;
+
 let mockOverviewResult: MockOverviewResult = {
   data: overviewFixture,
   error: undefined,
@@ -48,6 +97,8 @@ let mockOverviewResult: MockOverviewResult = {
 
 vi.mock("../../services/refact/codeIntel", () => ({
   useGetCodeIntelOverviewQuery: () => mockOverviewResult,
+  usePrBlastMutation: () => [mockPrBlastTrigger],
+  useSecurityScanMutation: () => [mockSecurityScanTrigger],
 }));
 
 vi.mock("./CodeGraphView", () => ({
@@ -75,6 +126,12 @@ describe("CodeIntelWorkspace", () => {
       isLoading: false,
     };
     graphViewMock.calls = 0;
+    mockPrBlastTrigger = vi.fn<MockPrBlastTrigger>(() => ({
+      unwrap: () => Promise.resolve(blastFixture),
+    }));
+    mockSecurityScanTrigger = vi.fn<MockSecurityScanTrigger>(() => ({
+      unwrap: () => Promise.resolve(securityFixture),
+    }));
   });
 
   it("renders tabs and live overview KPIs", () => {
@@ -88,6 +145,7 @@ describe("CodeIntelWorkspace", () => {
     expect(screen.getByRole("tab", { name: "Health" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Risk" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Security" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Tools" })).toBeInTheDocument();
 
     expect(screen.getByText("Nodes")).toBeInTheDocument();
     expect(screen.getByText("1,234")).toBeInTheDocument();
@@ -123,6 +181,79 @@ describe("CodeIntelWorkspace", () => {
 
     await user.click(screen.getByRole("tab", { name: "Security" }));
     expect(screen.getByText("Security scan coming soon")).toBeInTheDocument();
+  });
+
+  it("runs Tools tab PR blast and security scan panels", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+
+    await user.click(screen.getByRole("tab", { name: "Tools" }));
+
+    const blastPanel = screen.getByRole("region", { name: "PR Blast Radius" });
+    const securityPanel = screen.getByRole("region", { name: "Security Scan" });
+
+    expect(
+      within(blastPanel).getByText("No blast run yet"),
+    ).toBeInTheDocument();
+    expect(
+      within(securityPanel).getByText("No security scan yet"),
+    ).toBeInTheDocument();
+
+    await user.type(
+      within(blastPanel).getByLabelText(/Changed files/),
+      "src/main.rs{enter}src/router.ts",
+    );
+    await user.type(within(blastPanel).getByLabelText(/Max depth/), "2");
+    await user.click(within(blastPanel).getByRole("button", { name: "Run" }));
+
+    await waitFor(() => {
+      expect(mockPrBlastTrigger).toHaveBeenCalledWith({
+        changed_files: ["src/main.rs", "src/router.ts"],
+        max_depth: 2,
+      });
+    });
+    expect(
+      within(blastPanel).getByText("Directly impacted"),
+    ).toBeInTheDocument();
+    expect(
+      within(blastPanel).getByText("Transitively impacted"),
+    ).toBeInTheDocument();
+    expect(within(blastPanel).getByText("0.6200")).toBeInTheDocument();
+    expect(within(blastPanel).getAllByText("renderApp").length).toBeGreaterThan(
+      0,
+    );
+    expect(
+      within(blastPanel).getAllByText("createStore").length,
+    ).toBeGreaterThan(0);
+    expect(
+      within(blastPanel).getByText("Suggested reviewers"),
+    ).toBeInTheDocument();
+    expect(
+      within(blastPanel).getAllByText("src/app.rs").length,
+    ).toBeGreaterThan(0);
+
+    await user.type(
+      within(securityPanel).getByLabelText(/Path/),
+      "src/server.ts",
+    );
+    await user.click(
+      within(securityPanel).getByRole("button", { name: "Scan" }),
+    );
+
+    await waitFor(() => {
+      expect(mockSecurityScanTrigger).toHaveBeenCalledWith({
+        path: "src/server.ts",
+      });
+    });
+    expect(
+      within(securityPanel).getAllByText("dangerous-eval").length,
+    ).toBeGreaterThan(0);
+    expect(
+      within(securityPanel).getAllByText("Critical").length,
+    ).toBeGreaterThan(0);
+    expect(
+      within(securityPanel).getAllByText("eval(userInput)").length,
+    ).toBeGreaterThan(0);
   });
 
   it("registers code intel pages in the pages reducer", () => {
