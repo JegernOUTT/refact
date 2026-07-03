@@ -107,7 +107,7 @@ fn optional_usize_arg(
     }
 }
 
-async fn project_dir(gcx: Arc<crate::global_context::GlobalContext>) -> Option<PathBuf> {
+pub(crate) async fn project_dir(gcx: Arc<crate::global_context::GlobalContext>) -> Option<PathBuf> {
     crate::files_correction::get_project_dirs(gcx)
         .await
         .into_iter()
@@ -130,7 +130,7 @@ fn git_head_unchanged(repo_path: &Path, expected: &Option<Oid>) -> bool {
         .is_some_and(|current| &current == expected)
 }
 
-fn cached_mine_history(
+pub(crate) fn cached_mine_history(
     repo_path: &Path,
     max_commits: usize,
 ) -> Result<refact_git_intel::GitIntel, String> {

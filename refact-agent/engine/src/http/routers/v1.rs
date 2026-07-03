@@ -9,8 +9,9 @@ use crate::http::routers::v1::code_completion::{
 };
 use crate::http::routers::v1::code_lens::handle_v1_code_lens;
 use crate::http::routers::v1::code_intel::{
-    handle_v1_code_intel_communities, handle_v1_code_intel_dead_code, handle_v1_code_intel_graph,
-    handle_v1_code_intel_overview, handle_v1_code_intel_pr_blast,
+    handle_v1_code_intel_communities, handle_v1_code_intel_dead_code,
+    handle_v1_code_intel_duplication, handle_v1_code_intel_git_risk, handle_v1_code_intel_graph,
+    handle_v1_code_intel_health, handle_v1_code_intel_overview, handle_v1_code_intel_pr_blast,
     handle_v1_code_intel_security_scan,
 };
 use crate::http::routers::v1::ast::{
@@ -446,6 +447,12 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             get(handle_v1_code_intel_communities),
         )
         .route("/code-intel/dead-code", get(handle_v1_code_intel_dead_code))
+        .route("/code-intel/health", get(handle_v1_code_intel_health))
+        .route("/code-intel/git-risk", get(handle_v1_code_intel_git_risk))
+        .route(
+            "/code-intel/duplication",
+            get(handle_v1_code_intel_duplication),
+        )
         .route("/code-intel/pr-blast", post(handle_v1_code_intel_pr_blast))
         .route(
             "/code-intel/security-scan",
