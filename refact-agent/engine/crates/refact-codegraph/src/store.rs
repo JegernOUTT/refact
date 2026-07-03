@@ -124,6 +124,10 @@ fn prefix_upper_bound(prefix: &str) -> String {
     upper
 }
 
+fn normalize_query_path_separators(pattern: &str) -> String {
+    pattern.replace('\\', "/")
+}
+
 fn pattern_has_path_separator(pattern: &str) -> bool {
     pattern.contains("::") || pattern.contains('/') || pattern.contains('\\')
 }
@@ -444,8 +448,9 @@ impl Store {
     }
 
     pub fn symbol_data_by_dcp(&self, dcp: &str) -> Result<Vec<SymbolData>, String> {
-        if dcp.contains("::") {
-            let reversed = reverse_segments(dcp);
+        let dcp = normalize_query_path_separators(dcp);
+        if pattern_has_path_separator(&dcp) {
+            let reversed = reverse_segments(&dcp);
             let reversed_prefix = format!("{reversed}::");
             let reversed_upper = prefix_upper_bound(&reversed_prefix);
             let mut stmt = self
@@ -480,7 +485,7 @@ impl Store {
             self.query_symbol_data(
                 "SELECT n.id, n.path, s.double_colon_path, n.data FROM nodes n JOIN symbols s ON s.node_id = n.id \
                  WHERE n.name = ?1 AND n.data IS NOT NULL ORDER BY n.path, n.line1, s.double_colon_path",
-                dcp,
+                &dcp,
             )
         }
     }
@@ -548,7 +553,7 @@ impl Store {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let pattern = pattern.to_lowercase();
+        let pattern = normalize_query_path_separators(pattern).to_lowercase();
         let limit = limit.min(i64::MAX as usize) as i64;
         let fts_pattern = format!("\"{}\"", pattern.replace('"', "\"\""));
         if pattern_has_path_separator(&pattern) {
@@ -880,12 +885,16 @@ impl Store {
         keys: &HashSet<String>,
     ) -> Result<(), String> {
         for key in keys {
+            let escaped_key = escape_like(key);
+            let colon_suffix = format!("%::{escaped_key}");
+            let dot_suffix = format!("%.{escaped_key}");
+            let slash_suffix = format!("%/{escaped_key}");
             conn.execute(
                 "INSERT OR IGNORE INTO dirty_paths(path) \
                  SELECT DISTINCT n.path FROM pending_refs p JOIN nodes n ON n.id = p.from_node_id \
-                 WHERE p.name = ?1 OR p.name LIKE '%::' || ?1 OR p.name LIKE '%.' || ?1 \
-                 OR p.name LIKE '%/' || ?1",
-                params![key],
+                 WHERE p.name = ?1 OR p.name LIKE ?2 ESCAPE '\\' OR p.name LIKE ?3 ESCAPE '\\' \
+                 OR p.name LIKE ?4 ESCAPE '\\'",
+                params![key, colon_suffix, dot_suffix, slash_suffix],
             )
             .map_err(|e| format!("codegraph mark referencing paths dirty: {e}"))?;
         }
@@ -1324,12 +1333,12 @@ impl Store {
         like_term: &str,
         limit: i64,
     ) -> Result<Vec<(String, String, i64, i64)>, String> {
-        let pattern = format!("%{}%", like_term.to_lowercase());
+        let pattern = format!("%{}%", escape_like(&like_term.to_lowercase()));
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT path, name, line1, line2 FROM nodes \
-                 WHERE data IS NOT NULL AND lower(name) LIKE ?1 ORDER BY id LIMIT ?2",
+                 WHERE data IS NOT NULL AND lower(name) LIKE ?1 ESCAPE '\\' ORDER BY id LIMIT ?2",
             )
             .map_err(|e| format!("codegraph symbol_name_ranked prepare: {e}"))?;
         let rows = stmt
@@ -1517,6 +1526,77 @@ mod tests {
         let hits = store.symbol_paths_fuzzy("a/", 10).unwrap();
 
         assert_eq!(hits, vec!["a/b.rs::helper".to_string()]);
+    }
+
+    #[test]
+    fn path_qualified_lookup_normalizes_backslashes() {
+        let store = Store::open_in_memory().unwrap();
+        let node = store
+            .insert_node_with_data("function", "src/a/m.rs", "helper", "rust", 1, 1, "{}")
+            .unwrap();
+        store.add_symbol("src/a/m.rs::helper", node).unwrap();
+
+        let exact = store.symbol_data_by_dcp(r"src\a\m.rs::helper").unwrap();
+        let fuzzy = store.symbol_paths_fuzzy(r"src\a\m.rs::helper", 10).unwrap();
+
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].double_colon_path, "src/a/m.rs::helper");
+        assert_eq!(fuzzy, vec!["src/a/m.rs::helper".to_string()]);
+    }
+
+    #[test]
+    fn symbol_name_ranked_treats_underscore_as_literal() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_node_with_data("function", "src/a.rs", "foo_bar", "rust", 1, 1, "{}")
+            .unwrap();
+        store
+            .insert_node_with_data("function", "src/b.rs", "fooxbar", "rust", 1, 1, "{}")
+            .unwrap();
+
+        let literal_names: Vec<String> = store
+            .symbol_name_ranked("foo_bar", 10)
+            .unwrap()
+            .into_iter()
+            .map(|(_, name, _, _)| name)
+            .collect();
+        let substring_names: Vec<String> = store
+            .symbol_name_ranked("foo", 10)
+            .unwrap()
+            .into_iter()
+            .map(|(_, name, _, _)| name)
+            .collect();
+
+        assert_eq!(literal_names, vec!["foo_bar".to_string()]);
+        assert_eq!(
+            substring_names,
+            vec!["foo_bar".to_string(), "fooxbar".to_string()]
+        );
+    }
+
+    #[test]
+    fn dirty_path_fanout_treats_underscore_as_literal() {
+        let store = Store::open_in_memory().unwrap();
+        let exact_referrer = store
+            .insert_node("function", "src/exact.rs", "run_exact", "rust", 1, 1)
+            .unwrap();
+        let wildcard_referrer = store
+            .insert_node("function", "src/wildcard.rs", "run_wildcard", "rust", 1, 1)
+            .unwrap();
+        store
+            .add_pending_ref(exact_referrer, "ns::foo_bar", "calls", 1)
+            .unwrap();
+        store
+            .add_pending_ref(wildcard_referrer, "ns::fooxbar", "calls", 1)
+            .unwrap();
+        let keys = HashSet::from(["foo_bar".to_string()]);
+
+        Store::mark_paths_referencing_keys_on(&store.conn, &keys).unwrap();
+
+        assert_eq!(
+            Store::dirty_paths_on(&store.conn).unwrap(),
+            vec!["src/exact.rs".to_string()]
+        );
     }
 
     #[test]
