@@ -56,6 +56,21 @@ private fun escapeHtml(text: String): String {
         .replace("\"", "&quot;")
 }
 
+internal fun statusBarStateFromRagStatus(ragStatus: RagStatus, codegraphFileLimit: Int): StatusBarState {
+    val codegraph = ragStatus.codegraph
+    val codegraphLimitHit = codegraph != null &&
+        codegraph.state != "turned_off" &&
+        codegraph.counts.files >= codegraphFileLimit.toLong()
+    return StatusBarState(
+        astLimitHit = ragStatus.ast?.astMaxFilesHit == true,
+        vecdbLimitHit = ragStatus.vecdb?.vecdbMaxFilesHit == true,
+        codegraphLimitHit = codegraphLimitHit,
+        vecdbWarning = ragStatus.vecDbError,
+        codegraphWarning = ragStatus.codegraphError.orEmpty(),
+        lastRagStatus = ragStatus
+    )
+}
+
 class SMCStatusBarWidget(project: Project) : EditorBasedWidget(project), CustomStatusBarWidget, WidgetPresentation {
     private var component: StatusBarComponent? = null
     private var logger: Logger = Logger.getInstance(javaClass)
@@ -74,33 +89,7 @@ class SMCStatusBarWidget(project: Project) : EditorBasedWidget(project), CustomS
 
     private fun updateStatusBarStateAndUpdateStatusBarIfNeed(ragStatus: RagStatus) {
         try {
-            val currentState = statusbarStateRef.get()
-            val newState = when {
-                ragStatus.ast != null && ragStatus.ast.astMaxFilesHit ->
-                    currentState.copy(astLimitHit = true, lastRagStatus = ragStatus)
-                ragStatus.vecdb != null && ragStatus.vecdb.vecdbMaxFilesHit ->
-                    currentState.copy(vecdbLimitHit = true, lastRagStatus = ragStatus)
-                ragStatus.codegraph != null && ragStatus.codegraph.state != "turned_off" &&
-                    ragStatus.codegraph.counts.files >= InferenceGlobalContext.codegraphFileLimit.toLong() ->
-                    currentState.copy(codegraphLimitHit = true, lastRagStatus = ragStatus)
-                else -> {
-                    val warning = if (ragStatus.vecDbError.isNotEmpty()) ragStatus.vecDbError else currentState.vecdbWarning
-                    val codegraphError = ragStatus.codegraphError.orEmpty()
-                    val codegraphWarning = if (codegraphError.isNotEmpty()) {
-                        codegraphError
-                    } else {
-                        currentState.codegraphWarning
-                    }
-                    currentState.copy(
-                        astLimitHit = false,
-                        vecdbLimitHit = false,
-                        codegraphLimitHit = false,
-                        vecdbWarning = warning,
-                        codegraphWarning = codegraphWarning,
-                        lastRagStatus = ragStatus
-                    )
-                }
-            }
+            val newState = statusBarStateFromRagStatus(ragStatus, InferenceGlobalContext.codegraphFileLimit)
             statusbarStateRef.set(newState)
             update(null)
         } catch (e: Exception) {
