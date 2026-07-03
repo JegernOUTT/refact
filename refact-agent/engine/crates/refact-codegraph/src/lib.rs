@@ -426,6 +426,20 @@ impl CodeGraphService {
         Ok(())
     }
 
+    pub async fn index_files_batch(
+        &self,
+        entries: &[(String, String, String)],
+    ) -> Result<Vec<(i64, bool)>, String> {
+        let store = self.store.lock().await;
+        let results = store.index_files_batch(entries)?;
+        let changed = results.iter().any(|(_, changed)| *changed);
+        drop(store);
+        if changed {
+            self.bump_graph_generation();
+        }
+        Ok(results)
+    }
+
     pub async fn remove_path(&self, path: &str) -> Result<(), String> {
         let store = self.store.lock().await;
         let changed = store.remove_path(path)?;

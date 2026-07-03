@@ -13,6 +13,7 @@ use crate::global_context::GlobalContext;
 const CODEGRAPH_DB_FILE: &str = "codegraph.sqlite";
 const DRAIN_BATCH: usize = 512;
 const DRAIN_CONCURRENCY: usize = 8;
+const BATCH_TX_SIZE: usize = 64;
 const PROGRESS_REPORT_GRANULARITY: usize = 100;
 const CONNECT_EVERY_BATCHES: u32 = 8;
 const CONNECT_EVERY_SECS: u64 = 30;
@@ -74,11 +75,11 @@ async fn reconcile_deleted_paths(service: Arc<CodeGraphService>) -> Result<usize
     Ok(removed)
 }
 
-async fn index_or_remove_path(
+async fn prepare_index_entry_or_remove_path(
     gcx: Arc<GlobalContext>,
     service: Arc<CodeGraphService>,
     path: QueuedPath,
-) -> Result<(), String> {
+) -> Result<Option<(String, String, String)>, String> {
     let store_path = path.store_path;
     let read_path = path.read_path;
     let store_path_buf = PathBuf::from(&store_path);
@@ -87,25 +88,49 @@ async fn index_or_remove_path(
         crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &store_path_buf).await
     {
         if path_is_genuinely_absent(&store_path_buf) {
-            return remove_missing_path(service, &store_path, err).await;
+            return remove_missing_path(service, &store_path, err)
+                .await
+                .map(|_| None);
         }
         warn!("codegraph: read {read_path} failed for {store_path}, keeping existing index: {err}");
-        return Ok(());
+        return Ok(None);
     }
     match crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx, &read_path_buf).await {
         Ok(text) => {
             let lang = lang_from_path(&store_path);
-            service
-                .index_file(&store_path, &text, lang)
-                .await
-                .map_err(|err| format!("codegraph: index {store_path} failed: {err}"))
+            Ok(Some((store_path, text, lang.to_string())))
         }
         Err(err) if path_is_genuinely_absent(&store_path_buf) => {
-            remove_missing_path(service, &store_path, err).await
+            remove_missing_path(service, &store_path, err)
+                .await
+                .map(|_| None)
         }
         Err(err) => {
             warn!("codegraph: read {read_path} failed for {store_path}, keeping existing index: {err}");
-            Ok(())
+            Ok(None)
+        }
+    }
+}
+
+async fn submit_index_entries(
+    gcx: &Arc<GlobalContext>,
+    service: &Arc<CodeGraphService>,
+    entries: Vec<(String, String, String)>,
+) {
+    for chunk in entries.chunks(BATCH_TX_SIZE) {
+        let chunk_entries = chunk.to_vec();
+        if let Err(err) = service.index_files_batch(&chunk_entries).await {
+            error!("codegraph: index batch failed: {err}");
+            for entry in chunk_entries {
+                let single = vec![entry];
+                if let Err(err) = service.index_files_batch(&single).await {
+                    let entry = &single[0];
+                    let path = &entry.0;
+                    let err = format!("codegraph: index {path} failed: {err}");
+                    error!("{err}");
+                    *gcx.codegraph_error.lock().unwrap() = err;
+                }
+            }
         }
     }
 }
@@ -120,16 +145,22 @@ pub(crate) async fn process_index_batch(
         .map(|path| {
             let gcx = gcx.clone();
             let service = service.clone();
-            async move { index_or_remove_path(gcx, service, path).await }
+            async move { prepare_index_entry_or_remove_path(gcx, service, path).await }
         })
         .buffer_unordered(DRAIN_CONCURRENCY);
 
+    let mut entries = Vec::with_capacity(batch_len);
     while let Some(result) = results.next().await {
-        if let Err(err) = result {
-            error!("{err}");
-            *gcx.codegraph_error.lock().unwrap() = err;
+        match result {
+            Ok(Some(entry)) => entries.push(entry),
+            Ok(None) => {}
+            Err(err) => {
+                error!("{err}");
+                *gcx.codegraph_error.lock().unwrap() = err;
+            }
         }
     }
+    submit_index_entries(&gcx, &service, entries).await;
     service.record_index_completions(batch_len);
 }
 
@@ -475,7 +506,7 @@ mod tests {
             .unwrap();
         set_privacy(&gcx, vec![file.clone()]);
 
-        index_or_remove_path(
+        prepare_index_entry_or_remove_path(
             gcx,
             service.clone(),
             QueuedPath::new(file.clone(), file.clone()),
@@ -508,7 +539,7 @@ mod tests {
             .await
             .unwrap();
 
-        index_or_remove_path(
+        prepare_index_entry_or_remove_path(
             gcx,
             service.clone(),
             QueuedPath::new(store_path.clone(), read_path),
@@ -538,13 +569,15 @@ mod tests {
         let store_path = store_path.to_string_lossy().to_string();
         let read_path = read_path.to_string_lossy().to_string();
 
-        index_or_remove_path(
+        let entry = prepare_index_entry_or_remove_path(
             gcx,
             service.clone(),
             QueuedPath::new(store_path.clone(), read_path),
         )
         .await
+        .unwrap()
         .unwrap();
+        service.index_files_batch(&[entry]).await.unwrap();
 
         assert_eq!(
             service.all_files_with_text().await.unwrap(),
@@ -568,7 +601,7 @@ mod tests {
             .unwrap();
         std::fs::remove_file(&path).unwrap();
 
-        index_or_remove_path(
+        prepare_index_entry_or_remove_path(
             gcx,
             service.clone(),
             QueuedPath::new(path.clone(), path.clone()),
