@@ -8,3 +8,6 @@ refact-codegraph-parsers = { path = "../refact-codegraph-parsers" }
 refact-core = { path = "../refact-core" }
 tree-sitter = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

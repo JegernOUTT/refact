@@ -32,6 +32,7 @@ fn weight_multiplier(biomarker: &str) -> f64 {
         | "bumpy_road"
         | "primitive_obsession"
         | "dry_violation" => 0.5,
+        "blocking_sync_in_async" => 0.7,
         "knowledge_loss" => 0.4,
         _ => 1.0,
     }

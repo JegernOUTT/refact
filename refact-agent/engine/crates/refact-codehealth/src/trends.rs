@@ -1,89 +1,135 @@
+use crate::biomarkers::{Dimension, Finding, Severity};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap};
 
-const DECLINE_THRESHOLD: f64 = 0.5;
-const DECLINE_LOOKBACK: usize = 5;
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct HealthSnapshot {
-    pub ts: i64,
-    pub hotspot_health: f64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum TrendKind {
-    Declining,
-    PredictedDecline,
-    Improving,
-    Stable,
-}
+const CATEGORY: &str = "trend";
+const DECLINE_DROP_THRESHOLD: f64 = 1.0;
+const PREDICTED_DECLINE_MIN_SNAPSHOTS: usize = 4;
+const PREDICTED_DECLINE_HORIZON: f64 = 3.0;
+const PREDICTED_DECLINE_LIMIT: f64 = 4.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrendAlert {
-    pub kind: TrendKind,
-    pub detail: String,
+pub struct HealthSnapshot {
+    pub ts: i64,
+    pub per_file: HashMap<String, f64>,
+    pub aggregate: f64,
 }
 
-pub fn analyze_trend(history: &[HealthSnapshot]) -> Option<TrendAlert> {
-    if history.is_empty() {
-        return None;
-    }
-
-    if let Some(alert) = declining(history) {
-        return Some(alert);
-    }
-
-    if history.len() >= 3 {
-        let tail = &history[history.len() - 3..];
-        if tail[0].hotspot_health > tail[1].hotspot_health
-            && tail[1].hotspot_health > tail[2].hotspot_health
-        {
-            return Some(TrendAlert {
-                kind: TrendKind::PredictedDecline,
-                detail: format!(
-                    "Hotspot health declined for the last 3 snapshots ({:.2} -> {:.2} -> {:.2}).",
-                    tail[0].hotspot_health, tail[1].hotspot_health, tail[2].hotspot_health
-                ),
-            });
+pub fn evaluate_trends(history: &[HealthSnapshot]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for path in paths_in_history(history) {
+        let series = file_series(history, &path);
+        if let Some(finding) = declining_finding(&path, &series) {
+            out.push(finding);
         }
-        if tail[0].hotspot_health < tail[1].hotspot_health
-            && tail[1].hotspot_health < tail[2].hotspot_health
-        {
-            return Some(TrendAlert {
-                kind: TrendKind::Improving,
-                detail: format!(
-                    "Hotspot health improved for the last 3 snapshots ({:.2} -> {:.2} -> {:.2}).",
-                    tail[0].hotspot_health, tail[1].hotspot_health, tail[2].hotspot_health
-                ),
-            });
+        if let Some(finding) = predicted_decline_finding(&path, &series) {
+            out.push(finding);
         }
     }
-
-    Some(TrendAlert {
-        kind: TrendKind::Stable,
-        detail: "Hotspot health is stable in the recent history.".to_string(),
-    })
+    out.sort_by(|a, b| a.detail.cmp(&b.detail).then(a.biomarker.cmp(&b.biomarker)));
+    out
 }
 
-fn declining(history: &[HealthSnapshot]) -> Option<TrendAlert> {
-    if history.len() <= DECLINE_LOOKBACK {
+pub fn push_snapshot(history: &mut Vec<HealthSnapshot>, snap: HealthSnapshot, max_len: usize) {
+    if max_len == 0 {
+        history.clear();
+        return;
+    }
+    history.push(snap);
+    let overflow = history.len().saturating_sub(max_len);
+    if overflow > 0 {
+        history.drain(0..overflow);
+    }
+}
+
+fn paths_in_history(history: &[HealthSnapshot]) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    for snap in history {
+        paths.extend(snap.per_file.keys().cloned());
+    }
+    paths.into_iter().collect()
+}
+
+fn file_series(history: &[HealthSnapshot], path: &str) -> Vec<(i64, f64)> {
+    history
+        .iter()
+        .filter_map(|snap| snap.per_file.get(path).map(|score| (snap.ts, *score)))
+        .collect()
+}
+
+fn declining_finding(path: &str, series: &[(i64, f64)]) -> Option<Finding> {
+    if series.len() < 4 {
         return None;
     }
-    let current = history.last()?;
-    let baseline = &history[history.len() - 1 - DECLINE_LOOKBACK];
-    let delta = current.hotspot_health - baseline.hotspot_health;
-    if delta <= -DECLINE_THRESHOLD {
-        Some(TrendAlert {
-            kind: TrendKind::Declining,
-            detail: format!(
-                "Hotspot health dropped {:.2} points vs. snapshot {} ago ({:.2} -> {:.2}).",
-                delta.abs(),
-                DECLINE_LOOKBACK,
-                baseline.hotspot_health,
-                current.hotspot_health
+    let tail = &series[series.len() - 4..];
+    let strictly_dropping = tail[0].1 > tail[1].1 && tail[1].1 > tail[2].1 && tail[2].1 > tail[3].1;
+    let total_drop = tail[0].1 - tail[3].1;
+    if strictly_dropping && total_drop >= DECLINE_DROP_THRESHOLD {
+        Some(finding(
+            "health_declining",
+            Severity::High,
+            tail[3].0,
+            format!(
+                "{path}: health dropped {:.2} points across 3 consecutive drops ({:.2} -> {:.2} -> {:.2} -> {:.2})",
+                total_drop, tail[0].1, tail[1].1, tail[2].1, tail[3].1
             ),
-        })
+        ))
     } else {
         None
+    }
+}
+
+fn predicted_decline_finding(path: &str, series: &[(i64, f64)]) -> Option<Finding> {
+    if series.len() < PREDICTED_DECLINE_MIN_SNAPSHOTS {
+        return None;
+    }
+    let slope = linear_slope(series);
+    if slope >= 0.0 {
+        return None;
+    }
+    let current = series.last()?;
+    let projected = current.1 + slope * PREDICTED_DECLINE_HORIZON;
+    if projected < PREDICTED_DECLINE_LIMIT {
+        Some(finding(
+            "predicted_decline",
+            Severity::Medium,
+            current.0,
+            format!(
+                "{path}: health trend projects below {:.1} within 3 snapshots ({:.2} -> {:.2})",
+                PREDICTED_DECLINE_LIMIT, current.1, projected
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
+fn linear_slope(series: &[(i64, f64)]) -> f64 {
+    let n = series.len() as f64;
+    let mean_x = (n - 1.0) / 2.0;
+    let mean_y = series.iter().map(|(_, y)| *y).sum::<f64>() / n;
+    let mut numerator = 0.0;
+    let mut denominator = 0.0;
+    for (idx, (_, y)) in series.iter().enumerate() {
+        let x = idx as f64;
+        numerator += (x - mean_x) * (y - mean_y);
+        denominator += (x - mean_x).powi(2);
+    }
+    if denominator == 0.0 {
+        0.0
+    } else {
+        numerator / denominator
+    }
+}
+
+fn finding(biomarker: &str, severity: Severity, ts: i64, detail: String) -> Finding {
+    Finding {
+        biomarker: biomarker.to_string(),
+        category: CATEGORY.to_string(),
+        dimension: Dimension::Maintainability,
+        severity,
+        line: ts.max(0) as usize,
+        detail,
     }
 }
 
@@ -91,30 +137,95 @@ fn declining(history: &[HealthSnapshot]) -> Option<TrendAlert> {
 mod tests {
     use super::*;
 
-    fn snap(ts: i64, hotspot_health: f64) -> HealthSnapshot {
-        HealthSnapshot { ts, hotspot_health }
+    fn snap(ts: i64, scores: &[(&str, f64)]) -> HealthSnapshot {
+        let per_file = scores
+            .iter()
+            .map(|(path, score)| ((*path).to_string(), *score))
+            .collect::<HashMap<_, _>>();
+        let aggregate = if scores.is_empty() {
+            10.0
+        } else {
+            scores.iter().map(|(_, score)| *score).sum::<f64>() / scores.len() as f64
+        };
+        HealthSnapshot {
+            ts,
+            per_file,
+            aggregate,
+        }
     }
 
     #[test]
-    fn three_strict_drops_yield_predicted_decline() {
-        let history = vec![snap(1, 8.0), snap(2, 7.0), snap(3, 6.0)];
-
-        let alert = analyze_trend(&history).unwrap();
-        assert_eq!(alert.kind, TrendKind::PredictedDecline);
-    }
-
-    #[test]
-    fn current_half_point_lower_than_five_ago_yields_declining() {
+    fn declining_rule_fires_on_three_drops() {
         let history = vec![
-            snap(1, 9.0),
-            snap(2, 8.9),
-            snap(3, 8.8),
-            snap(4, 8.7),
-            snap(5, 8.6),
-            snap(6, 8.4),
+            snap(1, &[("src/a.rs", 8.0)]),
+            snap(2, &[("src/a.rs", 7.5)]),
+            snap(3, &[("src/a.rs", 7.1)]),
+            snap(4, &[("src/a.rs", 6.8)]),
         ];
 
-        let alert = analyze_trend(&history).unwrap();
-        assert_eq!(alert.kind, TrendKind::Declining);
+        let findings = evaluate_trends(&history);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| { f.biomarker == "health_declining" && f.detail.contains("src/a.rs") }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn predicted_decline_from_slope() {
+        let history = vec![
+            snap(1, &[("src/a.rs", 6.0)]),
+            snap(2, &[("src/a.rs", 5.4)]),
+            snap(3, &[("src/a.rs", 4.8)]),
+            snap(4, &[("src/a.rs", 4.2)]),
+        ];
+
+        let findings = evaluate_trends(&history);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| { f.biomarker == "predicted_decline" && f.detail.contains("src/a.rs") }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn stable_or_missing_file_does_not_emit() {
+        let history = vec![
+            snap(1, &[("src/a.rs", 8.0), ("src/b.rs", 5.0)]),
+            snap(2, &[("src/a.rs", 8.1)]),
+            snap(3, &[("src/a.rs", 8.2), ("src/b.rs", 4.7)]),
+            snap(4, &[("src/a.rs", 8.3)]),
+        ];
+
+        let findings = evaluate_trends(&history);
+
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn ring_buffer_caps_history() {
+        let mut history = Vec::new();
+
+        push_snapshot(&mut history, snap(1, &[("a", 8.0)]), 2);
+        push_snapshot(&mut history, snap(2, &[("a", 7.0)]), 2);
+        push_snapshot(&mut history, snap(3, &[("a", 6.0)]), 2);
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].ts, 2);
+        assert_eq!(history[1].ts, 3);
+    }
+
+    #[test]
+    fn snapshot_serde_roundtrip() {
+        let original = snap(7, &[("src/a.rs", 8.5), ("src/b.rs", 9.0)]);
+
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: HealthSnapshot = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored, original);
     }
 }

@@ -41,13 +41,15 @@ pub fn detect_perf(lang: &str, text: &str) -> Vec<Finding> {
         return Vec::new();
     };
     let bytes = text.as_bytes();
+    let root = tree.root_node();
     let mut loops = Vec::new();
-    collect_loops(tree.root_node(), &mut loops);
+    collect_loops(root, &mut loops);
 
     let mut out = Vec::new();
     for lp in loops {
         detect_loop(lp, bytes, &mut out);
     }
+    detect_blocking_sync_in_async(root, lang, bytes, &mut out);
     out.sort_by(|a, b| a.line.cmp(&b.line).then(a.biomarker.cmp(&b.biomarker)));
     out.dedup_by(|a, b| a.line == b.line && a.biomarker == b.biomarker && a.detail == b.detail);
     out
@@ -98,6 +100,154 @@ fn looks_like_http_receiver(receiver: &str) -> bool {
             | "fetch"
     ) || receiver.ends_with("client")
         || receiver.ends_with("session")
+}
+
+fn detect_blocking_sync_in_async(root: Node<'_>, lang: &str, bytes: &[u8], out: &mut Vec<Finding>) {
+    let mut stack = vec![root];
+    while let Some(cur) = stack.pop() {
+        if is_call(cur) && has_async_function_ancestor(cur, bytes) {
+            let txt = text_of(cur, bytes);
+            let name = callee_name(cur, bytes).unwrap_or_else(|| txt.to_string());
+            if let Some((severity, detail)) = blocking_sync_call(lang, &name, txt) {
+                push(out, "blocking_sync_in_async", severity, cur, detail);
+            }
+        }
+        let mut cursor = cur.walk();
+        for child in cur.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+fn has_async_function_ancestor(node: Node<'_>, bytes: &[u8]) -> bool {
+    let mut cur = node.parent();
+    while let Some(parent) = cur {
+        if is_function_like(parent) && is_async_function(parent, bytes) {
+            return true;
+        }
+        cur = parent.parent();
+    }
+    false
+}
+
+fn is_function_like(node: Node<'_>) -> bool {
+    FUNCTION_KINDS.contains(&node.kind())
+        || matches!(
+            node.kind(),
+            "function" | "function_expression" | "arrow_function" | "closure_expression"
+        )
+}
+
+fn is_async_function(node: Node<'_>, bytes: &[u8]) -> bool {
+    let txt = text_of(node, bytes).trim_start();
+    txt.starts_with("async ")
+        || txt.starts_with("async\n")
+        || txt.starts_with("pub async ")
+        || txt.starts_with("pub(crate) async ")
+        || txt.starts_with("pub(super) async ")
+        || txt.starts_with("pub(in ") && txt.contains(") async ")
+        || node_has_async_child(node, bytes)
+}
+
+fn node_has_async_child(node: Node<'_>, bytes: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    let has_async = node
+        .children(&mut cursor)
+        .any(|child| text_of(child, bytes).trim() == "async");
+    has_async
+}
+
+fn blocking_sync_call(lang: &str, name: &str, txt: &str) -> Option<(Severity, String)> {
+    let low_name = normalize_call_name(name);
+    let low_txt = txt.to_ascii_lowercase();
+    match lang {
+        "rust" => blocking_sync_rust(&low_name, &low_txt),
+        "python" => blocking_sync_python(&low_name, &low_txt),
+        "typescript" | "tsx" | "javascript" | "jsx" => blocking_sync_js(&low_name, &low_txt),
+        _ => None,
+    }
+}
+
+fn normalize_call_name(name: &str) -> String {
+    name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.' && c != ':')
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn blocking_sync_rust(name: &str, txt: &str) -> Option<(Severity, String)> {
+    if name.starts_with("std::fs::") || txt.starts_with("std::fs::") {
+        return Some((
+            Severity::Medium,
+            format!("blocking filesystem call `{name}` inside async function"),
+        ));
+    }
+    if name == "std::thread::sleep" || txt.starts_with("std::thread::sleep") {
+        return Some((
+            Severity::High,
+            format!("blocking sleep `{name}` inside async function"),
+        ));
+    }
+    if name == "std::io::stdin" || txt.starts_with("std::io::stdin") {
+        return Some((
+            Severity::Medium,
+            format!("blocking stdin call `{name}` inside async function"),
+        ));
+    }
+    if name == "std::net::tcpstream::connect" || txt.starts_with("std::net::tcpstream::connect") {
+        return Some((
+            Severity::High,
+            format!("blocking network connect `{name}` inside async function"),
+        ));
+    }
+    if name.starts_with("reqwest::blocking::") || txt.starts_with("reqwest::blocking::") {
+        return Some((
+            Severity::High,
+            format!("blocking HTTP call `{name}` inside async function"),
+        ));
+    }
+    None
+}
+
+fn blocking_sync_python(name: &str, txt: &str) -> Option<(Severity, String)> {
+    if name == "time.sleep" || txt.starts_with("time.sleep") {
+        return Some((
+            Severity::High,
+            format!("blocking sleep `{name}` inside async function"),
+        ));
+    }
+    if name.starts_with("requests.") || txt.starts_with("requests.") {
+        return Some((
+            Severity::High,
+            format!("blocking HTTP call `{name}` inside async function"),
+        ));
+    }
+    if name == "open" || txt.starts_with("open(") {
+        return Some((
+            Severity::Medium,
+            format!("blocking file open `{name}` inside async function"),
+        ));
+    }
+    None
+}
+
+fn blocking_sync_js(name: &str, txt: &str) -> Option<(Severity, String)> {
+    let is_sync_fs = name.starts_with("fs.") && name.ends_with("sync")
+        || txt.starts_with("fs.") && txt.split('(').next().unwrap_or("").ends_with("sync");
+    if is_sync_fs {
+        return Some((
+            Severity::Medium,
+            format!("blocking filesystem call `{name}` inside async function"),
+        ));
+    }
+    if name == "child_process.execsync" || txt.starts_with("child_process.execsync") {
+        return Some((
+            Severity::High,
+            format!("blocking child process call `{name}` inside async function"),
+        ));
+    }
+    None
 }
 
 fn detect_loop(node: Node<'_>, bytes: &[u8], out: &mut Vec<Finding>) {
@@ -382,6 +532,190 @@ fn push(
 mod tests {
     use super::*;
 
+    #[test]
+    fn rust_blocking_fs_in_async_is_detected() {
+        let src = r#"async fn load() {
+    let _ = std::fs::read_to_string("Cargo.toml");
+}
+"#;
+        let findings = detect_perf("rust", src);
+
+        assert!(
+            findings.iter().any(|f| {
+                f.biomarker == "blocking_sync_in_async" && f.severity == Severity::Medium
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn rust_sync_fs_outside_async_is_ignored() {
+        let src = r#"fn load() {
+    let _ = std::fs::read_to_string("Cargo.toml");
+}
+"#;
+        let findings = detect_perf("rust", src);
+
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.biomarker != "blocking_sync_in_async"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn rust_sleep_in_sync_closure_inside_async_is_detected() {
+        let src = r#"async fn wait() {
+    let f = || { std::thread::sleep(std::time::Duration::from_millis(1)); };
+    f();
+}
+"#;
+        let findings = detect_perf("rust", src);
+
+        assert!(
+            findings.iter().any(|f| {
+                f.biomarker == "blocking_sync_in_async" && f.severity == Severity::High
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn python_blocking_calls_in_async_are_detected() {
+        let src = r#"
+import time
+import requests
+async def load(path):
+    time.sleep(1)
+    requests.get("https://example.com")
+    return open(path).read()
+"#;
+        let findings = detect_perf("python", src);
+
+        assert!(
+            findings
+                .iter()
+                .filter(|f| f.biomarker == "blocking_sync_in_async")
+                .count()
+                >= 3,
+            "{findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| {
+                f.biomarker == "blocking_sync_in_async" && f.severity == Severity::High
+            }),
+            "{findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| {
+                f.biomarker == "blocking_sync_in_async" && f.severity == Severity::Medium
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn python_sync_requests_are_ignored() {
+        let src = r#"
+import requests
+def load(url):
+    return requests.get(url)
+"#;
+        let findings = detect_perf("python", src);
+
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.biomarker != "blocking_sync_in_async"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn typescript_sync_fs_and_child_process_in_async_are_detected() {
+        let src = r#"import fs from 'fs';
+import child_process from 'child_process';
+async function load(path: string) {
+    fs.readFileSync(path);
+    child_process.execSync('pwd');
+}
+"#;
+        let findings = detect_perf("typescript", src);
+
+        assert!(
+            findings.iter().any(|f| {
+                f.biomarker == "blocking_sync_in_async" && f.severity == Severity::Medium
+            }),
+            "{findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| {
+                f.biomarker == "blocking_sync_in_async" && f.severity == Severity::High
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn javascript_sync_fs_outside_async_is_ignored() {
+        let src = r#"const fs = require('fs');
+function load(path) {
+    return fs.readFileSync(path);
+}
+"#;
+        let findings = detect_perf("javascript", src);
+
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.biomarker != "blocking_sync_in_async"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn blocking_lock_is_not_flagged() {
+        let src = r#"async fn lock_it(m: tokio::sync::Mutex<i32>) {
+    let _guard = m.blocking_lock();
+}
+"#;
+        let findings = detect_perf("rust", src);
+
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.biomarker != "blocking_sync_in_async"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn blocking_weight_now_reachable() {
+        let src = r#"async fn wait() {
+    std::thread::sleep(std::time::Duration::from_millis(1));
+}
+"#;
+        let blocking = detect_perf("rust", src)
+            .into_iter()
+            .find(|f| f.biomarker == "blocking_sync_in_async")
+            .unwrap();
+        let control = Finding {
+            biomarker: "unweighted_control".to_string(),
+            category: blocking.category.clone(),
+            dimension: blocking.dimension,
+            severity: blocking.severity,
+            line: blocking.line,
+            detail: String::new(),
+        };
+
+        let blocking_score = crate::scoring::score_file(&[blocking]).defect;
+        let control_score = crate::scoring::score_file(&[control]).defect;
+
+        assert!((blocking_score - 9.16).abs() < 1e-9, "got {blocking_score}");
+        assert!((control_score - 9.0).abs() < 1e-9, "got {control_score}");
+        assert!(blocking_score > control_score);
+    }
     #[test]
     fn detects_nested_loop_with_io() {
         let src = r#"

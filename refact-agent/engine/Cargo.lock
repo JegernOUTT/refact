@@ -4116,6 +4116,7 @@ dependencies = [
  "refact-codegraph-parsers",
  "refact-core",
  "serde",
+ "serde_json",
  "tree-sitter",
 ]
 
