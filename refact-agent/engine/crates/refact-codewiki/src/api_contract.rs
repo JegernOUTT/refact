@@ -34,24 +34,44 @@ pub fn is_fastapi_router(parsed: &ParsedFile) -> bool {
         return true;
     }
 
-    let methods = ["get", "post", "put", "patch", "delete", "head", "options"];
+    let fastapi_receivers = fastapi_receiver_names(parsed);
 
     parsed.symbols.iter().any(|symbol| {
-        symbol.decorators.iter().any(|decorator| {
-            let head = decorator
-                .trim_start_matches('@')
-                .split('(')
-                .next()
-                .unwrap_or("");
-
-            head.contains('.')
-                && head
-                    .rsplit('.')
-                    .next()
-                    .map(|segment| methods.contains(&segment))
-                    .unwrap_or(false)
-        })
+        symbol
+            .decorators
+            .iter()
+            .any(|decorator| is_fastapi_route_decorator(decorator, &fastapi_receivers))
     })
+}
+
+fn fastapi_receiver_names(parsed: &ParsedFile) -> Vec<&str> {
+    let mut names = vec!["app", "router"];
+
+    for import in &parsed.imports {
+        if import.module_path == "fastapi" {
+            names.extend(import.imported_names.iter().filter_map(|name| {
+                matches!(name.as_str(), "FastAPI" | "APIRouter").then_some(name.as_str())
+            }));
+        }
+    }
+
+    names
+}
+
+fn is_fastapi_route_decorator(decorator: &str, receivers: &[&str]) -> bool {
+    let methods = ["get", "post", "put", "patch", "delete", "head", "options"];
+    let head = decorator
+        .trim_start_matches('@')
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim();
+    let Some((receiver, method)) = head.rsplit_once('.') else {
+        return false;
+    };
+    let receiver = receiver.rsplit('.').next().unwrap_or(receiver);
+
+    methods.contains(&method) && receivers.contains(&receiver)
 }
 
 pub fn is_aspnet_controller(parsed: &ParsedFile) -> bool {
@@ -71,11 +91,11 @@ pub fn is_aspnet_controller(parsed: &ParsedFile) -> bool {
         .iter()
         .filter(|symbol| symbol.kind == "class")
         .any(|symbol| {
-            bases.iter().any(|base| symbol.signature.contains(base))
+            bases
+                .iter()
+                .any(|base| csharp_signature_has_base(&symbol.signature, base))
                 || symbol.decorators.iter().any(|decorator| {
-                    csharp_attribute_name(decorator)
-                        .map(|attr| class_attrs.contains(&attr))
-                        .unwrap_or(false)
+                    csharp_attribute_names(decorator).any(|attr| class_attrs.contains(&attr))
                 })
         });
 
@@ -86,28 +106,48 @@ pub fn is_aspnet_controller(parsed: &ParsedFile) -> bool {
             .filter(|symbol| symbol.kind == "method")
             .any(|symbol| {
                 symbol.decorators.iter().any(|decorator| {
-                    csharp_attribute_name(decorator)
-                        .map(|attr| method_attrs.contains(&attr))
-                        .unwrap_or(false)
+                    csharp_attribute_names(decorator).any(|attr| method_attrs.contains(&attr))
                 })
             })
 }
 
-fn csharp_attribute_name(decorator: &str) -> Option<&str> {
-    let attr = decorator
+fn csharp_signature_has_base(signature: &str, expected: &str) -> bool {
+    let inherited = signature.split(" where ").next().unwrap_or(signature);
+    let Some((_, bases)) = inherited.split_once(':') else {
+        return false;
+    };
+
+    bases.split(',').any(|base| {
+        let token = base
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '.' && ch != '<');
+        let token = token
+            .split('<')
+            .next()
+            .unwrap_or(token)
+            .rsplit('.')
+            .next()
+            .unwrap_or(token);
+        token == expected
+    })
+}
+
+fn csharp_attribute_names(decorator: &str) -> impl Iterator<Item = &str> {
+    decorator
         .trim_start_matches('@')
         .trim_start_matches('[')
-        .split('(')
-        .next()
-        .unwrap_or("")
         .trim_end_matches(']')
-        .trim();
-
-    if attr.is_empty() {
-        None
-    } else {
-        Some(attr.rsplit('.').next().unwrap_or(attr))
-    }
+        .split(',')
+        .filter_map(|part| {
+            let attr = part.split('(').next().unwrap_or("").trim();
+            if attr.is_empty() {
+                None
+            } else {
+                Some(attr.rsplit('.').next().unwrap_or(attr))
+            }
+        })
 }
 
 pub fn detect_api_contract(parsed: &ParsedFile) -> bool {
@@ -185,6 +225,57 @@ mod tests {
     }
 
     #[test]
+    fn api_contract_python_fastapi_import_with_router_get_decorator_is_true() {
+        let mut parsed = parsed_file("python");
+        parsed.imports.push(Import {
+            module_path: "fastapi".to_string(),
+            imported_names: Vec::new(),
+        });
+        parsed.symbols.push(Symbol {
+            kind: "function".to_string(),
+            signature: "def list_users():".to_string(),
+            decorators: vec!["@router.get(\"/users\")".to_string()],
+        });
+
+        assert!(is_fastapi_router(&parsed));
+        assert!(detect_api_contract(&parsed));
+    }
+
+    #[test]
+    fn api_contract_python_fastapi_imported_receiver_route_decorator_is_true() {
+        let mut parsed = parsed_file("python");
+        parsed.imports.push(Import {
+            module_path: "fastapi".to_string(),
+            imported_names: vec!["FastAPI".to_string()],
+        });
+        parsed.symbols.push(Symbol {
+            kind: "function".to_string(),
+            signature: "def list_users():".to_string(),
+            decorators: vec!["@FastAPI.get(\"/users\")".to_string()],
+        });
+
+        assert!(is_fastapi_router(&parsed));
+        assert!(detect_api_contract(&parsed));
+    }
+
+    #[test]
+    fn api_contract_python_fastapi_http_exception_with_unrelated_decorator_is_false() {
+        let mut parsed = parsed_file("python");
+        parsed.imports.push(Import {
+            module_path: "fastapi".to_string(),
+            imported_names: vec!["HTTPException".to_string()],
+        });
+        parsed.symbols.push(Symbol {
+            kind: "function".to_string(),
+            signature: "def cached():".to_string(),
+            decorators: vec!["@cache.get(\"users\")".to_string()],
+        });
+
+        assert!(!is_fastapi_router(&parsed));
+        assert!(!detect_api_contract(&parsed));
+    }
+
+    #[test]
     fn api_contract_csharp_controllerbase_signature_is_true() {
         let mut parsed = parsed_file("csharp");
         parsed.symbols.push(Symbol {
@@ -198,12 +289,92 @@ mod tests {
     }
 
     #[test]
+    fn api_contract_csharp_controller_signature_is_true() {
+        let mut parsed = parsed_file("csharp");
+        parsed.symbols.push(Symbol {
+            kind: "class".to_string(),
+            signature: "public class UsersController : Microsoft.AspNetCore.Mvc.Controller"
+                .to_string(),
+            decorators: Vec::new(),
+        });
+
+        assert!(is_aspnet_controller(&parsed));
+        assert!(detect_api_contract(&parsed));
+    }
+
+    #[test]
+    fn api_contract_csharp_generic_controllerbase_signature_is_true() {
+        let mut parsed = parsed_file("csharp");
+        parsed.symbols.push(Symbol {
+            kind: "class".to_string(),
+            signature: "public class UsersController : ControllerBase<User> where User : class"
+                .to_string(),
+            decorators: Vec::new(),
+        });
+
+        assert!(is_aspnet_controller(&parsed));
+        assert!(detect_api_contract(&parsed));
+    }
+
+    #[test]
+    fn api_contract_csharp_controllerhelper_class_name_is_false() {
+        let mut parsed = parsed_file("csharp");
+        parsed.symbols.push(Symbol {
+            kind: "class".to_string(),
+            signature: "public class FooControllerHelper".to_string(),
+            decorators: Vec::new(),
+        });
+
+        assert!(!is_aspnet_controller(&parsed));
+        assert!(!detect_api_contract(&parsed));
+    }
+
+    #[test]
+    fn api_contract_csharp_controllerhelper_base_name_is_false() {
+        let mut parsed = parsed_file("csharp");
+        parsed.symbols.push(Symbol {
+            kind: "class".to_string(),
+            signature: "public class Foo : MyControllerHelper".to_string(),
+            decorators: Vec::new(),
+        });
+
+        assert!(!is_aspnet_controller(&parsed));
+        assert!(!detect_api_contract(&parsed));
+    }
+
+    #[test]
+    fn api_contract_csharp_field_named_controller_is_false() {
+        let mut parsed = parsed_file("csharp");
+        parsed.symbols.push(Symbol {
+            kind: "class".to_string(),
+            signature: "public class Foo { private string Controller".to_string(),
+            decorators: Vec::new(),
+        });
+
+        assert!(!is_aspnet_controller(&parsed));
+        assert!(!detect_api_contract(&parsed));
+    }
+
+    #[test]
     fn api_contract_csharp_apicontroller_decorator_is_true() {
         let mut parsed = parsed_file("csharp");
         parsed.symbols.push(Symbol {
             kind: "class".to_string(),
             signature: "public class Users".to_string(),
             decorators: vec!["[ApiController]".to_string()],
+        });
+
+        assert!(is_aspnet_controller(&parsed));
+        assert!(detect_api_contract(&parsed));
+    }
+
+    #[test]
+    fn api_contract_csharp_combined_apicontroller_route_decorator_is_true() {
+        let mut parsed = parsed_file("csharp");
+        parsed.symbols.push(Symbol {
+            kind: "class".to_string(),
+            signature: "public class Users".to_string(),
+            decorators: vec!["[ApiController, Route(\"users\")]".to_string()],
         });
 
         assert!(is_aspnet_controller(&parsed));
