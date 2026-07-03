@@ -129,7 +129,11 @@ pub fn render_event_message(msg: &ChatMessage) -> String {
     let payload = meta
         .and_then(|m| m.get("payload"))
         .unwrap_or(&serde_json::Value::Null);
-    let payload_json = serde_json::to_string(payload).unwrap_or_else(|_| "null".to_string());
+    let payload_json = if source == "agents.spawn" {
+        compact_agents_spawn_payload(payload)
+    } else {
+        serde_json::to_string(payload).unwrap_or_else(|_| "null".to_string())
+    };
     format!(
         "<event subkind=\"{}\" source=\"{}\">\n<payload>{}</payload>\n<message>{}</message>\n</event>",
         escape_xml_attr(subkind),
@@ -137,6 +141,23 @@ pub fn render_event_message(msg: &ChatMessage) -> String {
         escape_xml_text(&payload_json),
         escape_xml_text(&content)
     )
+}
+
+fn compact_agents_spawn_payload(payload: &serde_json::Value) -> String {
+    let mut compact = serde_json::Map::new();
+    for key in ["agent_id", "kind", "status", "title", "child_chat_id"] {
+        if let Some(value) = payload.get(key) {
+            compact.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(count) = payload
+        .get("edited_files")
+        .and_then(|v| v.as_array())
+        .map(|files| files.len())
+    {
+        compact.insert("edited_files_count".to_string(), serde_json::json!(count));
+    }
+    serde_json::to_string(&serde_json::Value::Object(compact)).unwrap_or_else(|_| "null".to_string())
 }
 
 pub fn render_plan_message(msg: &ChatMessage) -> Option<String> {

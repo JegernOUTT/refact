@@ -450,7 +450,7 @@ async fn collect_delegate_changes(
             .collect::<Vec<_>>();
         let diff_summary =
             command_stdout(&root, &["diff", "--stat"]).filter(|text| !text.trim().is_empty());
-        let conflict_summary = detect_conflicts(&root);
+        let conflict_summary = detect_conflicts(&root, &edited_files);
         (edited_files, diff_summary, conflict_summary)
     })
     .await
@@ -475,40 +475,34 @@ fn git_lines(root: &Path, args: &[&str]) -> Vec<String> {
         .collect()
 }
 
-fn detect_conflicts(root: &Path) -> Option<String> {
-    let mut files = Vec::new();
-    for entry in walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path
-            .components()
-            .any(|component| component.as_os_str() == ".git")
-        {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        if content.contains("<<<<<<<") || content.contains("=======") || content.contains(">>>>>>>")
-        {
-            files.push(
-                path.strip_prefix(root)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .to_string(),
-            );
-        }
-    }
+fn detect_conflicts(root: &Path, edited_files: &[String]) -> Option<String> {
+    let files: Vec<String> = edited_files
+        .iter()
+        .filter(|rel| file_has_conflict_markers(&root.join(rel)))
+        .cloned()
+        .collect();
     if files.is_empty() {
         None
     } else {
         Some(format!("Conflict markers detected in {}", files.join(", ")))
     }
+}
+
+fn file_has_conflict_markers(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let (mut start, mut sep, mut end) = (false, false, false);
+    for line in content.lines() {
+        if line.starts_with("<<<<<<< ") {
+            start = true;
+        } else if line == "=======" {
+            sep = true;
+        } else if line.starts_with(">>>>>>> ") {
+            end = true;
+        }
+    }
+    start && sep && end
 }
 
 fn fallback_failed_record(agent_id: String, req: SpawnRequest, error: String) -> BackgroundAgent {

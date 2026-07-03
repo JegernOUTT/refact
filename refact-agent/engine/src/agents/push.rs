@@ -9,6 +9,27 @@ use crate::chat::types::{BurstGuardDecision, ChatCommand, CommandRequest, Enqueu
 use crate::postprocessing::pp_command_output::OutputFilter;
 
 const DEFERRED_RETRY_AFTER: TimeDelta = TimeDelta::seconds(10);
+const MAX_EVENT_EDITED_FILES: usize = 50;
+const MAX_EVENT_DIFF_SUMMARY_CHARS: usize = 2000;
+const MAX_EVENT_CONFLICT_SUMMARY_CHARS: usize = 1000;
+
+fn cap_text_chars(text: &str, max: usize) -> String {
+    let total = text.chars().count();
+    if total <= max {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max).collect();
+    format!("{kept}… [truncated, {total} chars]")
+}
+
+fn cap_file_list(files: &[String], max: usize) -> Vec<String> {
+    if files.len() <= max {
+        return files.to_vec();
+    }
+    let mut capped: Vec<String> = files.iter().take(max).cloned().collect();
+    capped.push(format!("… and {} more", files.len() - max));
+    capped
+}
 
 pub async fn push_completion_to_parent(
     app: AppState,
@@ -118,6 +139,15 @@ fn already_pushed(record: &BackgroundAgent) -> bool {
 }
 
 fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::ChatMessage {
+    let edited_files = cap_file_list(&record.edited_files, MAX_EVENT_EDITED_FILES);
+    let diff_summary = record
+        .diff_summary
+        .as_deref()
+        .map(|text| cap_text_chars(text, MAX_EVENT_DIFF_SUMMARY_CHARS));
+    let conflict_summary = record
+        .conflict_summary
+        .as_deref()
+        .map(|text| cap_text_chars(text, MAX_EVENT_CONFLICT_SUMMARY_CHARS));
     let mut message = event(
         EventSubkind::SystemNotice,
         "agents.spawn",
@@ -133,9 +163,9 @@ fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::
             "target_files": record.target_files,
             "model": record.model,
             "child_chat_id": record.child_chat_id,
-            "edited_files": record.edited_files,
-            "diff_summary": record.diff_summary,
-            "conflict_summary": record.conflict_summary,
+            "edited_files": edited_files,
+            "diff_summary": diff_summary,
+            "conflict_summary": conflict_summary,
             "created_at": record.created_at,
             "last_update_at": record.last_update_at,
         }),
@@ -169,7 +199,11 @@ fn build_push_message(record: &BackgroundAgent) -> String {
     }
     if record.kind == BgAgentKind::Delegate && !record.edited_files.is_empty() {
         lines.push("Edited files:".to_string());
-        lines.extend(record.edited_files.iter().map(|file| format!("- {}", file)));
+        lines.extend(
+            cap_file_list(&record.edited_files, MAX_EVENT_EDITED_FILES)
+                .iter()
+                .map(|file| format!("- {}", file)),
+        );
         lines.push(String::new());
     }
 
@@ -203,6 +237,20 @@ fn build_push_message(record: &BackgroundAgent) -> String {
             lines.push("Summary:".to_string());
             lines.push(record.progress.as_deref().unwrap_or("").to_string());
         }
+    }
+
+    if let Some(conflict_summary) = record
+        .conflict_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        lines.push(String::new());
+        lines.push("Conflicts:".to_string());
+        lines.push(cap_text_chars(
+            conflict_summary,
+            MAX_EVENT_CONFLICT_SUMMARY_CHARS,
+        ));
     }
 
     lines.push(String::new());
