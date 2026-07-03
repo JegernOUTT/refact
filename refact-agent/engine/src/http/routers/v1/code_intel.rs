@@ -1,5 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
@@ -467,16 +467,13 @@ fn health_aggregate(files: &[HealthFileResponse]) -> HealthAggregateResponse {
     }
 }
 
-fn co_change_count(intel: Option<&refact_git_intel::GitIntel>, a: &str, b: &str) -> u32 {
-    intel
-        .and_then(|intel| {
-            intel
-                .co_change
-                .get(&(a.to_string(), b.to_string()))
-                .or_else(|| intel.co_change.get(&(b.to_string(), a.to_string())))
-                .copied()
-        })
-        .unwrap_or(0)
+fn co_change_count(
+    intel: Option<&refact_git_intel::GitIntel>,
+    a: &str,
+    b: &str,
+    project_root: Option<&Path>,
+) -> u32 {
+    crate::tools::tool_codegraph::co_change_count(intel, a, b, project_root)
 }
 
 fn duplication_finding_response(
@@ -843,7 +840,7 @@ pub async fn handle_v1_code_intel_duplication(
     State(app): State<AppState>,
     Query(query): Query<CodeIntelListQuery>,
 ) -> Result<Response<Body>, ScratchError> {
-    let Some(service) = codegraph_service(&app).await else {
+    let Some(_service) = codegraph_service(&app).await else {
         return codegraph_off_response();
     };
     let limit = clamped_limit(
@@ -852,8 +849,10 @@ pub async fn handle_v1_code_intel_duplication(
         MAX_DUPLICATION_LIMIT,
     );
     let filter = path_filter(query.path);
-    let files_text = service.all_files_with_text().await.map_err(store_error)?;
-    if files_text.is_empty() {
+    let analysis = crate::tools::tool_codegraph::cached_cross_file_clones(app.gcx.clone())
+        .await
+        .map_err(store_error)?;
+    if analysis.files == 0 {
         return json_response(&DuplicationResponse {
             aggregate: DuplicationAggregateResponse {
                 file_count: 0,
@@ -867,27 +866,21 @@ pub async fn handle_v1_code_intel_duplication(
         });
     }
     let matching_file_count = match filter.as_deref() {
-        Some(filter) => files_text
-            .iter()
-            .filter(|(path, _)| path_matches_filter(path, filter))
+        Some(filter) => analysis
+            .text_by_path
+            .keys()
+            .filter(|path| path_matches_filter(path, filter))
             .count(),
-        None => files_text.len(),
+        None => analysis.files,
     };
     if filter.is_some() && matching_file_count == 0 {
         return detail_response("path is not indexed in codegraph");
     }
 
-    let triples = files_text
+    let mut clones = analysis
+        .clones
         .iter()
-        .map(|(path, text)| {
-            (
-                path.clone(),
-                refact_codegraph::lang_from_path(path).to_string(),
-                text.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut clones = refact_codehealth::duplication::detect_cross_file_clones(&triples)
+        .cloned()
         .into_iter()
         .filter(|clone| {
             filter.as_deref().is_none_or(|filter| {
@@ -905,12 +898,11 @@ pub async fn handle_v1_code_intel_duplication(
             .then_with(|| a.b_start_line.cmp(&b.b_start_line))
     });
     let clone_pair_count = clones.len();
-    let duplication_pct = refact_codehealth::duplication::cross_file_duplication_pct(&triples);
-    let intel = crate::tools::tool_codegraph::project_dir(app.gcx.clone())
-        .await
-        .and_then(|dir| {
-            crate::tools::tool_codegraph::cached_mine_history(&dir, GIT_HISTORY_MAX_COMMITS).ok()
-        });
+    let duplication_pct = analysis.duplication_pct;
+    let project_root = crate::tools::tool_codegraph::project_dir(app.gcx.clone()).await;
+    let intel = project_root.as_deref().and_then(|dir| {
+        crate::tools::tool_codegraph::cached_mine_history(dir, GIT_HISTORY_MAX_COMMITS).ok()
+    });
 
     let clone_responses = clones
         .iter()
@@ -935,27 +927,16 @@ pub async fn handle_v1_code_intel_duplication(
                 b_end_line: clone.b_end_line,
                 lines: a_lines.max(b_lines),
                 token_len: clone.token_len,
-                co_change: co_change_count(intel.as_ref(), &clone.file_a, &clone.file_b),
+                co_change: co_change_count(
+                    intel.as_ref(),
+                    &clone.file_a,
+                    &clone.file_b,
+                    project_root.as_deref(),
+                ),
             }
         })
         .collect::<Vec<_>>();
 
-    let text_by_path: HashMap<String, (String, String)> = files_text
-        .into_iter()
-        .map(|(path, text)| {
-            let lang = refact_codegraph::lang_from_path(&path).to_string();
-            (path, (lang, text))
-        })
-        .collect();
-    let tokens_by_path: HashMap<String, usize> = text_by_path
-        .iter()
-        .map(|(path, (lang, text))| {
-            (
-                path.clone(),
-                refact_codehealth::duplication::tokenize(lang, text).len(),
-            )
-        })
-        .collect();
     let mut per_file: HashMap<String, Vec<&refact_codehealth::duplication::CrossFileClonePair>> =
         HashMap::new();
     for clone in &clones {
@@ -993,14 +974,24 @@ pub async fn handle_v1_code_intel_duplication(
                     .b_end_line
                     .saturating_sub(clone.b_start_line)
                     .saturating_add(1),
-                co_change_count: co_change_count(intel.as_ref(), &clone.file_a, &clone.file_b),
+                co_change_count: co_change_count(
+                    intel.as_ref(),
+                    &clone.file_a,
+                    &clone.file_b,
+                    project_root.as_deref(),
+                ),
             })
             .collect::<Vec<_>>();
         let file_dup_tokens = file_clones
             .iter()
             .map(|clone| clone.token_len)
             .sum::<usize>();
-        let file_total = tokens_by_path.get(&path).copied().unwrap_or(0).max(1);
+        let file_total = analysis
+            .tokens_by_path
+            .get(&path)
+            .copied()
+            .unwrap_or(0)
+            .max(1);
         let file_dup_pct = (file_dup_tokens as f64 / file_total as f64).min(1.0);
         let dry_input = refact_codehealth::dry::DryInput {
             file_path: path.clone(),
@@ -1013,7 +1004,7 @@ pub async fn handle_v1_code_intel_duplication(
                 .map(|finding| duplication_finding_response(&path, finding)),
         );
         if refact_git_intel::paths::is_test_path(&path) {
-            if let Some((lang, text)) = text_by_path.get(&path) {
+            if let Some((lang, text)) = analysis.text_by_path.get(&path) {
                 let assertion_blocks = refact_codehealth::assertions::assertion_blocks(lang, text);
                 let ts_clones = file_clones
                     .iter()
@@ -1050,7 +1041,7 @@ pub async fn handle_v1_code_intel_duplication(
             file_count: if filter.is_some() {
                 matching_file_count
             } else {
-                triples.len()
+                analysis.files
             },
             clone_pair_count,
             duplication_pct,
@@ -1490,5 +1481,93 @@ mod tests {
                 |impact| impact["path"].as_str() == Some(caller_path.as_str())
                     && impact["symbol"].as_str() == Some("caller")
             ));
+    }
+
+    fn commit_files_together(repo: &Repository, files: &[(&str, &str)], msg: &str) {
+        let workdir = repo.workdir().unwrap();
+        let mut index = repo.index().unwrap();
+        for (path, contents) in files {
+            let full_path = workdir.join(path);
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&full_path, contents).unwrap();
+            index.add_path(Path::new(path)).unwrap();
+        }
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let time = Time::new(1_700_000_100, 0);
+        let sig = Signature::new("Tester", "tester@example.com", &time).unwrap();
+        let parents = repo
+            .head()
+            .ok()
+            .and_then(|head| head.target())
+            .and_then(|oid| repo.find_commit(oid).ok())
+            .into_iter()
+            .collect::<Vec<_>>();
+        let parent_refs = parents.iter().collect::<Vec<_>>();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
+            .unwrap();
+    }
+
+    fn co_change_clone_source(name: &str, marker: &str) -> String {
+        let mut src =
+            format!("// {marker}\nfn {name}(input: i32) -> i32 {{\n    let mut total = input;\n");
+        for _ in 0..30 {
+            src.push_str("    total = total + input;\n    total = total - input;\n");
+        }
+        src.push_str("    total\n}\n");
+        src
+    }
+
+    async fn router_with_co_change_duplication() -> (axum::Router, tempfile::TempDir) {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let a_v1 = co_change_clone_source("alpha", "v1");
+        let b_v1 = co_change_clone_source("beta", "v1");
+        commit_files_together(
+            &repo,
+            &[("src/a.rs", &a_v1), ("src/b.rs", &b_v1)],
+            "first co-change",
+        );
+        let a_v2 = co_change_clone_source("alpha", "v2");
+        let b_v2 = co_change_clone_source("beta", "v2");
+        commit_files_together(
+            &repo,
+            &[("src/a.rs", &a_v2), ("src/b.rs", &b_v2)],
+            "second co-change",
+        );
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+
+        let a_abs = dir.path().join("src/a.rs").to_string_lossy().to_string();
+        let b_abs = dir.path().join("src/b.rs").to_string_lossy().to_string();
+        let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        codegraph.index_file(&a_abs, &a_v2, "rust").await.unwrap();
+        codegraph.index_file(&b_abs, &b_v2, "rust").await.unwrap();
+        codegraph.connect_usages().await.unwrap();
+        *gcx.codegraph.lock().await = Some(codegraph);
+        let app = AppState::from_gcx(gcx).await;
+        (make_refact_http_server(app), dir)
+    }
+
+    #[tokio::test]
+    async fn code_intel_duplication_co_change_joins_absolute_paths() {
+        let (router, _dir) = router_with_co_change_duplication().await;
+
+        let (status, json) = get_json(router, "/v1/code-intel/duplication?limit=5").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let clones = json["clones"].as_array().unwrap();
+        assert!(
+            !clones.is_empty(),
+            "expected a cross-file clone between absolute-path files: {json}"
+        );
+        assert_eq!(
+            clones[0]["co_change"].as_u64(),
+            Some(2),
+            "co-change join must translate absolute store paths to repo-relative git keys: {json}"
+        );
     }
 }

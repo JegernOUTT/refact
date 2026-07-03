@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -25,9 +25,28 @@ struct GitMiningCache {
     messages: HashMap<GitCacheKey, (Instant, Vec<String>)>,
 }
 
+pub(crate) struct CloneAnalysis {
+    pub(crate) generation: u64,
+    pub(crate) clones: Vec<refact_codehealth::duplication::CrossFileClonePair>,
+    pub(crate) duplication_pct: f64,
+    pub(crate) files: usize,
+    pub(crate) text_by_path: HashMap<String, (String, String)>,
+    pub(crate) tokens_by_path: HashMap<String, usize>,
+}
+
+#[derive(Default)]
+struct CrossFileCloneCache {
+    analyses: HashMap<usize, (Weak<refact_codegraph::CodeGraphService>, Arc<CloneAnalysis>)>,
+}
+
 fn git_cache() -> &'static StdMutex<GitMiningCache> {
     static CACHE: OnceLock<StdMutex<GitMiningCache>> = OnceLock::new();
     CACHE.get_or_init(|| StdMutex::new(GitMiningCache::default()))
+}
+
+fn clone_analysis_cache() -> &'static AMutex<CrossFileCloneCache> {
+    static CACHE: OnceLock<AMutex<CrossFileCloneCache>> = OnceLock::new();
+    CACHE.get_or_init(|| AMutex::new(CrossFileCloneCache::default()))
 }
 
 fn tool_message(tool_call_id: &String, text: String) -> Vec<ContextEnum> {
@@ -201,6 +220,127 @@ where
         cache.messages.insert(key, (now, messages.clone()));
     }
     Ok(messages)
+}
+
+pub(crate) async fn cached_cross_file_clones(
+    gcx: Arc<crate::global_context::GlobalContext>,
+) -> Result<Arc<CloneAnalysis>, String> {
+    let service = gcx
+        .codegraph
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "codegraph is not available".to_string())?;
+    let key = Arc::as_ptr(&service) as usize;
+    loop {
+        let generation = service.graph_generation();
+        if let Some(analysis) = cached_clone_analysis(&service, key, generation).await {
+            return Ok(analysis);
+        }
+
+        let files_text = service.all_files_with_text().await?;
+        let triples = files_text
+            .iter()
+            .map(|(path, text)| {
+                (
+                    path.clone(),
+                    refact_codegraph::lang_from_path(path).to_string(),
+                    text.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let clones = refact_codehealth::duplication::detect_cross_file_clones(&triples);
+        let duplication_pct = refact_codehealth::duplication::cross_file_duplication_pct(&triples);
+        let files = files_text.len();
+        let text_by_path = files_text
+            .into_iter()
+            .map(|(path, text)| {
+                let lang = refact_codegraph::lang_from_path(&path).to_string();
+                (path, (lang, text))
+            })
+            .collect::<HashMap<_, _>>();
+        let tokens_by_path = text_by_path
+            .iter()
+            .map(|(path, (lang, text))| {
+                (
+                    path.clone(),
+                    refact_codehealth::duplication::tokenize(lang, text).len(),
+                )
+            })
+            .collect();
+        let rebuilt = Arc::new(CloneAnalysis {
+            generation,
+            clones,
+            duplication_pct,
+            files,
+            text_by_path,
+            tokens_by_path,
+        });
+
+        let mut cache = clone_analysis_cache().lock().await;
+        cache
+            .analyses
+            .retain(|_, (weak, _)| weak.upgrade().is_some());
+        let current_generation = service.graph_generation();
+        if let Some((weak, cached)) = cache.analyses.get(&key) {
+            if weak
+                .upgrade()
+                .as_ref()
+                .is_some_and(|cached_service| Arc::ptr_eq(cached_service, &service))
+                && cached.generation == current_generation
+            {
+                return Ok(cached.clone());
+            }
+        }
+        if current_generation == generation {
+            cache
+                .analyses
+                .insert(key, (Arc::downgrade(&service), rebuilt.clone()));
+            return Ok(rebuilt);
+        }
+    }
+}
+
+async fn cached_clone_analysis(
+    service: &Arc<refact_codegraph::CodeGraphService>,
+    key: usize,
+    generation: u64,
+) -> Option<Arc<CloneAnalysis>> {
+    let cache = clone_analysis_cache().lock().await;
+    cache.analyses.get(&key).and_then(|(weak, analysis)| {
+        weak.upgrade().and_then(|cached_service| {
+            (Arc::ptr_eq(&cached_service, service) && analysis.generation == generation)
+                .then(|| analysis.clone())
+        })
+    })
+}
+
+pub(crate) fn co_change_count(
+    intel: Option<&refact_git_intel::GitIntel>,
+    a: &str,
+    b: &str,
+    project_root: Option<&Path>,
+) -> u32 {
+    let Some(intel) = intel else {
+        return 0;
+    };
+    let key_a = co_change_key(a, project_root);
+    let key_b = co_change_key(b, project_root);
+    intel
+        .co_change
+        .get(&(key_a.clone(), key_b.clone()))
+        .or_else(|| intel.co_change.get(&(key_b, key_a)))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn co_change_key(path: &str, project_root: Option<&Path>) -> String {
+    match project_root {
+        Some(root) => {
+            refact_git_intel::paths::repo_relative_or_basename(path, &root.to_string_lossy())
+        }
+        None => refact_git_intel::paths::normalize_separators(path),
+    }
 }
 
 pub struct ToolCodegraphOverview {
@@ -952,77 +1092,37 @@ impl Tool for ToolCodeDuplication {
         _args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let gcx = ccx.lock().await.app.gcx.clone();
-        let service = gcx
-            .codegraph
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| "codegraph is not available".to_string())?;
-        let files_text = service.all_files_with_text().await?;
-        let triples: Vec<(String, String, String)> = files_text
-            .iter()
-            .map(|(p, t)| {
-                (
-                    p.clone(),
-                    refact_codegraph::lang_from_path(p).to_string(),
-                    t.clone(),
-                )
-            })
-            .collect();
-        let clones = refact_codehealth::duplication::detect_cross_file_clones(&triples);
-        if clones.is_empty() {
+        let analysis = cached_cross_file_clones(gcx.clone()).await?;
+        if analysis.clones.is_empty() {
             return Ok((
                 false,
                 tool_message(tool_call_id, "No cross-file clones detected.".to_string()),
             ));
         }
-        let dup_pct = refact_codehealth::duplication::cross_file_duplication_pct(&triples) * 100.0;
-        let intel = project_dir(gcx.clone())
-            .await
-            .and_then(|dir| cached_mine_history(&dir, 1000).ok());
+        let dup_pct = analysis.duplication_pct * 100.0;
+        let project_root = project_dir(gcx.clone()).await;
+        let intel = project_root
+            .as_deref()
+            .and_then(|dir| cached_mine_history(dir, 1000).ok());
         let co_change = |a: &str, b: &str| -> u32 {
-            match &intel {
-                Some(i) => i
-                    .co_change
-                    .get(&(a.to_string(), b.to_string()))
-                    .or_else(|| i.co_change.get(&(b.to_string(), a.to_string())))
-                    .copied()
-                    .unwrap_or(0),
-                None => 0,
-            }
+            co_change_count(intel.as_ref(), a, b, project_root.as_deref())
         };
         let mut msg = format!(
             "Cross-file duplication: {:.1}% of tokens are in cross-file clones ({} pairs).\n",
             dup_pct,
-            clones.len()
+            analysis.clones.len()
         );
-        for c in clones.iter().take(15) {
+        for c in analysis.clones.iter().take(15) {
             msg.push_str(&format!(
                 "  {} tokens: {}:{} <-> {}:{}\n",
                 c.token_len, c.file_a, c.line_a, c.file_b, c.line_b
             ));
         }
-        let text_by_path: HashMap<String, (String, String)> = files_text
-            .into_iter()
-            .map(|(p, t)| {
-                let lang = refact_codegraph::lang_from_path(&p).to_string();
-                (p, (lang, t))
-            })
-            .collect();
-        let tokens_by_path: HashMap<String, usize> = text_by_path
-            .iter()
-            .map(|(p, (lang, text))| {
-                (
-                    p.clone(),
-                    refact_codehealth::duplication::tokenize(lang, text).len(),
-                )
-            })
-            .collect();
         let mut per_file: HashMap<
             String,
             Vec<&refact_codehealth::duplication::CrossFileClonePair>,
         > = HashMap::new();
-        for c in &clones {
+        for c in &analysis.clones {
             per_file.entry(c.file_a.clone()).or_default().push(c);
             per_file.entry(c.file_b.clone()).or_default().push(c);
         }
@@ -1042,7 +1142,12 @@ impl Tool for ToolCodeDuplication {
                 })
                 .collect();
             let file_dup_tokens: usize = file_clones.iter().map(|c| c.token_len).sum();
-            let file_total = tokens_by_path.get(path).copied().unwrap_or(0).max(1);
+            let file_total = analysis
+                .tokens_by_path
+                .get(path)
+                .copied()
+                .unwrap_or(0)
+                .max(1);
             let file_dup_pct = (file_dup_tokens as f64 / file_total as f64).min(1.0);
             let dry_input = refact_codehealth::dry::DryInput {
                 file_path: path.clone(),
@@ -1056,7 +1161,7 @@ impl Tool for ToolCodeDuplication {
                 ));
             }
             if refact_git_intel::paths::is_test_path(path) {
-                if let Some((lang, text)) = text_by_path.get(path) {
+                if let Some((lang, text)) = analysis.text_by_path.get(path) {
                     let assertion_blocks =
                         refact_codehealth::assertions::assertion_blocks(lang, text);
                     let ts_clones: Vec<refact_codehealth::test_smells::ClonePair> = file_clones
@@ -1599,5 +1704,51 @@ mod tests {
 
         assert_eq!(messages[0], "side branch history");
         assert!(git_cache().lock().unwrap().messages.get(&key).is_none());
+    }
+
+    fn shared_clone_body(name: &str) -> String {
+        let mut src = format!("fn {name}(input: i32) -> i32 {{\n    let mut total = input;\n");
+        for _ in 0..30 {
+            src.push_str("    total = total + input;\n    total = total - input;\n");
+        }
+        src.push_str("    total\n}\n");
+        src
+    }
+
+    #[tokio::test]
+    async fn clone_cache_reuses_until_generation_bump() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        service
+            .index_file("src/a.rs", &shared_clone_body("alpha"), "rust")
+            .await
+            .unwrap();
+        service
+            .index_file("src/b.rs", &shared_clone_body("beta"), "rust")
+            .await
+            .unwrap();
+        *gcx.codegraph.lock().await = Some(service.clone());
+
+        let first = cached_cross_file_clones(gcx.clone()).await.unwrap();
+        let second = cached_cross_file_clones(gcx.clone()).await.unwrap();
+
+        assert!(
+            !first.clones.is_empty(),
+            "expected cross-file clone between a.rs and b.rs"
+        );
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "same generation must serve the cached analysis"
+        );
+
+        service
+            .index_file("src/c.rs", "fn gamma() -> i32 { 3 }\n", "rust")
+            .await
+            .unwrap();
+        let third = cached_cross_file_clones(gcx.clone()).await.unwrap();
+        assert!(
+            !Arc::ptr_eq(&second, &third),
+            "generation bump must rebuild the clone analysis"
+        );
     }
 }
