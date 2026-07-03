@@ -1,6 +1,6 @@
 use crate::biomarkers::{Dimension, Finding, Severity};
 
-const MIN_DUP_PCT: f64 = 0.08;
+pub const DRY_DUPLICATION_THRESHOLD: f64 = 0.08;
 const MIN_CLONE_LINES: usize = 6;
 const ACTIVE_CO_CHANGE: u32 = 3;
 const HIGH_DUP_PCT: f64 = 0.25;
@@ -22,7 +22,7 @@ pub struct DryInput {
 }
 
 pub fn dry_violation(input: &DryInput) -> Vec<Finding> {
-    if input.clones.is_empty() || input.duplication_pct < MIN_DUP_PCT {
+    if input.clones.is_empty() || input.duplication_pct < DRY_DUPLICATION_THRESHOLD {
         return Vec::new();
     }
 
@@ -216,5 +216,22 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn dry_threshold_single_source() {
+        for (duplication_pct, expected) in [(0.09, true), (0.05, false)] {
+            let input = DryInput {
+                file_path: "a.rs".to_string(),
+                duplication_pct,
+                clones: vec![clone_pair("a.rs", 4, 10, "b.rs", 8, 10, 1)],
+            };
+
+            assert_eq!(
+                crate::duplication::dry_duplication_pct_violates(duplication_pct),
+                expected
+            );
+            assert_eq!(!dry_violation(&input).is_empty(), expected);
+        }
     }
 }

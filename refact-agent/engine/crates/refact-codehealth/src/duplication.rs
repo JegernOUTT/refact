@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
+use crate::dry::DRY_DUPLICATION_THRESHOLD;
 use serde::{Deserialize, Serialize};
 use tree_sitter::Node;
 
 const MIN_CLONE_TOKENS: usize = 50;
 const MAX_CLONE_PAIRS: usize = 200;
+const MAX_HOT_BUCKET_DENSE_OCCURRENCES: usize = 64;
 const BASE: u64 = 1_000_003;
 const MODULUS: u64 = 9_223_372_036_854_775_783;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -50,6 +52,12 @@ struct CloneMatch {
     start_a: usize,
     start_b: usize,
     token_len: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowOccurrence {
+    file_idx: usize,
+    start: usize,
 }
 
 pub fn tokenize(lang: &str, text: &str) -> Vec<Token> {
@@ -151,7 +159,10 @@ pub fn detect_cross_file_clones(files: &[(String, String, String)]) -> Vec<Cross
         .map(|(path, lang, text)| (path.as_str(), tokenize(lang, text)))
         .collect();
 
-    detect_cross_file_clone_matches(&tokenized)
+    let mut matches = detect_cross_file_clone_matches(&tokenized);
+    matches.truncate(MAX_CLONE_PAIRS);
+
+    matches
         .into_iter()
         .map(|m| {
             let (path_a, tokens_a) = &tokenized[m.file_a];
@@ -175,73 +186,188 @@ pub fn detect_cross_file_clones(files: &[(String, String, String)]) -> Vec<Cross
 }
 
 fn detect_cross_file_clone_matches(tokenized: &[(&str, Vec<Token>)]) -> Vec<CrossFileCloneMatch> {
-    let mut clones = Vec::new();
-    let mut processed_pairs = 0usize;
+    let mut buckets: HashMap<u64, Vec<WindowOccurrence>> = HashMap::new();
+    for (file_idx, (_, tokens)) in tokenized.iter().enumerate() {
+        if tokens.len() < MIN_CLONE_TOKENS {
+            continue;
+        }
 
-    'outer: for i in 0..tokenized.len() {
-        for j in (i + 1)..tokenized.len() {
-            if processed_pairs >= 2000 || clones.len() >= MAX_CLONE_PAIRS {
-                break 'outer;
-            }
-            processed_pairs += 1;
-
-            let (path_a, tokens_a) = &tokenized[i];
-            let (path_b, tokens_b) = &tokenized[j];
-            if path_a == path_b
-                || tokens_a.len() < MIN_CLONE_TOKENS
-                || tokens_b.len() < MIN_CLONE_TOKENS
-            {
-                continue;
-            }
-
-            let sentinel_len = MIN_CLONE_TOKENS + 1;
-            let offset_b = tokens_a.len() + sentinel_len;
-            let mut combined = Vec::with_capacity(tokens_a.len() + sentinel_len + tokens_b.len());
-            combined.extend_from_slice(tokens_a);
-            combined.extend((0..sentinel_len).map(|idx| Token {
-                kind_hash: u64::MAX - idx as u64,
-                line: usize::MAX,
-            }));
-            combined.extend_from_slice(tokens_b);
-
-            for m in detect_clone_matches(&combined) {
-                let in_a_first = m.start_a < tokens_a.len();
-                let in_b_second = m.start_b >= offset_b;
-                if !in_a_first || !in_b_second {
-                    continue;
-                }
-
-                let start_b = m.start_b - offset_b;
-                if m.start_a + MIN_CLONE_TOKENS > tokens_a.len()
-                    || start_b + MIN_CLONE_TOKENS > tokens_b.len()
-                {
-                    continue;
-                }
-
-                let token_len = m
-                    .token_len
-                    .min(tokens_a.len() - m.start_a)
-                    .min(tokens_b.len() - start_b);
-                if token_len < MIN_CLONE_TOKENS {
-                    continue;
-                }
-
-                clones.push(CrossFileCloneMatch {
-                    file_a: i,
-                    file_b: j,
-                    start_a: m.start_a,
-                    start_b,
-                    token_len,
-                });
-
-                if clones.len() >= MAX_CLONE_PAIRS {
-                    break 'outer;
-                }
-            }
+        for (start, hash) in rolling_window_hashes(tokens, MIN_CLONE_TOKENS)
+            .into_iter()
+            .enumerate()
+        {
+            buckets
+                .entry(hash)
+                .or_default()
+                .push(WindowOccurrence { file_idx, start });
         }
     }
 
-    clones
+    let mut matches = Vec::new();
+    let mut covered_pairs: HashMap<(usize, usize), Vec<((usize, usize), (usize, usize))>> =
+        HashMap::new();
+    let mut hashes: Vec<u64> = buckets.keys().copied().collect();
+    hashes.sort_unstable();
+
+    for hash in hashes {
+        let Some(mut occurrences) = buckets.remove(&hash) else {
+            continue;
+        };
+        if !bucket_has_cross_file_occurrences(&occurrences, tokenized) {
+            continue;
+        }
+
+        occurrences.sort_unstable_by_key(|occurrence| (occurrence.file_idx, occurrence.start));
+        if occurrences.len() > MAX_HOT_BUCKET_DENSE_OCCURRENCES {
+            process_hot_cross_file_bucket(
+                &occurrences,
+                tokenized,
+                &mut matches,
+                &mut covered_pairs,
+            );
+        } else {
+            process_cross_file_bucket_pairs(
+                &occurrences,
+                tokenized,
+                &mut matches,
+                &mut covered_pairs,
+            );
+        }
+    }
+
+    matches.sort_by_key(|m| (m.file_a, m.file_b, m.start_a, m.start_b, m.token_len));
+    matches
+}
+
+fn bucket_has_cross_file_occurrences(
+    occurrences: &[WindowOccurrence],
+    tokenized: &[(&str, Vec<Token>)],
+) -> bool {
+    let mut first_path: Option<&str> = None;
+    for occurrence in occurrences {
+        let path = tokenized[occurrence.file_idx].0;
+        let Some(first_path) = first_path else {
+            first_path = Some(path);
+            continue;
+        };
+        if first_path != path {
+            return true;
+        }
+    }
+    false
+}
+
+fn process_cross_file_bucket_pairs(
+    occurrences: &[WindowOccurrence],
+    tokenized: &[(&str, Vec<Token>)],
+    matches: &mut Vec<CrossFileCloneMatch>,
+    covered_pairs: &mut HashMap<(usize, usize), Vec<((usize, usize), (usize, usize))>>,
+) {
+    for i in 0..occurrences.len() {
+        for j in (i + 1)..occurrences.len() {
+            maybe_record_cross_file_match(
+                occurrences[i],
+                occurrences[j],
+                tokenized,
+                matches,
+                covered_pairs,
+            );
+        }
+    }
+}
+
+fn process_hot_cross_file_bucket(
+    occurrences: &[WindowOccurrence],
+    tokenized: &[(&str, Vec<Token>)],
+    matches: &mut Vec<CrossFileCloneMatch>,
+    covered_pairs: &mut HashMap<(usize, usize), Vec<((usize, usize), (usize, usize))>>,
+) {
+    let dense_len = occurrences.len().min(MAX_HOT_BUCKET_DENSE_OCCURRENCES);
+    process_cross_file_bucket_pairs(&occurrences[..dense_len], tokenized, matches, covered_pairs);
+
+    let representatives = distinct_path_representatives(occurrences, tokenized);
+    // Dense pair expansion is capped for hot buckets; representative sweep keeps later files visible
+    // without materializing all combinations.
+    for occurrence in &occurrences[dense_len..] {
+        let Some(representative) = representatives.iter().copied().find(|representative| {
+            tokenized[representative.file_idx].0 != tokenized[occurrence.file_idx].0
+        }) else {
+            continue;
+        };
+        maybe_record_cross_file_match(
+            representative,
+            *occurrence,
+            tokenized,
+            matches,
+            covered_pairs,
+        );
+    }
+}
+
+fn distinct_path_representatives(
+    occurrences: &[WindowOccurrence],
+    tokenized: &[(&str, Vec<Token>)],
+) -> Vec<WindowOccurrence> {
+    let mut representatives = Vec::new();
+    for occurrence in occurrences {
+        let path = tokenized[occurrence.file_idx].0;
+        if representatives
+            .iter()
+            .all(|representative: &WindowOccurrence| tokenized[representative.file_idx].0 != path)
+        {
+            representatives.push(*occurrence);
+            if representatives.len() == 2 {
+                break;
+            }
+        }
+    }
+    representatives
+}
+
+fn maybe_record_cross_file_match(
+    left: WindowOccurrence,
+    right: WindowOccurrence,
+    tokenized: &[(&str, Vec<Token>)],
+    matches: &mut Vec<CrossFileCloneMatch>,
+    covered_pairs: &mut HashMap<(usize, usize), Vec<((usize, usize), (usize, usize))>>,
+) {
+    if left.file_idx == right.file_idx || tokenized[left.file_idx].0 == tokenized[right.file_idx].0
+    {
+        return;
+    }
+
+    let (file_a, start_a, file_b, start_b) = if left.file_idx < right.file_idx {
+        (left.file_idx, left.start, right.file_idx, right.start)
+    } else {
+        (right.file_idx, right.start, left.file_idx, left.start)
+    };
+    let tokens_a = &tokenized[file_a].1;
+    let tokens_b = &tokenized[file_b].1;
+
+    if !cross_windows_equal(tokens_a, start_a, tokens_b, start_b, MIN_CLONE_TOKENS) {
+        return;
+    }
+
+    let (start_a, start_b, token_len) =
+        extend_cross_file_match(tokens_a, start_a, tokens_b, start_b, MIN_CLONE_TOKENS);
+    let pair_key = (file_a, file_b);
+    if let Some(covered) = covered_pairs.get(&pair_key) {
+        if is_pair_covered(start_a, start_b, covered) {
+            return;
+        }
+    }
+
+    matches.push(CrossFileCloneMatch {
+        file_a,
+        file_b,
+        start_a,
+        start_b,
+        token_len,
+    });
+    covered_pairs.entry(pair_key).or_default().push((
+        (start_a, start_a + token_len),
+        (start_b, start_b + token_len),
+    ));
 }
 
 fn detect_clone_matches(tokens: &[Token]) -> Vec<CloneMatch> {
@@ -339,6 +465,23 @@ fn windows_equal(tokens: &[Token], start_a: usize, start_b: usize, len: usize) -
         .all(|(a, b)| a.kind_hash == b.kind_hash)
 }
 
+fn cross_windows_equal(
+    tokens_a: &[Token],
+    start_a: usize,
+    tokens_b: &[Token],
+    start_b: usize,
+    len: usize,
+) -> bool {
+    if start_a + len > tokens_a.len() || start_b + len > tokens_b.len() {
+        return false;
+    }
+
+    tokens_a[start_a..start_a + len]
+        .iter()
+        .zip(&tokens_b[start_b..start_b + len])
+        .all(|(a, b)| a.kind_hash == b.kind_hash)
+}
+
 fn extend_match(tokens: &[Token], start_a: usize, start_b: usize, min_len: usize) -> usize {
     let mut len = min_len;
     while start_b + len < tokens.len()
@@ -348,6 +491,33 @@ fn extend_match(tokens: &[Token], start_a: usize, start_b: usize, min_len: usize
         len += 1;
     }
     len
+}
+
+fn extend_cross_file_match(
+    tokens_a: &[Token],
+    start_a: usize,
+    tokens_b: &[Token],
+    start_b: usize,
+    min_len: usize,
+) -> (usize, usize, usize) {
+    let mut back_len = 0;
+    while start_a > back_len
+        && start_b > back_len
+        && tokens_a[start_a - back_len - 1].kind_hash == tokens_b[start_b - back_len - 1].kind_hash
+    {
+        back_len += 1;
+    }
+
+    let start_a = start_a - back_len;
+    let start_b = start_b - back_len;
+    let mut len = min_len + back_len;
+    while start_a + len < tokens_a.len()
+        && start_b + len < tokens_b.len()
+        && tokens_a[start_a + len].kind_hash == tokens_b[start_b + len].kind_hash
+    {
+        len += 1;
+    }
+    (start_a, start_b, len)
 }
 
 fn is_pair_covered(
@@ -445,7 +615,11 @@ pub fn cross_file_duplication_pct(files: &[(String, String, String)]) -> f64 {
 }
 
 pub fn dry_violation(lang: &str, text: &str) -> bool {
-    duplication_pct(lang, text) > 0.10
+    dry_duplication_pct_violates(duplication_pct(lang, text))
+}
+
+pub(crate) fn dry_duplication_pct_violates(duplication_pct: f64) -> bool {
+    duplication_pct >= DRY_DUPLICATION_THRESHOLD
 }
 
 #[cfg(test)]
@@ -783,5 +957,54 @@ fn {name}({param}: i32) -> i32 {{
             clone.b_end_line
         );
         assert!(clone.token_len >= MIN_CLONE_TOKENS);
+    }
+
+    #[test]
+    fn clone_beyond_old_prefix_cap_is_found() {
+        let mut files: Vec<(String, String, String)> = (0..80)
+            .map(|idx| {
+                (
+                    format!("filler_{idx}.rs"),
+                    "rust".to_string(),
+                    format!("fn filler_{idx}() -> i32 {{ {idx} }}\n"),
+                )
+            })
+            .collect();
+        files[70] = (
+            "tail_a.rs".to_string(),
+            "rust".to_string(),
+            cross_file_rust_source("compute_tail_a", "input"),
+        );
+        files[75] = (
+            "tail_b.rs".to_string(),
+            "rust".to_string(),
+            cross_file_rust_source("compute_tail_b", "value"),
+        );
+        let processed_before_old_pair: usize =
+            (0..70).map(|i| files.len() - i - 1).sum::<usize>() + 5;
+        assert!(processed_before_old_pair > 2000);
+
+        let clones = detect_cross_file_clones(&files);
+
+        assert!(
+            clones.iter().any(|clone| clone.file_a == "tail_a.rs"
+                && clone.file_b == "tail_b.rs"
+                && clone.token_len >= MIN_CLONE_TOKENS),
+            "got {clones:?}"
+        );
+    }
+
+    #[test]
+    fn output_cap_does_not_hide_pct() {
+        let src = cross_file_rust_source("compute_shared", "input");
+        let files: Vec<(String, String, String)> = (0..(MAX_CLONE_PAIRS + 5))
+            .map(|idx| (format!("clone_{idx}.rs"), "rust".to_string(), src.clone()))
+            .collect();
+
+        let clones = detect_cross_file_clones(&files);
+        let pct = cross_file_duplication_pct(&files);
+
+        assert_eq!(clones.len(), MAX_CLONE_PAIRS);
+        assert_eq!(pct, 1.0);
     }
 }
