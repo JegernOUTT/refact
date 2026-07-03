@@ -525,6 +525,7 @@ fn push(
         severity,
         line: node.start_position().row + 1,
         detail,
+        deduction: None,
     });
 }
 
@@ -707,6 +708,7 @@ function load(path) {
             severity: blocking.severity,
             line: blocking.line,
             detail: String::new(),
+            deduction: None,
         };
 
         let blocking_score = crate::scoring::score_file(&[blocking]).defect;

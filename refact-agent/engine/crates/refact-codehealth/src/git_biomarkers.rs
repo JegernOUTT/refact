@@ -70,6 +70,7 @@ fn finding(biomarker: &str, severity: Severity, detail: String) -> Finding {
         severity,
         line: 1,
         detail,
+        deduction: None,
     }
 }
 
@@ -373,7 +374,6 @@ fn is_small_team(meta: &GitMeta) -> bool {
 
 fn severity_rank(severity: Severity) -> u8 {
     match severity {
-        Severity::Info => 0,
         Severity::Low => 1,
         Severity::Medium => 2,
         Severity::High => 3,

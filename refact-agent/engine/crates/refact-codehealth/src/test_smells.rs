@@ -92,6 +92,7 @@ fn finding(biomarker: &str, severity: Severity, line: usize, detail: String) -> 
         severity,
         line,
         detail,
+        deduction: None,
     }
 }
 

@@ -76,6 +76,7 @@ pub fn dry_violation(input: &DryInput) -> Vec<Finding> {
             partner,
             worst.co_change_count
         ),
+        deduction: None,
     }]
 }
 

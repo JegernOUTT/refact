@@ -2,7 +2,9 @@ use crate::biomarkers::{Dimension, Finding, Severity};
 use crate::coverage::CoverageReport;
 use std::collections::HashMap;
 
-const CATEGORY: &str = "test_coverage";
+const TEST_COVERAGE_CATEGORY: &str = "test_coverage";
+const COVERAGE_GRADIENT_CATEGORY: &str = "coverage_gradient";
+const COVERAGE_GRADIENT_WEIGHT: f64 = 4.0;
 
 pub fn coverage_biomarkers(
     coverage: &CoverageReport,
@@ -15,6 +17,29 @@ pub fn coverage_biomarkers(
         let line_fraction = pct_fraction(file.lines_covered, file.lines_total);
         let branch_fraction = pct_fraction(file.branches_covered, file.branches_total);
 
+        if file.lines_total > 0 && line_fraction < 1.0 {
+            let uncovered_fraction = 1.0 - line_fraction;
+            let severity = if line_fraction < 0.4 {
+                Severity::High
+            } else if line_fraction < 0.7 {
+                Severity::Medium
+            } else {
+                Severity::Low
+            };
+            out.push(finding_with_deduction(
+                "coverage_gradient",
+                COVERAGE_GRADIENT_CATEGORY,
+                severity,
+                format!(
+                    "{} has {:.0}% uncovered lines ({:.0}% line coverage); uncovered code carries proportionally more defect risk",
+                    file.path,
+                    uncovered_fraction * 100.0,
+                    file.line_pct()
+                ),
+                COVERAGE_GRADIENT_WEIGHT * uncovered_fraction,
+            ));
+        }
+
         if line_fraction < 0.5 && file.lines_total >= 20 {
             let severity = if line_fraction < 0.2 {
                 Severity::High
@@ -25,6 +50,7 @@ pub fn coverage_biomarkers(
             };
             out.push(finding(
                 "coverage_gap",
+                TEST_COVERAGE_CATEGORY,
                 severity,
                 format!(
                     "{} has {:.0}% line coverage ({}/{})",
@@ -38,7 +64,8 @@ pub fn coverage_biomarkers(
 
         if file.branches_total > 0 && line_fraction - branch_fraction > 0.3 {
             out.push(finding(
-                "coverage_gradient",
+                "branch_coverage_lag",
+                TEST_COVERAGE_CATEGORY,
                 Severity::Medium,
                 format!(
                     "{} has {:.0}% branch coverage vs {:.0}% line coverage; branches under-tested vs lines",
@@ -54,6 +81,7 @@ pub fn coverage_biomarkers(
         if line_fraction < 0.5 && (complexity >= 10 || churn >= 5) {
             out.push(finding(
                 "untested_hotspot",
+                TEST_COVERAGE_CATEGORY,
                 Severity::High,
                 format!(
                     "{} has {:.0}% line coverage with complexity {} and churn {}",
@@ -89,14 +117,28 @@ pub fn coverage_summary(coverage: &CoverageReport) -> (f64, f64, usize) {
     )
 }
 
-fn finding(biomarker: &str, severity: Severity, detail: String) -> Finding {
+fn finding(biomarker: &str, category: &str, severity: Severity, detail: String) -> Finding {
     Finding {
         biomarker: biomarker.to_string(),
-        category: CATEGORY.to_string(),
+        category: category.to_string(),
         dimension: Dimension::Defect,
         severity,
         line: 1,
         detail,
+        deduction: None,
+    }
+}
+
+fn finding_with_deduction(
+    biomarker: &str,
+    category: &str,
+    severity: Severity,
+    detail: String,
+    deduction: f64,
+) -> Finding {
+    Finding {
+        deduction: Some(deduction),
+        ..finding(biomarker, category, severity, detail)
     }
 }
 
@@ -168,9 +210,17 @@ mod tests {
                 && f.detail.contains("30%")
         }));
         assert!(findings.iter().any(|f| {
-            f.biomarker == "coverage_gradient"
+            f.biomarker == "branch_coverage_lag"
                 && f.severity == Severity::Medium
                 && f.detail.contains("40% branch")
+        }));
+        assert!(findings.iter().any(|f| {
+            f.biomarker == "coverage_gradient"
+                && f.category == "coverage_gradient"
+                && f.severity == Severity::Low
+                && f.deduction
+                    .is_some_and(|deduction| (deduction - 0.4).abs() < 1e-9)
+                && f.detail.contains("10% uncovered")
         }));
         assert!(findings.iter().any(|f| {
             f.biomarker == "untested_hotspot"
@@ -206,5 +256,28 @@ mod tests {
         assert!((line_pct - 52.941_176_470_588_24).abs() < 1e-6);
         assert!((branch_pct - 50.0).abs() < f64::EPSILON);
         assert_eq!(below_50, 2);
+    }
+
+    #[test]
+    fn continuous_gradient_deduction_tracks_uncovered_fraction() {
+        let coverage = CoverageReport {
+            format: "test".to_string(),
+            files: vec![FileCoverage {
+                path: "src/half.rs".to_string(),
+                lines_total: 100,
+                lines_covered: 50,
+                branches_total: 0,
+                branches_covered: 0,
+            }],
+        };
+
+        let findings = coverage_biomarkers(&coverage, &HashMap::new(), &HashMap::new());
+        let gradient = findings
+            .iter()
+            .find(|finding| finding.biomarker == "coverage_gradient")
+            .unwrap();
+        assert_eq!(gradient.category, "coverage_gradient");
+        assert_eq!(gradient.severity, Severity::Medium);
+        assert_eq!(gradient.deduction, Some(2.0));
     }
 }

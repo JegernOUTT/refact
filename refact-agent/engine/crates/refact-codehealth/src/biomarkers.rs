@@ -4,7 +4,6 @@ use tree_sitter::Node;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Severity {
-    Info,
     Low,
     Medium,
     High,
@@ -26,6 +25,8 @@ pub struct Finding {
     pub severity: Severity,
     pub line: usize,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deduction: Option<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -144,6 +145,7 @@ fn finding(
         severity,
         line,
         detail,
+        deduction: None,
     }
 }
 

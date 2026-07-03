@@ -130,6 +130,7 @@ fn finding(biomarker: &str, severity: Severity, ts: i64, detail: String) -> Find
         severity,
         line: ts.max(0) as usize,
         detail,
+        deduction: None,
     }
 }
 

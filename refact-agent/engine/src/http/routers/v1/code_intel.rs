@@ -362,7 +362,6 @@ fn severity_rank(severity: refact_codehealth::biomarkers::Severity) -> u8 {
         refact_codehealth::biomarkers::Severity::High => 1,
         refact_codehealth::biomarkers::Severity::Medium => 2,
         refact_codehealth::biomarkers::Severity::Low => 3,
-        refact_codehealth::biomarkers::Severity::Info => 4,
     }
 }
 
