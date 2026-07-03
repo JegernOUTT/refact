@@ -35,6 +35,7 @@ import {
   formatNumber,
 } from "../StatsDashboard/utils/formatters";
 import styles from "./CodeIntelWorkspace.module.css";
+import { CodeGraphView } from "./CodeGraphView";
 
 type CodeIntelTab = "overview" | "graph" | "health" | "risk" | "security";
 
@@ -292,16 +293,6 @@ function PlaceholderTab({ title, description, icon }: PlaceholderProps) {
   );
 }
 
-function GraphTabPlaceholder() {
-  return (
-    <PlaceholderTab
-      icon={Network}
-      title="Graph view coming soon"
-      description="The graph tab is reserved for the interactive CodeGraph visualization."
-    />
-  );
-}
-
 function HealthTabPlaceholder() {
   return (
     <PlaceholderTab
@@ -379,7 +370,7 @@ export const CodeIntelWorkspace: React.FC<CodeIntelWorkspaceProps> = ({
             <OverviewLiveTab />
           </Tabs.Content>
           <Tabs.Content value="graph" className={styles.tabContent}>
-            <GraphTabPlaceholder />
+            <CodeGraphView />
           </Tabs.Content>
           <Tabs.Content value="health" className={styles.tabContent}>
             <HealthTabPlaceholder />

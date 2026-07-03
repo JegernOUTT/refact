@@ -1,0 +1,193 @@
+.root {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  gap: var(--rf-space-3);
+}
+
+.toolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+}
+
+.toolbarCopy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.toolbarTitle,
+.toolbarDescription,
+.refreshing,
+.detailTitle,
+.detailText,
+.detailPath {
+  margin: 0;
+}
+
+.toolbarTitle,
+.detailTitle {
+  color: var(--rf-color-fg);
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.toolbarDescription,
+.limitLabel,
+.refreshing,
+.detailText,
+.detailPath {
+  color: var(--rf-color-muted);
+  font: var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
+.limitControl {
+  display: flex;
+  min-width: 0;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.limitLabel {
+  white-space: nowrap;
+}
+
+.stateCard,
+.canvasCard,
+.detailPanel {
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.stateCard {
+  display: flex;
+  min-height: 320px;
+  align-items: center;
+  justify-content: center;
+}
+
+.canvasCard {
+  display: flex;
+  min-width: 0;
+  min-height: 480px;
+  overflow: hidden;
+}
+
+.graphContainer {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 480px;
+  flex: 1;
+  overflow: hidden;
+}
+
+.graphCanvas {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+}
+
+.detailPanel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.detailEmpty,
+.detailHeader {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: var(--rf-space-3);
+}
+
+.detailIcon {
+  width: var(--rf-icon-lg);
+  height: var(--rf-icon-lg);
+  flex: 0 0 auto;
+  color: var(--rf-color-accent);
+  stroke-width: 1.5;
+}
+
+.detailCopy {
+  min-width: 0;
+}
+
+.detailPath {
+  overflow-wrap: anywhere;
+}
+
+.summaryGrid,
+.detailList {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.summaryGrid span,
+.detailList div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
+  font: var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
+.detailList {
+  margin: 0;
+}
+
+.detailList dt,
+.detailList dd {
+  margin: 0;
+}
+
+.detailList dt {
+  color: var(--rf-color-muted);
+}
+
+.detailList dd {
+  color: var(--rf-color-fg);
+  font-weight: 650;
+}
+
+@media (width <= 720px) {
+  .toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .limitControl {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .canvasCard,
+  .graphContainer {
+    min-height: 380px;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .stateCard,
+  .canvasCard,
+  .detailPanel {
+    backdrop-filter: none;
+  }
+}

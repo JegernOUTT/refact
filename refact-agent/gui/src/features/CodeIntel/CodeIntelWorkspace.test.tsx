@@ -9,6 +9,10 @@ import type {
 import { render, screen, within } from "../../utils/test-utils";
 import { CodeIntelWorkspace } from "./CodeIntelWorkspace";
 
+const graphViewMock = vi.hoisted(() => ({
+  calls: 0,
+}));
+
 type MockOverviewResult = {
   data: CodeIntelResponse<CodeIntelOverview> | undefined;
   error: unknown;
@@ -46,6 +50,18 @@ vi.mock("../../services/refact/codeIntel", () => ({
   useGetCodeIntelOverviewQuery: () => mockOverviewResult,
 }));
 
+vi.mock("./CodeGraphView", () => ({
+  CodeGraphView: () => {
+    graphViewMock.calls += 1;
+    return (
+      <div>
+        <span>Code graph</span>
+        <span>crate::main</span>
+      </div>
+    );
+  },
+}));
+
 function renderWorkspace() {
   return render(<CodeIntelWorkspace host="web" backFromCodeIntel={vi.fn()} />);
 }
@@ -58,6 +74,7 @@ describe("CodeIntelWorkspace", () => {
       isFetching: false,
       isLoading: false,
     };
+    graphViewMock.calls = 0;
   });
 
   it("renders tabs and live overview KPIs", () => {
@@ -96,12 +113,13 @@ describe("CodeIntelWorkspace", () => {
     expect(centrality.getByText("src/router.rs")).toBeInTheDocument();
   });
 
-  it("renders placeholder tabs for follow-up cards", async () => {
+  it("renders graph and placeholder tabs for follow-up cards", async () => {
     const user = userEvent.setup();
     renderWorkspace();
 
     await user.click(screen.getByRole("tab", { name: "Graph" }));
-    expect(screen.getByText("Graph view coming soon")).toBeInTheDocument();
+    expect(screen.getByText("Code graph")).toBeInTheDocument();
+    expect(screen.getByText("crate::main")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Security" }));
     expect(screen.getByText("Security scan coming soon")).toBeInTheDocument();
