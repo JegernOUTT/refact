@@ -8,7 +8,6 @@ import type {
   CodeGraphState,
   CodeGraphStatus,
   RagStatus,
-  VecDbStatus,
 } from "../../services/refact/types";
 import { MiniStatusIndicator } from "./ConnectionStatusIndicator";
 import styles from "./ConnectionStatus.module.css";
@@ -37,68 +36,60 @@ function codegraphIndicatorState(
   return stateFromAlive(alive);
 }
 
-function vecdbIndicatorState(
-  alive: string,
-  status: VecDbStatus | null,
-): IndicatorState {
-  if (alive === "turned_off") return "idle";
-  if (alive !== "working") return "error";
-  if (!status) return "success";
-  if (status.state === "done") return "success";
-  if (status.state === "cooldown") return "warning";
-  return "working";
-}
-
 function formatCodegraphTooltip(status: RagStatus): string {
   const codegraph = status.codegraph;
   const alive = status.codegraph_alive;
-  if (!codegraph) return `Codegraph: ${alive}`;
+  if (!codegraph) return `CodeGraph: ${alive}`;
   const suffix = codegraph.error ? ` · ${codegraph.error}` : "";
-  return `Codegraph: ${alive} · ${codegraph.counts.files} files · ${codegraph.counts.nodes} nodes · ${codegraph.queued} queued${suffix}`;
+  return `CodeGraph: ${alive} · ${codegraph.counts.files} files · ${codegraph.counts.nodes} nodes · ${codegraph.queued} queued${suffix}`;
 }
 
-function formatVecdbTooltip(status: RagStatus): string {
-  const vecdb = status.vecdb;
-  const alive = status.vecdb_alive;
-  if (!vecdb) {
-    const suffix = status.vec_db_error ? ` · ${status.vec_db_error}` : "";
-    return `VecDB: ${alive}${suffix}`;
-  }
-  return `VecDB: ${alive} · ${vecdb.state} · ${vecdb.files_unprocessed}/${vecdb.files_total} files`;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function formatAstTooltip(status: RagStatus): string {
-  return `AST: ${status.ast_alive}`;
+function formatRagStatusError(error: unknown): string {
+  if (!isRecord(error)) return "latest status poll failed";
+  if (typeof error.error === "string") return error.error;
+  if (typeof error.data === "string") return error.data;
+  if (typeof error.message === "string") return error.message;
+  if ("status" in error) return `status ${String(error.status)}`;
+  return "latest status poll failed";
+}
+
+function formatCodegraphErrorTooltip(
+  status: RagStatus | undefined,
+  error: unknown,
+): string {
+  const staleStatus = status
+    ? `${formatCodegraphTooltip(status)} · stale`
+    : "CodeGraph: status unavailable";
+  return `${staleStatus} · ${formatRagStatusError(error)}`;
 }
 
 export const RagStatusIndicators: React.FC = () => {
   const config = useAppSelector(selectConfig);
   const enabled = hasUsableEngineEndpoint(config);
-  const { data, refetch } = useGetRagStatusQuery(undefined, {
+  const { data, error, isError, refetch } = useGetRagStatusQuery(undefined, {
     skip: !enabled,
     pollingInterval: 5000,
   });
 
-  if (!enabled || !data) return null;
+  if (!enabled || (!data && !isError)) return null;
+
+  const status = isError
+    ? "error"
+    : codegraphIndicatorState(data.codegraph_alive, data.codegraph);
+  const tooltip = isError
+    ? formatCodegraphErrorTooltip(data, error)
+    : formatCodegraphTooltip(data);
 
   return (
     <div className={styles.ragStatuses} aria-label="Indexing status">
       <MiniStatusIndicator
-        label="Codegraph"
-        status={codegraphIndicatorState(data.codegraph_alive, data.codegraph)}
-        tooltip={formatCodegraphTooltip(data)}
-        onRefresh={() => void refetch()}
-      />
-      <MiniStatusIndicator
-        label="VecDB"
-        status={vecdbIndicatorState(data.vecdb_alive, data.vecdb)}
-        tooltip={formatVecdbTooltip(data)}
-        onRefresh={() => void refetch()}
-      />
-      <MiniStatusIndicator
-        label="AST"
-        status={stateFromAlive(data.ast_alive)}
-        tooltip={formatAstTooltip(data)}
+        label="CodeGraph"
+        status={status}
+        tooltip={tooltip}
         onRefresh={() => void refetch()}
       />
     </div>
