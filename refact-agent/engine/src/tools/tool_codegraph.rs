@@ -301,7 +301,7 @@ pub(crate) async fn cached_cross_file_clones(
         .clone()
         .ok_or_else(|| "codegraph is not available".to_string())?;
     let key = Arc::as_ptr(&service) as usize;
-    loop {
+    {
         let generation = service.graph_generation();
         if let Some(analysis) = cached_clone_analysis(&service, key, generation).await {
             return Ok(analysis);
@@ -365,8 +365,11 @@ pub(crate) async fn cached_cross_file_clones(
             cache
                 .analyses
                 .insert(key, (Arc::downgrade(&service), rebuilt.clone()));
-            return Ok(rebuilt);
         }
+        // The graph may keep advancing during active indexing; a stale-but-fresh
+        // analysis is still valid for this request. Returning it (uncached when
+        // the generation moved) avoids livelocking/recomputing until quiescence.
+        return Ok(rebuilt);
     }
 }
 
