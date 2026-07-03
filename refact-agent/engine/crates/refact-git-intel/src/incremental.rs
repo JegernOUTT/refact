@@ -158,6 +158,10 @@ pub fn merge_intel(base: &mut GitIntel, delta: &GitIntel) {
         *base.co_change.entry(pair.clone()).or_default() += count;
     }
 
+    for (path, count) in &delta.fix_commit_counts {
+        *base.fix_commit_counts.entry(path.clone()).or_default() += count;
+    }
+
     for (author, count) in author_counts_for(delta) {
         *base.author_commit_counts.entry(author).or_default() += count;
     }
@@ -644,6 +648,7 @@ mod tests {
             }],
             last_commit_id: Some("base".into()),
             author_commit_counts: HashMap::from([("base@x.com".into(), 1)]),
+            fix_commit_counts: HashMap::from([("base.rs".into(), 1)]),
         };
         let delta = GitIntel {
             file_churn: HashMap::from([("delta.rs".into(), 2)]),
@@ -663,6 +668,7 @@ mod tests {
             }],
             last_commit_id: Some("delta".into()),
             author_commit_counts: HashMap::from([("delta@x.com".into(), 2)]),
+            fix_commit_counts: HashMap::from([("delta.rs".into(), 2)]),
         };
 
         merge_intel(&mut base, &delta);
@@ -685,6 +691,8 @@ mod tests {
             .any(|record| record.oid.as_deref() == Some("delta")));
         assert_eq!(base.last_commit_id.as_deref(), Some("delta"));
         assert_eq!(base.author_commit_counts.get("delta@x.com"), Some(&2));
+        assert_eq!(base.fix_commit_counts.get("delta.rs"), Some(&2));
+        assert_eq!(base.fix_commit_counts.get("base.rs"), Some(&1));
     }
 
     #[test]
