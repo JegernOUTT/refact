@@ -35,6 +35,7 @@ impl LangExtractor for TypeScriptExtractor {
             &[],
             &mut symbols,
             &mut refs,
+            true,
         );
         (symbols, refs)
     }
@@ -43,7 +44,7 @@ impl LangExtractor for TypeScriptExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::SymbolKind;
+    use crate::ir::{EdgeKind, SymbolKind};
 
     fn extract(source: &str) -> (Vec<SymbolNode>, Vec<RawRef>) {
         let tree = TypeScriptExtractor::parse(source).expect("parse ts");
@@ -94,5 +95,38 @@ class Derived extends Base {}
         let (symbols, _refs) = extract(src);
         let derived = symbols.iter().find(|s| s.name() == "Derived").unwrap();
         assert_eq!(derived.this_class_derived_from, vec!["Base".to_string()]);
+    }
+
+    #[test]
+    fn extracts_barrel_reexports_and_consumer_imports() {
+        let (_barrel_symbols, barrel_refs) = extract("export { a } from './mod';\n");
+        assert!(
+            barrel_refs
+                .iter()
+                .any(|r| { r.kind == EdgeKind::Imports && r.name == "a" && r.from.is_empty() }),
+            "barrel refs: {barrel_refs:?}"
+        );
+
+        let (_star_symbols, star_refs) = extract("export * from './mod';\n");
+        assert!(
+            star_refs
+                .iter()
+                .any(|r| { r.kind == EdgeKind::Imports && r.name == "./mod" && r.from.is_empty() }),
+            "star refs: {star_refs:?}"
+        );
+
+        let (_consumer_symbols, consumer_refs) = extract("import { a } from './barrel';\n");
+        assert!(
+            consumer_refs.iter().any(|r| {
+                r.kind == EdgeKind::Imports && r.name == "./barrel" && r.from.is_empty()
+            }),
+            "consumer refs: {consumer_refs:?}"
+        );
+        assert!(
+            consumer_refs
+                .iter()
+                .any(|r| { r.kind == EdgeKind::Imports && r.name == "a" && r.from.is_empty() }),
+            "consumer refs: {consumer_refs:?}"
+        );
     }
 }

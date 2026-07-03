@@ -74,6 +74,7 @@ fn make_symbol(
         body_line2: line2(node),
         this_is_a_class: String::new(),
         this_class_derived_from: Vec::new(),
+        is_override: false,
     };
     (symbol, official_path)
 }

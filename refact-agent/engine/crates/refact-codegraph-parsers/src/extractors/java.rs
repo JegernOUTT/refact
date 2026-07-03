@@ -51,6 +51,44 @@ fn line2(node: Node) -> usize {
     node.end_position().row + 1
 }
 
+fn has_override_annotation(node: Node, bytes: &[u8]) -> bool {
+    let name_start = node
+        .child_by_field_name("name")
+        .map(|name| name.start_byte())
+        .unwrap_or(node.end_byte());
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.start_byte() >= name_start {
+            break;
+        }
+        if child.end_byte() <= name_start && node_has_override_annotation(child, bytes) {
+            return true;
+        }
+    }
+    false
+}
+
+fn node_has_override_annotation(node: Node, bytes: &[u8]) -> bool {
+    if matches!(node.kind(), "annotation" | "marker_annotation") {
+        return annotation_is_override(node, bytes);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if node_has_override_annotation(child, bytes) {
+            return true;
+        }
+    }
+    false
+}
+
+fn annotation_is_override(node: Node, bytes: &[u8]) -> bool {
+    let name = node
+        .child_by_field_name("name")
+        .map(|name| node_text(name, bytes).to_string())
+        .unwrap_or_else(|| node_text(node, bytes).trim_start_matches('@').to_string());
+    name.rsplit('.').next().unwrap_or(&name) == "Override"
+}
+
 fn heritage(node: Node, bytes: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut cursor = node.walk();
@@ -90,6 +128,7 @@ fn push(
     kind: SymbolKind,
     is_class: bool,
     derived: Vec<String>,
+    is_override: bool,
     node: Node,
 ) -> Vec<String> {
     let mut path = prefix.to_vec();
@@ -104,6 +143,7 @@ fn push(
         body_line2: line2(node),
         this_is_a_class: if is_class { name } else { String::new() },
         this_class_derived_from: derived,
+        is_override,
     });
     path
 }
@@ -130,6 +170,7 @@ fn walk(
                     SymbolKind::Struct,
                     true,
                     derived,
+                    false,
                     node,
                 );
                 if let Some(body) = node.child_by_field_name("body") {
@@ -141,6 +182,7 @@ fn walk(
         "method_declaration" | "constructor_declaration" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, bytes).to_string();
+                let is_override = has_override_annotation(node, bytes);
                 let child_prefix = push(
                     symbols,
                     prefix,
@@ -148,6 +190,7 @@ fn walk(
                     SymbolKind::Function,
                     false,
                     vec![],
+                    is_override,
                     node,
                 );
                 if let Some(body) = node.child_by_field_name("body") {
@@ -178,6 +221,7 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn extract(source: &str) -> (Vec<SymbolNode>, Vec<RawRef>) {
         let tree = JavaExtractor::parse(source).expect("parse java");
@@ -209,5 +253,37 @@ class Dog extends Animal {
         assert!(refs
             .iter()
             .any(|r| r.name == "bark" && r.from == "Dog::speak"));
+    }
+
+    #[test]
+    fn marks_override_annotated_methods_in_data_json() {
+        let src = "\
+interface Command {
+    void execute();
+}
+
+class RunCommand implements Command {
+    @Override
+    public void execute() {}
+
+    void helper() {}
+}
+";
+        let (symbols, _refs) = extract(src);
+        let execute = symbols
+            .iter()
+            .find(|s| s.double_colon_path() == "RunCommand::execute")
+            .unwrap();
+        assert!(execute.is_override);
+        let data = serde_json::to_value(execute).unwrap();
+        assert_eq!(data.get("override"), Some(&Value::Bool(true)));
+
+        let helper = symbols
+            .iter()
+            .find(|s| s.double_colon_path() == "RunCommand::helper")
+            .unwrap();
+        assert!(!helper.is_override);
+        let data = serde_json::to_value(helper).unwrap();
+        assert!(data.get("override").is_none());
     }
 }

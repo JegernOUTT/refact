@@ -86,6 +86,7 @@ fn push(
         body_line2: line2(node),
         this_is_a_class: if is_class { name } else { String::new() },
         this_class_derived_from: Vec::new(),
+        is_override: false,
     });
 }
 

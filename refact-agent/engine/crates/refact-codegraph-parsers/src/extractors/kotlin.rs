@@ -51,6 +51,36 @@ fn line2(node: Node) -> usize {
     node.end_position().row + 1
 }
 
+fn has_modifier_before_name(node: Node, bytes: &[u8], modifier: &str) -> bool {
+    let name_start = node
+        .child_by_field_name("name")
+        .map(|name| name.start_byte())
+        .unwrap_or(node.end_byte());
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.start_byte() >= name_start {
+            break;
+        }
+        if child.end_byte() <= name_start && node_has_token(child, bytes, modifier) {
+            return true;
+        }
+    }
+    false
+}
+
+fn node_has_token(node: Node, bytes: &[u8], token: &str) -> bool {
+    if node.kind() == token || node_text(node, bytes) == token {
+        return true;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if node_has_token(child, bytes, token) {
+            return true;
+        }
+    }
+    false
+}
+
 fn name_of(node: Node, bytes: &[u8]) -> Option<String> {
     if let Some(n) = node.child_by_field_name("name") {
         return Some(node_text(n, bytes).to_string());
@@ -140,6 +170,7 @@ fn walk(
                     body_line2: line2(node),
                     this_is_a_class: name,
                     this_class_derived_from: heritage(node, bytes),
+                    is_override: false,
                 });
                 if let Some(body) = body_of(node) {
                     walk(body, bytes, &path, symbols, refs);
@@ -149,6 +180,7 @@ fn walk(
         }
         "function_declaration" => {
             if let Some(name) = name_of(node, bytes) {
+                let is_override = has_modifier_before_name(node, bytes, "override");
                 let mut path = prefix.to_vec();
                 path.push(name);
                 symbols.push(SymbolNode {
@@ -161,6 +193,7 @@ fn walk(
                     body_line2: line2(node),
                     this_is_a_class: String::new(),
                     this_class_derived_from: Vec::new(),
+                    is_override,
                 });
                 if let Some(body) = body_of(node) {
                     walk(body, bytes, &path, symbols, refs);
@@ -198,6 +231,7 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn extract(source: &str) -> (Vec<SymbolNode>, Vec<RawRef>) {
         let tree = KotlinExtractor::parse(source).expect("parse kotlin");
@@ -230,5 +264,33 @@ fun helper() {}
             refs.iter().any(|r| r.name == "helper"),
             "expected helper call, got {refs:?}"
         );
+    }
+
+    #[test]
+    fn marks_override_functions_in_data_json() {
+        let src = "\
+interface Disposable {
+    fun dispose()
+}
+
+class Thing : Disposable {
+    override fun dispose() {}
+}
+
+fun helper() {}
+";
+        let (symbols, _refs) = extract(src);
+        let dispose = symbols
+            .iter()
+            .find(|s| s.double_colon_path() == "Thing::dispose")
+            .unwrap();
+        assert!(dispose.is_override);
+        let data = serde_json::to_value(dispose).unwrap();
+        assert_eq!(data.get("override"), Some(&Value::Bool(true)));
+
+        let helper = symbols.iter().find(|s| s.name() == "helper").unwrap();
+        assert!(!helper.is_override);
+        let data = serde_json::to_value(helper).unwrap();
+        assert!(data.get("override").is_none());
     }
 }

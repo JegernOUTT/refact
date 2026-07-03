@@ -93,6 +93,7 @@ fn walk(
                     body_line2: line2(node),
                     this_is_a_class: name,
                     this_class_derived_from: heritage(node, bytes),
+                    is_override: false,
                 });
                 if let Some(body) = node.child_by_field_name("body") {
                     walk(body, bytes, &path, symbols, refs);
@@ -114,6 +115,7 @@ fn walk(
                     body_line2: line2(node),
                     this_is_a_class: String::new(),
                     this_class_derived_from: Vec::new(),
+                    is_override: false,
                 });
                 if let Some(body) = node.child_by_field_name("body") {
                     walk(body, bytes, &path, symbols, refs);

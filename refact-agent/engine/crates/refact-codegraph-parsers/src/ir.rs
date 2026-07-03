@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum SymbolKind {
     Module,
@@ -24,6 +28,8 @@ pub struct SymbolNode {
     pub body_line2: usize,
     pub this_is_a_class: String,
     pub this_class_derived_from: Vec<String>,
+    #[serde(default, rename = "override", skip_serializing_if = "is_false")]
+    pub is_override: bool,
 }
 
 impl SymbolNode {

@@ -35,6 +35,7 @@ impl LangExtractor for JavaScriptExtractor {
             &[],
             &mut symbols,
             &mut refs,
+            false,
         );
         (symbols, refs)
     }

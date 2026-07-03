@@ -52,7 +52,10 @@ fn line2(node: Node) -> usize {
 }
 
 fn command_name(node: Node, bytes: &[u8]) -> Option<String> {
-    if let Some(name) = node.child_by_field_name("name") {
+    if let Some(name) = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("command_name"))
+    {
         return Some(node_text(name, bytes).to_string());
     }
     let mut cursor = node.walk();
@@ -62,6 +65,34 @@ fn command_name(node: Node, bytes: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+fn is_identifier_command(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !is_builtin_command(name)
+}
+
+fn is_builtin_command(name: &str) -> bool {
+    matches!(
+        name,
+        "echo"
+            | "cd"
+            | "exit"
+            | "return"
+            | "local"
+            | "export"
+            | "set"
+            | "shift"
+            | "test"
+            | "["
+            | "read"
+            | "printf"
+    )
 }
 
 fn walk(
@@ -87,6 +118,7 @@ fn walk(
                     body_line2: line2(node),
                     this_is_a_class: String::new(),
                     this_class_derived_from: Vec::new(),
+                    is_override: false,
                 });
                 if let Some(body) = node.child_by_field_name("body") {
                     walk(body, bytes, &path, symbols, refs);
@@ -96,7 +128,7 @@ fn walk(
         }
         "command" => {
             if let Some(name) = command_name(node, bytes) {
-                if !name.is_empty() {
+                if is_identifier_command(&name) {
                     refs.push(RawRef {
                         from: prefix.join("::"),
                         name,
@@ -130,5 +162,29 @@ mod tests {
         let (symbols, refs) = extract(src);
         assert!(symbols.iter().any(|s| s.name() == "greet"));
         assert!(refs.iter().any(|r| r.name == "greet"), "got {refs:?}");
+    }
+
+    #[test]
+    fn filters_command_calls_to_identifier_non_builtins() {
+        let src = "\
+foo() { :; }
+foo arg
+echo hi
+./script.sh
+/usr/bin/env bash
+$RUNNER
+";
+        let (_symbols, refs) = extract(src);
+        assert!(refs.iter().any(|r| r.name == "foo" && r.from.is_empty()));
+        assert!(!refs.iter().any(|r| r.name == "echo"), "got {refs:?}");
+        assert!(
+            !refs.iter().any(|r| r.name == "./script.sh"),
+            "got {refs:?}"
+        );
+        assert!(
+            !refs.iter().any(|r| r.name == "/usr/bin/env"),
+            "got {refs:?}"
+        );
+        assert!(!refs.iter().any(|r| r.name == "$RUNNER"), "got {refs:?}");
     }
 }

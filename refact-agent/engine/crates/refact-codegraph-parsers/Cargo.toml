@@ -24,3 +24,6 @@ tree-sitter-bash = "0.23"
 tree-sitter-elixir = "0.3"
 tree-sitter-ocaml = "0.24"
 tree-sitter-haskell = "0.23"
+
+[dev-dependencies]
+serde_json = { workspace = true }
