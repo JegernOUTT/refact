@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use git2::Repository;
@@ -15,6 +15,94 @@ pub struct BlameOwner {
 pub struct CodeAge {
     pub median_age_days: f64,
     pub volatility: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RangeGitFacts {
+    pub name: String,
+    pub line1: usize,
+    pub line2: usize,
+    pub last_modified_ts: i64,
+    pub author_count: u32,
+    pub commit_count: u32,
+}
+
+struct RangeGitFactsBuilder {
+    name: String,
+    line1: usize,
+    line2: usize,
+    last_modified_ts: Option<i64>,
+    authors: HashSet<String>,
+    commits: HashSet<String>,
+}
+
+pub fn range_facts(
+    repo_path: &Path,
+    file: &str,
+    ranges: &[(String, usize, usize)],
+) -> Result<Vec<RangeGitFacts>, String> {
+    if ranges.is_empty() {
+        return Ok(Vec::new());
+    }
+    let repo = Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
+    let blame = match repo.blame_file(Path::new(file), None) {
+        Ok(blame) => blame,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut builders: Vec<RangeGitFactsBuilder> = ranges
+        .iter()
+        .map(|(name, line1, line2)| RangeGitFactsBuilder {
+            name: name.clone(),
+            line1: *line1,
+            line2: *line2,
+            last_modified_ts: None,
+            authors: HashSet::new(),
+            commits: HashSet::new(),
+        })
+        .collect();
+
+    for hunk in blame.iter() {
+        let lines = hunk.lines_in_hunk();
+        if lines == 0 {
+            continue;
+        }
+        let hunk_line1 = hunk.final_start_line();
+        let hunk_line2 = hunk_line1.saturating_add(lines.saturating_sub(1));
+        let commit_id = hunk.final_commit_id().to_string();
+        let signature = hunk.final_signature();
+        let author = signature
+            .email()
+            .filter(|email| !email.is_empty())
+            .unwrap_or("unknown")
+            .to_string();
+        let ts = signature.when().seconds();
+
+        for builder in builders.iter_mut() {
+            if builder.line1 > builder.line2
+                || hunk_line1 > builder.line2
+                || hunk_line2 < builder.line1
+            {
+                continue;
+            }
+            builder.commits.insert(commit_id.clone());
+            builder.authors.insert(author.clone());
+            builder.last_modified_ts =
+                Some(builder.last_modified_ts.map_or(ts, |prev| prev.max(ts)));
+        }
+    }
+
+    Ok(builders
+        .into_iter()
+        .map(|builder| RangeGitFacts {
+            name: builder.name,
+            line1: builder.line1,
+            line2: builder.line2,
+            last_modified_ts: builder.last_modified_ts.unwrap_or(0),
+            author_count: builder.authors.len().min(u32::MAX as usize) as u32,
+            commit_count: builder.commits.len().min(u32::MAX as usize) as u32,
+        })
+        .collect())
 }
 
 pub fn blame_ownership(repo_path: &Path, file: &str) -> Result<Vec<BlameOwner>, String> {
@@ -156,9 +244,15 @@ mod tests {
         ts: i64,
     ) {
         let workdir = repo.workdir().unwrap().to_path_buf();
-        std::fs::write(workdir.join(path), content).unwrap();
+        let path = workdir.join(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, content).unwrap();
         let mut index = repo.index().unwrap();
-        index.add_path(Path::new(path)).unwrap();
+        index
+            .add_path(path.strip_prefix(&workdir).unwrap())
+            .unwrap();
         index.write().unwrap();
         let tree_oid = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_oid).unwrap();
@@ -198,6 +292,49 @@ mod tests {
             1_600_086_400,
         );
         dir
+    }
+
+    #[test]
+    fn range_facts_maps_blame_to_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_file(
+            &repo,
+            "src.rs",
+            "fn sample() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n",
+            "alice base",
+            "Alice",
+            "alice@example.com",
+            1_600_000_000,
+        );
+        commit_file(
+            &repo,
+            "src.rs",
+            "fn sample() {\n    let a = 10;\n    let b = 2;\n    let c = 3;\n}\n",
+            "bob edit",
+            "Bob",
+            "bob@example.com",
+            1_600_000_100,
+        );
+        commit_file(
+            &repo,
+            "src.rs",
+            "fn sample() {\n    let a = 10;\n    let b = 20;\n    let c = 3;\n}\n",
+            "alice edit",
+            "Alice",
+            "alice@example.com",
+            1_600_000_200,
+        );
+
+        let facts = range_facts(dir.path(), "src.rs", &[("sample".into(), 1, 5)]).unwrap();
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].name, "sample");
+        assert_eq!(facts[0].line1, 1);
+        assert_eq!(facts[0].line2, 5);
+        assert_eq!(facts[0].author_count, 2);
+        assert_eq!(facts[0].commit_count, 3);
+        assert_eq!(facts[0].last_modified_ts, 1_600_000_200);
     }
 
     #[test]

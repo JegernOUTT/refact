@@ -21,6 +21,8 @@ const TEMPORAL_HALFLIFE_DAYS: f64 = 180.0;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitIntel {
     pub file_churn: HashMap<String, u32>,
+    #[serde(default)]
+    pub fix_commit_counts: HashMap<String, u32>,
     pub file_authors: HashMap<String, HashMap<String, u32>>,
     pub co_change: HashMap<(String, String), u32>,
     pub commits_analyzed: u32,
@@ -101,6 +103,43 @@ fn changed_files_with_stats(repo: &Repository, commit: &Commit) -> Vec<(String, 
     files.sort();
     files.dedup();
     files
+}
+
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn contains_fix_word(message: &str, word: &str) -> bool {
+    message.match_indices(word).any(|(idx, _)| {
+        let before = idx
+            .checked_sub(1)
+            .and_then(|prev| message.as_bytes().get(prev))
+            .is_some_and(|byte| is_word_byte(*byte));
+        let after = message
+            .as_bytes()
+            .get(idx + word.len())
+            .is_some_and(|byte| is_word_byte(*byte));
+        !before && !after
+    })
+}
+
+fn is_fix_commit_message(message: &str) -> bool {
+    const FIX_WORDS: &[&str] = &[
+        "fix",
+        "bugfix",
+        "hotfix",
+        "patch",
+        "patched",
+        "patching",
+        "regression",
+        "crash",
+        "oops",
+        "revert",
+    ];
+    let message = message.to_ascii_lowercase();
+    FIX_WORDS
+        .iter()
+        .any(|word| contains_fix_word(&message, word))
 }
 
 pub fn is_empty_head_error(error: &git2::Error) -> bool {
@@ -257,11 +296,16 @@ fn mine_history_from_revwalk(
         let message = commit.message().unwrap_or("").to_string();
         let file_stats = changed_files_with_stats(repo, &commit);
         let files: Vec<String> = file_stats.iter().map(|(path, _, _)| path.clone()).collect();
+        let is_fix_commit = is_fix_commit_message(&message);
 
         intel.commits_analyzed = intel.commits_analyzed.saturating_add(1);
         for f in &files {
             let churn = intel.file_churn.entry(f.clone()).or_default();
             *churn = churn.saturating_add(1);
+            if is_fix_commit {
+                let fix_count = intel.fix_commit_counts.entry(f.clone()).or_default();
+                *fix_count = fix_count.saturating_add(1);
+            }
             let author_count = intel
                 .file_authors
                 .entry(f.clone())
@@ -292,6 +336,10 @@ fn mine_history_from_revwalk(
 }
 
 impl GitIntel {
+    pub fn prior_defects(&self, path: &str) -> u32 {
+        self.fix_commit_counts.get(path).copied().unwrap_or(0)
+    }
+
     pub fn hotspots(&self, top_n: usize) -> Vec<Hotspot> {
         let mut v: Vec<Hotspot> = self
             .file_churn
@@ -681,7 +729,11 @@ mod tests {
     ) {
         let workdir = repo.workdir().unwrap().to_path_buf();
         for (p, c) in files {
-            std::fs::write(workdir.join(p), c).unwrap();
+            let path = workdir.join(p);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, c).unwrap();
         }
         let mut index = repo.index().unwrap();
         for (p, _) in files {
@@ -788,6 +840,55 @@ mod tests {
         assert_eq!(intel.lines_in_window("missing.rs", now, 10), (0, 0));
         assert_eq!(intel.active_contributors_in_window(now, 10), 2);
         assert_eq!(intel.active_contributors_in_window(now, 1), 1);
+    }
+
+    #[test]
+    fn fix_commits_counted_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_files(
+            &repo,
+            &[("src/a.rs", "pub fn a() -> u32 { 1 }\n")],
+            "feature: add a",
+            "Alice",
+            "alice@x.com",
+        );
+        commit_files(
+            &repo,
+            &[("src/a.rs", "pub fn a() -> u32 { 2 }\n")],
+            "fix typo in docs",
+            "Bob",
+            "bob@x.com",
+        );
+        commit_files(
+            &repo,
+            &[("src/a.rs", "pub fn a() -> u32 { 3 }\n")],
+            "Hotfix crash in parser",
+            "Carol",
+            "carol@x.com",
+        );
+
+        let intel = mine_history(dir.path(), 10).unwrap();
+
+        assert_eq!(intel.prior_defects("src/a.rs"), 2);
+        assert_eq!(intel.prior_defects("missing.rs"), 0);
+    }
+
+    #[test]
+    fn prefix_is_not_a_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_files(
+            &repo,
+            &[("src/a.rs", "pub fn a() -> u32 { 1 }\n")],
+            "prefix cache keys",
+            "Alice",
+            "alice@x.com",
+        );
+
+        let intel = mine_history(dir.path(), 10).unwrap();
+
+        assert_eq!(intel.prior_defects("src/a.rs"), 0);
     }
 
     #[test]
