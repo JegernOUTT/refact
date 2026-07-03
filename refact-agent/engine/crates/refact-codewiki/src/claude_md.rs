@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::wiki::WikiEntry;
+use crate::selection_scoring::{PageCandidate, PageKind};
 
 pub const BEGIN_MARKER: &str = "<!-- BEGIN REPOWISE -->";
 pub const END_MARKER: &str = "<!-- END REPOWISE -->";
@@ -8,11 +8,20 @@ pub const END_MARKER: &str = "<!-- END REPOWISE -->";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClaudeMdInput {
     pub repo_name: String,
-    pub top_modules: Vec<(String, f64, String)>,
+    pub pages: Vec<PageCandidate>,
     pub health_callouts: Vec<String>,
     pub tech_stack: Vec<String>,
     pub indexed_commit: String,
-    pub wiki: Vec<WikiEntry>,
+}
+
+pub fn render_claude_md(pages: &[PageCandidate]) -> String {
+    generate_claude_md(&ClaudeMdInput {
+        repo_name: "repository".to_string(),
+        pages: pages.to_vec(),
+        health_callouts: Vec::new(),
+        tech_stack: Vec::new(),
+        indexed_commit: "unknown".to_string(),
+    })
 }
 
 pub fn generate_claude_md(input: &ClaudeMdInput) -> String {
@@ -34,42 +43,33 @@ pub fn generate_claude_md(input: &ClaudeMdInput) -> String {
     lines.push(String::new());
 
     lines.push("### Overview".to_string());
-    let overview: Vec<&WikiEntry> = input
-        .wiki
-        .iter()
-        .filter(|entry| !entry.summary.trim().is_empty())
-        .take(5)
-        .collect();
-    if overview.is_empty() {
-        lines.push("- No wiki summaries are indexed yet.".to_string());
+    if input.pages.is_empty() {
+        lines.push("- No deterministic wiki pages are selected yet.".to_string());
     } else {
-        for entry in overview {
+        for page in input.pages.iter().take(5) {
             lines.push(format!(
-                "- `{}` — {}",
-                md_escape(&entry.module),
-                one_line(&entry.summary, 180)
+                "- `{}` — {} page for {}",
+                md_escape(&page_title(page)),
+                page_kind_label(page.kind),
+                md_escape(&page.paths.join(", "))
             ));
         }
     }
     lines.push(String::new());
 
-    lines.push("### Top Modules".to_string());
-    if input.top_modules.is_empty() {
-        lines.push("No central modules were identified.".to_string());
+    lines.push("### Selected Pages".to_string());
+    if input.pages.is_empty() {
+        lines.push("No pages were selected.".to_string());
     } else {
-        lines.push("| Module | Centrality | Owner |".to_string());
-        lines.push("|---|---:|---|".to_string());
-        for (module, centrality, owner) in input.top_modules.iter().take(20) {
-            let owner = if owner.trim().is_empty() {
-                "—"
-            } else {
-                owner
-            };
+        lines.push("| Page | Kind | Score | Paths |".to_string());
+        lines.push("|---|---|---:|---|".to_string());
+        for page in input.pages.iter().take(30) {
             lines.push(format!(
-                "| `{}` | {:.3} | {} |",
-                md_escape(module),
-                centrality,
-                md_escape(owner)
+                "| `{}` | {} | {:.3} | {} |",
+                md_escape(&page_title(page)),
+                page_kind_label(page.kind),
+                page.score,
+                md_escape(&page.paths.join(", "))
             ));
         }
     }
@@ -97,7 +97,7 @@ pub fn generate_claude_md(input: &ClaudeMdInput) -> String {
 
     lines.push("### Search".to_string());
     lines.push(
-        "Use hybrid search for repository questions: BM25 keyword retrieval over module summaries fused with a freshness/PageRank-style prior via Reciprocal Rank Fusion (k=60)."
+        "Use hybrid search for repository questions: BM25 keyword retrieval over selected page text fused with a caller-provided PageRank prior via Reciprocal Rank Fusion (k=60)."
             .to_string(),
     );
     lines.push(String::new());
@@ -154,32 +154,38 @@ fn cap_marked_block(mut lines: Vec<String>, max_lines: usize) -> String {
     rendered
 }
 
-fn md_escape(text: &str) -> String {
-    text.replace('|', "\\|").replace('\n', " ")
+fn page_title(page: &PageCandidate) -> String {
+    page.id
+        .split_once(':')
+        .map(|(_, title)| title)
+        .unwrap_or(page.id.as_str())
+        .to_string()
 }
 
-fn one_line(text: &str, max_chars: usize) -> String {
-    let mut s = md_escape(text);
-    s = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if s.chars().count() <= max_chars {
-        return s;
+fn page_kind_label(kind: PageKind) -> &'static str {
+    match kind {
+        PageKind::File => "file",
+        PageKind::Module => "module",
+        PageKind::Scc => "scc",
+        PageKind::ApiContract => "api contract",
+        PageKind::Infra => "infra",
     }
+}
 
-    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-    out.push('…');
-    out
+fn md_escape(text: &str) -> String {
+    text.replace('|', "\\|").replace('\n', " ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn entry(module: &str, summary: &str) -> WikiEntry {
-        WikiEntry {
-            module: module.to_string(),
-            summary: summary.to_string(),
-            source_hash: 0,
-            freshness: 1.0,
+    fn page(id: &str, kind: PageKind, score: f64, paths: &[&str]) -> PageCandidate {
+        PageCandidate {
+            id: id.to_string(),
+            kind,
+            score,
+            paths: paths.iter().map(|path| (*path).to_string()).collect(),
         }
     }
 
@@ -187,19 +193,42 @@ mod tests {
     fn generate_claude_md_includes_core_fields_and_markers() {
         let input = ClaudeMdInput {
             repo_name: "demo-repo".to_string(),
-            top_modules: vec![("auth".to_string(), 0.91, "alice".to_string())],
+            pages: vec![page(
+                "file:src/auth.rs",
+                PageKind::File,
+                0.91,
+                &["src/auth.rs"],
+            )],
             health_callouts: vec!["auth has high churn".to_string()],
             tech_stack: vec!["Rust".to_string()],
             indexed_commit: "abc123".to_string(),
-            wiki: vec![entry("auth", "Handles login token validation.")],
         };
 
         let md = generate_claude_md(&input);
         assert!(md.contains(BEGIN_MARKER));
         assert!(md.contains(END_MARKER));
         assert!(md.contains("demo-repo"));
-        assert!(md.contains("auth"));
+        assert!(md.contains("src/auth.rs"));
         assert!(md.contains("abc123"));
+    }
+
+    #[test]
+    fn claude_md_renders_fixture() {
+        let pages = vec![
+            page("file:src/auth.rs", PageKind::File, 1.0, &["src/auth.rs"]),
+            page(
+                "module:src",
+                PageKind::Module,
+                0.8,
+                &["src/auth.rs", "src/lib.rs"],
+            ),
+        ];
+
+        let md = render_claude_md(&pages);
+
+        assert!(!md.trim().is_empty());
+        assert!(md.contains("src/auth.rs"));
+        assert!(md.contains("module:src") || md.contains("src"));
     }
 
     #[test]

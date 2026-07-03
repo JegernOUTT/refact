@@ -1,3 +1,7 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
+
 pub const BONUS_ENTRY_POINT: f64 = 0.40;
 pub const BONUS_HOTSPOT: f64 = 0.20;
 pub const BONUS_INIT_PY_RE_EXPORTER: f64 = 0.15;
@@ -7,6 +11,7 @@ pub const PENALTY_TRIVIAL_SIZE_BYTES: u64 = 4000;
 pub const PENALTY_TRIVIAL_SYMBOL_CAP: usize = 4;
 pub const PENALTY_TRIVIAL: f64 = 0.40;
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileInfo {
     pub path: String,
     pub is_entry_point: bool,
@@ -14,14 +19,73 @@ pub struct FileInfo {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SymbolInfo {
     pub kind: String,
     pub visibility: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParsedFile {
     pub file_info: FileInfo,
     pub symbols: Vec<SymbolInfo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageKind {
+    File,
+    Module,
+    Scc,
+    ApiContract,
+    Infra,
+}
+
+impl PageKind {
+    pub fn bucket(self) -> &'static str {
+        match self {
+            Self::File => "file_page",
+            Self::Module => "module_page",
+            Self::Scc => "scc_page",
+            Self::ApiContract => "api_contract",
+            Self::Infra => "infra_page",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PageCandidate {
+    pub id: String,
+    pub kind: PageKind,
+    pub score: f64,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileSelection {
+    pub parsed: ParsedFile,
+    pub pagerank: f64,
+    pub betweenness: f64,
+    pub is_hotspot: bool,
+    pub kg_bonus: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModuleSelection {
+    pub id: String,
+    pub paths: Vec<String>,
+    pub size: u64,
+    pub cohesion: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SelectionInput {
+    pub files: Vec<FileSelection>,
+    pub modules: Vec<ModuleSelection>,
+    pub sccs: Vec<Vec<String>>,
+    pub api_contract_paths: Vec<String>,
+    pub infra_paths: Vec<String>,
+    pub min_module_size: u64,
 }
 
 pub fn normalize(value: f64, max_value: f64) -> f64 {
@@ -147,6 +211,123 @@ pub fn score_infra(parsed: &ParsedFile) -> f64 {
     (size_kb as f64 / 5.0).min(5.0) + boost
 }
 
+pub fn select_pages(input: &SelectionInput) -> Vec<PageCandidate> {
+    let max_pagerank = input
+        .files
+        .iter()
+        .map(|file| file.pagerank)
+        .filter(|value| value.is_finite())
+        .fold(0.0, f64::max);
+    let max_betweenness = input
+        .files
+        .iter()
+        .map(|file| file.betweenness)
+        .filter(|value| value.is_finite())
+        .fold(0.0, f64::max);
+    let files_by_path: BTreeMap<&str, &FileSelection> = input
+        .files
+        .iter()
+        .map(|file| (file.parsed.file_info.path.as_str(), file))
+        .collect();
+    let mut pages = Vec::new();
+
+    for file in &input.files {
+        push_page(
+            &mut pages,
+            PageCandidate {
+                id: format!("file:{}", file.parsed.file_info.path),
+                kind: PageKind::File,
+                score: score_file(
+                    &file.parsed,
+                    file.pagerank,
+                    file.betweenness,
+                    max_pagerank,
+                    max_betweenness,
+                    file.is_hotspot,
+                    file.kg_bonus,
+                ),
+                paths: vec![file.parsed.file_info.path.clone()],
+            },
+        );
+    }
+
+    for module in &input.modules {
+        let paths = sorted_paths(&module.paths);
+        push_page(
+            &mut pages,
+            PageCandidate {
+                id: format!("module:{}", module.id),
+                kind: PageKind::Module,
+                score: score_module(module.size, module.cohesion, input.min_module_size),
+                paths,
+            },
+        );
+    }
+
+    for paths in &input.sccs {
+        let paths = sorted_paths(paths);
+        if paths.is_empty() {
+            continue;
+        }
+        push_page(
+            &mut pages,
+            PageCandidate {
+                id: format!("scc:{}", paths.join("|")),
+                kind: PageKind::Scc,
+                score: score_scc(paths.len()),
+                paths,
+            },
+        );
+    }
+
+    for path in sorted_paths(&input.api_contract_paths) {
+        if let Some(file) = files_by_path.get(path.as_str()) {
+            push_page(
+                &mut pages,
+                PageCandidate {
+                    id: format!("api:{}", path),
+                    kind: PageKind::ApiContract,
+                    score: score_api_contract(&file.parsed),
+                    paths: vec![path],
+                },
+            );
+        }
+    }
+
+    for path in sorted_paths(&input.infra_paths) {
+        if let Some(file) = files_by_path.get(path.as_str()) {
+            push_page(
+                &mut pages,
+                PageCandidate {
+                    id: format!("infra:{}", path),
+                    kind: PageKind::Infra,
+                    score: score_infra(&file.parsed),
+                    paths: vec![path],
+                },
+            );
+        }
+    }
+
+    pages.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
+    pages
+}
+
+fn sorted_paths(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|path| !path.is_empty())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn push_page(pages: &mut Vec<PageCandidate>, page: PageCandidate) {
+    if page.score > 0.0 && !page.id.is_empty() {
+        pages.push(page);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +417,55 @@ mod tests {
         let ordinary = parsed("ordinary", false, false, 1024, 0);
 
         assert_eq!(score_infra(&dockerfile), score_infra(&ordinary) + 0.5);
+    }
+
+    #[test]
+    fn select_pages_emits_all_kinds() {
+        let auth = parsed("src/auth.rs", true, false, 8192, 5);
+        let dockerfile = parsed("Dockerfile", false, false, 1024, 0);
+        let input = SelectionInput {
+            files: vec![
+                FileSelection {
+                    parsed: auth.clone(),
+                    pagerank: 2.0,
+                    betweenness: 1.0,
+                    is_hotspot: true,
+                    kg_bonus: 0.3,
+                },
+                FileSelection {
+                    parsed: dockerfile,
+                    pagerank: 0.0,
+                    betweenness: 0.0,
+                    is_hotspot: false,
+                    kg_bonus: 0.0,
+                },
+            ],
+            modules: vec![ModuleSelection {
+                id: "src".to_string(),
+                paths: vec!["src/auth.rs".to_string(), "Dockerfile".to_string()],
+                size: 20,
+                cohesion: 0.5,
+            }],
+            sccs: vec![vec!["src/auth.rs".to_string(), "Dockerfile".to_string()]],
+            api_contract_paths: vec!["src/auth.rs".to_string()],
+            infra_paths: vec!["Dockerfile".to_string()],
+            min_module_size: 10,
+        };
+
+        let pages = select_pages(&input);
+        let kinds: BTreeSet<PageKind> = pages.iter().map(|page| page.kind).collect();
+        let file_score = pages
+            .iter()
+            .find(|page| page.id == "file:src/auth.rs")
+            .unwrap()
+            .score;
+        let old_file_score = score_file(&auth, 2.0, 1.0, 2.0, 1.0, true, 0.3);
+
+        assert!(kinds.contains(&PageKind::File));
+        assert!(kinds.contains(&PageKind::Module));
+        assert!(kinds.contains(&PageKind::Scc));
+        assert!(kinds.contains(&PageKind::ApiContract));
+        assert!(kinds.contains(&PageKind::Infra));
+        assert_eq!(file_score, old_file_score);
     }
 }

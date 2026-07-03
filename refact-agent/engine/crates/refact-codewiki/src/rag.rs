@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::wiki::WikiEntry;
+use crate::selection_scoring::PageCandidate;
 
 const BM25_K1: f64 = 1.5;
 const BM25_B: f64 = 0.75;
@@ -10,7 +10,7 @@ const RRF_K: f64 = 60.0;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoredDoc<'a> {
-    pub entry: &'a WikiEntry,
+    pub page: &'a PageCandidate,
     pub score: f64,
     pub method: String,
 }
@@ -30,8 +30,13 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn document_tokens(entry: &WikiEntry) -> Vec<String> {
-    tokenize(&format!("{} {}", entry.module, entry.summary))
+fn document_tokens(page: &PageCandidate) -> Vec<String> {
+    tokenize(&format!(
+        "{} {:?} {}",
+        page.id,
+        page.kind,
+        page.paths.join(" ")
+    ))
 }
 
 fn build_corpus_stats(docs: &[Vec<String>]) -> CorpusStats {
@@ -64,7 +69,6 @@ fn term_counts(tokens: &[String]) -> HashMap<&str, usize> {
     counts
 }
 
-/// Okapi BM25 over wiki documents, using module + summary as each document.
 fn bm25(query_tokens: &[String], doc_tokens: &[String], corpus_stats: &CorpusStats) -> f64 {
     if query_tokens.is_empty()
         || doc_tokens.is_empty()
@@ -97,23 +101,15 @@ fn bm25(query_tokens: &[String], doc_tokens: &[String], corpus_stats: &CorpusSta
         .sum()
 }
 
-/// Uses WikiEntry::freshness as a deterministic stand-in for graph PageRank.
-///
-/// The full Repowise pipeline biases retrieval by graph PageRank centrality. This
-/// crate has no graph in scope, so freshness is clamped to [0, 1] and used as a
-/// stable centrality prior until the parent module can provide a real PageRank.
-fn pagerank_prior(entry: &WikiEntry) -> f64 {
-    if entry.freshness.is_nan() {
+fn pagerank_prior(page: &PageCandidate, prior: &HashMap<String, f64>) -> f64 {
+    let value = prior.get(&page.id).copied().unwrap_or(0.0);
+    if value.is_nan() {
         0.0
     } else {
-        entry.freshness.clamp(0.0, 1.0)
+        value.clamp(0.0, 1.0)
     }
 }
 
-/// Reciprocal Rank Fusion over document-index rankings.
-///
-/// Scores are `sum(1 / (k + rank))`, matching Repowise's zero-based rank merge
-/// with the standard `k = 60` when callers pass `60.0`.
 pub fn rrf_fuse(rankings: &[Vec<usize>], k: f64) -> Vec<(usize, f64)> {
     let k = if k > 0.0 { k } else { RRF_K };
     let mut scores: HashMap<usize, f64> = HashMap::new();
@@ -130,16 +126,16 @@ pub fn rrf_fuse(rankings: &[Vec<usize>], k: f64) -> Vec<(usize, f64)> {
 }
 
 pub fn search_hybrid<'a>(
-    entries: &'a [WikiEntry],
     query: &str,
-    top_n: usize,
+    pages: &'a [PageCandidate],
+    prior: &HashMap<String, f64>,
 ) -> Vec<ScoredDoc<'a>> {
     let query_tokens = tokenize(query);
-    if query_tokens.is_empty() || top_n == 0 || entries.is_empty() {
+    if query_tokens.is_empty() || pages.is_empty() {
         return vec![];
     }
 
-    let docs: Vec<Vec<String>> = entries.iter().map(document_tokens).collect();
+    let docs: Vec<Vec<String>> = pages.iter().map(document_tokens).collect();
     let stats = build_corpus_stats(&docs);
 
     let mut bm25_scores: Vec<(usize, f64)> = docs
@@ -150,7 +146,7 @@ pub fn search_hybrid<'a>(
         .collect();
     bm25_scores.sort_by(|a, b| {
         b.1.total_cmp(&a.1)
-            .then_with(|| entries[a.0].module.cmp(&entries[b.0].module))
+            .then_with(|| pages[a.0].id.cmp(&pages[b.0].id))
     });
     let bm25_ranking: Vec<usize> = bm25_scores.into_iter().map(|(idx, _)| idx).collect();
     if bm25_ranking.is_empty() {
@@ -159,58 +155,101 @@ pub fn search_hybrid<'a>(
 
     let mut prior_ranking = bm25_ranking.clone();
     prior_ranking.sort_by(|a, b| {
-        pagerank_prior(&entries[*b])
-            .total_cmp(&pagerank_prior(&entries[*a]))
-            .then_with(|| entries[*a].module.cmp(&entries[*b].module))
+        pagerank_prior(&pages[*b], prior)
+            .total_cmp(&pagerank_prior(&pages[*a], prior))
+            .then_with(|| pages[*a].id.cmp(&pages[*b].id))
     });
 
-    rrf_fuse(&[bm25_ranking, prior_ranking], RRF_K)
+    let mut docs: Vec<ScoredDoc<'a>> = rrf_fuse(&[bm25_ranking, prior_ranking], RRF_K)
         .into_iter()
-        .take(top_n)
         .map(|(idx, score)| ScoredDoc {
-            entry: &entries[idx],
+            page: &pages[idx],
             score,
             method: "hybrid".to_string(),
         })
-        .collect()
+        .collect();
+    docs.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| pagerank_prior(b.page, prior).total_cmp(&pagerank_prior(a.page, prior)))
+            .then_with(|| a.page.id.cmp(&b.page.id))
+    });
+    docs
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::selection_scoring::PageKind;
 
-    fn entry(module: &str, summary: &str, freshness: f64) -> WikiEntry {
-        WikiEntry {
-            module: module.to_string(),
-            summary: summary.to_string(),
-            source_hash: 0,
-            freshness,
+    fn page(id: &str, path: &str) -> PageCandidate {
+        PageCandidate {
+            id: id.to_string(),
+            kind: PageKind::File,
+            score: 1.0,
+            paths: vec![path.to_string()],
         }
     }
 
     #[test]
     fn search_hybrid_ranks_auth_token_login_first() {
-        let entries = vec![
-            entry("render", "draws widgets on screen", 1.0),
-            entry("auth", "handles token login auth validation", 0.7),
-            entry("storage", "persists user preferences", 0.9),
+        let pages = vec![
+            page(
+                "file:src/render.rs",
+                "src/render.rs draws widgets on screen",
+            ),
+            page(
+                "file:src/auth.rs",
+                "src/auth.rs handles token login auth validation",
+            ),
+            page(
+                "file:src/storage.rs",
+                "src/storage.rs persists user preferences",
+            ),
         ];
+        let prior = HashMap::from([
+            ("file:src/render.rs".to_string(), 1.0),
+            ("file:src/auth.rs".to_string(), 0.7),
+            ("file:src/storage.rs".to_string(), 0.9),
+        ]);
 
-        let hits = search_hybrid(&entries, "how does login token work", 5);
+        let hits = search_hybrid("how does login token work", &pages, &prior);
         assert!(!hits.is_empty());
-        assert_eq!(hits[0].entry.module, "auth");
+        assert_eq!(hits[0].page.id, "file:src/auth.rs");
         assert_eq!(hits[0].method, "hybrid");
-        assert!(search_hybrid(&entries, "a an to", 5).is_empty());
+        assert!(search_hybrid("a an to", &pages, &prior).is_empty());
     }
 
     #[test]
     fn search_hybrid_returns_empty_when_bm25_has_no_hits() {
-        let entries = vec![
-            entry("render", "draws widgets on screen", 1.0),
-            entry("storage", "persists user preferences", 0.9),
+        let pages = vec![
+            page(
+                "file:src/render.rs",
+                "src/render.rs draws widgets on screen",
+            ),
+            page(
+                "file:src/storage.rs",
+                "src/storage.rs persists user preferences",
+            ),
         ];
 
-        assert!(search_hybrid(&entries, "oauth token refresh", 5).is_empty());
+        assert!(search_hybrid("oauth token refresh", &pages, &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn search_hybrid_uses_prior() {
+        let pages = vec![
+            page("file:src/a.rs", "src/a.rs auth token"),
+            page("file:src/b.rs", "src/b.rs auth token"),
+        ];
+        let prior = HashMap::from([
+            ("file:src/a.rs".to_string(), 0.1),
+            ("file:src/b.rs".to_string(), 0.9),
+        ]);
+
+        let hits = search_hybrid("auth token", &pages, &prior);
+
+        assert_eq!(hits[0].page.id, "file:src/b.rs");
     }
 
     #[test]
