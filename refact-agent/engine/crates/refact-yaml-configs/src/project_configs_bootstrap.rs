@@ -427,7 +427,7 @@ tools:
         global_configs_try_create_all(config_dir).await.unwrap();
 
         let upgraded = fs::read_to_string(&buddy_path).await.unwrap();
-        assert!(upgraded.contains("schema_version: 16"));
+        assert!(upgraded.contains("schema_version: 17"));
         assert!(upgraded.contains("  - buddy_speak"));
         assert!(upgraded.contains("  - buddy_runtime_event"));
         assert!(upgraded.contains("  - buddy_log_activity"));

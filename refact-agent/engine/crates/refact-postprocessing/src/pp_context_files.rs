@@ -3,12 +3,12 @@ use std::collections::HashSet;
 use tracing::{info, warn};
 use tokenizers::Tokenizer;
 use indexmap::IndexMap;
-use refact_ast::ast::treesitter::structs::SymbolType;
+use refact_core::ast_types::SymbolType;
 
 use refact_core::chat_types::{ContextFile, PostprocessSettings};
-use refact_ast::ast::ast_structs::AstDefinition;
+use refact_core::ast_types::AstDefinition;
 use refact_core::custom_error::{first_n_chars, last_n_chars};
-use refact_ast::ast::chunk_utils::count_text_tokens_with_fallback;
+use refact_core::chunk_utils::count_text_tokens_with_fallback;
 use crate::pp_context_provider::PPContextTrait;
 use crate::pp_utils::{
     color_with_gradient_type, colorize_comments_up, colorize_if_more_useful, colorize_minus_one,

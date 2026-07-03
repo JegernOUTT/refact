@@ -9,7 +9,6 @@ use serde_json::{Value, json};
 use tokenizers::Tokenizer;
 use tracing::info;
 
-use refact_ast::ast::ast_structs::AstDB;
 use refact_core::chat_types::{CodeCompletionPost, SamplingParameters};
 use refact_core::custom_error::last_n_chars;
 use refact_postprocessing::pp_context_provider::PPContextTrait;
@@ -32,7 +31,7 @@ pub struct FillInTheMiddleScratchpad {
     pub extra_stop_tokens: Vec<String>,
     pub context_used: Value,
     pub data4cache: completion_cache::CompletionSaveToCache,
-    pub ast_index: Option<Arc<AstDB>>,
+    pub codegraph: Option<Arc<refact_codegraph::CodeGraphService>>,
     pub pp_context: Arc<dyn PPContextTrait>,
     pub project_dirs: Vec<PathBuf>,
 }
@@ -43,7 +42,7 @@ impl FillInTheMiddleScratchpad {
         post: &CodeCompletionPost,
         order: String,
         cache_arc: Arc<StdRwLock<completion_cache::CompletionCache>>,
-        ast_index: Option<Arc<AstDB>>,
+        codegraph: Option<Arc<refact_codegraph::CodeGraphService>>,
         pp_context: Arc<dyn PPContextTrait>,
         project_dirs: Vec<PathBuf>,
     ) -> Self {
@@ -58,7 +57,7 @@ impl FillInTheMiddleScratchpad {
             extra_stop_tokens: vec![],
             context_used: json!({}),
             data4cache,
-            ast_index,
+            codegraph,
             pp_context,
             project_dirs,
         }
@@ -141,7 +140,7 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
         let use_rag = !self.t.context_format.is_empty()
             && self.t.rag_ratio > 0.0
             && self.post.use_ast
-            && self.ast_index.is_some();
+            && self.codegraph.is_some();
         let mut rag_tokens_n = if self.post.rag_tokens_n > 0 {
             self.post.rag_tokens_n.min(4096).max(50)
         } else {
@@ -158,7 +157,7 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
                 self.t.context_format.is_empty() as i32,
                 self.post.use_ast as i32,
                 (rag_tokens_n > 0) as i32,
-                self.ast_index.is_some() as i32
+                self.codegraph.is_some() as i32
             );
         }
 
@@ -299,7 +298,7 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
                 let extra_context = retrieve_ast_based_extra_context(
                     self.pp_context.clone(),
                     self.project_dirs.clone(),
-                    self.ast_index.clone(),
+                    self.codegraph.clone(),
                     &self.t,
                     &cpath,
                     &pos,

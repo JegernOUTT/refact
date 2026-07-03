@@ -8,7 +8,10 @@ data class RagStatus(
     @SerializedName("ast_alive") val astAlive: String? = null,
     @SerializedName("vecdb") val vecdb: VecDbStatus? = null,
     @SerializedName("vecdb_alive") val vecdbAlive: String? = null,
-    @SerializedName("vec_db_error") val vecDbError: String
+    @SerializedName("vec_db_error") val vecDbError: String,
+    @SerializedName("codegraph") val codegraph: CodeGraphStatus? = null,
+    @SerializedName("codegraph_alive") val codegraphAlive: String? = null,
+    @SerializedName("codegraph_error") val codegraphError: String? = null
 )
 
 data class AstStatus(
@@ -29,4 +32,18 @@ data class VecDbStatus(
     @SerializedName("db_cache_size") val dbCacheSize: Int,
     @SerializedName("state") val state: String,
     @SerializedName("vecdb_max_files_hit") val vecdbMaxFilesHit: Boolean
+)
+
+data class CodeGraphStatus(
+    @SerializedName("counts") val counts: CodeGraphCounts,
+    @SerializedName("queued") val queued: Int,
+    @SerializedName("state") val state: String,
+    @SerializedName("error") val error: String
+)
+
+data class CodeGraphCounts(
+    @SerializedName("nodes") val nodes: Long,
+    @SerializedName("edges") val edges: Long,
+    @SerializedName("files") val files: Long,
+    @SerializedName("fts_docs") val ftsDocs: Long
 )

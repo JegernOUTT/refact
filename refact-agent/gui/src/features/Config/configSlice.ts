@@ -25,6 +25,7 @@ export type Config = {
     statistics?: boolean;
     vecdb?: boolean;
     ast?: boolean;
+    codegraph?: boolean;
     images?: boolean;
   };
   keyBindings?: {
@@ -43,6 +44,7 @@ const initialState: Config = {
     statistics: true,
     vecdb: true,
     ast: true,
+    codegraph: true,
     images: true,
   },
   themeProps: {
@@ -163,6 +165,10 @@ export const selectVecdb = createSelector(
 export const selectAst = createSelector(
   selectFeatures,
   (features) => features?.ast,
+);
+export const selectCodegraph = createSelector(
+  selectFeatures,
+  (features) => features?.codegraph,
 );
 
 export const selectApiKey = (state: RootState) => state.config.apiKey;

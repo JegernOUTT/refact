@@ -130,6 +130,24 @@ class InferenceGlobalContext : Disposable {
                 .vecdbFileLimitChanged(newValue)
         }
 
+    var codegraphIsEnabled: Boolean
+        get() = AppSettingsState.codegraphIsEnabled
+        set(newValue) {
+            if (newValue == codegraphIsEnabled) return
+            messageBus
+                .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
+                .codegraphFlagChanged(newValue)
+        }
+
+    var codegraphFileLimit: Int
+        get() { return AppSettingsState.codegraphFileLimit }
+        set(newValue) {
+            if (newValue == codegraphFileLimit) return
+            messageBus
+                .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
+                .codegraphFileLimitChanged(newValue)
+        }
+
     var insecureSSL: Boolean
         get() = AppSettingsState.insecureSSL
         set(newValue) {

@@ -1,14 +1,14 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use axum::extract::State;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
 use url::Url;
 
-use crate::ast::ast_structs::AstDefinition;
+use refact_core::ast_types::AstDefinition;
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::ast::treesitter::structs::SymbolType;
+use refact_core::ast_types::SymbolType;
 
 #[derive(Deserialize)]
 pub struct CodeLensPost {
@@ -17,9 +17,19 @@ pub struct CodeLensPost {
     pub debug: bool,
 }
 
-pub use refact_chat_api::code_lens::{
-    CodeLensCache, CodeLensCacheEntry, CodeLensOutput, CodeLensResponse,
-};
+#[derive(Serialize, Clone)]
+struct CodeLensResponse {
+    success: u8,
+    code_lens: Vec<CodeLensOutput>,
+}
+
+#[derive(Serialize, Clone)]
+struct CodeLensOutput {
+    spath: String,
+    line1: usize,
+    line2: usize,
+    debug_string: Option<String>,
+}
 
 pub async fn handle_v1_code_lens(
     State(app): State<AppState>,
@@ -30,7 +40,6 @@ pub async fn handle_v1_code_lens(
         tracing::info!("chat handler cannot parse input:\n{:?}", body_bytes);
         ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e))
     })?;
-    let codelens_cache = global_context.codelens_cache.clone();
 
     let cpath = crate::files_correction::canonical_path(
         &post
@@ -42,45 +51,36 @@ pub async fn handle_v1_code_lens(
     );
     let cpath_str = cpath.to_string_lossy().to_string();
 
-    let ast_service_opt = global_context.ast_service.lock().unwrap().clone();
-    let defs: Vec<Arc<AstDefinition>> = if let Some(ast_service) = ast_service_opt {
-        let indexing_finished = crate::ast::ast_indexer_thread::ast_indexer_block_until_finished(
-            ast_service.clone(),
-            300,
-            true,
-        )
-        .await;
-        let ast_index = ast_service.lock().await.ast_index.clone();
-        let defs = crate::ast::ast_db::doc_defs(ast_index, &cpath_str);
-        if !indexing_finished || defs.len() <= 1 {
-            tracing::info!(
-                "indexing_finished={} defs.len()=={}",
-                indexing_finished,
-                defs.len()
-            );
-            if let Some(cache_entry) = codelens_cache.lock().await.store.get(&cpath_str) {
-                tracing::info!(
-                    "therefore return cached {} records",
-                    cache_entry.response.code_lens.len()
-                );
-                return Ok(Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Body::from(
-                        serde_json::to_string(&cache_entry.response).unwrap(),
-                    ))
-                    .unwrap());
-            }
+    let codegraph_opt = global_context.codegraph.lock().await.clone();
+    let defs: Vec<Arc<AstDefinition>> = match codegraph_opt {
+        Some(service) => service
+            .doc_defs(&cpath_str)
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?,
+        None => {
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from(
+                    serde_json::json!({"detail": "codegraph turned off"}).to_string(),
+                ))
+                .unwrap());
         }
-        defs
-    } else {
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .body(Body::from(
-                serde_json::json!({"detail": "AST turned off"}).to_string(),
-            ))
-            .unwrap());
     };
 
+    let output = build_code_lens_output(&defs, post.debug);
+
+    let response = CodeLensResponse {
+        success: 1,
+        code_lens: output,
+    };
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(serde_json::to_string(&response).unwrap()))
+        .unwrap())
+}
+
+fn build_code_lens_output(defs: &[Arc<AstDefinition>], debug: bool) -> Vec<CodeLensOutput> {
     let mut output: Vec<CodeLensOutput> = Vec::new();
     for def in defs.iter() {
         if let Some(last) = def.official_path.last() {
@@ -88,7 +88,7 @@ pub async fn handle_v1_code_lens(
                 continue;
             }
         }
-        if !post.debug {
+        if !debug {
             let line1 = def.full_line1();
             let line2 = def.full_line2();
             if line2 > line1 {
@@ -144,26 +144,80 @@ pub async fn handle_v1_code_lens(
             }
         }
     }
+    output
+}
 
-    let response = CodeLensResponse {
-        success: 1,
-        code_lens: output,
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::State;
+    use hyper::body::to_bytes;
+    use std::path::Path;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
-    codelens_cache.lock().await.store.insert(
-        cpath_str.clone(),
-        CodeLensCacheEntry {
-            response: response.clone(),
-            ts: now,
-        },
-    );
-    codelens_cache.lock().await.clean_up_old_entries(now);
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::from(serde_json::to_string(&response).unwrap()))
-        .unwrap())
+    fn code_lens_body(path: &Path) -> hyper::body::Bytes {
+        let body = serde_json::json!({
+            "uri": Url::from_file_path(path).unwrap(),
+        });
+        hyper::body::Bytes::from(serde_json::to_vec(&body).unwrap())
+    }
+
+    #[test]
+    fn debug_output_includes_codegraph_doc_def_usages() {
+        let store = refact_codegraph::Store::open_in_memory().unwrap();
+        store
+            .index_file_graph(
+                "src/widget.rs",
+                "fn caller() {\n    helper();\n}\nfn helper() {}\n",
+                "rust",
+            )
+            .unwrap();
+        store.connect_usages().unwrap();
+
+        let defs = refact_codegraph::facade::doc_defs(&store, "src/widget.rs").unwrap();
+        let output = build_code_lens_output(&defs, true);
+
+        assert!(output.iter().any(|lens| {
+            lens.line1 == 2 && lens.debug_string.as_deref() == Some("↗src/widget.rs::helper")
+        }));
+    }
+
+    #[tokio::test]
+    async fn code_lens_empty_doc_defs_stays_200() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let codegraph = refact_codegraph::CodeGraphService::open_in_memory().unwrap();
+        *gcx.codegraph.lock().await = Some(Arc::new(codegraph));
+        let app = AppState::from_gcx(gcx).await;
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("empty.rs");
+
+        let response = handle_v1_code_lens(State(app), code_lens_body(&file_path))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body()).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], 1);
+        assert_eq!(json["code_lens"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn code_lens_doc_defs_error_returns_500() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let db_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("codegraph.sqlite");
+        let codegraph = refact_codegraph::CodeGraphService::open(db_path.clone()).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("DROP TABLE nodes").unwrap();
+        *gcx.codegraph.lock().await = Some(Arc::new(codegraph));
+        let app = AppState::from_gcx(gcx).await;
+        let file_path = db_dir.path().join("error.rs");
+
+        let err = match handle_v1_code_lens(State(app), code_lens_body(&file_path)).await {
+            Ok(response) => panic!("expected doc_defs error, got {}", response.status()),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.status_code, StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }

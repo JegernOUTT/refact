@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::time::Duration;
 
-use crate::ast::chunk_utils::official_text_hashing_function;
+use refact_core::chunk_utils::official_text_hashing_function;
 use crate::custom_error::{trace_and_default, MapErrToString};
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;

@@ -33,7 +33,10 @@ import {
   type EngineApiConfig,
 } from "../../services/refact/apiUrl";
 import { IconButton, Tooltip } from "../ui";
-import { ConnectionStatusIndicator } from "../ConnectionStatus";
+import {
+  ConnectionStatusIndicator,
+  RagStatusIndicators,
+} from "../ConnectionStatus";
 import styles from "./Toolbar.module.css";
 
 export type DashboardTab = {
@@ -199,6 +202,8 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         dispatch(push({ name: "stats dashboard" }));
       } else if (to === "knowledge graph") {
         dispatch(push({ name: "knowledge graph" }));
+      } else if (to === "code intel") {
+        dispatch(push({ name: "code intel" }));
       } else if (to === "chat") {
         dispatch(popBackTo({ name: "history" }));
         dispatch(push({ name: "chat" }));
@@ -290,6 +295,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         className={classNames(styles.toolbarSection, styles.connectionSection)}
       >
         <ConnectionStatusIndicator />
+        <RagStatusIndicators />
         <a
           className={styles.engineUrl}
           href={engineUrl}

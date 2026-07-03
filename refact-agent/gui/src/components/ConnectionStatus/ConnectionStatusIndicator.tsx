@@ -19,17 +19,11 @@ import {
 } from "../../features/History/historySlice";
 import styles from "./ConnectionStatus.module.css";
 
-export const ConnectionStatusIndicator: React.FC = () => {
+function useRefreshWorkspaceData() {
   const dispatch = useAppDispatch();
-  const isConnected = useAppSelector(selectIsFullyConnected);
-  const problem = useAppSelector(selectConnectionProblem);
-  const backendStatus = useAppSelector(selectBackendStatus);
-  const sseStatus = useAppSelector(selectCurrentChatSseStatus);
   const currentThreadId = useAppSelector(selectCurrentThreadId);
-  const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const handleRefresh = useCallback(async () => {
-    setIsRefreshing(true);
+  return useCallback(async () => {
     const trajQuery = dispatch(
       trajectoriesApi.endpoints.listTrajectoriesPaginated.initiate(
         { limit: 50, displayableOnly: true },
@@ -58,9 +52,26 @@ export const ConnectionStatusIndicator: React.FC = () => {
     } finally {
       trajQuery.unsubscribe();
       tasksQuery.unsubscribe();
-      setIsRefreshing(false);
     }
   }, [dispatch, currentThreadId]);
+}
+
+export const ConnectionStatusIndicator: React.FC = () => {
+  const isConnected = useAppSelector(selectIsFullyConnected);
+  const problem = useAppSelector(selectConnectionProblem);
+  const backendStatus = useAppSelector(selectBackendStatus);
+  const sseStatus = useAppSelector(selectCurrentChatSseStatus);
+  const refreshWorkspaceData = useRefreshWorkspaceData();
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleRefresh = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      await refreshWorkspaceData();
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [refreshWorkspaceData]);
 
   const isReconnecting =
     sseStatus === "connecting" || backendStatus === "unknown";
@@ -150,3 +161,48 @@ export const ConnectionStatusIndicator: React.FC = () => {
 };
 
 export default ConnectionStatusIndicator;
+
+type MiniStatusState = "idle" | "working" | "success" | "warning" | "error";
+
+const miniStatusIconClass: Record<MiniStatusState, string> = {
+  idle: styles.iconIdle,
+  working: styles.iconReconnecting,
+  success: styles.iconConnected,
+  warning: styles.iconRefreshing,
+  error: styles.iconDisconnected,
+};
+
+interface MiniStatusIndicatorProps {
+  label: string;
+  status: MiniStatusState;
+  tooltip: string;
+  onRefresh?: () => void;
+}
+
+export const MiniStatusIndicator: React.FC<MiniStatusIndicatorProps> = ({
+  label,
+  status,
+  tooltip,
+  onRefresh,
+}) => {
+  const icon = status === "working" ? LoaderCircle : CheckCircle;
+
+  return (
+    <Tooltip>
+      <Tooltip.Trigger asChild>
+        <button
+          type="button"
+          className={`${styles.miniStatusButton} ${styles[`miniStatus-${status}`]}`}
+          onClick={onRefresh}
+          disabled={!onRefresh}
+          aria-label={`${label} status: ${status}`}
+        >
+          <span className={styles.indicator}>
+            <Icon icon={icon} size="sm" className={miniStatusIconClass[status]} />
+          </span>
+        </button>
+      </Tooltip.Trigger>
+      <Tooltip.Content side="bottom">{tooltip}</Tooltip.Content>
+    </Tooltip>
+  );
+};

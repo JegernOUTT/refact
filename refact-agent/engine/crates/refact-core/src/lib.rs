@@ -1,13 +1,17 @@
+pub mod ast_types;
 pub mod at_commands_preview_cache;
 pub mod buddy_meta;
 pub mod chat_types;
+pub mod chunk_utils;
 pub mod custom_error;
 pub mod knowledge_frontmatter;
 pub mod knowledge_index;
 pub mod llm_types;
+pub mod memory_plane;
 pub mod model_caps;
 pub mod models_dev;
 pub mod net_utils;
+pub mod path_classifier;
 pub mod privacy_types;
 pub mod provider_types;
 pub mod retry_policy;

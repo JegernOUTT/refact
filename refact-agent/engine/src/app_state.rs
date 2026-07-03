@@ -15,7 +15,6 @@ use refact_runtime_api::{
 };
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 
-use crate::ast::ast_indexer_thread::AstIndexService;
 use crate::agents::registry::BackgroundAgentRegistry;
 use crate::buddy::actor::BuddyService;
 use crate::buddy::events::BuddyEvent;
@@ -28,7 +27,6 @@ use crate::exec::ExecRegistry;
 use crate::files_blocklist::IndexingEverywhere;
 use crate::files_in_workspace::DocumentsState;
 use crate::global_context::{AtCommandsPreviewCache, CommandLine, SharedGlobalContext};
-use crate::http::routers::v1::code_lens::CodeLensCache;
 use crate::http::routers::v1::sidebar::NotificationEvent;
 use crate::integrations::browser_runtime::BrowserRuntime;
 use crate::integrations::sessions::IntegrationSession;
@@ -78,7 +76,6 @@ pub struct WorkspaceServices {
     pub completions_cache: Arc<StdRwLock<CompletionCache>>,
     pub vec_db: Arc<AMutex<Option<Arc<dyn VecdbSearch>>>>,
     pub vec_db_error: Arc<StdMutex<String>>,
-    pub ast_service: Option<Arc<AMutex<AstIndexService>>>,
     pub knowledge_index: Arc<AMutex<KnowledgeIndex>>,
     pub at_commands_preview_cache: Arc<AMutex<AtCommandsPreviewCache>>,
 }
@@ -109,7 +106,6 @@ pub struct IntegrationServices {
     pub browser_runtimes: Arc<AMutex<HashMap<String, Arc<AMutex<BrowserRuntime>>>>>,
     pub ext_cache_generation: Arc<AtomicU64>,
     pub project_registry_cache: Arc<StdRwLock<RegistryCacheManager>>,
-    pub codelens_cache: Arc<AMutex<CodeLensCache>>,
     pub init_shadow_repos_lock: Arc<AMutex<bool>>,
     pub git_operations_abort_flag: Arc<AtomicBool>,
 }

@@ -8,6 +8,12 @@ use crate::http::routers::v1::code_completion::{
     handle_v1_code_completion_web, handle_v1_code_completion_prompt,
 };
 use crate::http::routers::v1::code_lens::handle_v1_code_lens;
+use crate::http::routers::v1::code_intel::{
+    handle_v1_code_intel_communities, handle_v1_code_intel_dead_code,
+    handle_v1_code_intel_duplication, handle_v1_code_intel_git_risk, handle_v1_code_intel_graph,
+    handle_v1_code_intel_health, handle_v1_code_intel_overview, handle_v1_code_intel_pr_blast,
+    handle_v1_code_intel_security_scan,
+};
 use crate::http::routers::v1::ast::{
     handle_v1_ast_file_dump, handle_v1_ast_file_symbols, handle_v1_ast_status,
 };
@@ -35,7 +41,7 @@ use crate::http::routers::v1::lsp_like_handlers::{
     handle_v1_lsp_did_change, handle_v1_lsp_add_folder, handle_v1_lsp_initialize,
     handle_v1_lsp_remove_folder, handle_v1_set_active_document, handle_v1_git_branch_changed,
 };
-use crate::http::routers::v1::status::handle_v1_rag_status;
+use crate::http::routers::v1::status::{handle_v1_codegraph_status, handle_v1_rag_status};
 use crate::http::routers::v1::customization::handle_v1_customization;
 use crate::http::routers::v1::customization::handle_v1_config_path;
 use crate::http::routers::v1::gui_help_handlers::handle_v1_fullpath;
@@ -56,7 +62,9 @@ use crate::providers::http::{
     handle_v1_providers_list,
 };
 
-use crate::http::routers::v1::vecdb::{handle_v1_vecdb_search, handle_v1_vecdb_status};
+use crate::http::routers::v1::vecdb::{
+    handle_v1_codegraph_search, handle_v1_vecdb_search, handle_v1_vecdb_status,
+};
 use crate::http::routers::v1::knowledge_graph::handle_v1_knowledge_graph;
 use crate::http::routers::v1::knowledge_ops::{
     handle_v1_knowledge_update_memory, handle_v1_knowledge_delete_memory,
@@ -123,6 +131,7 @@ pub mod chat_based_handlers;
 mod chat_modes;
 pub mod code_completion;
 mod code_edit;
+pub mod code_intel;
 pub mod code_lens;
 mod commands_marketplace;
 pub mod customization;
@@ -429,6 +438,26 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
     let builder = builder
         .route("/vdb-search", post(handle_v1_vecdb_search))
         .route("/vdb-status", get(handle_v1_vecdb_status))
+        .route("/codegraph-search", post(handle_v1_codegraph_search))
+        .route("/codegraph-status", get(handle_v1_codegraph_status))
+        .route("/code-intel/overview", get(handle_v1_code_intel_overview))
+        .route("/code-intel/graph", get(handle_v1_code_intel_graph))
+        .route(
+            "/code-intel/communities",
+            get(handle_v1_code_intel_communities),
+        )
+        .route("/code-intel/dead-code", get(handle_v1_code_intel_dead_code))
+        .route("/code-intel/health", get(handle_v1_code_intel_health))
+        .route("/code-intel/git-risk", get(handle_v1_code_intel_git_risk))
+        .route(
+            "/code-intel/duplication",
+            get(handle_v1_code_intel_duplication),
+        )
+        .route("/code-intel/pr-blast", post(handle_v1_code_intel_pr_blast))
+        .route(
+            "/code-intel/security-scan",
+            post(handle_v1_code_intel_security_scan),
+        )
         .route("/knowledge-graph", get(handle_v1_knowledge_graph))
         .route(
             "/knowledge/update-memory",

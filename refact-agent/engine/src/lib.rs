@@ -65,7 +65,6 @@ pub mod nicer_logs;
 pub mod version;
 pub mod yaml_configs;
 
-pub mod ast;
 pub mod at_commands;
 pub mod completion_cache;
 pub mod file_filter;
@@ -73,7 +72,9 @@ pub mod files_blocklist;
 pub mod files_correction;
 pub mod files_in_jsonl;
 pub mod files_in_workspace;
+pub mod indexing_routing;
 
+pub mod codegraph;
 pub mod postprocessing;
 pub mod scheduler;
 pub mod scratchpad_abstract;
@@ -241,16 +242,7 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
     )
     .await;
 
-    if cmdline.ast {
-        let tmp = Some(
-            crate::ast::ast_indexer_thread::ast_service_init(
-                cmdline.ast_permanent.clone(),
-                cmdline.ast_max_files,
-            )
-            .await,
-        );
-        *gcx.ast_service.lock().unwrap() = tmp;
-    }
+    crate::codegraph::cg_highlev::codegraph_init(gcx.clone()).await;
 
     // Start or connect to mcp servers
     let _ = running_integrations::load_integrations(gcx.clone(), &["**/*".to_string()]).await;

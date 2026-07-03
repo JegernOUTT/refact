@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use crate::memory_plane::MemoryPlaneRoots;
 use indexmap::IndexMap;
 use async_trait::async_trait;
 
@@ -23,7 +24,12 @@ pub trait VecdbSearch: Send + Sync {
     ) -> Result<SearchResult, String>;
     async fn get_status(&self) -> Result<VecDbStatus, String>;
     async fn remove_file(&self, file_path: &PathBuf) -> Result<(), String>;
-    async fn vectorizer_enqueue_files(&self, documents: &[String], process_immediately: bool);
+    async fn vectorizer_enqueue_files(
+        &self,
+        documents: &[String],
+        process_immediately: bool,
+        roots: MemoryPlaneRoots,
+    );
     fn current_constants(&self) -> (EmbeddingModelConfig, usize);
     async fn embed_query(&self, query: &str) -> Result<Vec<f32>, String>;
     async fn vecdb_search_with_embedding(

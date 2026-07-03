@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use async_trait::async_trait;
 use tracing::info;
 
+use refact_core::memory_plane::MemoryPlaneRoots;
 use refact_core::vecdb_types::{
     EmbeddingModelConfig, FileReader, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch,
 };
@@ -80,6 +81,7 @@ impl VecDb {
         workspace_folder: String,
         insecure: bool,
         constants: VecdbConstants,
+        memory_plane_roots: MemoryPlaneRoots,
     ) -> Result<VecDb, String> {
         let emb_table_name = vdb_emb_aux::create_emb_table_name(&vec![workspace_folder]);
         let handler = VecDBSqlite::init(
@@ -92,7 +94,12 @@ impl VecDb {
         .await?;
         let vecdb_handler = Arc::new(AMutex::new(handler));
         let vectorizer_service = Arc::new(AMutex::new(
-            FileVectorizerService::new(vecdb_handler.clone(), constants.clone()).await,
+            FileVectorizerService::new(
+                vecdb_handler.clone(),
+                constants.clone(),
+                memory_plane_roots.clone(),
+            )
+            .await,
         ));
         let mut http_client_builder = reqwest::Client::builder();
         if insecure {
@@ -179,11 +186,17 @@ impl VecdbSearch for VecDb {
             .await
     }
 
-    async fn vectorizer_enqueue_files(&self, documents: &[String], process_immediately: bool) {
+    async fn vectorizer_enqueue_files(
+        &self,
+        documents: &[String],
+        process_immediately: bool,
+        roots: MemoryPlaneRoots,
+    ) {
         vectorizer_enqueue_files(
             self.vectorizer_service.clone(),
             documents,
             process_immediately,
+            &roots,
         )
         .await;
     }

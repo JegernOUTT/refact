@@ -41,8 +41,11 @@ class AppSettingsState : PersistentStateComponent<AppSettingsState> {
     var astIsEnabledDefaultChanged: Boolean = false
     var vecdbIsEnabled: Boolean = true
     var vecdbIsEnabledDefaultChanged: Boolean = false
+    var codegraphIsEnabled: Boolean = true
+    var codegraphIsEnabledDefaultChanged: Boolean = false
     var astFileLimit: Int = 15000
     var vecdbFileLimit: Int = 15000
+    var codegraphFileLimit: Int = 15000
     var completionMaxTokens: Int = 0
     var insecureSSL: Boolean = false
     var isFirstStart: Boolean = true
@@ -99,6 +102,13 @@ class AppSettingsState : PersistentStateComponent<AppSettingsState> {
                     override fun vecdbFlagChanged(newValue: Boolean) {
                         instance.vecdbIsEnabled = newValue
                         instance.vecdbIsEnabledDefaultChanged = true
+                    }
+                    override fun codegraphFileLimitChanged(newValue: Int) {
+                        instance.codegraphFileLimit = newValue
+                    }
+                    override fun codegraphFlagChanged(newValue: Boolean) {
+                        instance.codegraphIsEnabled = newValue
+                        instance.codegraphIsEnabledDefaultChanged = true
                     }
                     override fun xDebugLSPPortChanged(newPort: Int?) {
                         instance.xDebugLSPPort = newPort

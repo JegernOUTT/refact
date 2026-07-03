@@ -1446,6 +1446,284 @@ export type RelinkMemoriesResponse = {
   links_added: number;
 };
 
+export type CodeIntelDetail = {
+  detail: string;
+};
+
+export type CodeIntelResponse<T> = T | CodeIntelDetail;
+
+export type CodeIntelScoreEntry = {
+  symbol: string;
+  score: number;
+};
+
+export type CodeIntelFileScoreEntry = {
+  path: string;
+  score: number;
+};
+
+export type CodeIntelFileCentrality = {
+  top_pagerank: CodeIntelFileScoreEntry[];
+  top_betweenness: CodeIntelFileScoreEntry[];
+};
+
+export type CodeIntelCounts = {
+  nodes: number;
+  edges: number;
+  files: number;
+};
+
+export type CodeIntelOverview = {
+  counts: CodeIntelCounts;
+  scc_count: number;
+  largest_scc: number;
+  component_count: number;
+  top_pagerank: CodeIntelScoreEntry[];
+  top_betweenness: CodeIntelScoreEntry[];
+  file_centrality: CodeIntelFileCentrality;
+  community_count: number;
+  dead_code_count: number;
+};
+
+export type CodeIntelGraphNode = {
+  id: number;
+  name: string;
+  path: string;
+  kind?: string;
+};
+
+export type CodeIntelGraphEdge = {
+  source: number;
+  target: number;
+  kind: string;
+};
+
+export type CodeIntelGraph = {
+  nodes: CodeIntelGraphNode[];
+  edges: CodeIntelGraphEdge[];
+};
+
+export type CodeIntelCommunity = {
+  id: number;
+  label: string;
+  member_count: number;
+  cohesion: number;
+};
+
+export type CodeIntelDeadSymbol = {
+  name: string;
+  path: string;
+  reason: string;
+  confidence: number;
+};
+
+export type CodeIntelCodeHealthSeverity =
+  | "Info"
+  | "Low"
+  | "Medium"
+  | "High"
+  | "Critical";
+
+export type CodeIntelCodeHealthDimension =
+  | "Defect"
+  | "Maintainability"
+  | "Performance";
+
+export type CodeIntelHealthAggregate = {
+  file_count: number;
+  function_count: number;
+  avg_score: number;
+  grade: string;
+  max_complexity: number;
+  avg_maintainability: number;
+  avg_duplication_pct: number;
+  biomarker_count: number;
+  refactoring_count: number;
+};
+
+export type CodeIntelHealthFunction = {
+  name: string;
+  line1: number;
+  complexity: number;
+  nesting: number;
+  loc: number;
+  maintainability: number;
+};
+
+export type CodeIntelHealthFinding = {
+  biomarker: string;
+  category: string;
+  dimension: CodeIntelCodeHealthDimension;
+  severity: CodeIntelCodeHealthSeverity;
+  line: number;
+  detail: string;
+};
+
+export type CodeIntelRefactoringKind =
+  | "ExtractMethod"
+  | "ExtractClass"
+  | "ExtractHelper"
+  | "MoveMethod"
+  | "BreakCycle"
+  | "SplitFile";
+
+export type CodeIntelRefactoring = {
+  kind: CodeIntelRefactoringKind;
+  target: string;
+  line: number;
+  rationale: string;
+  impact: number;
+  effort: string;
+};
+
+export type CodeIntelHealthFile = {
+  path: string;
+  lang: string;
+  score: number;
+  grade: string;
+  complexity: number;
+  maintainability: number;
+  max_complexity: number;
+  avg_maintainability: number;
+  function_count: number;
+  duplication_pct: number;
+  dry_violation: boolean;
+  defect_score: number;
+  maintainability_score: number;
+  performance_score: number;
+  biomarker_count: number;
+  refactoring_count: number;
+  functions: CodeIntelHealthFunction[];
+  findings: CodeIntelHealthFinding[];
+  refactorings: CodeIntelRefactoring[];
+};
+
+export type CodeIntelHealth = {
+  aggregate: CodeIntelHealthAggregate;
+  files: CodeIntelHealthFile[];
+};
+
+export type CodeIntelGitHotspot = {
+  path: string;
+  churn: number;
+  risk: number;
+  churn_risk: number;
+  churn_percentile: number;
+  temporal_score: number;
+  change_entropy: number;
+  change_entropy_pct: number;
+  bus_factor: number;
+  ownership_risk: boolean;
+  knowledge_loss: boolean;
+};
+
+export type CodeIntelGitOwner = {
+  author: string;
+  commits: number;
+  share: number;
+};
+
+export type CodeIntelGitOwnership = {
+  path: string;
+  top_owner: string;
+  top_owner_share: number;
+  bus_factor: number;
+  owner_count: number;
+  ownership_risk: boolean;
+  knowledge_loss: boolean;
+  owners: CodeIntelGitOwner[];
+};
+
+export type CodeIntelGitCoChange = {
+  path_a: string;
+  path_b: string;
+  count: number;
+};
+
+export type CodeIntelGitCoupling = {
+  a: string;
+  b: string;
+  strength: number;
+  co_changes: number;
+};
+
+export type CodeIntelGitReviewer = {
+  author: string;
+  score: number;
+};
+
+export type CodeIntelGitRisk = {
+  commits_analyzed: number;
+  agent_authored_pct: number;
+  hotspots: CodeIntelGitHotspot[];
+  ownership: CodeIntelGitOwnership[];
+  co_change: CodeIntelGitCoChange[];
+  coupling: CodeIntelGitCoupling[];
+  reviewers: CodeIntelGitReviewer[];
+};
+
+export type CodeIntelDuplicationAggregate = {
+  file_count: number;
+  clone_pair_count: number;
+  duplication_pct: number;
+  duplication_percent: number;
+};
+
+export type CodeIntelDuplicationClone = {
+  path_a: string;
+  path_b: string;
+  line_a: number;
+  line_b: number;
+  a_start_line: number;
+  a_end_line: number;
+  b_start_line: number;
+  b_end_line: number;
+  lines: number;
+  token_len: number;
+  co_change: number;
+};
+
+export type CodeIntelDuplicationFinding = {
+  path: string;
+  biomarker: string;
+  category: string;
+  dimension: CodeIntelCodeHealthDimension;
+  severity: CodeIntelCodeHealthSeverity;
+  line: number;
+  detail: string;
+};
+
+export type CodeIntelDuplication = {
+  aggregate: CodeIntelDuplicationAggregate;
+  clones: CodeIntelDuplicationClone[];
+  dry_violations: CodeIntelDuplicationFinding[];
+  test_smells: CodeIntelDuplicationFinding[];
+};
+
+export type BlastImpact = {
+  path: string;
+  symbol: string;
+  distance: number;
+  via: string;
+};
+
+export type BlastReport = {
+  changed_files: string[];
+  directly_impacted: BlastImpact[];
+  transitively_impacted: BlastImpact[];
+  impacted_file_count: number;
+  risk_score: number;
+};
+
+export type Severity = "Low" | "Medium" | "High" | "Critical";
+
+export type SecurityFinding = {
+  rule: string;
+  severity: Severity;
+  line: number;
+  snippet: string;
+};
+
 export type VecDbStatus = {
   files_unprocessed: number;
   files_total: number;
@@ -1458,6 +1736,62 @@ export type VecDbStatus = {
   vecdb_max_files_hit: boolean;
   vecdb_errors: Record<string, number>;
 };
+
+export type CodeGraphState = "turned_off" | "indexing" | "working" | "error";
+
+export type CodeGraphCounts = {
+  nodes: number;
+  edges: number;
+  files: number;
+  fts_docs: number;
+};
+
+export type CodeGraphStatus = {
+  counts: CodeGraphCounts;
+  queued: number;
+  state: CodeGraphState;
+  error: string;
+};
+
+export type RagStatus = {
+  ast: Record<string, unknown> | null;
+  ast_alive: string;
+  vecdb: VecDbStatus | null;
+  vecdb_alive: string;
+  vec_db_error: string;
+  codegraph: CodeGraphStatus | null;
+  codegraph_alive: string;
+  codegraph_error: string;
+};
+
+export function isCodeGraphState(value: unknown): value is CodeGraphState {
+  return (
+    value === "turned_off" ||
+    value === "indexing" ||
+    value === "working" ||
+    value === "error"
+  );
+}
+
+export function isCodeGraphCounts(value: unknown): value is CodeGraphCounts {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.nodes === "number" &&
+    typeof value.edges === "number" &&
+    typeof value.files === "number" &&
+    typeof value.fts_docs === "number"
+  );
+}
+
+export function isCodeGraphStatus(value: unknown): value is CodeGraphStatus {
+  if (!isRecord(value)) return false;
+  return (
+    isCodeGraphCounts(value.counts) &&
+    typeof value.queued === "number" &&
+    isCodeGraphState(value.state) &&
+    typeof value.error === "string"
+  );
+}
 
 export function isVecDbStatus(obj: unknown): obj is VecDbStatus {
   if (!obj) return false;
@@ -1507,6 +1841,20 @@ export function isVecDbStatus(obj: unknown): obj is VecDbStatus {
   }
 
   return true;
+}
+
+export function isRagStatus(value: unknown): value is RagStatus {
+  if (!isRecord(value)) return false;
+  return (
+    (value.ast === null || isRecord(value.ast)) &&
+    typeof value.ast_alive === "string" &&
+    (value.vecdb === null || isVecDbStatus(value.vecdb)) &&
+    typeof value.vecdb_alive === "string" &&
+    typeof value.vec_db_error === "string" &&
+    (value.codegraph === null || isCodeGraphStatus(value.codegraph)) &&
+    typeof value.codegraph_alive === "string" &&
+    typeof value.codegraph_error === "string"
+  );
 }
 export function isMCPArgumentsArray(json: unknown): json is MCPArgs {
   if (!json) return false;

@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { isAssistantDelta, isToolCallDelta } from "./types";
+import { isAssistantDelta, isRagStatus, isToolCallDelta } from "./types";
 
 const TOOL_DELTAS = [
   // Refact
@@ -146,6 +146,46 @@ describe("type-guards", () => {
     ...THINKING_DELTAS,
   ])("isToolCallDelta should be false", (toolCall) => {
     expect(isToolCallDelta(toolCall)).toBe(false);
+  });
+
+  test("isRagStatus accepts codegraph status payloads", () => {
+    expect(
+      isRagStatus({
+        ast: null,
+        ast_alive: "turned_off",
+        vecdb: null,
+        vecdb_alive: "turned_off",
+        vec_db_error: "",
+        codegraph: {
+          counts: { nodes: 12, edges: 8, files: 3, fts_docs: 3 },
+          queued: 1,
+          state: "indexing",
+          error: "",
+        },
+        codegraph_alive: "indexing",
+        codegraph_error: "",
+      }),
+    ).toBe(true);
+  });
+
+  test("isRagStatus rejects invalid codegraph state", () => {
+    expect(
+      isRagStatus({
+        ast: null,
+        ast_alive: "turned_off",
+        vecdb: null,
+        vecdb_alive: "turned_off",
+        vec_db_error: "",
+        codegraph: {
+          counts: { nodes: 12, edges: 8, files: 3, fts_docs: 3 },
+          queued: 1,
+          state: "parsing",
+          error: "",
+        },
+        codegraph_alive: "parsing",
+        codegraph_error: "",
+      }),
+    ).toBe(false);
   });
 
   test.each(ASSISTANT_DELTAS)("isAssistantDelta should be true", (toolCall) => {

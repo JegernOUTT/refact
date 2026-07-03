@@ -47,6 +47,10 @@ export interface KnowledgeGraphPage {
   name: "knowledge graph";
 }
 
+export interface CodeIntelPage {
+  name: "code intel";
+}
+
 export interface CustomizationPage {
   name: "customization";
   kind?: "modes" | "subagents" | "toolbox_commands" | "code_lens";
@@ -125,6 +129,7 @@ export type Page =
   | TaskAgentPage
   | SchedulerPage
   | KnowledgeGraphPage
+  | CodeIntelPage
   | CustomizationPage
   | DefaultModelsPage
   | StatsDashboardPage

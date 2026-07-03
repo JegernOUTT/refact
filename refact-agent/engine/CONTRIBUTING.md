@@ -111,8 +111,10 @@ and the project itself as a workspace dir:
 
 
 ```bash
-cargo build && target/debug/refact-lsp --http-port 8001 --reset-memory --experimental --workspace-folder . --logs-stderr --vecdb --ast
+cargo build && target/debug/refact-lsp --http-port 8001 --reset-memory --experimental --workspace-folder . --logs-stderr --vecdb
 ```
+
+CodeGraph source indexing starts with the engine, stores SQLite data under `~/.cache/refact/codegraph/`, and exposes readiness through `/v1/codegraph-status` and the CodeGraph fields in `/v1/rag-status`.
 
 Running those tests is still manual. To make sure your work didn't break other features,
 run tests for things you might have broken.

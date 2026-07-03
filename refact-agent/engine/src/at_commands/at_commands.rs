@@ -263,12 +263,12 @@ pub async fn at_commands_dict(app: AppState) -> HashMap<String, Arc<dyn AtComman
         ),
     ]);
 
-    let ast_on = app.workspace.ast_service.is_some();
+    let codegraph_on = app.gcx.codegraph.lock().await.is_some();
     let vecdb_on = app.workspace.vec_db.lock().await.is_some();
     let mut result = HashMap::new();
     for (key, value) in at_commands_dict {
         let depends_on = value.depends_on();
-        if depends_on.contains(&"ast".to_string()) && !ast_on {
+        if depends_on.contains(&"codegraph".to_string()) && !codegraph_on {
             continue;
         }
         if depends_on.contains(&"vecdb".to_string()) && !vecdb_on {

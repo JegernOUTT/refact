@@ -1,8 +1,6 @@
-pub mod ast_file_splitter;
 pub mod fetch_embedding;
 pub mod vdb_emb_aux;
 pub mod vdb_error;
-pub mod vdb_file_splitter;
 pub mod vdb_highlev;
 pub mod vdb_init;
 pub mod vdb_markdown_splitter;

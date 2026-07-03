@@ -4,8 +4,8 @@ use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::privacy::load_privacy_if_needed;
 use crate::tools::file_edit::auxiliary::{
-    append_scope_warnings, convert_edit_to_diffchunks, parse_path_for_update,
-    scope_warnings_to_tool_message, sync_documents_ast,
+    append_scope_warnings, convert_edit_to_diffchunks, fast_enqueue_for_edit,
+    parse_path_for_update, scope_warnings_to_tool_message,
 };
 use crate::files_in_workspace::remove_memory_document_for_path;
 use crate::tools::file_edit::undo_history::{get_undo_history, UndoEntry};
@@ -107,13 +107,14 @@ pub async fn tool_undo_text_doc_exec(
     remove_memory_document_for_path(gcx.clone(), &a.path).await;
 
     let summary = if target_content.is_empty() {
+        fast_enqueue_for_edit(gcx.clone(), &[a.path.clone()]).await?;
         format!(
             "✅ Undid {} step(s), deleted {:?}",
             a.steps,
             a.path.file_name().unwrap_or_default()
         )
     } else {
-        sync_documents_ast(gcx.clone(), &a.path).await?;
+        fast_enqueue_for_edit(gcx.clone(), &[a.path.clone()]).await?;
         format!(
             "✅ Undid {} step(s) on {:?}",
             a.steps,

@@ -6,10 +6,13 @@ export { useKnowledgeGraphTheme } from "./useKnowledgeGraphTheme";
 export {
   knowledgeSlice,
   setVecDbStatus,
+  setRagStatus,
   setMemory,
   deleteMemory,
   clearMemory,
   selectVecDbStatus,
+  selectRagStatus,
+  selectCodeGraphStatus,
   selectMemories,
   selectKnowledgeIsLoaded,
 } from "./knowledgeSlice";

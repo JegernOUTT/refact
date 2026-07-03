@@ -43,7 +43,9 @@ import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as I
 data class StatusBarState(
     val astLimitHit: Boolean = false,
     val vecdbLimitHit: Boolean = false,
+    val codegraphLimitHit: Boolean = false,
     val vecdbWarning: String = "",
+    val codegraphWarning: String = "",
     val lastRagStatus: RagStatus? = null
 )
 
@@ -52,6 +54,21 @@ private fun escapeHtml(text: String): String {
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace("\"", "&quot;")
+}
+
+internal fun statusBarStateFromRagStatus(ragStatus: RagStatus, codegraphFileLimit: Int): StatusBarState {
+    val codegraph = ragStatus.codegraph
+    val codegraphLimitHit = codegraph != null &&
+        codegraph.state != "turned_off" &&
+        codegraph.counts.files >= codegraphFileLimit.toLong()
+    return StatusBarState(
+        astLimitHit = ragStatus.ast?.astMaxFilesHit == true,
+        vecdbLimitHit = ragStatus.vecdb?.vecdbMaxFilesHit == true,
+        codegraphLimitHit = codegraphLimitHit,
+        vecdbWarning = ragStatus.vecDbError,
+        codegraphWarning = ragStatus.codegraphError.orEmpty(),
+        lastRagStatus = ragStatus
+    )
 }
 
 class SMCStatusBarWidget(project: Project) : EditorBasedWidget(project), CustomStatusBarWidget, WidgetPresentation {
@@ -72,22 +89,7 @@ class SMCStatusBarWidget(project: Project) : EditorBasedWidget(project), CustomS
 
     private fun updateStatusBarStateAndUpdateStatusBarIfNeed(ragStatus: RagStatus) {
         try {
-            val currentState = statusbarStateRef.get()
-            val newState = when {
-                ragStatus.ast != null && ragStatus.ast.astMaxFilesHit ->
-                    currentState.copy(astLimitHit = true, lastRagStatus = ragStatus)
-                ragStatus.vecdb != null && ragStatus.vecdb.vecdbMaxFilesHit ->
-                    currentState.copy(vecdbLimitHit = true, lastRagStatus = ragStatus)
-                else -> {
-                    val warning = if (ragStatus.vecDbError.isNotEmpty()) ragStatus.vecDbError else currentState.vecdbWarning
-                    currentState.copy(
-                        astLimitHit = false,
-                        vecdbLimitHit = false,
-                        vecdbWarning = warning,
-                        lastRagStatus = ragStatus
-                    )
-                }
-            }
+            val newState = statusBarStateFromRagStatus(ragStatus, InferenceGlobalContext.codegraphFileLimit)
             statusbarStateRef.set(newState)
             update(null)
         } catch (e: Exception) {
@@ -214,7 +216,7 @@ class SMCStatusBarWidget(project: Project) : EditorBasedWidget(project), CustomS
 
     private fun getIcon(): Icon {
         val state = statusbarStateRef.get()
-        if (state.astLimitHit || state.vecdbLimitHit) {
+        if (state.astLimitHit || state.vecdbLimitHit || state.codegraphLimitHit) {
             return AllIcons.Debugger.ThreadStates.Socket
         }
 
@@ -222,6 +224,7 @@ class SMCStatusBarWidget(project: Project) : EditorBasedWidget(project), CustomS
         if (lastRagStatus != null) {
             if ((lastRagStatus.vecdb != null && !listOf("done", "idle").contains(lastRagStatus.vecdb.state))
                 || lastRagStatus.ast != null && !listOf("done", "idle").contains(lastRagStatus.ast.state)
+                || lastRagStatus.codegraph != null && lastRagStatus.codegraph.state == "indexing"
             ) {
                 return spinIcon
             }
@@ -246,8 +249,11 @@ class SMCStatusBarWidget(project: Project) : EditorBasedWidget(project), CustomS
         if (state.vecdbWarning.isNotEmpty()) {
             return escapeHtml(state.vecdbWarning)
         }
+        if (state.codegraphWarning.isNotEmpty()) {
+            return escapeHtml(state.codegraphWarning)
+        }
 
-        if (state.astLimitHit || state.vecdbLimitHit) {
+        if (state.astLimitHit || state.vecdbLimitHit || state.codegraphLimitHit) {
             return RefactAIBundle.message("statusBar.tooltipClickToMakeChanges")
         }
 
@@ -288,6 +294,16 @@ class SMCStatusBarWidget(project: Project) : EditorBasedWidget(project), CustomS
             } else {
                 RefactAIBundle.message("statusBar.vecDBTurnedOff")
             }
+            ragStatusMsg += "<br><br>"
+            ragStatusMsg += if (lastRagStatus.codegraph != null && lastRagStatus.codegraph.state != "turned_off") {
+                RefactAIBundle.message("statusBar.codegraphStatus",
+                    lastRagStatus.codegraph.counts.files,
+                    lastRagStatus.codegraph.counts.nodes,
+                    lastRagStatus.codegraph.counts.edges,
+                    lastRagStatus.codegraph.counts.ftsDocs)
+            } else {
+                RefactAIBundle.message("statusBar.codegraphTurnedOff")
+            }
             ragStatusMsg = ragStatusMsg.trim()
         }
         if (ragStatusMsg.isNotEmpty()) {
@@ -301,7 +317,7 @@ class SMCStatusBarWidget(project: Project) : EditorBasedWidget(project), CustomS
         return Consumer { e: MouseEvent ->
             if (!e.isPopupTrigger && MouseEvent.BUTTON1 == e.button) {
                 val state = statusbarStateRef.get()
-                if (state.astLimitHit || state.vecdbLimitHit) {
+                if (state.astLimitHit || state.vecdbLimitHit || state.codegraphLimitHit) {
                     emitWarning(project, RefactAIBundle.message("statusBar.notificationAstVecdbLimitMsg"))
                     return@Consumer
                 }
@@ -313,8 +329,10 @@ class SMCStatusBarWidget(project: Project) : EditorBasedWidget(project), CustomS
     fun getBackgroundColor(): Color {
         val state = statusbarStateRef.get()
         if (state.vecdbWarning.isNotEmpty()
+            || state.codegraphWarning.isNotEmpty()
             || state.astLimitHit
             || state.vecdbLimitHit
+            || state.codegraphLimitHit
             || InferenceGlobalContext.status == ConnectionStatus.ERROR
         ) {
             return JBColor.YELLOW
@@ -331,6 +349,9 @@ class SMCStatusBarWidget(project: Project) : EditorBasedWidget(project), CustomS
         }
         if (state.vecdbLimitHit) {
             return RefactAIBundle.message("statusBar.tooltipIfVecdbLimitHit")
+        }
+        if (state.codegraphLimitHit) {
+            return RefactAIBundle.message("statusBar.tooltipIfCodegraphLimitHit")
         }
 
         val lastRagStatus = state.lastRagStatus
@@ -352,6 +373,9 @@ class SMCStatusBarWidget(project: Project) : EditorBasedWidget(project), CustomS
                         return RefactAIBundle.message("statusBar.astStarting")
                     }
                 }
+            }
+            if (lastRagStatus.codegraph != null && lastRagStatus.codegraph.state == "indexing") {
+                return RefactAIBundle.message("statusBar.codegraphProgress", lastRagStatus.codegraph.queued)
             }
         }
         return "Refact.ai"

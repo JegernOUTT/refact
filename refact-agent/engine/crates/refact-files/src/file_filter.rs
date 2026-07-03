@@ -3,6 +3,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
+use crate::path_utils::canonicalize_normalized_path;
+
 const LARGE_FILE_SIZE_THRESHOLD: u64 = 4096 * 1024; // 4Mb files
 const SMALL_FILE_SIZE_THRESHOLD: u64 = 5; // 5 Bytes
 
@@ -82,25 +84,70 @@ pub fn is_generated_index_path(path: &Path) -> bool {
     if !path.file_name().is_some_and(|name| name == "index.json") {
         return false;
     }
-    let parts: Vec<String> = path
-        .components()
+    let parts = normal_components(path);
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    for idx in 0..parts.len() {
+        if parts[idx] == ".refact" && is_generated_index_suffix(&parts[idx + 1..]) {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn is_generated_index_path_with_global_config_roots(
+    path: &Path,
+    global_config_roots: &[PathBuf],
+) -> bool {
+    if is_generated_index_path(path) {
+        return true;
+    }
+    if !path.file_name().is_some_and(|name| name == "index.json") {
+        return false;
+    }
+    let path = canonicalize_normalized_path(path.to_path_buf());
+    global_config_roots.iter().any(|root| {
+        let root = canonicalize_normalized_path(root.clone());
+        path.strip_prefix(root)
+            .ok()
+            .is_some_and(is_generated_index_relative_path)
+    })
+}
+
+fn normal_components(path: &Path) -> Vec<String> {
+    path.components()
         .filter_map(|component| match component {
             Component::Normal(part) => Some(part.to_string_lossy().to_string()),
             _ => None,
         })
-        .collect();
-    let Some(refact_pos) = parts.iter().position(|part| part == ".refact") else {
-        return false;
-    };
-    let rest = &parts[refact_pos..];
-    matches!(rest, [refact, trajectories, index] if refact == ".refact" && trajectories == "trajectories" && index == "index.json")
-        || matches!(rest, [refact, tasks, index] if refact == ".refact" && tasks == "tasks" && index == "index.json")
-        || matches!(rest, [refact, tasks, _task_id, trajectories, planner, index]
-            if refact == ".refact" && tasks == "tasks" && trajectories == "trajectories" && planner == "planner" && index == "index.json")
-        || matches!(rest, [refact, tasks, _task_id, trajectories, agents, index]
-            if refact == ".refact" && tasks == "tasks" && trajectories == "trajectories" && agents == "agents" && index == "index.json")
-        || matches!(rest, [refact, tasks, _task_id, trajectories, agents, _agent_id, index]
-            if refact == ".refact" && tasks == "tasks" && trajectories == "trajectories" && agents == "agents" && index == "index.json")
+        .collect()
+}
+
+fn is_generated_index_relative_path(path: &Path) -> bool {
+    let parts = normal_components(path);
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    is_generated_index_suffix(&parts)
+}
+
+fn is_generated_index_suffix(parts: &[&str]) -> bool {
+    matches!(parts, ["trajectories", "index.json"])
+        || matches!(parts, ["tasks", "index.json"])
+        || matches!(parts, ["tasks", _, "trajectories", "planner", "index.json"])
+        || matches!(parts, ["tasks", _, "trajectories", "agents", "index.json"])
+        || matches!(
+            parts,
+            ["tasks", _, "trajectories", "agents", _, "index.json"]
+        )
+}
+
+pub fn is_refact_codegraph_path(path: &Path) -> bool {
+    let mut last_was_refact = false;
+    for component in path.components() {
+        if last_was_refact && component == Component::Normal("codegraph".as_ref()) {
+            return true;
+        }
+        last_was_refact = component == Component::Normal(".refact".as_ref());
+    }
+    false
 }
 
 fn is_in_allowed_hidden_folder(path: &PathBuf) -> bool {
@@ -119,6 +166,10 @@ pub fn is_valid_file(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !path.is_file() {
         return Err("Path is not a file".into());
+    }
+
+    if is_refact_codegraph_path(path) {
+        return Err(".refact/codegraph is internal".into());
     }
 
     let in_allowed_hidden = is_in_allowed_hidden_folder(path);
@@ -158,8 +209,8 @@ pub fn is_valid_file(
 
 #[cfg(test)]
 mod tests {
-    use super::is_generated_index_path;
-    use std::path::Path;
+    use super::{is_generated_index_path, is_generated_index_path_with_global_config_roots};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn generated_refact_index_paths_match_exact_generated_shapes() {
@@ -182,8 +233,42 @@ mod tests {
             "/repo/.refact/tasks/task-1/trajectories/planner/archive/index.json",
             "/repo/.refact/tasks/task-1/notes/index.json",
             "/repo/.refact/knowledge/index.json",
+            "/work/refact/docs/trajectories/index.json",
+            "/home/user/refact/trajectories/index.json",
+            "/repo/.config/refact/trajectories/index.json",
+            "/repo/.config/not-refact/trajectories/index.json",
         ] {
             assert!(!is_generated_index_path(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn generated_global_config_index_paths_match_only_configured_roots() {
+        let roots = vec![PathBuf::from("/home/user/.config/refact")];
+        for path in [
+            "/home/user/.config/refact/trajectories/index.json",
+            "/home/user/.config/refact/tasks/index.json",
+            "/home/user/.config/refact/tasks/task-1/trajectories/planner/index.json",
+            "/home/user/.config/refact/tasks/task-1/trajectories/agents/index.json",
+            "/home/user/.config/refact/tasks/task-1/trajectories/agents/agent-1/index.json",
+        ] {
+            assert!(
+                is_generated_index_path_with_global_config_roots(Path::new(path), &roots),
+                "{path}"
+            );
+            assert!(!is_generated_index_path(Path::new(path)), "{path}");
+        }
+
+        for path in [
+            "/repo/.config/refact/trajectories/index.json",
+            "/repo/.config/refact/tasks/index.json",
+            "/home/user/.config/not-refact/trajectories/index.json",
+            "/home/user/.config/refact/knowledge/index.json",
+        ] {
+            assert!(
+                !is_generated_index_path_with_global_config_roots(Path::new(path), &roots),
+                "{path}"
+            );
         }
     }
 }

@@ -57,7 +57,9 @@ import { webviewEndpointConfig } from "./sidebarConfig";
 
 const OPEN_CHAT_IN_BROWSER_EVENT = "ide/openChatInBrowser";
 
-type ConfigUpdatePayload = Parameters<typeof updateConfig>[0] & RefactBackendConfig & { lspUrl?: string };
+type FeatureConfig = NonNullable<Parameters<typeof updateConfig>[0]["features"]> & { codegraph?: boolean };
+type ConfigUpdatePayload = Omit<Parameters<typeof updateConfig>[0], "features"> & { features?: FeatureConfig } & RefactBackendConfig & { lspUrl?: string };
+type InitialConfig = Omit<InitialState["config"], "features"> & { features?: FeatureConfig };
 
 type QueuedWebviewMessage = {
     generation: number;
@@ -139,6 +141,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
             if(
                 event.affectsConfiguration("refactai.vecdb") ||
                 event.affectsConfiguration("refactai.ast") ||
+                event.affectsConfiguration("refactai.codegraph") ||
                 event.affectsConfiguration("refactai.submitChatWithShiftEnter") ||
                 event.affectsConfiguration("refactai.xperimental") ||
                 event.affectsConfiguration("refactai.daemonPort") ||
@@ -377,6 +380,11 @@ export class PanelWebview implements vscode.WebviewViewProvider {
                 .getConfiguration()
                 ?.get<boolean>("refactai.ast") ?? false;
 
+        const codegraph =
+            vscode.workspace
+                .getConfiguration()
+                ?.get<boolean>("refactai.codegraph") ?? false;
+
 
         const rawPort = global.rust_binary_blob?.get_port();
         const port = this.backendLspPort(rawPort);
@@ -388,7 +396,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         const config: ConfigUpdatePayload = {
             lspPort: port,
             shiftEnterToSubmit: submitChatWithShiftEnter,
-            features: {vecdb, ast},
+            features: {vecdb, ast, codegraph},
             currentWorkspaceName: currentActiveWorkspaceName,
             ...webviewEndpointConfig(
                 backendConfig.backendReady,
@@ -1056,6 +1064,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         const activeColorTheme = this.getColorTheme();
         const vecdb = vscode.workspace.getConfiguration()?.get<boolean>("refactai.vecdb") ?? false;
         const ast = vscode.workspace.getConfiguration()?.get<boolean>("refactai.ast") ?? false;
+        const codegraph = vscode.workspace.getConfiguration()?.get<boolean>("refactai.codegraph") ?? false;
         const rawPort = global.rust_binary_blob?.get_port();
         const port = this.backendLspPort(rawPort);
         const completeManual = await getKeyBindingForChat("refactaicmd.completionManual");
@@ -1065,7 +1074,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         const currentProject = this.getCurrentProjectInfo();
 
         const backendConfig = this.backendConfig();
-        const config: InitialState["config"] & RefactBackendConfig = {
+        const config: InitialConfig & RefactBackendConfig = {
             host: "vscode",
             tabbed,
             shiftEnterToSubmit,
@@ -1078,6 +1087,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
             features: {
                 vecdb,
                 ast,
+                codegraph,
                 images: true,
                 statistics: true,
             },

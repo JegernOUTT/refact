@@ -104,7 +104,8 @@
 
 @container toolbar (max-width: 440px) {
   .newTaskAction,
-  .themeToggleAction {
+  .themeToggleAction,
+  .engineUrl {
     display: none;
   }
 }

@@ -7,6 +7,7 @@ AI coding assistant: Rust engine (LSP/HTTP server) + React chat UI + IDE plugins
 | Subproject | Path | Language | AGENTS.md |
 |---|---|---|---|
 | Agent Engine | `refact-agent/engine/` | Rust 2021, async/tokio | ✅ `refact-agent/engine/AGENTS.md` |
+| Engine CodeGraph crates | `refact-agent/engine/crates/refact-codegraph*`, `refact-codehealth`, `refact-codewiki`, `refact-git-intel` | Rust 2021 | ✅ `refact-agent/engine/AGENTS.md` |
 | Agent GUI | `refact-agent/gui/` | TypeScript/React 18 | ✅ `refact-agent/gui/AGENTS.md` |
 | VSCode Extension | `plugins/vscode/` | TypeScript | — |
 | JetBrains Plugin | `plugins/intellij/` | Kotlin, Gradle | — |
@@ -249,3 +250,4 @@ AGENTS.md files can appear at any directory level. Scope = entire directory tree
 - **SSE sequence gaps**: Every event has monotonic `seq`. Gap → client reconnects for fresh snapshot. Never skip or reorder events.
 - **Thinking block signatures**: Anthropic thinking blocks with cryptographic signatures must be preserved byte-for-byte. No JSON rebuilding, no field reordering.
 - **GUI state**: Chat/history state is ephemeral (not persisted). Only `tour` and `userSurvey` survive Redux persist.
+- **CodeGraph docs**: Source-code indexing is CodeGraph-backed and stored under `~/.cache/refact/codegraph/`; memory/knowledge indexing is VecDB-backed. Do not describe old AST database internals, and do not document CodeGraph-specific CLI flags unless they exist in `global_context.rs`.

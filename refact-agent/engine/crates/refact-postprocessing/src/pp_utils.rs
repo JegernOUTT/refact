@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 use std::hash::{Hash, Hasher};
 
-use refact_ast::ast::chunk_utils::official_text_hashing_function;
+use refact_core::chunk_utils::official_text_hashing_function;
 use refact_core::chat_types::{ContextFile, PostprocessSettings};
 use crate::pp_context_files::{PPFile, FileLine, DEBUG};
 use crate::pp_context_provider::PPContextTrait;

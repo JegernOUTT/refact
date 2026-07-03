@@ -126,7 +126,7 @@ export class ChatTab {
         }));
 
         this._disposables.push(vscode.workspace.onDidChangeConfiguration(event => {
-            if(event.affectsConfiguration("refactai.vecdb") || event.affectsConfiguration("refactai.ast")) {
+            if(event.affectsConfiguration("refactai.vecdb") || event.affectsConfiguration("refactai.ast") || event.affectsConfiguration("refactai.codegraph")) {
                 this.handleSettingsChange();
             }
         }));
@@ -897,6 +897,8 @@ export class ChatTab {
 
         const ast = vscode.workspace.getConfiguration()?.get<boolean>("refactai.ast") ?? false;
 
+        const codegraph = vscode.workspace.getConfiguration()?.get<boolean>("refactai.codegraph") ?? false;
+
         const scriptUri = webview.asWebviewUri(
             vscode.Uri.joinPath(extensionUri, "node_modules", "refact-chat-js", "dist", "chat", "index.umd.cjs")
         );
@@ -924,6 +926,7 @@ export class ChatTab {
             features: {
                 vecdb,
                 ast,
+                codegraph,
             },
             lspPort: port,
             ...backendConfigForStatus(backendStatus),

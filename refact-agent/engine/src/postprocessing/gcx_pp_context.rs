@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use async_trait::async_trait;
-use refact_ast::ast::ast_structs::AstDefinition;
-use refact_ast::ast::treesitter::parsers::get_ast_parser_by_filename;
+use refact_core::ast_types::AstDefinition;
 use refact_postprocessing::pp_context_provider::PPContextTrait;
 
 use crate::global_context::GlobalContext;
@@ -26,14 +25,10 @@ impl PPContextTrait for GcxPPContext {
     }
 
     async fn doc_defs_for_path(&self, path: &str) -> Vec<Arc<AstDefinition>> {
-        let path_buf = PathBuf::from(path);
-        let ast_service = self.0.ast_service.lock().unwrap().clone();
-        match ast_service {
-            Some(ast) if get_ast_parser_by_filename(&path_buf).is_ok() => {
-                let ast_index = ast.lock().await.ast_index.clone();
-                crate::ast::ast_db::doc_defs(ast_index, &path.to_string())
-            }
-            _ => vec![],
+        let codegraph_opt = self.0.codegraph.lock().await.clone();
+        match codegraph_opt {
+            Some(service) => service.doc_defs(path).await.unwrap_or_default(),
+            None => vec![],
         }
     }
 

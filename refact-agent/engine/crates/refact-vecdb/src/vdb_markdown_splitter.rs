@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use regex::Regex;
 
-use refact_ast::ast::chunk_utils::official_text_hashing_function;
+use refact_core::chunk_utils::official_text_hashing_function;
 use refact_core::knowledge_frontmatter::KnowledgeFrontmatter;
 use refact_core::vecdb_types::SplitResult;
 

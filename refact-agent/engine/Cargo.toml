@@ -2,9 +2,13 @@
 members = [
     ".",
     "crates/refact-core",
-    "crates/refact-ast",
     "crates/refact-chat-api",
     "crates/refact-vecdb",
+    "crates/refact-codegraph-parsers",
+    "crates/refact-codegraph",
+    "crates/refact-codehealth",
+    "crates/refact-git-intel",
+    "crates/refact-codewiki",
     "crates/refact-llm",
     "crates/refact-knowledge-graph",
     "crates/refact-git",
@@ -129,9 +133,13 @@ pnet_datalink = "0.35.0"
 aws-lc-sys = "=0.38.0"
 
 refact-core = { path = "crates/refact-core" }
-refact-ast = { path = "crates/refact-ast" }
 refact-chat-api = { path = "crates/refact-chat-api" }
 refact-vecdb = { path = "crates/refact-vecdb" }
+refact-codegraph = { path = "crates/refact-codegraph" }
+refact-codegraph-parsers = { path = "crates/refact-codegraph-parsers" }
+refact-codehealth = { path = "crates/refact-codehealth" }
+refact-git-intel = { path = "crates/refact-git-intel" }
+refact-codewiki = { path = "crates/refact-codewiki" }
 refact-llm = { path = "crates/refact-llm" }
 refact-knowledge-graph = { path = "crates/refact-knowledge-graph" }
 refact-git = { path = "crates/refact-git" }

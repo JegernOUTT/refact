@@ -38,7 +38,7 @@ class EventsTest {
             Events.Config.KeyBindings("foo"))
         val message = Events.Config.Update(payload)
         val result = Events.stringify(message)
-        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"keyBindings":{"completeManual":"foo"},"backendReady":true,"connectionStatus":"ready","tabbed":false,"host":"jetbrains"}}"""
+        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"keyBindings":{"completeManual":"foo"},"backendReady":true,"connectionStatus":"ready","tabbed":false,"host":"jetbrains"}}"""
         assertEquals(expected, result)
     }
 
@@ -54,7 +54,7 @@ class EventsTest {
         )
         val message = Events.Config.Update(payload)
         val result = Events.stringify(message)
-        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"keyBindings":{"completeManual":"foo"},"lspUrl":"http://127.0.0.1:8488/p/project-123/","backendReady":true,"connectionStatus":"ready","browserUrl":"http://host.local:8488/p/project-123/","tabbed":false,"host":"jetbrains"}}"""
+        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"keyBindings":{"completeManual":"foo"},"lspUrl":"http://127.0.0.1:8488/p/project-123/","backendReady":true,"connectionStatus":"ready","browserUrl":"http://host.local:8488/p/project-123/","tabbed":false,"host":"jetbrains"}}"""
         assertEquals(expected, result)
     }
 
@@ -94,7 +94,7 @@ class EventsTest {
         )
         val message = Events.Config.Update(payload)
         val result = Events.stringify(message)
-        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":0,"keyBindings":{"completeManual":"foo"},"backendReady":false,"connectionStatus":"starting","tabbed":false,"host":"jetbrains"}}"""
+        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":0,"keyBindings":{"completeManual":"foo"},"backendReady":false,"connectionStatus":"starting","tabbed":false,"host":"jetbrains"}}"""
         assertEquals(expected, result)
     }
 

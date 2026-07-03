@@ -170,6 +170,20 @@ describe("ToolsContent routing", () => {
     expect(screen.getByTestId(testId)).toBeInTheDocument();
   });
 
+  it.each([
+    "code_health",
+    "git_risk",
+    "code_why",
+    "codegraph_overview",
+    "code_duplication",
+    "code_map",
+  ])("routes %s to EngineAnalysisTool", (name) => {
+    renderToolContent(name, "# Analysis\n\n- useful result");
+
+    expect(screen.getByTestId("engine-analysis-tool")).toBeInTheDocument();
+    expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
+  });
+
   it("routes plain-text agent_finish results through FinalReportView legacy fallback", () => {
     renderToolContent("agent_finish", "Plain legacy report");
 

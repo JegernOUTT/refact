@@ -49,6 +49,7 @@ import { ThreadHistory } from "./ThreadHistory";
 import { LoginPage } from "./Login";
 import { selectOpenTasksFromRoot, TaskList, TaskWorkspace } from "./Tasks";
 import { KnowledgeWorkspace } from "./Knowledge";
+import { CodeIntelWorkspace } from "./CodeIntel";
 
 import { StatsDashboard } from "./StatsDashboard";
 import { RefactDaemonPage } from "./RefactDaemon";
@@ -441,6 +442,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     }
     if (
       desiredPage.name === "knowledge graph" ||
+      desiredPage.name === "code intel" ||
       desiredPage.name === "refact daemon"
     ) {
       return {
@@ -616,6 +618,13 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             )}
             {!pageSwitching && renderedPage.name === "knowledge graph" && (
               <KnowledgeWorkspace />
+            )}
+
+            {!pageSwitching && renderedPage.name === "code intel" && (
+              <CodeIntelWorkspace
+                backFromCodeIntel={goBack}
+                host={config.host}
+              />
             )}
 
             {!pageSwitching && renderedPage.name === "stats dashboard" && (

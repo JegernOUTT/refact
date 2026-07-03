@@ -31,6 +31,16 @@ const ENGINE_V1_ENDPOINT_SEGMENTS = new Set([
   "chats",
   "checkpoints-preview",
   "checkpoints-restore",
+  "codegraph-status",
+  "code-intel/overview",
+  "code-intel/graph",
+  "code-intel/communities",
+  "code-intel/dead-code",
+  "code-intel/health",
+  "code-intel/git-risk",
+  "code-intel/duplication",
+  "code-intel/pr-blast",
+  "code-intel/security-scan",
   "code-completion",
   "code-lens",
   "customization",
@@ -58,7 +68,16 @@ const ENGINE_V1_ENDPOINT_SEGMENTS = new Set([
 function isEngineV1Suffix(segments: string[], index: number): boolean {
   if (index >= segments.length - 1) return true;
   const nextSegment = segments[index + 1];
-  return nextSegment === "" || ENGINE_V1_ENDPOINT_SEGMENTS.has(nextSegment);
+  if (nextSegment === "") return true;
+
+  const suffix = segments
+    .slice(index + 1)
+    .filter((segment) => segment.length > 0)
+    .join("/");
+  return (
+    ENGINE_V1_ENDPOINT_SEGMENTS.has(nextSegment) ||
+    ENGINE_V1_ENDPOINT_SEGMENTS.has(suffix)
+  );
 }
 
 function isValidLspPort(port: number | undefined): boolean {

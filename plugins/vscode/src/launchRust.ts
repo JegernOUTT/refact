@@ -829,8 +829,10 @@ export class RustBinaryBlob {
         return {
             ast: config.get<boolean>("refactai.ast") ?? true,
             vecdb: config.get<boolean>("refactai.vecdb") ?? true,
+            codegraph: config.get<boolean>("refactai.codegraph") ?? true,
             ast_max_files: config.get<number>("refactai.astFileLimit") ?? 35000,
             vecdb_max_files: config.get<number>("refactai.vecdbFileLimit") ?? 15000,
+            codegraph_max_files: config.get<number>("refactai.codegraphFileLimit") ?? 35000,
         };
     }
 }

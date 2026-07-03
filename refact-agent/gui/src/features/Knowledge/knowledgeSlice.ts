@@ -1,16 +1,23 @@
 import { createSlice, PayloadAction } from "@reduxjs/toolkit";
-import type { MemoRecord, VecDbStatus } from "../../services/refact/types";
+import type {
+  CodeGraphStatus,
+  MemoRecord,
+  RagStatus,
+  VecDbStatus,
+} from "../../services/refact/types";
 
 export type KnowledgeState = {
   loaded: boolean;
   memories: Record<string, MemoRecord>;
   status: null | VecDbStatus;
+  ragStatus: null | RagStatus;
 };
 
 const initialState: KnowledgeState = {
   loaded: false,
   memories: {},
   status: null,
+  ragStatus: null,
 };
 
 export const knowledgeSlice = createSlice({
@@ -21,6 +28,11 @@ export const knowledgeSlice = createSlice({
     setVecDbStatus: (state, action: PayloadAction<VecDbStatus>) => {
       state.loaded = true;
       state.status = action.payload;
+    },
+    setRagStatus: (state, action: PayloadAction<RagStatus>) => {
+      state.loaded = true;
+      state.ragStatus = action.payload;
+      state.status = action.payload.vecdb;
     },
     setMemory: (state, action: PayloadAction<MemoRecord>) => {
       state.loaded = true;
@@ -39,13 +51,21 @@ export const knowledgeSlice = createSlice({
   // TODO: selectors
   selectors: {
     selectVecDbStatus: (state) => state.status,
+    selectRagStatus: (state) => state.ragStatus,
+    selectCodeGraphStatus: (state): CodeGraphStatus | null =>
+      state.ragStatus?.codegraph ?? null,
     selectMemories: (state) => state.memories,
     selectKnowledgeIsLoaded: (state) => state.loaded,
   },
 });
 
-export const { setVecDbStatus, setMemory, deleteMemory, clearMemory } =
+export const { setVecDbStatus, setRagStatus, setMemory, deleteMemory, clearMemory } =
   knowledgeSlice.actions;
 
-export const { selectVecDbStatus, selectMemories, selectKnowledgeIsLoaded } =
-  knowledgeSlice.selectors;
+export const {
+  selectVecDbStatus,
+  selectRagStatus,
+  selectCodeGraphStatus,
+  selectMemories,
+  selectKnowledgeIsLoaded,
+} = knowledgeSlice.selectors;

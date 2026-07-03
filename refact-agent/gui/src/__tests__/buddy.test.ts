@@ -2972,6 +2972,10 @@ describe("SIGNALS scene categories", () => {
     expect(SIGNALS.indexing.category).toBe("active");
   });
 
+  test("codegraph indexing signal is active category", () => {
+    expect(SIGNALS.codegraph_indexing.category).toBe("active");
+  });
+
   test("chat_error signal is speech category", () => {
     expect(SIGNALS.chat_error.category).toBe("speech");
   });

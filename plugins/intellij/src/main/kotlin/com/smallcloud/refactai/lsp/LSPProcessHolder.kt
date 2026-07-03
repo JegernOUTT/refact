@@ -338,6 +338,14 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                     settingsChanged("vecdb-file-limit-changed")
                 }
 
+                override fun codegraphFlagChanged(newValue: Boolean) {
+                    settingsChanged("codegraph-flag-changed")
+                }
+
+                override fun codegraphFileLimitChanged(newValue: Int) {
+                    settingsChanged("codegraph-file-limit-changed")
+                }
+
                 override fun xDebugLSPPortChanged(newPort: Int?) {
                     settingsChanged("daemon-port-changed")
                 }
@@ -425,6 +433,8 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             astFileLimit = InferenceGlobalContext.astFileLimit,
             vecdb = InferenceGlobalContext.vecdbIsEnabled,
             vecdbFileLimit = InferenceGlobalContext.vecdbFileLimit,
+            codegraph = InferenceGlobalContext.codegraphIsEnabled,
+            codegraphFileLimit = InferenceGlobalContext.codegraphFileLimit,
             insecureSSL = InferenceGlobalContext.insecureSSL,
             experimental = InferenceGlobalContext.experimentalLspFlagEnabled,
             httpHost = InferenceGlobalContext.httpHost.trim().ifEmpty { "0.0.0.0" },
@@ -669,6 +679,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
 
             if ((ragStatus.ast != null && listOf("starting", "parsing", "indexing").contains(ragStatus.ast.state))
                 || (ragStatus.vecdb != null && listOf("starting", "parsing").contains(ragStatus.vecdb.state))
+                || (ragStatus.codegraph != null && ragStatus.codegraph.state == "indexing")
             ) {
                 ragStatusCheckerScheduler.schedule({ lspRagStatusSync() }, 700, TimeUnit.MILLISECONDS)
             } else {

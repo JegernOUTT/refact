@@ -4,7 +4,7 @@ Binary: `refact-lsp` — AI coding agent, HTTP + LSP server. Rust 2021 edition, 
 
 ## Stack
 
-Axum (HTTP), tower-lsp (LSP), tree-sitter (AST), SQLite + vec0 (VecDB), LMDB/Heed (AST store), git2, headless_chrome, whisper-rs (optional, feature-gated), rmcp (MCP).
+Axum (HTTP), tower-lsp (LSP), tree-sitter extraction, SQLite + FTS5 (CodeGraph), SQLite + vec0 (VecDB memory plane), refact-codegraph, refact-codegraph-parsers, refact-codehealth, refact-codewiki, refact-git-intel, git2, headless_chrome, whisper-rs (optional, feature-gated), rmcp (MCP).
 
 ## Build
 
@@ -19,21 +19,28 @@ Release profile: `opt-level = "z"`, `lto = true`, `strip = true`, `codegen-units
 
 ## Architecture
 
-`GlobalContext` (`Arc<ARwLock<GlobalContext>>`) is the central shared state. HTTP server (Axum) and LSP server (tower-lsp) both hold a reference. Background tasks (AST indexer, VecDB, git shadow cleanup, knowledge graph, trajectory memos, agent monitor, OAuth refresh) are spawned via `start_background_tasks()` (~12 tokio tasks).
+`GlobalContext` (`Arc<ARwLock<GlobalContext>>`) is the central shared state. HTTP server (Axum) and LSP server (tower-lsp) both hold a reference. Background tasks (workspace file watcher, CodeGraph indexer, VecDB memory-plane vectorizer, git shadow cleanup, knowledge graph, trajectory memos, agent monitor, OAuth refresh) are spawned via `start_background_tasks()` (~18 tokio tasks). Workspace indexing is routed through `indexing_routing.rs`: memory-plane files go to VecDB, while source-code files go to CodeGraph.
 
 ### Source Layout
 
 ```
+crates/
+  refact-codegraph/          — SQLite graph store, FTS retrieval, graph analytics, security scan helpers
+  refact-codegraph-parsers/  — tree-sitter extractors and framework detection
+  refact-codehealth/         — deterministic code health, biomarkers, duplication, coverage trends
+  refact-codewiki/           — code-map/wiki selection and link graph helpers
+  refact-git-intel/          — churn, coupling, blame, provenance, change-risk signals
 src/
-  main.rs              — entry point, CLI (--http-port, --lsp-stdin-stdout, --ast, --vecdb, etc.)
-  global_context.rs    — SharedGlobalContext
+  main.rs              — entry point, CLI (--http-port, --lsp-stdin-stdout, --vecdb, etc.)
+  global_context.rs    — SharedGlobalContext, command-line flags, shared CodeGraph/VecDB handles
   lsp.rs               — tower-lsp LanguageServer impl
-  http/routers/v1/     — 27+ endpoint modules
+  http/routers/v1/     — 50+ endpoint modules including CodeGraph and RagStatus status/search routes
   chat/                — 22+ files, ~15K LOC (session, queue, generation, tools, trajectories, linearize, stream_core, etc.)
   llm/                 — LLM adapters (OpenAI, Anthropic wire formats), streaming
-  tools/               — 50+ tools (file_edit/, search, web, shell, subagent, knowledge, tasks)
-  ast/                 — tree-sitter indexing, 7 parsers (C/C++, Python, Java, Kotlin, JS, Rust, TS)
-  vecdb/               — SQLite vec0 semantic search
+  tools/               — 50+ tools (file_edit/, search, codegraph analysis, web, shell, subagent, knowledge, tasks)
+  codegraph/           — CodeGraph startup, persistent DB path, background queue drain, status
+  indexing_routing.rs  — memory-plane firewall: memory roots to VecDB, source files to CodeGraph
+  vecdb/               — SQLite vec0 memory/knowledge semantic search
   providers/           — 15+ LLM providers (Anthropic, OpenAI, Codex, DeepSeek, Gemini, Groq, LM Studio, Ollama, OpenRouter, vLLM, xAI, Claude Code, custom)
   integrations/        — GitHub, GitLab, Bitbucket, Chrome, PostgreSQL, MySQL, Docker, PDB, cmdline, services, MCP (stdio+SSE)
   knowledge_graph/     — petgraph DiGraph, builder/cleanup/staleness/query
@@ -43,7 +50,7 @@ src/
   git/                 — shadow repos, checkpoints
   voice/               — Whisper transcription, streaming sessions
   yaml_configs/        — defaults for modes, providers, toolbox commands, prompts
-  postprocessing/      — token-aware truncation, AST prioritization
+  postprocessing/      — token-aware truncation and context-file prioritization
   agentic/             — commit messages, agentic edit flows
   buddy/               — Buddy agent runtime (actor, jobs, observers, chat_reactions, diagnostics)
   daemon/              — headless daemon (CLI, client, auth, config, chat client)
@@ -321,11 +328,26 @@ OpenAI conversion lives in `src/llm/adapters/openai_chat.rs` (`convert_messages_
 
 ~50+ tools, filtered by mode/capabilities/config. Registered in `tools_list.rs`.
 
-**Categories**: Codebase search (AST defs, tree, cat, regex, semantic) · Codebase change (create/update/rm/mv/undo/apply_patch — confirmation required) · Web (fetch, search, Chrome automation) · Code execution (shell, process_*, sleep, cron_*) · System integrations (cmdline_*, service_*) · Knowledge (search, create, trajectories) · Agent (subagent, strategic_planning, deep_research, code_review) · Task management (~18 tools) · IDE (open_file, paste_text) · Integration-defined + MCP tools.
+**Categories**: Codebase search (CodeGraph definitions, tree, cat, regex, semantic memory) · CodeGraph analysis (overview, health, git risk, why, duplication, map) · Codebase change (create/update/rm/mv/undo/apply_patch — confirmation required) · Web (fetch, search, Chrome automation) · Code execution (shell, process_*, sleep, cron_*) · System integrations (cmdline_*, service_*) · Knowledge (search, create, trajectories) · Agent (subagent, strategic_planning, deep_research, code_review) · Task management (~18 tools) · IDE (open_file, paste_text) · Integration-defined + MCP tools.
 
 Tool trait: `tool_execute(&mut self, ccx, tool_call_id, args) -> Result<(bool, Vec<ContextEnum>)>`.
 
 `AtCommandsContext` provides: global_context, chat_id, n_ctx, abort_flag, messages, current_model, task_meta, subchat depth/channels, postprocess params.
+
+### CodeGraph tools
+
+CodeGraph-dependent tools are visible only when `gcx.codegraph` is available. `search_symbol_definition` is the compatibility definition lookup tool, backed by CodeGraph definitions and fuzzy corrections. The dedicated CodeGraph tool set is:
+
+| Tool | Purpose |
+|---|---|
+| `codegraph_overview` | Project-wide graph counts, strongly-connected components, and central symbols by PageRank. |
+| `code_health` | Per-file deterministic health: function complexity/nesting/LOC/maintainability, biomarkers, grade, and refactoring targets. |
+| `git_risk` | Git intelligence: churn hotspots, bus factor per file, and co-changed file pairs. |
+| `code_why` | Evidence-backed decisions from commit history that match a query. |
+| `code_duplication` | Project-wide token clone pairs, co-change-weighted DRY violations, and test smells. |
+| `security_scan` | Per-file security findings including secrets, injection, dangerous eval/deserialization, TLS, crypto, and random risks. |
+| `pr_blast` | PR blast-radius analysis over reverse CodeGraph dependencies, impacted files, risk score, and reviewer path hints. |
+| `code_map` | Documentation-worthy file map with selection score, forward links, and backlink hubs. |
 
 ### Exec runtime — PTY and process tools
 
@@ -840,15 +862,27 @@ session and durable stores, so a single hook call may perform the inline action 
 
 Base: `http://127.0.0.1:{port}/v1/`. Middleware: permissive CORS, 15MB body limit.
 
-Key endpoints: `/ping`, `/caps`, `/graceful-shutdown`, `/p/{project_id}/v1/chats/{id}/commands`, `/p/{project_id}/v1/chats/subscribe` (project-scoped chat protocol; `daemon::chat_client::ProxyChatClient` is the in-tree client), `/chat` (legacy), `/code-completion`, `/code-lens`, `/tools`, `/tools-check-if-confirmation-needed`, `/ast-file-symbols`, `/ast-status`, `/rag-status`, `/vecdb-search`, `/git-commit`, `/checkpoints-preview`, `/checkpoints-restore`, `/integrations`, `/integration-get`, `/integration-save`, `/knowledge/update-memory`, `/knowledge/delete-memory`, `/knowledge-graph`, `/voice/transcribe`, `/voice/stream/{id}`, `/voice/stream/{id}/chunk`.
+Key endpoints: `/ping`, `/caps`, `/graceful-shutdown`, `/p/{project_id}/v1/chats/{id}/commands`, `/p/{project_id}/v1/chats/subscribe` (project-scoped chat protocol; `daemon::chat_client::ProxyChatClient` is the in-tree client), `/chat` (legacy), `/code-completion`, `/code-lens`, `/tools`, `/tools-check-if-confirmation-needed`, `/ast-file-symbols`, `/ast-status` (legacy alias to CodeGraph status), `/rag-status`, `/vdb-search`, `/vdb-status`, `/codegraph-search`, `/codegraph-status`, `/git-commit`, `/checkpoints-preview`, `/checkpoints-restore`, `/integrations`, `/integration-get`, `/integration-save`, `/knowledge/update-memory`, `/knowledge/delete-memory`, `/knowledge-graph`, `/voice/transcribe`, `/voice/stream/{id}`, `/voice/stream/{id}/chunk`.
 
-## AST
+## CodeGraph and indexing
 
-8 languages: C, C++, Python, Java, Kotlin, JavaScript, Rust, TypeScript (7 tree-sitter parsers; C/C++ share parser). Two-phase indexing: parse+store → link cross-references. Storage in LMDB with key prefixes (`d|` defs, `c|` fuzzy lookup, `u|` back-links, `classes|` inheritance). Background thread with batch processing. Skeletonizer generates abbreviated code for embeddings.
+CodeGraph is the source-code index. `codegraph_init()` opens a persistent SQLite database at `~/.cache/refact/codegraph/<project-hash>/codegraph.sqlite` (or `~/.cache/refact/codegraph/codegraph.sqlite` when no project root is known), and `codegraph_background_task()` drains the workspace queue, indexes or removes changed paths, reconciles deleted paths on startup, and connects pending usages once the queue is empty. The store contains graph nodes/edges/symbols, pending references, dirty paths, file hashes, and an FTS5 `fts_code` table. Parser coverage comes from `refact-codegraph-parsers`: Rust, Python, JavaScript/JSX, TypeScript/TSX, Java, Kotlin, C, C++, Bash, Elixir, OCaml, Haskell, Go, C#, Ruby, PHP, Swift, and Scala.
+
+`indexing_routing.rs` is the memory-plane firewall. It builds `MemoryPlaneRoots` from project roots, global knowledge, and global trajectories, then partitions paths before enqueueing: memory-plane paths go to VecDB, source-code paths go to CodeGraph. `vecdb_only=true` returns after memory enqueueing, and if CodeGraph is unavailable the router skips code files instead of sending them to VecDB. Keep this boundary intact so code search does not pollute memory/knowledge retrieval.
+
+Status surfaces:
+
+- `GET /v1/codegraph-status` returns `{ counts: { nodes, edges, files, fts_docs }, queued, state, error }`.
+- `state` is one of `turned_off`, `indexing`, `working`, or `error`.
+- `POST /v1/codegraph-search` accepts `{ "query": string, "top_n": number }` and returns `{ query_text, results: [{ path, line1, line2, symbol, score }] }`.
+- `GET /v1/rag-status` embeds `codegraph` plus top-level `codegraph_alive` and `codegraph_error`, alongside legacy `ast`/`ast_alive` and VecDB status fields.
+- `GET /v1/ast-status` is a legacy compatibility alias that returns CodeGraph status; `/v1/ast-file-symbols` reads file definitions from CodeGraph.
+
+Current worker CLI flags are `--ast`, `--wait-ast`, `--vecdb`, `--vecdb-max-files`, `--vecdb-force-path`, and `--wait-vecdb`. CodeGraph opens during startup and readiness is observed through the status routes. Daemon and IDE project settings may carry CodeGraph feature switches for host coordination, but worker process arguments still gate only AST compatibility and VecDB; do not add CodeGraph-specific CLI switches to docs unless they exist in `global_context.rs`.
 
 ## VecDB
 
-SQLite + vec0 extension. File splitters: trajectory JSON (4 msgs/chunk), Markdown (heading-aware), code (AST-aware token windows). Embedding via external HTTP API with batching/retry. Search: cosine KNN → reject threshold → normalize usefulness score. Background thread: enqueue → split → cache check → embed → store. Cleanup: keep 10 newest tables, drop >7 days.
+SQLite + vec0 extension for memory-plane semantic search. File splitters handle trajectory JSON (4 msgs/chunk), Markdown (heading-aware), and other memory documents. Embedding uses the configured external HTTP API with batching/retry. Search: cosine KNN → reject threshold → normalize usefulness score. Background thread: enqueue → split → cache check → embed → store. Cleanup keeps 10 newest tables and drops tables older than 7 days. Source-code indexing belongs to CodeGraph; `indexing_routing.rs` prevents code paths from being enqueued into VecDB during workspace indexing.
 
 ## Providers
 
@@ -878,12 +912,12 @@ All foreground, background, service, and PTY exec spawns apply `EXEC_ENV_DEFAULT
 ## Testing
 
 - **Integration tests in `tests/`**: live HTTP+SSE Python suites plus Rust e2e suites (`daemon_e2e.rs`, `daemon_proxy.rs`, `daemon_supervisor.rs`) that share the `tests/e2e_helpers/` module. Python helpers include `fake_worker.py` and `lsp_connect.py`; 7 `test_chat_session_*.py` files cover the chat session flow.
-- **Rust unit tests**: `src/chat/tests.rs`, AST parser tests, 50+ modules. `cargo test --lib`.
+- **Rust unit tests**: `src/chat/tests.rs`, CodeGraph/parser tests, 50+ modules. `cargo test --lib`.
 - **Test data**: `tests/emergency_frog_situation/` — themed frog simulations for parsing edge cases.
 
 ## Config
 
 - **User**: `~/.config/refact/` (default_privacy.yaml, providers.d/*.yaml)
-- **Cache**: `~/.cache/refact/` (shadow repos, logs, integrations)
+- **Cache**: `~/.cache/refact/` (shadow repos, logs, integrations, `codegraph/` SQLite stores)
 - **Project**: `.refact/` (trajectories/, knowledge/, tasks/, integrations/, `project_information.yaml` — schema_version 1, toggles + size caps for the `system_info` / `environment_instructions` / `detected_environments` / `git_info` / `project_tree` / `instruction_files` / `project_configs` / `memories` sections surfaced to the model)
 - **System prompts**: `yaml_configs/defaults/` — modes (built-in modes in `modes/`, plus project-setup wizard modes like `setup`, `setup_skills`, `setup_agents_md`, `setup_mcp`, `setup_commands`, `setup_subagents`, `setup_modes`, `setup_hooks`, `setup_knowledge`), subagents, toolbox commands. Magic vars: `%ARGS%`, `%CODE_SELECTION%`, `%WORKSPACE_INFO%`, `%PROJECT_TREE%`.

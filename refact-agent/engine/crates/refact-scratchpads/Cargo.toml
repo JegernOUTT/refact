@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 refact-core = { path = "../refact-core" }
-refact-ast = { path = "../refact-ast" }
+refact-codegraph = { path = "../refact-codegraph" }
 refact-postprocessing = { path = "../refact-postprocessing" }
 async-trait = "0.1.73"
 serde.workspace = true

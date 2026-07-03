@@ -24,7 +24,17 @@ const ALLOWED_FOR_SUBAGENT: &[&str] = &[
     "search_pattern",
     "search_symbol_definition",
     "search_semantic",
+    "codegraph_overview",
+    "code_health",
+    "git_risk",
+    "code_why",
+    "code_duplication",
+    "security_scan",
+    "pr_blast",
+    "code_map",
     "knowledge",
+    "search_trajectories",
+    "get_trajectory_context",
     "web",
     "web_search",
     "shell",
@@ -494,7 +504,17 @@ mod tests {
             "search_pattern",
             "search_symbol_definition",
             "search_semantic",
+            "codegraph_overview",
+            "code_health",
+            "git_risk",
+            "code_why",
+            "code_duplication",
+            "security_scan",
+            "pr_blast",
+            "code_map",
             "knowledge",
+            "search_trajectories",
+            "get_trajectory_context",
             "web",
             "web_search",
             "shell",
@@ -505,6 +525,25 @@ mod tests {
         .into_iter()
         .map(str::to_string)
         .collect()
+    }
+
+    #[test]
+    fn configured_tools_are_all_allowed_and_error_list_is_exact() {
+        let configured_tools = configured_read_only_tools();
+
+        for tool in &configured_tools {
+            assert!(is_allowed_for_subagent(tool), "{tool} should be allowed");
+        }
+        assert_eq!(
+            format_allowed_tools(&configured_tools),
+            concat!(
+                "cat, tree, search_pattern, search_symbol_definition, search_semantic, ",
+                "codegraph_overview, code_health, git_risk, code_why, code_duplication, ",
+                "security_scan, pr_blast, code_map, knowledge, search_trajectories, ",
+                "get_trajectory_context, web, ",
+                "web_search, shell, tasks_set, compress_chat_probe, compress_chat_apply"
+            )
+        );
     }
 
     async fn install_test_caps(gcx: Arc<crate::global_context::GlobalContext>) {
@@ -606,6 +645,42 @@ mod tests {
         let configured_tools = configured_read_only_tools();
 
         assert!(validate_read_only_tools(&["shell".to_string()], &configured_tools).is_ok());
+    }
+
+    #[test]
+    fn history_and_codegraph_tools_are_accepted_when_configured() {
+        let configured_tools = configured_read_only_tools();
+
+        assert_eq!(
+            normalize_read_only_tools(
+                &[
+                    "hist_search".to_string(),
+                    "hist_get".to_string(),
+                    "codegraph_overview".to_string(),
+                    "code_health".to_string(),
+                    "git_risk".to_string(),
+                    "code_why".to_string(),
+                    "code_duplication".to_string(),
+                    "security_scan".to_string(),
+                    "pr_blast".to_string(),
+                    "code_map".to_string(),
+                ],
+                &configured_tools,
+            )
+            .unwrap(),
+            vec![
+                "search_trajectories".to_string(),
+                "get_trajectory_context".to_string(),
+                "codegraph_overview".to_string(),
+                "code_health".to_string(),
+                "git_risk".to_string(),
+                "code_why".to_string(),
+                "code_duplication".to_string(),
+                "security_scan".to_string(),
+                "pr_blast".to_string(),
+                "code_map".to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -27,7 +27,9 @@ export class StatusBarMenu {
     spinner: boolean = false;
     ast_limit_hit: boolean = false;
     vecdb_limit_hit: boolean = false;
+    codegraph_limit_hit: boolean = false;
     vecdb_warning: string = "";
+    codegraph_warning: string = "";
     last_url: string = "";
     last_model_name: string = "";
     have_completion_success: boolean = false;
@@ -92,10 +94,18 @@ export class StatusBarMenu {
             this.menu.text = `$(debug-disconnect) VecDB files limit`;
             this.menu.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
             this.menu.tooltip = "Click to make changes in settings";
+        } else if (this.codegraph_limit_hit) {
+            this.menu.text = `$(debug-disconnect) CodeGraph files limit`;
+            this.menu.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+            this.menu.tooltip = "Click to make changes in settings";
         } else if (this.vecdb_warning !== '') {
             this.menu.text = `$(debug-disconnect) Refact.ai`;
             this.menu.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
             this.menu.tooltip = this.vecdb_warning;
+        } else if (this.codegraph_warning !== '') {
+            this.menu.text = `$(debug-disconnect) Refact.ai`;
+            this.menu.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+            this.menu.tooltip = this.codegraph_warning;
         } else if (this.have_completion_success) {
             this.menu.text = this.rag_status || `$(codify-logo) Refact.ai`;
             this.menu.backgroundColor = undefined;
@@ -185,8 +195,18 @@ export class StatusBarMenu {
         this.choose_color();
     }
 
+    codegraph_status_limit_reached() {
+        this.codegraph_limit_hit = true;
+        this.choose_color();
+    }
+
     vecdb_error(error: string) {
         this.vecdb_warning = error;
+        this.choose_color();
+    }
+
+    codegraph_error(error: string) {
+        this.codegraph_warning = error;
         this.choose_color();
     }
 
@@ -207,6 +227,9 @@ export class StatusBarMenu {
                 this.rag_status = `$(sync~spin) Starting`;
             }
         }
+        if (status.codegraph && status.codegraph.state === "indexing") {
+            this.rag_status = `$(sync~spin) CodeGraph ${status.codegraph.queued} queued`;
+        }
 
         let rag_tootip = '';
         if (status.ast) {
@@ -226,6 +249,17 @@ export class StatusBarMenu {
             ;
         } else {
             rag_tootip += "VecDB turned off\n\n";
+        }
+        if (status.codegraph && status.codegraph.state !== "turned_off") {
+            rag_tootip +=
+                `CodeGraph files: ${status.codegraph.counts.files}\n` +
+                `CodeGraph nodes: ${status.codegraph.counts.nodes}\n` +
+                `CodeGraph edges: ${status.codegraph.counts.edges}\n` +
+                `CodeGraph FTS docs: ${status.codegraph.counts.fts_docs}\n` +
+                `CodeGraph queued: ${status.codegraph.queued}\n\n`
+            ;
+        } else {
+            rag_tootip += "CodeGraph turned off\n\n";
         }
         this.rag_tootip = rag_tootip.trim();
 

@@ -109,6 +109,7 @@ pub(crate) enum RepoHost {
     GitHub,
     GitLab,
     GitLabSelfHosted(String),
+    Unsupported(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,20 +220,33 @@ fn parse_remote_path(host: &str, path: &str) -> Option<RepoInfo> {
     if repo.ends_with(".git") {
         repo.truncate(repo.len() - 4);
     }
-    let host = host.to_ascii_lowercase();
-    let host = match host.as_str() {
+    let normalized_host = host.to_ascii_lowercase();
+    let host = match normalized_host.as_str() {
         "github.com" => RepoHost::GitHub,
         "gitlab.com" => RepoHost::GitLab,
-        _ => RepoHost::GitLabSelfHosted(host),
+        _ if normalized_host.split('.').any(|label| label == "gitlab") => {
+            RepoHost::GitLabSelfHosted(normalized_host)
+        }
+        _ => RepoHost::Unsupported(normalized_host),
     };
     let owner = match &host {
         RepoHost::GitHub => parts[parts.len() - 2].to_string(),
-        RepoHost::GitLab | RepoHost::GitLabSelfHosted(_) => parts[..parts.len() - 1].join("/"),
+        RepoHost::GitLab | RepoHost::GitLabSelfHosted(_) | RepoHost::Unsupported(_) => {
+            parts[..parts.len() - 1].join("/")
+        }
     };
     if owner.is_empty() || repo.is_empty() {
         return None;
     }
     Some(RepoInfo { owner, repo, host })
+}
+
+fn repo_host_provider(repo: &RepoInfo) -> Result<&'static str, String> {
+    match &repo.host {
+        RepoHost::GitHub => Ok("github"),
+        RepoHost::GitLab | RepoHost::GitLabSelfHosted(_) => Ok("gitlab"),
+        RepoHost::Unsupported(host) => Err(format!("unsupported issue repository host: {host}")),
+    }
 }
 
 pub(crate) async fn detect_repo_from_git(project_root: &Path) -> Option<RepoInfo> {
@@ -276,13 +290,17 @@ async fn detect_provider(
         }
     }
 
+    let host_provider = repo_host_provider(repo)?;
     Ok(match preferred_provider {
-        Some("github") => gh_provider,
-        Some("gitlab") => gl_provider,
-        _ => match &repo.host {
-            RepoHost::GitHub => gh_provider,
-            RepoHost::GitLab | RepoHost::GitLabSelfHosted(_) => gl_provider,
-        },
+        Some("github") if host_provider == "github" => gh_provider,
+        Some("gitlab") if host_provider == "gitlab" => gl_provider,
+        Some(requested) => {
+            return Err(format!(
+                "requested provider '{requested}' does not match the detected repository host '{host_provider}'"
+            ));
+        }
+        _ if host_provider == "github" => gh_provider,
+        _ => gl_provider,
     })
 }
 
@@ -627,10 +645,7 @@ pub async fn create_confirmed_issue_with_provider(
     let repo = detect_repo_from_git(&project_root)
         .await
         .ok_or_else(|| "could not detect issue repository from git origin remote".to_string())?;
-    let host_provider = match &repo.host {
-        RepoHost::GitHub => "github",
-        RepoHost::GitLab | RepoHost::GitLabSelfHosted(_) => "gitlab",
-    };
+    let host_provider = repo_host_provider(&repo)?;
     if let Some(requested) = provider {
         if requested != host_provider {
             return Err(format!(

@@ -60,13 +60,11 @@ pub async fn handle_v1_code_completion(
         }
     }
 
-    let ast_service_opt = gcx.ast_service.lock().unwrap().clone();
     let mut scratchpad = scratchpads::create_code_completion_scratchpad(
         gcx.clone(),
         &model_rec,
         &code_completion_post.clone(),
         cache_arc.clone(),
-        ast_service_opt,
     )
     .await
     .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
@@ -143,13 +141,11 @@ pub async fn handle_v1_code_completion_prompt(
     // don't need cache, but go along
     let cache_arc = { gcx.completions_cache.clone() };
 
-    let ast_service_opt = gcx.ast_service.lock().unwrap().clone();
     let mut scratchpad = scratchpads::create_code_completion_scratchpad(
         gcx.clone(),
         &model_rec,
         &post,
         cache_arc.clone(),
-        ast_service_opt,
     )
     .await
     .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;

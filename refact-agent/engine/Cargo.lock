@@ -3977,44 +3977,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "refact-ast"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "dyn_partial_eq",
- "heed",
- "indexmap 1.9.3",
- "itertools 0.14.0",
- "lazy_static",
- "md5",
- "parking_lot",
- "refact-core",
- "regex",
- "ropey",
- "serde",
- "serde_cbor",
- "serde_json",
- "sha2",
- "similar",
- "strsim 0.11.1",
- "tempfile",
- "tokenizers",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-cpp",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-kotlin-ng",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
- "typetag",
- "uuid",
-]
-
-[[package]]
 name = "refact-at-web"
 version = "0.1.0"
 dependencies = [
@@ -4104,6 +4066,69 @@ dependencies = [
 ]
 
 [[package]]
+name = "refact-codegraph"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "petgraph",
+ "refact-codegraph-parsers",
+ "refact-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "refact-codegraph-parsers"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-elixir",
+ "tree-sitter-go",
+ "tree-sitter-haskell",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-kotlin-ng",
+ "tree-sitter-ocaml",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-scala",
+ "tree-sitter-swift",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "refact-codehealth"
+version = "0.1.0"
+dependencies = [
+ "refact-codegraph-parsers",
+ "refact-core",
+ "serde",
+ "tree-sitter",
+]
+
+[[package]]
+name = "refact-codewiki"
+version = "0.1.0"
+dependencies = [
+ "refact-codegraph-parsers",
+ "refact-core",
+ "serde",
+ "tree-sitter",
+]
+
+[[package]]
 name = "refact-context-api"
 version = "0.1.0"
 dependencies = [
@@ -4120,7 +4145,10 @@ dependencies = [
  "hyper 0.14.32",
  "image",
  "indexmap 1.9.3",
+ "itertools 0.14.0",
+ "md5",
  "regex",
+ "ropey",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -4187,8 +4215,6 @@ dependencies = [
  "dunce",
  "glob",
  "itertools 0.14.0",
- "notify",
- "refact-ast",
  "refact-core",
  "serde",
  "serde_yaml",
@@ -4210,6 +4236,16 @@ dependencies = [
  "tempfile",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "refact-git-intel"
+version = "0.1.0"
+dependencies = [
+ "git2",
+ "refact-core",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]
@@ -4321,13 +4357,16 @@ dependencies = [
  "rayon",
  "refact-agentic",
  "refact-agents-core",
- "refact-ast",
  "refact-at-web",
  "refact-browser",
  "refact-buddy-core",
  "refact-caps-core",
  "refact-chat-api",
  "refact-chat-history",
+ "refact-codegraph",
+ "refact-codegraph-parsers",
+ "refact-codehealth",
+ "refact-codewiki",
  "refact-context-api",
  "refact-core",
  "refact-exec",
@@ -4335,6 +4374,7 @@ dependencies = [
  "refact-file-edit-core",
  "refact-files",
  "refact-git",
+ "refact-git-intel",
  "refact-integrations",
  "refact-knowledge-graph",
  "refact-llm",
@@ -4414,7 +4454,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "indexmap 1.9.3",
- "refact-ast",
  "refact-core",
  "regex",
  "serde",
@@ -4490,7 +4529,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "image",
- "refact-ast",
+ "refact-codegraph",
  "refact-core",
  "refact-postprocessing",
  "regex",
@@ -4593,7 +4632,6 @@ dependencies = [
  "itertools 0.14.0",
  "log",
  "md5",
- "refact-ast",
  "refact-core",
  "regex",
  "reqwest",
@@ -4606,14 +4644,6 @@ dependencies = [
  "tokio",
  "tokio-rusqlite",
  "tracing",
- "tree-sitter",
- "tree-sitter-cpp",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-kotlin-ng",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
  "uuid",
  "zerocopy",
 ]
@@ -6562,10 +6592,70 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-bash"
+version = "0.23.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "329a4d48623ac337d42b1df84e81a1c9dbb2946907c102ca72db158c1964a52e"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-c"
+version = "0.23.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "afd2b1bf1585dc2ef6d69e87d01db8adb059006649dd5f96f31aa789ee6e9c71"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-c-sharp"
+version = "0.23.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-cpp"
 version = "0.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-elixir"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66dd064a762ed95bfc29857fa3cb7403bb1e5cb88112de0f6341b7e47284ba40"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-go"
+version = "0.23.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b13d476345220dbe600147dd444165c5791bf85ef53e28acbedd46112ee18431"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-haskell"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "977c51e504548cba13fc27cb5a2edab2124cf6716a1934915d07ab99523b05a4"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -6608,6 +6698,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ae62f7eae5eb549c71b76658648b72cc6111f2d87d24a1e31fa907f4943e3ce"
 
 [[package]]
+name = "tree-sitter-ocaml"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d19db582b3855f56b5f9ec484170fbfb9ee60b938ec7720d76d2ee788e8b640"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-php"
+version = "0.23.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f066e94e9272cfe4f1dcb07a1c50c66097eca648f2d7233d299c8ae9ed8c130c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-python"
 version = "0.23.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6618,10 +6728,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-ruby"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be0484ea4ef6bb9c575b4fdabde7e31340a8d2dbc7d52b321ac83da703249f95"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-rust"
 version = "0.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca8ccb3e3a3495c8a943f6c3fd24c3804c471fd7f4f16087623c7fa4c0068e8a"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-scala"
+version = "0.23.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efde5e68b4736e9eac17bfa296c6f104a26bffab363b365eb898c40a63c15d2f"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-swift"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe36052155b9dd69ca82b3b8f1b4ccfb2d867125ac1a4db1dd7331829242668c"
 dependencies = [
  "cc",
  "tree-sitter-language",

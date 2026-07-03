@@ -61,6 +61,7 @@ import {
   SubagentTool as NewSubagentTool,
   PlanningTool,
   CodeReviewTool as NewCodeReviewTool,
+  EngineAnalysisTool,
   ResearchTool,
   ShellServiceTool as NewShellServiceTool,
   EditTool,
@@ -165,6 +166,15 @@ const EXEC_TOOL_NAMES = new Set([
   "process_kill",
   "process_wait",
   "process_write_stdin",
+] as const);
+
+const ENGINE_ANALYSIS_TOOLS: ReadonlySet<string> = new Set([
+  "code_duplication",
+  "code_health",
+  "code_map",
+  "code_why",
+  "codegraph_overview",
+  "git_risk",
 ] as const);
 
 type ProcessToolName =
@@ -1614,7 +1624,27 @@ function processToolCalls(
     );
   }
 
-  // Fallback: use GenericTool for any unhandled tool
+  if (headName && ENGINE_ANALYSIS_TOOLS.has(headName)) {
+    const elem = (
+      <EngineAnalysisTool
+        key={`generic-tool-${head.id ?? processed.length}`}
+        toolCall={normalizedHead}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+      activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
+      threadId,
+    );
+  }
+
   const elem = (
     <GenericTool
       key={`generic-tool-${head.id ?? processed.length}`}

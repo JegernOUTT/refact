@@ -4,7 +4,7 @@ use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
-use crate::ast::ast_structs::AstStatus;
+use refact_core::ast_types::AstStatus;
 use crate::custom_error::ScratchError;
 use crate::global_context::SharedGlobalContext;
 
@@ -15,17 +15,14 @@ pub struct RagStatus {
     pub vecdb: Option<crate::vecdb::vdb_structs::VecDbStatus>,
     pub vecdb_alive: String,
     pub vec_db_error: String,
+    pub codegraph: Option<crate::codegraph::cg_status::CodeGraphStatus>,
+    pub codegraph_alive: String,
+    pub codegraph_error: String,
 }
 
 pub async fn get_rag_status(gcx: SharedGlobalContext) -> RagStatus {
-    let (vec_db_module, vec_db_error, ast_module) = {
-        let status = (
-            gcx.vec_db.clone(),
-            gcx.vec_db_error.lock().unwrap().clone(),
-            gcx.ast_service.lock().unwrap().clone(),
-        );
-        status
-    };
+    let (vec_db_module, vec_db_error) =
+        { (gcx.vec_db.clone(), gcx.vec_db_error.lock().unwrap().clone()) };
 
     let (maybe_vecdb_status, vecdb_message) =
         match crate::vecdb::vdb_highlev::get_status(vec_db_module).await {
@@ -34,22 +31,39 @@ pub async fn get_rag_status(gcx: SharedGlobalContext) -> RagStatus {
             Err(err) => (None, err.to_string()),
         };
 
-    let (maybe_ast_status, ast_message) = match &ast_module {
-        Some(ast_service) => {
-            let ast_status = ast_service.lock().await.ast_status.clone();
-            let status = ast_status.lock().await.clone();
-            (Some(status), "working".to_string())
-        }
-        None => (None, "turned_off".to_string()),
-    };
+    let codegraph_status = crate::codegraph::cg_status::get_codegraph_status(gcx.clone()).await;
+    let codegraph_error = codegraph_status.error.clone();
+    let codegraph_message = codegraph_status.state.clone();
 
     RagStatus {
-        ast: maybe_ast_status,
-        ast_alive: ast_message,
+        ast: None,
+        ast_alive: "turned_off".to_string(),
         vecdb: maybe_vecdb_status,
         vecdb_alive: vecdb_message,
         vec_db_error,
+        codegraph: Some(codegraph_status),
+        codegraph_alive: codegraph_message,
+        codegraph_error,
     }
+}
+
+pub async fn handle_v1_codegraph_status(
+    State(app): State<AppState>,
+) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
+    let status = crate::codegraph::cg_status::get_codegraph_status(gcx).await;
+
+    let json_string = serde_json::to_string_pretty(&status).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("JSON serialization problem: {}", e),
+        )
+    })?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(json_string))
+        .unwrap())
 }
 
 pub async fn handle_v1_rag_status(
@@ -69,4 +83,85 @@ pub async fn handle_v1_rag_status(
         .status(StatusCode::OK)
         .body(Body::from(json_string))
         .unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::codegraph::CodeGraphService;
+
+    #[tokio::test]
+    async fn rag_status_codegraph_state_tracks_queue_and_errors() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+
+        let status = get_rag_status(gcx.clone()).await;
+        assert_eq!(status.codegraph_alive, "turned_off");
+        let codegraph = status.codegraph.expect("codegraph status must be present");
+        assert_eq!(codegraph.state, "turned_off");
+        assert_eq!(codegraph.queued, 0);
+        assert_eq!(codegraph.error, "");
+        assert_eq!(status.codegraph_error, "");
+
+        let service = Arc::new(CodeGraphService::open_in_memory().unwrap());
+        service.enqueue_files(&["src/main.rs".to_string()]);
+        *gcx.codegraph.lock().await = Some(service.clone());
+
+        let status = get_rag_status(gcx.clone()).await;
+        assert_eq!(status.codegraph_alive, "indexing");
+        let codegraph = status.codegraph.expect("codegraph status must be present");
+        assert_eq!(codegraph.state, "indexing");
+        assert_eq!(codegraph.queued, 1);
+        assert_eq!(codegraph.error, "");
+
+        service.drain_batch(10);
+        service
+            .index_file("src/main.rs", "fn main() {}", "rust")
+            .await
+            .unwrap();
+        service.connect_usages().await.unwrap();
+
+        let status = get_rag_status(gcx.clone()).await;
+        assert_eq!(status.codegraph_alive, "working");
+        let codegraph = status.codegraph.expect("codegraph status must be present");
+        assert_eq!(codegraph.state, "working");
+        assert_eq!(codegraph.queued, 0);
+        assert_eq!(codegraph.counts.files, 1);
+        assert_eq!(codegraph.error, "");
+
+        *gcx.codegraph_error.lock().unwrap() = "store unavailable".to_string();
+
+        let status = get_rag_status(gcx.clone()).await;
+        assert_eq!(status.codegraph_alive, "error");
+        assert_eq!(status.codegraph_error, "store unavailable");
+        let codegraph = status.codegraph.expect("codegraph status must be present");
+        assert_eq!(codegraph.state, "error");
+        assert_eq!(codegraph.error, "store unavailable");
+
+        *gcx.codegraph_error.lock().unwrap() = String::new();
+
+        let status = get_rag_status(gcx.clone()).await;
+        assert_eq!(status.codegraph_alive, "working");
+        assert_eq!(status.codegraph_error, "");
+        let codegraph = status.codegraph.expect("codegraph status must be present");
+        assert_eq!(codegraph.state, "working");
+        assert_eq!(codegraph.error, "");
+    }
+
+    #[tokio::test]
+    async fn rag_status_codegraph_open_error_surfaces_without_service() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.codegraph_error.lock().unwrap() = "open failed".to_string();
+
+        let status = get_rag_status(gcx.clone()).await;
+
+        assert_eq!(status.codegraph_alive, "error");
+        assert_eq!(status.codegraph_error, "open failed");
+        let codegraph = status.codegraph.expect("error status must be present");
+        assert_eq!(codegraph.state, "error");
+        assert_eq!(codegraph.error, "open failed");
+        assert_eq!(codegraph.queued, 0);
+        assert_eq!(codegraph.counts, refact_codegraph::Counts::default());
+    }
 }

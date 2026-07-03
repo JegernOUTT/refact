@@ -12,6 +12,7 @@ import {
   persistStore,
 } from "redux-persist";
 import { statsApi } from "../services/refact/stats";
+import { codeIntelApi } from "../services/refact/codeIntel";
 import {
   capsApi,
   promptsApi,
@@ -22,6 +23,7 @@ import {
   integrationsApi,
   knowledgeApi,
   knowledgeGraphApi,
+  ragStatusApi,
   providersApi,
   modelsApi,
   trajectoriesApi,
@@ -61,6 +63,7 @@ import { checkpointsSlice } from "../features/Checkpoints/checkpointsSlice";
 import { checkpointsApi } from "../services/refact/checkpoints";
 import { patchesAndDiffsTrackerSlice } from "../features/PatchesAndDiffsTracker/patchesAndDiffsTrackerSlice";
 import { tasksSlice } from "../features/Tasks";
+import { knowledgeSlice } from "../features/Knowledge/knowledgeSlice";
 import { connectionSlice } from "../features/Connection";
 import { browserSlice } from "../features/Browser";
 import { skillsStatusApi } from "../services/refact/skillsStatus";
@@ -100,6 +103,7 @@ const rootReducer = combineSlices(
     selected_snippet: selectedSnippetReducer,
     chat: chatReducer,
     [statsApi.reducerPath]: statsApi.reducer,
+    [codeIntelApi.reducerPath]: codeIntelApi.reducer,
     [capsApi.reducerPath]: capsApi.reducer,
     [promptsApi.reducerPath]: promptsApi.reducer,
     [toolsApi.reducerPath]: toolsApi.reducer,
@@ -110,6 +114,7 @@ const rootReducer = combineSlices(
     [checkpointsApi.reducerPath]: checkpointsApi.reducer,
     [knowledgeApi.reducerPath]: knowledgeApi.reducer,
     [knowledgeGraphApi.reducerPath]: knowledgeGraphApi.reducer,
+    [ragStatusApi.reducerPath]: ragStatusApi.reducer,
     [providersApi.reducerPath]: providersApi.reducer,
     [modelsApi.reducerPath]: modelsApi.reducer,
     [trajectoriesApi.reducerPath]: trajectoriesApi.reducer,
@@ -144,6 +149,7 @@ const rootReducer = combineSlices(
   checkpointsSlice,
   patchesAndDiffsTrackerSlice,
   tasksSlice,
+  knowledgeSlice,
   connectionSlice,
   browserSlice,
   notificationsSlice,
@@ -225,6 +231,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
         .prepend(
           pingApi.middleware,
           statsApi.middleware,
+          codeIntelApi.middleware,
           capsApi.middleware,
           promptsApi.middleware,
           toolsApi.middleware,
@@ -235,6 +242,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           checkpointsApi.middleware,
           knowledgeApi.middleware,
           knowledgeGraphApi.middleware,
+          ragStatusApi.middleware,
           providersApi.middleware,
           modelsApi.middleware,
           trajectoriesApi.middleware,

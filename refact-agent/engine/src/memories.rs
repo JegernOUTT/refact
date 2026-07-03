@@ -660,10 +660,11 @@ pub async fn memories_add(
         idx.add_from_frontmatter(file_path.clone(), frontmatter, Some(content));
     }
 
+    let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
     let vec_db = gcx.vec_db.clone();
     if let Some(vecdb) = vec_db.lock().await.as_ref() {
         vecdb
-            .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], true)
+            .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], true, roots)
             .await;
     }
 
@@ -1742,13 +1743,18 @@ pub async fn rewrite_memory_document(
         }
     }
 
+    let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
     let vec_db = gcx.vec_db.clone();
     if let Some(vecdb) = vec_db.lock().await.as_ref() {
         if frontmatter.is_archived() || frontmatter.is_deprecated() {
             let _ = vecdb.remove_file(&path_buf).await;
         } else {
             vecdb
-                .vectorizer_enqueue_files(&vec![path_buf.to_string_lossy().to_string()], true)
+                .vectorizer_enqueue_files(
+                    &vec![path_buf.to_string_lossy().to_string()],
+                    true,
+                    roots,
+                )
                 .await;
         }
     }
@@ -2468,5 +2474,191 @@ mod tests {
         assert_eq!(text[content_start..].trim(), body);
         let found = load_memories_by_tags(gcx, &["old"], 10).await.unwrap();
         assert!(found.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod firewall_tests {
+    use super::*;
+    use crate::vecdb::vdb_structs::{
+        EmbeddingModelConfig, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch,
+    };
+    use async_trait::async_trait;
+    use std::sync::Mutex as StdMutex;
+
+    struct StubVecdb {
+        record_path: PathBuf,
+        seen_filters: Arc<StdMutex<Vec<String>>>,
+        embed_calls: Arc<StdMutex<usize>>,
+    }
+
+    #[async_trait]
+    impl VecdbSearch for StubVecdb {
+        async fn vecdb_search(
+            &self,
+            _query: String,
+            _top_n: usize,
+            _filter_mb: Option<String>,
+        ) -> Result<SearchResult, String> {
+            Ok(SearchResult {
+                query_text: String::new(),
+                results: vec![],
+            })
+        }
+
+        async fn get_status(&self) -> Result<VecDbStatus, String> {
+            Err("stub has no status".to_string())
+        }
+
+        async fn remove_file(&self, _file_path: &PathBuf) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn vectorizer_enqueue_files(
+            &self,
+            _documents: &[String],
+            _process_immediately: bool,
+            _roots: refact_core::memory_plane::MemoryPlaneRoots,
+        ) {
+        }
+
+        fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
+            (
+                EmbeddingModelConfig {
+                    endpoint: String::new(),
+                    endpoint_style: String::new(),
+                    embedding_endpoint_style: String::new(),
+                    api_key: String::new(),
+                    model_name: String::new(),
+                    embedding_size: 0,
+                    dimensions: None,
+                    query_prefix: String::new(),
+                    document_prefix: String::new(),
+                    rejection_threshold: 0.0,
+                    embedding_batch: 0,
+                    n_ctx: 0,
+                },
+                0,
+            )
+        }
+
+        async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
+            *self.embed_calls.lock().unwrap() += 1;
+            Ok(vec![0.1, 0.2, 0.3])
+        }
+
+        async fn vecdb_search_with_embedding(
+            &self,
+            _embedding: &Vec<f32>,
+            _top_n: usize,
+            filter_mb: Option<String>,
+        ) -> Result<Vec<VecdbRecord>, String> {
+            if let Some(filter) = filter_mb {
+                self.seen_filters.lock().unwrap().push(filter);
+            }
+            Ok(vec![VecdbRecord {
+                vector: None,
+                file_path: self.record_path.clone(),
+                start_line: 1,
+                end_line: 1,
+                distance: 0.1,
+                usefulness: 90.0,
+            }])
+        }
+    }
+
+    async fn write_knowledge_note(knowledge_dir: &Path, name: &str, body: &str) -> PathBuf {
+        tokio::fs::create_dir_all(knowledge_dir).await.unwrap();
+        let path = knowledge_dir.join(name);
+        let frontmatter = create_frontmatter(
+            Some("Firewall note"),
+            &vec!["preference".to_string()],
+            &Vec::new(),
+            &Vec::new(),
+            "domain",
+        );
+        let md = format!("{}\n\n{}", frontmatter.to_yaml(), body);
+        tokio::fs::write(&path, md).await.unwrap();
+        path
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memories_search_rides_only_on_vecdb_with_scope_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let project_root = get_project_dirs(gcx.clone())
+            .await
+            .into_iter()
+            .next()
+            .expect("test workspace must resolve to a project dir");
+        let knowledge_dir = project_root.join(KNOWLEDGE_FOLDER_NAME);
+        write_knowledge_note(
+            &knowledge_dir,
+            "note.md",
+            "Firewall stub body about codegraph.",
+        )
+        .await;
+
+        let seen_filters = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let embed_calls = Arc::new(StdMutex::new(0usize));
+        let stub: Arc<dyn VecdbSearch> = Arc::new(StubVecdb {
+            record_path: PathBuf::new(),
+            seen_filters: seen_filters.clone(),
+            embed_calls: embed_calls.clone(),
+        });
+        *gcx.vec_db.lock().await = Some(stub);
+
+        let _records = memories_search(gcx.clone(), "codegraph", 5, 5, None)
+            .await
+            .unwrap();
+
+        assert!(
+            *embed_calls.lock().unwrap() >= 1,
+            "embed_query must be called by memories_search"
+        );
+        let filters = seen_filters.lock().unwrap().clone();
+        let knowledge_str = knowledge_dir.to_string_lossy().to_string();
+        assert!(
+            filters
+                .iter()
+                .any(|f| f.contains("scope LIKE") && f.contains(&knowledge_str)),
+            "expected a (scope LIKE '<knowledge_dir>%') filter, got {:?}",
+            filters
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memories_search_falls_back_when_vecdb_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let project_root = get_project_dirs(gcx.clone())
+            .await
+            .into_iter()
+            .next()
+            .expect("test workspace must resolve to a project dir");
+        let knowledge_dir = project_root.join(KNOWLEDGE_FOLDER_NAME);
+        write_knowledge_note(
+            &knowledge_dir,
+            "fallback.md",
+            "Codegraph firewall fallback keyword body.",
+        )
+        .await;
+
+        assert!(
+            gcx.vec_db.lock().await.is_none(),
+            "test fixture must start with vec_db absent"
+        );
+
+        let _records = memories_search(gcx.clone(), "codegraph", 5, 5, None)
+            .await
+            .unwrap();
     }
 }

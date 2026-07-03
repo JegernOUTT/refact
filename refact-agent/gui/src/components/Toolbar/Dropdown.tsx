@@ -1,6 +1,7 @@
 import React, { useMemo } from "react";
 import {
   BarChart3,
+  BrainCircuit,
   Bug,
   FileText,
   Gauge,
@@ -19,6 +20,7 @@ export type DropdownNavigationOptions =
   | "stats"
   | "settings"
   | "knowledge graph"
+  | "code intel"
   | "general settings"
   | "";
 
@@ -68,6 +70,9 @@ export const Dropdown: React.FC<DropdownProps> = ({
         </Menu.Item>
         <Menu.Item onSelect={() => handleNavigation("knowledge graph")}>
           <Icon icon={Gauge} size="sm" /> Manage Knowledge
+        </Menu.Item>
+        <Menu.Item onSelect={() => handleNavigation("code intel")}>
+          <Icon icon={BrainCircuit} size="sm" /> Code Intelligence
         </Menu.Item>
         <Menu.Item onSelect={() => handleNavigation("settings")}>
           <Icon icon={SlidersHorizontal} size="sm" /> {refactProductType}{" "}

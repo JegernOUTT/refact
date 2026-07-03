@@ -1271,6 +1271,12 @@ fn parse_remote_url_handles_ssh_https_dot_git_combinations() {
             "repo",
             RepoHost::GitLabSelfHosted("gitlab.example.com".to_string()),
         ),
+        (
+            "https://example.com/org/platform/team/repo.git",
+            "org/platform/team",
+            "repo",
+            RepoHost::Unsupported("example.com".to_string()),
+        ),
     ];
     for (url, owner, repo, host) in fixtures {
         let parsed = parse_remote_url(url).expect("remote URL must parse");
@@ -9212,14 +9218,6 @@ fn investigation_opportunity_carries_real_diagnostic_ids() {
         other => panic!("expected LaunchInvestigationChat, got {:?}", other),
     }
 }
-
-// Manual verification checklist for Buddy chat reaction bubbles:
-// 1. Send a normal message such as "please design a new caching architecture for services".
-// 2. Send an iterative interaction such as "can you tweak that and make it simpler?".
-// 3. Inspect `.refact/buddy/runtime_queue.jsonl` and count `source=chat_reactions`,
-//    `signal_type=speech_insight`, `signal_type=speech_humor`, and `signal_type=chat_bug_candidate`.
-// 4. Confirm a fresh JSONL event contains `chat_id`, `speech_text`, `ttl_ms`, and `bubble_policy`,
-//    then confirm the matching chat shows a visible Buddy bubble without a live LLM call.
 
 #[tokio::test]
 async fn maybe_enqueue_chat_reaction_emits_chat_scoped_runtime_event() {

@@ -50,6 +50,7 @@ class AppSettingsComponent {
     private val myModelText = JBTextField()
     private val myAstFileLimitText = JBTextField()
     private val myVecdbFileLimitText = JBTextField()
+    private val myCodegraphFileLimitText = JBTextField()
     private val insecureSSLCheckBox = JCheckBox(RefactAIBundle.message("advancedSettings.insecureSSL"))
     private val experimentalCheckBox = JCheckBox(RefactAIBundle.message("advancedSettings.experimentalLspFlag"))
     private val pauseCompletionCheckBox = JCheckBox(RefactAIBundle.message("advancedSettings.pauseCompletion"))
@@ -80,6 +81,10 @@ class AppSettingsComponent {
     }
 
     val vecdbCheckbox = JCheckBox(RefactAIBundle.message("advancedSettings.useVecDB")).apply {
+        isVisible = true
+    }
+
+    val codegraphCheckbox = JCheckBox(RefactAIBundle.message("advancedSettings.useCodegraph")).apply {
         isVisible = true
     }
 
@@ -180,6 +185,25 @@ class AppSettingsComponent {
                 }, 0
             )
 
+            addComponent(codegraphCheckbox, UIUtil.LARGE_VGAP)
+            addComponent(
+                JBLabel(
+                    RefactAIBundle.message("advancedSettings.useCodegraphDescription"),
+                    UIUtil.ComponentStyle.SMALL, UIUtil.FontColor.BRIGHTER
+                ).apply {
+                    setCopyable(true)
+                }, 0
+            )
+            addLabeledComponent(JBLabel("${RefactAIBundle.message("advancedSettings.codegraphFileLimit")}: "), myCodegraphFileLimitText)
+            addComponent(
+                JBLabel(
+                    RefactAIBundle.message("advancedSettings.codegraphFileLimitDescription"),
+                    UIUtil.ComponentStyle.SMALL, UIUtil.FontColor.BRIGHTER
+                ).apply {
+                    setCopyable(true)
+                }, 0
+            )
+
             addLabeledComponent(JBLabel("Customization").apply {
                 isVisible = openCustomizationButton.isVisible
             }, openCustomizationButton, (UIUtil.DEFAULT_VGAP * 1.5).toInt(), false)
@@ -239,6 +263,16 @@ class AppSettingsComponent {
         get() = myVecdbFileLimitText.text.toIntOrNull() ?: 15000
         set(newVal) {
             myVecdbFileLimitText.text = newVal.toString()
+        }
+    var codegraphIsEnabled: Boolean
+        get() = codegraphCheckbox.isSelected
+        set(newVal) {
+            codegraphCheckbox.isSelected = newVal
+        }
+    var codegraphFileLimit: Int
+        get() = myCodegraphFileLimitText.text.toIntOrNull() ?: 15000
+        set(newVal) {
+            myCodegraphFileLimitText.text = newVal.toString()
         }
     var inferenceModel: String?
         get() = myModelText.text
