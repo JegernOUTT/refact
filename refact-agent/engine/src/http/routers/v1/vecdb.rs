@@ -82,7 +82,7 @@ pub async fn handle_v1_codegraph_search(
     let hits = service
         .search_hybrid(&post.query, post.top_n)
         .await
-        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     json_response(&CodeGraphSearchResult {
         query_text: post.query,
         results: hits,
@@ -123,6 +123,14 @@ mod tests {
 
     struct RecordingVecdb {
         calls: Arc<AtomicUsize>,
+    }
+
+    fn codegraph_search_body(query: &str, top_n: usize) -> hyper::body::Bytes {
+        let body = serde_json::json!({
+            "query": query,
+            "top_n": top_n,
+        });
+        hyper::body::Bytes::from(serde_json::to_vec(&body).unwrap())
     }
 
     #[async_trait]
@@ -258,5 +266,44 @@ mod tests {
 
         assert_eq!(json["query_text"], "needle");
         assert_eq!(json["results"][0]["path"], "src/code.rs");
+    }
+
+    #[tokio::test]
+    async fn codegraph_search_empty_query_stays_200() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let codegraph = refact_codegraph::CodeGraphService::open_in_memory().unwrap();
+        *gcx.codegraph.lock().await = Some(Arc::new(codegraph));
+        let app = AppState::from_gcx(gcx).await;
+
+        let response = handle_v1_codegraph_search(State(app), codegraph_search_body(" ", 5))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body()).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["query_text"], " ");
+        assert_eq!(json["results"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn codegraph_search_backend_error_returns_500() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let db_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("codegraph.sqlite");
+        let codegraph = refact_codegraph::CodeGraphService::open(db_path.clone()).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("DROP TABLE fts_code").unwrap();
+        *gcx.codegraph.lock().await = Some(Arc::new(codegraph));
+        let app = AppState::from_gcx(gcx).await;
+
+        let err = match handle_v1_codegraph_search(State(app), codegraph_search_body("needle", 5))
+            .await
+        {
+            Ok(response) => panic!("expected search_hybrid error, got {}", response.status()),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.status_code, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
