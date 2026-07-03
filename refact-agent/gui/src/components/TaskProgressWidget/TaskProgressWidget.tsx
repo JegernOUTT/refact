@@ -28,7 +28,7 @@ import type {
 } from "../../services/refact/types";
 import type { GoalBudgetCommand } from "../../services/refact/chatCommands";
 import { Box, Flex, Separator, Text } from "../LongTailPrimitives";
-import { Badge, Button, Icon } from "../ui";
+import { Badge, Button, Icon, IconButton } from "../ui";
 import { Chevron } from "../Collapsible";
 import { CircularProgress } from "../CircularProgress/CircularProgress";
 import { StatusDot, type StatusDotState } from "../StatusDot";
@@ -182,6 +182,18 @@ function hasBudgetCommandLimits(budget: GoalBudgetCommand): boolean {
   return Object.keys(budget).length > 0;
 }
 
+function goalControlAvailability(goal: GoalSnapshot): {
+  canPause: boolean;
+  canResume: boolean;
+  canStop: boolean;
+} {
+  return {
+    canPause: goal.active && goal.status !== "paused",
+    canResume: goal.status === "paused" || !goal.active,
+    canStop: goal.status !== "stopped" && goal.status !== "completed",
+  };
+}
+
 const GOAL_SUPPORTED_MODES = new Set([
   "agent",
   "openai_agent",
@@ -258,6 +270,53 @@ const GoalIndicator: React.FC<GoalIndicatorProps> = ({ goal }) => (
   </Flex>
 );
 
+type GoalControlIconsProps = {
+  goal: GoalSnapshot;
+  onControl: (action: "pause" | "resume" | "stop") => void;
+  className?: string;
+};
+
+const GoalControlIcons: React.FC<GoalControlIconsProps> = ({
+  goal,
+  onControl,
+  className,
+}) => {
+  const { canPause, canResume, canStop } = goalControlAvailability(goal);
+
+  return (
+    <Flex
+      align="center"
+      gap="1"
+      className={classNames(styles.goalControlIcons, className)}
+    >
+      <IconButton
+        aria-label="Pause goal"
+        icon={Pause}
+        size="sm"
+        variant="soft"
+        disabled={!canPause}
+        onClick={() => onControl("pause")}
+      />
+      <IconButton
+        aria-label="Resume goal"
+        icon={Play}
+        size="sm"
+        variant="soft"
+        disabled={!canResume}
+        onClick={() => onControl("resume")}
+      />
+      <IconButton
+        aria-label="Stop goal"
+        icon={Square}
+        size="sm"
+        variant="danger"
+        disabled={!canStop}
+        onClick={() => onControl("stop")}
+      />
+    </Flex>
+  );
+};
+
 type GoalSectionProps = {
   goal: GoalSnapshot | null;
   expanded: boolean;
@@ -333,30 +392,39 @@ const GoalSection: React.FC<GoalSectionProps> = ({
   return (
     <Collapsible.Root open={expanded} onOpenChange={onExpandedChange}>
       <Flex direction="column" gap="2" className={styles.goalBlock}>
-        <Collapsible.Trigger asChild>
-          <button className={styles.goalHeader} type="button">
-            <Flex align="center" gap="2" className={styles.goalHeaderContent}>
-              <Icon icon={Target} size="sm" tone="accent" />
-              <Text size="1" weight="medium" className={styles.goalTitle}>
-                Goal
-              </Text>
-              {goal ? (
-                <Badge
-                  tone={goalStatusTone(goal.status)}
-                  size="xs"
-                  variant="soft"
-                >
-                  {GOAL_STATUS_LABELS[goal.status]}
-                </Badge>
-              ) : (
-                <Badge tone="muted" size="xs" variant="soft">
-                  Not set
-                </Badge>
-              )}
-            </Flex>
-            <Chevron open={expanded} />
-          </button>
-        </Collapsible.Trigger>
+        <Flex align="center" className={styles.goalHeaderRow}>
+          <Collapsible.Trigger asChild>
+            <button className={styles.goalHeader} type="button">
+              <Flex align="center" gap="2" className={styles.goalHeaderContent}>
+                <Icon icon={Target} size="sm" tone="accent" />
+                <Text size="1" weight="medium" className={styles.goalTitle}>
+                  Goal
+                </Text>
+                {goal ? (
+                  <Badge
+                    tone={goalStatusTone(goal.status)}
+                    size="xs"
+                    variant="soft"
+                  >
+                    {GOAL_STATUS_LABELS[goal.status]}
+                  </Badge>
+                ) : (
+                  <Badge tone="muted" size="xs" variant="soft">
+                    Not set
+                  </Badge>
+                )}
+              </Flex>
+              <Chevron open={expanded} />
+            </button>
+          </Collapsible.Trigger>
+          {goal && !expanded ? (
+            <GoalControlIcons
+              goal={goal}
+              onControl={onControl}
+              className={styles.goalHeaderRowControls}
+            />
+          ) : null}
+        </Flex>
 
         <Collapsible.Content>
           <Flex direction="column" gap="3" className={styles.goalBody}>
@@ -481,9 +549,7 @@ type GoalControlsProps = {
 };
 
 const GoalControls: React.FC<GoalControlsProps> = ({ goal, onControl }) => {
-  const canPause = goal.active && goal.status !== "paused";
-  const canResume = goal.status === "paused" || !goal.active;
-  const canStop = goal.status !== "stopped" && goal.status !== "completed";
+  const { canPause, canResume, canStop } = goalControlAvailability(goal);
 
   return (
     <Flex align="center" gap="2" wrap="wrap" className={styles.goalControls}>
@@ -536,7 +602,7 @@ const GoalAttempts: React.FC<GoalAttemptsProps> = ({ attempts }) => {
       <Text size="1" weight="medium">
         Verifier attempts
       </Text>
-      <Flex direction="column" gap="2">
+      <Flex direction="column" gap="2" className={styles.attemptList}>
         {attempts.map((attempt) => (
           <div
             className={styles.attemptCard}
@@ -707,72 +773,85 @@ export const TaskProgressWidget: React.FC = () => {
   return (
     <Box className={styles.widget}>
       <Collapsible.Root open={isExpanded} onOpenChange={handleOpenChange}>
-        <Collapsible.Trigger asChild>
-          <button className={styles.header} type="button">
-            <Flex align="center" gap="3" className={styles.headerInner}>
-              <Flex align="center" gap="2" className={styles.headerMain}>
-                {!isExpanded && hasGoal && goal ? (
-                  <GoalIndicator goal={goal} />
-                ) : null}
+        <Flex align="center" className={styles.headerRow}>
+          <Collapsible.Trigger asChild>
+            <button className={styles.header} type="button">
+              <Flex align="center" gap="3" className={styles.headerInner}>
+                <Flex align="center" gap="2" className={styles.headerMain}>
+                  {!isExpanded && hasGoal && goal ? (
+                    <GoalIndicator goal={goal} />
+                  ) : null}
 
-                {!isExpanded && hasTasks ? (
-                  <>
-                    <Flex gap="1" align="center">
-                      {tasks.map((task) => (
-                        <StatusIcon
-                          key={task.id}
-                          status={task.status}
-                          isStreaming={
-                            task.status === "in_progress" && isStreaming
-                          }
-                        />
-                      ))}
-                    </Flex>
+                  {!isExpanded && hasTasks ? (
+                    <>
+                      <Flex gap="1" align="center">
+                        {tasks.map((task) => (
+                          <StatusIcon
+                            key={task.id}
+                            status={task.status}
+                            isStreaming={
+                              task.status === "in_progress" && isStreaming
+                            }
+                          />
+                        ))}
+                      </Flex>
 
-                    <CircularProgress done={done} total={total} />
+                      <CircularProgress done={done} total={total} />
 
-                    {activeTitle ? (
-                      <Text size="1" color="gray" className={styles.activeHint}>
-                        {activeTitle}
-                      </Text>
-                    ) : null}
-                  </>
-                ) : null}
+                      {activeTitle ? (
+                        <Text
+                          size="1"
+                          color="gray"
+                          className={styles.activeHint}
+                        >
+                          {activeTitle}
+                        </Text>
+                      ) : null}
+                    </>
+                  ) : null}
 
-                {!isExpanded && isFreshGoalOpportunity ? (
-                  <Flex
-                    align="center"
-                    gap="2"
-                    className={styles.goalAffordance}
-                  >
-                    <Icon icon={Target} size="sm" tone="accent" />
-                    <Text
-                      size="1"
-                      weight="medium"
-                      className={styles.goalAffordanceText}
+                  {!isExpanded && isFreshGoalOpportunity ? (
+                    <Flex
+                      align="center"
+                      gap="2"
+                      className={styles.goalAffordance}
                     >
-                      Set a goal
+                      <Icon icon={Target} size="sm" tone="accent" />
+                      <Text
+                        size="1"
+                        weight="medium"
+                        className={styles.goalAffordanceText}
+                      >
+                        Set a goal
+                      </Text>
+                    </Flex>
+                  ) : null}
+
+                  {!isExpanded && isTasksCleared ? (
+                    <Text size="1" color="gray">
+                      Tasks cleared
                     </Text>
-                  </Flex>
-                ) : null}
+                  ) : null}
 
-                {!isExpanded && isTasksCleared ? (
-                  <Text size="1" color="gray">
-                    Tasks cleared
-                  </Text>
-                ) : null}
+                  {isExpanded ? (
+                    <Text size="1" weight="medium">
+                      Task Progress
+                    </Text>
+                  ) : null}
+                </Flex>
 
-                {isExpanded ? (
-                  <Text size="1" weight="medium">
-                    Task Progress
-                  </Text>
-                ) : null}
+                <Chevron open={isExpanded} />
               </Flex>
-
-              <Chevron open={isExpanded} />
-            </Flex>
-          </button>
-        </Collapsible.Trigger>
+            </button>
+          </Collapsible.Trigger>
+          {!isExpanded && hasGoal && goal ? (
+            <GoalControlIcons
+              goal={goal}
+              onControl={handleGoalControl}
+              className={styles.headerRowControls}
+            />
+          ) : null}
+        </Flex>
 
         <Collapsible.Content>
           <Flex direction="column" gap="3" className={styles.content}>

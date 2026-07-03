@@ -412,4 +412,50 @@ describe("TaskProgressWidget goal projection", () => {
       true,
     );
   });
+
+  test("collapsed widget keeps goal controls clickable without expanding", async () => {
+    const commands = captureCommands();
+    const { user } = renderWidget(makeRuntime({ goal: makeGoal() }));
+
+    expect(screen.getByText("Goal set")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Pause goal" }));
+
+    await waitFor(() => expect(commands).toHaveLength(1));
+    expect(commands[0]).toMatchObject({
+      type: "goal_control",
+      action: "pause",
+    });
+    expect(screen.queryByText("Task Progress")).not.toBeInTheDocument();
+  });
+
+  test("collapsed goal section keeps controls clickable without expanding", async () => {
+    const commands = captureCommands();
+    const { user } = renderWidget(
+      makeRuntime({
+        goal: makeGoal({ active: false, status: "paused" }),
+        expanded: true,
+        goalExpanded: false,
+      }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Resume goal" }));
+
+    await waitFor(() => expect(commands).toHaveLength(1));
+    expect(commands[0]).toMatchObject({
+      type: "goal_control",
+      action: "resume",
+    });
+    expect(screen.queryByLabelText("Goal text")).not.toBeInTheDocument();
+  });
+
+  test("collapsed goal controls reflect goal status availability", () => {
+    renderWidget(
+      makeRuntime({ goal: makeGoal({ active: false, status: "stopped" }) }),
+    );
+
+    expect(screen.getByRole("button", { name: "Pause goal" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Stop goal" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Resume goal" })).toBeEnabled();
+  });
 });

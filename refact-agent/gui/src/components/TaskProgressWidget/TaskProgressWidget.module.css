@@ -5,6 +5,7 @@
 .header {
   width: 100%;
   min-width: 0;
+  flex: 1 1 auto;
   border: 0;
   background: transparent;
   color: inherit;
@@ -29,10 +30,24 @@
 
 .headerInner,
 .headerMain,
+.headerRow,
+.goalHeaderRow,
 .goalHeaderContent,
 .goalAffordance,
 .goalIndicator {
   min-width: 0;
+}
+
+.goalControlIcons {
+  flex-shrink: 0;
+}
+
+.headerRowControls {
+  padding-right: var(--rf-space-3);
+}
+
+.goalHeaderRowControls {
+  padding-right: var(--rf-space-2);
 }
 
 .headerMain {
@@ -56,7 +71,10 @@
 }
 
 .content {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
   padding: 0 var(--rf-space-3) var(--rf-space-3);
+  max-height: min(400px, 50vh);
+  overflow-y: auto;
   transform-origin: top;
   animation: slideDown var(--rf-dur-med) var(--rf-ease-entrance);
 }
@@ -71,6 +89,7 @@
   display: flex;
   width: 100%;
   min-width: 0;
+  flex: 1 1 auto;
   align-items: center;
   justify-content: space-between;
   gap: var(--rf-space-2);
@@ -173,6 +192,13 @@
   min-width: 0;
 }
 
+.attemptList {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
+  min-width: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
 .attemptCard {
   display: flex;
   min-width: 0;
@@ -202,10 +228,13 @@
 }
 
 .eventList {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-1);
+  max-height: 180px;
+  overflow-y: auto;
 }
 
 .eventRow {

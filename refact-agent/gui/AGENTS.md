@@ -168,7 +168,7 @@ All generate hooks (`useGetCapsQuery`, etc.). Dynamic base URL from Redux state.
 | tasksApi                        | Tasks CRUD                                                             |
 | chatModesApi, customizationApi  | Agent modes/customization                                              |
 | knowledgeApi, knowledgeGraphApi | Knowledge/memory                                                       |
-| ragStatusApi                    | `/v1/rag-status`                                                      |
+| ragStatusApi                    | `/v1/rag-status`                                                       |
 
 `RagStatus` includes `codegraph: { counts: { nodes, edges, files, fts_docs }, queued, state, error } | null`, `codegraph_alive`, and `codegraph_error`; CodeGraph states are `turned_off`, `indexing`, `working`, and `error`. Keep `services/refact/types.ts`, `features/Knowledge/knowledgeSlice.ts`, and `components/ConnectionStatus/RagStatusIndicators.tsx` in sync with the backend shape.
 
@@ -237,6 +237,8 @@ PlanBanner renders synthesized plan text from the latest hidden base `plan` role
 ### TaskProgressWidget goal pattern (src/components/TaskProgressWidget/)
 
 TaskProgressWidget is the GUI owner for goal display and controls. It reads `thread.goal` with `selectGoalById` and never scans hidden `goal`, `goal_delta`, or `goal_pursuit` messages directly. The widget shows the goal content, status, turn/token/no-progress counters, verifier attempts, pursuit events, and ownership transfer hints from `GoalSnapshot`. Goal budget hard limits are optional and unlimited by default; absent, `null`, or `0` limits render as plain usage plus `No budget limits` rather than a ratio.
+
+Pause/resume/stop stay reachable while collapsed: compact icon controls (`IconButton`, labels `Pause goal` / `Resume goal` / `Stop goal`) render on the right side of the collapsed widget header and the collapsed goal header as siblings of the collapse trigger — never nested inside the trigger button. Exactly one control set is visible at a time (collapsed widget header, collapsed goal header, or the labeled buttons in the expanded goal body), and all share one availability rule (`goalControlAvailability`). Verifier attempts, goal events, and the expanded widget body are bounded scroll regions (`scrollbarThin` + `max-height`) so long histories scroll instead of clipping inside the dock's `overflow: hidden`.
 
 Goal controls dispatch chat commands through `useChatActions`: `setGoal(content, budget?)` sends `set_goal` with optional user-set hard limits, `setGoalBudget(budget)` sends `set_goal_budget` to set or clear limits on an existing goal, `updateGoal(note)` sends `update_goal`, and `controlGoal(action)` sends `goal_control` with `pause`, `resume`, or `stop`. Blank budget editor inputs are unlimited and must omit hard-limit keys. The reducer updates `thread.goal` from `Snapshot.goal`; `runtime_updated` mirrors only mutate the runtime fields on an existing projection (`goal_active`, `goal_status`, `goal_turns_used`, `goal_tokens_used`, `goal_no_progress_turns`). Hidden `event(goal_delta)` and `event(goal_pursuit)` remain out of EventLog and the normal transcript.
 
