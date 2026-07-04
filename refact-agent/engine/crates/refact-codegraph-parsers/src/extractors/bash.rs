@@ -180,10 +180,9 @@ echo hi
 $RUNNER
 ";
         let (_symbols, refs) = extract(src);
-        assert!(
-            refs.iter()
-                .any(|r| r.name == "foo" && r.from == RawRef::FILE_SCOPE)
-        );
+        assert!(refs
+            .iter()
+            .any(|r| r.name == "foo" && r.from == RawRef::FILE_SCOPE));
         assert!(!refs.iter().any(|r| r.name == "echo"), "got {refs:?}");
         assert!(
             !refs.iter().any(|r| r.name == "./script.sh"),

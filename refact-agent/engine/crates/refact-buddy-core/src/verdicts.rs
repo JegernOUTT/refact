@@ -196,7 +196,11 @@ mod tests {
             .all(|rule| !rule.starts_with("memory_ops:batch")));
         for class in crate::memory_lifecycle_model::MEMORY_BATCH_KEYS {
             let expected = format!("{}:{}", MEMORY_BATCH_PREFIX, class);
-            assert!(state.muted_rules.contains(&expected), "missing {}", expected);
+            assert!(
+                state.muted_rules.contains(&expected),
+                "missing {}",
+                expected
+            );
         }
         assert!(state.muted_rules.contains(&"task_health:stuck".to_string()));
 

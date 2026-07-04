@@ -157,7 +157,8 @@ fn compact_agents_spawn_payload(payload: &serde_json::Value) -> String {
     {
         compact.insert("edited_files_count".to_string(), serde_json::json!(count));
     }
-    serde_json::to_string(&serde_json::Value::Object(compact)).unwrap_or_else(|_| "null".to_string())
+    serde_json::to_string(&serde_json::Value::Object(compact))
+        .unwrap_or_else(|_| "null".to_string())
 }
 
 pub fn render_plan_message(msg: &ChatMessage) -> Option<String> {

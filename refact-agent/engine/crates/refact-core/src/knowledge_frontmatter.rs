@@ -75,7 +75,11 @@ pub struct KnowledgeFrontmatter {
     pub signal_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_observed: Option<String>,
-    #[serde(flatten, default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[serde(
+        flatten,
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty"
+    )]
     pub extra: BTreeMap<String, serde_yaml::Value>,
 }
 
@@ -363,6 +367,9 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(frontmatter.to_yaml(), "---\nid: \"id-1\"\ntitle: \"Title\"\ntags: [\"buddy\"]\n---");
+        assert_eq!(
+            frontmatter.to_yaml(),
+            "---\nid: \"id-1\"\ntitle: \"Title\"\ntags: [\"buddy\"]\n---"
+        );
     }
 }
