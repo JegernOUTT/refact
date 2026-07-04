@@ -2001,6 +2001,7 @@ mod tests {
                 "git_risk".to_string(),
                 "code_why".to_string(),
                 "code_duplication".to_string(),
+                "dead_code".to_string(),
                 "security_scan".to_string(),
                 "pr_blast".to_string(),
                 "code_map".to_string(),
