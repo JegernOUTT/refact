@@ -3,7 +3,10 @@ import { BarChart3, FileWarning, Percent, ShieldAlert } from "lucide-react";
 
 import { Badge, DataTable, Surface } from "../../../components/ui";
 import { useGetCodeIntelDeadCodeQuery } from "../../../services/refact/codeIntel";
-import type { CodeIntelDeadSymbol } from "../../../services/refact/types";
+import type {
+  CodeIntelDeadCodeReport,
+  CodeIntelDeadSymbol,
+} from "../../../services/refact/types";
 import { StatCard } from "../../StatsDashboard/components/StatCard";
 import { StatSection } from "../../StatsDashboard/components/StatSection";
 import {
@@ -21,8 +24,8 @@ import styles from "./CodeIntelStatsTabs.module.css";
 import { ChartCard, CodeIntelTabScaffold, MetaText, PathText } from "./shared";
 import { clampRatio } from "./tabUtils";
 
-function isEmpty(symbols: CodeIntelDeadSymbol[]): boolean {
-  return symbols.length === 0;
+function isEmpty(report: CodeIntelDeadCodeReport): boolean {
+  return report.entries.length === 0;
 }
 
 function averageConfidence(symbols: CodeIntelDeadSymbol[]): number {
@@ -104,7 +107,8 @@ export function DeadCodeTab() {
       isEmpty={isEmpty}
       readinessKey="dead-code"
     >
-      {(symbols) => {
+      {(report) => {
+        const symbols = report.entries;
         const sorted = [...symbols].sort((a, b) =>
           b.confidence === a.confidence
             ? a.path.localeCompare(b.path)

@@ -110,18 +110,6 @@ struct CommunityResponse {
     index_state: crate::tools::tool_codegraph::PrBlastIndexState,
 }
 
-#[derive(Serialize)]
-struct DeadCodeResponse {
-    name: String,
-    path: String,
-    line: usize,
-    reason: String,
-    confidence: f64,
-    git_recency: String,
-    incoming_edges: usize,
-    index_state: crate::tools::tool_codegraph::DeadCodeIndexState,
-}
-
 #[derive(Deserialize)]
 pub struct DeadCodeQuery {
     path: Option<String>,
@@ -570,18 +558,10 @@ fn duplication_pct_for_scope(
         return 0.0;
     }
     let duplicated_tokens = analysis
-        .clones
+        .duplicated_tokens_by_path
         .iter()
-        .map(|clone| {
-            let mut tokens = 0usize;
-            if matched_paths.contains(clone.file_a.as_str()) {
-                tokens = tokens.saturating_add(clone.token_len);
-            }
-            if matched_paths.contains(clone.file_b.as_str()) {
-                tokens = tokens.saturating_add(clone.token_len);
-            }
-            tokens
-        })
+        .filter(|(path, _)| matched_paths.contains(path.as_str()))
+        .map(|(_, tokens)| *tokens)
         .sum::<usize>()
         .min(total_tokens);
     duplicated_tokens as f64 / total_tokens as f64
@@ -769,24 +749,7 @@ pub async fn handle_v1_code_intel_dead_code(
     )
     .await
     .map_err(store_error)?;
-    // Response stays a bare array for GUI compatibility (additive per-entry fields
-    // only); the object shape {entries, index_state, ...} is the tool's rendering.
-    let index_state = report.index_state.clone();
-    let response = report
-        .entries
-        .into_iter()
-        .map(|dead| DeadCodeResponse {
-            name: dead.name,
-            path: dead.path,
-            line: dead.line,
-            reason: dead.reason,
-            confidence: dead.confidence,
-            git_recency: dead.git_recency,
-            incoming_edges: dead.incoming_edges,
-            index_state: index_state.clone(),
-        })
-        .collect::<Vec<_>>();
-    json_response(&response)
+    json_response(&report)
 }
 
 pub async fn handle_v1_code_intel_health(
@@ -1182,10 +1145,11 @@ pub async fn handle_v1_code_intel_duplication(
                 ),
             })
             .collect::<Vec<_>>();
-        let file_dup_tokens = file_clones
-            .iter()
-            .map(|clone| clone.token_len)
-            .sum::<usize>();
+        let file_dup_tokens = analysis
+            .duplicated_tokens_by_path
+            .get(&path)
+            .copied()
+            .unwrap_or(0);
         let file_total = analysis
             .tokens_by_path
             .get(&path)
@@ -1573,6 +1537,34 @@ mod tests {
         make_refact_http_server(app)
     }
 
+    async fn router_with_overlapping_duplication_codegraph() -> axum::Router {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        let a = co_change_clone_source("shared_alpha", "shared-a");
+        let b = co_change_clone_source("shared_beta", "shared-b");
+        let c = co_change_clone_source("shared_gamma", "shared-c");
+        codegraph.index_file("src/a.rs", &a, "rust").await.unwrap();
+        codegraph.index_file("src/b.rs", &b, "rust").await.unwrap();
+        codegraph.index_file("src/c.rs", &c, "rust").await.unwrap();
+        *gcx.codegraph.lock().await = Some(codegraph);
+        let app = AppState::from_gcx(gcx).await;
+        make_refact_http_server(app)
+    }
+
+    async fn router_with_empty_dead_code_partial_index() -> axum::Router {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        codegraph
+            .index_file("src/lib.rs", "fn main() {}\n", "rust")
+            .await
+            .unwrap();
+        codegraph.connect_usages().await.unwrap();
+        codegraph.enqueue_files(&["src/pending.rs".to_string()]);
+        *gcx.codegraph.lock().await = Some(codegraph);
+        let app = AppState::from_gcx(gcx).await;
+        make_refact_http_server(app)
+    }
+
     async fn router_with_git_risk_codegraph() -> (axum::Router, tempfile::TempDir) {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let dir = tempfile::tempdir().unwrap();
@@ -1803,11 +1795,27 @@ mod tests {
         assert!(communities.iter().all(|entry| {
             entry["index_state"]["queued"] == 1 && entry["index_state"]["cross_file_ready"] == false
         }));
-        let dead_code = dead_code.as_array().unwrap();
-        assert!(!dead_code.is_empty());
-        assert!(dead_code.iter().all(|entry| {
-            entry["index_state"]["queued"] == 1 && entry["index_state"]["cross_file_ready"] == false
-        }));
+        assert!(!dead_code["entries"].as_array().unwrap().is_empty());
+        assert_eq!(dead_code["index_state"]["queued"], 1);
+        assert_eq!(dead_code["index_state"]["cross_file_ready"], false);
+        assert_eq!(dead_code["partial"], true);
+    }
+
+    #[tokio::test]
+    async fn code_intel_dead_code_empty_response_keeps_index_state() {
+        let router = router_with_empty_dead_code_partial_index().await;
+
+        let (status, json) = get_json(router, "/v1/code-intel/dead-code").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["entries"].as_array().unwrap().len(), 0);
+        assert_eq!(json["index_state"]["queued"], 1);
+        assert_eq!(json["index_state"]["cross_file_ready"], false);
+        assert_eq!(json["partial"], true);
+        assert!(json["warning"]
+            .as_str()
+            .unwrap()
+            .contains("index still building"));
     }
 
     #[tokio::test]
@@ -1899,6 +1907,28 @@ mod tests {
         assert_eq!(
             filtered["aggregate"]["duplication_percent"].as_f64(),
             Some(0.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn duplication_filtered_pct_uses_union_token_counts() {
+        let router = router_with_overlapping_duplication_codegraph().await;
+
+        let (status, json) =
+            get_json(router, "/v1/code-intel/duplication?path=src/a.rs&limit=10").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["aggregate"]["file_count"], 1);
+        assert!(json["aggregate"]["clone_pair_count"].as_u64().unwrap() >= 2);
+        let filtered_pct = json["aggregate"]["duplication_pct"].as_f64().unwrap();
+        assert!(
+            filtered_pct > 0.9 && filtered_pct <= 1.0,
+            "filtered pct out of range: {filtered_pct}"
+        );
+        let filtered_percent = json["aggregate"]["duplication_percent"].as_f64().unwrap();
+        assert!(
+            (filtered_percent - filtered_pct * 100.0).abs() < 1e-9,
+            "percent must mirror pct: {filtered_percent} vs {filtered_pct}"
         );
     }
 

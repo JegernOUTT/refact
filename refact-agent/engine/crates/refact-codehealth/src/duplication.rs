@@ -21,7 +21,9 @@ pub struct Token {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClonePair {
     pub line_a: usize,
+    pub a_end_line: usize,
     pub line_b: usize,
+    pub b_end_line: usize,
     pub token_len: usize,
 }
 
@@ -147,7 +149,9 @@ pub fn detect_clones(lang: &str, text: &str) -> Vec<ClonePair> {
         .into_iter()
         .map(|m| ClonePair {
             line_a: tokens[m.start_a].line,
+            a_end_line: tokens[m.start_a + m.token_len - 1].line,
             line_b: tokens[m.start_b].line,
+            b_end_line: tokens[m.start_b + m.token_len - 1].line,
             token_len: m.token_len,
         })
         .collect()
@@ -594,11 +598,40 @@ pub fn cross_file_duplication_pct(files: &[(String, String, String)]) -> f64 {
         return 0.0;
     }
 
+    let duplicated = cross_file_duplicated_token_bitmaps(&tokenized);
+
+    let duplicated_count: usize = duplicated
+        .into_iter()
+        .map(|file| file.into_iter().filter(|is_dup| *is_dup).count())
+        .sum();
+    duplicated_count as f64 / total_tokens as f64
+}
+
+pub fn per_file_duplicated_token_counts(
+    files: &[(String, String, String)],
+) -> HashMap<String, usize> {
+    let tokenized: Vec<(&str, Vec<Token>)> = files
+        .iter()
+        .map(|(path, lang, text)| (path.as_str(), tokenize(lang, text)))
+        .collect();
+    let duplicated = cross_file_duplicated_token_bitmaps(&tokenized);
+    let mut counts = HashMap::new();
+    for ((path, _), duplicated) in tokenized.iter().zip(duplicated) {
+        let duplicated_count = duplicated.into_iter().filter(|is_dup| *is_dup).count();
+        counts
+            .entry((*path).to_string())
+            .and_modify(|count| *count += duplicated_count)
+            .or_insert(duplicated_count);
+    }
+    counts
+}
+
+fn cross_file_duplicated_token_bitmaps(tokenized: &[(&str, Vec<Token>)]) -> Vec<Vec<bool>> {
     let mut duplicated: Vec<Vec<bool>> = tokenized
         .iter()
         .map(|(_, tokens)| vec![false; tokens.len()])
         .collect();
-    for m in detect_cross_file_clone_matches(&tokenized) {
+    for m in detect_cross_file_clone_matches(tokenized) {
         for idx in m.start_a..(m.start_a + m.token_len).min(duplicated[m.file_a].len()) {
             duplicated[m.file_a][idx] = true;
         }
@@ -606,12 +639,7 @@ pub fn cross_file_duplication_pct(files: &[(String, String, String)]) -> f64 {
             duplicated[m.file_b][idx] = true;
         }
     }
-
-    let duplicated_count: usize = duplicated
-        .into_iter()
-        .map(|file| file.into_iter().filter(|is_dup| *is_dup).count())
-        .sum();
-    duplicated_count as f64 / total_tokens as f64
+    duplicated
 }
 
 pub fn dry_violation(lang: &str, text: &str) -> bool {
@@ -775,6 +803,9 @@ fn {name}({param}: i32) -> i32 {{
                 .any(|clone| clone.token_len >= MIN_CLONE_TOKENS),
             "got {clones:?}"
         );
+        assert!(clones
+            .iter()
+            .all(|clone| { clone.a_end_line >= clone.line_a && clone.b_end_line >= clone.line_b }));
         assert!(duplication_pct("rust", &src) > 0.0);
     }
 
@@ -850,6 +881,31 @@ fn {name}({param}: i32) -> i32 {{
                 && clone.token_len >= MIN_CLONE_TOKENS),
             "got {clones:?}"
         );
+        assert_eq!(cross_file_duplication_pct(&files), 1.0);
+    }
+
+    #[test]
+    fn per_file_duplicated_tokens_count_overlapping_regions_once() {
+        let src_a = cross_file_rust_source("compute_alpha", "input");
+        let src_b = cross_file_rust_source("compute_beta", "value");
+        let src_c = cross_file_rust_source("compute_gamma", "item");
+        let files = vec![
+            ("a.rs".to_string(), "rust".to_string(), src_a.clone()),
+            ("b.rs".to_string(), "rust".to_string(), src_b),
+            ("c.rs".to_string(), "rust".to_string(), src_c),
+        ];
+        let clones = detect_cross_file_clones(&files);
+        let a_pair_token_sum = clones
+            .iter()
+            .filter(|clone| clone.file_a == "a.rs" || clone.file_b == "a.rs")
+            .map(|clone| clone.token_len)
+            .sum::<usize>();
+        let a_total = tokenize("rust", &src_a).len();
+
+        let counts = per_file_duplicated_token_counts(&files);
+
+        assert!(a_pair_token_sum > a_total, "got clones {clones:?}");
+        assert_eq!(counts.get("a.rs").copied(), Some(a_total));
         assert_eq!(cross_file_duplication_pct(&files), 1.0);
     }
 

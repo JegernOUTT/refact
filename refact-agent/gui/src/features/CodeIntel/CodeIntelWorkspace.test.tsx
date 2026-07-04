@@ -7,6 +7,7 @@ import { useAppSelector } from "../../hooks";
 import type {
   BlastReport,
   CodeIntelCommunity,
+  CodeIntelDeadCodeReport,
   CodeIntelDeadSymbol,
   CodeIntelDuplication,
   CodeIntelGitRisk,
@@ -45,7 +46,7 @@ const mockQueryResults = vi.hoisted(() => ({
     isLoading: false,
   },
   deadCode: {
-    data: undefined as CodeIntelResponse<CodeIntelDeadSymbol[]> | undefined,
+    data: undefined as CodeIntelResponse<CodeIntelDeadCodeReport> | undefined,
     error: undefined as unknown,
     isFetching: false,
     isLoading: false,
@@ -262,15 +263,21 @@ const deadCodeFixture: CodeIntelDeadSymbol[] = [
     line: 42,
     git_recency: "last touched 400d ago; churn 1 in mined window",
     incoming_edges: 0,
-    index_state: {
-      queued: 0,
-      dirty_paths: 0,
-      pending_refs: 0,
-      cross_file_edges: 1,
-      cross_file_ready: true,
-    },
   },
 ];
+
+const deadCodeReportFixture: CodeIntelDeadCodeReport = {
+  entries: deadCodeFixture,
+  index_state: {
+    queued: 0,
+    dirty_paths: 0,
+    pending_refs: 0,
+    cross_file_edges: 1,
+    cross_file_ready: true,
+  },
+  partial: false,
+  warning: null,
+};
 
 const healthFixture: CodeIntelHealth = {
   index_state: {
@@ -486,7 +493,7 @@ function resetMocks() {
     isLoading: false,
   };
   mockQueryResults.deadCode = {
-    data: deadCodeFixture,
+    data: deadCodeReportFixture,
     error: undefined,
     isFetching: false,
     isLoading: false,
@@ -621,6 +628,36 @@ describe("CodeIntelWorkspace", () => {
     rerender(<CodeIntelWorkspace host="web" backFromCodeIntel={vi.fn()} />);
 
     expect(screen.queryByText("Indexing")).not.toBeInTheDocument();
+  });
+
+  it("uses the dead-code envelope index state even when entries are empty", async () => {
+    mockQueryResults.deadCode = {
+      data: {
+        entries: [],
+        index_state: {
+          queued: 7,
+          dirty_paths: 2,
+          pending_refs: 3,
+          cross_file_edges: 0,
+          cross_file_ready: false,
+        },
+        partial: true,
+        warning: "index still building",
+      },
+      error: undefined,
+      isFetching: false,
+      isLoading: false,
+    };
+    const user = userEvent.setup();
+    renderWorkspace();
+
+    await user.click(screen.getByRole("tab", { name: "Dead Code" }));
+
+    expect(screen.getByText("No dead code candidates")).toBeInTheDocument();
+    expect(screen.getByText("Indexing")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Code graph is still indexing \(7 files queued\)/),
+    ).toBeInTheDocument();
   });
 
   it("switches across all nine tabs without undefined CodeIntel hooks", async () => {

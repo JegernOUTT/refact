@@ -67,6 +67,7 @@ pub(crate) struct CloneAnalysis {
     pub(crate) files: usize,
     pub(crate) text_by_path: HashMap<String, (String, String)>,
     pub(crate) tokens_by_path: HashMap<String, usize>,
+    pub(crate) duplicated_tokens_by_path: HashMap<String, usize>,
 }
 
 pub(crate) struct GitRiskFileAssembly {
@@ -489,6 +490,8 @@ pub(crate) async fn cached_cross_file_clones(
             .collect::<Vec<_>>();
         let clones = refact_codehealth::duplication::detect_cross_file_clones(&triples);
         let duplication_pct = refact_codehealth::duplication::cross_file_duplication_pct(&triples);
+        let duplicated_tokens_by_path =
+            refact_codehealth::duplication::per_file_duplicated_token_counts(&triples);
         let files = files_text.len();
         let text_by_path = files_text
             .into_iter()
@@ -513,6 +516,7 @@ pub(crate) async fn cached_cross_file_clones(
             files,
             text_by_path,
             tokens_by_path,
+            duplicated_tokens_by_path,
         });
 
         let mut cache = clone_analysis_cache().lock().await;
@@ -607,10 +611,10 @@ pub(crate) struct DeadCodeEntry {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct DeadCodeReport {
     pub(crate) entries: Vec<DeadCodeEntry>,
+    #[serde(skip)]
     pub(crate) total_candidates: usize,
     pub(crate) index_state: DeadCodeIndexState,
     pub(crate) partial: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) warning: Option<String>,
 }
 
@@ -1177,10 +1181,16 @@ fn health_dry_findings(
         .map(|clone| refact_codehealth::dry::DryClonePair {
             file_a: path.to_string(),
             a_start_line: clone.line_a,
-            a_line_count: clone.token_len.max(1),
+            a_line_count: clone
+                .a_end_line
+                .saturating_sub(clone.line_a)
+                .saturating_add(1),
             file_b: path.to_string(),
             b_start_line: clone.line_b,
-            b_line_count: clone.token_len.max(1),
+            b_line_count: clone
+                .b_end_line
+                .saturating_sub(clone.line_b)
+                .saturating_add(1),
             co_change_count: 0,
         })
         .collect();
@@ -2664,6 +2674,10 @@ const CODE_WHY_SOURCE_LIMIT: usize = 800;
 const CODE_WHY_MATCH_LIMIT: usize = 20;
 const CODE_WHY_RELATED_PER_MATCH: usize = 4;
 
+#[cfg(test)]
+static CODE_WHY_FILE_READ_ATTEMPTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodeWhySource {
     kind: String,
@@ -2882,6 +2896,8 @@ async fn file_code_why_sources(
     let mut sources = Vec::new();
     for candidate in candidates {
         let absolute = repo_path.join(&candidate.relative);
+        #[cfg(test)]
+        CODE_WHY_FILE_READ_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Ok(text) =
             crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx.clone(), &absolute)
                 .await
@@ -2900,6 +2916,15 @@ async fn file_code_why_sources(
         });
     }
     sources
+}
+
+#[cfg(test)]
+fn code_why_selected_candidate_count_before_reads(
+    repo_path: &Path,
+    git_sources: &[CodeWhySource],
+    limit: usize,
+) -> usize {
+    select_code_why_file_candidates(code_why_file_candidates(repo_path), git_sources, limit).len()
 }
 
 fn sort_code_why_sources(sources: &mut [CodeWhySource]) {
@@ -3328,7 +3353,11 @@ impl Tool for ToolCodeDuplication {
                     co_change_count: co_change(&c.file_a, &c.file_b),
                 })
                 .collect();
-            let file_dup_tokens: usize = file_clones.iter().map(|c| c.token_len).sum();
+            let file_dup_tokens = analysis
+                .duplicated_tokens_by_path
+                .get(path)
+                .copied()
+                .unwrap_or(0);
             let file_total = analysis
                 .tokens_by_path
                 .get(path)
@@ -5030,6 +5059,91 @@ mod tests {
             .any(|source| source.reference == "commit:799"));
     }
 
+    fn allow_all_privacy(gcx: &Arc<crate::global_context::GlobalContext>) {
+        let loaded_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60;
+        *gcx.privacy_settings.write().unwrap() = Arc::new(crate::privacy::PrivacySettings {
+            privacy_rules: crate::privacy::FilePrivacySettings {
+                only_send_to_servers_I_control: Vec::new(),
+                blocked: Vec::new(),
+            },
+            loaded_ts,
+        });
+    }
+
+    #[tokio::test]
+    async fn assemble_code_why_sources_bounds_file_reads_before_reading() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        allow_all_privacy(&gcx);
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_file(
+            &repo,
+            "src/a.rs",
+            "a\n",
+            "switch code why source selection because file reads need bounds",
+        );
+        std::fs::create_dir_all(dir.path().join("docs/adr")).unwrap();
+        for index in 0..(CODE_WHY_SOURCE_LIMIT + 20) {
+            std::fs::write(
+                dir.path().join(format!("docs/adr/{index:04}.md")),
+                format!("# ADR {index}\n\nDecision {index}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.path().join("CHANGELOG.md"), "# Changelog\n").unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let intel = refact_git_intel::mine_history(dir.path(), 20).unwrap();
+        let git_sources = git_code_why_sources(&intel);
+        let candidate_count = code_why_file_candidates(dir.path()).len();
+        let selected_before_reads = code_why_selected_candidate_count_before_reads(
+            dir.path(),
+            &git_sources,
+            CODE_WHY_SOURCE_LIMIT,
+        );
+        CODE_WHY_FILE_READ_ATTEMPTS.store(0, std::sync::atomic::Ordering::Relaxed);
+
+        let sources = assemble_code_why_sources(gcx, dir.path(), &intel).await;
+        let read_attempts = CODE_WHY_FILE_READ_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed);
+
+        assert!(candidate_count > CODE_WHY_SOURCE_LIMIT);
+        assert!(selected_before_reads <= CODE_WHY_SOURCE_LIMIT);
+        assert_eq!(read_attempts, selected_before_reads);
+        assert!(sources.len() <= CODE_WHY_SOURCE_LIMIT);
+        let first_kinds = sources
+            .iter()
+            .take(4)
+            .map(|source| source.kind.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(first_kinds, vec!["adr", "adr", "adr", "adr"]);
+        let first_non_adr = sources
+            .iter()
+            .position(|source| source.kind != "adr")
+            .unwrap_or(sources.len());
+        let changelog_pos = sources.iter().position(|source| source.kind == "changelog");
+        let pr_pos = sources.iter().position(|source| source.kind == "pr");
+        let commit_pos = sources.iter().position(|source| source.kind == "commit");
+        if let Some(changelog_pos) = changelog_pos {
+            assert!(sources[..changelog_pos]
+                .iter()
+                .all(|source| source.kind == "adr"));
+            if let Some(pr_pos) = pr_pos {
+                assert!(changelog_pos < pr_pos);
+            }
+            if let Some(commit_pos) = commit_pos {
+                assert!(changelog_pos < commit_pos);
+            }
+        } else {
+            assert_eq!(first_non_adr, sources.len());
+        }
+        if let (Some(pr_pos), Some(commit_pos)) = (pr_pos, commit_pos) {
+            assert!(pr_pos < commit_pos);
+        }
+    }
+
     #[test]
     fn cached_mine_history_incremental_reuse() {
         let dir = tempfile::tempdir().unwrap();
@@ -5546,6 +5660,35 @@ def orphan():
             body.push_str("    total\n}\n");
         }
         body
+    }
+
+    #[test]
+    fn dense_short_clone_does_not_trigger_health_dry_finding() {
+        let dense_line = (0..30)
+            .map(|_| "total = total + input; total = total - input;")
+            .collect::<Vec<_>>()
+            .join(" ");
+        let src = format!(
+            "fn alpha(input: i32) -> i32 {{ let mut total = input; {dense_line} total }}\nfn beta(value: i32) -> i32 {{ let mut total = value; {} total }}\n",
+            dense_line.replace("input", "value")
+        );
+        let clones = refact_codehealth::duplication::detect_clones("rust", &src);
+
+        assert!(
+            clones.iter().any(|clone| clone.token_len >= 60
+                && clone
+                    .a_end_line
+                    .saturating_sub(clone.line_a)
+                    .saturating_add(1)
+                    <= 3
+                && clone
+                    .b_end_line
+                    .saturating_sub(clone.line_b)
+                    .saturating_add(1)
+                    <= 3),
+            "expected dense short clone, got {clones:?}"
+        );
+        assert!(health_dry_findings("src/dense.rs", "rust", &src, 1.0).is_empty());
     }
 
     #[tokio::test]

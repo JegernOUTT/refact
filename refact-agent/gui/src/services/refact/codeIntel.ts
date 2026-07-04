@@ -5,7 +5,7 @@ import { buildApiUrlFromState } from "./apiUrl";
 import type {
   BlastReport,
   CodeIntelCommunity,
-  CodeIntelDeadSymbol,
+  CodeIntelDeadCodeReport,
   CodeIntelDuplication,
   CodeIntelGitRisk,
   CodeIntelGraph,
@@ -105,7 +105,7 @@ export const codeIntelApi = createApi({
       },
     }),
     getCodeIntelDeadCode: builder.query<
-      CodeIntelResponse<CodeIntelDeadSymbol[]>,
+      CodeIntelResponse<CodeIntelDeadCodeReport>,
       undefined
     >({
       queryFn: async (_args, api, _extraOptions, baseQuery) => {
@@ -114,7 +114,7 @@ export const codeIntelApi = createApi({
         const result = await baseQuery(url);
         if (result.error) return { error: result.error };
         return {
-          data: result.data as CodeIntelResponse<CodeIntelDeadSymbol[]>,
+          data: result.data as CodeIntelResponse<CodeIntelDeadCodeReport>,
         };
       },
     }),

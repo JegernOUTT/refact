@@ -1554,7 +1554,13 @@ export type CodeIntelDeadSymbol = {
   confidence: number;
   git_recency?: string;
   incoming_edges?: number;
-  index_state?: CodeIntelIndexState;
+};
+
+export type CodeIntelDeadCodeReport = {
+  entries: CodeIntelDeadSymbol[];
+  index_state: CodeIntelIndexState;
+  partial: boolean;
+  warning?: string | null;
 };
 
 export type CodeIntelCodeHealthSeverity = "Low" | "Medium" | "High" | "Critical";
