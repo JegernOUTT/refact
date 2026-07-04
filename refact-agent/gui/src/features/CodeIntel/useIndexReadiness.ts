@@ -6,7 +6,10 @@ import { indexStateFromResponse } from "./indexReadinessState";
 
 export function useReportIndexReadiness(key: string, response: unknown): void {
   const context = React.useContext(CodeIntelReadinessContext);
-  const state = React.useMemo(() => indexStateFromResponse(response), [response]);
+  const state = React.useMemo(
+    () => indexStateFromResponse(response),
+    [response],
+  );
 
   React.useEffect(() => {
     context?.report(key, state);

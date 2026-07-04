@@ -21,9 +21,7 @@ import {
   Tabs,
 } from "../../components/ui";
 import { PageWrapper } from "../../components/PageWrapper";
-import {
-  useGetCodeIntelOverviewQuery,
-} from "../../services/refact/codeIntel";
+import { useGetCodeIntelOverviewQuery } from "../../services/refact/codeIntel";
 import type {
   CodeIntelDetail,
   CodeIntelFileScoreEntry,
@@ -96,8 +94,8 @@ function IndexReadinessBanner() {
           Indexing
         </Badge>
         <span>
-          Code graph is still indexing ({formatNumber(state.queued)} files queued)
-          — results may be incomplete
+          Code graph is still indexing ({formatNumber(state.queued)} files
+          queued) — results may be incomplete
         </span>
       </div>
     </Surface>

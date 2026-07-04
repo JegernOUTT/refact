@@ -104,7 +104,10 @@ const impactColumns: DataTableColumn<ImpactRow>[] = [
     id: "kind",
     header: "Kind",
     cell: (row) => (
-      <Badge tone={row.kind === "structural" ? "warning" : "accent"} variant="soft">
+      <Badge
+        tone={row.kind === "structural" ? "warning" : "accent"}
+        variant="soft"
+      >
         {row.kind}
       </Badge>
     ),

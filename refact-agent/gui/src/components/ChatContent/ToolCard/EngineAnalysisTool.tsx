@@ -167,7 +167,9 @@ function formatScore(value: number): string {
   return value.toFixed(4);
 }
 
-function severityTone(severity: Severity): React.ComponentProps<typeof Badge>["tone"] {
+function severityTone(
+  severity: Severity,
+): React.ComponentProps<typeof Badge>["tone"] {
   if (severity === "Critical" || severity === "High") return "danger";
   if (severity === "Medium") return "warning";
   return "success";
@@ -205,7 +207,8 @@ function parseSecurityScan(content: string): SecurityScanPreview | null {
   }
 
   const samples: SecurityFindingPreview[] = [];
-  const findingRe = /^\s+.+?:(\d+) \[(Critical|High|Medium|Low)\] (.+?) — (.+)$/gm;
+  const findingRe =
+    /^\s+.+?:(\d+) \[(Critical|High|Medium|Low)\] (.+?) — (.+)$/gm;
   for (const match of content.matchAll(findingRe)) {
     samples.push({
       line: toInt(match[1]),
@@ -309,7 +312,9 @@ function parseDeadCode(content: string): DeadCodePreview | null {
       currentPath = pathMatch[1];
       continue;
     }
-    const entryMatch = line.match(/^\s+([\d.]+)\s+line\s+(\d+)\s+(.+?)\s+—\s+(.+)$/);
+    const entryMatch = line.match(
+      /^\s+([\d.]+)\s+line\s+(\d+)\s+(.+?)\s+—\s+(.+)$/,
+    );
     if (entryMatch) {
       entries.push({
         confidence: toFloat(entryMatch[1]),
@@ -330,7 +335,13 @@ function parseDeadCode(content: string): DeadCodePreview | null {
   };
 }
 
-function MetricCard({ label, value }: { label: string; value: React.ReactNode }) {
+function MetricCard({
+  label,
+  value,
+}: {
+  label: string;
+  value: React.ReactNode;
+}) {
   return (
     <div className={styles.metricCard}>
       <span className={styles.metricLabel}>{label}</span>
@@ -406,10 +417,19 @@ function PrBlastResult({ preview }: { preview: PrBlastPreview }) {
   return (
     <PreviewSection title="Blast-radius summary">
       <div className={styles.metricGrid}>
-        <MetricCard label="Changed" value={formatNumber(preview.changedCount)} />
+        <MetricCard
+          label="Changed"
+          value={formatNumber(preview.changedCount)}
+        />
         <MetricCard label="Direct" value={formatNumber(preview.directCount)} />
-        <MetricCard label="Transitive" value={formatNumber(preview.transitiveCount)} />
-        <MetricCard label="Impacted files" value={formatNumber(preview.impactedFiles)} />
+        <MetricCard
+          label="Transitive"
+          value={formatNumber(preview.transitiveCount)}
+        />
+        <MetricCard
+          label="Impacted files"
+          value={formatNumber(preview.impactedFiles)}
+        />
         <MetricCard label="Risk" value={formatScore(preview.riskScore)} />
       </div>
       <div className={styles.chipRow}>
@@ -452,7 +472,10 @@ function PrBlastResult({ preview }: { preview: PrBlastPreview }) {
       {preview.impacts.length > 0 ? (
         <ul className={styles.itemList}>
           {preview.impacts.slice(0, 8).map((impact, index) => (
-            <li className={styles.itemCard} key={`${impact.path}-${impact.symbol}-${index}`}>
+            <li
+              className={styles.itemCard}
+              key={`${impact.path}-${impact.symbol}-${index}`}
+            >
               <span className={styles.itemTitle}>{impact.symbol}</span>
               <span className={styles.itemMeta}>{impact.path}</span>
               <div className={styles.badgeRow}>
@@ -496,11 +519,17 @@ function DeadCodeResult({ preview }: { preview: DeadCodePreview }) {
       {preview.entries.length > 0 ? (
         <ul className={styles.itemList}>
           {preview.entries.slice(0, 8).map((entry, index) => (
-            <li className={styles.itemCard} key={`${entry.path}-${entry.name}-${index}`}>
+            <li
+              className={styles.itemCard}
+              key={`${entry.path}-${entry.name}-${index}`}
+            >
               <span className={styles.itemTitle}>{entry.name}</span>
               <span className={styles.itemMeta}>{entry.path}</span>
               <div className={styles.badgeRow}>
-                <Badge tone={entry.confidence >= 0.8 ? "danger" : "warning"} variant="soft">
+                <Badge
+                  tone={entry.confidence >= 0.8 ? "danger" : "warning"}
+                  variant="soft"
+                >
                   confidence {formatScore(entry.confidence)}
                 </Badge>
                 <Badge tone="muted" variant="outline">
@@ -540,7 +569,10 @@ function SpecializedResult({
   return null;
 }
 
-function specializedMeta(toolName: string, content: string | null): string | undefined {
+function specializedMeta(
+  toolName: string,
+  content: string | null,
+): string | undefined {
   if (!content) return undefined;
   if (toolName === "security_scan") {
     const preview = parseSecurityScan(content);
@@ -549,7 +581,9 @@ function specializedMeta(toolName: string, content: string | null): string | und
   if (toolName === "pr_blast") {
     const preview = parsePrBlast(content);
     if (!preview) return undefined;
-    return `${preview.impactedFiles} files · risk ${formatScore(preview.riskScore)}`;
+    return `${preview.impactedFiles} files · risk ${formatScore(
+      preview.riskScore,
+    )}`;
   }
   if (toolName === "dead_code") {
     const preview = parseDeadCode(content);

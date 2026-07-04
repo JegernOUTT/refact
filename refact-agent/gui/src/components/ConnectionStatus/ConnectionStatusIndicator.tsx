@@ -192,13 +192,19 @@ export const MiniStatusIndicator: React.FC<MiniStatusIndicatorProps> = ({
       <Tooltip.Trigger asChild>
         <button
           type="button"
-          className={`${styles.miniStatusButton} ${styles[`miniStatus-${status}`]}`}
+          className={`${styles.miniStatusButton} ${
+            styles[`miniStatus-${status}`]
+          }`}
           onClick={onRefresh}
           disabled={!onRefresh}
           aria-label={`${label} status: ${status}`}
         >
           <span className={styles.indicator}>
-            <Icon icon={icon} size="sm" className={miniStatusIconClass[status]} />
+            <Icon
+              icon={icon}
+              size="sm"
+              className={miniStatusIconClass[status]}
+            />
           </span>
         </button>
       </Tooltip.Trigger>

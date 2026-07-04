@@ -102,19 +102,19 @@ The UMD build exposes the same API as `window.RefactChat.render`.
 
 `render(element, config)` accepts a partial GUI `Config` object. Common fields:
 
-| Field                  | Purpose                                                            |
-| ---------------------- | ------------------------------------------------------------------ |
-| `host`                 | One of `web`, `ide`, `vscode`, or `jetbrains`                      |
-| `lspUrl`               | Base URL for the local `refact-lsp` HTTP API                       |
-| `lspPort`              | Local engine port when `lspUrl` is not provided                    |
-| `tabbed`               | Enables tab-style host behavior used by some IDE surfaces          |
-| `dev`                  | Enables development behavior while previewing another host mode    |
-| `themeProps`           | Radix theme options passed to the app theme wrapper                |
+| Field                  | Purpose                                                                                   |
+| ---------------------- | ----------------------------------------------------------------------------------------- |
+| `host`                 | One of `web`, `ide`, `vscode`, or `jetbrains`                                             |
+| `lspUrl`               | Base URL for the local `refact-lsp` HTTP API                                              |
+| `lspPort`              | Local engine port when `lspUrl` is not provided                                           |
+| `tabbed`               | Enables tab-style host behavior used by some IDE surfaces                                 |
+| `dev`                  | Enables development behavior while previewing another host mode                           |
+| `themeProps`           | Radix theme options passed to the app theme wrapper                                       |
 | `features`             | Optional feature switches for statistics, VecDB, CodeGraph, AST compatibility, and images |
-| `keyBindings`          | Host-provided key binding labels                                   |
-| `apiKey`               | Optional API key forwarded to API requests when a host requires it |
-| `shiftEnterToSubmit`   | Toggles chat submit behavior                                       |
-| `currentWorkspaceName` | Display name for the active workspace                              |
+| `keyBindings`          | Host-provided key binding labels                                                          |
+| `apiKey`               | Optional API key forwarded to API requests when a host requires it                        |
+| `shiftEnterToSubmit`   | Toggles chat submit behavior                                                              |
+| `currentWorkspaceName` | Display name for the active workspace                                                     |
 
 ## Host modes and event API
 
@@ -131,20 +131,20 @@ See `src/events/index.ts`, `src/events/setup.ts`, `src/hooks/useEventBusForIDE.t
 
 ## Architecture pointers
 
-| Path                          | Notes                                                      |
-| ----------------------------- | ---------------------------------------------------------- |
-| `src/lib/render/`             | Public render entry point                                  |
-| `src/app/`                    | Redux store, middleware, persistence configuration         |
-| `src/features/Chat/Thread/`   | Thread state, actions, selectors, reducers, and types      |
-| `src/services/refact/`        | HTTP API clients, chat commands, RagStatus, and SSE subscription code |
-| `src/components/ConnectionStatus/` | Engine connection plus CodeGraph/VecDB/AST mini status indicators |
-| `src/features/Knowledge/`     | Memory state plus VecDB/CodeGraph `RagStatus` projections   |
-| `src/components/ChatContent/` | Message, tool, diff, reasoning, and citation rendering     |
-| `src/components/ChatForm/`    | Prompt form, image attachments, and tool confirmation UI   |
-| `src/features/Providers/`     | BYOK/local provider setup UI                               |
-| `src/features/Integrations/`  | Integration setup and status UI                            |
-| `src/features/Tasks/`         | Task board UI                                              |
-| `src/events/`                 | Host integration event exports                             |
+| Path                               | Notes                                                                 |
+| ---------------------------------- | --------------------------------------------------------------------- |
+| `src/lib/render/`                  | Public render entry point                                             |
+| `src/app/`                         | Redux store, middleware, persistence configuration                    |
+| `src/features/Chat/Thread/`        | Thread state, actions, selectors, reducers, and types                 |
+| `src/services/refact/`             | HTTP API clients, chat commands, RagStatus, and SSE subscription code |
+| `src/components/ConnectionStatus/` | Engine connection plus CodeGraph/VecDB/AST mini status indicators     |
+| `src/features/Knowledge/`          | Memory state plus VecDB/CodeGraph `RagStatus` projections             |
+| `src/components/ChatContent/`      | Message, tool, diff, reasoning, and citation rendering                |
+| `src/components/ChatForm/`         | Prompt form, image attachments, and tool confirmation UI              |
+| `src/features/Providers/`          | BYOK/local provider setup UI                                          |
+| `src/features/Integrations/`       | Integration setup and status UI                                       |
+| `src/features/Tasks/`              | Task board UI                                                         |
+| `src/events/`                      | Host integration event exports                                        |
 
 ## Links
 

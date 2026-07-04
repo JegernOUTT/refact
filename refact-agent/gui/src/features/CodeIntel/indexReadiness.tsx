@@ -8,9 +8,9 @@ export function CodeIntelReadinessProvider({
 }: {
   children: React.ReactNode;
 }) {
-  const [states, setStates] = React.useState<Record<string, CodeIntelIndexState>>(
-    {},
-  );
+  const [states, setStates] = React.useState<
+    Record<string, CodeIntelIndexState>
+  >({});
   const report = React.useCallback(
     (key: string, state: CodeIntelIndexState | null) => {
       setStates((previous) => {
@@ -47,4 +47,3 @@ export function CodeIntelReadinessProvider({
     </CodeIntelReadinessContext.Provider>
   );
 }
-

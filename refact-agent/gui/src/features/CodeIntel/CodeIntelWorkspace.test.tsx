@@ -685,7 +685,9 @@ describe("CodeIntelWorkspace", () => {
     expect(screen.getByText("Health aggregate")).toBeInTheDocument();
     expect(screen.getByText("Worst files")).toBeInTheDocument();
     expect(screen.getAllByText("src/health.ts").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Long method health impact").length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText("Long method health impact").length,
+    ).toBeGreaterThan(0);
     expect(screen.getAllByText("-4.5 health").length).toBeGreaterThan(0);
     expect(mockQueryResults.healthArgs.at(-1)).toEqual({ limit: 25 });
 

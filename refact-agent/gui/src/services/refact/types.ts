@@ -1563,7 +1563,11 @@ export type CodeIntelDeadCodeReport = {
   warning?: string | null;
 };
 
-export type CodeIntelCodeHealthSeverity = "Low" | "Medium" | "High" | "Critical";
+export type CodeIntelCodeHealthSeverity =
+  | "Low"
+  | "Medium"
+  | "High"
+  | "Critical";
 
 export type CodeIntelCodeHealthDimension =
   | "Defect"

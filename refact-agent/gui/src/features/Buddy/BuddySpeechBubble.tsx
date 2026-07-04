@@ -185,7 +185,9 @@ export const BuddySpeechBubble: React.FC<BuddySpeechBubbleProps> = ({
               ))}
             </div>
           ) : null}
-          {controlError ? <span title={controlError}>{controlError}</span> : null}
+          {controlError ? (
+            <span title={controlError}>{controlError}</span>
+          ) : null}
         </div>
       </div>
     </div>

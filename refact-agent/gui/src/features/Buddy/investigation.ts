@@ -97,9 +97,7 @@ function formatLiteralBlock(text: string): string {
   return lines.map((line) => `│ ${line}`).join("\n");
 }
 
-function sanitizeGithubSlugFragment(
-  value: string | undefined,
-): string | null {
+function sanitizeGithubSlugFragment(value: string | undefined): string | null {
   const candidate = value?.trim() ?? "";
   if (!candidate || !GITHUB_SLUG_FRAGMENT_PATTERN.test(candidate)) return null;
   return candidate;

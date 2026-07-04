@@ -414,7 +414,10 @@ function runtimeEventExpiryMs(event: BuddyRuntimeEvent): number | null {
 
   const explicitExpiryMs =
     eventWithHints.expires_ms ?? eventWithHints.expiresMs ?? null;
-  if (typeof explicitExpiryMs === "number" && Number.isFinite(explicitExpiryMs)) {
+  if (
+    typeof explicitExpiryMs === "number" &&
+    Number.isFinite(explicitExpiryMs)
+  ) {
     return explicitExpiryMs;
   }
 
@@ -424,7 +427,10 @@ function runtimeEventExpiryMs(event: BuddyRuntimeEvent): number | null {
   return createdAtMs + event.ttl_ms;
 }
 
-function isRuntimeEventExpired(event: BuddyRuntimeEvent, nowMs: number): boolean {
+function isRuntimeEventExpired(
+  event: BuddyRuntimeEvent,
+  nowMs: number,
+): boolean {
   if (!Number.isFinite(nowMs)) return true;
   const expiryMs = runtimeEventExpiryMs(event);
   return expiryMs !== null && nowMs > expiryMs;
@@ -456,7 +462,8 @@ function visibleRuntimeEvent(
   nowMs: number,
 ): BuddyRuntimeEvent | null {
   if (event === null || event.dismissed === true) return null;
-  if (event.persistent !== true && isRuntimeEventExpired(event, nowMs)) return null;
+  if (event.persistent !== true && isRuntimeEventExpired(event, nowMs))
+    return null;
   if (isActiveRuntime(event) && event.ttl_ms == null) return event;
   if (isBuddyRuntimeEventVisible(event, nowMs)) return event;
   return isProviderModelRuntimeProblem(event) ? event : null;

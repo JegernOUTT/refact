@@ -80,7 +80,10 @@ export function CodeIntelTabScaffold<T>({
   readinessKey,
 }: TabScaffoldProps<T>) {
   const data = isCodeIntelDetail(result.data) ? null : result.data;
-  useReportIndexReadiness(readinessKey ?? "", readinessKey ? result.data : null);
+  useReportIndexReadiness(
+    readinessKey ?? "",
+    readinessKey ? result.data : null,
+  );
 
   if (result.isLoading) {
     return <LoadingState label={loadingLabel} kind="skeleton" variant="full" />;

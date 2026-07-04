@@ -59,8 +59,13 @@ export const knowledgeSlice = createSlice({
   },
 });
 
-export const { setVecDbStatus, setRagStatus, setMemory, deleteMemory, clearMemory } =
-  knowledgeSlice.actions;
+export const {
+  setVecDbStatus,
+  setRagStatus,
+  setMemory,
+  deleteMemory,
+  clearMemory,
+} = knowledgeSlice.actions;
 
 export const {
   selectVecDbStatus,
