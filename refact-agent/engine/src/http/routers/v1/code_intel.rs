@@ -210,7 +210,7 @@ struct HealthFileResponse {
     biomarker_count: usize,
     refactoring_count: usize,
     functions: Vec<HealthFunctionResponse>,
-    findings: Vec<refact_codehealth::biomarkers::Finding>,
+    findings: Vec<crate::tools::tool_codegraph::HealthFinding>,
     health_impact: Vec<crate::tools::tool_codegraph::HealthImpactContributor>,
     cache_hit: bool,
     refactorings: Vec<refact_codehealth::refactoring::RefactoringSuggestion>,
@@ -1762,6 +1762,11 @@ mod tests {
         assert!(files[0]["score"].is_number());
         assert!(files[0]["grade"].is_string());
         assert!(files[0]["functions"].is_array());
+        assert!(files[0]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|finding| finding["hot_path"].is_boolean()));
         assert_eq!(json["index_state"]["cross_file_ready"], true);
         assert!(files[0]["health_impact"].is_array());
         assert!(files[0]["maintainability_index"].is_number());

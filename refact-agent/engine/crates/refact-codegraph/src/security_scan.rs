@@ -27,6 +27,9 @@ pub fn secret_key_names() -> &'static [&'static str] {
         "secret",
         "api_key",
         "apikey",
+        "access_key",
+        "aws_access_key",
+        "aws_key",
         "token",
         "private_key",
         "aws_secret",
@@ -181,9 +184,10 @@ pub fn scan(lang: &str, text: &str) -> Vec<SecurityFinding> {
         a.line
             .cmp(&b.line)
             .then(a.rule.cmp(&b.rule))
+            .then(a.snippet.len().cmp(&b.snippet.len()))
             .then(a.snippet.cmp(&b.snippet))
     });
-    findings.dedup_by(|a, b| a.rule == b.rule && a.line == b.line && a.snippet == b.snippet);
+    findings.dedup_by(|a, b| a.rule == b.rule && a.line == b.line);
     findings
 }
 
@@ -404,19 +408,15 @@ fn is_external_identifier(name: &str) -> bool {
 }
 
 fn line_has_command_injection(line: &str, lower: &str) -> bool {
-    (lower.contains("system(")
-        || lower.contains("exec(")
-        || lower.contains("popen(")
-        || lower.contains("spawn(")
-        || lower.contains("eval(")
-        || lower.contains("os.system(")
-        || lower.contains("subprocess."))
-        && call_has_non_literal_argument(line)
+    if line_has_shell_backticks(line) {
+        return has_identifier_outside_strings(line) || has_interpolation(line);
+    }
+    line_has_command_execution_call(lower) && call_has_non_literal_argument(line)
 }
 
 fn line_has_dangerous_eval(line: &str, lower: &str) -> bool {
-    let dangerous_call = lower.contains("eval(")
-        || lower.contains("exec(")
+    let dangerous_call = has_bare_call(lower, "eval")
+        || (has_bare_call(lower, "exec") && !has_command_execution_context("", lower))
         || line.contains("Function(")
         || lower.contains("pickle.loads(")
         || lower.contains("marshal.load(")
@@ -477,10 +477,7 @@ fn is_sql_sink(callee: &str) -> bool {
 }
 
 fn is_command_sink(callee: &str, lower: &str) -> bool {
-    let last = callee.rsplit('.').next().unwrap_or(callee);
-    matches!(last, "system" | "exec" | "popen" | "spawn" | "eval")
-        || lower.contains("os.system(")
-        || lower.contains("subprocess.")
+    has_command_execution_context(callee, lower)
 }
 
 fn call_contains_dynamic_sql(call_text: &str, lower: &str) -> bool {
@@ -542,11 +539,65 @@ fn is_single_literal(arg: &str) -> bool {
 
 fn call_has_dangerous_eval(callee: &str, call_text: &str, lower: &str) -> bool {
     let last = callee.rsplit('.').next().unwrap_or(callee);
-    (matches!(last, "eval" | "exec" | "function" | "deserialize")
+    ((last == "eval")
+        || (last == "exec" && !callee.contains('.') && !callee.contains(':'))
+        || matches!(last, "function" | "deserialize")
         || callee.ends_with("pickle.loads")
         || callee.ends_with("marshal.load")
         || (callee.ends_with("yaml.load") && !lower.contains("safeloader")))
+        && !has_command_execution_context(callee, lower)
         && call_has_external_input(call_text)
+}
+
+fn line_has_shell_backticks(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with('`') && trimmed[1..].contains('`')
+}
+
+fn line_has_command_execution_call(lower: &str) -> bool {
+    has_command_execution_context("", lower)
+        || ["system", "popen", "spawn", "shell_exec", "passthru"]
+            .iter()
+            .any(|name| has_bare_call(lower, name))
+}
+
+fn has_command_execution_context(callee: &str, lower: &str) -> bool {
+    let compact = lower
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let callee = callee.trim_matches('.').to_ascii_lowercase();
+    let last = callee.rsplit(['.', ':']).next().unwrap_or(&callee);
+    matches!(
+        last,
+        "system" | "popen" | "spawn" | "shell_exec" | "passthru"
+    ) || callee.contains("subprocess")
+        || callee.contains("child_process")
+        || callee.contains("runtime.getruntime")
+        || compact.contains("os.system(")
+        || compact.contains("os.popen(")
+        || compact.contains("subprocess.")
+        || compact.contains("child_process.")
+        || compact.contains("runtime.getruntime().exec(")
+        || compact.contains("runtime.exec(")
+        || compact.contains("processbuilder(")
+}
+
+fn has_bare_call(lower: &str, name: &str) -> bool {
+    let pattern = format!("{name}(");
+    let mut offset = 0;
+    while let Some(index) = lower[offset..].find(&pattern) {
+        let absolute = offset + index;
+        let bare = lower[..absolute]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !is_ident_char(ch) && ch != '.' && ch != ':');
+        if bare {
+            return true;
+        }
+        offset = absolute + pattern.len();
+    }
+    false
 }
 
 fn is_weak_crypto_callee(callee: &str, lower: &str) -> bool {
@@ -588,6 +639,48 @@ mod tests {
     fn detects_dangerous_eval() {
         let findings = scan("python", "eval(user_input)\n");
         assert!(has_rule(&findings, "dangerous_eval"));
+    }
+
+    #[test]
+    fn eval_reports_single_rule() {
+        let findings = scan("python", "eval(payload)\n");
+        assert_eq!(findings.len(), 1, "got {findings:?}");
+        assert_eq!(findings[0].rule, "dangerous_eval");
+        assert_eq!(findings[0].line, 1);
+    }
+
+    #[test]
+    fn subprocess_still_command_injection() {
+        let findings = scan("python", "subprocess.run(user_command, shell=True)\n");
+        let finding = findings
+            .iter()
+            .find(|finding| finding.rule == "command_injection")
+            .expect("subprocess must stay command injection");
+        assert_eq!(finding.severity, Severity::High);
+        assert_eq!(finding.line, 1);
+        assert!(!has_rule(&findings, "dangerous_eval"));
+    }
+
+    #[test]
+    fn planted_secret_and_injection_lines_still_report() {
+        let findings = scan(
+            "python",
+            "# planted\naws_key = \"AKIA1234567890ABCDEF\"\npassword = \"hunter2\"\nsubprocess.run(cmd, shell=True)\n",
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule == "hardcoded_secret"
+                && finding.severity == Severity::Critical
+                && finding.line == 2
+        }));
+        assert!(findings.iter().any(|finding| {
+            finding.rule == "hardcoded_secret" && finding.severity == Severity::Critical
+        }));
+        assert!(findings.iter().any(|finding| {
+            finding.rule == "command_injection"
+                && finding.severity == Severity::High
+                && finding.line == 4
+        }));
     }
 
     #[test]

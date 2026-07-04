@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -112,7 +112,7 @@ pub(crate) struct HealthFileAnalysis {
     pub(crate) biomarker_count: usize,
     pub(crate) refactoring_count: usize,
     pub(crate) functions: Vec<HealthFunctionSummary>,
-    pub(crate) findings: Vec<refact_codehealth::biomarkers::Finding>,
+    pub(crate) findings: Vec<HealthFinding>,
     pub(crate) health_impact: Vec<HealthImpactContributor>,
     pub(crate) impact_summaries: Vec<String>,
     pub(crate) refactorings: Vec<refact_codehealth::refactoring::RefactoringSuggestion>,
@@ -138,7 +138,7 @@ struct HealthFileCore {
     avg_maintainability: f64,
     duplication_pct: f64,
     dry_violation: bool,
-    findings: Vec<refact_codehealth::biomarkers::Finding>,
+    findings: Vec<HealthFinding>,
     refactorings: Vec<refact_codehealth::refactoring::RefactoringSuggestion>,
 }
 
@@ -1032,6 +1032,7 @@ async fn compute_health_core(
         ctx.repo_root,
     ));
     sort_health_findings(&mut findings);
+    let findings = enrich_health_findings(ctx.service, &path, &health.functions, findings).await;
 
     let mut functions = health.functions.clone();
     functions.sort_by(|a, b| {
@@ -1076,19 +1077,24 @@ async fn compute_health_core(
 }
 
 fn health_analysis_from_core(core: HealthFileCore, cache_hit: bool) -> HealthFileAnalysis {
-    let (score, impacts) = refact_codehealth::scoring::score_file_with_impacts(&core.findings);
+    let plain_findings = core
+        .findings
+        .iter()
+        .map(|finding| finding.finding.clone())
+        .collect::<Vec<_>>();
+    let (score, impacts) = refact_codehealth::scoring::score_file_with_impacts(&plain_findings);
     let mut health_impact = impacts
         .into_iter()
         .filter_map(|impact| {
             core.findings
                 .get(impact.index)
                 .map(|finding| HealthImpactContributor {
-                    biomarker: finding.biomarker.clone(),
-                    category: finding.category.clone(),
-                    dimension: finding.dimension,
-                    severity: finding.severity,
-                    line: finding.line,
-                    detail: finding.detail.clone(),
+                    biomarker: finding.finding.biomarker.clone(),
+                    category: finding.finding.category.clone(),
+                    dimension: finding.finding.dimension,
+                    severity: finding.finding.severity,
+                    line: finding.finding.line,
+                    detail: finding.finding.detail.clone(),
                     deduction: impact.deduction,
                     capped: impact.capped,
                 })
@@ -2020,6 +2026,246 @@ impl Tool for ToolCodegraphOverview {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct HealthFinding {
+    #[serde(flatten)]
+    pub(crate) finding: refact_codehealth::biomarkers::Finding,
+    pub(crate) hot_path: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FunctionKey {
+    name: String,
+    line1: usize,
+    line2: usize,
+}
+
+#[derive(Default)]
+struct HealthGraphContext {
+    fan_in: HashMap<FunctionKey, usize>,
+    hot_path: HashSet<FunctionKey>,
+}
+
+pub(crate) async fn enrich_health_findings(
+    service: Option<&Arc<refact_codegraph::CodeGraphService>>,
+    file_path: &str,
+    functions: &[refact_codehealth::FunctionHealth],
+    findings: Vec<refact_codehealth::biomarkers::Finding>,
+) -> Vec<HealthFinding> {
+    let graph = match service {
+        Some(service) => service.cached_graph_analytics().await.ok(),
+        None => None,
+    };
+    enrich_health_findings_with_graph(
+        graph.as_ref().map(|cached| &cached.data),
+        file_path,
+        functions,
+        findings,
+    )
+}
+
+pub(crate) fn enrich_health_findings_with_graph(
+    graph: Option<&refact_codegraph::analytics::GraphData>,
+    file_path: &str,
+    functions: &[refact_codehealth::FunctionHealth],
+    findings: Vec<refact_codehealth::biomarkers::Finding>,
+) -> Vec<HealthFinding> {
+    let context = graph.map(|graph| health_graph_context(graph, file_path, functions));
+    findings
+        .into_iter()
+        .map(|finding| enrich_health_finding(finding, functions, context.as_ref()))
+        .collect()
+}
+
+fn enrich_health_finding(
+    mut finding: refact_codehealth::biomarkers::Finding,
+    functions: &[refact_codehealth::FunctionHealth],
+    context: Option<&HealthGraphContext>,
+) -> HealthFinding {
+    let mut hot_path = false;
+    if let (Some(context), Some(function)) = (context, containing_function(functions, finding.line))
+    {
+        let key = function_key(function);
+        if finding.biomarker == "brain_method" {
+            if let Some(fan_in) = context.fan_in.get(&key).copied() {
+                if fan_in == 0 {
+                    finding.severity = downgrade_health_severity(finding.severity);
+                    finding.detail.push_str(" (low fan-in)");
+                } else if fan_in >= 5 {
+                    finding
+                        .detail
+                        .push_str(&format!(" (called from {fan_in} sites)"));
+                }
+            }
+        }
+        if finding.dimension == refact_codehealth::biomarkers::Dimension::Performance {
+            hot_path = context.hot_path.contains(&key);
+        }
+    }
+    HealthFinding { finding, hot_path }
+}
+
+fn health_graph_context(
+    graph: &refact_codegraph::analytics::GraphData,
+    file_path: &str,
+    functions: &[refact_codehealth::FunctionHealth],
+) -> HealthGraphContext {
+    let mut node_ids_by_key = HashMap::<FunctionKey, BTreeSet<i64>>::new();
+    let mut key_by_node_id = HashMap::<i64, Vec<FunctionKey>>::new();
+    for function in functions {
+        let key = function_key(function);
+        for (id, name, path) in &graph.nodes {
+            if graph_path_matches(path, file_path) && graph_name_matches(name, &function.name) {
+                node_ids_by_key.entry(key.clone()).or_default().insert(*id);
+                key_by_node_id.entry(*id).or_default().push(key.clone());
+            }
+        }
+    }
+
+    let mut sources_by_key = HashMap::<FunctionKey, BTreeSet<i64>>::new();
+    for (src, dst, kind) in &graph.edges {
+        if kind != "calls" {
+            continue;
+        }
+        if let Some(keys) = key_by_node_id.get(dst) {
+            for key in keys {
+                sources_by_key.entry(key.clone()).or_default().insert(*src);
+            }
+        }
+    }
+
+    let hot_node_ids = hot_path_node_ids(graph, 3);
+    let hot_path = node_ids_by_key
+        .iter()
+        .filter_map(|(key, ids)| {
+            ids.iter()
+                .any(|id| hot_node_ids.contains(id))
+                .then(|| key.clone())
+        })
+        .collect();
+
+    HealthGraphContext {
+        fan_in: node_ids_by_key
+            .into_keys()
+            .map(|key| {
+                let fan_in = sources_by_key.get(&key).map(BTreeSet::len).unwrap_or(0);
+                (key, fan_in)
+            })
+            .collect(),
+        hot_path,
+    }
+}
+
+fn hot_path_node_ids(
+    graph: &refact_codegraph::analytics::GraphData,
+    max_depth: usize,
+) -> BTreeSet<i64> {
+    let mut out = HashMap::<i64, Vec<i64>>::new();
+    let mut roots = BTreeSet::new();
+    for (src, dst, kind) in &graph.edges {
+        if !matches!(kind.as_str(), "calls" | "route_handler") {
+            continue;
+        }
+        out.entry(*src).or_default().push(*dst);
+        if kind == "route_handler" {
+            roots.insert(*src);
+        }
+    }
+    for (id, name, _) in &graph.nodes {
+        if graph_entry_name(name) {
+            roots.insert(*id);
+        }
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    for root in roots {
+        if seen.insert(root) {
+            queue.push_back((root, 0));
+        }
+    }
+    while let Some((id, depth)) = queue.pop_front() {
+        if depth >= max_depth {
+            continue;
+        }
+        if let Some(targets) = out.get(&id) {
+            for target in targets {
+                if seen.insert(*target) {
+                    queue.push_back((*target, depth + 1));
+                }
+            }
+        }
+    }
+    seen
+}
+
+fn containing_function(
+    functions: &[refact_codehealth::FunctionHealth],
+    line: usize,
+) -> Option<&refact_codehealth::FunctionHealth> {
+    functions
+        .iter()
+        .filter(|function| {
+            let line2 = function_line2(function);
+            function.line1 <= line && line <= line2
+        })
+        .max_by_key(|function| function.line1)
+}
+
+fn function_key(function: &refact_codehealth::FunctionHealth) -> FunctionKey {
+    FunctionKey {
+        name: function.name.clone(),
+        line1: function.line1,
+        line2: function_line2(function),
+    }
+}
+
+fn function_line2(function: &refact_codehealth::FunctionHealth) -> usize {
+    function
+        .line1
+        .saturating_add(function.loc as usize)
+        .saturating_sub(1)
+        .max(function.line1)
+}
+
+fn downgrade_health_severity(
+    severity: refact_codehealth::biomarkers::Severity,
+) -> refact_codehealth::biomarkers::Severity {
+    match severity {
+        refact_codehealth::biomarkers::Severity::Critical => {
+            refact_codehealth::biomarkers::Severity::High
+        }
+        refact_codehealth::biomarkers::Severity::High => {
+            refact_codehealth::biomarkers::Severity::Medium
+        }
+        refact_codehealth::biomarkers::Severity::Medium => {
+            refact_codehealth::biomarkers::Severity::Low
+        }
+        refact_codehealth::biomarkers::Severity::Low => {
+            refact_codehealth::biomarkers::Severity::Low
+        }
+    }
+}
+
+fn graph_path_matches(graph_path: &str, requested_path: &str) -> bool {
+    let graph_path = graph_path.replace('\\', "/");
+    let requested_path = requested_path.replace('\\', "/");
+    graph_path == requested_path
+        || graph_path.ends_with(&requested_path)
+        || requested_path.ends_with(&graph_path)
+        || graph_path.rsplit('/').next() == requested_path.rsplit('/').next()
+}
+
+fn graph_name_matches(graph_name: &str, function_name: &str) -> bool {
+    graph_name == function_name
+        || graph_name.ends_with(&format!("::{function_name}"))
+        || graph_name.ends_with(&format!(".{function_name}"))
+}
+
+fn graph_entry_name(name: &str) -> bool {
+    name == "main" || name.ends_with("::main") || name.ends_with(".main")
+}
+
 pub struct ToolDeadCode {
     pub config_path: String,
 }
@@ -2227,9 +2473,16 @@ impl Tool for ToolCodeHealth {
         if !analysis.findings.is_empty() {
             msg.push_str(&format!("Biomarkers ({}):\n", analysis.findings.len()));
             for fnd in analysis.findings.iter().take(15) {
+                let marker = if fnd.hot_path { " 🔥 hot path" } else { "" };
                 msg.push_str(&format!(
-                    "  {}:{} {} [{:?}/{:?}] {}\n",
-                    file_path, fnd.line, fnd.biomarker, fnd.severity, fnd.dimension, fnd.detail
+                    "  {}:{} {} [{:?}/{:?}] {}{}\n",
+                    file_path,
+                    fnd.finding.line,
+                    fnd.finding.biomarker,
+                    fnd.finding.severity,
+                    fnd.finding.dimension,
+                    fnd.finding.detail,
+                    marker
                 ));
             }
         }
@@ -3813,6 +4066,131 @@ mod tests {
         )
     }
 
+    fn brain_method_source(caller_count: usize) -> String {
+        let mut src = "fn brain(x: i32) -> i32 {\n".to_string();
+        for i in 0..75 {
+            src.push_str(&format!(
+                "    if x > {i} {{ if x % 2 == 0 {{ if x < 100 {{ if x != 42 {{ return {i}; }} }} }} }}\n"
+            ));
+        }
+        src.push_str("    0\n}\n");
+        for i in 0..caller_count {
+            src.push_str(&format!("fn caller_{i}(x: i32) -> i32 {{ brain(x) }}\n"));
+        }
+        src
+    }
+
+    async fn service_with_file(
+        path: &str,
+        text: &str,
+        lang: &str,
+    ) -> Arc<refact_codegraph::CodeGraphService> {
+        let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        service.index_file(path, text, lang).await.unwrap();
+        service.connect_usages().await.unwrap();
+        service
+    }
+
+    #[tokio::test]
+    async fn brain_method_downgraded_at_zero_fanin() {
+        let text = brain_method_source(0);
+        let service = service_with_file("src/a.rs", &text, "rust").await;
+        let health = refact_codehealth::analyze("rust", &text);
+        let findings = refact_codehealth::biomarkers::detect_biomarkers("rust", &text);
+        let original = findings
+            .iter()
+            .find(|finding| finding.biomarker == "brain_method")
+            .unwrap()
+            .severity;
+
+        let enriched =
+            enrich_health_findings(Some(&service), "src/a.rs", &health.functions, findings).await;
+        let brain = enriched
+            .iter()
+            .find(|finding| finding.finding.biomarker == "brain_method")
+            .unwrap();
+
+        assert_eq!(brain.finding.severity, downgrade_health_severity(original));
+        assert!(brain.finding.detail.contains("low fan-in"));
+    }
+
+    #[tokio::test]
+    async fn annotated_at_high_fanin() {
+        let text = brain_method_source(5);
+        let service = service_with_file("src/a.rs", &text, "rust").await;
+        let health = refact_codehealth::analyze("rust", &text);
+        let findings = refact_codehealth::biomarkers::detect_biomarkers("rust", &text);
+        let original = findings
+            .iter()
+            .find(|finding| finding.biomarker == "brain_method")
+            .unwrap()
+            .severity;
+
+        let enriched =
+            enrich_health_findings(Some(&service), "src/a.rs", &health.functions, findings).await;
+        let brain = enriched
+            .iter()
+            .find(|finding| finding.finding.biomarker == "brain_method")
+            .unwrap();
+
+        assert_eq!(brain.finding.severity, original);
+        assert!(brain.finding.detail.contains("called from 5 sites"));
+    }
+
+    #[tokio::test]
+    async fn perf_finding_hot_path_from_route() {
+        let text = r#"
+from fastapi import FastAPI
+import requests
+app = FastAPI()
+
+@app.get("/users")
+def handler():
+    return helper()
+
+def helper():
+    for u in urls:
+        for p in pages:
+            requests.get(p)
+
+def orphan():
+    for u in urls:
+        for p in pages:
+            requests.get(p)
+"#;
+        let service = service_with_file("src/api.py", text, "python").await;
+        let health = refact_codehealth::analyze("python", text);
+        let findings = refact_codehealth::perf::detect_perf("python", text);
+        let helper = health
+            .functions
+            .iter()
+            .find(|function| function.name == "helper")
+            .unwrap();
+        let orphan = health
+            .functions
+            .iter()
+            .find(|function| function.name == "orphan")
+            .unwrap();
+
+        let enriched =
+            enrich_health_findings(Some(&service), "src/api.py", &health.functions, findings).await;
+
+        assert!(enriched.iter().any(|finding| {
+            finding.hot_path
+                && finding.finding.dimension
+                    == refact_codehealth::biomarkers::Dimension::Performance
+                && helper.line1 <= finding.finding.line
+                && finding.finding.line <= function_line2(helper)
+        }));
+        assert!(enriched.iter().any(|finding| {
+            !finding.hot_path
+                && finding.finding.dimension
+                    == refact_codehealth::biomarkers::Dimension::Performance
+                && orphan.line1 <= finding.finding.line
+                && finding.finding.line <= function_line2(orphan)
+        }));
+    }
+
     #[tokio::test]
     async fn build_git_meta_fills_all_fields() {
         let dir = tempfile::tempdir().unwrap();
@@ -4116,14 +4494,14 @@ mod tests {
         let ctx = empty_health_ctx(&trends, &git_paths);
         let src = "fn a() -> i32 { 1 }\n".to_string();
 
-        let first = analyze_health_file_shared("src/a.rs".to_string(), src.clone(), &ctx)
+        let first = analyze_health_file_shared("src/health_cache_probe_unique.rs".to_string(), src.clone(), &ctx)
             .await
             .unwrap();
-        let second = analyze_health_file_shared("src/a.rs".to_string(), src, &ctx)
+        let second = analyze_health_file_shared("src/health_cache_probe_unique.rs".to_string(), src, &ctx)
             .await
             .unwrap();
         let third = analyze_health_file_shared(
-            "src/a.rs".to_string(),
+            "src/health_cache_probe_unique.rs".to_string(),
             "fn a() -> i32 { if true { 1 } else { 0 } }\n".to_string(),
             &ctx,
         )
@@ -4166,7 +4544,7 @@ mod tests {
         let categories = analysis
             .findings
             .iter()
-            .map(|finding| finding.category.as_str())
+            .map(|finding| finding.finding.category.as_str())
             .collect::<HashSet<_>>();
         let impacts = analysis
             .health_impact
@@ -4203,7 +4581,8 @@ mod tests {
         .unwrap();
 
         assert!(analysis.findings.iter().all(|finding| {
-            finding.category != "test_coverage" && finding.category != "coverage_gradient"
+            finding.finding.category != "test_coverage"
+                && finding.finding.category != "coverage_gradient"
         }));
     }
 
@@ -4238,7 +4617,7 @@ mod tests {
         assert!(analysis
             .findings
             .iter()
-            .any(|finding| finding.biomarker == "health_declining"));
+            .any(|finding| finding.finding.biomarker == "health_declining"));
         assert_eq!(snapshots.len(), 4);
     }
 
