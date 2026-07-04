@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use git2::{Oid, Repository};
@@ -19,6 +19,9 @@ use crate::tools::tools_description::{
 const GIT_CACHE_TTL: Duration = Duration::from_secs(30);
 const PR_BLAST_REVIEWER_LIMIT: usize = 3;
 const PR_BLAST_BOT_AUTHOR_PATTERNS: [&str; 3] = ["[bot]", "agent@", "noreply"];
+const DEAD_CODE_HISTORY_COMMITS: usize = 1000;
+const DEAD_CODE_DEFAULT_LIMIT: usize = 50;
+const DEAD_CODE_MAX_LIMIT: usize = 500;
 const GIT_META_FUNCTION_FACT_TOP_K: usize = 10;
 const GIT_STABLE_AGE_DAYS: i64 = 180;
 const GIT_RISK_RECENT_COMMITS: usize = 50;
@@ -162,6 +165,36 @@ fn optional_usize_arg(
         Some(value) => Err(format!(
             "argument `{key}` must be a positive integer: {value:?}"
         )),
+    }
+}
+
+fn optional_f64_arg(args: &HashMap<String, Value>, key: &str, default: f64) -> Result<f64, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(default),
+        Some(Value::String(value)) => value
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("argument `{key}` must be a number")),
+        Some(Value::Number(value)) => value
+            .as_f64()
+            .ok_or_else(|| format!("argument `{key}` must be a number")),
+        Some(value) => Err(format!("argument `{key}` must be a number: {value:?}")),
+    }
+}
+
+fn optional_string_arg(args: &HashMap<String, Value>, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(value.replace('\\', "/")))
+            }
+        }
+        Some(value) => Err(format!("argument `{key}` must be a string: {value:?}")),
     }
 }
 
@@ -447,6 +480,259 @@ fn co_change_key(path: &str, project_root: Option<&Path>) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct DeadCodeIndexState {
+    pub(crate) queued: usize,
+    pub(crate) dirty_paths: i64,
+    pub(crate) pending_refs: i64,
+    pub(crate) cross_file_edges: i64,
+    pub(crate) cross_file_ready: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct DeadCodeEntry {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) line: usize,
+    pub(crate) reason: String,
+    pub(crate) confidence: f64,
+    pub(crate) git_recency: String,
+    pub(crate) incoming_edges: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct DeadCodeReport {
+    pub(crate) entries: Vec<DeadCodeEntry>,
+    pub(crate) total_candidates: usize,
+    pub(crate) index_state: DeadCodeIndexState,
+    pub(crate) partial: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct DeadCodeGitFacts {
+    pub(crate) last_touched_days: Option<u64>,
+    pub(crate) file_churn: u32,
+    pub(crate) recent_churn_days: Option<u64>,
+}
+
+pub(crate) async fn dead_code_report(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    limit: usize,
+    path_filter: Option<&str>,
+    min_confidence: f64,
+) -> Result<DeadCodeReport, String> {
+    let service = gcx
+        .codegraph
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "codegraph is not available".to_string())?;
+    let readiness = service.index_readiness().await?;
+    let index_state = dead_code_index_state(&readiness);
+    let warning = dead_code_partial_warning(&index_state);
+    let dead = service.dead_code().await?;
+    let repo_dir = project_dir(gcx.clone()).await;
+    let intel = repo_dir
+        .as_deref()
+        .and_then(|dir| cached_mine_history(dir, DEAD_CODE_HISTORY_COMMITS).ok());
+    let now_ts = current_unix_ts();
+    let facts = dead_code_git_facts_by_node(&dead, repo_dir.as_deref(), intel.as_ref(), now_ts);
+    let min_confidence = min_confidence.clamp(0.0, 1.0);
+    let limit = limit.clamp(1, DEAD_CODE_MAX_LIMIT);
+    let mut entries = enrich_dead_symbols_with_facts(dead, &facts)
+        .into_iter()
+        .filter(|entry| entry.confidence >= min_confidence)
+        .filter(|entry| {
+            path_filter.is_none_or(|filter| dead_code_path_matches(&entry.path, filter))
+        })
+        .collect::<Vec<_>>();
+    let total_candidates = entries.len();
+    entries.truncate(limit);
+    Ok(DeadCodeReport {
+        entries,
+        total_candidates,
+        index_state,
+        partial: !readiness.cross_file_ready,
+        warning,
+    })
+}
+
+pub(crate) fn dead_code_index_state(
+    readiness: &refact_codegraph::IndexReadiness,
+) -> DeadCodeIndexState {
+    DeadCodeIndexState {
+        queued: readiness.queued,
+        dirty_paths: readiness.dirty_paths,
+        pending_refs: readiness.pending_refs,
+        cross_file_edges: readiness.cross_file_edges,
+        cross_file_ready: readiness.cross_file_ready,
+    }
+}
+
+pub(crate) fn dead_code_partial_warning(state: &DeadCodeIndexState) -> Option<String> {
+    (!state.cross_file_ready).then(|| {
+        format!(
+            "⚠ index still building ({} files queued, {} dirty paths, {} pending refs) — dead-code may be over-reported",
+            state.queued, state.dirty_paths, state.pending_refs
+        )
+    })
+}
+
+pub(crate) fn enrich_dead_symbols_with_facts(
+    dead: Vec<refact_codegraph::dead_code::DeadSymbol>,
+    facts_by_node: &HashMap<i64, DeadCodeGitFacts>,
+) -> Vec<DeadCodeEntry> {
+    let mut entries = dead
+        .into_iter()
+        .map(|symbol| {
+            let facts = facts_by_node
+                .get(&symbol.node_id)
+                .cloned()
+                .unwrap_or_default();
+            DeadCodeEntry {
+                name: symbol.name,
+                path: symbol.path,
+                line: symbol.line,
+                reason: symbol.reason,
+                confidence: dead_code_confidence(symbol.incoming_edges, &facts),
+                git_recency: dead_code_git_recency(&facts),
+                incoming_edges: symbol.incoming_edges,
+            }
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| {
+        b.confidence
+            .total_cmp(&a.confidence)
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    entries
+}
+
+fn dead_code_confidence(incoming_edges: usize, facts: &DeadCodeGitFacts) -> f64 {
+    let mut confidence: f64 = 0.4;
+    if facts
+        .last_touched_days
+        .is_some_and(|age_days| age_days > 365)
+        && facts.file_churn == 0
+    {
+        confidence += 0.3;
+    }
+    if incoming_edges == 0 {
+        confidence += 0.1;
+    }
+    if facts
+        .recent_churn_days
+        .is_some_and(|age_days| age_days <= 90)
+    {
+        confidence -= 0.2;
+    }
+    confidence.clamp(0.1, 0.9)
+}
+
+fn dead_code_git_recency(facts: &DeadCodeGitFacts) -> String {
+    match facts.last_touched_days {
+        Some(days) => format!(
+            "last touched {}d ago; churn {} in mined window",
+            days, facts.file_churn
+        ),
+        None if facts.file_churn == 0 => "no git touches in mined window".to_string(),
+        None => format!("churn {} in mined window", facts.file_churn),
+    }
+}
+
+fn dead_code_git_facts_by_node(
+    dead: &[refact_codegraph::dead_code::DeadSymbol],
+    repo_root: Option<&Path>,
+    intel: Option<&refact_git_intel::GitIntel>,
+    now_ts: i64,
+) -> HashMap<i64, DeadCodeGitFacts> {
+    let mut facts_by_node = HashMap::new();
+    let mut ranges_by_path: HashMap<String, Vec<(String, usize, usize)>> = HashMap::new();
+    for symbol in dead {
+        let key = dead_code_git_key(&symbol.path, repo_root);
+        let facts = DeadCodeGitFacts {
+            last_touched_days: None,
+            file_churn: intel
+                .and_then(|intel| intel.file_churn.get(&key).copied())
+                .unwrap_or(0),
+            recent_churn_days: intel.and_then(|intel| recent_churn_days(intel, &key, now_ts)),
+        };
+        facts_by_node.insert(symbol.node_id, facts);
+        if repo_root.is_some() {
+            ranges_by_path.entry(key).or_default().push((
+                symbol.node_id.to_string(),
+                symbol.line.max(1),
+                symbol.line.max(1),
+            ));
+        }
+    }
+    let Some(repo_root) = repo_root else {
+        return facts_by_node;
+    };
+    for (path, ranges) in ranges_by_path {
+        let Ok(range_facts) = refact_git_intel::blame::range_facts(repo_root, &path, &ranges)
+        else {
+            continue;
+        };
+        for range in range_facts {
+            let Ok(node_id) = range.name.parse::<i64>() else {
+                continue;
+            };
+            if let Some(facts) = facts_by_node.get_mut(&node_id) {
+                facts.last_touched_days = days_since_ts(now_ts, range.last_modified_ts);
+            }
+        }
+    }
+    facts_by_node
+}
+
+fn dead_code_git_key(path: &str, repo_root: Option<&Path>) -> String {
+    match repo_root {
+        Some(root) => {
+            refact_git_intel::paths::repo_relative_or_basename(path, &root.to_string_lossy())
+        }
+        None => refact_git_intel::paths::normalize_separators(path),
+    }
+}
+
+fn recent_churn_days(
+    intel: &refact_git_intel::GitIntel,
+    git_key: &str,
+    now_ts: i64,
+) -> Option<u64> {
+    intel
+        .commit_records
+        .iter()
+        .filter(|commit| commit_touches_path(commit, git_key))
+        .filter_map(|commit| days_since_ts(now_ts, commit.ts))
+        .min()
+}
+
+fn commit_touches_path(commit: &refact_git_intel::CommitRecord, git_key: &str) -> bool {
+    commit
+        .files
+        .iter()
+        .any(|(path, _, _)| refact_git_intel::paths::normalize_separators(path) == git_key)
+}
+
+fn days_since_ts(now_ts: i64, ts: i64) -> Option<u64> {
+    if ts <= 0 {
+        return None;
+    }
+    Some(now_ts.saturating_sub(ts).max(0) as u64 / 86_400)
+}
+
+fn current_unix_ts() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or(0)
+}
+
 pub(crate) fn git_churn_by_file(intel: &refact_git_intel::GitIntel) -> HashMap<String, u32> {
     intel.file_churn.clone()
 }
@@ -608,6 +894,15 @@ fn now_unix_ts() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
         .unwrap_or(0)
+}
+
+fn dead_code_path_matches(path: &str, filter: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    if normalized == filter || normalized.ends_with(filter) {
+        return true;
+    }
+    let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+    basename == filter
 }
 
 fn file_is_stable(intel: &refact_git_intel::GitIntel, file: &str, now_ts: i64) -> bool {
@@ -1078,6 +1373,104 @@ impl Tool for ToolCodegraphOverview {
     fn tool_depends_on(&self) -> Vec<String> {
         codegraph_dependency()
     }
+}
+
+pub struct ToolDeadCode {
+    pub config_path: String,
+}
+
+#[async_trait]
+impl Tool for ToolDeadCode {
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let limit = optional_usize_arg(args, "limit", DEAD_CODE_DEFAULT_LIMIT)?
+            .clamp(1, DEAD_CODE_MAX_LIMIT);
+        let min_confidence = optional_f64_arg(args, "min_confidence", 0.5)?.clamp(0.0, 1.0);
+        let path = optional_string_arg(args, "path")?;
+        let gcx = ccx.lock().await.app.gcx.clone();
+        let report = dead_code_report(gcx, limit, path.as_deref(), min_confidence).await?;
+        Ok((
+            false,
+            tool_message(tool_call_id, dead_code_tool_text(&report)),
+        ))
+    }
+
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "dead_code".to_string(),
+            display_name: "Dead Code".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: self.config_path.clone(),
+            },
+            experimental: false,
+            allow_parallel: true,
+            description: "Static reachability + git-recency ladder dead-code report; overrides and script entry points excluded; confidence-ranked with indexing warnings.".to_string(),
+            input_schema: json_schema_from_params(
+                &[
+                    ("limit", "integer", "Maximum number of candidates to return. Defaults to 50, max 500."),
+                    ("path", "string", "Optional path or basename filter."),
+                    ("min_confidence", "number", "Minimum confidence threshold. Defaults to 0.5."),
+                ],
+                &[],
+            ),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        codegraph_dependency()
+    }
+}
+
+fn dead_code_tool_text(report: &DeadCodeReport) -> String {
+    let mut msg = String::new();
+    if let Some(warning) = &report.warning {
+        msg.push_str(warning);
+        msg.push('\n');
+    }
+    msg.push_str(&format!(
+        "Dead code candidates: {} shown of {} matching candidates.\n",
+        report.entries.len(),
+        report.total_candidates
+    ));
+    msg.push_str(&format!(
+        "Index state: queued={} dirty_paths={} pending_refs={} cross_file_edges={} cross_file_ready={} partial={}\n",
+        report.index_state.queued,
+        report.index_state.dirty_paths,
+        report.index_state.pending_refs,
+        report.index_state.cross_file_edges,
+        report.index_state.cross_file_ready,
+        report.partial
+    ));
+    if report.entries.is_empty() {
+        msg.push_str("\nNo dead-code candidates matched the filters.\n");
+        return msg;
+    }
+
+    let mut grouped: Vec<(&str, Vec<&DeadCodeEntry>)> = Vec::new();
+    for entry in &report.entries {
+        if let Some((_, entries)) = grouped.iter_mut().find(|(path, _)| *path == entry.path) {
+            entries.push(entry);
+        } else {
+            grouped.push((entry.path.as_str(), vec![entry]));
+        }
+    }
+    for (path, entries) in grouped {
+        msg.push_str(&format!("\n{}:\n", path));
+        for entry in entries {
+            msg.push_str(&format!(
+                "  {:.2}  line {}  {} — {}; {}\n",
+                entry.confidence, entry.line, entry.name, entry.reason, entry.git_recency
+            ));
+        }
+    }
+    msg
 }
 
 pub struct ToolCodeHealth {

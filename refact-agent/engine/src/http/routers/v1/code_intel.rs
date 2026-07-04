@@ -114,9 +114,19 @@ struct CommunityResponse {
 struct DeadCodeResponse {
     name: String,
     path: String,
+    line: usize,
     reason: String,
     confidence: f64,
-    index_state: crate::tools::tool_codegraph::PrBlastIndexState,
+    git_recency: String,
+    incoming_edges: usize,
+    index_state: crate::tools::tool_codegraph::DeadCodeIndexState,
+}
+
+#[derive(Deserialize)]
+pub struct DeadCodeQuery {
+    path: Option<String>,
+    limit: Option<usize>,
+    min_confidence: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -703,22 +713,35 @@ pub async fn handle_v1_code_intel_communities(
 
 pub async fn handle_v1_code_intel_dead_code(
     State(app): State<AppState>,
+    Query(query): Query<DeadCodeQuery>,
 ) -> Result<Response<Body>, ScratchError> {
-    let Some(service) = codegraph_service(&app).await else {
+    if codegraph_service(&app).await.is_none() {
         return codegraph_off_response();
-    };
-    let index_state = codegraph_index_state(&service).await?;
-    let response = service
-        .cached_graph_analytics()
-        .await
-        .map_err(store_error)?
-        .dead_code
+    }
+    let limit = clamped_limit(query.limit, 500, 500);
+    let filter = path_filter(query.path);
+    let report = crate::tools::tool_codegraph::dead_code_report(
+        app.gcx.clone(),
+        limit,
+        filter.as_deref(),
+        query.min_confidence.unwrap_or(0.0),
+    )
+    .await
+    .map_err(store_error)?;
+    // Response stays a bare array for GUI compatibility (additive per-entry fields
+    // only); the object shape {entries, index_state, ...} is the tool's rendering.
+    let index_state = report.index_state.clone();
+    let response = report
+        .entries
         .into_iter()
         .map(|dead| DeadCodeResponse {
             name: dead.name,
             path: dead.path,
+            line: dead.line,
             reason: dead.reason,
             confidence: dead.confidence,
+            git_recency: dead.git_recency,
+            incoming_edges: dead.incoming_edges,
             index_state: index_state.clone(),
         })
         .collect::<Vec<_>>();

@@ -67,6 +67,10 @@ pub struct RawRef {
     pub line: usize,
 }
 
+impl RawRef {
+    pub const FILE_SCOPE: &'static str = "<file>";
+}
+
 pub trait LangExtractor {
     fn language(&self) -> &'static str;
 

@@ -336,6 +336,9 @@ mod tests {
             Box::new(crate::tools::tool_codegraph::ToolCodeDuplication {
                 config_path: "".to_string(),
             }),
+            Box::new(crate::tools::tool_codegraph::ToolDeadCode {
+                config_path: "".to_string(),
+            }),
             Box::new(crate::tools::tool_codegraph::ToolSecurityScan {
                 config_path: "".to_string(),
             }),
@@ -413,6 +416,7 @@ mod tests {
                     "git_risk",
                     "code_why",
                     "code_duplication",
+                    "dead_code",
                     "security_scan",
                     "pr_blast",
                     "code_map",
@@ -426,6 +430,7 @@ mod tests {
                     "git_risk",
                     "code_why",
                     "code_duplication",
+                    "dead_code",
                     "security_scan",
                     "pr_blast",
                     "code_map",
@@ -440,6 +445,7 @@ mod tests {
                     "git_risk",
                     "code_why",
                     "code_duplication",
+                    "dead_code",
                     "security_scan",
                     "pr_blast",
                     "code_map",
@@ -454,6 +460,7 @@ mod tests {
                     "git_risk",
                     "code_why",
                     "code_duplication",
+                    "dead_code",
                     "security_scan",
                     "pr_blast",
                     "code_map",
