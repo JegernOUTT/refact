@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -171,6 +171,8 @@ struct HealthAggregateResponse {
     grade: char,
     max_complexity: u32,
     avg_maintainability: f64,
+    avg_maintainability_index: f64,
+    avg_maintainability_signal: f64,
     avg_duplication_pct: f64,
     biomarker_count: usize,
     refactoring_count: usize,
@@ -184,6 +186,7 @@ struct HealthFunctionResponse {
     nesting: u32,
     loc: u32,
     maintainability: f64,
+    maintainability_index: f64,
 }
 
 #[derive(Serialize)]
@@ -194,6 +197,8 @@ struct HealthFileResponse {
     grade: char,
     complexity: u32,
     maintainability: f64,
+    maintainability_index: f64,
+    maintainability_signal: f64,
     max_complexity: u32,
     avg_maintainability: f64,
     function_count: usize,
@@ -206,11 +211,14 @@ struct HealthFileResponse {
     refactoring_count: usize,
     functions: Vec<HealthFunctionResponse>,
     findings: Vec<refact_codehealth::biomarkers::Finding>,
+    health_impact: Vec<crate::tools::tool_codegraph::HealthImpactContributor>,
+    cache_hit: bool,
     refactorings: Vec<refact_codehealth::refactoring::RefactoringSuggestion>,
 }
 
 #[derive(Serialize)]
 struct HealthResponse {
+    index_state: crate::tools::tool_codegraph::PrBlastIndexState,
     aggregate: HealthAggregateResponse,
     files: Vec<HealthFileResponse>,
 }
@@ -411,39 +419,12 @@ fn path_matches_filter(path: &str, filter: &str) -> bool {
     basename == filter
 }
 
-fn severity_rank(severity: refact_codehealth::biomarkers::Severity) -> u8 {
-    match severity {
-        refact_codehealth::biomarkers::Severity::Critical => 0,
-        refact_codehealth::biomarkers::Severity::High => 1,
-        refact_codehealth::biomarkers::Severity::Medium => 2,
-        refact_codehealth::biomarkers::Severity::Low => 3,
-    }
-}
-
-fn analyze_health_file(path: String, text: String) -> HealthFileResponse {
-    let lang = refact_codegraph::lang_from_path(&path).to_string();
-    let health = refact_codehealth::analyze(&lang, &text);
-    let duplication_pct = refact_codehealth::duplication::duplication_pct(&lang, &text);
-    let dry_violation = refact_codehealth::duplication::dry_violation(&lang, &text);
-    let mut findings = refact_codehealth::biomarkers::detect_biomarkers(&lang, &text);
-    findings.extend(refact_codehealth::perf::detect_perf(&lang, &text));
-    findings.sort_by(|a, b| {
-        severity_rank(a.severity)
-            .cmp(&severity_rank(b.severity))
-            .then_with(|| a.line.cmp(&b.line))
-            .then_with(|| a.biomarker.cmp(&b.biomarker))
-    });
-    let file_score = refact_codehealth::scoring::score_file(&findings);
-    let mut functions = health.functions.clone();
-    functions.sort_by(|a, b| {
-        b.complexity
-            .cmp(&a.complexity)
-            .then_with(|| b.loc.cmp(&a.loc))
-            .then_with(|| a.line1.cmp(&b.line1))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    let function_count = functions.len();
-    let functions = functions
+fn health_file_response(
+    analysis: crate::tools::tool_codegraph::HealthFileAnalysis,
+) -> HealthFileResponse {
+    let function_count = analysis.function_count;
+    let functions = analysis
+        .functions
         .into_iter()
         .take(MAX_FUNCTIONS_PER_FILE)
         .map(|function| HealthFunctionResponse {
@@ -453,35 +434,42 @@ fn analyze_health_file(path: String, text: String) -> HealthFileResponse {
             nesting: function.nesting,
             loc: function.loc,
             maintainability: function.maintainability,
+            maintainability_index: function.maintainability_index,
         })
         .collect();
-    let biomarker_count = findings.len();
-    let findings = findings.into_iter().take(MAX_FINDINGS_PER_FILE).collect();
-    let mut refactorings = refact_codehealth::refactoring::rank(
-        refact_codehealth::refactoring::suggest_refactorings(&lang, &text),
-    );
-    let refactoring_count = refactorings.len();
+    let biomarker_count = analysis.biomarker_count;
+    let findings = analysis
+        .findings
+        .into_iter()
+        .take(MAX_FINDINGS_PER_FILE)
+        .collect();
+    let refactoring_count = analysis.refactoring_count;
+    let mut refactorings = analysis.refactorings;
     refactorings.truncate(MAX_REFACTORINGS_PER_FILE);
 
     HealthFileResponse {
-        path,
-        lang,
-        score: file_score.defect,
-        grade: refact_codehealth::scoring::grade(file_score.defect),
-        complexity: health.max_complexity,
-        maintainability: health.avg_maintainability,
-        max_complexity: health.max_complexity,
-        avg_maintainability: health.avg_maintainability,
+        path: analysis.path,
+        lang: analysis.lang,
+        score: analysis.defect_score,
+        grade: analysis.grade,
+        complexity: analysis.max_complexity,
+        maintainability: analysis.maintainability_index,
+        maintainability_index: analysis.maintainability_index,
+        maintainability_signal: analysis.maintainability_score,
+        max_complexity: analysis.max_complexity,
+        avg_maintainability: analysis.avg_maintainability,
         function_count,
-        duplication_pct,
-        dry_violation,
-        defect_score: file_score.defect,
-        maintainability_score: file_score.maintainability,
-        performance_score: file_score.performance,
+        duplication_pct: analysis.duplication_pct,
+        dry_violation: analysis.dry_violation,
+        defect_score: analysis.defect_score,
+        maintainability_score: analysis.maintainability_score,
+        performance_score: analysis.performance_score,
         biomarker_count,
         refactoring_count,
         functions,
         findings,
+        health_impact: analysis.health_impact,
+        cache_hit: analysis.cache_hit,
         refactorings,
     }
 }
@@ -497,7 +485,20 @@ fn health_aggregate(files: &[HealthFileResponse]) -> HealthAggregateResponse {
     let avg_maintainability = if files.is_empty() {
         100.0
     } else {
-        files.iter().map(|file| file.maintainability).sum::<f64>() / files.len() as f64
+        files
+            .iter()
+            .map(|file| file.maintainability_index)
+            .sum::<f64>()
+            / files.len() as f64
+    };
+    let avg_maintainability_signal = if files.is_empty() {
+        10.0
+    } else {
+        files
+            .iter()
+            .map(|file| file.maintainability_signal)
+            .sum::<f64>()
+            / files.len() as f64
     };
     let avg_duplication_pct = if files.is_empty() {
         0.0
@@ -516,6 +517,8 @@ fn health_aggregate(files: &[HealthFileResponse]) -> HealthAggregateResponse {
             .max()
             .unwrap_or(0),
         avg_maintainability,
+        avg_maintainability_index: avg_maintainability,
+        avg_maintainability_signal,
         avg_duplication_pct,
         biomarker_count: files.iter().map(|file| file.biomarker_count).sum(),
         refactoring_count: files.iter().map(|file| file.refactoring_count).sum(),
@@ -757,26 +760,62 @@ pub async fn handle_v1_code_intel_health(
     };
     let limit = clamped_limit(query.limit, DEFAULT_HEALTH_LIMIT, MAX_HEALTH_LIMIT);
     let filter = path_filter(query.path);
+    let index_state = codegraph_index_state(&service).await?;
+    let project_root = crate::tools::tool_codegraph::project_dir(app.gcx.clone()).await;
+    let intel = project_root.as_deref().and_then(|dir| {
+        crate::tools::tool_codegraph::cached_mine_history(dir, GIT_HISTORY_MAX_COMMITS).ok()
+    });
+    let mut snapshots = crate::tools::tool_codegraph::load_health_snapshots(&service).await;
+    let mut trend_findings = if filter.is_some() {
+        refact_codehealth::trends::evaluate_trends(&snapshots)
+    } else {
+        Vec::new()
+    };
+    let git_function_fact_paths =
+        crate::tools::tool_codegraph::top_git_function_fact_paths(intel.as_ref());
+    let files_text = service.all_files_with_text().await.map_err(store_error)?;
+    let mut analyses = analyze_health_files_for_response(
+        &files_text,
+        filter.as_deref(),
+        project_root.as_deref(),
+        intel.as_ref(),
+        &service,
+        &trend_findings,
+        &git_function_fact_paths,
+    )
+    .await?;
 
-    let mut files = service
-        .all_files_with_text()
-        .await
-        .map_err(store_error)?
-        .into_iter()
-        .filter(|(path, _)| {
-            filter
-                .as_deref()
-                .is_none_or(|filter| path_matches_filter(path, filter))
-        })
-        .map(|(path, text)| analyze_health_file(path, text))
-        .collect::<Vec<_>>();
-
-    if files.is_empty() {
-        if filter.is_some() {
-            return detail_response("path is not indexed in codegraph");
-        }
+    if analyses.is_empty() && filter.is_some() {
+        return detail_response("path is not indexed in codegraph");
     }
 
+    if filter.is_none() {
+        let snapshot = crate::tools::tool_codegraph::build_health_snapshot(&analyses);
+        let mut trend_history = snapshots.clone();
+        crate::tools::tool_codegraph::push_health_snapshot(&mut trend_history, snapshot.clone());
+        trend_findings = refact_codehealth::trends::evaluate_trends(&trend_history);
+        if !trend_findings.is_empty() {
+            analyses = analyze_health_files_for_response(
+                &files_text,
+                None,
+                project_root.as_deref(),
+                intel.as_ref(),
+                &service,
+                &trend_findings,
+                &git_function_fact_paths,
+            )
+            .await?;
+        }
+        crate::tools::tool_codegraph::push_health_snapshot(&mut snapshots, snapshot);
+        crate::tools::tool_codegraph::persist_health_snapshots(&service, &snapshots)
+            .await
+            .map_err(store_error)?;
+    }
+
+    let mut files = analyses
+        .into_iter()
+        .map(health_file_response)
+        .collect::<Vec<_>>();
     let aggregate = health_aggregate(&files);
     files.sort_by(|a, b| {
         a.score
@@ -787,9 +826,53 @@ pub async fn handle_v1_code_intel_health(
     });
     files.truncate(limit);
 
-    json_response(&HealthResponse { aggregate, files })
+    json_response(&HealthResponse {
+        index_state,
+        aggregate,
+        files,
+    })
 }
 
+async fn analyze_health_files_for_response(
+    files_text: &[(String, String)],
+    filter: Option<&str>,
+    project_root: Option<&Path>,
+    intel: Option<&refact_git_intel::GitIntel>,
+    service: &Arc<refact_codegraph::CodeGraphService>,
+    trend_findings: &[refact_codehealth::biomarkers::Finding],
+    git_function_fact_paths: &HashSet<String>,
+) -> Result<Vec<crate::tools::tool_codegraph::HealthFileAnalysis>, ScratchError> {
+    let ctx = crate::tools::tool_codegraph::HealthAnalysisContext {
+        repo_root: project_root,
+        intel,
+        service: Some(service),
+        coverage: None,
+        trend_findings,
+        git_function_fact_paths,
+    };
+    let mut analyses = Vec::new();
+    for (path, text) in files_text {
+        if filter.is_some_and(|filter| {
+            !crate::tools::tool_codegraph::health_paths_refer_to_same_file(
+                path,
+                filter,
+                project_root,
+            )
+        }) {
+            continue;
+        }
+        analyses.push(
+            crate::tools::tool_codegraph::analyze_health_file_shared(
+                path.clone(),
+                text.clone(),
+                &ctx,
+            )
+            .await
+            .map_err(store_error)?,
+        );
+    }
+    Ok(analyses)
+}
 pub async fn handle_v1_code_intel_git_risk(
     State(app): State<AppState>,
     Query(query): Query<CodeIntelListQuery>,
@@ -1679,6 +1762,11 @@ mod tests {
         assert!(files[0]["score"].is_number());
         assert!(files[0]["grade"].is_string());
         assert!(files[0]["functions"].is_array());
+        assert_eq!(json["index_state"]["cross_file_ready"], true);
+        assert!(files[0]["health_impact"].is_array());
+        assert!(files[0]["maintainability_index"].is_number());
+        assert!(files[0]["maintainability_signal"].is_number());
+        assert!(json["aggregate"]["avg_maintainability_index"].is_number());
     }
 
     #[tokio::test]
