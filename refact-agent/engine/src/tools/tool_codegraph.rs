@@ -889,7 +889,7 @@ pub(crate) fn build_health_snapshot(
         files.iter().map(|file| file.defect_score).sum::<f64>() / files.len() as f64
     };
     refact_codehealth::trends::HealthSnapshot {
-        ts: now_unix_ts(),
+        ts: current_unix_ts(),
         per_file,
         aggregate,
     }
@@ -1404,7 +1404,7 @@ pub(crate) async fn build_git_meta(
     service: Option<&Arc<refact_codegraph::CodeGraphService>>,
     function_ranges: Option<&[(String, usize, usize)]>,
 ) -> refact_codehealth::git_biomarkers::GitMeta {
-    let now_ts = now_unix_ts();
+    let now_ts = current_unix_ts();
     let entropy_map = intel.change_entropy();
     let (added_90d, deleted_90d) = intel.lines_in_window(path_repo_relative, now_ts, 90);
     let (primary_owner_name, primary_owner_commit_pct) = intel.primary_owner(path_repo_relative);
@@ -1479,7 +1479,7 @@ pub(crate) async fn build_git_risk_assembly(
     limit: usize,
     filter: Option<&str>,
 ) -> GitRiskAssembly {
-    let now_ts = now_unix_ts();
+    let now_ts = current_unix_ts();
     let all_hotspots = intel.hotspots(intel.file_churn.len().max(1));
     let mut selected = all_hotspots
         .into_iter()
@@ -1547,13 +1547,6 @@ pub(crate) async fn build_git_risk_assembly(
         files,
         recent_commit_risks: recent_commit_risk_summaries(intel),
     }
-}
-
-fn now_unix_ts() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
-        .unwrap_or(0)
 }
 
 fn dead_code_path_matches(path: &str, filter: &str) -> bool {
@@ -2257,12 +2250,14 @@ fn downgrade_health_severity(
 }
 
 fn graph_path_matches(graph_path: &str, requested_path: &str) -> bool {
+    // Exact or suffix path matches only. A bare-basename fallback is deliberately
+    // NOT allowed here: enrichment (fan-in gates, hot-path flags) must never
+    // borrow signals from a same-named file in another directory.
     let graph_path = graph_path.replace('\\', "/");
     let requested_path = requested_path.replace('\\', "/");
     graph_path == requested_path
-        || graph_path.ends_with(&requested_path)
-        || requested_path.ends_with(&graph_path)
-        || graph_path.rsplit('/').next() == requested_path.rsplit('/').next()
+        || graph_path.ends_with(&format!("/{requested_path}"))
+        || requested_path.ends_with(&format!("/{graph_path}"))
 }
 
 fn graph_name_matches(graph_name: &str, function_name: &str) -> bool {
