@@ -9,6 +9,9 @@ const MESSAGES_PER_CHUNK: usize = 4;
 const MAX_CONTENT_PER_MESSAGE: usize = 2000;
 const OVERLAP_MESSAGES: usize = 1;
 const LLM_SEGMENT_SUMMARY_KIND: &str = "llm_segment_summary";
+// Keep in sync with refact_chat_history::trajectory_ops::COMPRESSION_REPORT_ROLE;
+// refact-vecdb intentionally has no dependency on the chat-history crate.
+const COMPRESSION_REPORT_ROLE: &str = "compression_report";
 
 pub struct TrajectoryFileSplitter {
     max_tokens: usize,
@@ -128,10 +131,9 @@ impl TrajectoryFileSplitter {
     }
 
     fn should_skip_message(&self, msg: &Value, role: &str) -> bool {
-        if matches!(
-            role,
-            "context_file" | "cd_instruction" | "compression_report" | "system"
-        ) {
+        if role == COMPRESSION_REPORT_ROLE
+            || matches!(role, "context_file" | "cd_instruction" | "system")
+        {
             return true;
         }
         role == "assistant" && message_compression_kind(msg) == Some(LLM_SEGMENT_SUMMARY_KIND)

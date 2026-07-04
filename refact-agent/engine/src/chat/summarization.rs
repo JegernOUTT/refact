@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -219,7 +219,20 @@ fn is_excluded_from_segment(message: &ChatMessage) -> bool {
     {
         return true;
     }
+    // Exempt events (process_completed, tool_decision, system_notice, ...) must
+    // survive on the wire per compression_exemption rules; only DropOnAge events
+    // (mode_switch, tick) may be folded into a summarized segment.
+    if message.role == "event" {
+        return exemption_for(message) != CompressionExemption::DropOnAge;
+    }
     exemption_for(message) == CompressionExemption::Never
+}
+
+/// True when an active source-preserving summary already covers this message.
+/// Covered messages are wire-suppressed, so re-summarizing them wastes
+/// summarizer calls and produces overlapping summaries.
+fn is_covered_by_active_summary(covered: &HashSet<String>, message: &ChatMessage) -> bool {
+    !message.message_id.is_empty() && covered.contains(&message.message_id)
 }
 
 fn is_segment_boundary(message: &ChatMessage) -> bool {
@@ -242,17 +255,22 @@ pub fn closed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment>
         return Vec::new();
     }
 
+    let covered = summarized_source_id_union(messages);
+    let excluded = |idx: usize| {
+        is_excluded_from_segment(&messages[idx])
+            || is_covered_by_active_summary(&covered, &messages[idx])
+    };
     let mut segments = Vec::new();
     for pair in boundary_indices.windows(2) {
         let left_boundary = pair[0];
         let right_boundary = pair[1];
         let mut start = left_boundary + 1;
-        while start < right_boundary && is_excluded_from_segment(&messages[start]) {
+        while start < right_boundary && excluded(start) {
             start += 1;
         }
         let mut idx = start;
         while idx < right_boundary {
-            if is_excluded_from_segment(&messages[idx]) {
+            if excluded(idx) {
                 if start < idx {
                     segments.push(SummarySegment {
                         start,
@@ -260,7 +278,7 @@ pub fn closed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment>
                     });
                 }
                 idx += 1;
-                while idx < right_boundary && is_excluded_from_segment(&messages[idx]) {
+                while idx < right_boundary && excluded(idx) {
                     idx += 1;
                 }
                 start = idx;
@@ -581,11 +599,13 @@ fn tail_non_user_segment_candidates(messages: &[ChatMessage]) -> Vec<SummarySegm
     let Some(last_boundary) = messages.iter().rposition(is_segment_boundary) else {
         return Vec::new();
     };
+    let covered = summarized_source_id_union(messages);
     let mut candidates = Vec::new();
     let mut run_start = None;
 
     for idx in last_boundary + 1..messages.len() {
         let is_separator = is_excluded_from_segment(&messages[idx])
+            || is_covered_by_active_summary(&covered, &messages[idx])
             || message_has_unresolved_tool_calls_within(messages, idx, messages.len() - 1);
         if is_separator {
             if let Some(start) = run_start.take() {
@@ -771,13 +791,25 @@ fn ensure_candidate_source_message_ids(
     changed
 }
 
-fn ensure_all_candidate_source_message_ids(messages: &mut [ChatMessage]) -> bool {
+/// Assigns missing message ids across every compression candidate and returns
+/// the indices that changed, so callers can emit granular `MessageUpdated`
+/// events instead of relying on the next snapshot.
+fn ensure_all_candidate_source_message_ids(messages: &mut [ChatMessage]) -> Vec<usize> {
     let candidates = compression_candidates(messages);
-    let mut changed = false;
+    let mut assigned = Vec::new();
     for candidate in candidates {
-        changed |= ensure_candidate_source_message_ids(messages, &candidate);
+        for range in &candidate.ranges {
+            for idx in range.start..=range.end {
+                if messages[idx].message_id.is_empty() {
+                    messages[idx].message_id = Uuid::new_v4().to_string();
+                    assigned.push(idx);
+                }
+            }
+        }
     }
-    changed
+    assigned.sort_unstable();
+    assigned.dedup();
+    assigned
 }
 
 fn source_messages_for_candidate(
@@ -1560,6 +1592,81 @@ fn preserved_agentic_tool_source_ids(source_messages: &[ChatMessage]) -> Vec<Str
     ids
 }
 
+/// Preserving a tool/diff result whose calling assistant gets summarized would
+/// orphan it on the wire: linearize suppresses the assistant, the surviving
+/// result keeps a dangling `tool_call_id`, and history repair silently drops it
+/// (observed as data loss in field trajectories). Expand every preserved
+/// tool/diff result to its whole call group — the calling assistant plus all
+/// sibling results answering that assistant's calls — so suppressed groups stay
+/// atomic.
+fn expand_preserved_call_groups(
+    source_messages: &[ChatMessage],
+    preserved_source_ids: Vec<String>,
+) -> Vec<String> {
+    let mut expanded_set: HashSet<String> = preserved_source_ids.iter().cloned().collect();
+    let mut expanded = preserved_source_ids;
+
+    let mut call_owner: HashMap<&str, usize> = HashMap::new();
+    for (idx, message) in source_messages.iter().enumerate() {
+        for tool_call in message.tool_calls.iter().flatten() {
+            call_owner.insert(tool_call.id.as_str(), idx);
+        }
+    }
+
+    let mut preserved_assistants: Vec<usize> = Vec::new();
+    let mut seen_assistants: HashSet<usize> = HashSet::new();
+    for message in source_messages {
+        if message.message_id.is_empty()
+            || message.tool_call_id.is_empty()
+            || !matches!(message.role.as_str(), "tool" | "diff")
+            || !expanded_set.contains(&message.message_id)
+        {
+            continue;
+        }
+        if let Some(owner_idx) = call_owner.get(message.tool_call_id.as_str()) {
+            if seen_assistants.insert(*owner_idx) {
+                preserved_assistants.push(*owner_idx);
+            }
+        }
+    }
+
+    for owner_idx in preserved_assistants {
+        let assistant = &source_messages[owner_idx];
+        if !assistant.message_id.is_empty() && expanded_set.insert(assistant.message_id.clone()) {
+            expanded.push(assistant.message_id.clone());
+        }
+        let owned_calls: HashSet<&str> = assistant
+            .tool_calls
+            .iter()
+            .flatten()
+            .map(|tool_call| tool_call.id.as_str())
+            .collect();
+        for message in source_messages {
+            if message.message_id.is_empty()
+                || message.tool_call_id.is_empty()
+                || !matches!(message.role.as_str(), "tool" | "diff" | "context_file")
+                || !owned_calls.contains(message.tool_call_id.as_str())
+            {
+                continue;
+            }
+            if expanded_set.insert(message.message_id.clone()) {
+                expanded.push(message.message_id.clone());
+            }
+        }
+    }
+
+    expanded
+}
+
+fn split_with_expanded_preserved_groups(
+    source_messages: &[ChatMessage],
+    source_ids: &[String],
+    preserved_source_ids: Vec<String>,
+) -> (Vec<String>, Vec<String>) {
+    let preserved = expand_preserved_call_groups(source_messages, preserved_source_ids);
+    split_summarized_and_preserved_source_ids(source_ids, preserved)
+}
+
 fn split_summarized_and_preserved_source_ids(
     source_ids: &[String],
     preserved_source_ids: Vec<String>,
@@ -1806,7 +1913,7 @@ fn make_segment_summary_message(
     let mut preserved_source_ids = decision.preserved_context_file_ids.clone();
     preserved_source_ids.extend(preserved_agentic_tool_source_ids(source_messages));
     let (summarized_source_ids, preserved_source_ids) =
-        split_summarized_and_preserved_source_ids(&source_ids, preserved_source_ids);
+        split_with_expanded_preserved_groups(source_messages, &source_ids, preserved_source_ids);
     let created_at = chrono::Utc::now().to_rfc3339();
     let mut extra = serde_json::Map::new();
     extra.insert(
@@ -1858,7 +1965,11 @@ fn refresh_segment_summary_metadata(
     let preserved_source_message_ids =
         compression_metadata_string_array(summary_metadata, "preserved_source_message_ids");
     let (summarized_source_message_ids, preserved_source_message_ids) =
-        split_summarized_and_preserved_source_ids(&source_ids, preserved_source_message_ids);
+        split_with_expanded_preserved_groups(
+            source_messages,
+            &source_ids,
+            preserved_source_message_ids,
+        );
     let preserved_context_file_paths =
         compression_metadata_string_array(summary_metadata, "preserved_context_file_paths");
     let preserved_context_file_count =
@@ -1918,7 +2029,11 @@ fn make_segment_compression_report_message_with_benefit(
     let preserved_source_message_ids =
         compression_metadata_string_array(summary_metadata, "preserved_source_message_ids");
     let (summarized_source_message_ids, preserved_source_message_ids) =
-        split_summarized_and_preserved_source_ids(&source_ids, preserved_source_message_ids);
+        split_with_expanded_preserved_groups(
+            source_messages,
+            &source_ids,
+            preserved_source_message_ids,
+        );
     let preserved_context_file_paths =
         compression_metadata_string_array(summary_metadata, "preserved_context_file_paths");
     let preserved_context_file_count =
@@ -2253,6 +2368,26 @@ fn append_compression_outcome_event(session: &mut ChatSession, reason: Compressi
     session.emit(ChatEvent::MessageAdded { message, index });
     session.increment_version();
     session.touch();
+}
+
+/// Best-effort cleanup for a reserved compression attempt. Every normal exit of
+/// `run_reserved_segment_summarization` writes a terminal phase first (which
+/// clears the attempt), so this guard only fires on panics or future
+/// cancellation mid-await. If the session lock is contended at drop time the
+/// 15-minute staleness window (`COMPRESSION_ATTEMPT_STALE_MS`) self-heals.
+struct CompressionAttemptGuard {
+    session_arc: Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    attempt: u64,
+}
+
+impl Drop for CompressionAttemptGuard {
+    fn drop(&mut self) {
+        if let Ok(mut session) = self.session_arc.try_lock() {
+            if owns_compression_attempt(&session, self.attempt) {
+                emit_compression_failed(&mut session, CompressionReason::TransientFailure);
+            }
+        }
+    }
 }
 
 fn reserve_compression_attempt(
@@ -2655,10 +2790,24 @@ async fn run_reserved_segment_summarization(
         }
         if !should_attempt_segment_summarization(thread, force) {
             emit_compression_skipped(&mut session, CompressionReason::AutoCompactDisabled);
+            if forced_context_limit {
+                append_compression_outcome_event(
+                    &mut session,
+                    CompressionReason::AutoCompactDisabled,
+                );
+            }
             return CompactionOutcome::NothingToCompact;
         }
         let attempt = reserve_compression_attempt(&mut session, reason);
-        if ensure_all_candidate_source_message_ids(&mut session.messages) {
+        let assigned_id_indexes = ensure_all_candidate_source_message_ids(&mut session.messages);
+        if !assigned_id_indexes.is_empty() {
+            for index in assigned_id_indexes {
+                let message = session.messages[index].clone();
+                session.emit(ChatEvent::MessageUpdated {
+                    message_id: message.message_id.clone(),
+                    message,
+                });
+            }
             session.increment_version();
             session.touch();
         }
@@ -2672,10 +2821,19 @@ async fn run_reserved_segment_summarization(
         ) || session.draft_message.is_some()
         {
             emit_compression_skipped(&mut session, CompressionReason::NoEligibleSegment);
+            if forced_context_limit {
+                append_compression_outcome_event(
+                    &mut session,
+                    CompressionReason::NoEligibleSegment,
+                );
+            }
             return CompactionOutcome::NothingToCompact;
         }
         if current_tail_has_active_pending_tool_calls(&session.messages) {
             emit_compression_skipped(&mut session, CompressionReason::PendingToolCalls);
+            if forced_context_limit {
+                append_compression_outcome_event(&mut session, CompressionReason::PendingToolCalls);
+            }
             return CompactionOutcome::NothingToCompact;
         }
         (
@@ -2684,6 +2842,10 @@ async fn run_reserved_segment_summarization(
             session.compression_insufficient_hashes.clone(),
             session.provider_usage_stale,
         )
+    };
+    let _attempt_guard = CompressionAttemptGuard {
+        session_arc: session_arc.clone(),
+        attempt,
     };
 
     if compression_candidates(&raw_messages).is_empty() {
@@ -2881,6 +3043,17 @@ async fn run_reserved_segment_summarization(
             if current_source.is_empty() {
                 continue;
             }
+            if !resolved_summary_source_still_current(
+                &current_source,
+                source_messages.len(),
+                &source_hash,
+            ) {
+                // The chat changed while the summarizer ran (edit, removal, or another
+                // compaction). Never apply a summary over sources it no longer
+                // describes, and do not remember the span as insufficient — the next
+                // pass re-collects candidates from the current state.
+                continue;
+            }
             let current_preserved_source_messages =
                 preserved_source_messages_from_summary(&summary, &current_source);
             let current_benefit = effective_compression_benefit(
@@ -2965,6 +3138,20 @@ async fn run_reserved_segment_summarization(
         }
         CompactionOutcome::NothingToCompact
     }
+}
+
+/// Post-await revalidation for a resolved segment summary: the summary may only
+/// be applied when every pre-await source message is still present and its
+/// content hash is unchanged. This mirrors the test-path
+/// `apply_resolved_segment_summary` guard and closes the queue-race window
+/// where an edit/removal/compaction lands while the summarizer LLM runs.
+fn resolved_summary_source_still_current(
+    current_source: &[ChatMessage],
+    expected_len: usize,
+    expected_hash: &str,
+) -> bool {
+    current_source.len() == expected_len
+        && source_hash_for_messages(current_source) == expected_hash
 }
 
 const MAX_REMEMBERED_INSUFFICIENT_HASHES: usize = 256;
@@ -3129,6 +3316,158 @@ mod tests {
         let mut message = event(text);
         message.extra.insert("_ui_only".to_string(), json!(true));
         message
+    }
+
+    #[test]
+    fn expand_preserved_call_groups_pulls_calling_assistant_and_siblings() {
+        let mut assistant_msg = with_message_id(assistant_with_tool_call_id("call-1"), "a-1");
+        if let Some(calls) = assistant_msg.tool_calls.as_mut() {
+            calls.push(ChatToolCall {
+                id: "call-2".to_string(),
+                index: Some(1),
+                function: ChatToolFunction {
+                    name: "shell".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            });
+        }
+        let preserved_tool = with_message_id(tool_with_id("call-1", "preserved output"), "t-1");
+        let sibling_tool = with_message_id(tool_with_id("call-2", "sibling output"), "t-2");
+        let source_messages = vec![assistant_msg, preserved_tool, sibling_tool];
+
+        let expanded = expand_preserved_call_groups(&source_messages, vec!["t-1".to_string()]);
+
+        assert!(expanded.contains(&"t-1".to_string()));
+        assert!(
+            expanded.contains(&"a-1".to_string()),
+            "calling assistant must be preserved with its tool result"
+        );
+        assert!(
+            expanded.contains(&"t-2".to_string()),
+            "sibling results of the preserved call group must be preserved"
+        );
+    }
+
+    #[test]
+    fn make_segment_summary_never_orphans_preserved_tool_results() {
+        let assistant_msg = with_message_id(assistant_with_tool_call_id("call-1"), "a-1");
+        let mut preserved_tool =
+            with_message_id(tool_with_id("call-1", "big preserved output"), "t-1");
+        preserved_tool.preserve = Some(true);
+        let source_messages = vec![assistant_msg, preserved_tool];
+
+        let summary = make_segment_summary_message(
+            "summary text".to_string(),
+            &source_messages,
+            "test-model",
+        );
+
+        let metadata = summary.extra.get("compression");
+        let preserved = compression_metadata_string_array(metadata, "preserved_source_message_ids");
+        let summarized =
+            compression_metadata_string_array(metadata, "summarized_source_message_ids");
+        assert!(preserved.contains(&"t-1".to_string()));
+        assert!(
+            preserved.contains(&"a-1".to_string()),
+            "assistant of a preserved tool result must not be wire-suppressed"
+        );
+        assert!(!summarized.contains(&"a-1".to_string()));
+    }
+
+    #[test]
+    fn segments_exclude_sources_covered_by_active_summary() {
+        let covered_assistant = with_message_id(assistant("old work"), "a-old");
+        let summary_sources = vec![covered_assistant.clone()];
+        let summary =
+            make_segment_summary_message("old summary".to_string(), &summary_sources, "test-model");
+        let messages = vec![
+            with_message_id(user("q1"), "u-1"),
+            covered_assistant,
+            summary,
+            with_message_id(assistant("new work"), "a-new"),
+            with_message_id(user("q2"), "u-2"),
+        ];
+
+        let segments = closed_non_user_segments(&messages);
+
+        assert!(
+            segments
+                .iter()
+                .all(|segment| !(segment.start..=segment.end).contains(&1)),
+            "sources covered by an active summary must not be re-collected: {:?}",
+            segments
+        );
+        assert!(
+            segments
+                .iter()
+                .any(|segment| (segment.start..=segment.end).contains(&3)),
+            "uncovered messages must stay summarizable: {:?}",
+            segments
+        );
+    }
+
+    #[test]
+    fn exempt_events_are_excluded_from_segments_but_droppable_events_are_not() {
+        let notice = event("worker finished");
+        assert!(
+            is_excluded_from_segment(&notice),
+            "PreserveAnchor events must never enter summarized segments"
+        );
+
+        let tick = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::Tick,
+            "test.summarization",
+            json!({}),
+            "tick".to_string(),
+        );
+        assert!(
+            !is_excluded_from_segment(&tick),
+            "DropOnAge events may be folded into segments"
+        );
+    }
+
+    #[test]
+    fn image_only_segment_is_not_summarizable() {
+        let image_assistant = with_message_id(
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::Multimodal(vec![MultimodalElement {
+                    m_type: "image/png".to_string(),
+                    m_content: "base64data".to_string(),
+                }]),
+                ..Default::default()
+            },
+            "a-img",
+        );
+        let messages = vec![
+            with_message_id(user("q1"), "u-1"),
+            image_assistant,
+            with_message_id(user("q2"), "u-2"),
+        ];
+
+        assert!(
+            compression_candidates(&messages).is_empty(),
+            "image-only spans have no summarizable text and must not reach the summarizer"
+        );
+    }
+
+    #[test]
+    fn resolved_summary_source_revalidation_rejects_changed_or_missing_sources() {
+        let source = vec![
+            with_message_id(assistant("original"), "a-1"),
+            with_message_id(tool("output"), "t-1"),
+        ];
+        let hash = source_hash_for_messages(&source);
+        assert!(resolved_summary_source_still_current(&source, 2, &hash));
+
+        let mut edited = source.clone();
+        edited[0].content = ChatContent::SimpleText("edited".to_string());
+        assert!(!resolved_summary_source_still_current(&edited, 2, &hash));
+
+        let shrunk = vec![source[0].clone()];
+        assert!(!resolved_summary_source_still_current(&shrunk, 2, &hash));
     }
 
     fn plan(text: &str) -> ChatMessage {
@@ -3540,14 +3879,16 @@ mod tests {
 
             assert!(!text.contains("## Compressed Tool Outputs"), "{name}");
             assert_eq!(metadata["compressed_tool_output_count"], json!(0), "{name}");
+            // The preserved tool result pulls its calling assistant into the
+            // preserved set so the pair never orphans on the wire.
             assert_eq!(
                 metadata["preserved_source_message_ids"],
-                json!(["tool-source"]),
+                json!(["tool-source", "assistant-source"]),
                 "{name}"
             );
             assert_eq!(
                 metadata["summarized_source_message_ids"],
-                json!(["assistant-source", "assistant-routine"]),
+                json!(["assistant-routine"]),
                 "{name}"
             );
 
@@ -3608,19 +3949,19 @@ mod tests {
 
         assert_eq!(
             summary_metadata["preserved_source_message_ids"],
-            json!(["tool-source"])
+            json!(["tool-source", "assistant-source"])
         );
         assert_eq!(
             summary_metadata["summarized_source_message_ids"],
-            json!(["assistant-source", "assistant-routine"])
+            json!(["assistant-routine"])
         );
         assert_eq!(
             report_metadata["preserved_source_message_ids"],
-            json!(["tool-source"])
+            json!(["tool-source", "assistant-source"])
         );
         assert_eq!(
             report_metadata["summarized_source_message_ids"],
-            json!(["assistant-source", "assistant-routine"])
+            json!(["assistant-routine"])
         );
 
         let linearized = crate::chat::linearize::apply_summarization_linearize(messages);
@@ -3669,11 +4010,11 @@ mod tests {
         assert_eq!(metadata["compressed_tool_output_count"], json!(0));
         assert_eq!(
             metadata["preserved_source_message_ids"],
-            json!(["tool-source"])
+            json!(["tool-source", "assistant-source"])
         );
         assert_eq!(
             metadata["summarized_source_message_ids"],
-            json!(["assistant-source", "assistant-routine"])
+            json!(["assistant-routine"])
         );
 
         let messages = vec![
@@ -4329,7 +4670,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_segments_include_event_tool_context_file_inside_run() {
+    fn closed_segments_split_on_exempt_events_but_keep_tool_context_file() {
         let messages = vec![
             user("a"),
             assistant_with_tool_call(),
@@ -4338,14 +4679,19 @@ mod tests {
             context_file("file"),
             user("b"),
         ];
+        // Exempt events must stay on the wire, so they split segments instead of
+        // being folded into summarized source ids; tool and context_file stay in.
         assert_eq!(
             closed_non_user_segments(&messages),
-            vec![SummarySegment { start: 1, end: 4 }]
+            vec![
+                SummarySegment { start: 1, end: 2 },
+                SummarySegment { start: 4, end: 4 }
+            ]
         );
     }
 
     #[test]
-    fn event_inside_segment_is_included_not_split() {
+    fn exempt_event_inside_run_splits_segments() {
         let messages = vec![
             user("q1"),
             assistant("a1"),
@@ -4354,10 +4700,11 @@ mod tests {
             user("q2"),
         ];
         let segments = closed_non_user_segments(&messages);
-        // Events are included in segments for LLM summarization (content is preserved
-        // in the summary). PreserveAnchor protection applies in linearize.rs instead.
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0], SummarySegment { start: 1, end: 3 });
+        // Exempt events never enter summarized segments (they must stay on the
+        // wire), so a PreserveAnchor event splits the run around itself.
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0], SummarySegment { start: 1, end: 1 });
+        assert_eq!(segments[1], SummarySegment { start: 3, end: 3 });
     }
 
     #[test]
@@ -5530,11 +5877,11 @@ mod tests {
 
         assert_eq!(
             closed_non_user_segments(&messages),
-            vec![SummarySegment { start: 2, end: 3 }]
+            vec![SummarySegment { start: 3, end: 3 }]
         );
         assert_eq!(
             first_eligible_segment(&messages),
-            Some(SummarySegment { start: 2, end: 3 })
+            Some(SummarySegment { start: 3, end: 3 })
         );
         assert!(summarize_oldest_segment_with_static_summary(
             &mut messages,
@@ -5546,7 +5893,7 @@ mod tests {
         assert_segment_report_summary_pair(
             &messages,
             2,
-            2,
+            1,
             "test-model",
             "compressed post-summary run",
         );

@@ -8,7 +8,7 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::goal_verifier::{
-    apply_goal_verdict, begin_goal_verification_if_needed, run_goal_verifier,
+    apply_goal_verdict_guarded, begin_goal_verification_if_needed, run_goal_verifier,
     GoalVerificationApplyOutcome, GoalVerificationBegin, GoalVerdict,
 };
 use crate::chat::types::ChatSession;
@@ -58,10 +58,14 @@ impl Tool for ToolValidateGoal {
         }
         .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
 
-        let (begin, epoch) = {
+        let (begin, epoch, fork_trajectory_version) = {
             let mut session = session_arc.lock().await;
             let begin = begin_validate_goal(&mut session);
-            (begin, session.goal_ledger_last_seq())
+            (
+                begin,
+                session.goal_ledger_last_seq(),
+                session.trajectory_version,
+            )
         };
         match begin {
             GoalVerificationBegin::Started => {}
@@ -88,7 +92,13 @@ impl Tool for ToolValidateGoal {
         let verifier_reply = reply.verifier_reply.clone();
         let outcome = {
             let mut session = session_arc.lock().await;
-            apply_goal_verdict(&mut session, "validate_goal", reply, Some(epoch))
+            apply_goal_verdict_guarded(
+                &mut session,
+                "validate_goal",
+                reply,
+                Some(epoch),
+                fork_trajectory_version,
+            )
         };
         let content = validation_content(outcome, &verdict, &verifier_reply);
         let extra = validation_extra(outcome, &verdict);
@@ -195,7 +205,7 @@ mod tests {
     use refact_chat_api::GoalBudget;
 
     use crate::app_state::AppState;
-    use crate::chat::goal_verifier::GoalVerifierReply;
+    use crate::chat::goal_verifier::{apply_goal_verdict, GoalVerifierReply};
     use crate::chat::types::{GoalStatus, SessionState};
     use crate::tools::tools_list::get_tools_for_mode;
 

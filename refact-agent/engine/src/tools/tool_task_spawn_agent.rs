@@ -1169,6 +1169,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn build_agent_thread_params_starts_with_fresh_compaction_and_cache_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let params = build_agent_thread_params(
+            "agent-chat-1",
+            "Card Title",
+            "provider/model",
+            "task-1",
+            "agent-1",
+            "T-1",
+            "planner-chat-1",
+            sample_worktree_meta(temp.path()),
+        );
+
+        // Task-agent children must never inherit the planner's compaction or
+        // provider-cache state; a stale cap/response id would corrupt the
+        // child's first generation.
+        assert_eq!(params.context_tokens_cap, None);
+        assert_eq!(params.previous_response_id, None);
+        assert_eq!(params.auto_compact_enabled, None);
+        assert_eq!(params.reactive_compact_attempts, None);
+        assert_eq!(params.frozen_request_prefix, None);
+        assert_eq!(params.mode, "task_agent");
+        assert_eq!(params.parent_id.as_deref(), Some("planner-chat-1"));
+    }
+
     fn test_card(id: &str, column: &str, worktree: Option<String>) -> BoardCard {
         BoardCard {
             id: id.to_string(),

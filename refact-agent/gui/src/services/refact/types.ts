@@ -923,6 +923,24 @@ function withNormalizedExtraMetadata(
   return { ...(extra ?? {}), [key]: metadata };
 }
 
+const KNOWN_SUMMARIZATION_TIERS: readonly SummarizationTier[] = [
+  "tier0_deterministic",
+  "tier1_llm",
+  "tier1_merged",
+  "tier2_reactive",
+];
+
+// Engine summary messages stamp `summarization_tier` with the compression kind
+// ("llm_segment_summary"); reports carry real tier values. Pass known tiers
+// through so future engine tiers (e.g. merged-history) label correctly, and
+// fall back per message kind for everything else.
+function normalizeSummarizationTier(
+  tier: string | undefined,
+  fallback: SummarizationTier,
+): SummarizationTier {
+  return KNOWN_SUMMARIZATION_TIERS.find((known) => known === tier) ?? fallback;
+}
+
 export function syntheticSummarizationMessage(
   msg: AssistantMessage,
 ): SummarizationMessage {
@@ -931,7 +949,10 @@ export function syntheticSummarizationMessage(
     role: "summarization",
     content: typeof msg.content === "string" ? msg.content : "",
     message_id: msg.message_id,
-    summarization_tier: "tier1_llm",
+    summarization_tier: normalizeSummarizationTier(
+      msg.summarization_tier,
+      "tier1_llm",
+    ),
     summarized_token_estimate:
       typeof msg.summarized_token_estimate === "number"
         ? msg.summarized_token_estimate
@@ -949,7 +970,10 @@ export function syntheticCompressionReportMessage(
     role: "summarization",
     content: msg.content,
     message_id: msg.message_id,
-    summarization_tier: msg.summarization_tier ?? "tier2_reactive",
+    summarization_tier: normalizeSummarizationTier(
+      msg.summarization_tier,
+      "tier2_reactive",
+    ),
     summarized_token_estimate:
       typeof msg.summarized_token_estimate === "number"
         ? msg.summarized_token_estimate

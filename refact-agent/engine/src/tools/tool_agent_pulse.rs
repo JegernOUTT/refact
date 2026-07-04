@@ -183,7 +183,7 @@ fn build_agent_pulse(
     let latest_assistant = messages
         .iter()
         .rev()
-        .find(|message| message.role == "assistant");
+        .find(|message| message.role == "assistant" && !is_segment_summary_message(message));
     let latest_usage = latest_assistant
         .and_then(|message| message.usage.as_ref())
         .cloned();
@@ -420,11 +420,22 @@ fn currently_editing_from_tool_call(tool_call: &ChatToolCall) -> Option<String> 
         .map(str::to_string)
 }
 
+/// Segment summaries are assistant-role compression artifacts, not agent
+/// output; pulses must report the agent's own latest message and usage.
+fn is_segment_summary_message(message: &ChatMessage) -> bool {
+    message
+        .extra
+        .get("compression")
+        .and_then(|compression| compression.get("kind"))
+        .and_then(|kind| kind.as_str())
+        == Some("llm_segment_summary")
+}
+
 fn last_assistant_preview(messages: &[ChatMessage]) -> Option<String> {
     messages
         .iter()
         .rev()
-        .filter(|message| message.role == "assistant")
+        .filter(|message| message.role == "assistant" && !is_segment_summary_message(message))
         .find_map(|message| {
             let text = message.content.content_text_only();
             let preview = sanitize_preview(&text, PREVIEW_CHARS);

@@ -376,6 +376,7 @@ fn remove_equivalent_compression_reports(
     messages: &mut Vec<ChatMessage>,
     report: &ChatMessage,
     affected_boundary: usize,
+    modifiable_end: usize,
 ) -> usize {
     let report_fingerprint = compression_report_op_fingerprint(report);
     let report_key = compression_report_metadata_key(report);
@@ -383,21 +384,27 @@ fn remove_equivalent_compression_reports(
         return affected_boundary;
     }
 
+    let modifiable_end = modifiable_end.min(messages.len());
     let mut idx = 0usize;
     let mut removed_before_boundary = 0usize;
     messages.retain(|message| {
         // Reports are equivalent only when they describe the same operation: matching
         // stable fingerprints, or — for legacy fingerprint-less pairs — matching metrics.
-        let remove = match (
-            &report_fingerprint,
-            compression_report_op_fingerprint(message),
-        ) {
-            (Some(new_fingerprint), Some(old_fingerprint)) => *new_fingerprint == old_fingerprint,
-            (None, None) => {
-                report_key.is_some() && compression_report_metadata_key(message) == report_key
-            }
-            _ => false,
-        };
+        // Removal never reaches past `modifiable_end`: preserved/immutable tails must
+        // stay byte-identical even when they happen to contain a twin report.
+        let remove = idx < modifiable_end
+            && match (
+                &report_fingerprint,
+                compression_report_op_fingerprint(message),
+            ) {
+                (Some(new_fingerprint), Some(old_fingerprint)) => {
+                    *new_fingerprint == old_fingerprint
+                }
+                (None, None) => {
+                    report_key.is_some() && compression_report_metadata_key(message) == report_key
+                }
+                _ => false,
+            };
         if remove && idx < affected_boundary {
             removed_before_boundary += 1;
         }
@@ -413,8 +420,27 @@ pub fn insert_compression_report_at_boundary(
     report: ChatMessage,
     affected_boundary: usize,
 ) -> usize {
+    let modifiable_end = messages.len();
+    insert_compression_report_at_boundary_scoped(
+        messages,
+        report,
+        affected_boundary,
+        modifiable_end,
+    )
+}
+
+/// Like `insert_compression_report_at_boundary`, but equivalent-report removal is
+/// confined to `messages[..modifiable_end]`. Callers with a preserved tail
+/// (ctx_apply `preserve_last_turns`, deterministic sweeps) pass the modifiable
+/// prefix length so tail bytes are never mutated by report deduplication.
+pub fn insert_compression_report_at_boundary_scoped(
+    messages: &mut Vec<ChatMessage>,
+    report: ChatMessage,
+    affected_boundary: usize,
+    modifiable_end: usize,
+) -> usize {
     let adjusted_boundary =
-        remove_equivalent_compression_reports(messages, &report, affected_boundary);
+        remove_equivalent_compression_reports(messages, &report, affected_boundary, modifiable_end);
     let insert_idx = compression_report_insert_index(messages, adjusted_boundary);
     messages.insert(insert_idx, report);
     insert_idx
@@ -526,6 +552,35 @@ fn compression_report_insert_index(messages: &[ChatMessage], affected_boundary: 
 
     // Never split an assistant's tool calls from their results.
     while insert_idx < messages.len() && answers_earlier_tool_call(messages, insert_idx) {
+        insert_idx += 1;
+    }
+
+    // Stored history may interleave non-result messages (events, cd_instructions)
+    // between a tool call and its results. Keep skipping until every tool call
+    // opened before the insert point is answered; stop at a user/system/assistant
+    // barrier, past which the pair is already broken by history-validation rules.
+    let mut pending_call_ids: HashSet<&str> = HashSet::new();
+    for message in &messages[..insert_idx] {
+        if let Some(tool_calls) = message.tool_calls.as_ref() {
+            for tool_call in tool_calls {
+                pending_call_ids.insert(tool_call.id.as_str());
+            }
+        }
+        if matches!(message.role.as_str(), "tool" | "diff" | "context_file")
+            && !message.tool_call_id.is_empty()
+        {
+            pending_call_ids.remove(message.tool_call_id.as_str());
+        }
+    }
+    while insert_idx < messages.len() && !pending_call_ids.is_empty() {
+        let message = &messages[insert_idx];
+        match message.role.as_str() {
+            "tool" | "diff" | "context_file" if !message.tool_call_id.is_empty() => {
+                pending_call_ids.remove(message.tool_call_id.as_str());
+            }
+            "user" | "system" | "assistant" => break,
+            _ => {}
+        }
         insert_idx += 1;
     }
 
@@ -1337,6 +1392,70 @@ mod tests {
                 .filter(|message| message.role == COMPRESSION_REPORT_ROLE)
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn report_insert_skips_interleaved_events_between_call_and_results() {
+        let messages = vec![
+            make_user_msg("q"),
+            assistant_declaring_call("tc-1"),
+            make_event_message(),
+            make_tool_msg("tc-1", "late result"),
+            make_assistant_msg("done"),
+        ];
+
+        // An event interleaved between the call and its result must not let the
+        // report split the pair in stored form.
+        assert_eq!(compression_report_insert_index(&messages, 2), 4);
+    }
+
+    #[test]
+    fn report_insert_stops_at_barrier_when_pair_already_broken() {
+        let messages = vec![
+            make_user_msg("q"),
+            assistant_declaring_call("tc-1"),
+            make_event_message(),
+            make_user_msg("interrupting user"),
+            make_tool_msg("tc-1", "stray result"),
+        ];
+
+        // A user barrier between call and result already breaks the pair; the
+        // report stops at the barrier instead of chasing the stray result.
+        assert_eq!(compression_report_insert_index(&messages, 2), 3);
+    }
+
+    #[test]
+    fn scoped_dedupe_never_removes_twin_reports_past_modifiable_end() {
+        let twin = build_compression_report_message_with_fingerprint(1, 0, 0, 100, 50, "op-1");
+        let mut messages = vec![
+            make_user_msg("q"),
+            make_assistant_msg("a"),
+            twin.clone(),
+            make_user_msg("preserved tail user"),
+        ];
+
+        let replay = build_compression_report_message_with_fingerprint(1, 0, 0, 100, 50, "op-1");
+        insert_compression_report_at_boundary_scoped(&mut messages, replay, 2, 2);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == COMPRESSION_REPORT_ROLE)
+                .count(),
+            2,
+            "twin report beyond modifiable_end must stay byte-identical"
+        );
+
+        let unscoped_replay =
+            build_compression_report_message_with_fingerprint(1, 0, 0, 100, 50, "op-1");
+        insert_compression_report_at_boundary(&mut messages, unscoped_replay, 2);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == COMPRESSION_REPORT_ROLE)
+                .count(),
+            1,
+            "unscoped insert keeps full-history dedupe semantics"
         );
     }
 

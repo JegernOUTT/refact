@@ -111,7 +111,7 @@ pub async fn verify_goal_before_completion(
     session_arc: Arc<AMutex<ChatSession>>,
     trigger: &str,
 ) -> GoalCompletionGateOutcome {
-    let (begin, epoch) = {
+    let (begin, epoch, fork_trajectory_version) = {
         let mut session = session_arc.lock().await;
         let now_ms = epoch_ms_now();
         if session
@@ -122,7 +122,11 @@ pub async fn verify_goal_before_completion(
             return GoalCompletionGateOutcome::VerificationUnavailable;
         }
         let begin = begin_goal_verification_if_needed(&mut session);
-        (begin, session.goal_ledger_last_seq())
+        (
+            begin,
+            session.goal_ledger_last_seq(),
+            session.trajectory_version,
+        )
     };
     match begin {
         GoalVerificationBegin::Started => {}
@@ -169,7 +173,13 @@ pub async fn verify_goal_before_completion(
     }
 
     let mut session = session_arc.lock().await;
-    match apply_goal_verdict(&mut session, trigger, reply, Some(epoch)) {
+    match apply_goal_verdict_guarded(
+        &mut session,
+        trigger,
+        reply,
+        Some(epoch),
+        fork_trajectory_version,
+    ) {
         GoalVerificationApplyOutcome::Finalized => GoalCompletionGateOutcome::Finalized,
         GoalVerificationApplyOutcome::Rearmed => GoalCompletionGateOutcome::Rearmed,
         GoalVerificationApplyOutcome::Continued => GoalCompletionGateOutcome::Rearmed,
@@ -597,6 +607,27 @@ fn goal_verifier_reply_from_choice(choice: ChoiceFinal) -> GoalVerifierReply {
         verifier_reply: choice.content,
         tokens,
     }
+}
+
+/// Applies a verifier verdict only when the parent chat history is still the
+/// one the verifier forked from. The goal-status epoch alone cannot see queue
+/// commands, edits, or compaction rewrites that landed mid-verification; a
+/// `trajectory_version` mismatch means the verdict may describe messages that
+/// no longer exist, so the goal is re-armed for a fresh verification instead.
+pub fn apply_goal_verdict_guarded(
+    session: &mut ChatSession,
+    trigger: &str,
+    reply: GoalVerifierReply,
+    epoch: Option<u64>,
+    fork_trajectory_version: u64,
+) -> GoalVerificationApplyOutcome {
+    if session.goal.is_some() && session.trajectory_version != fork_trajectory_version {
+        if session.goal_status == Some(GoalStatus::Verifying) {
+            session.goal_set_status(GoalStatus::Active);
+        }
+        return GoalVerificationApplyOutcome::Superseded;
+    }
+    apply_goal_verdict(session, trigger, reply, epoch)
 }
 
 pub fn apply_goal_verdict(

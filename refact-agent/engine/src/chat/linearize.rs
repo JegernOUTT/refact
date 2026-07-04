@@ -88,12 +88,24 @@ fn can_suppress_source_preserving_source(
     suppressed: &HashSet<String>,
     preserved: &HashSet<String>,
 ) -> bool {
-    !msg.message_id.is_empty()
-        && suppressed.contains(&msg.message_id)
-        && !preserved.contains(&msg.message_id)
-        && !matches!(msg.role.as_str(), "user" | "system" | "plan" | "goal")
-        && !is_authoritative_summary(msg)
-        && exemption_for(msg) != CompressionExemption::Never
+    if msg.message_id.is_empty()
+        || !suppressed.contains(&msg.message_id)
+        || preserved.contains(&msg.message_id)
+        || matches!(msg.role.as_str(), "user" | "system" | "plan" | "goal")
+        || is_authoritative_summary(msg)
+        || exemption_for(msg) == CompressionExemption::Never
+    {
+        return false;
+    }
+    // Exempt events (process_completed, tool_decision, system_notice, ...) keep
+    // their wire presence even when a stored summary lists them as summarized
+    // sources; only DropOnAge events may be suppressed. This mirrors the legacy
+    // range-summary path and heals summaries recorded before segment collection
+    // learned to exclude exempt events.
+    if msg.role == "event" && exemption_for(msg) != CompressionExemption::DropOnAge {
+        return false;
+    }
+    true
 }
 
 fn is_visual_compression_report(msg: &ChatMessage) -> bool {
@@ -377,6 +389,58 @@ mod tests {
             .map(|message| message.message_id.as_str())
             .collect();
         assert!(!ids.contains(&"src-1"));
+        assert!(ids.contains(&"summary-1"));
+    }
+
+    #[test]
+    fn source_preserving_summary_does_not_suppress_exempt_events() {
+        let notice = with_id(
+            crate::chat::internal_roles::event(
+                crate::chat::internal_roles::EventSubkind::ProcessCompleted,
+                "exec.registry",
+                serde_json::json!({}),
+                "process finished".to_string(),
+            ),
+            "ev-1",
+        );
+        let tick = with_id(
+            crate::chat::internal_roles::event(
+                crate::chat::internal_roles::EventSubkind::Tick,
+                "tool.sleep",
+                serde_json::json!({}),
+                "tick".to_string(),
+            ),
+            "ev-2",
+        );
+        let source = with_id(assistant("work"), "src-1");
+        let summary = with_id(
+            source_preserving_summary("compact summary", &["src-1", "ev-1", "ev-2"], &[]),
+            "summary-1",
+        );
+        let messages = vec![
+            with_id(user("question"), "u-1"),
+            source,
+            notice,
+            tick,
+            summary,
+            with_id(user("next"), "u-2"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+
+        let ids: Vec<&str> = result
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+        assert!(!ids.contains(&"src-1"), "plain sources stay suppressed");
+        assert!(
+            ids.contains(&"ev-1"),
+            "exempt events listed as summarized sources must stay on the wire"
+        );
+        assert!(
+            !ids.contains(&"ev-2"),
+            "DropOnAge events may be suppressed by the summary"
+        );
         assert!(ids.contains(&"summary-1"));
     }
 

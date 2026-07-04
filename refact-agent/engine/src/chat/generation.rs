@@ -930,6 +930,7 @@ async fn maybe_compact_after_high_pressure_length_stop(
     if matches!(
         outcome,
         crate::chat::summarization::CompactionOutcome::LlmUnavailable
+            | crate::chat::summarization::CompactionOutcome::NothingToCompact
     ) && crate::chat::summarization::apply_deterministic_compaction_for_recovery(session_arc)
         .await
     {
@@ -1477,15 +1478,29 @@ pub fn start_generation(
                                 session.cache_guard_force_next = true;
                                 continue;
                             }
-                            crate::chat::summarization::CompactionOutcome::LlmUnavailable => {
+                            stalled_outcome @ (crate::chat::summarization::CompactionOutcome::LlmUnavailable
+                            | crate::chat::summarization::CompactionOutcome::NothingToCompact) => {
+                                // A single oversize span (or image-only history) can leave the
+                                // summarizer with nothing eligible while the context is still
+                                // over the limit; the deterministic sweep is the recovery for
+                                // both stalls, not just summarizer unavailability.
                                 if crate::chat::summarization::apply_deterministic_compaction_for_recovery(
                                     &session_arc,
                                 )
                                 .await
                                 {
-                                    warn!(
-                                        "Context limit recovered via deterministic full sweep (summarizer unavailable)"
-                                    );
+                                    if matches!(
+                                        stalled_outcome,
+                                        crate::chat::summarization::CompactionOutcome::LlmUnavailable
+                                    ) {
+                                        warn!(
+                                            "Context limit recovered via deterministic full sweep (summarizer unavailable)"
+                                        );
+                                    } else {
+                                        warn!(
+                                            "Context limit recovered via deterministic full sweep (no summarizable segment)"
+                                        );
+                                    }
                                     let mut session = session_arc.lock().await;
                                     session.clear_stream_for_retry();
                                     session.thread.previous_response_id = None;
@@ -1493,7 +1508,6 @@ pub fn start_generation(
                                     continue;
                                 }
                             }
-                            crate::chat::summarization::CompactionOutcome::NothingToCompact => {}
                         }
                     }
                     error.message = context_limit_final_error_message(&original_error);

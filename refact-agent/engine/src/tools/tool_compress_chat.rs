@@ -14,8 +14,8 @@ use crate::tools::tools_description::{
 };
 use refact_chat_history::history_limit::{compress_duplicate_context_files, compute_context_budget};
 use refact_chat_history::trajectory_ops::{
-    build_compression_report_message_with_fingerprint, insert_compression_report_at_boundary,
-    is_memory_path, should_preserve_tool,
+    build_compression_report_message_with_fingerprint,
+    insert_compression_report_at_boundary_scoped, is_memory_path, should_preserve_tool,
 };
 use refact_core::string_utils::redact_sensitive;
 use refact_runtime_api::{ChatSessionUpdate, SessionState};
@@ -73,6 +73,7 @@ struct CompressChatApplyStats {
     tool_dropped: usize,
     project_info_dropped: usize,
     dedup_count: usize,
+    non_text_stripped: usize,
     aggressive_summary_skipped_reason: Option<&'static str>,
 }
 
@@ -92,6 +93,7 @@ impl CompressChatApplyStats {
             || self.tool_dropped > 0
             || self.project_info_dropped > 0
             || self.dedup_count > 0
+            || self.non_text_stripped > 0
     }
 }
 
@@ -104,6 +106,7 @@ struct CompressChatApplyRequest<'a> {
     drop_context_messages: &'a HashSet<String>,
     dedup_context_files: bool,
     drop_project_information: bool,
+    strip_images: bool,
     strength: &'a str,
     preserve_last_turns: Option<usize>,
     target_tokens: Option<usize>,
@@ -116,6 +119,10 @@ struct CompressChatApplyOutput {
     before_tokens: usize,
     report: Option<ChatMessage>,
     affected_boundary: Option<usize>,
+    /// Length of the mutated modifiable prefix inside `messages`; everything at
+    /// or past this index (the `preserve_last_turns` tail) must stay
+    /// byte-identical, including during report deduplication.
+    modifiable_len: usize,
 }
 
 fn first_changed_boundary(before: &[ChatMessage], after: &[ChatMessage]) -> Option<usize> {
@@ -132,10 +139,12 @@ fn insert_current_compression_report(
     messages: &mut Vec<ChatMessage>,
     report: Option<ChatMessage>,
     affected_boundary: Option<usize>,
+    modifiable_end: usize,
 ) -> Option<Value> {
     let report = report?;
-    let boundary = affected_boundary.unwrap_or(messages.len());
-    let report_idx = insert_compression_report_at_boundary(messages, report, boundary);
+    let boundary = affected_boundary.unwrap_or(modifiable_end.min(messages.len()));
+    let report_idx =
+        insert_compression_report_at_boundary_scoped(messages, report, boundary, modifiable_end);
     messages[report_idx]
         .extra
         .get("compression_report")
@@ -280,6 +289,7 @@ fn compress_chat_apply_head_output(
         });
     }
 
+    let mut dropped_message_ids: HashSet<String> = HashSet::new();
     let mut updated_head: Vec<ChatMessage> = Vec::with_capacity(head_messages.len());
     for msg in head_messages.into_iter() {
         if msg.role != "context_file" {
@@ -289,6 +299,9 @@ fn compress_chat_apply_head_output(
         if !msg.tool_call_id.is_empty() && request.drop_context_messages.contains(&msg.tool_call_id)
         {
             stats.context_messages_dropped += 1;
+            if !msg.message_id.is_empty() {
+                dropped_message_ids.insert(msg.message_id.clone());
+            }
             continue;
         }
 
@@ -318,6 +331,9 @@ fn compress_chat_apply_head_output(
 
         if remaining.is_empty() {
             stats.context_messages_dropped += 1;
+            if !msg.message_id.is_empty() {
+                dropped_message_ids.insert(msg.message_id.clone());
+            }
             continue;
         }
 
@@ -327,6 +343,21 @@ fn compress_chat_apply_head_output(
     }
 
     head_messages = updated_head;
+    prune_dropped_ids_from_summaries(&mut head_messages, &dropped_message_ids);
+
+    if request.strip_images {
+        for msg in head_messages.iter_mut() {
+            if let ChatContent::Multimodal(elements) = &mut msg.content {
+                for element in elements.iter_mut() {
+                    if element.m_type != "text" {
+                        element.m_type = "text".to_string();
+                        element.m_content = "[non-text content removed by compression]".to_string();
+                        stats.non_text_stripped += 1;
+                    }
+                }
+            }
+        }
+    }
 
     if request.dedup_context_files {
         if let Ok((count, _)) = compress_duplicate_context_files(&mut head_messages) {
@@ -433,6 +464,7 @@ fn compress_chat_apply_head_output(
     } else {
         None
     };
+    let modifiable_len = head_messages.len();
     head_messages.append(&mut preserved_tail);
     let affected_boundary = report
         .as_ref()
@@ -443,6 +475,54 @@ fn compress_chat_apply_head_output(
         before_tokens,
         report,
         affected_boundary,
+        modifiable_len,
+    }
+}
+
+const SUMMARY_ID_ARRAY_FIELDS: &[&str] = &[
+    "source_message_ids",
+    "summarized_source_message_ids",
+    "preserved_source_message_ids",
+];
+
+/// ctx_apply and deterministic sweeps can drop messages that active segment
+/// summaries list as sources. Prune the dropped ids from summary metadata in
+/// the modifiable head so summaries stay truthful instead of accumulating dead
+/// references (observed in field trajectories as summaries with 100+ missing
+/// sources). Visible compression reports keep their original arrays as a
+/// historical record.
+fn prune_dropped_ids_from_summaries(
+    messages: &mut [ChatMessage],
+    dropped_message_ids: &HashSet<String>,
+) {
+    if dropped_message_ids.is_empty() {
+        return;
+    }
+    for message in messages.iter_mut() {
+        if message.role != "assistant" {
+            continue;
+        }
+        let Some(compression) = message.extra.get_mut("compression") else {
+            continue;
+        };
+        if compression.get("kind").and_then(|value| value.as_str()) != Some("llm_segment_summary") {
+            continue;
+        }
+        let Some(object) = compression.as_object_mut() else {
+            continue;
+        };
+        for field in SUMMARY_ID_ARRAY_FIELDS {
+            if let Some(values) = object
+                .get_mut(*field)
+                .and_then(|value| value.as_array_mut())
+            {
+                values.retain(|value| {
+                    value
+                        .as_str()
+                        .map_or(true, |id| !dropped_message_ids.contains(id))
+                });
+            }
+        }
     }
 }
 
@@ -477,6 +557,7 @@ pub(crate) fn deterministic_full_sweep(messages: &[ChatMessage]) -> Option<Vec<C
         drop_context_messages: &empty,
         dedup_context_files: true,
         drop_project_information: true,
+        strip_images: true,
         strength: "aggressive",
         preserve_last_turns: None,
         target_tokens: None,
@@ -487,12 +568,13 @@ pub(crate) fn deterministic_full_sweep(messages: &[ChatMessage]) -> Option<Vec<C
         stats,
         report,
         affected_boundary,
+        modifiable_len,
         ..
     } = compress_chat_apply_head_output(messages.to_vec(), &[], &request);
     if !stats.has_meaningful_mutation() {
         return None;
     }
-    insert_current_compression_report(&mut messages, report, affected_boundary);
+    insert_current_compression_report(&mut messages, report, affected_boundary, modifiable_len);
     Some(messages)
 }
 
@@ -508,8 +590,9 @@ fn compress_chat_apply_head_messages(
         before_tokens,
         report,
         affected_boundary,
+        modifiable_len,
     } = compress_chat_apply_head_output(head_messages, immutable_tail, request);
-    insert_current_compression_report(&mut messages, report, affected_boundary);
+    insert_current_compression_report(&mut messages, report, affected_boundary, modifiable_len);
     (messages, stats, before_tokens)
 }
 
@@ -653,11 +736,117 @@ mod tests {
             drop_context_messages,
             dedup_context_files: false,
             drop_project_information: false,
+            strip_images: false,
             strength: "conservative",
             preserve_last_turns: Some(1),
             target_tokens: None,
             tool_call_names,
         }
+    }
+
+    #[test]
+    fn deterministic_full_sweep_strips_non_text_multimodal_content() {
+        use crate::call_validation::MultimodalElement;
+        let mut image_msg = ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::Multimodal(vec![
+                MultimodalElement {
+                    m_type: "text".to_string(),
+                    m_content: "look at this".to_string(),
+                },
+                MultimodalElement {
+                    m_type: "image/png".to_string(),
+                    m_content: "AAAA".repeat(2000),
+                },
+            ]),
+            ..Default::default()
+        };
+        image_msg.message_id = "u-img".to_string();
+        let messages = vec![image_msg, assistant_message("ok")];
+
+        let swept = deterministic_full_sweep(&messages).expect("stripping images is a mutation");
+
+        let user_msg = swept
+            .iter()
+            .find(|message| message.message_id == "u-img")
+            .expect("user message survives the sweep");
+        match &user_msg.content {
+            ChatContent::Multimodal(elements) => {
+                assert!(elements.iter().all(|element| element.m_type == "text"));
+                assert!(elements.iter().any(
+                    |element| element.m_content == "[non-text content removed by compression]"
+                ));
+                assert!(elements
+                    .iter()
+                    .any(|element| element.m_content == "look at this"));
+            }
+            other => panic!("expected multimodal content, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn apply_prunes_dropped_context_ids_from_summary_metadata() {
+        let mut context_msg = context_file_message("ctx", "old.rs", "old context");
+        context_msg.message_id = "cf-1".to_string();
+        let mut summary = assistant_message("segment summary");
+        summary.message_id = "sum-1".to_string();
+        summary.extra.insert(
+            "compression".to_string(),
+            serde_json::json!({
+                "kind": "llm_segment_summary",
+                "insert_mode": "source_preserving",
+                "source_message_ids": ["cf-1", "a-2"],
+                "summarized_source_message_ids": ["cf-1", "a-2"],
+                "preserved_source_message_ids": ["cf-1"],
+            }),
+        );
+        let messages = vec![
+            user_message("q"),
+            context_msg,
+            summary,
+            user_message("tail"),
+        ];
+        let drop_context_files = HashSet::from(["old.rs".to_string()]);
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+
+        let (messages, stats, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+        assert_eq!(stats.context_messages_dropped, 1);
+        let summary = messages
+            .iter()
+            .find(|message| message.message_id == "sum-1")
+            .expect("summary survives");
+        let compression = summary.extra.get("compression").expect("metadata kept");
+        let source_ids: Vec<&str> = compression["source_message_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect();
+        assert_eq!(source_ids, vec!["a-2"], "dropped source id must be pruned");
+        assert_eq!(
+            compression["summarized_source_message_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(compression["preserved_source_message_ids"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     fn assert_preserved_tail_unchanged(
@@ -1507,10 +1696,15 @@ mod tests {
             stats,
             report,
             affected_boundary,
+            modifiable_len,
             ..
         } = compress_chat_apply_head_output(messages, &[], &request);
-        let current_metadata =
-            insert_current_compression_report(&mut messages, report, affected_boundary);
+        let current_metadata = insert_current_compression_report(
+            &mut messages,
+            report,
+            affected_boundary,
+            modifiable_len,
+        );
 
         assert!(!stats.has_meaningful_mutation());
         assert_eq!(current_metadata, None);
@@ -1549,11 +1743,16 @@ mod tests {
             stats,
             report,
             affected_boundary,
+            modifiable_len,
             ..
         } = compress_chat_apply_head_output(messages, &[], &request);
-        let current_metadata =
-            insert_current_compression_report(&mut messages, report, affected_boundary)
-                .expect("current invocation should create report metadata");
+        let current_metadata = insert_current_compression_report(
+            &mut messages,
+            report,
+            affected_boundary,
+            modifiable_len,
+        )
+        .expect("current invocation should create report metadata");
 
         assert_eq!(stats.context_messages_dropped, 1);
         assert_ne!(current_metadata, old_metadata);
@@ -2253,6 +2452,7 @@ impl Tool for ToolCompressChatApply {
             drop_context_messages: &drop_context_messages,
             dedup_context_files,
             drop_project_information,
+            strip_images: false,
             strength: &strength,
             preserve_last_turns,
             target_tokens,
@@ -2264,14 +2464,19 @@ impl Tool for ToolCompressChatApply {
             before_tokens,
             report,
             affected_boundary,
+            modifiable_len,
         } = compress_chat_apply_head_output(
             session_snapshot.messages[..active_start].to_vec(),
             &tail_messages,
             &request,
         );
         head_messages.extend(tail_messages);
-        let compression_report_metadata =
-            insert_current_compression_report(&mut head_messages, report, affected_boundary);
+        let compression_report_metadata = insert_current_compression_report(
+            &mut head_messages,
+            report,
+            affected_boundary,
+            modifiable_len,
+        );
 
         let after_tokens = head_messages
             .iter()

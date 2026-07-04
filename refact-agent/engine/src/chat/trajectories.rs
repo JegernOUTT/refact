@@ -1843,6 +1843,9 @@ async fn load_trajectory_candidate(
         auto_compact_enabled: t.get("auto_compact_enabled").and_then(|v| v.as_bool()),
         frozen_request_prefix,
         claude_code_identity,
+        // Runtime-only: saves strip this key and loads ignore injected values
+        // (pinned by `reactive_compact_attempts_is_runtime_only_not_persisted`),
+        // so a stale in-flight retry counter can never survive a reload.
         reactive_compact_attempts: None,
     };
 
@@ -3834,17 +3837,12 @@ fn build_title_generation_context(messages: &[serde_json::Value]) -> String {
         if role == "error" {
             continue;
         }
-        if matches!(
-            role,
-            "system"
-                | "tool"
-                | "context_file"
-                | "cd_instruction"
-                | "compression_report"
-                | "plan"
-                | "goal"
-                | "event"
-        ) {
+        if role == refact_chat_history::trajectory_ops::COMPRESSION_REPORT_ROLE
+            || matches!(
+                role,
+                "system" | "tool" | "context_file" | "cd_instruction" | "plan" | "goal" | "event"
+            )
+        {
             continue;
         }
         let content_text = match msg
