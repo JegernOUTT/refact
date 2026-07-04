@@ -549,6 +549,44 @@ fn duplication_finding_response(
     }
 }
 
+fn duplication_pct_for_scope(
+    analysis: &crate::tools::tool_codegraph::CloneAnalysis,
+    filter: Option<&str>,
+) -> f64 {
+    let Some(filter) = filter else {
+        return analysis.duplication_pct;
+    };
+    let matched_paths = analysis
+        .tokens_by_path
+        .keys()
+        .filter(|path| path_matches_filter(path, filter))
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let total_tokens = matched_paths
+        .iter()
+        .map(|path| analysis.tokens_by_path.get(*path).copied().unwrap_or(0))
+        .sum::<usize>();
+    if total_tokens == 0 {
+        return 0.0;
+    }
+    let duplicated_tokens = analysis
+        .clones
+        .iter()
+        .map(|clone| {
+            let mut tokens = 0usize;
+            if matched_paths.contains(clone.file_a.as_str()) {
+                tokens = tokens.saturating_add(clone.token_len);
+            }
+            if matched_paths.contains(clone.file_b.as_str()) {
+                tokens = tokens.saturating_add(clone.token_len);
+            }
+            tokens
+        })
+        .sum::<usize>()
+        .min(total_tokens);
+    duplicated_tokens as f64 / total_tokens as f64
+}
+
 pub async fn handle_v1_code_intel_overview(
     State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
@@ -1060,7 +1098,7 @@ pub async fn handle_v1_code_intel_duplication(
             .then_with(|| a.b_start_line.cmp(&b.b_start_line))
     });
     let clone_pair_count = clones.len();
-    let duplication_pct = analysis.duplication_pct;
+    let duplication_pct = duplication_pct_for_scope(&analysis, filter.as_deref());
     let project_root = crate::tools::tool_codegraph::project_dir(app.gcx.clone()).await;
     let intel = project_root.as_deref().and_then(|dir| {
         crate::tools::tool_codegraph::cached_mine_history(dir, GIT_HISTORY_MAX_COMMITS).ok()
@@ -1510,6 +1548,31 @@ mod tests {
         make_refact_http_server(app)
     }
 
+    async fn router_with_filtered_duplication_codegraph() -> axum::Router {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        let cloned = co_change_clone_source("shared_alpha", "shared");
+        codegraph
+            .index_file("src/a.rs", &cloned, "rust")
+            .await
+            .unwrap();
+        codegraph
+            .index_file("src/copy.rs", &cloned, "rust")
+            .await
+            .unwrap();
+        codegraph
+            .index_file(
+                "src/b.rs",
+                "fn independent(value: i32) -> i32 { value + 1 }\n",
+                "rust",
+            )
+            .await
+            .unwrap();
+        *gcx.codegraph.lock().await = Some(codegraph);
+        let app = AppState::from_gcx(gcx).await;
+        make_refact_http_server(app)
+    }
+
     async fn router_with_git_risk_codegraph() -> (axum::Router, tempfile::TempDir) {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let dir = tempfile::tempdir().unwrap();
@@ -1814,6 +1877,29 @@ mod tests {
         assert!(json["clones"].is_array());
         assert!(json["dry_violations"].is_array());
         assert!(json["test_smells"].is_array());
+    }
+
+    #[tokio::test]
+    async fn duplication_filtered_pct_is_scope_consistent() {
+        let router = router_with_filtered_duplication_codegraph().await;
+
+        let (unfiltered_status, unfiltered) =
+            get_json(router.clone(), "/v1/code-intel/duplication?limit=5").await;
+        let (filtered_status, filtered) =
+            get_json(router, "/v1/code-intel/duplication?path=src/b.rs&limit=5").await;
+
+        assert_eq!(unfiltered_status, StatusCode::OK);
+        assert_eq!(filtered_status, StatusCode::OK);
+        assert!(unfiltered["aggregate"]["duplication_pct"]
+            .as_f64()
+            .is_some_and(|pct| pct > 0.0));
+        assert_eq!(filtered["aggregate"]["file_count"], 1);
+        assert_eq!(filtered["aggregate"]["clone_pair_count"], 0);
+        assert_eq!(filtered["aggregate"]["duplication_pct"].as_f64(), Some(0.0));
+        assert_eq!(
+            filtered["aggregate"]["duplication_percent"].as_f64(),
+            Some(0.0)
+        );
     }
 
     #[test]

@@ -617,6 +617,54 @@ mod tests {
     }
 
     #[test]
+    fn mine_history_order_matches_incremental() {
+        let dir = TempRepo::new();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_files_at(
+            &repo,
+            &[("a.rs", "1\n")],
+            "first",
+            "Alice",
+            "alice@x.com",
+            1_700_000_000,
+        );
+        commit_files_at(
+            &repo,
+            &[("b.rs", "1\n")],
+            "second",
+            "Bob",
+            "bob@x.com",
+            1_700_000_100,
+        );
+        let base = mine_history(dir.path(), 100).unwrap();
+
+        commit_files_at(
+            &repo,
+            &[("c.rs", "1\n")],
+            "third",
+            "Cara",
+            "cara@x.com",
+            1_700_000_200,
+        );
+
+        let incremental = mine_history_incremental(dir.path(), Some(base), 100).unwrap();
+        let full = mine_history(dir.path(), 100).unwrap();
+        let incremental_order = incremental
+            .commit_records
+            .iter()
+            .map(|record| record.oid.clone())
+            .collect::<Vec<_>>();
+        let full_order = full
+            .commit_records
+            .iter()
+            .map(|record| record.oid.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(incremental_order, full_order);
+        assert_eq!(incremental.commit_records, full.commit_records);
+    }
+
+    #[test]
     fn incremental_falls_back_on_unreachable_base() {
         let dir = fixture_repo();
         let mut base = mine_history(dir.path(), 100).unwrap();

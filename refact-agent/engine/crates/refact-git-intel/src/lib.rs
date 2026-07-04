@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use git2::{Commit, ErrorClass, ErrorCode, Oid, Repository, Revwalk};
+use git2::{Commit, ErrorClass, ErrorCode, Oid, Repository, Revwalk, Sort};
 use serde::{Deserialize, Serialize};
 
 pub mod blame;
@@ -240,53 +240,15 @@ fn percentile(values: &[f64], target: f64) -> f64 {
     (less as f64 / (finite - 1) as f64).clamp(0.0, 1.0)
 }
 
-pub fn collect_commit_messages(repo_path: &Path, max: usize) -> Result<Vec<String>, String> {
-    let repo = Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
-    let mut revwalk = repo.revwalk().map_err(|e| format!("git revwalk: {e}"))?;
-    if !push_head_or_empty(&mut revwalk)? {
-        return Ok(Vec::new());
-    }
-    collect_commit_messages_from_revwalk(&repo, revwalk, max)
-}
-
-pub fn collect_commit_messages_at(
-    repo_path: &Path,
-    head: Option<Oid>,
-    max: usize,
-) -> Result<Vec<String>, String> {
-    let repo = Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
-    let mut revwalk = repo.revwalk().map_err(|e| format!("git revwalk: {e}"))?;
-    if !push_oid_or_empty(&mut revwalk, head)? {
-        return Ok(Vec::new());
-    }
-    collect_commit_messages_from_revwalk(&repo, revwalk, max)
-}
-
-fn collect_commit_messages_from_revwalk(
-    repo: &Repository,
-    revwalk: Revwalk,
-    max: usize,
-) -> Result<Vec<String>, String> {
-    let mut out = Vec::new();
-    for (i, oid) in revwalk.enumerate() {
-        if i >= max {
-            break;
-        }
-        let oid = oid.map_err(|e| format!("git oid: {e}"))?;
-        let commit = repo
-            .find_commit(oid)
-            .map_err(|e| format!("git find_commit: {e}"))?;
-        out.push(commit.message().unwrap_or("").to_string());
-    }
-    Ok(out)
-}
-
 pub fn mine_history(repo_path: &Path, max_commits: usize) -> Result<GitIntel, String> {
     let repo = Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
     let mut revwalk = repo.revwalk().map_err(|e| format!("git revwalk: {e}"))?;
     if !push_head_or_empty(&mut revwalk)? {
         return Ok(GitIntel::default());
     }
+    revwalk
+        .set_sorting(Sort::TIME)
+        .map_err(|e| format!("git sort: {e}"))?;
     mine_history_from_revwalk(&repo, revwalk, max_commits)
 }
 
@@ -300,6 +262,9 @@ pub fn mine_history_at(
     if !push_oid_or_empty(&mut revwalk, head)? {
         return Ok(GitIntel::default());
     }
+    revwalk
+        .set_sorting(Sort::TIME)
+        .map_err(|e| format!("git sort: {e}"))?;
     mine_history_from_revwalk(&repo, revwalk, max_commits)
 }
 
@@ -1051,10 +1016,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         Repository::init(dir.path()).unwrap();
 
-        assert_eq!(
-            collect_commit_messages(dir.path(), 10).unwrap(),
-            Vec::<String>::new()
-        );
         let intel = mine_history(dir.path(), 10).unwrap();
         assert_eq!(intel.commits_analyzed, 0);
         assert!(intel.commit_records.is_empty());

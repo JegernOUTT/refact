@@ -2678,6 +2678,23 @@ struct CodeWhySource {
     order: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeWhyFileCandidate {
+    relative: PathBuf,
+    kind: &'static str,
+    reference: String,
+    priority: u8,
+    order: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CodeWhySourceMeta {
+    priority: u8,
+    order: usize,
+    reference: String,
+    file: Option<CodeWhyFileCandidate>,
+}
+
 #[derive(Debug, Clone)]
 struct CodeWhyCandidate {
     decision: refact_codewiki::Decision,
@@ -2811,13 +2828,65 @@ fn code_why_file_kinds(repo_path: &Path) -> Vec<(PathBuf, &'static str)> {
     by_path.into_iter().collect()
 }
 
+fn code_why_file_candidates(repo_path: &Path) -> Vec<CodeWhyFileCandidate> {
+    code_why_file_kinds(repo_path)
+        .into_iter()
+        .enumerate()
+        .map(|(index, (relative, kind))| CodeWhyFileCandidate {
+            reference: path_ref(&relative),
+            relative,
+            kind,
+            priority: code_why_priority(kind),
+            order: usize::MAX / 2 + index,
+        })
+        .collect()
+}
+
+fn sort_code_why_source_meta(items: &mut [CodeWhySourceMeta]) {
+    items.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| left.reference.cmp(&right.reference))
+            .then_with(|| left.order.cmp(&right.order))
+    });
+}
+
+fn select_code_why_file_candidates(
+    candidates: Vec<CodeWhyFileCandidate>,
+    git_sources: &[CodeWhySource],
+    limit: usize,
+) -> Vec<CodeWhyFileCandidate> {
+    let mut slots = git_sources
+        .iter()
+        .map(|source| CodeWhySourceMeta {
+            priority: source.priority,
+            order: source.order,
+            reference: source.reference.clone(),
+            file: None,
+        })
+        .chain(candidates.into_iter().map(|candidate| CodeWhySourceMeta {
+            priority: candidate.priority,
+            order: candidate.order,
+            reference: candidate.reference.clone(),
+            file: Some(candidate),
+        }))
+        .collect::<Vec<_>>();
+    sort_code_why_source_meta(&mut slots);
+    slots
+        .into_iter()
+        .take(limit)
+        .filter_map(|slot| slot.file)
+        .collect()
+}
+
 async fn file_code_why_sources(
     gcx: Arc<crate::global_context::GlobalContext>,
     repo_path: &Path,
+    candidates: Vec<CodeWhyFileCandidate>,
 ) -> Vec<CodeWhySource> {
     let mut sources = Vec::new();
-    for (order, (relative, kind)) in code_why_file_kinds(repo_path).into_iter().enumerate() {
-        let absolute = repo_path.join(&relative);
+    for candidate in candidates {
+        let absolute = repo_path.join(&candidate.relative);
         let Ok(text) =
             crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx.clone(), &absolute)
                 .await
@@ -2828,23 +2897,27 @@ async fn file_code_why_sources(
             continue;
         }
         sources.push(CodeWhySource {
-            kind: kind.to_string(),
+            kind: candidate.kind.to_string(),
             text,
-            reference: path_ref(&relative),
-            priority: code_why_priority(kind),
-            order: usize::MAX / 2 + order,
+            reference: candidate.reference,
+            priority: candidate.priority,
+            order: candidate.order,
         });
     }
     sources
 }
 
-fn cap_code_why_sources(mut sources: Vec<CodeWhySource>) -> Vec<CodeWhySource> {
+fn sort_code_why_sources(sources: &mut [CodeWhySource]) {
     sources.sort_by(|left, right| {
         left.priority
             .cmp(&right.priority)
             .then_with(|| left.order.cmp(&right.order))
             .then_with(|| left.reference.cmp(&right.reference))
     });
+}
+
+fn cap_code_why_sources(mut sources: Vec<CodeWhySource>) -> Vec<CodeWhySource> {
+    sort_code_why_sources(&mut sources);
     sources.truncate(CODE_WHY_SOURCE_LIMIT);
     sources
 }
@@ -2855,7 +2928,12 @@ async fn assemble_code_why_sources(
     intel: &refact_git_intel::GitIntel,
 ) -> Vec<CodeWhySource> {
     let mut sources = git_code_why_sources(intel);
-    sources.extend(file_code_why_sources(gcx, repo_path).await);
+    let file_candidates = select_code_why_file_candidates(
+        code_why_file_candidates(repo_path),
+        &sources,
+        CODE_WHY_SOURCE_LIMIT,
+    );
+    sources.extend(file_code_why_sources(gcx, repo_path, file_candidates).await);
     cap_code_why_sources(sources)
 }
 
@@ -4860,6 +4938,101 @@ mod tests {
         assert!(output.contains("[verbatim"));
         assert!(output.contains("corr=2"));
         assert!(output.contains("src=adr:docs/adr/001-codegraph.md"));
+    }
+
+    #[test]
+    fn code_why_file_sources_bounded_and_prioritized() {
+        let mut git_sources = Vec::new();
+        for index in 0..CODE_WHY_SOURCE_LIMIT {
+            git_sources.push(CodeWhySource {
+                kind: "commit".to_string(),
+                text: format!("commit decision {index}"),
+                reference: format!("commit:{index:03}"),
+                priority: code_why_priority("commit"),
+                order: index,
+            });
+        }
+        git_sources.push(CodeWhySource {
+            kind: "pr".to_string(),
+            text: "merge decision".to_string(),
+            reference: "pr:001".to_string(),
+            priority: code_why_priority("pr"),
+            order: CODE_WHY_SOURCE_LIMIT,
+        });
+        let candidates = vec![
+            CodeWhyFileCandidate {
+                relative: PathBuf::from("docs/adr/002.md"),
+                kind: "adr",
+                reference: "docs/adr/002.md".to_string(),
+                priority: code_why_priority("adr"),
+                order: usize::MAX / 2 + 1,
+            },
+            CodeWhyFileCandidate {
+                relative: PathBuf::from("CHANGELOG.md"),
+                kind: "changelog",
+                reference: "CHANGELOG.md".to_string(),
+                priority: code_why_priority("changelog"),
+                order: usize::MAX / 2 + 2,
+            },
+            CodeWhyFileCandidate {
+                relative: PathBuf::from("docs/adr/001.md"),
+                kind: "adr",
+                reference: "docs/adr/001.md".to_string(),
+                priority: code_why_priority("adr"),
+                order: usize::MAX / 2,
+            },
+        ];
+
+        let selected =
+            select_code_why_file_candidates(candidates, &git_sources, CODE_WHY_SOURCE_LIMIT);
+        let selected_refs = selected
+            .iter()
+            .map(|candidate| candidate.reference.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            selected_refs,
+            vec!["docs/adr/001.md", "docs/adr/002.md", "CHANGELOG.md"]
+        );
+
+        let mut sources = git_sources;
+        sources.extend(selected.into_iter().map(|candidate| CodeWhySource {
+            kind: candidate.kind.to_string(),
+            text: candidate.reference.clone(),
+            reference: candidate.reference,
+            priority: candidate.priority,
+            order: candidate.order,
+        }));
+        let sources = cap_code_why_sources(sources);
+        let first_refs = sources
+            .iter()
+            .take(5)
+            .map(|source| source.reference.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(sources.len(), CODE_WHY_SOURCE_LIMIT);
+        assert_eq!(
+            first_refs,
+            vec![
+                "docs/adr/001.md",
+                "docs/adr/002.md",
+                "CHANGELOG.md",
+                "pr:001",
+                "commit:000"
+            ]
+        );
+        assert!(!sources
+            .iter()
+            .any(|source| source.reference == "commit:796"));
+        assert!(!sources
+            .iter()
+            .any(|source| source.reference == "commit:797"));
+        assert!(!sources
+            .iter()
+            .any(|source| source.reference == "commit:798"));
+        assert!(!sources
+            .iter()
+            .any(|source| source.reference == "commit:799"));
     }
 
     #[test]
