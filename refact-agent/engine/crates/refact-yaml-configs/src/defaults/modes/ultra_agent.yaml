@@ -178,6 +178,7 @@ tools:
   - git_risk
   - code_why
   - code_duplication
+  - dead_code
   - security_scan
   - pr_blast
   - code_map
@@ -257,6 +258,8 @@ tool_confirm:
     - match: "code_why"
       action: auto
     - match: "code_duplication"
+      action: auto
+    - match: "dead_code"
       action: auto
     - match: "security_scan"
       action: auto

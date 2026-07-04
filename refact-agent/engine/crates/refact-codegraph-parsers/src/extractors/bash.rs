@@ -129,8 +129,13 @@ fn walk(
         "command" => {
             if let Some(name) = command_name(node, bytes) {
                 if is_identifier_command(&name) {
+                    let from = if prefix.is_empty() {
+                        RawRef::FILE_SCOPE.to_string()
+                    } else {
+                        prefix.join("::")
+                    };
                     refs.push(RawRef {
-                        from: prefix.join("::"),
+                        from,
                         name,
                         kind: EdgeKind::Calls,
                         line: line1(node),
@@ -175,7 +180,10 @@ echo hi
 $RUNNER
 ";
         let (_symbols, refs) = extract(src);
-        assert!(refs.iter().any(|r| r.name == "foo" && r.from.is_empty()));
+        assert!(
+            refs.iter()
+                .any(|r| r.name == "foo" && r.from == RawRef::FILE_SCOPE)
+        );
         assert!(!refs.iter().any(|r| r.name == "echo"), "got {refs:?}");
         assert!(
             !refs.iter().any(|r| r.name == "./script.sh"),
@@ -186,5 +194,15 @@ $RUNNER
             "got {refs:?}"
         );
         assert!(!refs.iter().any(|r| r.name == "$RUNNER"), "got {refs:?}");
+    }
+
+    #[test]
+    fn bash_top_level_call_has_real_caller() {
+        let src = "foo() { :; }\nfoo\n";
+        let (_symbols, refs) = extract(src);
+        let call = refs.iter().find(|r| r.name == "foo").expect("foo call");
+
+        assert_eq!(call.from, RawRef::FILE_SCOPE);
+        assert_eq!(call.kind, EdgeKind::Calls);
     }
 }

@@ -1,12 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use git2::{Oid, Repository};
+use petgraph::algo::tarjan_scc;
+use petgraph::graph::{DiGraph, NodeIndex};
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -19,10 +22,23 @@ use crate::tools::tools_description::{
 const GIT_CACHE_TTL: Duration = Duration::from_secs(30);
 const PR_BLAST_REVIEWER_LIMIT: usize = 3;
 const PR_BLAST_BOT_AUTHOR_PATTERNS: [&str; 3] = ["[bot]", "agent@", "noreply"];
+const DEAD_CODE_HISTORY_COMMITS: usize = 1000;
+const DEAD_CODE_DEFAULT_LIMIT: usize = 50;
+const DEAD_CODE_MAX_LIMIT: usize = 500;
 const GIT_META_FUNCTION_FACT_TOP_K: usize = 10;
 const GIT_STABLE_AGE_DAYS: i64 = 180;
+const GIT_HISTORY_MAX_COMMITS: usize = 1000;
 const GIT_RISK_RECENT_COMMITS: usize = 50;
 const GIT_RISK_RECENT_COMMIT_LIMIT: usize = 10;
+const CODE_MAP_DEFAULT_BUDGET_TOKENS: usize = 12_000;
+const CODE_MAP_MAX_PAGES_WITHOUT_QUERY: usize = 60;
+const CODE_MAP_QUERY_LIMIT: usize = 12;
+const CODE_MAP_LINK_LIMIT: usize = 8;
+const CODE_MAP_MIN_MODULE_FILES: usize = 2;
+const CODE_MAP_MIN_MODULE_SIZE: u64 = 2;
+const CODE_MAP_LINK_EDGE_KINDS: [&str; 3] = ["calls", "inherits", "route_handler"];
+const HEALTH_SNAPSHOT_META_KEY: &str = "health_snapshots";
+const HEALTH_SNAPSHOT_LIMIT: usize = 30;
 
 type GitCacheKey = (PathBuf, Option<Oid>, usize);
 
@@ -66,6 +82,92 @@ pub(crate) struct GitRiskAssembly {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct HealthImpactContributor {
+    pub(crate) biomarker: String,
+    pub(crate) category: String,
+    pub(crate) dimension: refact_codehealth::biomarkers::Dimension,
+    pub(crate) severity: refact_codehealth::biomarkers::Severity,
+    pub(crate) line: usize,
+    pub(crate) detail: String,
+    pub(crate) deduction: f64,
+    pub(crate) capped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct HealthFunctionSummary {
+    pub(crate) name: String,
+    pub(crate) line1: usize,
+    pub(crate) complexity: u32,
+    pub(crate) nesting: u32,
+    pub(crate) loc: u32,
+    pub(crate) maintainability: f64,
+    pub(crate) maintainability_index: f64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HealthFileAnalysis {
+    pub(crate) path: String,
+    pub(crate) lang: String,
+    pub(crate) grade: char,
+    pub(crate) maintainability_index: f64,
+    pub(crate) max_complexity: u32,
+    pub(crate) avg_maintainability: f64,
+    pub(crate) function_count: usize,
+    pub(crate) duplication_pct: f64,
+    pub(crate) dry_violation: bool,
+    pub(crate) defect_score: f64,
+    pub(crate) maintainability_score: f64,
+    pub(crate) performance_score: f64,
+    pub(crate) biomarker_count: usize,
+    pub(crate) refactoring_count: usize,
+    pub(crate) functions: Vec<HealthFunctionSummary>,
+    pub(crate) findings: Vec<HealthFinding>,
+    pub(crate) health_impact: Vec<HealthImpactContributor>,
+    pub(crate) impact_summaries: Vec<String>,
+    pub(crate) refactorings: Vec<refact_codehealth::refactoring::RefactoringSuggestion>,
+    pub(crate) cache_hit: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct HealthAnalysisContext<'a> {
+    pub(crate) repo_root: Option<&'a Path>,
+    pub(crate) intel: Option<&'a refact_git_intel::GitIntel>,
+    pub(crate) service: Option<&'a Arc<refact_codegraph::CodeGraphService>>,
+    pub(crate) coverage: Option<&'a refact_codehealth::coverage::CoverageReport>,
+    pub(crate) trend_findings: &'a [refact_codehealth::biomarkers::Finding],
+    pub(crate) git_function_fact_paths: &'a HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct HealthFileCore {
+    path: String,
+    lang: String,
+    functions: Vec<HealthFunctionSummary>,
+    max_complexity: u32,
+    avg_maintainability: f64,
+    duplication_pct: f64,
+    dry_violation: bool,
+    findings: Vec<HealthFinding>,
+    refactorings: Vec<refact_codehealth::refactoring::RefactoringSuggestion>,
+}
+
+#[derive(Default)]
+struct HealthAnalysisCache {
+    files: HashMap<String, HealthCacheEntry>,
+    hits: usize,
+    misses: usize,
+}
+
+#[derive(Clone)]
+struct HealthCacheEntry {
+    content_hash: String,
+    git_generation: Option<String>,
+    coverage_signature: Option<String>,
+    trend_signature: String,
+    core: HealthFileCore,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct RecentCommitRiskSummary {
     pub(crate) sha: String,
     pub(crate) summary: String,
@@ -86,6 +188,11 @@ fn git_cache() -> &'static StdMutex<GitMiningCache> {
 fn clone_analysis_cache() -> &'static AMutex<CrossFileCloneCache> {
     static CACHE: OnceLock<AMutex<CrossFileCloneCache>> = OnceLock::new();
     CACHE.get_or_init(|| AMutex::new(CrossFileCloneCache::default()))
+}
+
+fn health_analysis_cache() -> &'static StdMutex<HealthAnalysisCache> {
+    static CACHE: OnceLock<StdMutex<HealthAnalysisCache>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(HealthAnalysisCache::default()))
 }
 
 fn tool_message(tool_call_id: &String, text: String) -> Vec<ContextEnum> {
@@ -162,6 +269,36 @@ fn optional_usize_arg(
         Some(value) => Err(format!(
             "argument `{key}` must be a positive integer: {value:?}"
         )),
+    }
+}
+
+fn optional_f64_arg(args: &HashMap<String, Value>, key: &str, default: f64) -> Result<f64, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(default),
+        Some(Value::String(value)) => value
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("argument `{key}` must be a number")),
+        Some(Value::Number(value)) => value
+            .as_f64()
+            .ok_or_else(|| format!("argument `{key}` must be a number")),
+        Some(value) => Err(format!("argument `{key}` must be a number: {value:?}")),
+    }
+}
+
+fn optional_string_arg(args: &HashMap<String, Value>, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(value.replace('\\', "/")))
+            }
+        }
+        Some(value) => Err(format!("argument `{key}` must be a string: {value:?}")),
     }
 }
 
@@ -447,8 +584,817 @@ fn co_change_key(path: &str, project_root: Option<&Path>) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct DeadCodeIndexState {
+    pub(crate) queued: usize,
+    pub(crate) dirty_paths: i64,
+    pub(crate) pending_refs: i64,
+    pub(crate) cross_file_edges: i64,
+    pub(crate) cross_file_ready: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct DeadCodeEntry {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) line: usize,
+    pub(crate) reason: String,
+    pub(crate) confidence: f64,
+    pub(crate) git_recency: String,
+    pub(crate) incoming_edges: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct DeadCodeReport {
+    pub(crate) entries: Vec<DeadCodeEntry>,
+    pub(crate) total_candidates: usize,
+    pub(crate) index_state: DeadCodeIndexState,
+    pub(crate) partial: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct DeadCodeGitFacts {
+    pub(crate) last_touched_days: Option<u64>,
+    pub(crate) file_churn: u32,
+    pub(crate) recent_churn_days: Option<u64>,
+}
+
+pub(crate) async fn dead_code_report(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    limit: usize,
+    path_filter: Option<&str>,
+    min_confidence: f64,
+) -> Result<DeadCodeReport, String> {
+    let service = gcx
+        .codegraph
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "codegraph is not available".to_string())?;
+    let readiness = service.index_readiness().await?;
+    let index_state = dead_code_index_state(&readiness);
+    let warning = dead_code_partial_warning(&index_state);
+    let dead = service.dead_code().await?;
+    let repo_dir = project_dir(gcx.clone()).await;
+    let intel = repo_dir
+        .as_deref()
+        .and_then(|dir| cached_mine_history(dir, DEAD_CODE_HISTORY_COMMITS).ok());
+    let now_ts = current_unix_ts();
+    let facts = dead_code_git_facts_by_node(&dead, repo_dir.as_deref(), intel.as_ref(), now_ts);
+    let min_confidence = min_confidence.clamp(0.0, 1.0);
+    let limit = limit.clamp(1, DEAD_CODE_MAX_LIMIT);
+    let mut entries = enrich_dead_symbols_with_facts(dead, &facts)
+        .into_iter()
+        .filter(|entry| entry.confidence >= min_confidence)
+        .filter(|entry| {
+            path_filter.is_none_or(|filter| dead_code_path_matches(&entry.path, filter))
+        })
+        .collect::<Vec<_>>();
+    let total_candidates = entries.len();
+    entries.truncate(limit);
+    Ok(DeadCodeReport {
+        entries,
+        total_candidates,
+        index_state,
+        partial: !readiness.cross_file_ready,
+        warning,
+    })
+}
+
+pub(crate) fn dead_code_index_state(
+    readiness: &refact_codegraph::IndexReadiness,
+) -> DeadCodeIndexState {
+    DeadCodeIndexState {
+        queued: readiness.queued,
+        dirty_paths: readiness.dirty_paths,
+        pending_refs: readiness.pending_refs,
+        cross_file_edges: readiness.cross_file_edges,
+        cross_file_ready: readiness.cross_file_ready,
+    }
+}
+
+pub(crate) fn dead_code_partial_warning(state: &DeadCodeIndexState) -> Option<String> {
+    (!state.cross_file_ready).then(|| {
+        format!(
+            "⚠ index still building ({} files queued, {} dirty paths, {} pending refs) — dead-code may be over-reported",
+            state.queued, state.dirty_paths, state.pending_refs
+        )
+    })
+}
+
+pub(crate) fn enrich_dead_symbols_with_facts(
+    dead: Vec<refact_codegraph::dead_code::DeadSymbol>,
+    facts_by_node: &HashMap<i64, DeadCodeGitFacts>,
+) -> Vec<DeadCodeEntry> {
+    let mut entries = dead
+        .into_iter()
+        .map(|symbol| {
+            let facts = facts_by_node
+                .get(&symbol.node_id)
+                .cloned()
+                .unwrap_or_default();
+            DeadCodeEntry {
+                name: symbol.name,
+                path: symbol.path,
+                line: symbol.line,
+                reason: symbol.reason,
+                confidence: dead_code_confidence(symbol.incoming_edges, &facts),
+                git_recency: dead_code_git_recency(&facts),
+                incoming_edges: symbol.incoming_edges,
+            }
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| {
+        b.confidence
+            .total_cmp(&a.confidence)
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    entries
+}
+
+fn dead_code_confidence(incoming_edges: usize, facts: &DeadCodeGitFacts) -> f64 {
+    let mut confidence: f64 = 0.4;
+    if facts
+        .last_touched_days
+        .is_some_and(|age_days| age_days > 365)
+        && facts.file_churn == 0
+    {
+        confidence += 0.3;
+    }
+    if incoming_edges == 0 {
+        confidence += 0.1;
+    }
+    if facts
+        .recent_churn_days
+        .is_some_and(|age_days| age_days <= 90)
+    {
+        confidence -= 0.2;
+    }
+    confidence.clamp(0.1, 0.9)
+}
+
+fn dead_code_git_recency(facts: &DeadCodeGitFacts) -> String {
+    match facts.last_touched_days {
+        Some(days) => format!(
+            "last touched {}d ago; churn {} in mined window",
+            days, facts.file_churn
+        ),
+        None if facts.file_churn == 0 => "no git touches in mined window".to_string(),
+        None => format!("churn {} in mined window", facts.file_churn),
+    }
+}
+
+fn dead_code_git_facts_by_node(
+    dead: &[refact_codegraph::dead_code::DeadSymbol],
+    repo_root: Option<&Path>,
+    intel: Option<&refact_git_intel::GitIntel>,
+    now_ts: i64,
+) -> HashMap<i64, DeadCodeGitFacts> {
+    let mut facts_by_node = HashMap::new();
+    let mut ranges_by_path: HashMap<String, Vec<(String, usize, usize)>> = HashMap::new();
+    for symbol in dead {
+        let key = dead_code_git_key(&symbol.path, repo_root);
+        let facts = DeadCodeGitFacts {
+            last_touched_days: None,
+            file_churn: intel
+                .and_then(|intel| intel.file_churn.get(&key).copied())
+                .unwrap_or(0),
+            recent_churn_days: intel.and_then(|intel| recent_churn_days(intel, &key, now_ts)),
+        };
+        facts_by_node.insert(symbol.node_id, facts);
+        if repo_root.is_some() {
+            ranges_by_path.entry(key).or_default().push((
+                symbol.node_id.to_string(),
+                symbol.line.max(1),
+                symbol.line.max(1),
+            ));
+        }
+    }
+    let Some(repo_root) = repo_root else {
+        return facts_by_node;
+    };
+    for (path, ranges) in ranges_by_path {
+        let Ok(range_facts) = refact_git_intel::blame::range_facts(repo_root, &path, &ranges)
+        else {
+            continue;
+        };
+        for range in range_facts {
+            let Ok(node_id) = range.name.parse::<i64>() else {
+                continue;
+            };
+            if let Some(facts) = facts_by_node.get_mut(&node_id) {
+                facts.last_touched_days = days_since_ts(now_ts, range.last_modified_ts);
+            }
+        }
+    }
+    facts_by_node
+}
+
+fn dead_code_git_key(path: &str, repo_root: Option<&Path>) -> String {
+    match repo_root {
+        Some(root) => {
+            refact_git_intel::paths::repo_relative_or_basename(path, &root.to_string_lossy())
+        }
+        None => refact_git_intel::paths::normalize_separators(path),
+    }
+}
+
+fn recent_churn_days(
+    intel: &refact_git_intel::GitIntel,
+    git_key: &str,
+    now_ts: i64,
+) -> Option<u64> {
+    intel
+        .commit_records
+        .iter()
+        .filter(|commit| commit_touches_path(commit, git_key))
+        .filter_map(|commit| days_since_ts(now_ts, commit.ts))
+        .min()
+}
+
+fn commit_touches_path(commit: &refact_git_intel::CommitRecord, git_key: &str) -> bool {
+    commit
+        .files
+        .iter()
+        .any(|(path, _, _)| refact_git_intel::paths::normalize_separators(path) == git_key)
+}
+
+fn days_since_ts(now_ts: i64, ts: i64) -> Option<u64> {
+    if ts <= 0 {
+        return None;
+    }
+    Some(now_ts.saturating_sub(ts).max(0) as u64 / 86_400)
+}
+
+fn current_unix_ts() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or(0)
+}
+
 pub(crate) fn git_churn_by_file(intel: &refact_git_intel::GitIntel) -> HashMap<String, u32> {
     intel.file_churn.clone()
+}
+
+pub(crate) fn top_git_function_fact_paths(
+    intel: Option<&refact_git_intel::GitIntel>,
+) -> HashSet<String> {
+    intel
+        .map(|intel| {
+            intel
+                .hotspots(GIT_META_FUNCTION_FACT_TOP_K)
+                .into_iter()
+                .map(|hotspot| hotspot.path)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) async fn load_health_snapshots(
+    service: &refact_codegraph::CodeGraphService,
+) -> Vec<refact_codehealth::trends::HealthSnapshot> {
+    service
+        .meta_get(HEALTH_SNAPSHOT_META_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) async fn persist_health_snapshots(
+    service: &refact_codegraph::CodeGraphService,
+    snapshots: &[refact_codehealth::trends::HealthSnapshot],
+) -> Result<(), String> {
+    let value = serde_json::to_string(snapshots)
+        .map_err(|err| format!("health snapshot serialize: {err}"))?;
+    service.meta_set(HEALTH_SNAPSHOT_META_KEY, &value).await
+}
+
+pub(crate) fn build_health_snapshot(
+    files: &[HealthFileAnalysis],
+) -> refact_codehealth::trends::HealthSnapshot {
+    let per_file = files
+        .iter()
+        .map(|file| (file.path.clone(), file.defect_score))
+        .collect::<HashMap<_, _>>();
+    let aggregate = if files.is_empty() {
+        10.0
+    } else {
+        files.iter().map(|file| file.defect_score).sum::<f64>() / files.len() as f64
+    };
+    refact_codehealth::trends::HealthSnapshot {
+        ts: now_unix_ts(),
+        per_file,
+        aggregate,
+    }
+}
+
+pub(crate) fn push_health_snapshot(
+    history: &mut Vec<refact_codehealth::trends::HealthSnapshot>,
+    snapshot: refact_codehealth::trends::HealthSnapshot,
+) {
+    refact_codehealth::trends::push_snapshot(history, snapshot, HEALTH_SNAPSHOT_LIMIT);
+}
+
+pub(crate) async fn analyze_health_file_shared(
+    path: String,
+    text: String,
+    ctx: &HealthAnalysisContext<'_>,
+) -> Result<HealthFileAnalysis, String> {
+    let lang = refact_codegraph::lang_from_path(&path).to_string();
+    let content_hash = health_content_hash(&text, &lang);
+    let git_generation = health_git_generation(ctx.intel);
+    let coverage_signature = health_coverage_signature(ctx.coverage, &path, ctx.repo_root);
+    let trend_signature = health_trend_signature(ctx.trend_findings, &path, ctx.repo_root);
+    if let Some(core) = health_cache_lookup(
+        &path,
+        &content_hash,
+        &git_generation,
+        &coverage_signature,
+        &trend_signature,
+    ) {
+        return Ok(health_analysis_from_core(core, true));
+    }
+
+    let core = compute_health_core(path, text, lang, ctx).await?;
+    health_cache_store(
+        &core.path,
+        content_hash,
+        git_generation,
+        coverage_signature,
+        trend_signature,
+        core.clone(),
+    );
+    Ok(health_analysis_from_core(core, false))
+}
+
+fn health_content_hash(text: &str, lang: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(lang.as_bytes());
+    hasher.update([0xff]);
+    hasher.update(text.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn hash_string(value: impl AsRef<[u8]>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_ref());
+    hex::encode(hasher.finalize())
+}
+
+fn health_git_generation(intel: Option<&refact_git_intel::GitIntel>) -> Option<String> {
+    intel.map(|intel| {
+        if let Some(last) = &intel.last_commit_id {
+            return last.clone();
+        }
+        let mut parts = vec![format!("commits={}", intel.commits_analyzed)];
+        let mut churn = intel.file_churn.iter().collect::<Vec<_>>();
+        churn.sort_by(|a, b| a.0.cmp(b.0));
+        for (path, count) in churn {
+            parts.push(format!("churn:{path}:{count}"));
+        }
+        let mut fixes = intel.fix_commit_counts.iter().collect::<Vec<_>>();
+        fixes.sort_by(|a, b| a.0.cmp(b.0));
+        for (path, count) in fixes {
+            parts.push(format!("fix:{path}:{count}"));
+        }
+        hash_string(parts.join("\n"))
+    })
+}
+
+fn health_cache_lookup(
+    path: &str,
+    content_hash: &str,
+    git_generation: &Option<String>,
+    coverage_signature: &Option<String>,
+    trend_signature: &str,
+) -> Option<HealthFileCore> {
+    let mut cache = health_analysis_cache().lock().unwrap();
+    let core = cache
+        .files
+        .get(path)
+        .filter(|entry| {
+            entry.content_hash == content_hash
+                && &entry.git_generation == git_generation
+                && &entry.coverage_signature == coverage_signature
+                && entry.trend_signature == trend_signature
+        })
+        .map(|entry| entry.core.clone());
+    if core.is_some() {
+        cache.hits += 1;
+    } else {
+        cache.misses += 1;
+    }
+    core
+}
+
+fn health_cache_store(
+    path: &str,
+    content_hash: String,
+    git_generation: Option<String>,
+    coverage_signature: Option<String>,
+    trend_signature: String,
+    core: HealthFileCore,
+) {
+    health_analysis_cache().lock().unwrap().files.insert(
+        path.to_string(),
+        HealthCacheEntry {
+            content_hash,
+            git_generation,
+            coverage_signature,
+            trend_signature,
+            core,
+        },
+    );
+}
+
+async fn compute_health_core(
+    path: String,
+    text: String,
+    lang: String,
+    ctx: &HealthAnalysisContext<'_>,
+) -> Result<HealthFileCore, String> {
+    let health = refact_codehealth::analyze(&lang, &text);
+    let duplication_pct = refact_codehealth::duplication::duplication_pct(&lang, &text);
+    let mut findings = refact_codehealth::biomarkers::detect_biomarkers(&lang, &text);
+    findings.extend(refact_codehealth::perf::detect_perf(&lang, &text));
+    let dry_findings = health_dry_findings(&path, &lang, &text, duplication_pct);
+    let dry_violation = !dry_findings.is_empty();
+    findings.extend(dry_findings);
+    findings.extend(health_git_findings(&path, ctx, &health).await?);
+    findings.extend(health_coverage_findings(
+        &path,
+        ctx.coverage,
+        ctx.repo_root,
+        ctx.intel,
+        health.max_complexity,
+    ));
+    findings.extend(health_trend_findings_for_path(
+        ctx.trend_findings,
+        &path,
+        ctx.repo_root,
+    ));
+    sort_health_findings(&mut findings);
+    let findings = enrich_health_findings(ctx.service, &path, &health.functions, findings).await;
+
+    let mut functions = health.functions.clone();
+    functions.sort_by(|a, b| {
+        b.complexity
+            .cmp(&a.complexity)
+            .then_with(|| b.loc.cmp(&a.loc))
+            .then_with(|| a.line1.cmp(&b.line1))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let functions = functions
+        .into_iter()
+        .map(|function| HealthFunctionSummary {
+            name: function.name,
+            line1: function.line1,
+            complexity: function.complexity,
+            nesting: function.nesting,
+            loc: function.loc,
+            maintainability: function.maintainability,
+            maintainability_index: function.maintainability,
+        })
+        .collect();
+    let mut refactorings = refact_codehealth::refactoring::rank(
+        refact_codehealth::refactoring::suggest_refactorings(&lang, &text),
+    );
+    refactorings.sort_by(|a, b| {
+        b.impact
+            .total_cmp(&a.impact)
+            .then_with(|| a.line.cmp(&b.line))
+    });
+
+    Ok(HealthFileCore {
+        path,
+        lang,
+        functions,
+        max_complexity: health.max_complexity,
+        avg_maintainability: health.avg_maintainability,
+        duplication_pct,
+        dry_violation,
+        findings,
+        refactorings,
+    })
+}
+
+fn health_analysis_from_core(core: HealthFileCore, cache_hit: bool) -> HealthFileAnalysis {
+    let plain_findings = core
+        .findings
+        .iter()
+        .map(|finding| finding.finding.clone())
+        .collect::<Vec<_>>();
+    let (score, impacts) = refact_codehealth::scoring::score_file_with_impacts(&plain_findings);
+    let mut health_impact = impacts
+        .into_iter()
+        .filter_map(|impact| {
+            core.findings
+                .get(impact.index)
+                .map(|finding| HealthImpactContributor {
+                    biomarker: finding.finding.biomarker.clone(),
+                    category: finding.finding.category.clone(),
+                    dimension: finding.finding.dimension,
+                    severity: finding.finding.severity,
+                    line: finding.finding.line,
+                    detail: finding.finding.detail.clone(),
+                    deduction: impact.deduction,
+                    capped: impact.capped,
+                })
+        })
+        .collect::<Vec<_>>();
+    health_impact.sort_by(|a, b| {
+        b.deduction
+            .total_cmp(&a.deduction)
+            .then_with(|| a.biomarker.cmp(&b.biomarker))
+            .then_with(|| a.line.cmp(&b.line))
+    });
+    health_impact.truncate(5);
+    let impact_summaries = health_impact
+        .iter()
+        .map(health_impact_summary)
+        .collect::<Vec<_>>();
+    let function_count = core.functions.len();
+    let biomarker_count = core.findings.len();
+    let refactoring_count = core.refactorings.len();
+
+    HealthFileAnalysis {
+        path: core.path,
+        lang: core.lang,
+        grade: refact_codehealth::scoring::grade(score.defect),
+        maintainability_index: core.avg_maintainability,
+        max_complexity: core.max_complexity,
+        avg_maintainability: core.avg_maintainability,
+        function_count,
+        duplication_pct: core.duplication_pct,
+        dry_violation: core.dry_violation,
+        defect_score: score.defect,
+        maintainability_score: score.maintainability,
+        performance_score: score.performance,
+        biomarker_count,
+        refactoring_count,
+        functions: core.functions,
+        findings: core.findings,
+        health_impact,
+        impact_summaries,
+        refactorings: core.refactorings,
+        cache_hit,
+    }
+}
+
+fn health_impact_summary(impact: &HealthImpactContributor) -> String {
+    format!(
+        "−{:.1} {}: {} — {}",
+        impact.deduction,
+        health_dimension_label(impact.dimension),
+        impact.biomarker,
+        impact.detail
+    )
+}
+
+fn health_dimension_label(dimension: refact_codehealth::biomarkers::Dimension) -> &'static str {
+    match dimension {
+        refact_codehealth::biomarkers::Dimension::Defect => "defect",
+        refact_codehealth::biomarkers::Dimension::Maintainability => "maintainability",
+        refact_codehealth::biomarkers::Dimension::Performance => "performance",
+    }
+}
+
+fn health_dry_findings(
+    path: &str,
+    lang: &str,
+    text: &str,
+    duplication_pct: f64,
+) -> Vec<refact_codehealth::biomarkers::Finding> {
+    let clones = refact_codehealth::duplication::detect_clones(lang, text)
+        .into_iter()
+        .map(|clone| refact_codehealth::dry::DryClonePair {
+            file_a: path.to_string(),
+            a_start_line: clone.line_a,
+            a_line_count: clone.token_len.max(1),
+            file_b: path.to_string(),
+            b_start_line: clone.line_b,
+            b_line_count: clone.token_len.max(1),
+            co_change_count: 0,
+        })
+        .collect();
+    let input = refact_codehealth::dry::DryInput {
+        file_path: path.to_string(),
+        duplication_pct,
+        clones,
+    };
+    refact_codehealth::dry::dry_violation(&input)
+}
+
+async fn health_git_findings(
+    path: &str,
+    ctx: &HealthAnalysisContext<'_>,
+    health: &refact_codehealth::FileHealth,
+) -> Result<Vec<refact_codehealth::biomarkers::Finding>, String> {
+    let (Some(intel), Some(repo_root)) = (ctx.intel, ctx.repo_root) else {
+        return Ok(Vec::new());
+    };
+    let repo_root_str = repo_root.to_string_lossy();
+    let path_key = refact_git_intel::paths::repo_relative_or_basename(path, &repo_root_str);
+    let ranges = if ctx.git_function_fact_paths.contains(&path_key) {
+        health
+            .functions
+            .iter()
+            .map(|function| {
+                let line2 = function
+                    .line1
+                    .saturating_add(function.loc as usize)
+                    .saturating_sub(1)
+                    .max(function.line1);
+                (function.name.clone(), function.line1, line2)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let meta = build_git_meta(
+        intel,
+        repo_root,
+        &path_key,
+        ctx.service,
+        (!ranges.is_empty()).then_some(ranges.as_slice()),
+    )
+    .await;
+    Ok(refact_codehealth::git_biomarkers::git_biomarkers(&meta))
+}
+
+fn health_coverage_findings(
+    path: &str,
+    coverage: Option<&refact_codehealth::coverage::CoverageReport>,
+    repo_root: Option<&Path>,
+    intel: Option<&refact_git_intel::GitIntel>,
+    max_complexity: u32,
+) -> Vec<refact_codehealth::biomarkers::Finding> {
+    let Some(coverage) = coverage else {
+        return Vec::new();
+    };
+    let Some(file) = coverage_file_for_path(coverage, path, repo_root) else {
+        return Vec::new();
+    };
+    let mut complexity_by_file = HashMap::new();
+    complexity_by_file.insert(file.path.clone(), max_complexity);
+    let mut churn_by_file = HashMap::new();
+    if let Some(churn) = health_churn_for_path(intel, &file.path, repo_root) {
+        churn_by_file.insert(file.path.clone(), churn);
+    }
+    let report = refact_codehealth::coverage::CoverageReport {
+        format: coverage.format.clone(),
+        files: vec![file],
+    };
+    refact_codehealth::coverage_biomarkers::coverage_biomarkers(
+        &report,
+        &complexity_by_file,
+        &churn_by_file,
+    )
+}
+
+fn coverage_file_for_path(
+    coverage: &refact_codehealth::coverage::CoverageReport,
+    path: &str,
+    repo_root: Option<&Path>,
+) -> Option<refact_codehealth::coverage::FileCoverage> {
+    let matches = coverage
+        .files
+        .iter()
+        .filter(|file| health_paths_refer_to_same_file(&file.path, path, repo_root))
+        .cloned()
+        .collect::<Vec<_>>();
+    if matches.len() == 1 {
+        matches.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn health_coverage_signature(
+    coverage: Option<&refact_codehealth::coverage::CoverageReport>,
+    path: &str,
+    repo_root: Option<&Path>,
+) -> Option<String> {
+    coverage.map(|coverage| {
+        let file = coverage_file_for_path(coverage, path, repo_root);
+        serde_json::to_string(&(coverage.format.as_str(), file))
+            .map(hash_string)
+            .unwrap_or_else(|_| "coverage-unserializable".to_string())
+    })
+}
+
+fn health_churn_for_path(
+    intel: Option<&refact_git_intel::GitIntel>,
+    path: &str,
+    repo_root: Option<&Path>,
+) -> Option<u32> {
+    let intel = intel?;
+    intel.file_churn.get(path).copied().or_else(|| {
+        intel
+            .file_churn
+            .iter()
+            .find(|(candidate, _)| health_paths_refer_to_same_file(candidate, path, repo_root))
+            .map(|(_, churn)| *churn)
+    })
+}
+
+fn health_trend_findings_for_path(
+    findings: &[refact_codehealth::biomarkers::Finding],
+    path: &str,
+    repo_root: Option<&Path>,
+) -> Vec<refact_codehealth::biomarkers::Finding> {
+    findings
+        .iter()
+        .filter(|finding| {
+            health_trend_path(&finding.detail).is_some_and(|trend_path| {
+                health_paths_refer_to_same_file(trend_path, path, repo_root)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn health_trend_signature(
+    findings: &[refact_codehealth::biomarkers::Finding],
+    path: &str,
+    repo_root: Option<&Path>,
+) -> String {
+    let relevant = health_trend_findings_for_path(findings, path, repo_root);
+    if relevant.is_empty() {
+        return String::new();
+    }
+    serde_json::to_string(&relevant)
+        .map(hash_string)
+        .unwrap_or_else(|_| "trend-unserializable".to_string())
+}
+
+fn health_trend_path(detail: &str) -> Option<&str> {
+    detail.split_once(':').map(|(path, _)| path.trim())
+}
+
+pub(crate) fn health_paths_refer_to_same_file(a: &str, b: &str, repo_root: Option<&Path>) -> bool {
+    match repo_root {
+        Some(repo_root) => {
+            refact_git_intel::paths::paths_refer_to_same_file(a, b, &repo_root.to_string_lossy())
+        }
+        None => {
+            refact_git_intel::paths::normalize_separators(a)
+                == refact_git_intel::paths::normalize_separators(b)
+        }
+    }
+}
+
+pub(crate) fn health_stored_path_for_request(
+    paths: impl IntoIterator<Item = String>,
+    requested: &str,
+    repo_root: Option<&Path>,
+) -> Option<String> {
+    let matches = paths
+        .into_iter()
+        .filter(|path| health_paths_refer_to_same_file(path, requested, repo_root))
+        .collect::<BTreeSet<_>>();
+    if matches.len() == 1 {
+        matches.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn sort_health_findings(findings: &mut [refact_codehealth::biomarkers::Finding]) {
+    findings.sort_by(|a, b| {
+        health_severity_rank(a.severity)
+            .cmp(&health_severity_rank(b.severity))
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.biomarker.cmp(&b.biomarker))
+            .then_with(|| a.detail.cmp(&b.detail))
+    });
+}
+
+fn health_severity_rank(severity: refact_codehealth::biomarkers::Severity) -> u8 {
+    match severity {
+        refact_codehealth::biomarkers::Severity::Critical => 0,
+        refact_codehealth::biomarkers::Severity::High => 1,
+        refact_codehealth::biomarkers::Severity::Medium => 2,
+        refact_codehealth::biomarkers::Severity::Low => 3,
+    }
+}
+
+#[cfg(test)]
+fn reset_health_cache_for_tests() {
+    *health_analysis_cache().lock().unwrap() = HealthAnalysisCache::default();
+}
+
+#[cfg(test)]
+fn health_cache_stats_for_tests() -> (usize, usize) {
+    let cache = health_analysis_cache().lock().unwrap();
+    (cache.hits, cache.misses)
 }
 
 pub(crate) async fn build_git_meta(
@@ -608,6 +1554,15 @@ fn now_unix_ts() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
         .unwrap_or(0)
+}
+
+fn dead_code_path_matches(path: &str, filter: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    if normalized == filter || normalized.ends_with(filter) {
+        return true;
+    }
+    let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+    basename == filter
 }
 
 fn file_is_stable(intel: &refact_git_intel::GitIntel, file: &str, now_ts: i64) -> bool {
@@ -1080,6 +2035,344 @@ impl Tool for ToolCodegraphOverview {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct HealthFinding {
+    #[serde(flatten)]
+    pub(crate) finding: refact_codehealth::biomarkers::Finding,
+    pub(crate) hot_path: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FunctionKey {
+    name: String,
+    line1: usize,
+    line2: usize,
+}
+
+#[derive(Default)]
+struct HealthGraphContext {
+    fan_in: HashMap<FunctionKey, usize>,
+    hot_path: HashSet<FunctionKey>,
+}
+
+pub(crate) async fn enrich_health_findings(
+    service: Option<&Arc<refact_codegraph::CodeGraphService>>,
+    file_path: &str,
+    functions: &[refact_codehealth::FunctionHealth],
+    findings: Vec<refact_codehealth::biomarkers::Finding>,
+) -> Vec<HealthFinding> {
+    let graph = match service {
+        Some(service) => service.cached_graph_analytics().await.ok(),
+        None => None,
+    };
+    enrich_health_findings_with_graph(
+        graph.as_ref().map(|cached| &cached.data),
+        file_path,
+        functions,
+        findings,
+    )
+}
+
+pub(crate) fn enrich_health_findings_with_graph(
+    graph: Option<&refact_codegraph::analytics::GraphData>,
+    file_path: &str,
+    functions: &[refact_codehealth::FunctionHealth],
+    findings: Vec<refact_codehealth::biomarkers::Finding>,
+) -> Vec<HealthFinding> {
+    let context = graph.map(|graph| health_graph_context(graph, file_path, functions));
+    findings
+        .into_iter()
+        .map(|finding| enrich_health_finding(finding, functions, context.as_ref()))
+        .collect()
+}
+
+fn enrich_health_finding(
+    mut finding: refact_codehealth::biomarkers::Finding,
+    functions: &[refact_codehealth::FunctionHealth],
+    context: Option<&HealthGraphContext>,
+) -> HealthFinding {
+    let mut hot_path = false;
+    if let (Some(context), Some(function)) = (context, containing_function(functions, finding.line))
+    {
+        let key = function_key(function);
+        if finding.biomarker == "brain_method" {
+            if let Some(fan_in) = context.fan_in.get(&key).copied() {
+                if fan_in == 0 {
+                    finding.severity = downgrade_health_severity(finding.severity);
+                    finding.detail.push_str(" (low fan-in)");
+                } else if fan_in >= 5 {
+                    finding
+                        .detail
+                        .push_str(&format!(" (called from {fan_in} sites)"));
+                }
+            }
+        }
+        if finding.dimension == refact_codehealth::biomarkers::Dimension::Performance {
+            hot_path = context.hot_path.contains(&key);
+        }
+    }
+    HealthFinding { finding, hot_path }
+}
+
+fn health_graph_context(
+    graph: &refact_codegraph::analytics::GraphData,
+    file_path: &str,
+    functions: &[refact_codehealth::FunctionHealth],
+) -> HealthGraphContext {
+    let mut node_ids_by_key = HashMap::<FunctionKey, BTreeSet<i64>>::new();
+    let mut key_by_node_id = HashMap::<i64, Vec<FunctionKey>>::new();
+    for function in functions {
+        let key = function_key(function);
+        for (id, name, path) in &graph.nodes {
+            if graph_path_matches(path, file_path) && graph_name_matches(name, &function.name) {
+                node_ids_by_key.entry(key.clone()).or_default().insert(*id);
+                key_by_node_id.entry(*id).or_default().push(key.clone());
+            }
+        }
+    }
+
+    let mut sources_by_key = HashMap::<FunctionKey, BTreeSet<i64>>::new();
+    for (src, dst, kind) in &graph.edges {
+        if kind != "calls" {
+            continue;
+        }
+        if let Some(keys) = key_by_node_id.get(dst) {
+            for key in keys {
+                sources_by_key.entry(key.clone()).or_default().insert(*src);
+            }
+        }
+    }
+
+    let hot_node_ids = hot_path_node_ids(graph, 3);
+    let hot_path = node_ids_by_key
+        .iter()
+        .filter_map(|(key, ids)| {
+            ids.iter()
+                .any(|id| hot_node_ids.contains(id))
+                .then(|| key.clone())
+        })
+        .collect();
+
+    HealthGraphContext {
+        fan_in: node_ids_by_key
+            .into_keys()
+            .map(|key| {
+                let fan_in = sources_by_key.get(&key).map(BTreeSet::len).unwrap_or(0);
+                (key, fan_in)
+            })
+            .collect(),
+        hot_path,
+    }
+}
+
+fn hot_path_node_ids(
+    graph: &refact_codegraph::analytics::GraphData,
+    max_depth: usize,
+) -> BTreeSet<i64> {
+    let mut out = HashMap::<i64, Vec<i64>>::new();
+    let mut roots = BTreeSet::new();
+    for (src, dst, kind) in &graph.edges {
+        if !matches!(kind.as_str(), "calls" | "route_handler") {
+            continue;
+        }
+        out.entry(*src).or_default().push(*dst);
+        if kind == "route_handler" {
+            roots.insert(*src);
+        }
+    }
+    for (id, name, _) in &graph.nodes {
+        if graph_entry_name(name) {
+            roots.insert(*id);
+        }
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    for root in roots {
+        if seen.insert(root) {
+            queue.push_back((root, 0));
+        }
+    }
+    while let Some((id, depth)) = queue.pop_front() {
+        if depth >= max_depth {
+            continue;
+        }
+        if let Some(targets) = out.get(&id) {
+            for target in targets {
+                if seen.insert(*target) {
+                    queue.push_back((*target, depth + 1));
+                }
+            }
+        }
+    }
+    seen
+}
+
+fn containing_function(
+    functions: &[refact_codehealth::FunctionHealth],
+    line: usize,
+) -> Option<&refact_codehealth::FunctionHealth> {
+    functions
+        .iter()
+        .filter(|function| {
+            let line2 = function_line2(function);
+            function.line1 <= line && line <= line2
+        })
+        .max_by_key(|function| function.line1)
+}
+
+fn function_key(function: &refact_codehealth::FunctionHealth) -> FunctionKey {
+    FunctionKey {
+        name: function.name.clone(),
+        line1: function.line1,
+        line2: function_line2(function),
+    }
+}
+
+fn function_line2(function: &refact_codehealth::FunctionHealth) -> usize {
+    function
+        .line1
+        .saturating_add(function.loc as usize)
+        .saturating_sub(1)
+        .max(function.line1)
+}
+
+fn downgrade_health_severity(
+    severity: refact_codehealth::biomarkers::Severity,
+) -> refact_codehealth::biomarkers::Severity {
+    match severity {
+        refact_codehealth::biomarkers::Severity::Critical => {
+            refact_codehealth::biomarkers::Severity::High
+        }
+        refact_codehealth::biomarkers::Severity::High => {
+            refact_codehealth::biomarkers::Severity::Medium
+        }
+        refact_codehealth::biomarkers::Severity::Medium => {
+            refact_codehealth::biomarkers::Severity::Low
+        }
+        refact_codehealth::biomarkers::Severity::Low => {
+            refact_codehealth::biomarkers::Severity::Low
+        }
+    }
+}
+
+fn graph_path_matches(graph_path: &str, requested_path: &str) -> bool {
+    let graph_path = graph_path.replace('\\', "/");
+    let requested_path = requested_path.replace('\\', "/");
+    graph_path == requested_path
+        || graph_path.ends_with(&requested_path)
+        || requested_path.ends_with(&graph_path)
+        || graph_path.rsplit('/').next() == requested_path.rsplit('/').next()
+}
+
+fn graph_name_matches(graph_name: &str, function_name: &str) -> bool {
+    graph_name == function_name
+        || graph_name.ends_with(&format!("::{function_name}"))
+        || graph_name.ends_with(&format!(".{function_name}"))
+}
+
+fn graph_entry_name(name: &str) -> bool {
+    name == "main" || name.ends_with("::main") || name.ends_with(".main")
+}
+
+pub struct ToolDeadCode {
+    pub config_path: String,
+}
+
+#[async_trait]
+impl Tool for ToolDeadCode {
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let limit = optional_usize_arg(args, "limit", DEAD_CODE_DEFAULT_LIMIT)?
+            .clamp(1, DEAD_CODE_MAX_LIMIT);
+        let min_confidence = optional_f64_arg(args, "min_confidence", 0.5)?.clamp(0.0, 1.0);
+        let path = optional_string_arg(args, "path")?;
+        let gcx = ccx.lock().await.app.gcx.clone();
+        let report = dead_code_report(gcx, limit, path.as_deref(), min_confidence).await?;
+        Ok((
+            false,
+            tool_message(tool_call_id, dead_code_tool_text(&report)),
+        ))
+    }
+
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "dead_code".to_string(),
+            display_name: "Dead Code".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: self.config_path.clone(),
+            },
+            experimental: false,
+            allow_parallel: true,
+            description: "Static reachability + git-recency ladder dead-code report; overrides and script entry points excluded; confidence-ranked with indexing warnings.".to_string(),
+            input_schema: json_schema_from_params(
+                &[
+                    ("limit", "integer", "Maximum number of candidates to return. Defaults to 50, max 500."),
+                    ("path", "string", "Optional path or basename filter."),
+                    ("min_confidence", "number", "Minimum confidence threshold. Defaults to 0.5."),
+                ],
+                &[],
+            ),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        codegraph_dependency()
+    }
+}
+
+fn dead_code_tool_text(report: &DeadCodeReport) -> String {
+    let mut msg = String::new();
+    if let Some(warning) = &report.warning {
+        msg.push_str(warning);
+        msg.push('\n');
+    }
+    msg.push_str(&format!(
+        "Dead code candidates: {} shown of {} matching candidates.\n",
+        report.entries.len(),
+        report.total_candidates
+    ));
+    msg.push_str(&format!(
+        "Index state: queued={} dirty_paths={} pending_refs={} cross_file_edges={} cross_file_ready={} partial={}\n",
+        report.index_state.queued,
+        report.index_state.dirty_paths,
+        report.index_state.pending_refs,
+        report.index_state.cross_file_edges,
+        report.index_state.cross_file_ready,
+        report.partial
+    ));
+    if report.entries.is_empty() {
+        msg.push_str("\nNo dead-code candidates matched the filters.\n");
+        return msg;
+    }
+
+    let mut grouped: Vec<(&str, Vec<&DeadCodeEntry>)> = Vec::new();
+    for entry in &report.entries {
+        if let Some((_, entries)) = grouped.iter_mut().find(|(path, _)| *path == entry.path) {
+            entries.push(entry);
+        } else {
+            grouped.push((entry.path.as_str(), vec![entry]));
+        }
+    }
+    for (path, entries) in grouped {
+        msg.push_str(&format!("\n{}:\n", path));
+        for entry in entries {
+            msg.push_str(&format!(
+                "  {:.2}  line {}  {} — {}; {}\n",
+                entry.confidence, entry.line, entry.name, entry.reason, entry.git_recency
+            ));
+        }
+    }
+    msg
+}
+
 pub struct ToolCodeHealth {
     pub config_path: String,
 }
@@ -1100,78 +2393,118 @@ impl Tool for ToolCodeHealth {
         )
         .await?
         .to_string();
-        let lang = refact_codegraph::lang_from_path(&file_path);
-        let health = refact_codehealth::analyze(lang, &text);
-        if health.functions.is_empty() {
+        let coverage = match args.get("coverage_file") {
+            Some(Value::String(cov_path)) if !cov_path.trim().is_empty() => {
+                let rope = crate::files_in_workspace::get_file_text_from_memory_or_disk(
+                    gcx.clone(),
+                    &PathBuf::from(cov_path),
+                )
+                .await?;
+                refact_codehealth::coverage::detect_and_parse(&rope.to_string())
+            }
+            _ => None,
+        };
+        let service = gcx.codegraph.lock().await.clone();
+        let repo_root = project_dir(gcx.clone()).await;
+        let intel = repo_root
+            .as_deref()
+            .and_then(|dir| cached_mine_history(dir, GIT_HISTORY_MAX_COMMITS).ok());
+        let snapshots = match service.as_deref() {
+            Some(service) => load_health_snapshots(service).await,
+            None => Vec::new(),
+        };
+        let trend_findings = refact_codehealth::trends::evaluate_trends(&snapshots);
+        let git_function_fact_paths = top_git_function_fact_paths(intel.as_ref());
+        let ctx = HealthAnalysisContext {
+            repo_root: repo_root.as_deref(),
+            intel: intel.as_ref(),
+            service: service.as_ref(),
+            coverage: coverage.as_ref(),
+            trend_findings: &trend_findings,
+            git_function_fact_paths: &git_function_fact_paths,
+        };
+        let analysis = analyze_health_file_shared(file_path.clone(), text, &ctx).await?;
+        if analysis.functions.is_empty() {
             return Ok((
                 false,
                 tool_message(
                     tool_call_id,
-                    format!("No functions analyzed in `{file_path}` (lang: {lang})."),
+                    format!(
+                        "No functions analyzed in `{file_path}` (lang: {}).",
+                        analysis.lang
+                    ),
                 ),
             ));
         }
+
         let mut msg = format!(
-            "Code health for `{}` (avg maintainability {:.1}, max complexity {}):\n",
-            file_path, health.avg_maintainability, health.max_complexity
+            "Code health for `{}` (MI (0-100) {:.1}, max complexity {}):\n",
+            file_path, analysis.maintainability_index, analysis.max_complexity
         );
-        let category = refact_codewiki::well_known::file_category(&file_path, lang, false);
+        let category =
+            refact_codewiki::well_known::file_category(&file_path, &analysis.lang, false);
         match refact_codewiki::well_known::well_known_role(&file_path) {
             Some(role) => msg.push_str(&format!("File role: {role} (category: {category})\n")),
             None => msg.push_str(&format!("File category: {category}\n")),
         }
-        let mut funcs = health.functions.clone();
-        funcs.sort_by(|a, b| b.complexity.cmp(&a.complexity));
-        for f in funcs.iter().take(30) {
+        for f in analysis.functions.iter().take(30) {
             msg.push_str(&format!(
-                "  {}:{}  complexity={} nesting={} loc={} maintainability={:.0}\n",
-                f.name, f.line1, f.complexity, f.nesting, f.loc, f.maintainability
+                "  {}:{}  complexity={} nesting={} loc={} MI (0-100)={:.0}\n",
+                f.name, f.line1, f.complexity, f.nesting, f.loc, f.maintainability_index
             ));
         }
-        let dup_pct = refact_codehealth::duplication::duplication_pct(lang, &text);
-        if dup_pct > 0.0 {
+        if analysis.duplication_pct > 0.0 {
             msg.push_str(&format!(
                 "\nDuplication: {:.0}% of tokens are in clones{}\n",
-                dup_pct * 100.0,
-                if refact_codehealth::duplication::dry_violation(lang, &text) {
+                analysis.duplication_pct * 100.0,
+                if analysis.dry_violation {
                     " (DRY violation)"
                 } else {
                     ""
                 }
             ));
         }
-        let mut findings = refact_codehealth::biomarkers::detect_biomarkers(lang, &text);
-        findings.extend(refact_codehealth::perf::detect_perf(lang, &text));
-        let score = refact_codehealth::scoring::score_file(&findings);
         msg.push_str(&format!(
-            "\nHealth score (1-10): defect={:.1} ({}) · maintainability={:.1} · performance={:.1}\n",
-            score.defect,
-            refact_codehealth::scoring::grade(score.defect),
-            score.maintainability,
-            score.performance
+            "\nHealth score (1-10): defect={:.1} ({}) · maintainability signal (1-10)={:.1} · performance={:.1}\n",
+            analysis.defect_score,
+            analysis.grade,
+            analysis.maintainability_score,
+            analysis.performance_score
         ));
-        if !findings.is_empty() {
-            msg.push_str(&format!("Biomarkers ({}):\n", findings.len()));
-            for fnd in findings.iter().take(15) {
+        if !analysis.health_impact.is_empty() {
+            msg.push_str("Top health impact contributors:\n");
+            for summary in &analysis.impact_summaries {
+                msg.push_str("  ");
+                msg.push_str(summary);
+                msg.push('\n');
+            }
+        }
+        if !analysis.findings.is_empty() {
+            msg.push_str(&format!("Biomarkers ({}):\n", analysis.findings.len()));
+            for fnd in analysis.findings.iter().take(15) {
+                let marker = if fnd.hot_path { " 🔥 hot path" } else { "" };
                 msg.push_str(&format!(
-                    "  {}:{} {} [{:?}/{:?}] {}\n",
-                    file_path, fnd.line, fnd.biomarker, fnd.severity, fnd.dimension, fnd.detail
+                    "  {}:{} {} [{:?}/{:?}] {}{}\n",
+                    file_path,
+                    fnd.finding.line,
+                    fnd.finding.biomarker,
+                    fnd.finding.severity,
+                    fnd.finding.dimension,
+                    fnd.finding.detail,
+                    marker
                 ));
             }
         }
-        let suggestions = refact_codehealth::refactoring::rank(
-            refact_codehealth::refactoring::suggest_refactorings(lang, &text),
-        );
-        if !suggestions.is_empty() {
+        if !analysis.refactorings.is_empty() {
             msg.push_str("Refactoring targets:\n");
-            for r in suggestions.iter().take(8) {
+            for r in analysis.refactorings.iter().take(8) {
                 msg.push_str(&format!(
                     "  {:?} @ {}:{} — {} (impact {:.1}, {} effort)\n",
                     r.kind, file_path, r.line, r.rationale, r.impact, r.effort
                 ));
             }
         }
-        if let Some(service) = gcx.codegraph.lock().await.clone() {
+        if let Some(service) = service.as_ref() {
             if let Ok(cached) = service.cached_graph_analytics().await {
                 let graph = refact_codewiki::graph_intelligence::CodeGraph {
                     nodes: cached
@@ -1199,27 +2532,11 @@ impl Tool for ToolCodeHealth {
                         )
                         .collect(),
                 };
-                let stored_path = if cached.data.nodes.iter().any(|(_, _, p)| p == &file_path) {
-                    Some(file_path.clone())
-                } else {
-                    let mut candidates: std::collections::BTreeSet<&str> =
-                        std::collections::BTreeSet::new();
-                    let requested_base = file_path.rsplit('/').next().unwrap_or(&file_path);
-                    for (_, _, p) in &cached.data.nodes {
-                        let base = p.rsplit('/').next().unwrap_or(p);
-                        if p.ends_with(file_path.as_str())
-                            || file_path.ends_with(p.as_str())
-                            || base == requested_base
-                        {
-                            candidates.insert(p.as_str());
-                        }
-                    }
-                    if candidates.len() == 1 {
-                        candidates.iter().next().map(|s| s.to_string())
-                    } else {
-                        None
-                    }
-                };
+                let stored_path = health_stored_path_for_request(
+                    cached.data.nodes.iter().map(|(_, _, path)| path.clone()),
+                    &file_path,
+                    repo_root.as_deref(),
+                );
                 if let Some(stored_path) = stored_path {
                     let calls = refact_codewiki::graph_intelligence::extract_call_graph(
                         &stored_path,
@@ -1237,79 +2554,22 @@ impl Tool for ToolCodeHealth {
                 }
             }
         }
-        if let Some(Value::String(cov_path)) = args.get("coverage_file") {
-            match crate::files_in_workspace::get_file_text_from_memory_or_disk(
-                gcx.clone(),
-                &PathBuf::from(cov_path),
-            )
-            .await
-            {
-                Ok(rope) => {
-                    match refact_codehealth::coverage::detect_and_parse(&rope.to_string()) {
-                        Some(report) => {
-                            let mut coverage_candidates: Vec<_> = report
-                                .files
-                                .iter()
-                                .filter(|f| f.path == file_path)
-                                .cloned()
-                                .collect();
-                            if coverage_candidates.is_empty() {
-                                let requested_base =
-                                    file_path.rsplit('/').next().unwrap_or(&file_path);
-                                coverage_candidates = report
-                                    .files
-                                    .iter()
-                                    .filter(|f| {
-                                        let base = f.path.rsplit('/').next().unwrap_or(&f.path);
-                                        f.path.ends_with(file_path.as_str())
-                                            || file_path.ends_with(f.path.as_str())
-                                            || base == requested_base
-                                    })
-                                    .cloned()
-                                    .collect();
-                                let mut unique_paths = std::collections::BTreeSet::new();
-                                for f in &coverage_candidates {
-                                    unique_paths.insert(f.path.clone());
-                                }
-                                if unique_paths.len() != 1 {
-                                    coverage_candidates.clear();
-                                }
-                            }
-                            let report = refact_codehealth::coverage::CoverageReport {
-                                format: report.format,
-                                files: coverage_candidates,
-                            };
-                            let mut complexity_by_file = HashMap::new();
-                            for f in &report.files {
-                                complexity_by_file.insert(f.path.clone(), health.max_complexity);
-                            }
-                            let churn_by_file: HashMap<String, u32> = HashMap::new();
-                            let (line_pct, branch_pct, below_50) =
-                                refact_codehealth::coverage_biomarkers::coverage_summary(&report);
-                            msg.push_str(&format!(
-                            "\nCoverage ({}): {:.0}% lines, {:.0}% branches, {} files below 50%\n",
-                            report.format, line_pct, branch_pct, below_50
-                        ));
-                            let cov_findings =
-                                refact_codehealth::coverage_biomarkers::coverage_biomarkers(
-                                    &report,
-                                    &complexity_by_file,
-                                    &churn_by_file,
-                                );
-                            for f in cov_findings.iter().take(15) {
-                                msg.push_str(&format!(
-                                    "  {} [{:?}] {}\n",
-                                    f.biomarker, f.severity, f.detail
-                                ));
-                            }
-                        }
-                        None => msg.push_str(&format!(
-                            "\nCoverage file `{cov_path}` could not be parsed (unknown format).\n"
-                        )),
-                    }
-                }
-                Err(e) => msg.push_str(&format!("\nCoverage file `{cov_path}` unreadable: {e}\n")),
+        if let Some(report) = coverage.as_ref() {
+            if let Some(file) = coverage_file_for_path(report, &file_path, repo_root.as_deref()) {
+                let single = refact_codehealth::coverage::CoverageReport {
+                    format: report.format.clone(),
+                    files: vec![file],
+                };
+                let (line_pct, branch_pct, below_50) =
+                    refact_codehealth::coverage_biomarkers::coverage_summary(&single);
+                msg.push_str(&format!(
+                    "\nCoverage ({}): {:.0}% lines, {:.0}% branches, {} files below 50%\n",
+                    single.format, line_pct, branch_pct, below_50
+                ));
             }
+        }
+        if analysis.cache_hit {
+            msg.push_str("\nWarm cache: served unchanged file analysis from cache.\n");
         }
         Ok((false, tool_message(tool_call_id, msg)))
     }
@@ -2349,6 +3609,783 @@ fn blast_impact_kind_label(kind: refact_codegraph::pr_blast::ImpactKind) -> &'st
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeMapNode {
+    id: i64,
+    kind: String,
+    name: String,
+    path: String,
+    visibility: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CodeMapFile {
+    parsed: refact_codewiki::ParsedFile,
+    text: String,
+    is_hotspot: bool,
+    kg_bonus: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeMapLink {
+    target_path: String,
+    labels: Vec<String>,
+    count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CodeMapRenderedPage {
+    page: refact_codewiki::AllocatedPage,
+    content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CodeMapFormat {
+    Markdown,
+    ClaudeMd,
+}
+
+impl CodeMapFormat {
+    fn parse(value: Option<&Value>) -> Result<Self, String> {
+        match value {
+            None | Some(Value::Null) => Ok(Self::Markdown),
+            Some(Value::String(value)) if value == "markdown" => Ok(Self::Markdown),
+            Some(Value::String(value)) if value == "claude_md" => Ok(Self::ClaudeMd),
+            Some(Value::String(value)) => Err(format!(
+                "argument `format` must be `markdown` or `claude_md`, got `{value}`"
+            )),
+            Some(value) => Err(format!(
+                "argument `format` must be `markdown` or `claude_md`: {value:?}"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeMapArgs {
+    query: Option<String>,
+    format: CodeMapFormat,
+    budget_tokens: usize,
+}
+
+fn code_map_args(args: &HashMap<String, Value>) -> Result<CodeMapArgs, String> {
+    Ok(CodeMapArgs {
+        query: optional_string_arg(args, "query")?,
+        format: CodeMapFormat::parse(args.get("format"))?,
+        budget_tokens: optional_usize_arg(args, "budget", CODE_MAP_DEFAULT_BUDGET_TOKENS)?.max(1),
+    })
+}
+
+fn code_map_node_kind(kind: &str) -> String {
+    match kind {
+        "typealias" => "type_alias".to_string(),
+        "route" => "route".to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn code_map_node_visibility(data: Option<&str>) -> Option<String> {
+    let data = data?;
+    let value = serde_json::from_str::<Value>(data).ok()?;
+    let visibility = value.get("visibility")?.as_str()?.trim();
+    (!visibility.is_empty()).then(|| visibility.to_string())
+}
+
+fn code_map_nodes_from_records(
+    records: Vec<(i64, String, String, String, Option<String>)>,
+) -> Vec<CodeMapNode> {
+    let mut nodes = records
+        .into_iter()
+        .map(|(id, kind, name, path, data)| CodeMapNode {
+            id,
+            kind: code_map_node_kind(&kind),
+            name,
+            path,
+            visibility: code_map_node_visibility(data.as_deref()),
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    nodes
+}
+
+fn code_map_symbols_by_path(
+    nodes: &[CodeMapNode],
+) -> HashMap<String, Vec<refact_codewiki::SymbolInfo>> {
+    let mut symbols = HashMap::<String, Vec<refact_codewiki::SymbolInfo>>::new();
+    for node in nodes {
+        if node.kind == "route" || node.kind == "unknown" {
+            continue;
+        }
+        symbols
+            .entry(node.path.clone())
+            .or_default()
+            .push(refact_codewiki::SymbolInfo {
+                kind: node.kind.clone(),
+                visibility: node.visibility.clone().unwrap_or_default(),
+            });
+    }
+    for values in symbols.values_mut() {
+        values.sort_by(|left, right| {
+            left.kind
+                .cmp(&right.kind)
+                .then_with(|| left.visibility.cmp(&right.visibility))
+        });
+    }
+    symbols
+}
+
+fn normalize_file_scores(values: &HashMap<String, f64>) -> HashMap<String, f64> {
+    let max = values
+        .values()
+        .copied()
+        .filter(|value| value.is_finite())
+        .fold(0.0_f64, f64::max);
+    values
+        .iter()
+        .map(|(path, score)| {
+            let normalized = if max > 0.0 && score.is_finite() {
+                (score / max).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (path.clone(), normalized)
+        })
+        .collect()
+}
+
+fn code_map_is_hotspot(
+    path: &str,
+    intel: Option<&refact_git_intel::GitIntel>,
+    repo_root: Option<&Path>,
+) -> bool {
+    let Some(intel) = intel else {
+        return false;
+    };
+    let key = match repo_root {
+        Some(root) => {
+            refact_git_intel::paths::repo_relative_or_basename(path, &root.to_string_lossy())
+        }
+        None => refact_git_intel::paths::normalize_separators(path),
+    };
+    intel.churn_percentile(&key) >= 0.9
+}
+
+fn code_map_infra_path(path: &str) -> bool {
+    let normalized = refact_git_intel::paths::normalize_separators(path).to_ascii_lowercase();
+    let name = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+    matches!(
+        name,
+        "dockerfile"
+            | "docker-compose.yml"
+            | "docker-compose.yaml"
+            | "makefile"
+            | "gnumakefile"
+            | "package.json"
+            | "package-lock.json"
+            | "cargo.toml"
+            | "cargo.lock"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "settings.gradle"
+            | "settings.gradle.kts"
+            | "pom.xml"
+    ) || normalized.starts_with(".github/workflows/")
+        || normalized.contains("/.github/workflows/")
+}
+
+fn top_level_module(path: &str) -> Option<String> {
+    path.split('/')
+        .find(|segment| !segment.is_empty())
+        .map(str::to_string)
+}
+
+fn second_level_module(path: &str) -> Option<String> {
+    let segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .take(2)
+        .collect::<Vec<_>>();
+    (segments.len() == 2).then(|| segments.join("/"))
+}
+
+fn module_selections(files: &[CodeMapFile]) -> Vec<refact_codewiki::ModuleSelection> {
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for file in files {
+        let path = file.parsed.file_info.path.as_str();
+        if let Some(module) = top_level_module(path) {
+            grouped.entry(module).or_default().push(path.to_string());
+        }
+        if let Some(module) = second_level_module(path) {
+            grouped.entry(module).or_default().push(path.to_string());
+        }
+    }
+    grouped
+        .into_iter()
+        .filter_map(|(id, mut paths)| {
+            paths.sort();
+            paths.dedup();
+            if paths.len() < CODE_MAP_MIN_MODULE_FILES {
+                return None;
+            }
+            Some(refact_codewiki::ModuleSelection {
+                id,
+                size: paths.len() as u64,
+                cohesion: 0.5,
+                paths,
+            })
+        })
+        .collect()
+}
+
+fn scc_path_groups(
+    nodes: &[CodeMapNode],
+    edges: &[refact_codegraph::analytics::GraphEdge],
+) -> Vec<Vec<String>> {
+    let mut graph = DiGraph::<i64, ()>::new();
+    let mut index_by_id = HashMap::<i64, NodeIndex>::new();
+    for node in nodes {
+        index_by_id
+            .entry(node.id)
+            .or_insert_with(|| graph.add_node(node.id));
+    }
+    for (src, dst, kind) in edges {
+        if !CODE_MAP_LINK_EDGE_KINDS.contains(&kind.as_str()) {
+            continue;
+        }
+        let (Some(src_idx), Some(dst_idx)) = (index_by_id.get(src), index_by_id.get(dst)) else {
+            continue;
+        };
+        graph.add_edge(*src_idx, *dst_idx, ());
+    }
+    let path_by_id: HashMap<i64, &str> = nodes
+        .iter()
+        .map(|node| (node.id, node.path.as_str()))
+        .collect();
+    let mut out = Vec::new();
+    for component in tarjan_scc(&graph) {
+        if component.len() <= 1 {
+            continue;
+        }
+        let mut paths = component
+            .into_iter()
+            .filter_map(|idx| path_by_id.get(&graph[idx]).map(|path| (*path).to_string()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if paths.len() <= 1 {
+            continue;
+        }
+        paths.sort();
+        out.push(paths);
+    }
+    out.sort();
+    out
+}
+
+fn build_code_map_files(
+    files_text: &[(String, String)],
+    nodes: &[CodeMapNode],
+    centrality: &refact_codegraph::analytics::FileCentrality,
+    intel: Option<&refact_git_intel::GitIntel>,
+    repo_root: Option<&Path>,
+) -> Vec<CodeMapFile> {
+    let pr: HashMap<String, f64> = centrality.top_pagerank.iter().cloned().collect();
+    let normalized_pr = normalize_file_scores(&pr);
+    let symbols_by_path = code_map_symbols_by_path(nodes);
+    let mut out = files_text
+        .iter()
+        .map(|(path, text)| {
+            let parsed = refact_codewiki::ParsedFile {
+                file_info: refact_codewiki::FileInfo {
+                    path: path.clone(),
+                    is_entry_point: refact_codewiki::entry_points::is_conventional_entry(path),
+                    is_test: refact_git_intel::paths::is_test_path(path),
+                    size_bytes: text.len() as u64,
+                },
+                symbols: symbols_by_path.get(path).cloned().unwrap_or_default(),
+            };
+            CodeMapFile {
+                parsed,
+                text: text.clone(),
+                is_hotspot: code_map_is_hotspot(path, intel, repo_root),
+                kg_bonus: normalized_pr.get(path).copied().unwrap_or(0.0),
+            }
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| left.parsed.file_info.path.cmp(&right.parsed.file_info.path));
+    out
+}
+
+fn code_map_selection_input(
+    files: Vec<CodeMapFile>,
+    nodes: &[CodeMapNode],
+    edges: &[refact_codegraph::analytics::GraphEdge],
+    centrality: &refact_codegraph::analytics::FileCentrality,
+) -> refact_codewiki::SelectionInput {
+    let pr: HashMap<String, f64> = centrality.top_pagerank.iter().cloned().collect();
+    let bt: HashMap<String, f64> = centrality.top_betweenness.iter().cloned().collect();
+    let api_contract_paths = files
+        .iter()
+        .filter_map(|file| {
+            let path = file.parsed.file_info.path.as_str();
+            let lang = refact_codegraph::lang_from_path(path);
+            let parsed = refact_codewiki::parsed_file::build_parsed_file(lang, &file.text);
+            refact_codewiki::api_contract::detect_api_contract(&parsed).then(|| path.to_string())
+        })
+        .collect();
+    let infra_paths = files
+        .iter()
+        .filter_map(|file| {
+            code_map_infra_path(&file.parsed.file_info.path)
+                .then(|| file.parsed.file_info.path.clone())
+        })
+        .collect();
+    let modules = module_selections(&files);
+    let selections = files
+        .into_iter()
+        .map(|file| {
+            let path = file.parsed.file_info.path.clone();
+            refact_codewiki::FileSelection {
+                parsed: file.parsed,
+                pagerank: pr.get(&path).copied().unwrap_or(0.0),
+                betweenness: bt.get(&path).copied().unwrap_or(0.0),
+                is_hotspot: file.is_hotspot,
+                kg_bonus: file.kg_bonus,
+            }
+        })
+        .collect();
+    refact_codewiki::SelectionInput {
+        files: selections,
+        modules,
+        sccs: scc_path_groups(nodes, edges),
+        api_contract_paths,
+        infra_paths,
+        min_module_size: CODE_MAP_MIN_MODULE_SIZE,
+    }
+}
+
+fn page_title(page: &refact_codewiki::PageCandidate) -> String {
+    page.id
+        .split_once(':')
+        .map(|(_, title)| title)
+        .unwrap_or(page.id.as_str())
+        .to_string()
+}
+
+fn page_kind_label(kind: refact_codewiki::PageKind) -> &'static str {
+    match kind {
+        refact_codewiki::PageKind::File => "file",
+        refact_codewiki::PageKind::Module => "module",
+        refact_codewiki::PageKind::Scc => "scc",
+        refact_codewiki::PageKind::ApiContract => "api-contract",
+        refact_codewiki::PageKind::Infra => "infra",
+    }
+}
+
+fn page_paths(page: &refact_codewiki::PageCandidate) -> BTreeSet<String> {
+    page.paths.iter().cloned().collect()
+}
+
+fn code_map_links_for_page(
+    page: &refact_codewiki::PageCandidate,
+    nodes: &[CodeMapNode],
+    edges: &[refact_codegraph::analytics::GraphEdge],
+) -> Vec<CodeMapLink> {
+    let page_paths = page_paths(page);
+    let path_by_id: HashMap<i64, &str> = nodes
+        .iter()
+        .map(|node| (node.id, node.path.as_str()))
+        .collect();
+    let mut links = BTreeMap::<String, BTreeMap<String, usize>>::new();
+    for (src, dst, kind) in edges {
+        if !CODE_MAP_LINK_EDGE_KINDS.contains(&kind.as_str()) {
+            continue;
+        }
+        let (Some(src_path), Some(dst_path)) = (path_by_id.get(src), path_by_id.get(dst)) else {
+            continue;
+        };
+        if src_path == dst_path {
+            continue;
+        }
+        let target = if page_paths.contains(*src_path) && !page_paths.contains(*dst_path) {
+            Some(*dst_path)
+        } else if page_paths.contains(*dst_path) && !page_paths.contains(*src_path) {
+            Some(*src_path)
+        } else {
+            None
+        };
+        if let Some(target) = target {
+            *links
+                .entry(target.to_string())
+                .or_default()
+                .entry(kind.clone())
+                .or_default() += 1;
+        }
+    }
+    let mut out = links
+        .into_iter()
+        .map(|(target_path, labels)| {
+            let count = labels.values().sum();
+            CodeMapLink {
+                target_path,
+                labels: labels.into_keys().collect(),
+                count,
+            }
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.target_path.cmp(&right.target_path))
+    });
+    out.truncate(CODE_MAP_LINK_LIMIT);
+    out
+}
+
+fn symbol_kind_counts(
+    page: &refact_codewiki::PageCandidate,
+    nodes: &[CodeMapNode],
+) -> Vec<(String, usize)> {
+    let page_paths = page_paths(page);
+    let mut counts = BTreeMap::<String, usize>::new();
+    for node in nodes {
+        if !page_paths.contains(&node.path) || node.kind == "route" || node.kind == "unknown" {
+            continue;
+        }
+        *counts.entry(node.kind.clone()).or_default() += 1;
+    }
+    counts.into_iter().collect()
+}
+
+fn symbol_visibility_counts(
+    page: &refact_codewiki::PageCandidate,
+    nodes: &[CodeMapNode],
+) -> Vec<(String, usize)> {
+    let page_paths = page_paths(page);
+    let mut counts = BTreeMap::<String, usize>::new();
+    for node in nodes {
+        if !page_paths.contains(&node.path) {
+            continue;
+        }
+        if let Some(visibility) = &node.visibility {
+            *counts.entry(visibility.clone()).or_default() += 1;
+        }
+    }
+    counts.into_iter().collect()
+}
+
+fn trim_to_token_allowance(mut content: String, token_allowance: usize) -> String {
+    if refact_codewiki::token_budget::estimate_tokens(&content) <= token_allowance {
+        return content;
+    }
+    if token_allowance == 0 {
+        return String::new();
+    }
+    let suffix = "...";
+    let suffix_tokens = refact_codewiki::token_budget::estimate_tokens(suffix).max(1);
+    if token_allowance <= suffix_tokens {
+        return suffix.to_string();
+    }
+    let max_chars = token_allowance
+        .saturating_sub(suffix_tokens)
+        .saturating_mul(4);
+    if content.chars().count() > max_chars {
+        content = content.chars().take(max_chars).collect();
+    }
+    let target_tokens = token_allowance.saturating_sub(suffix_tokens);
+    while refact_codewiki::token_budget::estimate_tokens(&content) > target_tokens
+        && !content.is_empty()
+    {
+        content.pop();
+    }
+    content.push_str(suffix);
+    content
+}
+
+fn page_signal_labels(
+    page: &refact_codewiki::PageCandidate,
+    input: &refact_codewiki::SelectionInput,
+) -> Vec<String> {
+    let page_paths = page_paths(page);
+    let mut labels = BTreeSet::new();
+    for file in &input.files {
+        if !page_paths.contains(&file.parsed.file_info.path) {
+            continue;
+        }
+        if file.parsed.file_info.is_entry_point {
+            labels.insert("entry_point".to_string());
+        }
+        if file.parsed.file_info.is_test {
+            labels.insert("test".to_string());
+        }
+        if file.is_hotspot {
+            labels.insert("hotspot".to_string());
+        }
+        if file.kg_bonus > 0.0 {
+            labels.insert(format!("kg_prior={:.2}", file.kg_bonus));
+        }
+    }
+    labels.into_iter().collect()
+}
+
+fn render_code_map_page_markdown(
+    allocation: &refact_codewiki::AllocatedPage,
+    input: &refact_codewiki::SelectionInput,
+    nodes: &[CodeMapNode],
+    edges: &[refact_codegraph::analytics::GraphEdge],
+) -> String {
+    let page = &allocation.page;
+    let mut content = String::new();
+    content.push_str(&format!(
+        "### {} — {}\n",
+        page_title(page),
+        page_kind_label(page.kind)
+    ));
+    content.push_str(&format!("Score: {:.3}\n", page.score));
+    content.push_str(&format!("Paths: {}\n", page.paths.join(", ")));
+    let signals = page_signal_labels(page, input);
+    if !signals.is_empty() {
+        content.push_str(&format!("Signals: {}\n", signals.join(", ")));
+    }
+    let symbol_counts = symbol_kind_counts(page, nodes);
+    if !symbol_counts.is_empty() {
+        content.push_str("Symbols:");
+        for (kind, count) in symbol_counts {
+            content.push_str(&format!(" {}={}", kind, count));
+        }
+        content.push('\n');
+    }
+    let visibility_counts = symbol_visibility_counts(page, nodes);
+    if !visibility_counts.is_empty() {
+        content.push_str("Visibility:");
+        for (visibility, count) in visibility_counts {
+            content.push_str(&format!(" {}={}", visibility, count));
+        }
+        content.push('\n');
+    }
+    let links = code_map_links_for_page(page, nodes, edges);
+    if !links.is_empty() {
+        content.push_str("Links:\n");
+        for link in links {
+            content.push_str(&format!(
+                "- {} ({}, {} edges)\n",
+                link.target_path,
+                link.labels.join("/"),
+                link.count
+            ));
+        }
+    }
+    trim_to_token_allowance(content, allocation.token_allowance)
+}
+
+fn code_map_backlink_hubs(
+    rendered_pages: &[CodeMapRenderedPage],
+    nodes: &[CodeMapNode],
+    edges: &[refact_codegraph::analytics::GraphEdge],
+) -> Vec<(String, usize)> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for rendered in rendered_pages {
+        for link in code_map_links_for_page(&rendered.page.page, nodes, edges) {
+            *counts.entry(link.target_path).or_default() += link.count;
+        }
+    }
+    let mut hubs = counts.into_iter().collect::<Vec<_>>();
+    hubs.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    hubs
+}
+
+fn code_map_page_prior(pages: &[refact_codewiki::PageCandidate]) -> HashMap<String, f64> {
+    let max_score = pages
+        .iter()
+        .map(|page| page.score)
+        .filter(|score| score.is_finite())
+        .fold(0.0_f64, f64::max);
+    pages
+        .iter()
+        .map(|page| {
+            let prior = if max_score > 0.0 && page.score.is_finite() {
+                page.score / max_score
+            } else {
+                0.0
+            };
+            (page.id.clone(), prior.clamp(0.0, 1.0))
+        })
+        .collect()
+}
+
+fn choose_code_map_pages(
+    mut pages: Vec<refact_codewiki::PageCandidate>,
+    query: Option<&str>,
+) -> Vec<refact_codewiki::PageCandidate> {
+    if let Some(query) = query {
+        let prior = code_map_page_prior(&pages);
+        let mut hits = refact_codewiki::search_hybrid(query, &pages, &prior);
+        if hits.is_empty() {
+            pages.sort_by(|left, right| {
+                right
+                    .score
+                    .total_cmp(&left.score)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            pages.truncate(CODE_MAP_QUERY_LIMIT);
+            return pages;
+        }
+        return hits
+            .drain(..)
+            .into_iter()
+            .take(CODE_MAP_QUERY_LIMIT)
+            .map(|hit| hit.page.clone())
+            .collect();
+    }
+    pages.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    pages.truncate(CODE_MAP_MAX_PAGES_WITHOUT_QUERY);
+    pages
+}
+
+fn render_code_map_markdown(
+    files_count: usize,
+    index_state: Option<&PrBlastIndexState>,
+    rendered_pages: &[CodeMapRenderedPage],
+    nodes: &[CodeMapNode],
+    edges: &[refact_codegraph::analytics::GraphEdge],
+    query: Option<&str>,
+) -> String {
+    let link_count: usize = rendered_pages
+        .iter()
+        .map(|page| code_map_links_for_page(&page.page.page, nodes, edges).len())
+        .sum();
+    let mut msg = String::new();
+    if let Some(state) = index_state {
+        if let Some(warning) = pr_blast_partial_warning(state) {
+            msg.push_str(&warning);
+            msg.push('\n');
+        }
+    }
+    msg.push_str(&format!(
+        "Code map: {} indexed files, {} documentation-worthy pages, {} cross-file links.",
+        files_count,
+        rendered_pages.len(),
+        link_count
+    ));
+    if let Some(query) = query {
+        msg.push_str(&format!(" Query: `{query}`."));
+    }
+    msg.push_str("\n\nMost documentation-worthy files (selection score):\n");
+    for rendered in rendered_pages
+        .iter()
+        .filter(|rendered| rendered.page.page.kind == refact_codewiki::PageKind::File)
+        .take(12)
+    {
+        let path = rendered
+            .page
+            .page
+            .paths
+            .first()
+            .map(String::as_str)
+            .unwrap_or(rendered.page.page.id.as_str());
+        msg.push_str(&format!("  {:.2}  {}\n", rendered.page.page.score, path));
+    }
+    let hubs = code_map_backlink_hubs(rendered_pages, nodes, edges);
+    let hub_lines = hubs
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .take(12)
+        .collect::<Vec<_>>();
+    if !hub_lines.is_empty() {
+        msg.push_str("\nMost-referenced files (backlink hubs):\n");
+        for (path, count) in hub_lines {
+            msg.push_str(&format!("  {}x  {}\n", count, path));
+        }
+    }
+    msg.push_str("\nPages:\n");
+    for rendered in rendered_pages {
+        msg.push('\n');
+        msg.push_str(&rendered.content);
+    }
+    msg
+}
+
+fn render_code_map_claude_md(
+    rendered_pages: &[CodeMapRenderedPage],
+    index_state: Option<&PrBlastIndexState>,
+) -> String {
+    let pages = rendered_pages
+        .iter()
+        .map(|rendered| rendered.page.page.clone())
+        .collect::<Vec<_>>();
+    let mut out = String::new();
+    if let Some(state) = index_state {
+        if let Some(warning) = pr_blast_partial_warning(state) {
+            out.push_str(&warning);
+            out.push('\n');
+        }
+    }
+    out.push_str(&refact_codewiki::render_claude_md(&pages));
+    out
+}
+
+fn assemble_code_map_output(
+    files_text: Vec<(String, String)>,
+    node_records: Vec<(i64, String, String, String, Option<String>)>,
+    edges: Vec<refact_codegraph::analytics::GraphEdge>,
+    centrality: refact_codegraph::analytics::FileCentrality,
+    index_state: Option<PrBlastIndexState>,
+    intel: Option<&refact_git_intel::GitIntel>,
+    repo_root: Option<&Path>,
+    args: &CodeMapArgs,
+) -> String {
+    if files_text.is_empty() {
+        let mut msg = String::new();
+        if let Some(state) = index_state.as_ref() {
+            if let Some(warning) = pr_blast_partial_warning(state) {
+                msg.push_str(&warning);
+                msg.push('\n');
+            }
+        }
+        msg.push_str("Code graph has no indexed files (index empty/building).");
+        return msg;
+    }
+    let nodes = code_map_nodes_from_records(node_records);
+    let files = build_code_map_files(&files_text, &nodes, &centrality, intel, repo_root);
+    let input = code_map_selection_input(files, &nodes, &edges, &centrality);
+    let selected_pages =
+        choose_code_map_pages(refact_codewiki::select_pages(&input), args.query.as_deref());
+    let allocations = refact_codewiki::allocate(&selected_pages, args.budget_tokens);
+    let rendered_pages = allocations
+        .into_iter()
+        .map(|page| {
+            let content = render_code_map_page_markdown(&page, &input, &nodes, &edges);
+            CodeMapRenderedPage { page, content }
+        })
+        .collect::<Vec<_>>();
+    let output = match args.format {
+        CodeMapFormat::Markdown => render_code_map_markdown(
+            files_text.len(),
+            index_state.as_ref(),
+            &rendered_pages,
+            &nodes,
+            &edges,
+            args.query.as_deref(),
+        ),
+        CodeMapFormat::ClaudeMd => render_code_map_claude_md(&rendered_pages, index_state.as_ref()),
+    };
+    trim_to_token_allowance(output, args.budget_tokens)
+}
+
 pub struct ToolCodeMap {
     pub config_path: String,
 }
@@ -2359,8 +4396,9 @@ impl Tool for ToolCodeMap {
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
         tool_call_id: &String,
-        _args: &HashMap<String, Value>,
+        args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let args = code_map_args(args)?;
         let gcx = ccx.lock().await.app.gcx.clone();
         let service = gcx
             .codegraph
@@ -2370,131 +4408,22 @@ impl Tool for ToolCodeMap {
             .ok_or_else(|| "codegraph is not available".to_string())?;
         let files_text = service.all_files_with_text().await?;
         let cached = service.cached_graph_analytics().await?;
-        let nodes = cached.data.nodes;
-        let edges = cached.data.edges;
-        let centrality = cached.analytics.file_centrality.truncated(5000);
-        if files_text.is_empty() {
-            return Ok((
-                false,
-                tool_message(tool_call_id, "Code graph has no indexed files.".to_string()),
-            ));
-        }
-        let pr: HashMap<String, f64> = centrality.top_pagerank.iter().cloned().collect();
-        let bt: HashMap<String, f64> = centrality.top_betweenness.iter().cloned().collect();
-        let max_pr = pr.values().cloned().fold(0.0_f64, f64::max);
-        let max_bt = bt.values().cloned().fold(0.0_f64, f64::max);
-        let mut id_to_path: HashMap<i64, String> = HashMap::new();
-        let mut symbols_by_path: HashMap<String, Vec<String>> = HashMap::new();
-        for (id, name, path) in &nodes {
-            id_to_path.insert(*id, path.clone());
-            symbols_by_path
-                .entry(path.clone())
-                .or_default()
-                .push(name.clone());
-        }
-        let mut neighbors_by_path: HashMap<String, std::collections::BTreeSet<String>> =
-            HashMap::new();
-        for (src, dst, _kind) in &edges {
-            if let (Some(sp), Some(dp)) = (id_to_path.get(src), id_to_path.get(dst)) {
-                if sp != dp {
-                    neighbors_by_path
-                        .entry(sp.clone())
-                        .or_default()
-                        .insert(dp.clone());
-                }
-            }
-        }
-        let mut scored: Vec<(String, f64)> = files_text
-            .iter()
-            .map(|(path, text)| {
-                let symbols: Vec<refact_codewiki::selection_scoring::SymbolInfo> = symbols_by_path
-                    .get(path)
-                    .map(|names| {
-                        names
-                            .iter()
-                            .map(|_| refact_codewiki::selection_scoring::SymbolInfo {
-                                kind: "symbol".to_string(),
-                                visibility: "public".to_string(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let parsed = refact_codewiki::selection_scoring::ParsedFile {
-                    file_info: refact_codewiki::selection_scoring::FileInfo {
-                        path: path.clone(),
-                        is_entry_point: refact_codewiki::entry_points::is_conventional_entry(path),
-                        is_test: refact_git_intel::paths::is_test_path(path),
-                        size_bytes: text.len() as u64,
-                    },
-                    symbols,
-                };
-                let score = refact_codewiki::selection_scoring::score_file(
-                    &parsed,
-                    pr.get(path).copied().unwrap_or(0.0),
-                    bt.get(path).copied().unwrap_or(0.0),
-                    max_pr,
-                    max_bt,
-                    false,
-                    0.0,
-                );
-                (path.clone(), score)
-            })
-            .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(60);
-        let selected: std::collections::BTreeSet<String> =
-            scored.iter().map(|(p, _)| p.clone()).collect();
-        let pages: Vec<refact_codewiki::interlinking::GeneratedPage> = scored
-            .iter()
-            .map(|(path, _)| {
-                let basename = path.rsplit('/').next().unwrap_or(path).to_string();
-                let mut content = String::new();
-                if let Some(names) = symbols_by_path.get(path) {
-                    let mut names = names.clone();
-                    names.sort();
-                    names.dedup();
-                    content.push_str(&format!("Symbols: {}\n", names.len()));
-                }
-                if let Some(neigh) = neighbors_by_path.get(path) {
-                    content.push_str("Related files:\n");
-                    for n in neigh.iter().filter(|n| selected.contains(*n)).take(15) {
-                        content.push_str(&format!("- `{}`\n", n));
-                    }
-                }
-                refact_codewiki::interlinking::GeneratedPage {
-                    page_id: path.clone(),
-                    title: basename,
-                    page_type: "file_page".to_string(),
-                    target_path: path.clone(),
-                    content,
-                }
-            })
-            .collect();
-        let (forward, backlinks) =
-            refact_codewiki::interlinking::attach_wiki_links_and_backlinks(&pages);
-        let total_links: usize = forward.values().map(|v| v.len()).sum();
-        let mut hubs: Vec<(String, usize)> = backlinks
-            .iter()
-            .map(|(page, links)| (page.clone(), links.len()))
-            .collect();
-        hubs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        let mut msg = format!(
-            "Code map: {} indexed files, {} documentation-worthy pages, {} cross-reference links.\n\nMost documentation-worthy files (selection score):\n",
-            files_text.len(),
-            pages.len(),
-            total_links
+        let node_records = service.graph_node_records().await?;
+        let readiness = service.index_readiness().await?;
+        let repo_dir = project_dir(gcx.clone()).await;
+        let intel = repo_dir
+            .as_deref()
+            .and_then(|dir| cached_mine_history(dir, 1000).ok());
+        let msg = assemble_code_map_output(
+            files_text,
+            node_records,
+            cached.data.edges,
+            cached.analytics.file_centrality.truncated(5000),
+            Some(pr_blast_index_state(&readiness)),
+            intel.as_ref(),
+            repo_dir.as_deref(),
+            &args,
         );
-        for (path, score) in scored.iter().take(12) {
-            msg.push_str(&format!("  {:.2}  {}\n", score, path));
-        }
-        let hub_lines: Vec<&(String, usize)> =
-            hubs.iter().filter(|(_, n)| *n > 0).take(12).collect();
-        if !hub_lines.is_empty() {
-            msg.push_str("\nMost-referenced files (backlink hubs):\n");
-            for (path, n) in hub_lines {
-                msg.push_str(&format!("  {}x  {}\n", n, path));
-            }
-        }
         Ok((false, tool_message(tool_call_id, msg)))
     }
 
@@ -2508,8 +4437,25 @@ impl Tool for ToolCodeMap {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Documentation-worthy file map: ranks files by selection score (centrality + entry-point/symbol signals) and builds a deterministic cross-reference link graph between them (forward links + backlink hubs).".to_string(),
-            input_schema: json_schema_from_params(&[], &[]),
+            description: "Documentation-worthy code map using real CodeGraph and git signals: file centrality, churn hotspots, real symbol kinds, module/SCC/API/infra pages, edge-derived links/backlink hubs, token budget, optional query filtering, and markdown or claude_md output.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional search query; when supplied, hybrid search returns only the most relevant selected pages."
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["markdown", "claude_md"],
+                        "description": "Output format. Defaults to markdown."
+                    },
+                    "budget": {
+                        "type": "integer",
+                        "description": "Approximate token budget for selected page output. Defaults to 12000."
+                    }
+                }
+            }),
             output_schema: None,
             annotations: None,
         }
@@ -2582,6 +4528,225 @@ mod tests {
         commit_file(&repo, "file.txt", "side\n", "side branch history");
         repo.set_head("refs/heads/main").unwrap();
         (dir, main_oid)
+    }
+
+    fn code_map_node_record(
+        id: i64,
+        kind: &str,
+        name: &str,
+        path: &str,
+    ) -> (i64, String, String, String, Option<String>) {
+        (
+            id,
+            kind.to_string(),
+            name.to_string(),
+            path.to_string(),
+            None,
+        )
+    }
+
+    fn code_map_centrality(
+        pagerank: &[(&str, f64)],
+        betweenness: &[(&str, f64)],
+    ) -> refact_codegraph::analytics::FileCentrality {
+        refact_codegraph::analytics::FileCentrality {
+            top_pagerank: pagerank
+                .iter()
+                .map(|(path, score)| ((*path).to_string(), *score))
+                .collect(),
+            top_betweenness: betweenness
+                .iter()
+                .map(|(path, score)| ((*path).to_string(), *score))
+                .collect(),
+        }
+    }
+
+    fn code_map_markdown_args(budget_tokens: usize) -> CodeMapArgs {
+        CodeMapArgs {
+            query: None,
+            format: CodeMapFormat::Markdown,
+            budget_tokens,
+        }
+    }
+
+    fn code_map_output_fixture(args: CodeMapArgs) -> String {
+        assemble_code_map_output(
+            vec![
+                (
+                    "payments/api.rs".to_string(),
+                    "pub fn charge() { validate(); }\n".to_string(),
+                ),
+                (
+                    "auth/login.rs".to_string(),
+                    "pub fn login() {}\n".to_string(),
+                ),
+            ],
+            vec![
+                code_map_node_record(1, "function", "charge", "payments/api.rs"),
+                code_map_node_record(2, "function", "validate", "payments/api.rs"),
+                code_map_node_record(3, "function", "login", "auth/login.rs"),
+            ],
+            vec![(1, 2, "calls".to_string())],
+            code_map_centrality(&[("payments/api.rs", 3.0), ("auth/login.rs", 1.0)], &[]),
+            Some(PrBlastIndexState {
+                queued: 0,
+                cross_file_edges: 1,
+                cross_file_ready: true,
+            }),
+            None,
+            None,
+            &args,
+        )
+    }
+
+    #[test]
+    fn code_map_marks_real_hotspot() {
+        let mut intel = refact_git_intel::GitIntel::default();
+        intel.file_churn.insert("src/hot.rs".to_string(), 20);
+        for index in 0..10 {
+            intel.file_churn.insert(format!("src/cold{index}.rs"), 1);
+        }
+        let files_text = vec![
+            ("src/hot.rs".to_string(), "fn hot() {}\n".to_string()),
+            ("src/cold0.rs".to_string(), "fn cold() {}\n".to_string()),
+        ];
+        let nodes = code_map_nodes_from_records(vec![
+            code_map_node_record(1, "function", "hot", "src/hot.rs"),
+            code_map_node_record(2, "function", "cold", "src/cold0.rs"),
+        ]);
+        let centrality = code_map_centrality(&[], &[]);
+        let files = build_code_map_files(&files_text, &nodes, &centrality, Some(&intel), None);
+
+        let hot = files
+            .iter()
+            .find(|file| file.parsed.file_info.path == "src/hot.rs")
+            .unwrap();
+        let cold = files
+            .iter()
+            .find(|file| file.parsed.file_info.path == "src/cold0.rs")
+            .unwrap();
+        assert!(hot.is_hotspot);
+        assert!(!cold.is_hotspot);
+
+        let input = code_map_selection_input(files, &nodes, &[], &centrality);
+        let pages = refact_codewiki::select_pages(&input);
+        let hot_score = pages
+            .iter()
+            .find(|page| page.id == "file:src/hot.rs")
+            .unwrap()
+            .score;
+        let cold_score = pages
+            .iter()
+            .find(|page| page.id == "file:src/cold0.rs")
+            .unwrap()
+            .score;
+        assert!(hot_score > cold_score);
+    }
+
+    #[test]
+    fn code_map_symbols_use_node_kinds() {
+        let nodes = code_map_nodes_from_records(vec![
+            code_map_node_record(1, "struct", "Thing", "src/model.rs"),
+            code_map_node_record(2, "function", "build", "src/model.rs"),
+            code_map_node_record(3, "typealias", "Id", "src/model.rs"),
+        ]);
+        let symbols = code_map_symbols_by_path(&nodes);
+        let symbols = symbols.get("src/model.rs").unwrap();
+        let kinds = symbols
+            .iter()
+            .map(|symbol| symbol.kind.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(kinds.contains("struct"));
+        assert!(kinds.contains("function"));
+        assert!(kinds.contains("type_alias"));
+        assert!(symbols.iter().all(|symbol| symbol.visibility.is_empty()));
+
+        let output = assemble_code_map_output(
+            vec![(
+                "src/model.rs".to_string(),
+                "struct Thing; fn build() {}\n".to_string(),
+            )],
+            vec![
+                code_map_node_record(1, "struct", "Thing", "src/model.rs"),
+                code_map_node_record(2, "function", "build", "src/model.rs"),
+                code_map_node_record(3, "typealias", "Id", "src/model.rs"),
+            ],
+            Vec::new(),
+            code_map_centrality(&[("src/model.rs", 1.0)], &[]),
+            None,
+            None,
+            None,
+            &code_map_markdown_args(1_000),
+        );
+        assert!(output.contains("function=1"));
+        assert!(output.contains("struct=1"));
+        assert!(output.contains("type_alias=1"));
+        assert!(!output.contains("public"));
+    }
+
+    #[test]
+    fn code_map_links_from_graph_edges() {
+        let output = assemble_code_map_output(
+            vec![
+                ("src/a.rs".to_string(), "fn a() { b(); }\n".to_string()),
+                ("src/b.rs".to_string(), "fn b() {}\n".to_string()),
+            ],
+            vec![
+                code_map_node_record(1, "function", "a", "src/a.rs"),
+                code_map_node_record(2, "function", "b", "src/b.rs"),
+            ],
+            vec![(1, 2, "calls".to_string())],
+            code_map_centrality(&[("src/a.rs", 2.0), ("src/b.rs", 1.0)], &[]),
+            None,
+            None,
+            None,
+            &code_map_markdown_args(2_000),
+        );
+
+        assert!(output.contains("Links:"));
+        assert!(output.contains("src/b.rs (calls"));
+        assert!(output.contains("Most-referenced files"));
+        assert!(!output.contains("Related files:"));
+    }
+
+    #[test]
+    fn code_map_query_returns_relevant_page() {
+        let mut args = code_map_markdown_args(2_000);
+        args.query = Some("payments".to_string());
+
+        let output = code_map_output_fixture(args);
+
+        assert!(output.contains("Query: `payments`"));
+        assert!(output.contains("payments/api.rs"));
+        assert!(!output.contains("auth/login.rs"));
+    }
+
+    #[test]
+    fn claude_md_format_renders() {
+        let output = code_map_output_fixture(CodeMapArgs {
+            query: Some("payments".to_string()),
+            format: CodeMapFormat::ClaudeMd,
+            budget_tokens: 4_000,
+        });
+
+        assert!(output.contains(refact_codewiki::claude_md::BEGIN_MARKER));
+        assert!(output.contains("### Selected Pages"));
+        assert!(output.contains("payments/api.rs"));
+    }
+
+    #[test]
+    fn budget_bounds_total_tokens() {
+        let budget = 40;
+        let output = code_map_output_fixture(code_map_markdown_args(budget));
+
+        assert!(
+            refact_codewiki::token_budget::estimate_tokens(&output) <= budget,
+            "estimated tokens exceeded budget: {} > {}\n{}",
+            refact_codewiki::token_budget::estimate_tokens(&output),
+            budget,
+            output
+        );
     }
 
     #[test]
@@ -2813,6 +4978,131 @@ mod tests {
         format!(
             "pub fn hot(x: i32) -> i32 {{\n    if x > 0 {{\n        if x > 1 {{\n            for i in 0..x {{\n                if i % 2 == 0 {{\n                    return {a};\n                }}\n            }}\n            return {b};\n        }}\n    }}\n    {c}\n}}\n"
         )
+    }
+
+    fn brain_method_source(caller_count: usize) -> String {
+        let mut src = "fn brain(x: i32) -> i32 {\n".to_string();
+        for i in 0..75 {
+            src.push_str(&format!(
+                "    if x > {i} {{ if x % 2 == 0 {{ if x < 100 {{ if x != 42 {{ return {i}; }} }} }} }}\n"
+            ));
+        }
+        src.push_str("    0\n}\n");
+        for i in 0..caller_count {
+            src.push_str(&format!("fn caller_{i}(x: i32) -> i32 {{ brain(x) }}\n"));
+        }
+        src
+    }
+
+    async fn service_with_file(
+        path: &str,
+        text: &str,
+        lang: &str,
+    ) -> Arc<refact_codegraph::CodeGraphService> {
+        let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        service.index_file(path, text, lang).await.unwrap();
+        service.connect_usages().await.unwrap();
+        service
+    }
+
+    #[tokio::test]
+    async fn brain_method_downgraded_at_zero_fanin() {
+        let text = brain_method_source(0);
+        let service = service_with_file("src/a.rs", &text, "rust").await;
+        let health = refact_codehealth::analyze("rust", &text);
+        let findings = refact_codehealth::biomarkers::detect_biomarkers("rust", &text);
+        let original = findings
+            .iter()
+            .find(|finding| finding.biomarker == "brain_method")
+            .unwrap()
+            .severity;
+
+        let enriched =
+            enrich_health_findings(Some(&service), "src/a.rs", &health.functions, findings).await;
+        let brain = enriched
+            .iter()
+            .find(|finding| finding.finding.biomarker == "brain_method")
+            .unwrap();
+
+        assert_eq!(brain.finding.severity, downgrade_health_severity(original));
+        assert!(brain.finding.detail.contains("low fan-in"));
+    }
+
+    #[tokio::test]
+    async fn annotated_at_high_fanin() {
+        let text = brain_method_source(5);
+        let service = service_with_file("src/a.rs", &text, "rust").await;
+        let health = refact_codehealth::analyze("rust", &text);
+        let findings = refact_codehealth::biomarkers::detect_biomarkers("rust", &text);
+        let original = findings
+            .iter()
+            .find(|finding| finding.biomarker == "brain_method")
+            .unwrap()
+            .severity;
+
+        let enriched =
+            enrich_health_findings(Some(&service), "src/a.rs", &health.functions, findings).await;
+        let brain = enriched
+            .iter()
+            .find(|finding| finding.finding.biomarker == "brain_method")
+            .unwrap();
+
+        assert_eq!(brain.finding.severity, original);
+        assert!(brain.finding.detail.contains("called from 5 sites"));
+    }
+
+    #[tokio::test]
+    async fn perf_finding_hot_path_from_route() {
+        let text = r#"
+from fastapi import FastAPI
+import requests
+app = FastAPI()
+
+@app.get("/users")
+def handler():
+    return helper()
+
+def helper():
+    for u in urls:
+        for p in pages:
+            requests.get(p)
+
+def orphan():
+    for u in urls:
+        for p in pages:
+            requests.get(p)
+"#;
+        let service = service_with_file("src/api.py", text, "python").await;
+        let health = refact_codehealth::analyze("python", text);
+        let findings = refact_codehealth::perf::detect_perf("python", text);
+        let helper = health
+            .functions
+            .iter()
+            .find(|function| function.name == "helper")
+            .unwrap();
+        let orphan = health
+            .functions
+            .iter()
+            .find(|function| function.name == "orphan")
+            .unwrap();
+
+        let enriched =
+            enrich_health_findings(Some(&service), "src/api.py", &health.functions, findings).await;
+
+        assert!(enriched.iter().any(|finding| {
+            finding.hot_path
+                && finding.finding.dimension
+                    == refact_codehealth::biomarkers::Dimension::Performance
+                && helper.line1 <= finding.finding.line
+                && finding.finding.line <= function_line2(helper)
+        }));
+        assert!(enriched.iter().any(|finding| {
+            !finding.hot_path
+                && finding.finding.dimension
+                    == refact_codehealth::biomarkers::Dimension::Performance
+                && orphan.line1 <= finding.finding.line
+                && finding.finding.line <= function_line2(orphan)
+        }));
     }
 
     #[tokio::test]
@@ -3060,6 +5350,213 @@ mod tests {
         assert!(tool_text.contains("src/a.rs"));
         assert!(tool_text.contains("prior_defect"));
         assert!(tool_text.contains("Recent commit change-risk"));
+    }
+
+    fn empty_health_ctx<'a>(
+        trend_findings: &'a [refact_codehealth::biomarkers::Finding],
+        git_function_fact_paths: &'a HashSet<String>,
+    ) -> HealthAnalysisContext<'a> {
+        HealthAnalysisContext {
+            repo_root: None,
+            intel: None,
+            service: None,
+            coverage: None,
+            trend_findings,
+            git_function_fact_paths,
+        }
+    }
+
+    fn duplicate_health_source() -> String {
+        let mut body = String::new();
+        for name in ["alpha", "beta"] {
+            body.push_str(&format!(
+                "fn {name}(input: i32) -> i32 {{\n    let mut total = input;\n"
+            ));
+            for _ in 0..30 {
+                body.push_str("    total = total + input;\n    total = total - input;\n");
+            }
+            body.push_str("    total\n}\n");
+        }
+        body
+    }
+
+    #[tokio::test]
+    async fn structural_only_fixture_score_unchanged() {
+        reset_health_cache_for_tests();
+        let src = "fn branchy(x: i32) -> i32 {\n    if x > 0 {\n        if x > 1 {\n            return x;\n        }\n    }\n    0\n}\n";
+        let trends = Vec::new();
+        let git_paths = HashSet::new();
+        let ctx = empty_health_ctx(&trends, &git_paths);
+
+        let analysis = analyze_health_file_shared("src/a.rs".to_string(), src.to_string(), &ctx)
+            .await
+            .unwrap();
+        let mut expected_findings = refact_codehealth::biomarkers::detect_biomarkers("rust", src);
+        expected_findings.extend(refact_codehealth::perf::detect_perf("rust", src));
+        let expected = refact_codehealth::scoring::score_file(&expected_findings);
+
+        assert_eq!(analysis.defect_score, expected.defect);
+        assert_eq!(analysis.maintainability_score, expected.maintainability);
+        assert_eq!(analysis.performance_score, expected.performance);
+    }
+
+    #[tokio::test]
+    async fn health_cache_hits_on_unchanged_content_and_invalidates_on_edit() {
+        reset_health_cache_for_tests();
+        let trends = Vec::new();
+        let git_paths = HashSet::new();
+        let ctx = empty_health_ctx(&trends, &git_paths);
+        let src = "fn a() -> i32 { 1 }\n".to_string();
+
+        let first = analyze_health_file_shared(
+            "src/health_cache_probe_unique.rs".to_string(),
+            src.clone(),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let second =
+            analyze_health_file_shared("src/health_cache_probe_unique.rs".to_string(), src, &ctx)
+                .await
+                .unwrap();
+        let third = analyze_health_file_shared(
+            "src/health_cache_probe_unique.rs".to_string(),
+            "fn a() -> i32 { if true { 1 } else { 0 } }\n".to_string(),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        assert!(!first.cache_hit);
+        assert!(second.cache_hit);
+        assert!(!third.cache_hit);
+        // NOTE: no global-stats assertion here — the cache/counters are process-global
+        // and other parallel tests also exercise analyze_health_file_shared; the three
+        // per-call cache_hit flags above are the race-free proof of hit/invalidate.
+    }
+
+    #[tokio::test]
+    async fn health_scores_include_git_and_dry_categories() {
+        reset_health_cache_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let src = duplicate_health_source();
+        std::fs::write(dir.path().join("src/a.rs"), &src).unwrap();
+        let mut intel = refact_git_intel::GitIntel::default();
+        intel.file_churn.insert("src/a.rs".to_string(), 6);
+        intel.fix_commit_counts.insert("src/a.rs".to_string(), 3);
+        intel.commits_analyzed = 6;
+        let trends = Vec::new();
+        let git_paths = top_git_function_fact_paths(Some(&intel));
+        let ctx = HealthAnalysisContext {
+            repo_root: Some(dir.path()),
+            intel: Some(&intel),
+            service: None,
+            coverage: None,
+            trend_findings: &trends,
+            git_function_fact_paths: &git_paths,
+        };
+
+        let analysis = analyze_health_file_shared("src/a.rs".to_string(), src, &ctx)
+            .await
+            .unwrap();
+        let categories = analysis
+            .findings
+            .iter()
+            .map(|finding| finding.finding.category.as_str())
+            .collect::<HashSet<_>>();
+        let impacts = analysis
+            .health_impact
+            .iter()
+            .map(|impact| impact.biomarker.as_str())
+            .collect::<HashSet<_>>();
+
+        assert!(
+            categories.contains("duplication"),
+            "{:?}",
+            analysis.findings
+        );
+        assert!(
+            categories.contains("organizational"),
+            "{:?}",
+            analysis.findings
+        );
+        assert!(impacts.contains("prior_defect") || impacts.contains("dry_violation"));
+    }
+
+    #[tokio::test]
+    async fn no_coverage_file_means_zero_coverage_findings() {
+        reset_health_cache_for_tests();
+        let trends = Vec::new();
+        let git_paths = HashSet::new();
+        let ctx = empty_health_ctx(&trends, &git_paths);
+
+        let analysis = analyze_health_file_shared(
+            "src/a.rs".to_string(),
+            "fn a() -> i32 { 1 }\n".to_string(),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        assert!(analysis.findings.iter().all(|finding| {
+            finding.finding.category != "test_coverage"
+                && finding.finding.category != "coverage_gradient"
+        }));
+    }
+
+    #[tokio::test]
+    async fn trend_snapshot_persisted_and_trend_finding_fires() {
+        reset_health_cache_for_tests();
+        let service = refact_codegraph::CodeGraphService::open_in_memory().unwrap();
+        let snapshots = vec![
+            health_snap(1, "src/a.rs", 10.0),
+            health_snap(2, "src/a.rs", 8.8),
+            health_snap(3, "src/a.rs", 7.6),
+        ];
+        persist_health_snapshots(&service, &snapshots)
+            .await
+            .unwrap();
+        let mut loaded = load_health_snapshots(&service).await;
+        push_health_snapshot(&mut loaded, health_snap(4, "src/a.rs", 6.4));
+        let trends = refact_codehealth::trends::evaluate_trends(&loaded);
+        let git_paths = HashSet::new();
+        let ctx = empty_health_ctx(&trends, &git_paths);
+
+        let analysis = analyze_health_file_shared(
+            "src/a.rs".to_string(),
+            "fn a() -> i32 { 1 }\n".to_string(),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        persist_health_snapshots(&service, &loaded).await.unwrap();
+        let snapshots = load_health_snapshots(&service).await;
+
+        assert!(analysis
+            .findings
+            .iter()
+            .any(|finding| finding.finding.biomarker == "health_declining"));
+        assert_eq!(snapshots.len(), 4);
+    }
+
+    fn health_snap(ts: i64, path: &str, score: f64) -> refact_codehealth::trends::HealthSnapshot {
+        refact_codehealth::trends::HealthSnapshot {
+            ts,
+            per_file: HashMap::from([(path.to_string(), score)]),
+            aggregate: score,
+        }
+    }
+
+    #[test]
+    fn basename_collision_does_not_cross_bind() {
+        let matched = health_stored_path_for_request(
+            vec!["a/util.rs".to_string(), "b/util.rs".to_string()],
+            "util.rs",
+            Some(Path::new("/repo")),
+        );
+
+        assert_eq!(matched, None);
     }
 
     #[tokio::test]

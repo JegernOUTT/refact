@@ -4,7 +4,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use refact_codegraph_parsers::Resolver;
+use refact_codegraph_parsers::{RawRef, Resolver};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -187,6 +187,17 @@ pub struct SymbolData {
     pub node_id: i64,
     pub path: String,
     pub double_colon_path: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRecord {
+    pub node_id: i64,
+    pub name: String,
+    pub path: String,
+    pub kind: String,
+    pub lang: String,
+    pub line1: usize,
     pub data: String,
 }
 
@@ -773,6 +784,34 @@ impl Store {
         Ok(out)
     }
 
+    pub fn symbol_records(&self) -> Result<Vec<SymbolRecord>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT n.id, n.name, n.path, n.kind, n.lang, n.line1, COALESCE(n.data, '') \
+                 FROM nodes n JOIN symbols s ON s.node_id = n.id ORDER BY n.path, n.line1, n.name",
+            )
+            .map_err(|e| format!("codegraph symbol_records prepare: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SymbolRecord {
+                    node_id: row.get(0)?,
+                    name: row.get(1)?,
+                    path: row.get(2)?,
+                    kind: row.get(3)?,
+                    lang: row.get(4)?,
+                    line1: row.get::<_, i64>(5)?.max(1) as usize,
+                    data: row.get(6)?,
+                })
+            })
+            .map_err(|e| format!("codegraph symbol_records: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("codegraph symbol_records row: {e}"))?);
+        }
+        Ok(out)
+    }
+
     pub fn all_symbols(&self) -> Result<Vec<(String, i64)>, String> {
         Self::all_symbols_on(&self.conn)
     }
@@ -1210,6 +1249,31 @@ impl Store {
         Ok(out)
     }
 
+    pub fn node_records(
+        &self,
+    ) -> Result<Vec<(i64, String, String, String, Option<String>)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, kind, name, path, data FROM nodes WHERE kind != 'file'")
+            .map_err(|e| format!("codegraph node_records prepare: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|e| format!("codegraph node_records: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("codegraph node_records row: {e}"))?);
+        }
+        Ok(out)
+    }
+
     pub fn symbol_count(&self) -> Result<i64, String> {
         Self::symbol_count_on(&self.conn)
     }
@@ -1340,6 +1404,8 @@ impl Store {
         Self::mark_paths_referencing_keys_on(conn, &affected_keys)?;
 
         let mut path_to_node: HashMap<String, i64> = HashMap::new();
+        path_to_node.insert(qualify(path, RawRef::FILE_SCOPE), file_id);
+        path_to_node.insert(qualify(path, ""), file_id);
         for symbol in &symbols {
             let kind = format!("{:?}", symbol.kind).to_lowercase();
             let data = serde_json::to_string(symbol)

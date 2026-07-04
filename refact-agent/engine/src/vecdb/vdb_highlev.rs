@@ -15,9 +15,13 @@ async fn do_i_need_to_reload_vecdb(gcx: Arc<GlobalContext>) -> (bool, Option<Vec
         match crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
             Ok(caps) => caps,
             Err(e) => {
+                let err_msg = format!("caps unavailable: {}", e);
+                if gcx.vec_db.lock().await.is_none() {
+                    *gcx.vec_db_error.lock().unwrap() = err_msg.clone();
+                }
                 info!(
                     "vecdb: no caps, will not start or reload vecdb, the error was: {}",
-                    e
+                    err_msg
                 );
                 return (false, None);
             }
@@ -49,6 +53,8 @@ async fn do_i_need_to_reload_vecdb(gcx: Arc<GlobalContext>) -> (bool, Option<Vec
 
     if consts.embedding_model.model_name.is_empty() || consts.embedding_model.endpoint.is_empty() {
         error!("command line says to launch vecdb, but this will not happen: embedding model name or endpoint are empty");
+        *gcx.vec_db_error.lock().unwrap() =
+            "embedding model name or endpoint are empty".to_string();
         return (true, None);
     }
 
@@ -62,6 +68,7 @@ async fn do_i_need_to_reload_vecdb(gcx: Arc<GlobalContext>) -> (bool, Option<Vec
                 "vecdb launch failed, embedding model tokenizer didn't load: {}",
                 err
             );
+            *gcx.vec_db_error.lock().unwrap() = format!("tokenizer load failed: {}", err);
             return (false, None);
         }
     };
@@ -85,6 +92,7 @@ pub async fn vecdb_background_reload(gcx: Arc<GlobalContext>) {
         }
         if need_reload && consts.is_some() {
             background_tasks = BackgroundTasksHolder::new(vec![]);
+            *gcx.vec_db_error.lock().unwrap() = String::new();
 
             let init_config = refact_vecdb::vdb_init::VecDbInitConfig {
                 max_attempts: 5,

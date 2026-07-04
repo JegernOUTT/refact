@@ -1,4 +1,3 @@
-use axum::response::Result;
 use axum::extract::State;
 use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -20,16 +19,54 @@ pub struct RagStatus {
     pub codegraph_error: String,
 }
 
-pub async fn get_rag_status(gcx: SharedGlobalContext) -> RagStatus {
-    let (vec_db_module, vec_db_error) =
-        { (gcx.vec_db.clone(), gcx.vec_db_error.lock().unwrap().clone()) };
+const LEGACY_AST_ALIVE: &str = "turned_off";
 
-    let (maybe_vecdb_status, vecdb_message) =
-        match crate::vecdb::vdb_highlev::get_status(vec_db_module).await {
-            Ok(Some(status)) => (Some(status), "working".to_string()),
-            Ok(None) => (None, "turned_off".to_string()),
-            Err(err) => (None, err.to_string()),
-        };
+fn vecdb_rag_status_fields(
+    vecdb_requested: bool,
+    stored_vec_db_error: String,
+    status_result: std::result::Result<Option<crate::vecdb::vdb_structs::VecDbStatus>, String>,
+) -> (
+    Option<crate::vecdb::vdb_structs::VecDbStatus>,
+    String,
+    String,
+) {
+    match status_result {
+        Ok(Some(status)) => {
+            let alive = if !stored_vec_db_error.is_empty() {
+                "error"
+            } else if status.state == "starting" {
+                "starting"
+            } else {
+                "working"
+            };
+            (Some(status), alive.to_string(), stored_vec_db_error)
+        }
+        Ok(None) if !vecdb_requested => (None, "turned_off".to_string(), String::new()),
+        Ok(None) if !stored_vec_db_error.is_empty() => {
+            (None, "error".to_string(), stored_vec_db_error)
+        }
+        Ok(None) => (None, "starting".to_string(), stored_vec_db_error),
+        Err(err) => {
+            let vec_db_error = if stored_vec_db_error.is_empty() {
+                err
+            } else {
+                stored_vec_db_error
+            };
+            (None, "error".to_string(), vec_db_error)
+        }
+    }
+}
+
+pub async fn get_rag_status(gcx: SharedGlobalContext) -> RagStatus {
+    let vecdb_requested = gcx.cmdline.vecdb;
+    let vec_db_module = gcx.vec_db.clone();
+    let stored_vec_db_error = gcx.vec_db_error.lock().unwrap().clone();
+
+    let (maybe_vecdb_status, vecdb_message, vec_db_error) = vecdb_rag_status_fields(
+        vecdb_requested,
+        stored_vec_db_error,
+        crate::vecdb::vdb_highlev::get_status(vec_db_module).await,
+    );
 
     let codegraph_status = crate::codegraph::cg_status::get_codegraph_status(gcx.clone()).await;
     let codegraph_error = codegraph_status.error.clone();
@@ -37,7 +74,7 @@ pub async fn get_rag_status(gcx: SharedGlobalContext) -> RagStatus {
 
     RagStatus {
         ast: None,
-        ast_alive: "turned_off".to_string(),
+        ast_alive: LEGACY_AST_ALIVE.to_string(),
         vecdb: maybe_vecdb_status,
         vecdb_alive: vecdb_message,
         vec_db_error,
@@ -91,7 +128,95 @@ mod tests {
 
     use super::*;
     use crate::codegraph::CodeGraphService;
+    use crate::vecdb::vdb_structs::VecDbStatus;
+    use indexmap::IndexMap;
 
+    fn vecdb_status(state: &str) -> VecDbStatus {
+        VecDbStatus {
+            files_unprocessed: 0,
+            files_total: 0,
+            requests_made_since_start: 0,
+            vectors_made_since_start: 0,
+            db_size: 0,
+            db_cache_size: 0,
+            state: state.to_string(),
+            queue_additions: false,
+            vecdb_max_files_hit: false,
+            vecdb_errors: IndexMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn rag_status_vecdb_disabled_reports_turned_off() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+
+        let status = get_rag_status(gcx).await;
+
+        assert!(status.vecdb.is_none());
+        assert_eq!(status.vecdb_alive, "turned_off");
+        assert_eq!(status.vec_db_error, "");
+        assert!(status.ast.is_none());
+        assert_eq!(status.ast_alive, LEGACY_AST_ALIVE);
+    }
+
+    #[test]
+    fn rag_status_vecdb_disabled_ignores_stale_error() {
+        let (status, alive, error) =
+            vecdb_rag_status_fields(false, "old vecdb error".to_string(), Ok(None));
+
+        assert!(status.is_none());
+        assert_eq!(alive, "turned_off");
+        assert_eq!(error, "");
+    }
+
+    #[test]
+    fn rag_status_vecdb_requested_reports_starting_before_service_exists() {
+        let (status, alive, error) = vecdb_rag_status_fields(true, String::new(), Ok(None));
+
+        assert!(status.is_none());
+        assert_eq!(alive, "starting");
+        assert_eq!(error, "");
+    }
+
+    #[test]
+    fn rag_status_vecdb_service_reports_working() {
+        let (status, alive, error) =
+            vecdb_rag_status_fields(true, String::new(), Ok(Some(vecdb_status("done"))));
+
+        assert_eq!(alive, "working");
+        assert_eq!(status.expect("vecdb status").state, "done");
+        assert_eq!(error, "");
+    }
+
+    #[test]
+    fn rag_status_vecdb_service_starting_state_surfaces_starting() {
+        let (status, alive, error) =
+            vecdb_rag_status_fields(true, String::new(), Ok(Some(vecdb_status("starting"))));
+
+        assert_eq!(alive, "starting");
+        assert_eq!(status.expect("vecdb status").state, "starting");
+        assert_eq!(error, "");
+    }
+
+    #[test]
+    fn rag_status_vecdb_stored_error_reports_error() {
+        let (status, alive, error) =
+            vecdb_rag_status_fields(true, "embedding config missing".to_string(), Ok(None));
+
+        assert!(status.is_none());
+        assert_eq!(alive, "error");
+        assert_eq!(error, "embedding config missing");
+    }
+
+    #[test]
+    fn rag_status_vecdb_status_error_reports_error() {
+        let (status, alive, error) =
+            vecdb_rag_status_fields(true, String::new(), Err("status failed".to_string()));
+
+        assert!(status.is_none());
+        assert_eq!(alive, "error");
+        assert_eq!(error, "status failed");
+    }
     #[tokio::test]
     async fn rag_status_codegraph_state_tracks_queue_and_errors() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
