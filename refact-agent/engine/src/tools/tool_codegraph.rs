@@ -5,6 +5,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use git2::{Oid, Repository};
+use petgraph::algo::tarjan_scc;
+use petgraph::graph::{DiGraph, NodeIndex};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -28,6 +30,13 @@ const GIT_STABLE_AGE_DAYS: i64 = 180;
 const GIT_HISTORY_MAX_COMMITS: usize = 1000;
 const GIT_RISK_RECENT_COMMITS: usize = 50;
 const GIT_RISK_RECENT_COMMIT_LIMIT: usize = 10;
+const CODE_MAP_DEFAULT_BUDGET_TOKENS: usize = 12_000;
+const CODE_MAP_MAX_PAGES_WITHOUT_QUERY: usize = 60;
+const CODE_MAP_QUERY_LIMIT: usize = 12;
+const CODE_MAP_LINK_LIMIT: usize = 8;
+const CODE_MAP_MIN_MODULE_FILES: usize = 2;
+const CODE_MAP_MIN_MODULE_SIZE: u64 = 2;
+const CODE_MAP_LINK_EDGE_KINDS: [&str; 3] = ["calls", "inherits", "route_handler"];
 const HEALTH_SNAPSHOT_META_KEY: &str = "health_snapshots";
 const HEALTH_SNAPSHOT_LIMIT: usize = 30;
 
@@ -3600,6 +3609,783 @@ fn blast_impact_kind_label(kind: refact_codegraph::pr_blast::ImpactKind) -> &'st
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeMapNode {
+    id: i64,
+    kind: String,
+    name: String,
+    path: String,
+    visibility: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CodeMapFile {
+    parsed: refact_codewiki::ParsedFile,
+    text: String,
+    is_hotspot: bool,
+    kg_bonus: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeMapLink {
+    target_path: String,
+    labels: Vec<String>,
+    count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CodeMapRenderedPage {
+    page: refact_codewiki::AllocatedPage,
+    content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CodeMapFormat {
+    Markdown,
+    ClaudeMd,
+}
+
+impl CodeMapFormat {
+    fn parse(value: Option<&Value>) -> Result<Self, String> {
+        match value {
+            None | Some(Value::Null) => Ok(Self::Markdown),
+            Some(Value::String(value)) if value == "markdown" => Ok(Self::Markdown),
+            Some(Value::String(value)) if value == "claude_md" => Ok(Self::ClaudeMd),
+            Some(Value::String(value)) => Err(format!(
+                "argument `format` must be `markdown` or `claude_md`, got `{value}`"
+            )),
+            Some(value) => Err(format!(
+                "argument `format` must be `markdown` or `claude_md`: {value:?}"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeMapArgs {
+    query: Option<String>,
+    format: CodeMapFormat,
+    budget_tokens: usize,
+}
+
+fn code_map_args(args: &HashMap<String, Value>) -> Result<CodeMapArgs, String> {
+    Ok(CodeMapArgs {
+        query: optional_string_arg(args, "query")?,
+        format: CodeMapFormat::parse(args.get("format"))?,
+        budget_tokens: optional_usize_arg(args, "budget", CODE_MAP_DEFAULT_BUDGET_TOKENS)?.max(1),
+    })
+}
+
+fn code_map_node_kind(kind: &str) -> String {
+    match kind {
+        "typealias" => "type_alias".to_string(),
+        "route" => "route".to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn code_map_node_visibility(data: Option<&str>) -> Option<String> {
+    let data = data?;
+    let value = serde_json::from_str::<Value>(data).ok()?;
+    let visibility = value.get("visibility")?.as_str()?.trim();
+    (!visibility.is_empty()).then(|| visibility.to_string())
+}
+
+fn code_map_nodes_from_records(
+    records: Vec<(i64, String, String, String, Option<String>)>,
+) -> Vec<CodeMapNode> {
+    let mut nodes = records
+        .into_iter()
+        .map(|(id, kind, name, path, data)| CodeMapNode {
+            id,
+            kind: code_map_node_kind(&kind),
+            name,
+            path,
+            visibility: code_map_node_visibility(data.as_deref()),
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    nodes
+}
+
+fn code_map_symbols_by_path(
+    nodes: &[CodeMapNode],
+) -> HashMap<String, Vec<refact_codewiki::SymbolInfo>> {
+    let mut symbols = HashMap::<String, Vec<refact_codewiki::SymbolInfo>>::new();
+    for node in nodes {
+        if node.kind == "route" || node.kind == "unknown" {
+            continue;
+        }
+        symbols
+            .entry(node.path.clone())
+            .or_default()
+            .push(refact_codewiki::SymbolInfo {
+                kind: node.kind.clone(),
+                visibility: node.visibility.clone().unwrap_or_default(),
+            });
+    }
+    for values in symbols.values_mut() {
+        values.sort_by(|left, right| {
+            left.kind
+                .cmp(&right.kind)
+                .then_with(|| left.visibility.cmp(&right.visibility))
+        });
+    }
+    symbols
+}
+
+fn normalize_file_scores(values: &HashMap<String, f64>) -> HashMap<String, f64> {
+    let max = values
+        .values()
+        .copied()
+        .filter(|value| value.is_finite())
+        .fold(0.0_f64, f64::max);
+    values
+        .iter()
+        .map(|(path, score)| {
+            let normalized = if max > 0.0 && score.is_finite() {
+                (score / max).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (path.clone(), normalized)
+        })
+        .collect()
+}
+
+fn code_map_is_hotspot(
+    path: &str,
+    intel: Option<&refact_git_intel::GitIntel>,
+    repo_root: Option<&Path>,
+) -> bool {
+    let Some(intel) = intel else {
+        return false;
+    };
+    let key = match repo_root {
+        Some(root) => {
+            refact_git_intel::paths::repo_relative_or_basename(path, &root.to_string_lossy())
+        }
+        None => refact_git_intel::paths::normalize_separators(path),
+    };
+    intel.churn_percentile(&key) >= 0.9
+}
+
+fn code_map_infra_path(path: &str) -> bool {
+    let normalized = refact_git_intel::paths::normalize_separators(path).to_ascii_lowercase();
+    let name = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+    matches!(
+        name,
+        "dockerfile"
+            | "docker-compose.yml"
+            | "docker-compose.yaml"
+            | "makefile"
+            | "gnumakefile"
+            | "package.json"
+            | "package-lock.json"
+            | "cargo.toml"
+            | "cargo.lock"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "settings.gradle"
+            | "settings.gradle.kts"
+            | "pom.xml"
+    ) || normalized.starts_with(".github/workflows/")
+        || normalized.contains("/.github/workflows/")
+}
+
+fn top_level_module(path: &str) -> Option<String> {
+    path.split('/')
+        .find(|segment| !segment.is_empty())
+        .map(str::to_string)
+}
+
+fn second_level_module(path: &str) -> Option<String> {
+    let segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .take(2)
+        .collect::<Vec<_>>();
+    (segments.len() == 2).then(|| segments.join("/"))
+}
+
+fn module_selections(files: &[CodeMapFile]) -> Vec<refact_codewiki::ModuleSelection> {
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for file in files {
+        let path = file.parsed.file_info.path.as_str();
+        if let Some(module) = top_level_module(path) {
+            grouped.entry(module).or_default().push(path.to_string());
+        }
+        if let Some(module) = second_level_module(path) {
+            grouped.entry(module).or_default().push(path.to_string());
+        }
+    }
+    grouped
+        .into_iter()
+        .filter_map(|(id, mut paths)| {
+            paths.sort();
+            paths.dedup();
+            if paths.len() < CODE_MAP_MIN_MODULE_FILES {
+                return None;
+            }
+            Some(refact_codewiki::ModuleSelection {
+                id,
+                size: paths.len() as u64,
+                cohesion: 0.5,
+                paths,
+            })
+        })
+        .collect()
+}
+
+fn scc_path_groups(
+    nodes: &[CodeMapNode],
+    edges: &[refact_codegraph::analytics::GraphEdge],
+) -> Vec<Vec<String>> {
+    let mut graph = DiGraph::<i64, ()>::new();
+    let mut index_by_id = HashMap::<i64, NodeIndex>::new();
+    for node in nodes {
+        index_by_id
+            .entry(node.id)
+            .or_insert_with(|| graph.add_node(node.id));
+    }
+    for (src, dst, kind) in edges {
+        if !CODE_MAP_LINK_EDGE_KINDS.contains(&kind.as_str()) {
+            continue;
+        }
+        let (Some(src_idx), Some(dst_idx)) = (index_by_id.get(src), index_by_id.get(dst)) else {
+            continue;
+        };
+        graph.add_edge(*src_idx, *dst_idx, ());
+    }
+    let path_by_id: HashMap<i64, &str> = nodes
+        .iter()
+        .map(|node| (node.id, node.path.as_str()))
+        .collect();
+    let mut out = Vec::new();
+    for component in tarjan_scc(&graph) {
+        if component.len() <= 1 {
+            continue;
+        }
+        let mut paths = component
+            .into_iter()
+            .filter_map(|idx| path_by_id.get(&graph[idx]).map(|path| (*path).to_string()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if paths.len() <= 1 {
+            continue;
+        }
+        paths.sort();
+        out.push(paths);
+    }
+    out.sort();
+    out
+}
+
+fn build_code_map_files(
+    files_text: &[(String, String)],
+    nodes: &[CodeMapNode],
+    centrality: &refact_codegraph::analytics::FileCentrality,
+    intel: Option<&refact_git_intel::GitIntel>,
+    repo_root: Option<&Path>,
+) -> Vec<CodeMapFile> {
+    let pr: HashMap<String, f64> = centrality.top_pagerank.iter().cloned().collect();
+    let normalized_pr = normalize_file_scores(&pr);
+    let symbols_by_path = code_map_symbols_by_path(nodes);
+    let mut out = files_text
+        .iter()
+        .map(|(path, text)| {
+            let parsed = refact_codewiki::ParsedFile {
+                file_info: refact_codewiki::FileInfo {
+                    path: path.clone(),
+                    is_entry_point: refact_codewiki::entry_points::is_conventional_entry(path),
+                    is_test: refact_git_intel::paths::is_test_path(path),
+                    size_bytes: text.len() as u64,
+                },
+                symbols: symbols_by_path.get(path).cloned().unwrap_or_default(),
+            };
+            CodeMapFile {
+                parsed,
+                text: text.clone(),
+                is_hotspot: code_map_is_hotspot(path, intel, repo_root),
+                kg_bonus: normalized_pr.get(path).copied().unwrap_or(0.0),
+            }
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| left.parsed.file_info.path.cmp(&right.parsed.file_info.path));
+    out
+}
+
+fn code_map_selection_input(
+    files: Vec<CodeMapFile>,
+    nodes: &[CodeMapNode],
+    edges: &[refact_codegraph::analytics::GraphEdge],
+    centrality: &refact_codegraph::analytics::FileCentrality,
+) -> refact_codewiki::SelectionInput {
+    let pr: HashMap<String, f64> = centrality.top_pagerank.iter().cloned().collect();
+    let bt: HashMap<String, f64> = centrality.top_betweenness.iter().cloned().collect();
+    let api_contract_paths = files
+        .iter()
+        .filter_map(|file| {
+            let path = file.parsed.file_info.path.as_str();
+            let lang = refact_codegraph::lang_from_path(path);
+            let parsed = refact_codewiki::parsed_file::build_parsed_file(lang, &file.text);
+            refact_codewiki::api_contract::detect_api_contract(&parsed).then(|| path.to_string())
+        })
+        .collect();
+    let infra_paths = files
+        .iter()
+        .filter_map(|file| {
+            code_map_infra_path(&file.parsed.file_info.path)
+                .then(|| file.parsed.file_info.path.clone())
+        })
+        .collect();
+    let modules = module_selections(&files);
+    let selections = files
+        .into_iter()
+        .map(|file| {
+            let path = file.parsed.file_info.path.clone();
+            refact_codewiki::FileSelection {
+                parsed: file.parsed,
+                pagerank: pr.get(&path).copied().unwrap_or(0.0),
+                betweenness: bt.get(&path).copied().unwrap_or(0.0),
+                is_hotspot: file.is_hotspot,
+                kg_bonus: file.kg_bonus,
+            }
+        })
+        .collect();
+    refact_codewiki::SelectionInput {
+        files: selections,
+        modules,
+        sccs: scc_path_groups(nodes, edges),
+        api_contract_paths,
+        infra_paths,
+        min_module_size: CODE_MAP_MIN_MODULE_SIZE,
+    }
+}
+
+fn page_title(page: &refact_codewiki::PageCandidate) -> String {
+    page.id
+        .split_once(':')
+        .map(|(_, title)| title)
+        .unwrap_or(page.id.as_str())
+        .to_string()
+}
+
+fn page_kind_label(kind: refact_codewiki::PageKind) -> &'static str {
+    match kind {
+        refact_codewiki::PageKind::File => "file",
+        refact_codewiki::PageKind::Module => "module",
+        refact_codewiki::PageKind::Scc => "scc",
+        refact_codewiki::PageKind::ApiContract => "api-contract",
+        refact_codewiki::PageKind::Infra => "infra",
+    }
+}
+
+fn page_paths(page: &refact_codewiki::PageCandidate) -> BTreeSet<String> {
+    page.paths.iter().cloned().collect()
+}
+
+fn code_map_links_for_page(
+    page: &refact_codewiki::PageCandidate,
+    nodes: &[CodeMapNode],
+    edges: &[refact_codegraph::analytics::GraphEdge],
+) -> Vec<CodeMapLink> {
+    let page_paths = page_paths(page);
+    let path_by_id: HashMap<i64, &str> = nodes
+        .iter()
+        .map(|node| (node.id, node.path.as_str()))
+        .collect();
+    let mut links = BTreeMap::<String, BTreeMap<String, usize>>::new();
+    for (src, dst, kind) in edges {
+        if !CODE_MAP_LINK_EDGE_KINDS.contains(&kind.as_str()) {
+            continue;
+        }
+        let (Some(src_path), Some(dst_path)) = (path_by_id.get(src), path_by_id.get(dst)) else {
+            continue;
+        };
+        if src_path == dst_path {
+            continue;
+        }
+        let target = if page_paths.contains(*src_path) && !page_paths.contains(*dst_path) {
+            Some(*dst_path)
+        } else if page_paths.contains(*dst_path) && !page_paths.contains(*src_path) {
+            Some(*src_path)
+        } else {
+            None
+        };
+        if let Some(target) = target {
+            *links
+                .entry(target.to_string())
+                .or_default()
+                .entry(kind.clone())
+                .or_default() += 1;
+        }
+    }
+    let mut out = links
+        .into_iter()
+        .map(|(target_path, labels)| {
+            let count = labels.values().sum();
+            CodeMapLink {
+                target_path,
+                labels: labels.into_keys().collect(),
+                count,
+            }
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.target_path.cmp(&right.target_path))
+    });
+    out.truncate(CODE_MAP_LINK_LIMIT);
+    out
+}
+
+fn symbol_kind_counts(
+    page: &refact_codewiki::PageCandidate,
+    nodes: &[CodeMapNode],
+) -> Vec<(String, usize)> {
+    let page_paths = page_paths(page);
+    let mut counts = BTreeMap::<String, usize>::new();
+    for node in nodes {
+        if !page_paths.contains(&node.path) || node.kind == "route" || node.kind == "unknown" {
+            continue;
+        }
+        *counts.entry(node.kind.clone()).or_default() += 1;
+    }
+    counts.into_iter().collect()
+}
+
+fn symbol_visibility_counts(
+    page: &refact_codewiki::PageCandidate,
+    nodes: &[CodeMapNode],
+) -> Vec<(String, usize)> {
+    let page_paths = page_paths(page);
+    let mut counts = BTreeMap::<String, usize>::new();
+    for node in nodes {
+        if !page_paths.contains(&node.path) {
+            continue;
+        }
+        if let Some(visibility) = &node.visibility {
+            *counts.entry(visibility.clone()).or_default() += 1;
+        }
+    }
+    counts.into_iter().collect()
+}
+
+fn trim_to_token_allowance(mut content: String, token_allowance: usize) -> String {
+    if refact_codewiki::token_budget::estimate_tokens(&content) <= token_allowance {
+        return content;
+    }
+    if token_allowance == 0 {
+        return String::new();
+    }
+    let suffix = "...";
+    let suffix_tokens = refact_codewiki::token_budget::estimate_tokens(suffix).max(1);
+    if token_allowance <= suffix_tokens {
+        return suffix.to_string();
+    }
+    let max_chars = token_allowance
+        .saturating_sub(suffix_tokens)
+        .saturating_mul(4);
+    if content.chars().count() > max_chars {
+        content = content.chars().take(max_chars).collect();
+    }
+    let target_tokens = token_allowance.saturating_sub(suffix_tokens);
+    while refact_codewiki::token_budget::estimate_tokens(&content) > target_tokens
+        && !content.is_empty()
+    {
+        content.pop();
+    }
+    content.push_str(suffix);
+    content
+}
+
+fn page_signal_labels(
+    page: &refact_codewiki::PageCandidate,
+    input: &refact_codewiki::SelectionInput,
+) -> Vec<String> {
+    let page_paths = page_paths(page);
+    let mut labels = BTreeSet::new();
+    for file in &input.files {
+        if !page_paths.contains(&file.parsed.file_info.path) {
+            continue;
+        }
+        if file.parsed.file_info.is_entry_point {
+            labels.insert("entry_point".to_string());
+        }
+        if file.parsed.file_info.is_test {
+            labels.insert("test".to_string());
+        }
+        if file.is_hotspot {
+            labels.insert("hotspot".to_string());
+        }
+        if file.kg_bonus > 0.0 {
+            labels.insert(format!("kg_prior={:.2}", file.kg_bonus));
+        }
+    }
+    labels.into_iter().collect()
+}
+
+fn render_code_map_page_markdown(
+    allocation: &refact_codewiki::AllocatedPage,
+    input: &refact_codewiki::SelectionInput,
+    nodes: &[CodeMapNode],
+    edges: &[refact_codegraph::analytics::GraphEdge],
+) -> String {
+    let page = &allocation.page;
+    let mut content = String::new();
+    content.push_str(&format!(
+        "### {} — {}\n",
+        page_title(page),
+        page_kind_label(page.kind)
+    ));
+    content.push_str(&format!("Score: {:.3}\n", page.score));
+    content.push_str(&format!("Paths: {}\n", page.paths.join(", ")));
+    let signals = page_signal_labels(page, input);
+    if !signals.is_empty() {
+        content.push_str(&format!("Signals: {}\n", signals.join(", ")));
+    }
+    let symbol_counts = symbol_kind_counts(page, nodes);
+    if !symbol_counts.is_empty() {
+        content.push_str("Symbols:");
+        for (kind, count) in symbol_counts {
+            content.push_str(&format!(" {}={}", kind, count));
+        }
+        content.push('\n');
+    }
+    let visibility_counts = symbol_visibility_counts(page, nodes);
+    if !visibility_counts.is_empty() {
+        content.push_str("Visibility:");
+        for (visibility, count) in visibility_counts {
+            content.push_str(&format!(" {}={}", visibility, count));
+        }
+        content.push('\n');
+    }
+    let links = code_map_links_for_page(page, nodes, edges);
+    if !links.is_empty() {
+        content.push_str("Links:\n");
+        for link in links {
+            content.push_str(&format!(
+                "- {} ({}, {} edges)\n",
+                link.target_path,
+                link.labels.join("/"),
+                link.count
+            ));
+        }
+    }
+    trim_to_token_allowance(content, allocation.token_allowance)
+}
+
+fn code_map_backlink_hubs(
+    rendered_pages: &[CodeMapRenderedPage],
+    nodes: &[CodeMapNode],
+    edges: &[refact_codegraph::analytics::GraphEdge],
+) -> Vec<(String, usize)> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for rendered in rendered_pages {
+        for link in code_map_links_for_page(&rendered.page.page, nodes, edges) {
+            *counts.entry(link.target_path).or_default() += link.count;
+        }
+    }
+    let mut hubs = counts.into_iter().collect::<Vec<_>>();
+    hubs.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    hubs
+}
+
+fn code_map_page_prior(pages: &[refact_codewiki::PageCandidate]) -> HashMap<String, f64> {
+    let max_score = pages
+        .iter()
+        .map(|page| page.score)
+        .filter(|score| score.is_finite())
+        .fold(0.0_f64, f64::max);
+    pages
+        .iter()
+        .map(|page| {
+            let prior = if max_score > 0.0 && page.score.is_finite() {
+                page.score / max_score
+            } else {
+                0.0
+            };
+            (page.id.clone(), prior.clamp(0.0, 1.0))
+        })
+        .collect()
+}
+
+fn choose_code_map_pages(
+    mut pages: Vec<refact_codewiki::PageCandidate>,
+    query: Option<&str>,
+) -> Vec<refact_codewiki::PageCandidate> {
+    if let Some(query) = query {
+        let prior = code_map_page_prior(&pages);
+        let mut hits = refact_codewiki::search_hybrid(query, &pages, &prior);
+        if hits.is_empty() {
+            pages.sort_by(|left, right| {
+                right
+                    .score
+                    .total_cmp(&left.score)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            pages.truncate(CODE_MAP_QUERY_LIMIT);
+            return pages;
+        }
+        return hits
+            .drain(..)
+            .into_iter()
+            .take(CODE_MAP_QUERY_LIMIT)
+            .map(|hit| hit.page.clone())
+            .collect();
+    }
+    pages.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    pages.truncate(CODE_MAP_MAX_PAGES_WITHOUT_QUERY);
+    pages
+}
+
+fn render_code_map_markdown(
+    files_count: usize,
+    index_state: Option<&PrBlastIndexState>,
+    rendered_pages: &[CodeMapRenderedPage],
+    nodes: &[CodeMapNode],
+    edges: &[refact_codegraph::analytics::GraphEdge],
+    query: Option<&str>,
+) -> String {
+    let link_count: usize = rendered_pages
+        .iter()
+        .map(|page| code_map_links_for_page(&page.page.page, nodes, edges).len())
+        .sum();
+    let mut msg = String::new();
+    if let Some(state) = index_state {
+        if let Some(warning) = pr_blast_partial_warning(state) {
+            msg.push_str(&warning);
+            msg.push('\n');
+        }
+    }
+    msg.push_str(&format!(
+        "Code map: {} indexed files, {} documentation-worthy pages, {} cross-file links.",
+        files_count,
+        rendered_pages.len(),
+        link_count
+    ));
+    if let Some(query) = query {
+        msg.push_str(&format!(" Query: `{query}`."));
+    }
+    msg.push_str("\n\nMost documentation-worthy files (selection score):\n");
+    for rendered in rendered_pages
+        .iter()
+        .filter(|rendered| rendered.page.page.kind == refact_codewiki::PageKind::File)
+        .take(12)
+    {
+        let path = rendered
+            .page
+            .page
+            .paths
+            .first()
+            .map(String::as_str)
+            .unwrap_or(rendered.page.page.id.as_str());
+        msg.push_str(&format!("  {:.2}  {}\n", rendered.page.page.score, path));
+    }
+    let hubs = code_map_backlink_hubs(rendered_pages, nodes, edges);
+    let hub_lines = hubs
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .take(12)
+        .collect::<Vec<_>>();
+    if !hub_lines.is_empty() {
+        msg.push_str("\nMost-referenced files (backlink hubs):\n");
+        for (path, count) in hub_lines {
+            msg.push_str(&format!("  {}x  {}\n", count, path));
+        }
+    }
+    msg.push_str("\nPages:\n");
+    for rendered in rendered_pages {
+        msg.push('\n');
+        msg.push_str(&rendered.content);
+    }
+    msg
+}
+
+fn render_code_map_claude_md(
+    rendered_pages: &[CodeMapRenderedPage],
+    index_state: Option<&PrBlastIndexState>,
+) -> String {
+    let pages = rendered_pages
+        .iter()
+        .map(|rendered| rendered.page.page.clone())
+        .collect::<Vec<_>>();
+    let mut out = String::new();
+    if let Some(state) = index_state {
+        if let Some(warning) = pr_blast_partial_warning(state) {
+            out.push_str(&warning);
+            out.push('\n');
+        }
+    }
+    out.push_str(&refact_codewiki::render_claude_md(&pages));
+    out
+}
+
+fn assemble_code_map_output(
+    files_text: Vec<(String, String)>,
+    node_records: Vec<(i64, String, String, String, Option<String>)>,
+    edges: Vec<refact_codegraph::analytics::GraphEdge>,
+    centrality: refact_codegraph::analytics::FileCentrality,
+    index_state: Option<PrBlastIndexState>,
+    intel: Option<&refact_git_intel::GitIntel>,
+    repo_root: Option<&Path>,
+    args: &CodeMapArgs,
+) -> String {
+    if files_text.is_empty() {
+        let mut msg = String::new();
+        if let Some(state) = index_state.as_ref() {
+            if let Some(warning) = pr_blast_partial_warning(state) {
+                msg.push_str(&warning);
+                msg.push('\n');
+            }
+        }
+        msg.push_str("Code graph has no indexed files (index empty/building).");
+        return msg;
+    }
+    let nodes = code_map_nodes_from_records(node_records);
+    let files = build_code_map_files(&files_text, &nodes, &centrality, intel, repo_root);
+    let input = code_map_selection_input(files, &nodes, &edges, &centrality);
+    let selected_pages =
+        choose_code_map_pages(refact_codewiki::select_pages(&input), args.query.as_deref());
+    let allocations = refact_codewiki::allocate(&selected_pages, args.budget_tokens);
+    let rendered_pages = allocations
+        .into_iter()
+        .map(|page| {
+            let content = render_code_map_page_markdown(&page, &input, &nodes, &edges);
+            CodeMapRenderedPage { page, content }
+        })
+        .collect::<Vec<_>>();
+    let output = match args.format {
+        CodeMapFormat::Markdown => render_code_map_markdown(
+            files_text.len(),
+            index_state.as_ref(),
+            &rendered_pages,
+            &nodes,
+            &edges,
+            args.query.as_deref(),
+        ),
+        CodeMapFormat::ClaudeMd => render_code_map_claude_md(&rendered_pages, index_state.as_ref()),
+    };
+    trim_to_token_allowance(output, args.budget_tokens)
+}
+
 pub struct ToolCodeMap {
     pub config_path: String,
 }
@@ -3610,8 +4396,9 @@ impl Tool for ToolCodeMap {
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
         tool_call_id: &String,
-        _args: &HashMap<String, Value>,
+        args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let args = code_map_args(args)?;
         let gcx = ccx.lock().await.app.gcx.clone();
         let service = gcx
             .codegraph
@@ -3621,131 +4408,22 @@ impl Tool for ToolCodeMap {
             .ok_or_else(|| "codegraph is not available".to_string())?;
         let files_text = service.all_files_with_text().await?;
         let cached = service.cached_graph_analytics().await?;
-        let nodes = cached.data.nodes;
-        let edges = cached.data.edges;
-        let centrality = cached.analytics.file_centrality.truncated(5000);
-        if files_text.is_empty() {
-            return Ok((
-                false,
-                tool_message(tool_call_id, "Code graph has no indexed files.".to_string()),
-            ));
-        }
-        let pr: HashMap<String, f64> = centrality.top_pagerank.iter().cloned().collect();
-        let bt: HashMap<String, f64> = centrality.top_betweenness.iter().cloned().collect();
-        let max_pr = pr.values().cloned().fold(0.0_f64, f64::max);
-        let max_bt = bt.values().cloned().fold(0.0_f64, f64::max);
-        let mut id_to_path: HashMap<i64, String> = HashMap::new();
-        let mut symbols_by_path: HashMap<String, Vec<String>> = HashMap::new();
-        for (id, name, path) in &nodes {
-            id_to_path.insert(*id, path.clone());
-            symbols_by_path
-                .entry(path.clone())
-                .or_default()
-                .push(name.clone());
-        }
-        let mut neighbors_by_path: HashMap<String, std::collections::BTreeSet<String>> =
-            HashMap::new();
-        for (src, dst, _kind) in &edges {
-            if let (Some(sp), Some(dp)) = (id_to_path.get(src), id_to_path.get(dst)) {
-                if sp != dp {
-                    neighbors_by_path
-                        .entry(sp.clone())
-                        .or_default()
-                        .insert(dp.clone());
-                }
-            }
-        }
-        let mut scored: Vec<(String, f64)> = files_text
-            .iter()
-            .map(|(path, text)| {
-                let symbols: Vec<refact_codewiki::selection_scoring::SymbolInfo> = symbols_by_path
-                    .get(path)
-                    .map(|names| {
-                        names
-                            .iter()
-                            .map(|_| refact_codewiki::selection_scoring::SymbolInfo {
-                                kind: "symbol".to_string(),
-                                visibility: "public".to_string(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let parsed = refact_codewiki::selection_scoring::ParsedFile {
-                    file_info: refact_codewiki::selection_scoring::FileInfo {
-                        path: path.clone(),
-                        is_entry_point: refact_codewiki::entry_points::is_conventional_entry(path),
-                        is_test: refact_git_intel::paths::is_test_path(path),
-                        size_bytes: text.len() as u64,
-                    },
-                    symbols,
-                };
-                let score = refact_codewiki::selection_scoring::score_file(
-                    &parsed,
-                    pr.get(path).copied().unwrap_or(0.0),
-                    bt.get(path).copied().unwrap_or(0.0),
-                    max_pr,
-                    max_bt,
-                    false,
-                    0.0,
-                );
-                (path.clone(), score)
-            })
-            .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(60);
-        let selected: std::collections::BTreeSet<String> =
-            scored.iter().map(|(p, _)| p.clone()).collect();
-        let pages: Vec<refact_codewiki::interlinking::GeneratedPage> = scored
-            .iter()
-            .map(|(path, _)| {
-                let basename = path.rsplit('/').next().unwrap_or(path).to_string();
-                let mut content = String::new();
-                if let Some(names) = symbols_by_path.get(path) {
-                    let mut names = names.clone();
-                    names.sort();
-                    names.dedup();
-                    content.push_str(&format!("Symbols: {}\n", names.len()));
-                }
-                if let Some(neigh) = neighbors_by_path.get(path) {
-                    content.push_str("Related files:\n");
-                    for n in neigh.iter().filter(|n| selected.contains(*n)).take(15) {
-                        content.push_str(&format!("- `{}`\n", n));
-                    }
-                }
-                refact_codewiki::interlinking::GeneratedPage {
-                    page_id: path.clone(),
-                    title: basename,
-                    page_type: "file_page".to_string(),
-                    target_path: path.clone(),
-                    content,
-                }
-            })
-            .collect();
-        let (forward, backlinks) =
-            refact_codewiki::interlinking::attach_wiki_links_and_backlinks(&pages);
-        let total_links: usize = forward.values().map(|v| v.len()).sum();
-        let mut hubs: Vec<(String, usize)> = backlinks
-            .iter()
-            .map(|(page, links)| (page.clone(), links.len()))
-            .collect();
-        hubs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        let mut msg = format!(
-            "Code map: {} indexed files, {} documentation-worthy pages, {} cross-reference links.\n\nMost documentation-worthy files (selection score):\n",
-            files_text.len(),
-            pages.len(),
-            total_links
+        let node_records = service.graph_node_records().await?;
+        let readiness = service.index_readiness().await?;
+        let repo_dir = project_dir(gcx.clone()).await;
+        let intel = repo_dir
+            .as_deref()
+            .and_then(|dir| cached_mine_history(dir, 1000).ok());
+        let msg = assemble_code_map_output(
+            files_text,
+            node_records,
+            cached.data.edges,
+            cached.analytics.file_centrality.truncated(5000),
+            Some(pr_blast_index_state(&readiness)),
+            intel.as_ref(),
+            repo_dir.as_deref(),
+            &args,
         );
-        for (path, score) in scored.iter().take(12) {
-            msg.push_str(&format!("  {:.2}  {}\n", score, path));
-        }
-        let hub_lines: Vec<&(String, usize)> =
-            hubs.iter().filter(|(_, n)| *n > 0).take(12).collect();
-        if !hub_lines.is_empty() {
-            msg.push_str("\nMost-referenced files (backlink hubs):\n");
-            for (path, n) in hub_lines {
-                msg.push_str(&format!("  {}x  {}\n", n, path));
-            }
-        }
         Ok((false, tool_message(tool_call_id, msg)))
     }
 
@@ -3759,8 +4437,25 @@ impl Tool for ToolCodeMap {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Documentation-worthy file map: ranks files by selection score (centrality + entry-point/symbol signals) and builds a deterministic cross-reference link graph between them (forward links + backlink hubs).".to_string(),
-            input_schema: json_schema_from_params(&[], &[]),
+            description: "Documentation-worthy code map using real CodeGraph and git signals: file centrality, churn hotspots, real symbol kinds, module/SCC/API/infra pages, edge-derived links/backlink hubs, token budget, optional query filtering, and markdown or claude_md output.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional search query; when supplied, hybrid search returns only the most relevant selected pages."
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["markdown", "claude_md"],
+                        "description": "Output format. Defaults to markdown."
+                    },
+                    "budget": {
+                        "type": "integer",
+                        "description": "Approximate token budget for selected page output. Defaults to 12000."
+                    }
+                }
+            }),
             output_schema: None,
             annotations: None,
         }
@@ -3833,6 +4528,225 @@ mod tests {
         commit_file(&repo, "file.txt", "side\n", "side branch history");
         repo.set_head("refs/heads/main").unwrap();
         (dir, main_oid)
+    }
+
+    fn code_map_node_record(
+        id: i64,
+        kind: &str,
+        name: &str,
+        path: &str,
+    ) -> (i64, String, String, String, Option<String>) {
+        (
+            id,
+            kind.to_string(),
+            name.to_string(),
+            path.to_string(),
+            None,
+        )
+    }
+
+    fn code_map_centrality(
+        pagerank: &[(&str, f64)],
+        betweenness: &[(&str, f64)],
+    ) -> refact_codegraph::analytics::FileCentrality {
+        refact_codegraph::analytics::FileCentrality {
+            top_pagerank: pagerank
+                .iter()
+                .map(|(path, score)| ((*path).to_string(), *score))
+                .collect(),
+            top_betweenness: betweenness
+                .iter()
+                .map(|(path, score)| ((*path).to_string(), *score))
+                .collect(),
+        }
+    }
+
+    fn code_map_markdown_args(budget_tokens: usize) -> CodeMapArgs {
+        CodeMapArgs {
+            query: None,
+            format: CodeMapFormat::Markdown,
+            budget_tokens,
+        }
+    }
+
+    fn code_map_output_fixture(args: CodeMapArgs) -> String {
+        assemble_code_map_output(
+            vec![
+                (
+                    "payments/api.rs".to_string(),
+                    "pub fn charge() { validate(); }\n".to_string(),
+                ),
+                (
+                    "auth/login.rs".to_string(),
+                    "pub fn login() {}\n".to_string(),
+                ),
+            ],
+            vec![
+                code_map_node_record(1, "function", "charge", "payments/api.rs"),
+                code_map_node_record(2, "function", "validate", "payments/api.rs"),
+                code_map_node_record(3, "function", "login", "auth/login.rs"),
+            ],
+            vec![(1, 2, "calls".to_string())],
+            code_map_centrality(&[("payments/api.rs", 3.0), ("auth/login.rs", 1.0)], &[]),
+            Some(PrBlastIndexState {
+                queued: 0,
+                cross_file_edges: 1,
+                cross_file_ready: true,
+            }),
+            None,
+            None,
+            &args,
+        )
+    }
+
+    #[test]
+    fn code_map_marks_real_hotspot() {
+        let mut intel = refact_git_intel::GitIntel::default();
+        intel.file_churn.insert("src/hot.rs".to_string(), 20);
+        for index in 0..10 {
+            intel.file_churn.insert(format!("src/cold{index}.rs"), 1);
+        }
+        let files_text = vec![
+            ("src/hot.rs".to_string(), "fn hot() {}\n".to_string()),
+            ("src/cold0.rs".to_string(), "fn cold() {}\n".to_string()),
+        ];
+        let nodes = code_map_nodes_from_records(vec![
+            code_map_node_record(1, "function", "hot", "src/hot.rs"),
+            code_map_node_record(2, "function", "cold", "src/cold0.rs"),
+        ]);
+        let centrality = code_map_centrality(&[], &[]);
+        let files = build_code_map_files(&files_text, &nodes, &centrality, Some(&intel), None);
+
+        let hot = files
+            .iter()
+            .find(|file| file.parsed.file_info.path == "src/hot.rs")
+            .unwrap();
+        let cold = files
+            .iter()
+            .find(|file| file.parsed.file_info.path == "src/cold0.rs")
+            .unwrap();
+        assert!(hot.is_hotspot);
+        assert!(!cold.is_hotspot);
+
+        let input = code_map_selection_input(files, &nodes, &[], &centrality);
+        let pages = refact_codewiki::select_pages(&input);
+        let hot_score = pages
+            .iter()
+            .find(|page| page.id == "file:src/hot.rs")
+            .unwrap()
+            .score;
+        let cold_score = pages
+            .iter()
+            .find(|page| page.id == "file:src/cold0.rs")
+            .unwrap()
+            .score;
+        assert!(hot_score > cold_score);
+    }
+
+    #[test]
+    fn code_map_symbols_use_node_kinds() {
+        let nodes = code_map_nodes_from_records(vec![
+            code_map_node_record(1, "struct", "Thing", "src/model.rs"),
+            code_map_node_record(2, "function", "build", "src/model.rs"),
+            code_map_node_record(3, "typealias", "Id", "src/model.rs"),
+        ]);
+        let symbols = code_map_symbols_by_path(&nodes);
+        let symbols = symbols.get("src/model.rs").unwrap();
+        let kinds = symbols
+            .iter()
+            .map(|symbol| symbol.kind.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(kinds.contains("struct"));
+        assert!(kinds.contains("function"));
+        assert!(kinds.contains("type_alias"));
+        assert!(symbols.iter().all(|symbol| symbol.visibility.is_empty()));
+
+        let output = assemble_code_map_output(
+            vec![(
+                "src/model.rs".to_string(),
+                "struct Thing; fn build() {}\n".to_string(),
+            )],
+            vec![
+                code_map_node_record(1, "struct", "Thing", "src/model.rs"),
+                code_map_node_record(2, "function", "build", "src/model.rs"),
+                code_map_node_record(3, "typealias", "Id", "src/model.rs"),
+            ],
+            Vec::new(),
+            code_map_centrality(&[("src/model.rs", 1.0)], &[]),
+            None,
+            None,
+            None,
+            &code_map_markdown_args(1_000),
+        );
+        assert!(output.contains("function=1"));
+        assert!(output.contains("struct=1"));
+        assert!(output.contains("type_alias=1"));
+        assert!(!output.contains("public"));
+    }
+
+    #[test]
+    fn code_map_links_from_graph_edges() {
+        let output = assemble_code_map_output(
+            vec![
+                ("src/a.rs".to_string(), "fn a() { b(); }\n".to_string()),
+                ("src/b.rs".to_string(), "fn b() {}\n".to_string()),
+            ],
+            vec![
+                code_map_node_record(1, "function", "a", "src/a.rs"),
+                code_map_node_record(2, "function", "b", "src/b.rs"),
+            ],
+            vec![(1, 2, "calls".to_string())],
+            code_map_centrality(&[("src/a.rs", 2.0), ("src/b.rs", 1.0)], &[]),
+            None,
+            None,
+            None,
+            &code_map_markdown_args(2_000),
+        );
+
+        assert!(output.contains("Links:"));
+        assert!(output.contains("src/b.rs (calls"));
+        assert!(output.contains("Most-referenced files"));
+        assert!(!output.contains("Related files:"));
+    }
+
+    #[test]
+    fn code_map_query_returns_relevant_page() {
+        let mut args = code_map_markdown_args(2_000);
+        args.query = Some("payments".to_string());
+
+        let output = code_map_output_fixture(args);
+
+        assert!(output.contains("Query: `payments`"));
+        assert!(output.contains("payments/api.rs"));
+        assert!(!output.contains("auth/login.rs"));
+    }
+
+    #[test]
+    fn claude_md_format_renders() {
+        let output = code_map_output_fixture(CodeMapArgs {
+            query: Some("payments".to_string()),
+            format: CodeMapFormat::ClaudeMd,
+            budget_tokens: 4_000,
+        });
+
+        assert!(output.contains(refact_codewiki::claude_md::BEGIN_MARKER));
+        assert!(output.contains("### Selected Pages"));
+        assert!(output.contains("payments/api.rs"));
+    }
+
+    #[test]
+    fn budget_bounds_total_tokens() {
+        let budget = 40;
+        let output = code_map_output_fixture(code_map_markdown_args(budget));
+
+        assert!(
+            refact_codewiki::token_budget::estimate_tokens(&output) <= budget,
+            "estimated tokens exceeded budget: {} > {}\n{}",
+            refact_codewiki::token_budget::estimate_tokens(&output),
+            budget,
+            output
+        );
     }
 
     #[test]
@@ -4494,12 +5408,17 @@ def orphan():
         let ctx = empty_health_ctx(&trends, &git_paths);
         let src = "fn a() -> i32 { 1 }\n".to_string();
 
-        let first = analyze_health_file_shared("src/health_cache_probe_unique.rs".to_string(), src.clone(), &ctx)
-            .await
-            .unwrap();
-        let second = analyze_health_file_shared("src/health_cache_probe_unique.rs".to_string(), src, &ctx)
-            .await
-            .unwrap();
+        let first = analyze_health_file_shared(
+            "src/health_cache_probe_unique.rs".to_string(),
+            src.clone(),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let second =
+            analyze_health_file_shared("src/health_cache_probe_unique.rs".to_string(), src, &ctx)
+                .await
+                .unwrap();
         let third = analyze_health_file_shared(
             "src/health_cache_probe_unique.rs".to_string(),
             "fn a() -> i32 { if true { 1 } else { 0 } }\n".to_string(),

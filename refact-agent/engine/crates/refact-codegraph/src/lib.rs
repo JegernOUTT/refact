@@ -606,6 +606,12 @@ impl CodeGraphService {
         Ok(self.cached_graph_analytics().await?.data.nodes)
     }
 
+    pub async fn graph_node_records(
+        &self,
+    ) -> Result<Vec<(i64, String, String, String, Option<String>)>, String> {
+        self.with_read_store(|store| store.node_records()).await
+    }
+
     pub async fn graph_edges(&self) -> Result<Vec<analytics::GraphEdge>, String> {
         Ok(self.cached_graph_analytics().await?.data.edges)
     }

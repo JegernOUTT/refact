@@ -1249,6 +1249,31 @@ impl Store {
         Ok(out)
     }
 
+    pub fn node_records(
+        &self,
+    ) -> Result<Vec<(i64, String, String, String, Option<String>)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, kind, name, path, data FROM nodes WHERE kind != 'file'")
+            .map_err(|e| format!("codegraph node_records prepare: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|e| format!("codegraph node_records: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("codegraph node_records row: {e}"))?);
+        }
+        Ok(out)
+    }
+
     pub fn symbol_count(&self) -> Result<i64, String> {
         Self::symbol_count_on(&self.conn)
     }
