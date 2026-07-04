@@ -14,6 +14,7 @@ import {
 } from "../../components/ui";
 import { useReducedMotion } from "../../hooks/useReducedMotion";
 import { useGetCodeIntelGraphQuery } from "../../services/refact/codeIntel";
+import { useReportIndexReadiness } from "./useIndexReadiness";
 import type {
   CodeIntelDetail,
   CodeIntelGraph,
@@ -263,6 +264,7 @@ export function CodeGraphView() {
     limit,
   });
   const graph = isCodeIntelDetail(data) ? null : data;
+  useReportIndexReadiness("graph", data);
 
   const degreeMap = useMemo(
     () => (graph ? buildDegreeMap(graph) : new Map<string, number>()),

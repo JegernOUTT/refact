@@ -49,10 +49,9 @@ type RunState<T> = {
   error?: string;
 };
 
-type BlastReportWithReviewers = BlastReport & {
-  suggested_reviewers?: string[];
-  reviewers?: string[];
-  reviewer_hints?: string[];
+type ReviewerChip = {
+  author: string;
+  score?: number;
 };
 
 type ImpactRow = BlastImpact & {
@@ -63,7 +62,7 @@ type ParsedMaxDepth =
   | { value?: number; error?: undefined }
   | { value?: undefined; error: string };
 
-const initialBlastState: RunState<BlastReportWithReviewers> = {
+const initialBlastState: RunState<BlastReport> = {
   status: "idle",
 };
 
@@ -100,6 +99,16 @@ const impactColumns: DataTableColumn<ImpactRow>[] = [
     cell: (row) => formatNumber(row.distance),
     sortValue: (row) => row.distance,
     align: "end",
+  },
+  {
+    id: "kind",
+    header: "Kind",
+    cell: (row) => (
+      <Badge tone={row.kind === "structural" ? "warning" : "accent"} variant="soft">
+        {row.kind}
+      </Badge>
+    ),
+    sortValue: (row) => row.kind,
   },
   {
     id: "via",
@@ -222,13 +231,11 @@ function severityRank(severity: Severity): number {
   return 1;
 }
 
-function getReviewers(report: BlastReportWithReviewers): string[] {
-  return (
-    report.suggested_reviewers ??
-    report.reviewers ??
-    report.reviewer_hints ??
-    []
-  );
+function getReviewers(report: BlastReport): ReviewerChip[] {
+  return (report.suggested_reviewers ?? []).map((reviewer) => ({
+    author: reviewer.author,
+    score: reviewer.score,
+  }));
 }
 
 function SeverityBadge({ severity }: { severity: Severity }) {
@@ -303,7 +310,7 @@ function FileChips({ files }: { files: string[] }) {
   );
 }
 
-function BlastReportView({ report }: { report: BlastReportWithReviewers }) {
+function BlastReportView({ report }: { report: BlastReport }) {
   const impactRows = useMemo<ImpactRow[]>(
     () => [
       ...report.directly_impacted.map((impact) => ({
@@ -321,6 +328,17 @@ function BlastReportView({ report }: { report: BlastReportWithReviewers }) {
 
   return (
     <div className={styles.resultStack}>
+      {report.partial ? (
+        <div className={styles.chips}>
+          <Badge tone="warning" variant="soft">
+            Partial index
+          </Badge>
+          {report.warning ? (
+            <span className={styles.warningText}>{report.warning}</span>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className={styles.metricGrid}>
         <StatCard
           icon={FileCode2}
@@ -376,11 +394,13 @@ function BlastReportView({ report }: { report: BlastReportWithReviewers }) {
           <div className={styles.chips}>
             {reviewers.map((reviewer) => (
               <Chip
-                key={reviewer}
+                key={reviewer.author}
                 icon={<Icon icon={Users} size="sm" />}
                 radius="chip"
               >
-                {reviewer}
+                {reviewer.score === undefined
+                  ? reviewer.author
+                  : `${reviewer.author} · ${formatScore(reviewer.score)}`}
               </Chip>
             ))}
           </div>
@@ -426,7 +446,7 @@ function BlastPanel() {
   const [changedFilesText, setChangedFilesText] = useState("");
   const [maxDepthText, setMaxDepthText] = useState("");
   const [blastState, setBlastState] =
-    useState<RunState<BlastReportWithReviewers>>(initialBlastState);
+    useState<RunState<BlastReport>>(initialBlastState);
   const [runPrBlast] = usePrBlastMutation();
 
   const changedFiles = useMemo(

@@ -1476,8 +1476,17 @@ export type CodeIntelDetail = {
 
 export type CodeIntelResponse<T> = T | CodeIntelDetail;
 
+export type CodeIntelIndexState = {
+  queued: number;
+  cross_file_edges: number;
+  cross_file_ready: boolean;
+  dirty_paths?: number;
+  pending_refs?: number;
+};
+
 export type CodeIntelScoreEntry = {
   symbol: string;
+  path: string;
   score: number;
 };
 
@@ -1499,6 +1508,7 @@ export type CodeIntelCounts = {
 
 export type CodeIntelOverview = {
   counts: CodeIntelCounts;
+  index_state: CodeIntelIndexState;
   scc_count: number;
   largest_scc: number;
   component_count: number;
@@ -1523,6 +1533,7 @@ export type CodeIntelGraphEdge = {
 };
 
 export type CodeIntelGraph = {
+  index_state: CodeIntelIndexState;
   nodes: CodeIntelGraphNode[];
   edges: CodeIntelGraphEdge[];
 };
@@ -1532,21 +1543,21 @@ export type CodeIntelCommunity = {
   label: string;
   member_count: number;
   cohesion: number;
+  index_state?: CodeIntelIndexState;
 };
 
 export type CodeIntelDeadSymbol = {
   name: string;
   path: string;
+  line?: number;
   reason: string;
   confidence: number;
+  git_recency?: string;
+  incoming_edges?: number;
+  index_state?: CodeIntelIndexState;
 };
 
-export type CodeIntelCodeHealthSeverity =
-  | "Info"
-  | "Low"
-  | "Medium"
-  | "High"
-  | "Critical";
+export type CodeIntelCodeHealthSeverity = "Low" | "Medium" | "High" | "Critical";
 
 export type CodeIntelCodeHealthDimension =
   | "Defect"
@@ -1560,6 +1571,8 @@ export type CodeIntelHealthAggregate = {
   grade: string;
   max_complexity: number;
   avg_maintainability: number;
+  avg_maintainability_index?: number;
+  avg_maintainability_signal?: number;
   avg_duplication_pct: number;
   biomarker_count: number;
   refactoring_count: number;
@@ -1572,6 +1585,7 @@ export type CodeIntelHealthFunction = {
   nesting: number;
   loc: number;
   maintainability: number;
+  maintainability_index?: number;
 };
 
 export type CodeIntelHealthFinding = {
@@ -1581,6 +1595,12 @@ export type CodeIntelHealthFinding = {
   severity: CodeIntelCodeHealthSeverity;
   line: number;
   detail: string;
+  hot_path?: boolean;
+};
+
+export type CodeIntelHealthImpactContributor = CodeIntelHealthFinding & {
+  deduction: number;
+  capped: boolean;
 };
 
 export type CodeIntelRefactoringKind =
@@ -1607,6 +1627,8 @@ export type CodeIntelHealthFile = {
   grade: string;
   complexity: number;
   maintainability: number;
+  maintainability_index?: number;
+  maintainability_signal?: number;
   max_complexity: number;
   avg_maintainability: number;
   function_count: number;
@@ -1619,10 +1641,13 @@ export type CodeIntelHealthFile = {
   refactoring_count: number;
   functions: CodeIntelHealthFunction[];
   findings: CodeIntelHealthFinding[];
+  health_impact?: CodeIntelHealthImpactContributor[];
+  cache_hit?: boolean;
   refactorings: CodeIntelRefactoring[];
 };
 
 export type CodeIntelHealth = {
+  index_state: CodeIntelIndexState;
   aggregate: CodeIntelHealthAggregate;
   files: CodeIntelHealthFile[];
 };
@@ -1676,6 +1701,13 @@ export type CodeIntelGitReviewer = {
   score: number;
 };
 
+export type CodeIntelRecentCommitRisk = {
+  sha: string;
+  summary: string;
+  risk: number;
+  top_factor_names: string[];
+};
+
 export type CodeIntelGitRisk = {
   commits_analyzed: number;
   agent_authored_pct: number;
@@ -1684,6 +1716,8 @@ export type CodeIntelGitRisk = {
   co_change: CodeIntelGitCoChange[];
   coupling: CodeIntelGitCoupling[];
   reviewers: CodeIntelGitReviewer[];
+  findings?: CodeIntelHealthFinding[];
+  recent_commit_risks: CodeIntelRecentCommitRisk[];
 };
 
 export type CodeIntelDuplicationAggregate = {
@@ -1724,11 +1758,19 @@ export type CodeIntelDuplication = {
   test_smells: CodeIntelDuplicationFinding[];
 };
 
+export type BlastImpactKind = "behavioral" | "structural";
+
 export type BlastImpact = {
   path: string;
   symbol: string;
   distance: number;
   via: string;
+  kind: BlastImpactKind;
+};
+
+export type BlastSuggestedReviewer = {
+  author: string;
+  score: number;
 };
 
 export type BlastReport = {
@@ -1737,6 +1779,10 @@ export type BlastReport = {
   transitively_impacted: BlastImpact[];
   impacted_file_count: number;
   risk_score: number;
+  suggested_reviewers?: BlastSuggestedReviewer[];
+  index_state?: CodeIntelIndexState;
+  partial?: boolean;
+  warning?: string;
 };
 
 export type Severity = "Low" | "Medium" | "High" | "Critical";

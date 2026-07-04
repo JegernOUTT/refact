@@ -44,8 +44,7 @@ function severityTone(
 ): React.ComponentProps<typeof Badge>["tone"] {
   if (severity === "Critical" || severity === "High") return "danger";
   if (severity === "Medium") return "warning";
-  if (severity === "Low") return "muted";
-  return "accent";
+  return "muted";
 }
 
 function gradeBadgeTone(
@@ -65,6 +64,27 @@ function gradeStatTone(grade: string): StatCardProps["tone"] {
 }
 
 function FindingSummary({ file }: { file: CodeIntelHealthFile }) {
+  const impacts = file.health_impact ?? [];
+  if (impacts.length > 0) {
+    const [first] = impacts;
+    return (
+      <div>
+        <div className={styles.badgeRow}>
+          <Badge tone={severityTone(first.severity)} variant="soft">
+            {first.severity}
+          </Badge>
+          <Badge tone="muted" variant="outline">
+            {first.biomarker}
+          </Badge>
+          <Badge tone="warning" variant="soft">
+            -{formatMaybeFixed(first.deduction, 1)} health
+          </Badge>
+        </div>
+        <MetaText>{first.detail}</MetaText>
+      </div>
+    );
+  }
+
   if (file.findings.length === 0) {
     return <MetaText>No findings in top sample</MetaText>;
   }
@@ -164,6 +184,7 @@ export function HealthTab() {
       emptyTitle="No health data yet"
       emptyDescription="Once CodeGraph indexes source text, per-file health metrics will appear here."
       isEmpty={isEmpty}
+      readinessKey="health"
     >
       {(health) => {
         const files = [...health.files].sort((a, b) =>

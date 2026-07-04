@@ -180,6 +180,39 @@ const ownershipColumns = [
   },
 ];
 
+function RecentCommitRiskList({ risk }: { risk: CodeIntelGitRisk }) {
+  if (risk.recent_commit_risks.length === 0) return null;
+
+  return (
+    <Card className={styles.summaryCard} variant="glass">
+      <h4 className={styles.summaryTitle}>
+        <GitCommitHorizontal size={16} />
+        Recent commit risks
+      </h4>
+      <ul className={styles.summaryList}>
+        {risk.recent_commit_risks.slice(0, 5).map((commit) => (
+          <li className={styles.summaryItem} key={commit.sha}>
+            <p className={styles.pathText} title={commit.sha}>
+              {commit.sha}
+            </p>
+            <p className={styles.summaryText}>{commit.summary}</p>
+            <div className={styles.badgeRow}>
+              <Badge tone={riskTone(commit.risk)} variant="soft">
+                Risk {formatRatio(commit.risk, 0)}
+              </Badge>
+              {commit.top_factor_names.slice(0, 3).map((factor) => (
+                <Badge key={factor} tone="muted" variant="outline">
+                  {factor}
+                </Badge>
+              ))}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
 export function RiskTab() {
   const result = useGetCodeIntelGitRiskQuery({ limit: 25 });
   const theme = useChartTheme();
@@ -348,6 +381,8 @@ export function RiskTab() {
                 </ul>
               </Card>
             ) : null}
+
+            <RecentCommitRiskList risk={risk} />
 
             <Surface className={styles.tableSurface} variant="glass">
               <DataTable

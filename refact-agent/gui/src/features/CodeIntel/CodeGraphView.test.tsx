@@ -134,6 +134,11 @@ vi.mock("react-cytoscapejs", () => ({
 }));
 
 const graphFixture: CodeIntelGraph = {
+  index_state: {
+    queued: 0,
+    cross_file_edges: 1,
+    cross_file_ready: true,
+  },
   nodes: [
     {
       id: 1,
@@ -226,7 +231,15 @@ describe("CodeGraphView", () => {
 
   it("renders an empty state when the graph has no nodes", () => {
     graphHookMock.result = {
-      data: { nodes: [], edges: [] },
+      data: {
+        index_state: {
+          queued: 0,
+          cross_file_edges: 0,
+          cross_file_ready: true,
+        },
+        nodes: [],
+        edges: [],
+      },
       error: undefined,
       isFetching: false,
       isLoading: false,

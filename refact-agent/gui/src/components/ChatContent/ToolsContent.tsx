@@ -174,7 +174,10 @@ const ENGINE_ANALYSIS_TOOLS: ReadonlySet<string> = new Set([
   "code_map",
   "code_why",
   "codegraph_overview",
+  "dead_code",
   "git_risk",
+  "pr_blast",
+  "security_scan",
 ] as const);
 
 type ProcessToolName =

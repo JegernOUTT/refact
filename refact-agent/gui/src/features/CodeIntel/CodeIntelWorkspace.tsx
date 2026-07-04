@@ -11,15 +11,19 @@ import {
 } from "lucide-react";
 
 import {
+  Badge,
   Button,
   Card,
   EmptyState,
   ErrorState,
   LoadingState,
+  Surface,
   Tabs,
 } from "../../components/ui";
 import { PageWrapper } from "../../components/PageWrapper";
-import { useGetCodeIntelOverviewQuery } from "../../services/refact/codeIntel";
+import {
+  useGetCodeIntelOverviewQuery,
+} from "../../services/refact/codeIntel";
 import type {
   CodeIntelDetail,
   CodeIntelFileScoreEntry,
@@ -35,6 +39,11 @@ import {
   formatNumber,
 } from "../StatsDashboard/utils/formatters";
 import styles from "./CodeIntelWorkspace.module.css";
+import { CodeIntelReadinessProvider } from "./indexReadiness";
+import {
+  useCodeIntelReadinessState,
+  useReportIndexReadiness,
+} from "./useIndexReadiness";
 import { CodeGraphView } from "./CodeGraphView";
 import { CommunitiesTab } from "./tabs/CommunitiesTab";
 import { DeadCodeTab } from "./tabs/DeadCodeTab";
@@ -77,6 +86,24 @@ const TAB_ORDER: CodeIntelTab[] = [
   "tools",
 ];
 
+function IndexReadinessBanner() {
+  const state = useCodeIntelReadinessState();
+  if (!state) return null;
+  return (
+    <Surface className={styles.readinessBanner} variant="glass">
+      <div className={styles.readinessCopy}>
+        <Badge tone="warning" variant="soft">
+          Indexing
+        </Badge>
+        <span>
+          Code graph is still indexing ({formatNumber(state.queued)} files queued)
+          — results may be incomplete
+        </span>
+      </div>
+    </Surface>
+  );
+}
+
 function isCodeIntelDetail(
   response: CodeIntelResponse<CodeIntelOverview> | undefined,
 ): response is CodeIntelDetail {
@@ -105,10 +132,11 @@ function isOverviewEmpty(overview: CodeIntelOverview): boolean {
   );
 }
 
-function toSymbolRanking(entry: CodeIntelScoreEntry): RankingItem {
+function toQualifiedSymbolRanking(entry: CodeIntelScoreEntry): RankingItem {
   return {
     label: entry.symbol,
     score: entry.score,
+    meta: entry.path,
   };
 }
 
@@ -170,6 +198,7 @@ function OverviewLiveTab() {
   const { data, error, isFetching, isLoading } =
     useGetCodeIntelOverviewQuery(undefined);
   const overview = isCodeIntelDetail(data) ? null : data;
+  useReportIndexReadiness("overview", data);
 
   if (isLoading) {
     return (
@@ -270,12 +299,12 @@ function OverviewLiveTab() {
       <StatSection title="Centrality leaders" icon={GitBranch} dense>
         <RankingCard
           title="Top PageRank"
-          items={overview.top_pagerank.map(toSymbolRanking)}
+          items={overview.top_pagerank.map(toQualifiedSymbolRanking)}
           emptyLabel="No PageRank leaders yet."
         />
         <RankingCard
           title="Top Betweenness"
-          items={overview.top_betweenness.map(toSymbolRanking)}
+          items={overview.top_betweenness.map(toQualifiedSymbolRanking)}
           emptyLabel="No betweenness leaders yet."
         />
         <RankingCard
@@ -329,75 +358,79 @@ export const CodeIntelWorkspace: React.FC<CodeIntelWorkspaceProps> = ({
   const [activeTab, setActiveTab] = useState<CodeIntelTab>("overview");
 
   return (
-    <PageWrapper host={host}>
-      <div className={styles.root}>
-        <header className={styles.header}>
-          <Button
-            leftIcon={ArrowLeft}
-            onClick={backFromCodeIntel}
-            size="sm"
-            variant="ghost"
-          >
-            Back
-          </Button>
-          <div className={styles.headerCopy}>
-            <h2 className={styles.title}>Code Intelligence</h2>
-            <p className={styles.subtitle}>
-              Explore CodeGraph structure, health, risk, and security signals.
-            </p>
-          </div>
-          <div className={styles.headerSpacer} />
-        </header>
+    <CodeIntelReadinessProvider>
+      <PageWrapper host={host}>
+        <div className={styles.root}>
+          <header className={styles.header}>
+            <Button
+              leftIcon={ArrowLeft}
+              onClick={backFromCodeIntel}
+              size="sm"
+              variant="ghost"
+            >
+              Back
+            </Button>
+            <div className={styles.headerCopy}>
+              <h2 className={styles.title}>Code Intelligence</h2>
+              <p className={styles.subtitle}>
+                Explore CodeGraph structure, health, risk, and security signals.
+              </p>
+            </div>
+            <div className={styles.headerSpacer} />
+          </header>
 
-        <Tabs
-          value={activeTab}
-          onValueChange={(value) => setActiveTab(value as CodeIntelTab)}
-          className={styles.tabsRoot}
-        >
-          <Tabs.List
-            activeIndex={TAB_ORDER.indexOf(activeTab)}
-            className={styles.tabsList}
-          >
-            <Tabs.Trigger value="overview">Overview</Tabs.Trigger>
-            <Tabs.Trigger value="graph">Graph</Tabs.Trigger>
-            <Tabs.Trigger value="communities">Communities</Tabs.Trigger>
-            <Tabs.Trigger value="dead-code">Dead Code</Tabs.Trigger>
-            <Tabs.Trigger value="health">Health</Tabs.Trigger>
-            <Tabs.Trigger value="risk">Risk</Tabs.Trigger>
-            <Tabs.Trigger value="duplication">Duplication</Tabs.Trigger>
-            <Tabs.Trigger value="security">Security</Tabs.Trigger>
-            <Tabs.Trigger value="tools">Tools</Tabs.Trigger>
-          </Tabs.List>
+          <IndexReadinessBanner />
 
-          <Tabs.Content value="overview" className={styles.tabContent}>
-            <OverviewLiveTab />
-          </Tabs.Content>
-          <Tabs.Content value="graph" className={styles.tabContent}>
-            <CodeGraphView />
-          </Tabs.Content>
-          <Tabs.Content value="communities" className={styles.tabContent}>
-            <CommunitiesTab />
-          </Tabs.Content>
-          <Tabs.Content value="dead-code" className={styles.tabContent}>
-            <DeadCodeTab />
-          </Tabs.Content>
-          <Tabs.Content value="health" className={styles.tabContent}>
-            <HealthTab />
-          </Tabs.Content>
-          <Tabs.Content value="risk" className={styles.tabContent}>
-            <RiskTab />
-          </Tabs.Content>
-          <Tabs.Content value="duplication" className={styles.tabContent}>
-            <DuplicationTab />
-          </Tabs.Content>
-          <Tabs.Content value="security" className={styles.tabContent}>
-            <SecurityTabPlaceholder />
-          </Tabs.Content>
-          <Tabs.Content value="tools" className={styles.tabContent}>
-            <ToolsTab />
-          </Tabs.Content>
-        </Tabs>
-      </div>
-    </PageWrapper>
+          <Tabs
+            value={activeTab}
+            onValueChange={(value) => setActiveTab(value as CodeIntelTab)}
+            className={styles.tabsRoot}
+          >
+            <Tabs.List
+              activeIndex={TAB_ORDER.indexOf(activeTab)}
+              className={styles.tabsList}
+            >
+              <Tabs.Trigger value="overview">Overview</Tabs.Trigger>
+              <Tabs.Trigger value="graph">Graph</Tabs.Trigger>
+              <Tabs.Trigger value="communities">Communities</Tabs.Trigger>
+              <Tabs.Trigger value="dead-code">Dead Code</Tabs.Trigger>
+              <Tabs.Trigger value="health">Health</Tabs.Trigger>
+              <Tabs.Trigger value="risk">Risk</Tabs.Trigger>
+              <Tabs.Trigger value="duplication">Duplication</Tabs.Trigger>
+              <Tabs.Trigger value="security">Security</Tabs.Trigger>
+              <Tabs.Trigger value="tools">Tools</Tabs.Trigger>
+            </Tabs.List>
+
+            <Tabs.Content value="overview" className={styles.tabContent}>
+              <OverviewLiveTab />
+            </Tabs.Content>
+            <Tabs.Content value="graph" className={styles.tabContent}>
+              <CodeGraphView />
+            </Tabs.Content>
+            <Tabs.Content value="communities" className={styles.tabContent}>
+              <CommunitiesTab />
+            </Tabs.Content>
+            <Tabs.Content value="dead-code" className={styles.tabContent}>
+              <DeadCodeTab />
+            </Tabs.Content>
+            <Tabs.Content value="health" className={styles.tabContent}>
+              <HealthTab />
+            </Tabs.Content>
+            <Tabs.Content value="risk" className={styles.tabContent}>
+              <RiskTab />
+            </Tabs.Content>
+            <Tabs.Content value="duplication" className={styles.tabContent}>
+              <DuplicationTab />
+            </Tabs.Content>
+            <Tabs.Content value="security" className={styles.tabContent}>
+              <SecurityTabPlaceholder />
+            </Tabs.Content>
+            <Tabs.Content value="tools" className={styles.tabContent}>
+              <ToolsTab />
+            </Tabs.Content>
+          </Tabs>
+        </div>
+      </PageWrapper>
+    </CodeIntelReadinessProvider>
   );
 };

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { render, screen, createDefaultChatState } from "../../utils/test-utils";
+import {
+  createDefaultChatState,
+  fireEvent,
+  render,
+  screen,
+} from "../../utils/test-utils";
 import type {
   ChatMessages,
   ExecToolMetadata,
@@ -149,6 +154,10 @@ function renderToolContent(
   );
 }
 
+function openToolCard() {
+  fireEvent.click(screen.getByRole("button", { expanded: false }));
+}
+
 describe("ToolsContent routing", () => {
   it.each([
     ["check_agents", CHECK_AGENTS_OUTPUT, "agent-status-view"],
@@ -177,11 +186,85 @@ describe("ToolsContent routing", () => {
     "codegraph_overview",
     "code_duplication",
     "code_map",
+    "security_scan",
+    "pr_blast",
+    "dead_code",
   ])("routes %s to EngineAnalysisTool", (name) => {
     renderToolContent(name, "# Analysis\n\n- useful result");
 
     expect(screen.getByTestId("engine-analysis-tool")).toBeInTheDocument();
     expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
+  });
+
+  it("renders security_scan summary instead of GenericTool fallback", () => {
+    renderToolContent(
+      "security_scan",
+      [
+        "Security scan for `src/server.ts` found 2 findings (lang: TypeScript).",
+        "Severity counts: Critical=1 High=0 Medium=1 Low=0",
+        "",
+        "  src/server.ts:12 [Critical] dangerous-eval — eval(userInput)",
+        "  src/server.ts:20 [Medium] insecure-random — Math.random()",
+      ].join("\n"),
+    );
+
+    expect(screen.getByTestId("engine-analysis-tool")).toBeInTheDocument();
+    expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
+    openToolCard();
+    expect(screen.getAllByText("dangerous-eval").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Critical 1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("eval(userInput)").length).toBeGreaterThan(0);
+  });
+
+  it("renders pr_blast summary with reviewers and impact kinds", () => {
+    renderToolContent(
+      "pr_blast",
+      [
+        "⚠ index still building (3 files queued, 5 cross-file edges) — impact may be under-reported",
+        "PR blast radius (max depth 3) for 2 changed files:",
+        "Index state: queued=3 cross_file_edges=5 cross_file_ready=false partial=true",
+        "  changed: src/main.rs",
+        "  changed: src/router.ts",
+        "",
+        "Impacted files: 2",
+        "Risk score: 0.62",
+        "",
+        "Directly impacted symbols (1):",
+        "  d1 renderApp @ src/app.rs via calls (behavioral)",
+        "",
+        "Transitively impacted symbols (1):",
+        "  d2 createStore @ src/state.ts via inherits (structural)",
+        "",
+        "Suggested reviewers (git ownership):",
+        "  ada@example.com (score 0.95)",
+      ].join("\n"),
+    );
+
+    expect(screen.getByTestId("engine-analysis-tool")).toBeInTheDocument();
+    expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
+    openToolCard();
+    expect(screen.getAllByText("partial index").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("structural").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/ada@example.com/).length).toBeGreaterThan(0);
+  });
+
+  it("renders dead_code confidence preview", () => {
+    renderToolContent(
+      "dead_code",
+      [
+        "Dead code candidates: 1 shown of 4 matching candidates.",
+        "Index state: queued=0 dirty_paths=0 pending_refs=0 cross_file_edges=10 cross_file_ready=true partial=false",
+        "",
+        "src/unused.ts:",
+        "  0.91  line 42  unusedHelper — unreachable; last touched 400d ago; churn 1 in mined window",
+      ].join("\n"),
+    );
+
+    expect(screen.getByTestId("engine-analysis-tool")).toBeInTheDocument();
+    expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
+    openToolCard();
+    expect(screen.getAllByText("unusedHelper").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("confidence 0.9100").length).toBeGreaterThan(0);
   });
 
   it("routes plain-text agent_finish results through FinalReportView legacy fallback", () => {

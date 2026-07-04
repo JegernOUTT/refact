@@ -22,6 +22,7 @@ import {
 import type { CodeIntelResponse } from "../../../services/refact/types";
 import styles from "./CodeIntelStatsTabs.module.css";
 import { isCodeIntelDetail } from "./tabUtils";
+import { useReportIndexReadiness } from "../useIndexReadiness";
 
 echarts.use([
   TitleComponent,
@@ -50,6 +51,7 @@ type TabScaffoldProps<T> = {
   emptyDescription: string;
   isEmpty: (data: T) => boolean;
   children: (data: T, isFetching: boolean) => React.ReactNode;
+  readinessKey?: string;
 };
 
 function CodeIntelUnavailable({ detail }: { detail: string }) {
@@ -75,8 +77,10 @@ export function CodeIntelTabScaffold<T>({
   emptyDescription,
   isEmpty,
   children,
+  readinessKey,
 }: TabScaffoldProps<T>) {
   const data = isCodeIntelDetail(result.data) ? null : result.data;
+  useReportIndexReadiness(readinessKey ?? "", readinessKey ? result.data : null);
 
   if (result.isLoading) {
     return <LoadingState label={loadingLabel} kind="skeleton" variant="full" />;

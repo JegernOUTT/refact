@@ -62,6 +62,24 @@
   max-width: 100%;
 }
 
+.readinessBanner {
+  min-width: 0;
+  padding: var(--rf-space-3);
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.readinessCopy {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  color: var(--rf-color-fg);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
 .tabContent {
   min-width: 0;
   min-height: 0;
@@ -184,7 +202,8 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .stateCard,
-  .rankingCard {
+  .rankingCard,
+  .readinessBanner {
     backdrop-filter: none;
   }
 }

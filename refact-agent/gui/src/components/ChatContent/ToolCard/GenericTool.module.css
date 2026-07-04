@@ -20,3 +20,94 @@
   font-size: var(--rf-text-2);
   line-height: var(--rf-line);
 }
+
+.summaryGrid {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.metricGrid {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, calc(var(--rf-control-h-lg) * 3)), 1fr)
+  );
+}
+
+.metricCard {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2);
+  color: var(--rf-color-muted);
+  background: color-mix(in oklab, var(--rf-surface-glass) 48%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+}
+
+.metricLabel,
+.itemMeta,
+.emptyText {
+  color: var(--rf-color-muted);
+  font: var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
+.metricValue {
+  color: var(--rf-color-fg);
+  font: 700 var(--rf-text-4) / var(--rf-line) var(--rf-font-ui);
+}
+
+.chipRow,
+.badgeRow {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.itemList {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.itemCard {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2);
+  background: color-mix(in oklab, var(--rf-surface-glass) 48%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+}
+
+.itemTitle {
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.itemSnippet {
+  padding: var(--rf-space-1) var(--rf-space-2);
+  overflow-wrap: anywhere;
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-2);
+  border-radius: var(--rf-radius-ctl);
+  font-family: var(--rf-font-mono);
+  white-space: pre-wrap;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .metricCard,
+  .itemCard {
+    background: var(--rf-surface-glass);
+  }
+}

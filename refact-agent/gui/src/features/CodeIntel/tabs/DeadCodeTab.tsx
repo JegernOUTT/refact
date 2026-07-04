@@ -102,6 +102,7 @@ export function DeadCodeTab() {
       emptyTitle="No dead code candidates"
       emptyDescription="CodeGraph did not find unreachable symbols in the indexed workspace."
       isEmpty={isEmpty}
+      readinessKey="dead-code"
     >
       {(symbols) => {
         const sorted = [...symbols].sort((a, b) =>

@@ -194,6 +194,11 @@ vi.mock("echarts-for-react/lib/core", () => ({
 }));
 
 const overviewFixture: CodeIntelOverview = {
+  index_state: {
+    queued: 0,
+    cross_file_edges: 4,
+    cross_file_ready: true,
+  },
   counts: {
     nodes: 1234,
     edges: 5678,
@@ -202,8 +207,12 @@ const overviewFixture: CodeIntelOverview = {
   scc_count: 3,
   largest_scc: 9,
   component_count: 6,
-  top_pagerank: [{ symbol: "crate::main", score: 0.123456 }],
-  top_betweenness: [{ symbol: "crate::router", score: 1.25 }],
+  top_pagerank: [
+    { symbol: "crate::main", path: "src/main.rs", score: 0.123456 },
+  ],
+  top_betweenness: [
+    { symbol: "crate::router", path: "src/router.rs", score: 1.25 },
+  ],
   file_centrality: {
     top_pagerank: [{ path: "src/main.rs", score: 0.42 }],
     top_betweenness: [{ path: "src/router.rs", score: 2.5 }],
@@ -213,6 +222,11 @@ const overviewFixture: CodeIntelOverview = {
 };
 
 const graphFixture: CodeIntelGraph = {
+  index_state: {
+    queued: 0,
+    cross_file_edges: 1,
+    cross_file_ready: true,
+  },
   nodes: [
     {
       id: 1,
@@ -245,10 +259,25 @@ const deadCodeFixture: CodeIntelDeadSymbol[] = [
     path: "src/unused.ts",
     reason: "unreachable",
     confidence: 0.91,
+    line: 42,
+    git_recency: "last touched 400d ago; churn 1 in mined window",
+    incoming_edges: 0,
+    index_state: {
+      queued: 0,
+      dirty_paths: 0,
+      pending_refs: 0,
+      cross_file_edges: 1,
+      cross_file_ready: true,
+    },
   },
 ];
 
 const healthFixture: CodeIntelHealth = {
+  index_state: {
+    queued: 0,
+    cross_file_edges: 1,
+    cross_file_ready: true,
+  },
   aggregate: {
     file_count: 1,
     function_count: 3,
@@ -298,6 +327,18 @@ const healthFixture: CodeIntelHealth = {
           detail: "Long method",
         },
       ],
+      health_impact: [
+        {
+          biomarker: "long_method",
+          category: "complexity",
+          dimension: "Maintainability",
+          severity: "Medium",
+          line: 10,
+          detail: "Long method health impact",
+          deduction: 4.5,
+          capped: false,
+        },
+      ],
       refactorings: [
         {
           kind: "ExtractMethod",
@@ -345,6 +386,14 @@ const gitRiskFixture: CodeIntelGitRisk = {
   co_change: [{ path_a: "src/a.ts", path_b: "src/b.ts", count: 3 }],
   coupling: [{ a: "src/a.ts", b: "src/b.ts", strength: 0.7, co_changes: 3 }],
   reviewers: [{ author: "ada", score: 0.95 }],
+  recent_commit_risks: [
+    {
+      sha: "abc123",
+      summary: "Tightened risky path",
+      risk: 0.8,
+      top_factor_names: ["churn", "ownership"],
+    },
+  ],
 };
 
 const duplicationFixture: CodeIntelDuplication = {
@@ -383,7 +432,7 @@ const duplicationFixture: CodeIntelDuplication = {
   test_smells: [],
 };
 
-const blastFixture: BlastReport & { suggested_reviewers: string[] } = {
+const blastFixture: BlastReport = {
   changed_files: ["src/main.rs", "src/router.ts"],
   directly_impacted: [
     {
@@ -391,6 +440,7 @@ const blastFixture: BlastReport & { suggested_reviewers: string[] } = {
       symbol: "renderApp",
       distance: 1,
       via: "calls",
+      kind: "behavioral",
     },
   ],
   transitively_impacted: [
@@ -399,11 +449,12 @@ const blastFixture: BlastReport & { suggested_reviewers: string[] } = {
       symbol: "createStore",
       distance: 2,
       via: "imports",
+      kind: "structural",
     },
   ],
   impacted_file_count: 2,
   risk_score: 0.62,
-  suggested_reviewers: ["ada"],
+  suggested_reviewers: [{ author: "ada", score: 0.95 }],
 };
 
 const securityFixture: SecurityFinding[] = [
@@ -539,6 +590,39 @@ describe("CodeIntelWorkspace", () => {
     expect(screen.getByText("crate::main")).toBeInTheDocument();
   });
 
+  it("shows and hides the index readiness banner from loaded responses", () => {
+    mockQueryResults.overview = {
+      data: {
+        ...overviewFixture,
+        index_state: {
+          queued: 12,
+          cross_file_edges: 2,
+          cross_file_ready: false,
+        },
+      },
+      error: undefined,
+      isFetching: false,
+      isLoading: false,
+    };
+
+    const { rerender } = renderWorkspace();
+
+    expect(screen.getByText("Indexing")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Code graph is still indexing \(12 files queued\)/),
+    ).toBeInTheDocument();
+
+    mockQueryResults.overview = {
+      data: overviewFixture,
+      error: undefined,
+      isFetching: false,
+      isLoading: false,
+    };
+    rerender(<CodeIntelWorkspace host="web" backFromCodeIntel={vi.fn()} />);
+
+    expect(screen.queryByText("Indexing")).not.toBeInTheDocument();
+  });
+
   it("switches across all nine tabs without undefined CodeIntel hooks", async () => {
     const user = userEvent.setup();
     renderWorkspace();
@@ -564,6 +648,8 @@ describe("CodeIntelWorkspace", () => {
     expect(screen.getByText("Health aggregate")).toBeInTheDocument();
     expect(screen.getByText("Worst files")).toBeInTheDocument();
     expect(screen.getAllByText("src/health.ts").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Long method health impact").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("-4.5 health").length).toBeGreaterThan(0);
     expect(mockQueryResults.healthArgs.at(-1)).toEqual({ limit: 25 });
 
     await user.click(screen.getByRole("tab", { name: "Risk" }));
@@ -571,6 +657,8 @@ describe("CodeIntelWorkspace", () => {
     expect(screen.getByText("Git risk hotspots")).toBeInTheDocument();
     expect(screen.getByText("Ownership and bus factor")).toBeInTheDocument();
     expect(screen.getAllByText("src/risky.ts").length).toBeGreaterThan(0);
+    expect(screen.getByText("Recent commit risks")).toBeInTheDocument();
+    expect(screen.getByText("Tightened risky path")).toBeInTheDocument();
     expect(mockQueryResults.gitRiskArgs.at(-1)).toEqual({ limit: 25 });
 
     await user.click(screen.getByRole("tab", { name: "Duplication" }));
@@ -642,7 +730,7 @@ describe("CodeIntelWorkspace", () => {
     expect(
       within(blastPanel).getByText("Suggested reviewers"),
     ).toBeInTheDocument();
-    expect(within(blastPanel).getByText("ada")).toBeInTheDocument();
+    expect(within(blastPanel).getByText(/ada/)).toBeInTheDocument();
 
     await user.type(
       within(securityPanel).getByLabelText(/Path/),
@@ -695,7 +783,15 @@ describe("CodeIntelWorkspace", () => {
     expect(screen.getByText("CodeGraph is disabled")).toBeInTheDocument();
 
     mockQueryResults.graph = {
-      data: { nodes: [], edges: [] },
+      data: {
+        index_state: {
+          queued: 0,
+          cross_file_edges: 0,
+          cross_file_ready: true,
+        },
+        nodes: [],
+        edges: [],
+      },
       error: undefined,
       isFetching: false,
       isLoading: false,

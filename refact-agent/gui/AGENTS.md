@@ -255,7 +255,7 @@ Largest component (~1900 lines). Dispatches a `ToolCall` list to the right speci
 
 **Tool status**: ⏳ thinking · ✅ success · ❌ error · ☁️ server (`srvtoolu_*` prefix)
 
-CodeGraph tools render through the engine-analysis tool-card path. The recognized names are `codegraph_overview`, `code_health`, `git_risk`, `code_why`, `code_duplication`, and `code_map`; keep icons/status rendering aligned with the backend tool descriptions.
+CodeGraph tools render through the engine-analysis tool-card path. The recognized names are `codegraph_overview`, `code_health`, `git_risk`, `code_why`, `code_duplication`, `code_map`, `security_scan`, `pr_blast`, and `dead_code`; keep icons/status rendering aligned with the backend tool descriptions. Code Intelligence response severity unions no longer include `Info`; keep GUI unions to `Low`, `Medium`, `High`, and `Critical`. Page-level index-readiness banners should be driven from loaded response `index_state` data and disappear once `cross_file_ready` is true.
 
 ### Tool Confirmation
 

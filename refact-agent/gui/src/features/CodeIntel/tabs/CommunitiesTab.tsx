@@ -71,6 +71,7 @@ export function CommunitiesTab() {
       emptyTitle="No communities detected"
       emptyDescription="Once CodeGraph has enough relationship data, detected code communities will appear here."
       isEmpty={isEmpty}
+      readinessKey="communities"
     >
       {(communities) => {
         const sorted = [...communities].sort((a, b) =>

@@ -45,8 +45,7 @@ function severityTone(
 ): React.ComponentProps<typeof Badge>["tone"] {
   if (severity === "Critical" || severity === "High") return "danger";
   if (severity === "Medium") return "warning";
-  if (severity === "Low") return "muted";
-  return "accent";
+  return "muted";
 }
 
 const cloneColumns = [

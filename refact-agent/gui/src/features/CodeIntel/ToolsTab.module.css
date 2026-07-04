@@ -72,6 +72,11 @@
   font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
 }
 
+.warningText {
+  color: var(--rf-color-warning);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
 .resultTitle {
   color: var(--rf-color-fg);
   font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
