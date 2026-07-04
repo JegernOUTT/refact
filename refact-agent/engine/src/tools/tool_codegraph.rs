@@ -2023,7 +2023,7 @@ impl Tool for ToolCodegraphOverview {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Project-wide code-graph overview: node/edge counts, strongly-connected components, and the most central symbols by PageRank.".to_string(),
+            description: "Project-wide CodeGraph overview from the generation-keyed analytics cache: readiness warning, node/edge counts, SCCs, PageRank/betweenness symbols with paths, communities, entry points, API-contract files, and likely dead code.".to_string(),
             input_schema: json_schema_from_params(&[], &[]),
             output_schema: None,
             annotations: None,
@@ -2309,7 +2309,7 @@ impl Tool for ToolDeadCode {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Static reachability + git-recency ladder dead-code report; overrides and script entry points excluded; confidence-ranked with indexing warnings.".to_string(),
+            description: "Dead-code candidates from cached CodeGraph reachability: excludes override methods, build scripts, and shell setup/install entry points; adds git recency/churn confidence, path/min-confidence filters, and readiness warnings while the index is partial.".to_string(),
             input_schema: json_schema_from_params(
                 &[
                     ("limit", "integer", "Maximum number of candidates to return. Defaults to 50, max 500."),
@@ -2584,7 +2584,7 @@ impl Tool for ToolCodeHealth {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Deterministic code-health for a file: per-function complexity/nesting/LOC/maintainability, clone duplication, structural + performance biomarkers, a 3-signal (defect/maintainability/performance) score with grade, and ranked refactoring targets.".to_string(),
+            description: "Deterministic per-file health: function complexity/nesting/LOC/MI, duplication, structural/git/coverage/trend/performance findings, hot-path and fan-in graph enrichment, cached unchanged-file analysis, 1-10 defect/maintainability/performance scores with A-F grade, health-impact contributors, and refactoring targets.".to_string(),
             input_schema: json_schema_from_params(
                 &[
                     ("file_path", "string", "Path to the file to analyze."),
@@ -2647,7 +2647,7 @@ impl Tool for ToolGitRisk {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Git intelligence for the project: churn hotspots, bus factor per file, and frequently co-changed file pairs.".to_string(),
+            description: "Git intelligence for the project: mined history summary, churn/temporal hotspots, ownership and bus-factor risk, co-change/coupling pairs, reviewer ownership hints, recent commit risk factors, and git-biomarker findings with function-level facts for the top hotspot files.".to_string(),
             input_schema: json_schema_from_params(&[], &[]),
             output_schema: None,
             annotations: None,
@@ -3238,7 +3238,7 @@ impl Tool for ToolCodeWhy {
                 tool_message(
                     tool_call_id,
                     format!(
-                        "No evidence-backed decisions found in commit prose, ADRs, changelogs, or merge PRs matching `{query}`."
+                        "No matching decision records found in commit prose, ADRs, changelogs, or merge PRs for `{query}`."
                     ),
                 ),
             ));
@@ -3256,7 +3256,7 @@ impl Tool for ToolCodeWhy {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Explain why the code is the way it is: mines evidence-backed decisions from significant commit prose, merge PR bodies, ADRs, and changelogs matching a query.".to_string(),
+            description: "Explain why the code is the way it is: mines significant commit prose, merge PR bodies, ADRs, and changelogs for query-matching decisions, then reports source refs, confidence, corroboration, provenance tags, and related-decision links.".to_string(),
             input_schema: json_schema_from_params(
                 &[("query", "string", "Topic or keyword to find decisions about.")],
                 &["query"],
@@ -3413,7 +3413,7 @@ impl Tool for ToolCodeDuplication {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Project-wide cross-file duplication: token-level clone pairs across files, co-change-weighted DRY violations, and test smells (large/duplicated assertion blocks in test files).".to_string(),
+            description: "Project-wide cross-file duplication from a graph-generation cache: token clone pairs and duplication percentage, git co-change counts joined to clone paths, co-change-weighted DRY findings, and assertion/clone test smells.".to_string(),
             input_schema: json_schema_from_params(&[], &[]),
             output_schema: None,
             annotations: None,
@@ -3505,7 +3505,7 @@ impl Tool for ToolSecurityScan {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Security scan for a file: detects hardcoded secrets, SQL/command injection, dangerous eval/deserialization, TLS verification disabled, weak crypto, and insecure random usage.".to_string(),
+            description: "Security scan for one file using CodeGraph security heuristics: deduped findings for hardcoded secrets, dynamic SQL and command execution, dangerous eval/deserialization, TLS verification disabled, weak crypto, and insecure randomness.".to_string(),
             input_schema: json_schema_from_params(
                 &[("file_path", "string", "Path to the file to scan.")],
                 &["file_path"],
@@ -3634,7 +3634,7 @@ impl Tool for ToolPrBlast {
             },
             experimental: false,
             allow_parallel: true,
-            description: "PR blast-radius analysis: given changed files, walks reverse codegraph dependencies to list directly and transitively impacted symbols, impacted file count, risk score, reviewer suggestions from git ownership, structural/behavioral impact classification, and index readiness. Bot authors matching [bot], agent@, or noreply are excluded.".to_string(),
+            description: "PR blast-radius analysis for changed files: resolves indexed paths, walks reverse CodeGraph dependencies to max depth, reports direct/transitive impacted symbols, structural vs behavioral impact kind, impacted file count, risk score, git-ownership reviewer suggestions excluding bot authors, and readiness/partial-index warnings.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -4515,7 +4515,7 @@ impl Tool for ToolCodeMap {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Documentation-worthy code map using real CodeGraph and git signals: file centrality, churn hotspots, real symbol kinds, module/SCC/API/infra pages, edge-derived links/backlink hubs, token budget, optional query filtering, and markdown or claude_md output.".to_string(),
+            description: "Documentation-worthy code map from CodeGraph and git signals: file centrality, churn hotspots, real symbol kinds and parsed visibility when present, file/module/SCC/API/infra pages, edge-derived links and backlink hubs, readiness warnings, optional hybrid query filtering, token budget trimming, and markdown or claude_md output.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

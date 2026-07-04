@@ -185,7 +185,7 @@ taxonomy: `component/*`, `type/*`, `P0-critical`/`P1-important`/`P2-nice`,
 │ event/plan  │                         │ 15+ providers│  │ cron + sleep │
 └──────┬──────┘                         └──────────────┘  └──────┬───────┘
        │                                                         │
-       ├──────────────► Local indexes (AST, VecDB) ◄─────────────┘
+       ├──────────────► Local indexes (CodeGraph, VecDB) ◄────────┘
        └──────────────► Integrations (GitHub, MCP, shell, browser, DBs)
 ```
 

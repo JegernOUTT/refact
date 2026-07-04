@@ -331,7 +331,7 @@ OpenAI conversion lives in `src/llm/adapters/openai_chat.rs` (`convert_messages_
 
 ~50+ tools, filtered by mode/capabilities/config. Registered in `tools_list.rs`.
 
-**Categories**: Codebase search (CodeGraph definitions, tree, cat, regex, semantic memory) · CodeGraph analysis (overview, health, git risk, why, duplication, map) · Codebase change (create/update/rm/mv/undo/apply_patch — confirmation required) · Web (fetch, search, Chrome automation) · Code execution (shell, process_*, sleep, cron_*) · System integrations (cmdline_*, service_*) · Knowledge (search, create, trajectories) · Agent (subagent, strategic_planning, deep_research, code_review) · Task management (~18 tools) · IDE (open_file, paste_text) · Integration-defined + MCP tools.
+**Categories**: Codebase search (CodeGraph definitions, tree, cat, regex, semantic memory) · CodeGraph analysis (overview, health, git risk, why, duplication, dead code, security scan, PR blast, map) · Codebase change (create/update/rm/mv/undo/apply_patch — confirmation required) · Web (fetch, search, Chrome automation) · Code execution (shell, process_*, sleep, cron_*) · System integrations (cmdline_*, service_*) · Knowledge (search, create, trajectories) · Agent (subagent, strategic_planning, deep_research, code_review) · Task management (~18 tools) · IDE (open_file, paste_text) · Integration-defined + MCP tools.
 
 Tool trait: `tool_execute(&mut self, ccx, tool_call_id, args) -> Result<(bool, Vec<ContextEnum>)>`.
 
@@ -339,18 +339,23 @@ Tool trait: `tool_execute(&mut self, ccx, tool_call_id, args) -> Result<(bool, V
 
 ### CodeGraph tools
 
-CodeGraph-dependent tools are visible only when `gcx.codegraph` is available. `search_symbol_definition` is the compatibility definition lookup tool, backed by CodeGraph definitions and fuzzy corrections. The dedicated CodeGraph tool set is:
+CodeGraph-dependent tools are visible only when `gcx.codegraph` is available. `search_symbol_definition` is the compatibility definition lookup tool, backed by CodeGraph definitions, fuzzy suggestions, and `type_hierarchy` inheritance context; it does not read an old AST database. The dedicated CodeGraph analysis tool set is:
 
 | Tool | Purpose |
 |---|---|
-| `codegraph_overview` | Project-wide graph counts, strongly-connected components, and central symbols by PageRank. |
-| `code_health` | Per-file deterministic health: function complexity/nesting/LOC/maintainability, biomarkers, grade, and refactoring targets. |
-| `git_risk` | Git intelligence: churn hotspots, bus factor per file, and co-changed file pairs. |
-| `code_why` | Evidence-backed decisions from commit history that match a query. |
-| `code_duplication` | Project-wide token clone pairs, co-change-weighted DRY violations, and test smells. |
-| `security_scan` | Per-file security findings including secrets, injection, dangerous eval/deserialization, TLS, crypto, and random risks. |
-| `pr_blast` | PR blast-radius analysis over reverse CodeGraph dependencies, impacted files, risk score, and reviewer path hints. |
-| `code_map` | Documentation-worthy file map with selection score, forward links, and backlink hubs. |
+| `codegraph_overview` | Project-wide summary from `cached_graph_analytics`: readiness warning, node/edge counts, SCCs/components, PageRank/betweenness symbols with paths, communities, entry points, API-contract files, and likely dead code. |
+| `dead_code` | Static reachability candidates from cached CodeGraph data, with override/build-script/shell-entry exclusions, path and confidence filters, git recency/churn confidence, and partial-index warnings. |
+| `code_health` | Per-file deterministic health: function complexity/nesting/LOC/maintainability index, duplication, structural/git/coverage/trend/performance findings, hot-path and fan-in graph enrichment, cached unchanged-file analysis, 1-10 defect/maintainability/performance scores, A-F grade, health-impact contributors, and refactoring targets. |
+| `git_risk` | Git intelligence from mined history: churn/temporal hotspots, ownership and bus-factor risk, co-change/coupling pairs, reviewer ownership hints, recent commit risk factors, and git-biomarker findings with function facts for the top hotspot files. |
+| `code_why` | Decision mining from significant commit prose, merge PR bodies, ADR files, and changelogs, reporting source refs, confidence, corroboration, provenance tags, and related-decision links. |
+| `code_duplication` | Project-wide cross-file duplication from a graph-generation cache: token clone pairs, duplication percentage, git co-change counts joined to clone paths, co-change-weighted DRY findings, and test smells. |
+| `security_scan` | Per-file/file-text security heuristics for deduped hardcoded secrets, dynamic SQL, command execution, dangerous eval/deserialization, TLS verification disabled, weak crypto, and insecure randomness. |
+| `pr_blast` | Blast-radius analysis for changed files: indexed-path resolution, reverse CodeGraph dependency walk to bounded depth, direct/transitive impacted symbols, structural vs behavioral impact kind, impacted file count, risk score, git-ownership reviewer suggestions with bot authors filtered, and readiness/partial-index warnings. |
+| `code_map` | Documentation-worthy map from CodeGraph and git signals: file centrality, churn hotspots, real symbol kinds and parsed visibility when present, file/module/SCC/API/infra pages, edge-derived links and backlink hubs, readiness warnings, optional hybrid query filtering, token budget trimming, and markdown or `claude_md` output. |
+
+Code-intelligence surfaces use readiness fields rather than pretending a building index is complete. `CodeGraphService::index_readiness()` reports `queued`, `dirty_paths`, `pending_refs`, `cross_file_edges`, and `cross_file_ready`; overview, graph, health, PR blast, communities, dead-code, and code-map surfaces expose the relevant subset or warning text. `code_health` intentionally exposes two maintainability scales: `maintainability_index` is the classic MI-style structural metric, while `maintainability_score` / `avg_maintainability_signal` are normalized 1-10 health dimensions after findings are applied.
+
+The health letter grade is a deliberate presentation-layer divergence from repowise's no-grade stance because GUI and user-facing summaries need a compact label. Numeric scores remain the source of truth; grades are only labels with cutoffs `A >= 9.0`, `B >= 7.5`, `C >= 6.0`, `D >= 4.0`, and `F < 4.0`.
 
 ### Exec runtime — PTY and process tools
 
@@ -865,21 +870,26 @@ session and durable stores, so a single hook call may perform the inline action 
 
 Base: `http://127.0.0.1:{port}/v1/`. Middleware: permissive CORS, 15MB body limit.
 
-Key endpoints: `/ping`, `/caps`, `/graceful-shutdown`, `/p/{project_id}/v1/chats/{id}/commands`, `/p/{project_id}/v1/chats/subscribe` (project-scoped chat protocol; `daemon::chat_client::ProxyChatClient` is the in-tree client), `/chat` (legacy), `/code-completion`, `/code-lens`, `/tools`, `/tools-check-if-confirmation-needed`, `/ast-file-symbols`, `/ast-status` (legacy alias to CodeGraph status), `/rag-status`, `/vdb-search`, `/vdb-status`, `/codegraph-search`, `/codegraph-status`, `/git-commit`, `/checkpoints-preview`, `/checkpoints-restore`, `/integrations`, `/integration-get`, `/integration-save`, `/knowledge/update-memory`, `/knowledge/delete-memory`, `/knowledge-graph`, `/voice/transcribe`, `/voice/stream/{id}`, `/voice/stream/{id}/chunk`.
+Key endpoints: `/ping`, `/caps`, `/graceful-shutdown`, `/p/{project_id}/v1/chats/{id}/commands`, `/p/{project_id}/v1/chats/subscribe` (project-scoped chat protocol; `daemon::chat_client::ProxyChatClient` is the in-tree client), `/chat` (legacy), `/code-completion`, `/code-lens`, `/tools`, `/tools-check-if-confirmation-needed`, `/ast-file-symbols`, `/ast-status` (legacy alias to CodeGraph status), `/rag-status`, `/vdb-search`, `/vdb-status`, `/codegraph-search`, `/codegraph-status`, `/code-intel/*`, `/git-commit`, `/checkpoints-preview`, `/checkpoints-restore`, `/integrations`, `/integration-get`, `/integration-save`, `/knowledge/update-memory`, `/knowledge/delete-memory`, `/knowledge-graph`, `/voice/transcribe`, `/voice/stream/{id}`, `/voice/stream/{id}/chunk`.
 
 ## CodeGraph and indexing
 
-CodeGraph is the source-code index. `codegraph_init()` opens a persistent SQLite database at `~/.cache/refact/codegraph/<project-hash>/codegraph.sqlite` (or `~/.cache/refact/codegraph/codegraph.sqlite` when no project root is known), and `codegraph_background_task()` drains the workspace queue, indexes or removes changed paths, reconciles deleted paths on startup, and connects pending usages once the queue is empty. The store contains graph nodes/edges/symbols, pending references, dirty paths, file hashes, and an FTS5 `fts_code` table. Parser coverage comes from `refact-codegraph-parsers`: Rust, Python, JavaScript/JSX, TypeScript/TSX, Java, Kotlin, C, C++, Bash, Elixir, OCaml, Haskell, Go, C#, Ruby, PHP, Swift, and Scala.
+CodeGraph is the source-code index. `codegraph_init()` opens a persistent SQLite schema v7 database at `~/.cache/refact/codegraph/<project-hash>/codegraph.sqlite` (or `~/.cache/refact/codegraph/codegraph.sqlite` when no project root is known), and `codegraph_background_task()` drains the workspace queue, indexes or removes changed paths, reconciles deleted paths on startup, and connects pending usages periodically after 8 batches or 30 seconds as well as on drain completion. The store contains graph nodes/edges/symbols, pending references, dirty paths, file hashes, a reserved `schema_version` meta row plus tool-owned meta KV, and an FTS5 `fts_code` table. Parser coverage comes from `refact-codegraph-parsers`: Rust, Python, JavaScript/JSX, TypeScript/TSX, Java, Kotlin, C, C++, Bash, Elixir, OCaml, Haskell, Go, C#, Ruby, PHP, Swift, and Scala.
+
+`CodeGraphService` is the async facade used by tools, HTTP, completion, and code-lens surfaces. It exposes counts, search, definition lookup, `doc_usages`, `type_hierarchy`, `index_readiness`, `graph_generation`, `meta_get`/`meta_set`, `cached_graph_analytics`, communities, execution flows, dead-code analysis, security scan, and PR blast-radius helpers. The cross-file resolver tries path-qualified/local names before bare names, and fuzzy last-segment matches only when the candidate is globally unique or uniquely in the same file; ambiguous candidates are skipped rather than creating speculative edges. `doc_usages` is consumed by completion RAG and CodeLens debug output, and `type_hierarchy` is consumed by `search_symbol_definition` inheritance context.
+
+Cached analytics are generation-keyed by `graph_generation`, which bumps when indexing, removals, or usage-connection changes mutate graph data. The shared analytics cache covers graph overview data, file centrality, communities, and dead-code candidates; cross-file clone analysis has a separate generation-keyed cache, and health analysis caches unchanged per-file results by content hash plus git/coverage/trend signatures. `wiki.rs`, `vec_code`, and code-embedding search paths are not part of the current CodeGraph/codewiki pipeline; code-map output uses `refact-codewiki` page selection and rendering over CodeGraph and git signals. Code-intelligence severity unions are `Low`, `Medium`, `High`, and `Critical`; there is no `Info` variant.
 
 `indexing_routing.rs` is the memory-plane firewall. It builds `MemoryPlaneRoots` from project roots, global knowledge, and global trajectories, then partitions paths before enqueueing: memory-plane paths go to VecDB, source-code paths go to CodeGraph. `vecdb_only=true` returns after memory enqueueing, and if CodeGraph is unavailable the router skips code files instead of sending them to VecDB. Keep this boundary intact so code search does not pollute memory/knowledge retrieval.
 
-Status surfaces:
+Status and code-intelligence surfaces:
 
-- `GET /v1/codegraph-status` returns `{ counts: { nodes, edges, files, fts_docs }, queued, state, error }`.
+- `GET /v1/codegraph-status` returns `{ counts: { nodes, edges, files, fts_docs }, queued, cross_file_edges, cross_file_ready, throughput_files_per_min, eta_seconds, state, error }`.
 - `state` is one of `turned_off`, `indexing`, `working`, or `error`.
 - `POST /v1/codegraph-search` accepts `{ "query": string, "top_n": number }` and returns `{ query_text, results: [{ path, line1, line2, symbol, score }] }`.
 - `GET /v1/rag-status` embeds `codegraph` plus top-level `codegraph_alive` and `codegraph_error`, alongside legacy `ast`/`ast_alive` and VecDB status fields.
 - `GET /v1/ast-status` is a legacy compatibility alias that returns CodeGraph status; `/v1/ast-file-symbols` reads file definitions from CodeGraph.
+- `/v1/code-intel/overview`, `/graph`, `/communities`, `/dead-code`, `/health`, `/git-risk`, `/duplication`, `/pr-blast`, and `/security-scan` back the GUI code-intelligence page and mirror the tool implementations where applicable. Overview/graph/health/pr-blast responses carry top-level `index_state`; communities/dead-code keep their array response shape and attach readiness per item; PR blast also returns `partial` and `warning` when impact may be under-reported.
 
 Current worker CLI flags are `--ast`, `--wait-ast`, `--vecdb`, `--vecdb-max-files`, `--vecdb-force-path`, and `--wait-vecdb`. CodeGraph opens during startup and readiness is observed through the status routes. Daemon and IDE project settings may carry CodeGraph feature switches for host coordination, but worker process arguments still gate only AST compatibility and VecDB; do not add CodeGraph-specific CLI switches to docs unless they exist in `global_context.rs`.
 
