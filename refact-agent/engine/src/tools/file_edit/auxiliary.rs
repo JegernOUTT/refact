@@ -1346,7 +1346,7 @@ mod tests {
             .unwrap()
             .unwrap();
             assert_eq!(
-                fs::read_to_string(f.root.join("src/fast.rs")).unwrap(),
+                fs::read_to_string(f.root.join("src").join("fast.rs")).unwrap(),
                 "fast\n"
             );
             assert_eq!(service.queue_len(), 2);
@@ -1364,8 +1364,8 @@ mod tests {
             fs::create_dir_all(worktree_root.join("src")).unwrap();
             let worktree_root =
                 dunce::simplified(&fs::canonicalize(worktree_root).unwrap()).to_path_buf();
-            let source_file = source.join("src/fast.rs");
-            let worktree_file = worktree_root.join("src/fast.rs");
+            let source_file = source.join("src").join("fast.rs");
+            let worktree_file = worktree_root.join("src").join("fast.rs");
             fs::write(&source_file, "fn source() {}\n").unwrap();
             fs::write(&worktree_file, "fn worktree() {}\n").unwrap();
             let worktree = WorktreeMeta {
@@ -1409,8 +1409,8 @@ mod tests {
             fs::create_dir_all(worktree_root.join("src")).unwrap();
             let worktree_root =
                 dunce::simplified(&fs::canonicalize(worktree_root).unwrap()).to_path_buf();
-            let source_file = source.join("src/fast.rs");
-            let worktree_file = worktree_root.join("src/fast.rs");
+            let source_file = source.join("src").join("fast.rs");
+            let worktree_file = worktree_root.join("src").join("fast.rs");
             fs::write(&source_file, "fn source() {}\n").unwrap();
             fs::write(&worktree_file, "fn worktree() {}\n").unwrap();
             let worktree = WorktreeMeta {
@@ -1467,8 +1467,8 @@ mod tests {
             fs::create_dir_all(worktree_root.join("src")).unwrap();
             let worktree_root =
                 dunce::simplified(&fs::canonicalize(worktree_root).unwrap()).to_path_buf();
-            let source_file = source.join("src/fast.rs");
-            let worktree_file = worktree_root.join("src/fast.rs");
+            let source_file = source.join("src").join("fast.rs");
+            let worktree_file = worktree_root.join("src").join("fast.rs");
             fs::write(&source_file, "fn source() {}\n").unwrap();
             fs::write(&worktree_file, "fn worktree_edited() {}\n").unwrap();
             let worktree = WorktreeMeta {
@@ -1525,8 +1525,8 @@ mod tests {
             fs::create_dir_all(worktree_root.join("src")).unwrap();
             let worktree_root =
                 dunce::simplified(&fs::canonicalize(worktree_root).unwrap()).to_path_buf();
-            let source_file = source.join("src/new.rs");
-            let worktree_file = worktree_root.join("src/new.rs");
+            let source_file = source.join("src").join("new.rs");
+            let worktree_file = worktree_root.join("src").join("new.rs");
             fs::write(&worktree_file, "fn worktree_only() {}\n").unwrap();
             let worktree = WorktreeMeta {
                 id: "wt-tools".to_string(),

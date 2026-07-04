@@ -2623,6 +2623,10 @@ mod tests {
             .tempdir()
             .unwrap();
         let source = source_temp.path().join("source");
+        std::fs::create_dir_all(source.join("src")).unwrap();
+        // Canonicalize while the dir exists so raw fixture paths match canonical
+        // index keys on Windows runners with an 8.3 short TMP (RUNNER~1).
+        let source = normalized(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         allow_all_privacy(&gcx);
         let source_file = source.join("src").join("lib.rs");
@@ -2630,6 +2634,8 @@ mod tests {
         let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
         let worktree_file = worktree.join("src").join("lib.rs");
         write_file(&worktree_file, "fn worktree() {}\n");
+        let worktree = normalized(&worktree);
+        let worktree_file = worktree.join("src").join("lib.rs");
         write_worktree_registry(&gcx.cache_dir, &source, &worktree);
         let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
         let source_key = normalized(&source_file).to_string_lossy().to_string();
@@ -2896,6 +2902,10 @@ mod tests {
             .tempdir()
             .unwrap();
         let source = source_temp.path().join("source");
+        std::fs::create_dir_all(source.join("src")).unwrap();
+        // Canonicalize while the dir exists so raw fixture paths match canonical
+        // index keys on Windows runners with an 8.3 short TMP (RUNNER~1).
+        let source = normalized(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         allow_all_privacy(&gcx);
         let source_file = source.join("src").join("lib.rs");
@@ -2903,6 +2913,8 @@ mod tests {
         let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
         let worktree_file = worktree.join("src").join("lib.rs");
         write_file(&worktree_file, "fn worktree() {}\n");
+        let worktree = normalized(&worktree);
+        let worktree_file = worktree.join("src").join("lib.rs");
         write_worktree_registry(&gcx.cache_dir, &source, &worktree);
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![worktree.clone()];
         let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
@@ -2939,6 +2951,10 @@ mod tests {
             .tempdir()
             .unwrap();
         let source = source_temp.path().join("source");
+        std::fs::create_dir_all(source.join("src")).unwrap();
+        // Canonicalize while the dir exists so raw fixture paths match canonical
+        // index keys on Windows runners with an 8.3 short TMP (RUNNER~1).
+        let source = normalized(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         allow_all_privacy(&gcx);
         let source_file = source.join("src").join("lib.rs");
@@ -2946,6 +2962,8 @@ mod tests {
         let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
         let worktree_file = worktree.join("src").join("lib.rs");
         write_file(&worktree_file, "fn worktree() {}\n");
+        let worktree = normalized(&worktree);
+        let worktree_file = worktree.join("src").join("lib.rs");
         write_worktree_registry(&gcx.cache_dir, &source, &worktree);
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![worktree.clone()];
         *gcx.documents_state.workspace_files.lock().unwrap() = vec![normalized(&source_file)];
@@ -3016,6 +3034,10 @@ mod tests {
             .tempdir()
             .unwrap();
         let source = source_temp.path().join("source");
+        std::fs::create_dir_all(source.join("src")).unwrap();
+        // Canonicalize while the dir exists so raw fixture paths match canonical
+        // index keys on Windows runners with an 8.3 short TMP (RUNNER~1).
+        let source = normalized(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         allow_all_privacy(&gcx);
         let source_file = source.join("src").join("lib.rs");
@@ -3023,6 +3045,8 @@ mod tests {
         let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
         let worktree_file = worktree.join("src").join("lib.rs");
         write_file(&worktree_file, "fn worktree() {}\n");
+        let worktree = normalized(&worktree);
+        let worktree_file = worktree.join("src").join("lib.rs");
         write_worktree_registry(&gcx.cache_dir, &source, &worktree);
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![worktree.clone()];
 
@@ -3272,10 +3296,14 @@ mod tests {
     async fn rename_remove_create_removes_old_and_enqueues_new() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let temp = tempfile::tempdir().unwrap();
-        let old_file = temp.path().join("src").join("old.rs");
-        let new_file = temp.path().join("src").join("new.rs");
+        // Canonical root first: raw event paths must equal canonical index keys
+        // on Windows runners with an 8.3 short TMP.
+        let root = normalized(temp.path());
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let old_file = root.join("src").join("old.rs");
+        let new_file = root.join("src").join("new.rs");
         write_file(&old_file, "pub fn old_name() {}\n");
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![normalized(temp.path())];
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
         *gcx.documents_state.workspace_files.lock().unwrap() = vec![normalized(&old_file)];
         let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
         service

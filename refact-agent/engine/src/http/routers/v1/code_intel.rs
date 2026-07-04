@@ -2086,7 +2086,12 @@ mod tests {
     async fn router_with_co_change_duplication() -> (axum::Router, tempfile::TempDir) {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let dir = tempfile::tempdir().unwrap();
-        let repo = Repository::init(dir.path()).unwrap();
+        // Canonical root: on Windows runners TMP is an 8.3 short path (RUNNER~1);
+        // production canonicalizes the project root, so the fixture must too or
+        // the repo-relative co-change join misses.
+        let root =
+            crate::files_correction::canonical_path(dir.path().to_string_lossy().to_string());
+        let repo = Repository::init(&root).unwrap();
         let a_v1 = co_change_clone_source("alpha", "v1");
         let b_v1 = co_change_clone_source("beta", "v1");
         commit_files_together(
@@ -2101,10 +2106,10 @@ mod tests {
             &[("src/a.rs", &a_v2), ("src/b.rs", &b_v2)],
             "second co-change",
         );
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
 
-        let a_abs = dir.path().join("src/a.rs").to_string_lossy().to_string();
-        let b_abs = dir.path().join("src/b.rs").to_string_lossy().to_string();
+        let a_abs = root.join("src").join("a.rs").to_string_lossy().to_string();
+        let b_abs = root.join("src").join("b.rs").to_string_lossy().to_string();
         let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
         codegraph.index_file(&a_abs, &a_v2, "rust").await.unwrap();
         codegraph.index_file(&b_abs, &b_v2, "rust").await.unwrap();

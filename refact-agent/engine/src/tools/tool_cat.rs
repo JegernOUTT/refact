@@ -849,7 +849,11 @@ mod tests {
     }
 
     fn normalized(path: &std::path::Path) -> String {
-        refact_core::chat_types::normalize_file_name(path.to_string_lossy().to_string())
+        // Mirror the production path pipeline: canonical_path resolves platform
+        // quirks (Windows 8.3 short names like RUNNER~1, symlinked /tmp on macOS)
+        // exactly like tool_cat does before emitting context files.
+        let canonical = crate::files_correction::canonical_path(path.to_string_lossy().to_string());
+        refact_core::chat_types::normalize_file_name(canonical.to_string_lossy().to_string())
     }
 
     fn context_file_ranges(results: &[ContextEnum]) -> Vec<(String, usize, usize)> {
