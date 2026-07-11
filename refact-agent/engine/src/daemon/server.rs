@@ -24,6 +24,7 @@ use crate::daemon::state::DaemonState;
 struct StatusResponse {
     pid: u32,
     version: String,
+    executable_sha256: Option<String>,
     port: u16,
     started_at_ms: u64,
     uptime_secs: u64,
@@ -210,9 +211,14 @@ async fn status(State((state, port)): State<(Arc<DaemonState>, u16)>) -> Json<St
     let uptime_secs =
         Duration::from_millis(crate::daemon::state::now_ms().saturating_sub(state.started_at_ms))
             .as_secs();
+    let executable_sha256 =
+        tokio::task::spawn_blocking(crate::daemon::state::current_executable_sha256)
+            .await
+            .unwrap_or(None);
     Json(StatusResponse {
         pid: std::process::id(),
         version: state.version.clone(),
+        executable_sha256,
         port,
         started_at_ms: state.started_at_ms,
         uptime_secs,
@@ -855,6 +861,10 @@ mod tests {
         assert_eq!(json["workers"], 0);
         assert_eq!(json["cron_pending"], serde_json::json!({}));
         assert_eq!(json["port"], 8488);
+        let executable_sha256 = json["executable_sha256"]
+            .as_str()
+            .expect("daemon status must report executable_sha256 for staleness detection");
+        assert_eq!(executable_sha256.len(), 64);
     }
 
     #[tokio::test]

@@ -59,6 +59,10 @@ internal data class RefactBinaryResolverOptions(
 
 internal object RefactBinaryResolver {
     fun resolve(options: RefactBinaryResolverOptions): String {
+        return resolveLocalOrNull(options) ?: downloadPinnedRefactBinary(options)
+    }
+
+    fun resolveLocalOrNull(options: RefactBinaryResolverOptions): String? {
         val explicit = options.explicitPath?.trim()?.takeIf { it.isNotEmpty() }
         if (explicit != null) {
             return Path.of(explicit).toAbsolutePath().normalize().toString()
@@ -76,7 +80,7 @@ internal object RefactBinaryResolver {
             }
         }
 
-        return downloadPinnedRefactBinary(options)
+        return null
     }
 }
 
@@ -512,13 +516,13 @@ private fun verifySha256(archivePath: Path, shaPath: Path) {
         ?.value
         ?.lowercase()
         ?: throw IOException("sha256 sidecar did not contain a checksum")
-    val actual = sha256(archivePath)
+    val actual = sha256File(archivePath)
     if (actual != expected) {
         throw IOException("sha256 mismatch for ${archivePath.fileName}")
     }
 }
 
-private fun sha256(filePath: Path): String {
+internal fun sha256File(filePath: Path): String {
     val digest = MessageDigest.getInstance("SHA-256")
     Files.newInputStream(filePath).use { input ->
         val buffer = ByteArray(8192)

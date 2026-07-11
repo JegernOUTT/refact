@@ -19,6 +19,7 @@ import {
     daemonOpenProjectUrl,
     daemonSpawnCommand,
     daemonStatusUrl,
+    daemonExecutableMatchesExpected,
     ensureBundledRefactPath,
     ensureDaemon,
     findExistingDaemon,
@@ -29,6 +30,7 @@ import {
     projectProxyBaseUrl,
     resolveBundledRefactPath,
     selectPrimaryWorkspaceRoot,
+    sha256OfFile,
     shouldRetryProjectProxyStatus,
     type DaemonStatus,
 } from "./refactDaemon";
@@ -131,6 +133,12 @@ export async function runRefactDaemonTests() {
     assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0-alpha.1"), true);
     assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0-main-4053-d8e6abb9"), true);
     assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0"), false);
+    assert.strictEqual(daemonExecutableMatchesExpected(daemonStatus("8.2.0", 8488, undefined, "actual"), "8.1.0", "expected"), true);
+    assert.strictEqual(daemonExecutableMatchesExpected(daemonStatus("8.0.0", 8488, undefined, "actual"), "8.1.0", "actual"), false);
+    assert.strictEqual(daemonExecutableMatchesExpected(daemonStatus("8.1.0", 8488, undefined, "actual"), "8.1.0", "actual"), true);
+    assert.strictEqual(daemonExecutableMatchesExpected(daemonStatus("8.1.0", 8488, undefined, "actual"), "8.1.0", "expected"), false);
+    assert.strictEqual(daemonExecutableMatchesExpected(daemonStatus("8.1.0"), "8.1.0", "expected"), true);
+    assert.strictEqual(daemonExecutableMatchesExpected(daemonStatus("8.1.0", 8488, undefined, "actual"), "8.1.0", undefined), true);
     assert.strictEqual(DAEMON_POLL_TIMEOUT_MS, 30000);
     assert.strictEqual(DAEMON_SHUTDOWN_TIMEOUT_MS, 15000);
     assert.strictEqual(DAEMON_OPEN_PROJECT_TIMEOUT_MS, 130000);
@@ -143,8 +151,12 @@ export async function runRefactDaemonTests() {
     await runStandaloneResolutionTests();
     await runArchiveTraversalRejectedTest();
     await runDaemonUpgradeWaitsForExitTest();
+    await runDaemonExecutableHashMismatchUpgradeTest();
+    await runDaemonPollRejectsWrongHashReplacementTest();
+    await runDaemonExecutableHashMatchReuseTest();
     await runDaemonUpgradeShutdownFailureTest();
     await runDaemonUpgradeTimeoutTest();
+    await runSha256OfFileCacheTest();
     await runCompatibleDaemonSkipsMissingBinaryTest();
     await runDaemonJsonDiscoveryTest();
     await runDaemonReportedPortFallbackTest(0);
@@ -719,6 +731,101 @@ async function runDaemonUpgradeWaitsForExitTest() {
     }
 }
 
+async function runDaemonExecutableHashMismatchUpgradeTest() {
+    const assetPath = fs.mkdtempSync(path.join(os.tmpdir(), "refact-daemon-hash-mismatch-"));
+    try {
+        const refactPath = resolveBundledRefactPath(assetPath);
+        writeExecutable(refactPath, "expected executable bytes");
+
+        let shutdownReason: string | undefined;
+        let spawned = false;
+        const status = await ensureDaemon(refactPath, {
+            pluginVersion: "8.1.0",
+            timeoutMs: 1000,
+            shutdownTimeoutMs: 1000,
+            shutdownPollMs: 1,
+            readDaemonInfo: async () => spawned
+                ? daemonStatus("8.1.0", 8488, undefined, await sha256OfFile(refactPath))
+                : daemonStatus("8.1.0", 8488, undefined, "different-sha256"),
+            shutdownDaemon: async (_port, reason) => {
+                shutdownReason = reason;
+            },
+            spawnDaemon: binPath => {
+                assert.strictEqual(binPath, refactPath);
+                spawned = true;
+            },
+            isProcessRunning: () => false,
+            sleep: async () => undefined,
+        });
+
+        assert.strictEqual(status.executable_sha256, await sha256OfFile(refactPath));
+        assert.strictEqual(shutdownReason, "upgrade");
+        assert.strictEqual(spawned, true);
+    } finally {
+        fs.rmSync(assetPath, { recursive: true, force: true });
+    }
+}
+
+async function runDaemonPollRejectsWrongHashReplacementTest() {
+    const assetPath = fs.mkdtempSync(path.join(os.tmpdir(), "refact-daemon-poll-wrong-hash-"));
+    try {
+        const refactPath = resolveBundledRefactPath(assetPath);
+        writeExecutable(refactPath, "poll gate executable bytes");
+        const expected = await sha256OfFile(refactPath);
+        let spawned = false;
+        let postSpawnPolls = 0;
+
+        const status = await ensureDaemon(refactPath, {
+            pluginVersion: "8.1.0",
+            timeoutMs: 1000,
+            shutdownTimeoutMs: 1000,
+            shutdownPollMs: 1,
+            readDaemonInfo: async () => {
+                if (!spawned) {
+                    return daemonStatus("8.1.0", 8488, undefined, "stale-sha256");
+                }
+                postSpawnPolls += 1;
+                return postSpawnPolls <= 2
+                    ? daemonStatus("8.1.0", 8488, undefined, "foreign-sha256")
+                    : daemonStatus("8.1.0", 8488, undefined, expected);
+            },
+            shutdownDaemon: async () => undefined,
+            spawnDaemon: () => { spawned = true; },
+            isProcessRunning: () => false,
+            sleep: async () => undefined,
+        });
+
+        assert.strictEqual(status.executable_sha256, expected);
+        assert.ok(postSpawnPolls > 2, `wrong-hash replacement must be rejected during polling (polls=${postSpawnPolls})`);
+    } finally {
+        fs.rmSync(assetPath, { recursive: true, force: true });
+    }
+}
+
+async function runDaemonExecutableHashMatchReuseTest() {
+    const assetPath = fs.mkdtempSync(path.join(os.tmpdir(), "refact-daemon-hash-match-"));
+    try {
+        const refactPath = resolveBundledRefactPath(assetPath);
+        writeExecutable(refactPath, "matching executable bytes");
+        const executableSha256 = await sha256OfFile(refactPath);
+        let shutdownCalled = false;
+        let spawned = false;
+
+        const status = await ensureDaemon(refactPath, {
+            pluginVersion: "8.1.0",
+            readDaemonInfo: async () => daemonStatus("8.1.0", 8488, undefined, executableSha256),
+            shutdownDaemon: async () => { shutdownCalled = true; },
+            spawnDaemon: () => { spawned = true; },
+        });
+
+        assert.strictEqual(status.executable_sha256, executableSha256);
+        assert.strictEqual(shutdownCalled, false);
+        assert.strictEqual(spawned, false);
+    } finally {
+        fs.rmSync(assetPath, { recursive: true, force: true });
+    }
+}
+
 async function runDaemonUpgradeTimeoutTest() {
     const assetPath = fs.mkdtempSync(path.join(os.tmpdir(), "refact-daemon-upgrade-timeout-"));
     try {
@@ -817,6 +924,29 @@ async function runCompatibleDaemonSkipsMissingBinaryTest() {
     assert.strictEqual(status.version, "8.1.0");
     assert.strictEqual(reads, 1);
     assert.strictEqual(spawned, false);
+}
+
+async function runSha256OfFileCacheTest() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-sha256-cache-"));
+    try {
+        const filePath = path.join(root, "refact");
+        fs.writeFileSync(filePath, "first");
+        const first = await sha256OfFile(filePath);
+        const second = await sha256OfFile(filePath);
+        assert.strictEqual(first, second);
+        assert.strictEqual(first, sha256FileSync(filePath));
+
+        fs.writeFileSync(filePath, "second content");
+        const changedTime = new Date(Date.now() + 1000);
+        fs.utimesSync(filePath, changedTime, changedTime);
+        const third = await sha256OfFile(filePath);
+        assert.strictEqual(third, sha256FileSync(filePath));
+        assert.notStrictEqual(third, first);
+
+        assert.strictEqual(await sha256OfFile(path.join(root, "missing")), undefined);
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
 }
 
 async function runDaemonJsonDiscoveryTest() {
@@ -1297,10 +1427,11 @@ function openProjectResponse(projectId: string, root: string): string {
     return JSON.stringify({ ["project_id"]: projectId, slug: projectId, root, pinned: false });
 }
 
-function daemonStatus(version = "8.1.0", port = 8488, authToken?: string): DaemonStatus {
+function daemonStatus(version = "8.1.0", port = 8488, authToken?: string, executableSha256?: string): DaemonStatus {
     const status = {} as DaemonStatus;
     status.pid = 1;
     status.version = version;
+    status.executable_sha256 = executableSha256;
     status.port = port;
     status.started_at_ms = 0;
     status.uptime_secs = 0;

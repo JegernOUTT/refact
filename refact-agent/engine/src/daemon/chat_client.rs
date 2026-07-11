@@ -369,6 +369,7 @@ mod tests {
             port: 8488,
             bind: "0.0.0.0".to_string(),
             version: "1".to_string(),
+            executable_sha256: None,
             auth_token: None,
             started_at_ms: 0,
             hostname_local: "host.local".to_string(),

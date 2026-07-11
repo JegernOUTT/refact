@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import * as fetchH2 from "fetch-h2";
 import { spawn, type StdioOptions } from "child_process";
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -34,6 +35,7 @@ export type WorkerInfo = {
 export type DaemonStatus = {
     pid: number;
     version: string;
+    executable_sha256?: string | null;
     port: number;
     started_at_ms: number;
     uptime_secs: number;
@@ -84,6 +86,7 @@ type SpawnDaemon = (binPath: string, options?: DaemonClientOptions) => void | Pr
 
 export type FindDaemonOptions = DaemonClientOptions & {
     pluginVersion?: string;
+    expectedExecutableSha256?: string;
     readDaemonInfo?: ReadDaemonInfo;
 };
 
@@ -312,6 +315,55 @@ export function isPluginNewerThanDaemon(pluginVersion: string | undefined, daemo
     return compareVersions(pluginVersion, daemonVersion) > 0;
 }
 
+export function daemonExecutableMatchesExpected(
+    status: DaemonStatus,
+    pluginVersion: string | undefined,
+    expectedExecutableSha256: string | undefined,
+): boolean {
+    if (isPluginNewerThanDaemon(pluginVersion, status.version)) {
+        return false;
+    }
+    if ((status.version ?? "").trim() !== (pluginVersion ?? "").trim()) {
+        return true;
+    }
+    const expectedHash = expectedExecutableSha256?.trim();
+    if (!expectedHash) {
+        return true;
+    }
+    const actualHash = status.executable_sha256?.trim();
+    if (!actualHash) {
+        return true;
+    }
+    return actualHash === expectedHash;
+}
+
+type Sha256CacheEntry = {
+    size: number;
+    mtimeMs: number;
+    sha256: string;
+};
+
+const sha256Cache = new Map<string, Sha256CacheEntry>();
+
+export async function sha256OfFile(filePath: string): Promise<string | undefined> {
+    const absolutePath = path.resolve(filePath);
+    try {
+        const stat = await fs.promises.stat(absolutePath);
+        if (!stat.isFile()) {
+            return undefined;
+        }
+        const cached = sha256Cache.get(absolutePath);
+        if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+            return cached.sha256;
+        }
+        const sha256 = await sha256File(absolutePath);
+        sha256Cache.set(absolutePath, { size: stat.size, mtimeMs: stat.mtimeMs, sha256 });
+        return sha256;
+    } catch {
+        return undefined;
+    }
+}
+
 type ParsedVersion = {
     core: [number, number, number];
     prerelease?: string[];
@@ -451,7 +503,7 @@ export async function findExistingDaemon(options: FindDaemonOptions = {}): Promi
     const readInfo = options.readDaemonInfo ?? readDaemonInfo;
     for (const endpoint of daemonEndpoints(options)) {
         const status = await readInfo(endpoint.port, endpoint.authToken);
-        if (status && !isPluginNewerThanDaemon(options.pluginVersion, status.version)) {
+        if (status && daemonExecutableMatchesExpected(status, options.pluginVersion, options.expectedExecutableSha256)) {
             return daemonStatusForEndpoint(status, endpoint);
         }
     }
@@ -459,6 +511,7 @@ export async function findExistingDaemon(options: FindDaemonOptions = {}): Promi
 }
 
 export async function ensureDaemon(binPath: string, options: EnsureDaemonOptions = {}): Promise<DaemonStatus> {
+    const expectedExecutableSha256 = await sha256OfFile(binPath);
     const preferredEndpoint = daemonEndpoints(options)[0];
     const timeoutMs = options.timeoutMs ?? DAEMON_POLL_TIMEOUT_MS;
     const shutdownTimeoutMs = options.shutdownTimeoutMs ?? DAEMON_SHUTDOWN_TIMEOUT_MS;
@@ -477,7 +530,7 @@ export async function ensureDaemon(binPath: string, options: EnsureDaemonOptions
             continue;
         }
         const candidate = daemonStatusForEndpoint(status, endpoint);
-        if (!isPluginNewerThanDaemon(options.pluginVersion, candidate.version)) {
+        if (daemonExecutableMatchesExpected(candidate, options.pluginVersion, expectedExecutableSha256)) {
             return candidate;
         }
         if (!current) {
@@ -510,6 +563,8 @@ export async function ensureDaemon(binPath: string, options: EnsureDaemonOptions
             () => mergeDaemonEndpoints(daemonEndpoints(options), [preferredEndpoint, ...(currentEndpoint ? [currentEndpoint] : [])]),
             timeoutMs,
             minimumVersion,
+            options.pluginVersion,
+            expectedExecutableSha256,
             sleep,
             now,
             readInfo,
@@ -593,6 +648,8 @@ async function pollDaemon(
     endpoints: () => DaemonEndpoint[],
     timeoutMs: number,
     minimumVersion: string | undefined,
+    pluginVersion: string | undefined,
+    expectedExecutableSha256: string | undefined,
     sleep: (ms: number) => Promise<void>,
     now: () => number,
     readInfo: ReadDaemonInfo,
@@ -604,7 +661,9 @@ async function pollDaemon(
         lastPort = candidates[0]?.port ?? lastPort;
         for (const endpoint of candidates) {
             const status = await readInfo(endpoint.port, endpoint.authToken);
-            if (status && (!minimumVersion || compareVersions(status.version, minimumVersion) >= 0)) {
+            if (status
+                && (!minimumVersion || compareVersions(status.version, minimumVersion) >= 0)
+                && daemonExecutableMatchesExpected(status, pluginVersion, expectedExecutableSha256)) {
                 return daemonStatusForEndpoint(status, endpoint);
             }
         }
@@ -660,6 +719,16 @@ function defaultIsProcessRunning(pid: number): boolean {
 
 function delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function sha256File(filePath: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const hash = crypto.createHash("sha256");
+        const stream = fs.createReadStream(filePath);
+        stream.on("data", chunk => hash.update(chunk));
+        stream.once("error", reject);
+        stream.once("end", () => resolve(hash.digest("hex")));
+    });
 }
 
 async function requestJsonWithAuthRetry<T>(

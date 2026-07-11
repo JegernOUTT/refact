@@ -88,6 +88,23 @@ export function extractRefactVersion(output: string | undefined): string | undef
 }
 
 export async function resolveRefactBinary(options: RefactBinaryResolverOptions): Promise<string> {
+    const local = await resolveLocalRefactBinaryOrNull(options);
+    if (local) {
+        return local;
+    }
+
+    const platform = options.platform ?? process.platform;
+    const arch = options.arch ?? process.arch;
+    const homeDir = options.homeDir ?? os.homedir();
+    const runVersion = options.runVersion ?? readRefactVersion;
+    try {
+        return await downloadPinnedRefactBinary({ ...options, platform, arch, homeDir, runVersion });
+    } catch (error) {
+        throw new Error(refactBinaryResolutionFailureMessage(options.pinnedVersion, error));
+    }
+}
+
+export async function resolveLocalRefactBinaryOrNull(options: RefactBinaryResolverOptions): Promise<string | undefined> {
     const explicitPath = options.explicitPath?.trim();
     if (explicitPath) {
         return path.resolve(explicitPath);
@@ -95,7 +112,6 @@ export async function resolveRefactBinary(options: RefactBinaryResolverOptions):
 
     const minVersion = options.minVersion;
     const platform = options.platform ?? process.platform;
-    const arch = options.arch ?? process.arch;
     const homeDir = options.homeDir ?? os.homedir();
     const runVersion = options.runVersion ?? readRefactVersion;
     const bundledDir = options.bundledDir?.trim();
@@ -110,12 +126,7 @@ export async function resolveRefactBinary(options: RefactBinaryResolverOptions):
             return candidate;
         }
     }
-
-    try {
-        return await downloadPinnedRefactBinary({ ...options, platform, arch, homeDir, runVersion });
-    } catch (error) {
-        throw new Error(refactBinaryResolutionFailureMessage(options.pinnedVersion, error));
-    }
+    return undefined;
 }
 
 function refactBinaryResolutionFailureMessage(version: string, error: unknown): string {

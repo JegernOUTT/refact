@@ -308,7 +308,15 @@ export class RustBinaryBlob {
         this.warn_about_ignored_roots(rootSelection);
 
         const pluginVersion = this.plugin_version();
-        let daemon = await refactDaemon.findExistingDaemon({ port: daemonPort, pluginVersion });
+        const localBinPath = await refactBinary.resolveLocalRefactBinaryOrNull({
+            explicitPath: vscode.workspace.getConfiguration().get<string>("refactai.binaryPath")?.trim(),
+            bundledDir: this.asset_path,
+            minVersion: pluginVersion,
+            pinnedVersion: pluginVersion,
+            cacheDir: this.binary_cache_path,
+        });
+        const expectedExecutableSha256 = localBinPath ? await refactDaemon.sha256OfFile(localBinPath) : undefined;
+        let daemon = await refactDaemon.findExistingDaemon({ port: daemonPort, pluginVersion, expectedExecutableSha256 });
         if (!this.is_current_generation(generation)) {
             return;
         }

@@ -223,6 +223,38 @@ class RefactBinaryResolverTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun resolveLocalOrNullReturnsCompatibleSharedBinaryWithoutDownloading() {
+        val root = Files.createTempDirectory("refact-binary-resolver-local-shared")
+        val shared = sharedRefactBinaryPath(root.resolve("home"), "Linux")
+        try {
+            writeBinary(shared)
+
+            val resolved = RefactBinaryResolver.resolveLocalOrNull(options(root = root))
+
+            assertEquals(shared.toString(), resolved)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun resolveLocalOrNullReturnsNullInsteadOfDownloading() {
+        val root = Files.createTempDirectory("refact-binary-resolver-local-none")
+        try {
+            val resolved = RefactBinaryResolver.resolveLocalOrNull(
+                options(
+                    root = root,
+                    downloader = { _, _ -> throw AssertionError("resolveLocalOrNull must never download") },
+                )
+            )
+
+            assertEquals(null, resolved)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
 }
 
 private fun options(

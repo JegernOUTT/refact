@@ -521,12 +521,38 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             .getOrNull()
             ?: return null
         val requiredVersion = requiredDaemonVersion()
-        return if (versionIsOlder(status.version, requiredVersion)) {
+        if (versionIsOlder(status.version, requiredVersion)) {
             logger.info("LSP daemon version ${status.version} is older than plugin $requiredVersion")
-            null
-        } else {
-            status
+            return null
         }
+        val expectedExecutableSha256 = if (shouldVerifyDaemonExecutableHash(status, requiredVersion)) {
+            localBinaryExecutableSha256OrNull(requiredVersion)
+        } else {
+            null
+        }
+        if (!daemonStatusMatchesExpected(status, requiredVersion, expectedExecutableSha256)) {
+            logger.info(
+                "LSP daemon version ${status.version} runs executable ${status.executableSha256} " +
+                    "but the local binary is $expectedExecutableSha256; forcing daemon upgrade",
+            )
+            return null
+        }
+        return status
+    }
+
+    protected open fun localBinaryExecutableSha256OrNull(requiredVersion: String): String? {
+        val localBinary = runCatching {
+            RefactBinaryResolver.resolveLocalOrNull(
+                RefactBinaryResolverOptions(
+                    explicitPath = InferenceGlobalContext.refactBinaryPath,
+                    bundledDir = getThisPlugin()?.pluginPath,
+                    minVersion = requiredVersion,
+                    pinnedVersion = requiredVersion,
+                    cacheDir = BIN_CACHE_DIR,
+                ),
+            )
+        }.getOrNull() ?: return null
+        return RefactBinaryHashCache.sha256OrNull(java.nio.file.Path.of(localBinary))
     }
 
     protected open fun requiredDaemonVersion(): String {

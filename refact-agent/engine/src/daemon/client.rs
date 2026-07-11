@@ -152,20 +152,34 @@ pub async fn ping_daemon(info: &DaemonInfo) -> DaemonPingStatus {
 }
 
 pub async fn ensure_daemon_running() -> Result<DaemonInfo, String> {
-    if let Some(info) = shutdown_for_upgrade_if_older(env!("CARGO_PKG_VERSION")).await? {
+    if let Some(info) = shutdown_for_upgrade_if_stale(env!("CARGO_PKG_VERSION")).await? {
         return Ok(info);
     }
     ensure_daemon_running_with_starter(spawn_detached_daemon).await
 }
 
 pub async fn shutdown_for_upgrade_if_older(my_version: &str) -> Result<Option<DaemonInfo>, String> {
-    let Some(info) = read_daemon_json()
+    shutdown_for_upgrade_if_stale(my_version).await
+}
+
+pub async fn shutdown_for_upgrade_if_stale(my_version: &str) -> Result<Option<DaemonInfo>, String> {
+    let Some(mut info) = read_daemon_json()
         .await
         .map_err(|error| error.to_string())?
     else {
         return Ok(None);
     };
-    if !version_is_older(&info.version, my_version) {
+    if info.executable_sha256.is_none() {
+        if let Ok(live) = get_json::<Value>(&info, "/daemon/v1/status").await {
+            if let Some(version) = live.get("version").and_then(Value::as_str) {
+                info.version = version.to_string();
+            }
+            if let Some(hash) = live.get("executable_sha256").and_then(Value::as_str) {
+                info.executable_sha256 = Some(hash.to_string());
+            }
+        }
+    }
+    if !daemon_needs_upgrade(&info, my_version) {
         return Ok(None);
     }
     match ping_daemon(&info).await {
@@ -180,6 +194,22 @@ pub async fn shutdown_for_upgrade_if_older(my_version: &str) -> Result<Option<Da
     }
     let upgraded = ensure_daemon_running_with_starter(spawn_detached_daemon).await?;
     Ok(Some(upgraded))
+}
+
+fn daemon_needs_upgrade(info: &DaemonInfo, my_version: &str) -> bool {
+    if version_is_older(&info.version, my_version) {
+        return true;
+    }
+    if info.version.trim() != my_version.trim() {
+        return false;
+    }
+    let Some(running_hash) = info.executable_sha256.as_deref() else {
+        return false;
+    };
+    let Some(current_hash) = crate::daemon::state::current_executable_sha256() else {
+        return false;
+    };
+    running_hash != current_hash
 }
 
 pub async fn get_json<T: DeserializeOwned>(
@@ -616,6 +646,42 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn daemon_needs_upgrade_detects_older_version() {
+        let mut info = daemon_info(8488, None);
+        info.version = "0.0.1".to_string();
+        assert!(daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn daemon_needs_upgrade_keeps_newer_version() {
+        let mut info = daemon_info(8488, None);
+        info.version = "999.0.0".to_string();
+        info.executable_sha256 = Some("differs-from-current".to_string());
+        assert!(!daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn daemon_needs_upgrade_same_version_without_hash_is_kept() {
+        let info = daemon_info(8488, None);
+        assert!(!daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn daemon_needs_upgrade_same_version_same_hash_is_kept() {
+        let mut info = daemon_info(8488, None);
+        info.executable_sha256 = crate::daemon::state::current_executable_sha256();
+        assert!(info.executable_sha256.is_some());
+        assert!(!daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn daemon_needs_upgrade_same_version_different_hash_upgrades() {
+        let mut info = daemon_info(8488, None);
+        info.executable_sha256 = Some("0".repeat(64));
+        assert!(daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+    }
+
     #[tokio::test]
     async fn read_daemon_json_path_reports_corrupt_json() {
         let dir = tempfile::tempdir().unwrap();
@@ -640,6 +706,7 @@ mod tests {
             port,
             bind: "127.0.0.1".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            executable_sha256: None,
             auth_token: auth_token.map(str::to_string),
             started_at_ms: 0,
             hostname_local: "test.local".to_string(),

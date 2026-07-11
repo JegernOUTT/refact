@@ -2223,6 +2223,7 @@ mod tests {
             port,
             bind: "127.0.0.1".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            executable_sha256: None,
             auth_token: Some("secret".to_string()),
             started_at_ms: 0,
             hostname_local: "test.local".to_string(),

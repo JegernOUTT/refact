@@ -428,14 +428,15 @@ class RefactDaemonClientTest {
         val status = ensureDaemonWithHealthGate(
             status = { current },
             pluginVersion = "8.0.0",
+            expectedExecutableSha256 = null,
             commands = listOf(DaemonSpawnCommand(listOf("refact-lsp", "daemon"))),
             spawnCandidate = { spawns += 1 },
-            pollCandidate = { _, _ ->
+            pollCandidate = { _, _, _ ->
                 polls += 1
                 DaemonStatus(pid = 44, version = "9.0.0")
             },
             shutdown = { _, _ -> shutdowns += 1 },
-            waitUntilDown = { _, _ ->
+            waitUntilDown = { _, _, _ ->
                 waitUntilDowns += 1
                 null
             },
@@ -458,15 +459,17 @@ class RefactDaemonClientTest {
         val status = ensureDaemonWithHealthGate(
             status = { current },
             pluginVersion = "8.2.0",
+            expectedExecutableSha256 = null,
             commands = listOf(DaemonSpawnCommand(listOf("refact", "daemon"))),
             spawnCandidate = { spawns += 1 },
-            pollCandidate = { expectedVersion, rejectedPid ->
+            pollCandidate = { expectedVersion, rejectedPid, expectedHash ->
                 assertEquals("8.2.0", expectedVersion)
                 assertEquals(33, rejectedPid)
+                assertEquals(null, expectedHash)
                 DaemonStatus(pid = 44, version = "8.2.0")
             },
             shutdown = { _, _ -> shutdowns += 1 },
-            waitUntilDown = { current, expectedVersion ->
+            waitUntilDown = { current, expectedVersion, _ ->
                 assertEquals(33, current.pid)
                 assertEquals("8.2.0", expectedVersion)
                 waits += 1
@@ -478,9 +481,9 @@ class RefactDaemonClientTest {
         assertEquals(1, spawns)
         assertEquals(1, shutdowns)
         assertEquals(1, waits)
-        assertFalse(spawnedDaemonStatusAccepted(DaemonStatus(pid = 33, version = "8.2.0"), "8.2.0", 33))
-        assertFalse(spawnedDaemonStatusAccepted(DaemonStatus(pid = 44, version = "8.1.0"), "8.2.0", 33))
-        assertTrue(spawnedDaemonStatusAccepted(DaemonStatus(pid = 44, version = "8.2.0"), "8.2.0", 33))
+        assertFalse(spawnedDaemonStatusAccepted(DaemonStatus(pid = 33, version = "8.2.0"), "8.2.0", 33, null))
+        assertFalse(spawnedDaemonStatusAccepted(DaemonStatus(pid = 44, version = "8.1.0"), "8.2.0", 33, null))
+        assertTrue(spawnedDaemonStatusAccepted(DaemonStatus(pid = 44, version = "8.2.0"), "8.2.0", 33, null))
     }
 
     @Test
@@ -495,14 +498,15 @@ class RefactDaemonClientTest {
         val status = ensureDaemonWithHealthGate(
             status = { current },
             pluginVersion = "8.2.0",
+            expectedExecutableSha256 = null,
             commands = listOf(DaemonSpawnCommand(listOf("refact", "daemon"))),
             spawnCandidate = { spawns += 1 },
-            pollCandidate = { _, _ ->
+            pollCandidate = { _, _, _ ->
                 polls += 1
                 compatible
             },
             shutdown = { _, _ -> shutdowns += 1 },
-            waitUntilDown = { oldDaemon, expectedVersion ->
+            waitUntilDown = { oldDaemon, expectedVersion, _ ->
                 assertEquals(current, oldDaemon)
                 assertEquals("8.2.0", expectedVersion)
                 waits += 1
@@ -515,6 +519,135 @@ class RefactDaemonClientTest {
         assertEquals(0, polls)
         assertEquals(1, shutdowns)
         assertEquals(1, waits)
+    }
+
+    @Test
+    fun daemonStatusMatchingHonorsExecutableHashOnlyForSameVersion() {
+        val newer = DaemonStatus(pid = 1, version = "9.0.0", executableSha256 = "bbb")
+        assertTrue(daemonStatusMatchesExpected(newer, "8.2.3", "aaa"))
+
+        val older = DaemonStatus(pid = 1, version = "8.2.2", executableSha256 = "aaa")
+        assertFalse(daemonStatusMatchesExpected(older, "8.2.3", "aaa"))
+
+        val sameVersionSameHash = DaemonStatus(pid = 1, version = "8.2.3", executableSha256 = "aaa")
+        assertTrue(daemonStatusMatchesExpected(sameVersionSameHash, "8.2.3", "aaa"))
+
+        val sameVersionDifferentHash = DaemonStatus(pid = 1, version = "8.2.3", executableSha256 = "bbb")
+        assertFalse(daemonStatusMatchesExpected(sameVersionDifferentHash, "8.2.3", "aaa"))
+
+        val sameVersionNoReportedHash = DaemonStatus(pid = 1, version = "8.2.3")
+        assertTrue(daemonStatusMatchesExpected(sameVersionNoReportedHash, "8.2.3", "aaa"))
+
+        val sameVersionNoExpectedHash = DaemonStatus(pid = 1, version = "8.2.3", executableSha256 = "bbb")
+        assertTrue(daemonStatusMatchesExpected(sameVersionNoExpectedHash, "8.2.3", null))
+    }
+
+    @Test
+    fun executableHashVerificationOnlyAppliesToSameVersionDaemonsReportingHashes() {
+        assertTrue(shouldVerifyDaemonExecutableHash(DaemonStatus(pid = 1, version = "8.2.3", executableSha256 = "aaa"), "8.2.3"))
+        assertFalse(shouldVerifyDaemonExecutableHash(DaemonStatus(pid = 1, version = "8.2.3"), "8.2.3"))
+        assertFalse(shouldVerifyDaemonExecutableHash(DaemonStatus(pid = 1, version = "9.0.0", executableSha256 = "aaa"), "8.2.3"))
+        assertFalse(shouldVerifyDaemonExecutableHash(DaemonStatus(pid = 1, version = "8.2.3", executableSha256 = ""), "8.2.3"))
+    }
+
+    @Test
+    fun binaryHashCacheRecomputesWhenFileChanges() {
+        val root = Files.createTempDirectory("refact-binary-hash-cache")
+        try {
+            val binary = root.resolve("refact")
+            Files.writeString(binary, "engine-build-one")
+            Files.setLastModifiedTime(binary, java.nio.file.attribute.FileTime.fromMillis(1_000_000))
+
+            val first = RefactBinaryHashCache.sha256OrNull(binary)
+            val cached = RefactBinaryHashCache.sha256OrNull(binary)
+            assertEquals(first, cached)
+            assertEquals(64, first?.length)
+
+            Files.writeString(binary, "engine-build-two!")
+            Files.setLastModifiedTime(binary, java.nio.file.attribute.FileTime.fromMillis(2_000_000))
+            val changed = RefactBinaryHashCache.sha256OrNull(binary)
+            assertTrue(first != changed)
+
+            assertEquals(null, RefactBinaryHashCache.sha256OrNull(root.resolve("missing")))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun upgradeWaitAndSpawnPollRejectSameVersionDifferentHashReplacements() {
+        val old = DaemonStatus(pid = 33, version = "8.2.3", executableSha256 = "old", port = 8488)
+        val wrongHash = DaemonStatus(pid = 44, version = "8.2.3", executableSha256 = "bbb", port = 8488)
+        val rightHash = DaemonStatus(pid = 44, version = "8.2.3", executableSha256 = "aaa", port = 8488)
+        val noHash = DaemonStatus(pid = 44, version = "8.2.3", port = 8488)
+
+        assertFalse(daemonUpgradeWaitSatisfied(old, wrongHash, "8.2.3", "aaa"))
+        assertTrue(daemonUpgradeWaitSatisfied(old, rightHash, "8.2.3", "aaa"))
+        assertTrue(daemonUpgradeWaitSatisfied(old, noHash, "8.2.3", "aaa"))
+
+        assertFalse(daemonUpgradeWaitFinished(old, wrongHash, old, "8.2.3", "aaa"))
+        assertTrue(daemonUpgradeWaitFinished(old, wrongHash, null, "8.2.3", "aaa"))
+
+        assertFalse(spawnedDaemonStatusAccepted(wrongHash, "8.2.3", null, "aaa"))
+        assertTrue(spawnedDaemonStatusAccepted(rightHash, "8.2.3", null, "aaa"))
+        assertTrue(spawnedDaemonStatusAccepted(noHash, "8.2.3", null, "aaa"))
+    }
+
+    @Test
+    fun sameVersionDifferentExecutableHashTriggersDaemonUpgrade() {
+        val current = DaemonStatus(pid = 33, version = "8.2.3", executableSha256 = "bbb", port = 8488)
+        val replacement = DaemonStatus(pid = 44, version = "8.2.3", executableSha256 = "aaa", port = 8488)
+        var spawns = 0
+        var shutdowns = 0
+        var waits = 0
+
+        val status = ensureDaemonWithHealthGate(
+            status = { current },
+            pluginVersion = "8.2.3",
+            expectedExecutableSha256 = "aaa",
+            commands = listOf(DaemonSpawnCommand(listOf("refact", "daemon"))),
+            spawnCandidate = { spawns += 1 },
+            pollCandidate = { _, rejectedPid, expectedHash ->
+                assertEquals(33, rejectedPid)
+                assertEquals("aaa", expectedHash)
+                replacement
+            },
+            shutdown = { _, reason ->
+                assertEquals("upgrade", reason)
+                shutdowns += 1
+            },
+            waitUntilDown = { _, _, _ ->
+                waits += 1
+                null
+            },
+        )
+
+        assertEquals(replacement, status)
+        assertEquals(1, shutdowns)
+        assertEquals(1, waits)
+        assertEquals(1, spawns)
+    }
+
+    @Test
+    fun sameVersionSameExecutableHashReusesRunningDaemon() {
+        val current = DaemonStatus(pid = 33, version = "8.2.3", executableSha256 = "aaa", port = 8488)
+        var spawns = 0
+        var shutdowns = 0
+
+        val status = ensureDaemonWithHealthGate(
+            status = { current },
+            pluginVersion = "8.2.3",
+            expectedExecutableSha256 = "aaa",
+            commands = listOf(DaemonSpawnCommand(listOf("refact", "daemon"))),
+            spawnCandidate = { spawns += 1 },
+            pollCandidate = { _, _, _ -> current },
+            shutdown = { _, _ -> shutdowns += 1 },
+            waitUntilDown = { _, _, _ -> null },
+        )
+
+        assertEquals(current, status)
+        assertEquals(0, spawns)
+        assertEquals(0, shutdowns)
     }
 
     @Test
@@ -880,6 +1013,7 @@ class RefactDaemonClientTest {
                 DaemonStatus(pid = 44, version = "8.2.0", port = 9499),
                 DaemonStatus(pid = 33, version = "8.1.0", port = 8488),
                 "8.2.0",
+                null,
             )
         )
         assertTrue(
@@ -888,6 +1022,7 @@ class RefactDaemonClientTest {
                 DaemonStatus(pid = 33, version = "8.1.0", port = 8488),
                 null,
                 "8.2.0",
+                null,
             )
         )
         assertFalse(
@@ -896,6 +1031,7 @@ class RefactDaemonClientTest {
                 DaemonStatus(pid = 33, version = "8.2.0", port = 8488),
                 DaemonStatus(pid = 33, version = "8.2.0", port = 8488),
                 "8.2.0",
+                null,
             )
         )
         assertFalse(
@@ -904,6 +1040,7 @@ class RefactDaemonClientTest {
                 DaemonStatus(pid = 44, version = "8.1.0", port = 9499),
                 DaemonStatus(pid = 33, version = "8.1.0", port = 8488),
                 "8.2.0",
+                null,
             )
         )
     }

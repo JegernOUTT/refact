@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock as SyncRwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, RwLock};
 
@@ -37,6 +38,7 @@ pub struct DaemonInfo {
     pub port: u16,
     pub bind: String,
     pub version: String,
+    pub executable_sha256: Option<String>,
     pub auth_token: Option<String>,
     pub started_at_ms: u64,
     pub hostname_local: String,
@@ -89,6 +91,49 @@ pub struct DaemonState {
     shutdown_requested: AtomicBool,
 }
 
+pub fn executable_sha256_for_path(path: &Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("failed to open executable {}: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("failed to read executable {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+static CURRENT_EXECUTABLE_SHA256: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+pub fn current_executable_sha256() -> Option<String> {
+    CURRENT_EXECUTABLE_SHA256
+        .get_or_init(|| {
+            let path = std::env::current_exe().ok()?;
+            executable_sha256_for_path(&path).ok()
+        })
+        .clone()
+}
+
+pub fn current_executable_sha256_if_computed() -> Option<String> {
+    CURRENT_EXECUTABLE_SHA256.get().cloned().flatten()
+}
+
+pub fn warm_current_executable_sha256() {
+    if CURRENT_EXECUTABLE_SHA256.get().is_some() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("refact-exe-sha256".to_string())
+        .spawn(|| {
+            let _ = current_executable_sha256();
+        });
+}
+
 impl DaemonState {
     pub fn new(config: DaemonConfig, events: EventBus, auth_token: Option<String>) -> Arc<Self> {
         Self::new_with_daemon_dir(
@@ -139,6 +184,7 @@ impl DaemonState {
             .no_proxy()
             .build()
             .expect("failed to build daemon proxy stream http client");
+        warm_current_executable_sha256();
         Arc::new(Self {
             config,
             auth_token,
@@ -154,6 +200,7 @@ impl DaemonState {
             proxy_stream_client,
             events,
             daemon_dir,
+
             cron_pending,
             shutdown_tx,
             shutdown_requested: AtomicBool::new(false),
@@ -522,6 +569,7 @@ impl DaemonState {
             port,
             bind,
             version: self.version.clone(),
+            executable_sha256: current_executable_sha256_if_computed(),
             auth_token: self.auth_token.clone(),
             started_at_ms: self.started_at_ms,
             hostname_local: host_local.clone(),
@@ -756,6 +804,7 @@ mod tests {
             port: 8488,
             bind: "127.0.0.1".to_string(),
             version: "1.2.3".to_string(),
+            executable_sha256: None,
             auth_token: None,
             started_at_ms: 100,
             hostname_local: "host.local".to_string(),
@@ -791,6 +840,18 @@ mod tests {
             last_active_ms: 100,
             settings: ProjectSettings::default(),
         }
+    }
+
+    #[test]
+    fn executable_sha256_for_path_hashes_file_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bin");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            executable_sha256_for_path(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(executable_sha256_for_path(&dir.path().join("missing")).is_err());
     }
 
     #[test]
