@@ -31,7 +31,7 @@
   {
     "provider_ids": ["openai", "openrouter", "openai-codex", "openai_codex", "github-copilot"],
     "family_prefixes": ["gpt"],
-    "model_prefixes": ["gpt-5.4", "gpt-5.5"],
+    "model_prefixes": ["gpt-5.4", "gpt-5.5", "gpt-5.6"],
     "reasoning_effort_options": ["minimal", "low", "medium", "high", "xhigh"],
     "supports_adaptive_thinking_budget": false,
     "supports_thinking_budget": false

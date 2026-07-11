@@ -1264,6 +1264,29 @@ mod tests {
     }
 
     #[test]
+    fn gpt56_variants_use_expanded_reasoning_controls() {
+        let openai_codex_provider = ModelsDevProvider {
+            id: "openai_codex".to_string(),
+            name: "OpenAI Codex".to_string(),
+            ..Default::default()
+        };
+        let gpt56_sol = ModelsDevModel {
+            id: "gpt-5.6-sol".to_string(),
+            name: "gpt-5.6-sol".to_string(),
+            reasoning: Some(true),
+            ..Default::default()
+        };
+        let controls =
+            reasoning_controls_for_model("openai_codex", &openai_codex_provider, &gpt56_sol);
+        assert_eq!(
+            controls.reasoning_effort_options,
+            effort(&["minimal", "low", "medium", "high", "xhigh"])
+        );
+        assert!(!controls.supports_adaptive_thinking_budget);
+        assert!(!controls.supports_thinking_budget);
+    }
+
+    #[test]
     fn reasoning_model_stem_collapses_dates_and_suffixes() {
         assert_eq!(
             reasoning_model_stem("claude-opus-4-20250514"),

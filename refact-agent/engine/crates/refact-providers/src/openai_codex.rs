@@ -25,6 +25,7 @@ const CHATGPT_CODEX_MODELS_URL: &str =
 const CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL: &str = "wss://chatgpt.com/backend-api/codex/responses";
 const CHATGPT_CODEX_RESET_REDEEM_URL: &str =
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
+const GPT_5_6_CODEX_CONTEXT_WINDOW: usize = 372_000;
 const GPT_5_5_CODEX_CONTEXT_WINDOW: usize = 272_000;
 pub const CODEX_WEBSOCKET_ENDPOINT_HEADER: &str =
     "x-refact-internal-openai-codex-websocket-endpoint";
@@ -98,7 +99,10 @@ fn is_gpt5_subscription_model(id: &str) -> bool {
         return false;
     }
     let suffixes: Vec<&str> = parts.collect();
-    matches!(suffixes.as_slice(), [] | ["mini"])
+    matches!(
+        suffixes.as_slice(),
+        [] | ["mini"] | ["sol"] | ["terra"] | ["luna"]
+    )
 }
 
 fn is_openai_codex_catalog_model(id: &str) -> bool {
@@ -115,13 +119,40 @@ fn is_openai_api_codex_live_model(id: &str) -> bool {
 }
 
 fn codex_model_context_window_override(id: &str) -> Option<usize> {
-    (normalized_model_id(id) == "gpt-5.5").then_some(GPT_5_5_CODEX_CONTEXT_WINDOW)
+    match normalized_model_id(id).as_str() {
+        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => Some(GPT_5_6_CODEX_CONTEXT_WINDOW),
+        "gpt-5.5" => Some(GPT_5_5_CODEX_CONTEXT_WINDOW),
+        _ => None,
+    }
 }
 
 fn apply_codex_model_overrides(model: &mut AvailableModel) {
     if let Some(n_ctx) = codex_model_context_window_override(&model.id) {
         model.n_ctx = n_ctx;
     }
+}
+
+fn codex_builtin_fallback_caps(model_id: &str) -> Option<ModelCapabilities> {
+    let n_ctx = codex_model_context_window_override(model_id)?;
+    Some(ModelCapabilities {
+        n_ctx,
+        max_output_tokens: 16_384,
+        supports_tools: true,
+        supports_parallel_tools: true,
+        supports_vision: true,
+        reasoning_effort_options: Some(vec![
+            "minimal".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+        ]),
+        ..Default::default()
+    })
+}
+
+fn codex_builtin_fallback_model_ids() -> &'static [&'static str] {
+    &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
 }
 
 fn openai_codex_catalog_model_id(capability_key: &str) -> Option<&str> {
@@ -1038,6 +1069,20 @@ impl OpenAICodexProvider {
                 model
             });
         }
+        for model_id in codex_builtin_fallback_model_ids() {
+            if models_map.contains_key(*model_id) {
+                continue;
+            }
+            let Some(caps) = codex_builtin_fallback_caps(model_id) else {
+                continue;
+            };
+            let enabled = enabled_set.contains(*model_id);
+            let pricing = self.custom_model_pricing(model_id);
+            models_map.insert(
+                (*model_id).to_string(),
+                AvailableModel::from_caps(model_id, &caps, enabled, pricing),
+            );
+        }
         models_map
     }
 
@@ -1452,7 +1497,7 @@ impl ProviderTrait for OpenAICodexProvider {
 
     fn model_filter_regex(&self) -> Option<&'static str> {
         Some(
-            r"(?i)^(?:gpt[-_]5(?:\.[0-9]+)?(?:[-_]mini)?|gpt[-_][a-z0-9.]+(?:[-_][a-z0-9.]+)*[-_]codex(?:[-_](?:latest|preview|mini|spark|max))?)$",
+            r"(?i)^(?:gpt[-_]5(?:\.[0-9]+)?(?:[-_](?:mini|sol|terra|luna))?|gpt[-_][a-z0-9.]+(?:[-_][a-z0-9.]+)*[-_]codex(?:[-_](?:latest|preview|mini|spark|max))?)$",
         )
     }
 
@@ -1789,6 +1834,10 @@ mod tests {
             ("openai/gpt-5.3-codex".to_string(), codex_caps(253_000)),
             ("openai-codex/gpt-5.4".to_string(), codex_caps(404_000)),
             ("openai_codex/gpt-5.5".to_string(), codex_caps(405_000)),
+            (
+                "openai_codex/gpt-5.6-sol".to_string(),
+                codex_caps(1_050_000),
+            ),
         ])
     }
 
@@ -1844,6 +1893,111 @@ mod tests {
         assert!(ids.contains(&"gpt-5.3-codex"));
         assert!(ids.contains(&"gpt-5.4"));
         assert!(ids.contains(&"gpt-5.5"));
+        assert!(ids.contains(&"gpt-5.6-sol"));
+        assert!(ids.contains(&"gpt-5.6-terra"));
+        assert!(ids.contains(&"gpt-5.6-luna"));
+    }
+
+    #[test]
+    fn codex_model_filters_accept_known_gpt56_variants_only() {
+        assert!(super::is_chatgpt_codex_live_model("gpt-5.6-sol"));
+        assert!(super::is_chatgpt_codex_live_model("gpt-5.6-terra"));
+        assert!(super::is_chatgpt_codex_live_model("gpt-5.6-luna"));
+        assert!(super::is_chatgpt_codex_live_model("gpt-5.6"));
+        assert!(!super::is_chatgpt_codex_live_model("gpt-5.6-random"));
+        assert!(!super::is_chatgpt_codex_live_model("gpt-5.6-sol-preview"));
+
+        let regex = regex::Regex::new(OpenAICodexProvider::default().model_filter_regex().unwrap())
+            .unwrap();
+        assert!(regex.is_match("gpt-5.6-sol"));
+        assert!(regex.is_match("gpt-5.6-terra"));
+        assert!(regex.is_match("gpt-5.6-luna"));
+        assert!(!regex.is_match("gpt-5.6-random"));
+    }
+
+    #[test]
+    fn codex_context_overrides_pin_subscription_windows() {
+        assert_eq!(
+            super::codex_model_context_window_override("gpt-5.6-sol"),
+            Some(372_000)
+        );
+        assert_eq!(
+            super::codex_model_context_window_override("gpt-5.6-terra"),
+            Some(372_000)
+        );
+        assert_eq!(
+            super::codex_model_context_window_override("gpt-5.6-luna"),
+            Some(372_000)
+        );
+        assert_eq!(
+            super::codex_model_context_window_override("gpt-5.5"),
+            Some(272_000)
+        );
+        assert_eq!(super::codex_model_context_window_override("gpt-5.6"), None);
+        assert_eq!(super::codex_model_context_window_override("gpt-5.4"), None);
+    }
+
+    #[test]
+    fn catalog_fallback_adds_gpt56_variants_when_models_dev_is_stale() {
+        let p = provider_with_oauth("tok", "acct-123");
+        let stale_caps = HashMap::from([("openai_codex/gpt-5.5".to_string(), codex_caps(405_000))]);
+        let models = p.fetch_models_from_catalog(&stale_caps);
+
+        for model_id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            let model = models.iter().find(|m| m.id == model_id).unwrap();
+            assert_eq!(model.n_ctx, 372_000);
+            assert_eq!(
+                model.reasoning_effort_options.as_deref(),
+                Some(
+                    &[
+                        "minimal".to_string(),
+                        "low".to_string(),
+                        "medium".to_string(),
+                        "high".to_string(),
+                        "xhigh".to_string(),
+                    ][..]
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn codex_context_overrides_apply_to_live_and_catalog_models() {
+        let p = provider_with_oauth("tok", "acct-123");
+        let catalog_models = p.fetch_models_from_catalog(&caps_map());
+        let sol_from_catalog = catalog_models
+            .iter()
+            .find(|m| m.id == "gpt-5.6-sol")
+            .unwrap();
+        let gpt55_from_catalog = catalog_models.iter().find(|m| m.id == "gpt-5.5").unwrap();
+        assert_eq!(sol_from_catalog.n_ctx, 372_000);
+        assert_eq!(gpt55_from_catalog.n_ctx, 272_000);
+
+        let live_models = p.available_models_from_live_chatgpt_models(
+            &[
+                json!({
+                    "slug": "gpt-5.6-terra",
+                    "display_name": "GPT-5.6 Terra",
+                    "max_context_window": 1_050_000,
+                    "supported": true,
+                    "supported_reasoning_levels": ["low", "medium", "high", "xhigh"]
+                }),
+                json!({
+                    "slug": "gpt-5.6-random",
+                    "display_name": "GPT-5.6 Random",
+                    "max_context_window": 372_000,
+                    "supported": true
+                }),
+            ],
+            &caps_map(),
+        );
+        let terra = live_models
+            .iter()
+            .find(|m| m.id == "gpt-5.6-terra")
+            .unwrap();
+        assert_eq!(terra.n_ctx, 372_000);
+        assert_eq!(terra.display_name.as_deref(), Some("GPT-5.6 Terra"));
+        assert!(!live_models.iter().any(|m| m.id == "gpt-5.6-random"));
     }
 
     #[test]
