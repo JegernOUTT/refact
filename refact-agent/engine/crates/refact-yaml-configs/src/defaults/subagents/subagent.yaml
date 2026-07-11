@@ -27,7 +27,6 @@ tool:
     - expected_result
 
 subchat:
-  context_mode: bare
   stateful: true
   max_steps: 50
   model_type: light

@@ -6,7 +6,6 @@ expose_as_tool: false
 has_code: true
 
 subchat:
-  context_mode: fork
   stateful: false
   model_type: light
   n_ctx: 200000

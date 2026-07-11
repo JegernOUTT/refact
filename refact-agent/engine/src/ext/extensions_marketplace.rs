@@ -1181,7 +1181,6 @@ fn convert_markdown_subagent_to_yaml(item_id: &str, content: &str) -> Result<Str
         yaml.push_str("    - task\n");
     }
     yaml.push_str("subchat:\n");
-    yaml.push_str("  context_mode: bare\n");
     yaml.push_str("  stateful: false\n");
     yaml.push_str("  model_type: default\n");
     yaml.push_str("  max_steps: 10\n");

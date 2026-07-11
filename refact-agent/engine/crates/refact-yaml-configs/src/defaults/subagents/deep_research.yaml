@@ -17,7 +17,6 @@ tool:
     - research_query
 
 subchat:
-  context_mode: bare
   stateful: false
   max_steps: 30
   model_type: default

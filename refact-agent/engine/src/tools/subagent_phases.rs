@@ -17,6 +17,11 @@ use crate::worktrees::scope::ExecutionScope;
 pub const DEFAULT_MAX_FILES: usize = 30;
 pub const DEFAULT_GATHER_MAX_STEPS: usize = 10;
 
+pub const MAX_GATHER_SEED_TOTAL_CHARS: usize = 32_000;
+pub const MAX_GATHER_SEED_USER_MSG_CHARS: usize = 4_000;
+pub const MAX_GATHER_SEED_ASSISTANT_MSG_CHARS: usize = 4_000;
+pub const MAX_GATHER_SEED_TOOL_MSG_CHARS: usize = 2_000;
+
 pub static DEFAULT_GATHER_FILES_TOOLS: &[&str] = &[
     "tree",
     "cat",
@@ -169,6 +174,104 @@ fn build_gather_instruction(params: &GatherFilesParams<'_>) -> String {
     instruction
 }
 
+fn cap_seed_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max_chars).collect();
+    format!("{}\n...[truncated for gather seed]", kept)
+}
+
+/// Convert the parent transcript into a bounded, tool-plumbing-free seed.
+///
+/// User messages are always kept (they define the task). Assistant text and
+/// tool outputs are included newest-first within the remaining budget, then
+/// re-emitted in chronological order. Tool outputs become plain assistant
+/// text so the seed never carries dangling tool_call pairings, and images
+/// are replaced with placeholders.
+pub fn build_gather_seed_messages(external_messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    struct SeedItem {
+        idx: usize,
+        role: &'static str,
+        text: String,
+    }
+
+    let mut items: Vec<SeedItem> = Vec::new();
+    for (idx, msg) in external_messages.iter().enumerate() {
+        let text = msg.content.to_text_with_image_placeholders();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let item = match msg.role.as_str() {
+            "user" => SeedItem {
+                idx,
+                role: "user",
+                text: cap_seed_text(trimmed, MAX_GATHER_SEED_USER_MSG_CHARS),
+            },
+            "assistant" => SeedItem {
+                idx,
+                role: "assistant",
+                text: cap_seed_text(trimmed, MAX_GATHER_SEED_ASSISTANT_MSG_CHARS),
+            },
+            "tool" => SeedItem {
+                idx,
+                role: "assistant",
+                text: format!(
+                    "Tool result:\n{}",
+                    cap_seed_text(trimmed, MAX_GATHER_SEED_TOOL_MSG_CHARS)
+                ),
+            },
+            _ => continue,
+        };
+        items.push(item);
+    }
+
+    let user_budget: usize = items
+        .iter()
+        .filter(|item| item.role == "user")
+        .map(|item| item.text.chars().count())
+        .sum();
+    let mut remaining = MAX_GATHER_SEED_TOTAL_CHARS.saturating_sub(user_budget);
+
+    let mut included: Vec<bool> = items.iter().map(|item| item.role == "user").collect();
+    for (pos, item) in items.iter().enumerate().rev() {
+        if included[pos] {
+            continue;
+        }
+        let cost = item.text.chars().count();
+        if cost <= remaining {
+            remaining -= cost;
+            included[pos] = true;
+        }
+    }
+
+    let dropped = included.iter().filter(|kept| !**kept).count();
+    let mut out: Vec<ChatMessage> = Vec::new();
+    if dropped > 0 {
+        out.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(format!(
+                "[{} earlier conversation message(s) omitted to fit the gather seed budget]",
+                dropped
+            )),
+            ..Default::default()
+        });
+    }
+    for (pos, item) in items.iter().enumerate() {
+        if !included[pos] {
+            continue;
+        }
+        let _ = item.idx;
+        out.push(ChatMessage {
+            role: item.role.to_string(),
+            content: ChatContent::SimpleText(item.text.clone()),
+            ..Default::default()
+        });
+    }
+    out
+}
+
 fn merge_files_with_seeds(seeds: &[String], parsed: Vec<String>, max_files: usize) -> Vec<String> {
     let mut out = Vec::with_capacity(seeds.len() + parsed.len());
     let mut seen = HashSet::new();
@@ -288,11 +391,7 @@ pub async fn gather_files_phase(
         ..Default::default()
     }];
 
-    for msg in external_messages.iter() {
-        if msg.role == "user" || msg.role == "assistant" || msg.role == "tool" {
-            messages.push(msg.clone());
-        }
-    }
+    messages.extend(build_gather_seed_messages(&external_messages));
 
     let gather_instruction = build_gather_instruction(params);
 
@@ -387,4 +486,74 @@ pub async fn gather_files_phase(
     send_files_gathered_message(&parent_subchat_tx, &tool_call_id, &valid_paths).await;
 
     Ok(valid_paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(role: &str, text: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn gather_seed_keeps_users_and_converts_tools() {
+        let external = vec![
+            msg("system", "should be skipped"),
+            msg("user", "review the compression"),
+            msg("assistant", "looking"),
+            msg("tool", "grep output here"),
+            msg("event", "hidden event"),
+        ];
+        let seed = build_gather_seed_messages(&external);
+        assert_eq!(seed.len(), 3);
+        assert_eq!(seed[0].role, "user");
+        assert_eq!(seed[1].role, "assistant");
+        assert_eq!(seed[2].role, "assistant");
+        assert!(seed[2]
+            .content
+            .content_text_only()
+            .starts_with("Tool result:"));
+        assert!(seed.iter().all(|m| m.tool_calls.is_none()));
+        assert!(seed.iter().all(|m| m.tool_call_id.is_empty()));
+    }
+
+    #[test]
+    fn gather_seed_drops_oldest_non_user_when_over_budget() {
+        let big = "x".repeat(MAX_GATHER_SEED_TOOL_MSG_CHARS);
+        let mut external = vec![msg("user", "task statement")];
+        for _ in 0..40 {
+            external.push(msg("tool", &big));
+        }
+        let seed = build_gather_seed_messages(&external);
+        let total: usize = seed
+            .iter()
+            .map(|m| m.content.content_text_only().chars().count())
+            .sum();
+        assert!(total <= MAX_GATHER_SEED_TOTAL_CHARS + 200);
+        assert!(seed
+            .first()
+            .unwrap()
+            .content
+            .content_text_only()
+            .contains("omitted"));
+        assert_eq!(
+            seed.iter().filter(|m| m.role == "user").count(),
+            1,
+            "user message must survive budget pressure"
+        );
+    }
+
+    #[test]
+    fn gather_seed_caps_each_message() {
+        let huge = "y".repeat(MAX_GATHER_SEED_USER_MSG_CHARS * 3);
+        let seed = build_gather_seed_messages(&[msg("user", &huge)]);
+        let text = seed[0].content.content_text_only();
+        assert!(text.chars().count() <= MAX_GATHER_SEED_USER_MSG_CHARS + 50);
+        assert!(text.contains("[truncated for gather seed]"));
+    }
 }

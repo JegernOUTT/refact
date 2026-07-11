@@ -414,6 +414,7 @@ pub async fn prepare_chat_passthrough(
     // 8. Strip thinking blocks if thinking is disabled
     let mut limited_adapted_msgs =
         strip_thinking_blocks_if_disabled(limited_msgs, sampling_parameters, &model_record);
+    limited_adapted_msgs = replace_images_for_text_only_model(limited_adapted_msgs, &model_record);
 
     // OpenAI Responses API stateful multi-turn: when we chain with previous_response_id,
     // we should send only the new tail items (tool outputs and/or new user message).
@@ -648,6 +649,35 @@ fn strip_thinking_blocks_if_disabled(
     }
 }
 
+pub(crate) const TEXT_ONLY_IMAGE_PLACEHOLDER: &str =
+    "[image removed: model does not support image input]";
+
+/// Replace image (and other non-text) multimodal elements with a text
+/// placeholder when the target model has no multimodality support, so
+/// text-only providers never receive `image_url` content parts.
+fn replace_images_for_text_only_model(
+    messages: Vec<ChatMessage>,
+    model_record: &ChatModelRecord,
+) -> Vec<ChatMessage> {
+    if model_record.supports_multimodality {
+        return messages;
+    }
+    messages
+        .into_iter()
+        .map(|mut msg| {
+            if let ChatContent::Multimodal(elements) = &mut msg.content {
+                for element in elements.iter_mut() {
+                    if element.m_type != "text" {
+                        element.m_type = "text".to_string();
+                        element.m_content = TEXT_ONLY_IMAGE_PLACEHOLDER.to_string();
+                    }
+                }
+            }
+            msg
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,6 +689,51 @@ mod tests {
     use refact_tool_api::{ToolSource, ToolSourceType};
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn images_replaced_for_text_only_model() {
+        use crate::call_validation::MultimodalElement;
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::Multimodal(vec![
+                MultimodalElement {
+                    m_type: "text".to_string(),
+                    m_content: "look at this".to_string(),
+                },
+                MultimodalElement {
+                    m_type: "image/png".to_string(),
+                    m_content: "base64data".to_string(),
+                },
+            ]),
+            ..Default::default()
+        }];
+
+        let text_only = ChatModelRecord {
+            supports_multimodality: false,
+            ..Default::default()
+        };
+        let out = replace_images_for_text_only_model(messages.clone(), &text_only);
+        match &out[0].content {
+            ChatContent::Multimodal(elements) => {
+                assert_eq!(elements[0].m_content, "look at this");
+                assert_eq!(elements[1].m_type, "text");
+                assert_eq!(elements[1].m_content, TEXT_ONLY_IMAGE_PLACEHOLDER);
+            }
+            other => panic!("unexpected content: {:?}", other),
+        }
+
+        let vision = ChatModelRecord {
+            supports_multimodality: true,
+            ..Default::default()
+        };
+        let untouched = replace_images_for_text_only_model(messages, &vision);
+        match &untouched[0].content {
+            ChatContent::Multimodal(elements) => {
+                assert_eq!(elements[1].m_type, "image/png");
+            }
+            other => panic!("unexpected content: {:?}", other),
+        }
+    }
 
     fn make_model_record_effort(effort_options: Option<Vec<&str>>) -> ChatModelRecord {
         ChatModelRecord {

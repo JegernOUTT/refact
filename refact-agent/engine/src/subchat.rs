@@ -36,6 +36,8 @@ use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeReference;
 
 const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 1;
+const MAX_EMPTY_CHOICE_RETRIES: usize = 2;
+const EMPTY_CHOICE_ERROR_PREFIX: &str = "subchat produced no visible content";
 const PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS: usize = 2_000;
 const PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS: usize = 512;
 const PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED: &str = "\n...[truncated]";
@@ -317,6 +319,7 @@ pub struct SubchatConfig {
     pub subchat_depth: usize,
     pub final_step_force_answer: bool,
     pub buddy_meta: Option<crate::buddy::types::BuddyThreadMeta>,
+    pub step_progress: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
 fn should_stream_thinking_progress(tool_name: &str) -> bool {
@@ -950,6 +953,24 @@ pub async fn resolve_subchat_config_with_parent(
 
     let worktree = resolve_subchat_worktree(gcx.clone(), parent_id.as_deref(), worktree).await;
 
+    if let Some(requested_tools) = tools.as_ref().filter(|list| !list.is_empty()) {
+        let known_names: std::collections::HashSet<String> = get_available_tools(gcx.clone())
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect();
+        let unknown: Vec<&String> = requested_tools
+            .iter()
+            .filter(|name| !known_names.contains(*name))
+            .collect();
+        if !unknown.is_empty() {
+            warn!(
+                "subchat '{}' requested tools not present in the registry (check config tool names): {:?}",
+                tool_name, unknown,
+            );
+        }
+    }
+
     Ok(SubchatConfig {
         tool_name: tool_name.to_string(),
         stateful,
@@ -978,6 +999,7 @@ pub async fn resolve_subchat_config_with_parent(
         subchat_depth,
         final_step_force_answer: false,
         buddy_meta: None,
+        step_progress: None,
     })
 }
 
@@ -1336,9 +1358,13 @@ async fn run_subchat_loop(
     usage: &mut ChatUsage,
 ) -> Result<Vec<ChatMessage>, String> {
     let mut context_limit_compact_count = 0usize;
+    let mut empty_choice_retry_count = 0usize;
     for step in 0..config.max_steps {
         if is_aborted(&config.abort_flag) {
             return Err("Aborted".to_string());
+        }
+        if let Some(step_progress) = &config.step_progress {
+            step_progress(step + 1);
         }
 
         let results = loop {
@@ -1386,6 +1412,17 @@ async fn run_subchat_loop(
                         false,
                     )
                     .await;
+                }
+                Err(ref err)
+                    if err.starts_with(EMPTY_CHOICE_ERROR_PREFIX)
+                        && empty_choice_retry_count < MAX_EMPTY_CHOICE_RETRIES
+                        && !is_aborted(&config.abort_flag) =>
+                {
+                    empty_choice_retry_count += 1;
+                    warn!(
+                        "Subchat returned no visible content, retrying step ({}/{}): {}",
+                        empty_choice_retry_count, MAX_EMPTY_CHOICE_RETRIES, err,
+                    );
                 }
                 Err(err) => return Err(err),
             }
@@ -1442,6 +1479,7 @@ async fn run_forced_final_answer_turn(
     usage: &mut ChatUsage,
 ) -> Result<Vec<ChatMessage>, String> {
     messages.push(final_step_wrap_up_message(config.max_steps));
+    let mut empty_choice_retry_count = 0usize;
 
     let results = loop {
         match subchat_single_internal(
@@ -1489,6 +1527,17 @@ async fn run_forced_final_answer_turn(
                 )
                 .await;
             }
+            Err(ref err)
+                if err.starts_with(EMPTY_CHOICE_ERROR_PREFIX)
+                    && empty_choice_retry_count < MAX_EMPTY_CHOICE_RETRIES
+                    && !is_aborted(&config.abort_flag) =>
+            {
+                empty_choice_retry_count += 1;
+                warn!(
+                    "Subchat forced final answer returned no visible content, retrying ({}/{}): {}",
+                    empty_choice_retry_count, MAX_EMPTY_CHOICE_RETRIES, err,
+                );
+            }
             Err(err) => return Err(err),
         }
     };
@@ -1507,6 +1556,7 @@ async fn run_subchat_with_wrap_up(
 ) -> Result<Vec<ChatMessage>, String> {
     let mut step_n = 0;
     let mut context_limit_compact_count = 0usize;
+    let mut empty_choice_retry_count = 0usize;
 
     loop {
         if is_aborted(&config.abort_flag) {
@@ -1585,6 +1635,17 @@ async fn run_subchat_with_wrap_up(
                         false,
                     )
                     .await;
+                }
+                Err(ref err)
+                    if err.starts_with(EMPTY_CHOICE_ERROR_PREFIX)
+                        && empty_choice_retry_count < MAX_EMPTY_CHOICE_RETRIES
+                        && !is_aborted(&config.abort_flag) =>
+                {
+                    empty_choice_retry_count += 1;
+                    warn!(
+                        "Subchat returned no visible content, retrying step ({}/{}): {}",
+                        empty_choice_retry_count, MAX_EMPTY_CHOICE_RETRIES, err,
+                    );
                 }
                 Err(err) => return Err(err),
             }
@@ -2211,7 +2272,7 @@ fn convert_results_to_messages(
 
     if all_choices.is_empty() {
         return Err(format!(
-            "subchat produced no visible content (finish_reason: {})",
+            "{EMPTY_CHOICE_ERROR_PREFIX} (finish_reason: {})",
             skipped_empty_finish_reason.unwrap_or_else(|| "unknown".to_string())
         ));
     }
@@ -2420,6 +2481,7 @@ mod subchat_tests {
             subchat_depth: 1,
             final_step_force_answer: false,
             buddy_meta: None,
+            step_progress: None,
         }
     }
 
@@ -2735,6 +2797,7 @@ mod subchat_tests {
             subchat_depth: 1,
             final_step_force_answer: false,
             buddy_meta: None,
+            step_progress: None,
         };
 
         let thread = stateful_thread_from_config("subchat-1", &config);
@@ -2784,6 +2847,7 @@ mod subchat_tests {
             subchat_depth: 1,
             final_step_force_answer: false,
             buddy_meta: None,
+            step_progress: None,
         };
 
         let thread = stateful_thread_from_config("subchat-1", &config);
@@ -2839,6 +2903,7 @@ mod subchat_tests {
             subchat_depth: 1,
             final_step_force_answer: false,
             buddy_meta: None,
+            step_progress: None,
         };
 
         assert_eq!(config.task_meta, Some(task_meta));
@@ -3053,6 +3118,7 @@ mod subchat_tests {
             subchat_depth: 1,
             final_step_force_answer: false,
             buddy_meta: None,
+            step_progress: None,
         };
         let mut thread = stateful_thread_from_config("child-ref-chat", &config);
 

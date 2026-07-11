@@ -326,6 +326,19 @@ impl BackgroundAgentRegistry {
         Ok(())
     }
 
+    pub async fn count_active_for_parent_root(&self, parent_root_chat_id: &str) -> usize {
+        self.records
+            .read()
+            .await
+            .values()
+            .filter(|record| {
+                record.parent_root_chat_id.as_deref() == Some(parent_root_chat_id)
+                    || record.parent_chat_id == parent_root_chat_id
+            })
+            .filter(|record| !record.status.is_terminal())
+            .count()
+    }
+
     pub async fn list_for_parent(
         &self,
         parent_chat_id: &str,

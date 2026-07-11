@@ -300,6 +300,13 @@ pub fn try_apply_goal_nudge(
         let context = session.goal.as_ref().map(nudge_context).unwrap_or_default();
         session.add_message(goal_nudge_event(trigger, reason, now_ms, &context));
     }
+    if matches!(reason, GoalNudgeReason::Error) {
+        // A turn that ends in an error never records usage-based progress, so
+        // nothing else advances no_progress_turns. Count the error nudge itself
+        // as a no-progress turn so exponential backoff and quiescence still
+        // engage for permanent-error loops instead of retrying forever.
+        session.goal_note_no_progress_turn();
+    }
     session.goal_record_nudge(now_ms);
     GoalNudgeOutcome::Nudged(reason)
 }
@@ -705,6 +712,17 @@ mod tests {
             GoalNudgeOutcome::Nudged(GoalNudgeReason::Error)
         );
 
+        assert_eq!(
+            error_session
+                .goal
+                .as_ref()
+                .unwrap()
+                .progress
+                .no_progress_turns,
+            1,
+            "an error nudge must count as a no-progress turn"
+        );
+
         let mut generating = active_goal_session();
         generating.set_runtime_state(SessionState::Generating, None);
         generating.last_activity = now - Duration::from_secs(10);
@@ -712,6 +730,43 @@ mod tests {
             apply_monitor(&mut generating, 10_000, now),
             GoalNudgeOutcome::Nudged(GoalNudgeReason::GeneratingNoTokens)
         );
+    }
+
+    #[test]
+    fn goal_monitor_error_loop_reaches_quiescence() {
+        let mut session = unlimited_no_progress_session();
+        let now = Instant::now();
+        session.set_runtime_state(SessionState::Error, Some("permanent 400".to_string()));
+        session.last_activity = now - Duration::from_secs(10);
+
+        let mut now_ms = 10_000u64;
+        let mut nudges = 0u32;
+        let mut quiescent_seen = false;
+        for _ in 0..20 {
+            match apply_monitor(&mut session, now_ms, now) {
+                GoalNudgeOutcome::Nudged(GoalNudgeReason::Error) => {
+                    nudges += 1;
+                    session.command_queue.clear();
+                    session
+                        .set_runtime_state(SessionState::Error, Some("permanent 400".to_string()));
+                    session.last_activity = now - Duration::from_secs(10);
+                }
+                GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown) => {}
+                GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent) => {
+                    quiescent_seen = true;
+                    break;
+                }
+                other => panic!("unexpected outcome: {:?}", other),
+            }
+            now_ms += 600_000;
+        }
+
+        assert_eq!(
+            nudges, QUIESCENCE_NUDGES,
+            "error loop must stop nudging after the quiescence threshold"
+        );
+        assert!(quiescent_seen, "error loop must reach quiescence");
+        assert!(goal_is_quiescent(&session));
     }
 
     #[test]

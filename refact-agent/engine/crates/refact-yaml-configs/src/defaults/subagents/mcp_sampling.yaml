@@ -6,7 +6,6 @@ expose_as_tool: false
 has_code: false
 
 subchat:
-  context_mode: bare
   stateful: false
   max_steps: 1
   model_type: light

@@ -5,7 +5,6 @@ description: Gentle nudge when the user pauses with local work in progress
 expose_as_tool: false
 has_code: false
 subchat:
-  context_mode: default
   stateful: false
   max_steps: 3
   model_type: light

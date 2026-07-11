@@ -18,7 +18,6 @@ tool:
     - task
 
 subchat:
-  context_mode: bare
   stateful: false
   model_type: default
   max_steps: 10

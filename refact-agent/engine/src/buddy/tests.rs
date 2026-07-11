@@ -6557,7 +6557,8 @@ async fn draft_customization_change_reads_real_editor_storage() {
         .unwrap();
     let skill_raw = "---\nname: real_skill\ndescription: Real skill\n---\nKeep exact skill body\n";
     let command_raw = "---\ndescription: Real command\n---\nKeep exact command body\n";
-    let delegate_raw = "schema_version: 1\nid: real_delegate\ntitle: Real Delegate\nsubchat:\n  context_mode: bare\n";
+    let delegate_raw =
+        "schema_version: 1\nid: real_delegate\ntitle: Real Delegate\nsubchat:\n  stateful: false\n";
     let mode_raw = "schema_version: 1\nid: real_mode\ntitle: Real Mode\nprompt: Keep mode prompt\n";
     let hooks_raw = "hooks:\n  SessionStart:\n    - hooks:\n        - type: command\n          command: echo start\n";
     tokio::fs::write(config_dir.join("skills/real_skill/SKILL.md"), skill_raw)
@@ -6775,7 +6776,7 @@ async fn customization_delegates_route_writes_subagent_storage_and_consumes() {
         &app,
         DraftKind::Delegate,
         "Delegate Draft",
-        "schema_version: 1\nid: helper_delegate\ntitle: Helper\nsubchat:\n  context_mode: bare\n",
+        "schema_version: 1\nid: helper_delegate\ntitle: Helper\nsubchat:\n  stateful: false\n",
     )
     .await;
     let body = serde_json::to_vec(&serde_json::json!({
@@ -6783,7 +6784,7 @@ async fn customization_delegates_route_writes_subagent_storage_and_consumes() {
             "schema_version": 1,
             "id": "helper_delegate",
             "title": "Helper",
-            "subchat": { "context_mode": "bare" }
+            "subchat": { "stateful": false }
         },
         "scope": "global",
         "draft_id": draft_id.clone()

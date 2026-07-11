@@ -330,13 +330,6 @@ const SubchatTab: React.FC<{
   return (
     <>
       <div className={styles.fieldGrid}>
-        <Field label="Context Mode">
-          <FieldText
-            value={safeString(subchat.context_mode) || "bare"}
-            onChange={(value) => patch(["subchat", "context_mode"], value)}
-            placeholder="bare / full / ..."
-          />
-        </Field>
         <Field label="Model">
           <FieldText
             value={safeString(subchat.model)}

@@ -12,7 +12,6 @@ tool:
   required: []
 
 subchat:
-  context_mode: fork
   stateful: false
   model_type: thinking
   n_ctx: 400000

@@ -390,6 +390,7 @@ async fn run_summary_subchat(
         subchat_depth: parent_depth + 1,
         final_step_force_answer: false,
         buddy_meta: None,
+        step_progress: None,
     };
 
     let messages = vec![ChatMessage::new("user".to_string(), prompt)];

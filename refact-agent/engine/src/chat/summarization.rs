@@ -1503,6 +1503,7 @@ async fn summarize_segment_text(
         subchat_depth: 0,
         final_step_force_answer: false,
         buddy_meta: None,
+        step_progress: None,
     };
 
     let result = run_subchat(gcx, summarize_messages, config)

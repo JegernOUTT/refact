@@ -5,7 +5,6 @@ description: Detect and triage recent compilation failures
 expose_as_tool: false
 has_code: false
 subchat:
-  context_mode: default
   stateful: false
   max_steps: 6
   model_type: light

@@ -53,9 +53,6 @@ impl SubagentConfig {
         if ovr.tool.is_some() {
             result.tool = ovr.tool.clone();
         }
-        if !ovr.subchat.context_mode.is_empty() {
-            result.subchat.context_mode = ovr.subchat.context_mode.clone();
-        }
         if ovr.subchat.stateful {
             result.subchat.stateful = true;
         }
@@ -162,8 +159,6 @@ pub struct ToolParameter {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubchatConfig {
-    #[serde(default = "default_context_mode")]
-    pub context_mode: String,
     #[serde(default)]
     pub stateful: bool,
     #[serde(default)]
@@ -186,10 +181,6 @@ pub struct SubchatConfig {
     pub tokens_for_rag: Option<usize>,
     #[serde(default)]
     pub autonomous_no_confirm: Option<bool>,
-}
-
-fn default_context_mode() -> String {
-    "bare".to_string()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

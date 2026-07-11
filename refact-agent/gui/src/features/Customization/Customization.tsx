@@ -606,7 +606,7 @@ function getDefaultConfig(
         specific: false,
         expose_as_tool: true,
         has_code: false,
-        subchat: { context_mode: "bare" },
+        subchat: { stateful: false },
         messages: {},
       };
     case "toolbox_commands":

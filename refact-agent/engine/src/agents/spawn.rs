@@ -22,6 +22,9 @@ use crate::global_context::GlobalContext;
 use crate::subchat::{SubchatConfig, SubchatResult, resolve_subchat_config_with_parent};
 use crate::worktrees::types::WorktreeMeta;
 
+pub const MAX_ACTIVE_AGENTS_PER_CHAT: usize = 8;
+const MAX_DIFF_SUMMARY_PATHSPECS: usize = 100;
+
 #[cfg(test)]
 type TestRunner = Arc<
     dyn Fn(
@@ -124,6 +127,21 @@ pub async fn spawn_background_agent(
             MAX_SUBCHAT_DEPTH
         ));
     }
+    let active_agents = app
+        .agents
+        .count_active_for_parent_root(
+            req.parent_root_chat_id
+                .as_deref()
+                .unwrap_or(&req.parent_chat_id),
+        )
+        .await;
+    if active_agents >= MAX_ACTIVE_AGENTS_PER_CHAT {
+        return Err(format!(
+            "Too many concurrent background agents for this chat ({} running, limit {}). \
+             Wait for some to finish, or cancel them with agent_cancel.",
+            active_agents, MAX_ACTIVE_AGENTS_PER_CHAT
+        ));
+    }
     let child_chat_id = format!("subchat-{}", Uuid::new_v4());
     let config_name = req.config_name.clone();
     let config_title = req.title.clone();
@@ -167,6 +185,7 @@ pub async fn spawn_background_agent(
             subchat_depth: subchat_depth + 1,
             final_step_force_answer: false,
             buddy_meta: None,
+            step_progress: None,
         }
     } else {
         resolve_subchat_config_with_parent(
@@ -288,6 +307,28 @@ async fn run_spawned_agent(
 ) -> BackgroundAgent {
     config.abort_flag = Some(abort_flag);
     config.final_step_force_answer = true;
+    {
+        let progress_app = app.clone();
+        let progress_agent_id = agent_id.clone();
+        config.step_progress = Some(Arc::new(move |step: usize| {
+            let app = progress_app.clone();
+            let agent_id = progress_agent_id.clone();
+            tokio::spawn(async move {
+                if let Ok(record) = app
+                    .agents
+                    .update_progress(
+                        &agent_id,
+                        format!("step {}", step),
+                        step as u32,
+                        Some(chrono::Utc::now().to_rfc3339()),
+                    )
+                    .await
+                {
+                    emit_background_agent_update(app.clone(), &record).await;
+                }
+            });
+        }));
+    }
     let running = app
         .agents
         .mark_running(&agent_id, child_chat_id.clone())
@@ -295,6 +336,12 @@ async fn run_spawned_agent(
     if let Ok(record) = running.as_ref() {
         emit_background_agent_update(app.clone(), record).await;
     }
+
+    let dirty_baseline = if req.kind == BgAgentKind::Delegate {
+        collect_worktree_dirty_files(req.parent_worktree.as_ref()).await
+    } else {
+        std::collections::HashSet::new()
+    };
 
     let result = run_background_subchat(app.gcx.clone(), messages, config).await;
     let final_record = match result {
@@ -309,7 +356,12 @@ async fn run_spawned_agent(
                 .unwrap_or_else(|| NO_TEXT_RESULT_SUMMARY.to_string());
             let (edited_files, diff_summary, conflict_summary) =
                 if req.kind == BgAgentKind::Delegate {
-                    collect_delegate_changes(req.parent_worktree.as_ref()).await
+                    collect_delegate_changes(
+                        req.parent_worktree.as_ref(),
+                        &dirty_baseline,
+                        &req.target_files,
+                    )
+                    .await
                 } else {
                     (Vec::new(), None, None)
                 };
@@ -435,21 +487,60 @@ pub async fn emit_background_agent_update(app: AppState, record: &BackgroundAgen
     });
 }
 
+fn status_paths(root: &Path) -> Vec<String> {
+    git_lines(root, &["status", "--porcelain"])
+        .into_iter()
+        .filter_map(|line| line.get(3..).map(str::trim).map(str::to_string))
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+async fn collect_worktree_dirty_files(
+    worktree: Option<&WorktreeMeta>,
+) -> std::collections::HashSet<String> {
+    let Some(worktree) = worktree else {
+        return std::collections::HashSet::new();
+    };
+    let root = worktree.root.clone();
+    tokio::task::spawn_blocking(move || status_paths(&root).into_iter().collect())
+        .await
+        .unwrap_or_default()
+}
+
 async fn collect_delegate_changes(
     worktree: Option<&WorktreeMeta>,
+    dirty_baseline: &std::collections::HashSet<String>,
+    target_files: &[String],
 ) -> (Vec<String>, Option<String>, Option<String>) {
     let Some(worktree) = worktree else {
         return (Vec::new(), None, None);
     };
     let root = worktree.root.clone();
+    let baseline = dirty_baseline.clone();
+    let targets: Vec<String> = target_files.to_vec();
     tokio::task::spawn_blocking(move || {
-        let edited_files = git_lines(&root, &["status", "--porcelain"])
+        let dirty_now = status_paths(&root);
+        let target_matches = |path: &str| {
+            targets
+                .iter()
+                .any(|t| path == t || path.ends_with(t.trim_start_matches("./")))
+        };
+        let edited_files: Vec<String> = dirty_now
             .into_iter()
-            .filter_map(|line| line.get(3..).map(str::trim).map(str::to_string))
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>();
-        let diff_summary =
-            command_stdout(&root, &["diff", "--stat"]).filter(|text| !text.trim().is_empty());
+            .filter(|path| !baseline.contains(path) || target_matches(path))
+            .collect();
+        let diff_summary = if edited_files.is_empty() {
+            None
+        } else {
+            let mut args: Vec<&str> = vec!["diff", "--stat", "HEAD", "--"];
+            let capped: Vec<&str> = edited_files
+                .iter()
+                .take(MAX_DIFF_SUMMARY_PATHSPECS)
+                .map(String::as_str)
+                .collect();
+            args.extend(capped);
+            command_stdout(&root, &args).filter(|text| !text.trim().is_empty())
+        };
         let conflict_summary = detect_conflicts(&root, &edited_files);
         (edited_files, diff_summary, conflict_summary)
     })

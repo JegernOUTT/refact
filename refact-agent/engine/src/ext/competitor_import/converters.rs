@@ -413,7 +413,6 @@ fn render_subagent_yaml(
     yaml.push_str("  required:\n");
     yaml.push_str("    - task\n");
     yaml.push_str("subchat:\n");
-    yaml.push_str("  context_mode: bare\n");
     yaml.push_str("  stateful: false\n");
     yaml.push_str(&format!("  max_steps: {max_steps}\n"));
     if let Some(model) = model.filter(|model| !model.trim().is_empty()) {

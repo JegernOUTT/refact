@@ -408,7 +408,7 @@ pub(crate) async fn dispatch_action(
                             .to_string()
                     }
                     BuddyAction::DraftDelegate { .. } => format!(
-                        "schema_version: 1\nid: {}\ntitle: {}\nsubchat:\n  context_mode: bare\n",
+                        "schema_version: 1\nid: {}\ntitle: {}\nsubchat:\n  stateful: false\n",
                         label, label
                     ),
                     _ => format!(
@@ -822,7 +822,7 @@ fn default_customization_template(kind: CustomizationKind, id: &str) -> String {
                 .to_string()
         }
         CustomizationKind::Delegate => format!(
-            "schema_version: 1\nid: {}\ntitle: {}\nsubchat:\n  context_mode: bare\n",
+            "schema_version: 1\nid: {}\ntitle: {}\nsubchat:\n  stateful: false\n",
             id, id
         ),
         CustomizationKind::Hook => "hooks: {}\n".to_string(),

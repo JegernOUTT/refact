@@ -491,7 +491,7 @@ title: Test
 expose_as_tool: true
 has_code: false
 subchat:
-  context_mode: bare
+  stateful: false
 custom_field: custom_value
 another_extra: 123
 "#;
@@ -592,31 +592,6 @@ subchat:
     }
 
     #[test]
-    fn test_subagent_apply_override_context_mode_back_to_bare() {
-        let base: SubagentConfig = serde_yaml::from_str(
-            r#"
-schema_version: 1
-id: base
-subchat:
-  context_mode: default
-"#,
-        )
-        .unwrap();
-        let override_cfg: SubagentConfig = serde_yaml::from_str(
-            r#"
-schema_version: 1
-id: override
-subchat:
-  context_mode: bare
-"#,
-        )
-        .unwrap();
-
-        let result = base.apply_override(&override_cfg);
-        assert_eq!(result.subchat.context_mode, "bare");
-    }
-
-    #[test]
     fn test_toolbox_command_selection_needed() {
         let yaml = r#"
 schema_version: 1
@@ -668,7 +643,7 @@ mod ui_defaults_tests {
 
     #[test]
     fn test_ui_default_subagent_config() {
-        let json = r#"{"schema_version":1,"id":"test_sub","title":"test_sub","description":"","specific":false,"expose_as_tool":true,"has_code":false,"subchat":{"context_mode":"bare"},"messages":{}}"#;
+        let json = r#"{"schema_version":1,"id":"test_sub","title":"test_sub","description":"","specific":false,"expose_as_tool":true,"has_code":false,"subchat":{"stateful":false},"messages":{}}"#;
         let result: Result<SubagentConfig, _> = serde_json::from_str(json);
         assert!(result.is_ok(), "subagent default: {:?}", result.err());
     }

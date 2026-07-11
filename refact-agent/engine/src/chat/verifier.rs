@@ -681,6 +681,7 @@ async fn run_verifier_review(
         subchat_depth: 1,
         final_step_force_answer: false,
         buddy_meta: None,
+        step_progress: None,
     };
     let messages = vec![event(
         EventSubkind::VerifierReport,

@@ -2050,6 +2050,57 @@ impl ChatSession {
         self.touch();
     }
 
+    /// Append a ui-only error message, collapsing repeats: if the same error
+    /// text was already the most recent error (allowing a few hidden `event`
+    /// messages in between, e.g. goal nudges), bump its `repeat_count` and
+    /// emit `MessageUpdated` instead of appending another copy.
+    pub fn append_error_message_deduped(&mut self, error: &str) {
+        const LOOKBACK_PAST_EVENTS: usize = 4;
+        let fresh = make_ui_only_error_message(error);
+        let fresh_text = fresh.content.content_text_only();
+
+        let mut candidate_idx: Option<usize> = None;
+        let mut events_skipped = 0usize;
+        for (idx, message) in self.messages.iter().enumerate().rev() {
+            match message.role.as_str() {
+                "event" if events_skipped < LOOKBACK_PAST_EVENTS => {
+                    events_skipped += 1;
+                }
+                "error" => {
+                    if message.content.content_text_only() == fresh_text {
+                        candidate_idx = Some(idx);
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+
+        if let Some(idx) = candidate_idx {
+            let updated = {
+                let message = &mut self.messages[idx];
+                let count = message
+                    .extra
+                    .get("repeat_count")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(1);
+                message
+                    .extra
+                    .insert("repeat_count".to_string(), serde_json::json!(count + 1));
+                message.clone()
+            };
+            self.emit(ChatEvent::MessageUpdated {
+                message_id: updated.message_id.clone(),
+                message: updated,
+            });
+            self.increment_version();
+            self.touch();
+            return;
+        }
+
+        self.add_message(fresh);
+    }
+
     pub fn finish_stream_with_error(&mut self, error: String) {
         if let Some(mut draft) = self.draft_message.take() {
             if has_displayable_assistant_content(&draft) {
@@ -2068,7 +2119,7 @@ impl ChatSession {
                 });
             }
         }
-        self.add_message(make_ui_only_error_message(&error));
+        self.append_error_message_deduped(&error);
         self.set_runtime_state(SessionState::Error, Some(error.clone()));
         self.touch();
 
