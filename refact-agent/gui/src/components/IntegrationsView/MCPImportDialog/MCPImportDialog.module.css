@@ -1,0 +1,36 @@
+.textarea {
+  min-height: 12rem;
+  font-family: var(--rf-font-mono);
+}
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+}
+
+.resultGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.resultList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  margin: 0;
+  padding-left: var(--rf-space-4);
+}
+
+.successText {
+  color: var(--rf-color-success);
+}
+
+.mutedText {
+  color: var(--rf-color-muted);
+}
+
+.errorText {
+  color: var(--rf-color-danger);
+}

@@ -82,6 +82,7 @@ import { selectFocusedWorkspaceChatId } from "./Workspace";
 import { InternalLinkProvider } from "../contexts/InternalLinkContext";
 import { parseRefactLink } from "../contexts/internalLinkUtils";
 import { ProcessCompletedToasts } from "./Notifications";
+import { MCPInteractionCenter } from "../components/MCPInteractionCenter";
 import { hasUsableEngineEndpoint } from "../services/refact/apiUrl";
 import { isPointerDragHost } from "./ChatPanes/pointerDrag";
 import { PointerDragGhost } from "./ChatPanes/PointerDragGhost";
@@ -652,6 +653,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
           </PageWrapper>
           <ProcessCompletedToasts />
+          <MCPInteractionCenter />
           {isPointerDragHost(config.host) && <PointerDragGhost />}
         </>
       )}

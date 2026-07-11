@@ -48,8 +48,11 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
   useEffect(() => {
     const shouldPoll =
       waitingForCallback ||
-      (!status?.authenticated && status?.auth_type === "oauth2_pkce");
-    setPollingInterval(shouldPoll ? 3000 : status?.authenticated ? 0 : 0);
+      (status !== undefined &&
+        !status.authenticated &&
+        (status.auth_type === "oauth2_pkce" ||
+          (status.needs_login && status.oauth_available)));
+    setPollingInterval(shouldPoll ? 3000 : 0);
   }, [waitingForCallback, status]);
 
   const handleStartOAuth = async () => {
@@ -115,7 +118,10 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
   };
 
   if (isLoading) return null;
-  if (!status || status.auth_type !== "oauth2_pkce") return null;
+  if (!status) return null;
+  const oauthConfigured = status.auth_type === "oauth2_pkce";
+  const oauthOffered = status.needs_login && status.oauth_available;
+  if (!oauthConfigured && !oauthOffered) return null;
 
   const expiresAtMs = Number.isFinite(status.expires_at)
     ? status.expires_at
@@ -246,6 +252,11 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
       variant="glass"
     >
       <Flex direction="column" gap="2">
+        {!oauthConfigured && oauthOffered && (
+          <Text as="p" size="1" color="gray">
+            This server requires authentication. Login with OAuth to connect.
+          </Text>
+        )}
         <Flex align="center" justify="between" gap="2" wrap="wrap">
           <Flex align="center" gap="2">
             {isExpired ? (

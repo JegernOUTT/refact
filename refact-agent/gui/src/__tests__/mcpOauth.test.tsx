@@ -21,7 +21,14 @@ const PRELOADED_STATE = {
 function mockStatus(body: object) {
   server.use(
     http.get("*/v1/mcp/oauth/status", () => {
-      return HttpResponse.json(body);
+      return HttpResponse.json({
+        needs_login: false,
+        oauth_available: false,
+        suggested_scopes: [],
+        expires_at: 0,
+        scopes: [],
+        ...body,
+      });
     }),
   );
 }
@@ -49,6 +56,81 @@ describe("MCPOAuth", () => {
     ).toBeNull();
     expect(screen.queryByText("Authenticated")).toBeNull();
     expect(screen.queryByText("Not authenticated")).toBeNull();
+  });
+
+  test("shows login prompt when auth_type is none but server needs login and oauth is available", async () => {
+    mockStatus({
+      auth_type: "none",
+      authenticated: false,
+      needs_login: true,
+      oauth_available: true,
+    });
+
+    render(<MCPOAuth configPath={CONFIG_PATH} />, {
+      preloadedState: PRELOADED_STATE,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/requires authentication/i)).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /Login with OAuth/i }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  test("renders nothing when server needs login but oauth is not available", async () => {
+    mockStatus({
+      auth_type: "none",
+      authenticated: false,
+      needs_login: true,
+      oauth_available: false,
+    });
+
+    render(<MCPOAuth configPath={CONFIG_PATH} />, {
+      preloadedState: PRELOADED_STATE,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(
+      screen.queryByRole("button", { name: /Login with OAuth/i }),
+    ).toBeNull();
+    expect(screen.queryByText(/requires authentication/i)).toBeNull();
+    expect(screen.queryByText("Not authenticated")).toBeNull();
+  });
+
+  test("login click starts oauth flow when auth_type is none", async () => {
+    mockStatus({
+      auth_type: "none",
+      authenticated: false,
+      needs_login: true,
+      oauth_available: true,
+    });
+    server.use(
+      http.post("*/v1/mcp/oauth/start", () => {
+        return HttpResponse.json({
+          session_id: "s1",
+          authorize_url: "https://auth.example.com/authorize?state=x",
+        });
+      }),
+    );
+
+    const { user } = render(<MCPOAuth configPath={CONFIG_PATH} />, {
+      preloadedState: PRELOADED_STATE,
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Login with OAuth/i }),
+      ).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Login with OAuth/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Waiting for authorization..."),
+      ).toBeInTheDocument();
+    });
   });
 
   test("renders Login button when not authenticated", async () => {
@@ -331,6 +413,9 @@ describe("MCPOAuth", () => {
           authenticated: true,
           expires_at: Date.now() + 3600000,
           scopes: [],
+          needs_login: false,
+          oauth_available: false,
+          suggested_scopes: [],
         });
       }),
     );

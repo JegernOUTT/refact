@@ -69,6 +69,7 @@ import { connectionSlice } from "../features/Connection";
 import { browserSlice } from "../features/Browser";
 import { skillsStatusApi } from "../services/refact/skillsStatus";
 import { mcpServerInfoApi } from "../services/refact/mcpServerInfo";
+import { mcpInteractionsApi } from "../services/refact/mcpInteractions";
 import { mcpMarketplaceApi } from "../services/refact/mcpMarketplace";
 import { extensionsMarketplaceApi } from "../services/refact/extensionsMarketplace";
 import { memoryEnrichmentApi } from "../services/refact/memoryEnrichment";
@@ -130,6 +131,7 @@ const rootReducer = combineSlices(
     [daemonApi.reducerPath]: daemonApi.reducer,
     [skillsStatusApi.reducerPath]: skillsStatusApi.reducer,
     [mcpServerInfoApi.reducerPath]: mcpServerInfoApi.reducer,
+    [mcpInteractionsApi.reducerPath]: mcpInteractionsApi.reducer,
     [chatModesApi.reducerPath]: chatModesApi.reducer,
     [customizationApi.reducerPath]: customizationApi.reducer,
     [projectInformationApi.reducerPath]: projectInformationApi.reducer,
@@ -265,6 +267,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           extensionsApi.middleware,
           pluginsApi.middleware,
           mcpServerInfoApi.middleware,
+          mcpInteractionsApi.middleware,
           mcpMarketplaceApi.middleware,
           extensionsMarketplaceApi.middleware,
           memoryEnrichmentApi.middleware,

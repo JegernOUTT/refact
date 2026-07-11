@@ -37,6 +37,14 @@ export type MCPServerCapabilities = {
   sampling: boolean;
 };
 
+export type MCPProgressInfo = {
+  token: string;
+  progress: number;
+  total?: number;
+  message?: string;
+  updated_at_ms: number;
+};
+
 export type MCPServerInfo = {
   config_path: string;
   status: Record<string, unknown>;
@@ -48,6 +56,7 @@ export type MCPServerInfo = {
   prompts: MCPPromptInfo[];
   capabilities: MCPServerCapabilities;
   logs_tail: string[];
+  active_progress?: MCPProgressInfo[];
 };
 
 export const mcpServerInfoApi = createApi({

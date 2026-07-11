@@ -65,6 +65,8 @@ export interface FieldSelectProps
   value: string;
   options: FieldSelectOption[];
   placeholder?: string;
+  id?: string;
+  "aria-label"?: string;
   onChange: (value: string) => void;
   onCommit?: (value: string) => void;
 }
@@ -231,6 +233,8 @@ export function FieldSelect({
   onCommit,
   options,
   placeholder,
+  id,
+  "aria-label": ariaLabel,
   ...props
 }: FieldSelectProps) {
   return (
@@ -242,7 +246,9 @@ export function FieldSelect({
       }}
     >
       <Select.Trigger
+        aria-label={ariaLabel}
         className={styles.selectTrigger}
+        id={id}
         placeholder={placeholder}
       />
       <Select.Content

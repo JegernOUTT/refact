@@ -760,4 +760,7 @@ export type MCPOAuthStatusResponse = {
   authenticated: boolean;
   expires_at: number;
   scopes: string[];
+  needs_login: boolean;
+  oauth_available: boolean;
+  suggested_scopes: string[];
 };

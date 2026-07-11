@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { Progress } from "@radix-ui/themes";
 import {
   Bolt,
   ChevronDown,
@@ -12,6 +13,7 @@ import {
   useGetMCPServerInfoQuery,
   useReconnectMCPServerMutation,
 } from "../../../services/refact/mcpServerInfo";
+import type { MCPProgressInfo } from "../../../services/refact/mcpServerInfo";
 import { MCPConnectionStatus } from "./MCPConnectionStatus";
 import { MCPToolsList } from "./MCPToolsList";
 import { MCPResourcesList } from "./MCPResourcesList";
@@ -77,6 +79,42 @@ const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
     </Surface>
   );
 };
+
+function progressPercent(progress: MCPProgressInfo): number | undefined {
+  if (!progress.total || progress.total <= 0) {
+    return undefined;
+  }
+
+  return Math.max(0, Math.min(100, (progress.progress / progress.total) * 100));
+}
+
+function ActiveProgress({ entries }: { entries: MCPProgressInfo[] }) {
+  if (entries.length === 0) {
+    return null;
+  }
+
+  return (
+    <CollapsibleSection
+      title="In progress"
+      count={entries.length}
+      defaultExpanded
+    >
+      <Flex direction="column" gap="2">
+        {entries.map((entry) => {
+          const percent = progressPercent(entry);
+          return (
+            <Flex key={entry.token} direction="column" gap="1">
+              <Text size="1" color="gray">
+                {entry.message ?? entry.token}
+              </Text>
+              <Progress value={percent} />
+            </Flex>
+          );
+        })}
+      </Flex>
+    </CollapsibleSection>
+  );
+}
 
 type MCPServerViewProps = {
   configPath: string;
@@ -185,13 +223,15 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
           />
         </CollapsibleSection>
 
+        <ActiveProgress entries={data.active_progress ?? []} />
+
         <CollapsibleSection
           icon={<Icon icon={Settings} size="sm" />}
           title="Tools"
           count={data.tools.length}
           defaultExpanded
         >
-          <MCPToolsList tools={data.tools} />
+          <MCPToolsList tools={data.tools} configPath={configPath} />
         </CollapsibleSection>
 
         {data.resources.length > 0 && (

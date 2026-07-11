@@ -13,7 +13,8 @@ import { NewIntegrations } from "./NewIntegrations";
 import { ProjectIntegrations } from "./ProjectIntegrations";
 import { useAppDispatch } from "../../../hooks";
 import { push } from "../../../features/Pages/pagesSlice";
-import { Button } from "../../ui";
+import { Button, Flex } from "../../ui";
+import { MCPImportDialog } from "../MCPImportDialog";
 import styles from "./DisplayIntegrations.module.css";
 
 type IntegrationsListProps = {
@@ -40,14 +41,17 @@ export const IntegrationsList: FC<IntegrationsListProps> = ({
       title="Integrations"
       description="Connect Refact.ai Agent to command-line tools, MCP servers, and workspace services."
       actions={
-        <Button
-          variant="soft"
-          size="sm"
-          rightIcon={Store}
-          onClick={() => dispatch(push({ name: "mcp marketplace" }))}
-        >
-          Browse MCP Marketplace
-        </Button>
+        <Flex align="center" gap="2" wrap="wrap">
+          <MCPImportDialog />
+          <Button
+            variant="soft"
+            size="sm"
+            rightIcon={Store}
+            onClick={() => dispatch(push({ name: "mcp marketplace" }))}
+          >
+            Browse MCP Marketplace
+          </Button>
+        </Flex>
       }
       width="wide"
       className={styles.settingsSection}

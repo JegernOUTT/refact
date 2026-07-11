@@ -12,8 +12,8 @@ use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
 use crate::custom_error::ScratchError;
 use crate::integrations::mcp::mcp_auth::{
-    MCPOAuthSessionManager, clear_tokens_from_config, load_tokens_from_config,
-    save_tokens_to_config,
+    MCPOAuthSessionManager, clear_tokens_from_config, ensure_oauth2_pkce_auth_type,
+    load_tokens_from_config, save_tokens_to_config,
 };
 
 fn html_escape(s: &str) -> String {
@@ -172,7 +172,51 @@ pub async fn handle_v1_mcp_oauth_start(
         })?
         .to_string();
 
-    let scopes: Vec<&str> = req.scopes.iter().map(|s| s.as_str()).collect();
+    let probe_scopes: Vec<String> = {
+        let session_opt = {
+            let sessions = gcx.integration_sessions.lock().await;
+            sessions.get(&req.config_path).cloned()
+        };
+        match session_opt {
+            Some(session_arc) => {
+                let mut session_locked = session_arc.lock().await;
+                session_locked
+                    .as_any_mut()
+                    .downcast_mut::<crate::integrations::mcp::session_mcp::SessionMCP>()
+                    .and_then(|s| s.oauth_probe.as_ref().map(|p| p.suggested_scopes.clone()))
+                    .unwrap_or_default()
+            }
+            None => vec![],
+        }
+    };
+
+    let config_auth_type = config_yaml
+        .get("auth_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none")
+        .to_string();
+    if config_auth_type != "oauth2_pkce" {
+        ensure_oauth2_pkce_auth_type(&req.config_path)
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+
+    let effective_scopes: Vec<String> = if !req.scopes.is_empty() {
+        req.scopes.clone()
+    } else {
+        let config_scopes = serde_yaml::from_value::<
+            crate::integrations::mcp::mcp_auth::MCPAuthSettings,
+        >(config_yaml.clone())
+        .map(|a| a.oauth2_scopes)
+        .unwrap_or_default();
+        if !config_scopes.is_empty() {
+            config_scopes
+        } else {
+            probe_scopes
+        }
+    };
+
+    let scopes: Vec<&str> = effective_scopes.iter().map(|s| s.as_str()).collect();
     let (session_id, authorize_url) = MCPOAuthSessionManager::start_oauth_flow(
         &mcp_url,
         &req.config_path,
@@ -390,6 +434,9 @@ struct McpOAuthStatusResponse {
     authenticated: bool,
     expires_at: i64,
     scopes: Vec<String>,
+    needs_login: bool,
+    oauth_available: bool,
+    suggested_scopes: Vec<String>,
 }
 
 pub async fn handle_v1_mcp_oauth_status(
@@ -433,6 +480,45 @@ pub async fn handle_v1_mcp_oauth_status(
         None => (false, 0, vec![]),
     };
 
+    let (session_needs_login, probe_oauth_available, probe_scopes) = {
+        let session_opt = {
+            let sessions = gcx.integration_sessions.lock().await;
+            sessions.get(&query.config_path).cloned()
+        };
+        match session_opt {
+            Some(session_arc) => {
+                let mut session_locked = session_arc.lock().await;
+                match session_locked
+                    .as_any_mut()
+                    .downcast_mut::<crate::integrations::mcp::session_mcp::SessionMCP>()
+                {
+                    Some(s) => {
+                        let needs = matches!(
+                            s.auth_status,
+                            crate::integrations::mcp::session_mcp::MCPAuthStatus::NeedsLogin
+                                | crate::integrations::mcp::session_mcp::MCPAuthStatus::NeedsReauth
+                        );
+                        let (avail, pscopes) = match s.oauth_probe.as_ref() {
+                            Some(p) => (p.oauth_available, p.suggested_scopes.clone()),
+                            None => (false, vec![]),
+                        };
+                        (needs, avail, pscopes)
+                    }
+                    None => (false, false, vec![]),
+                }
+            }
+            None => (false, false, vec![]),
+        }
+    };
+
+    let needs_login = session_needs_login || (auth_type == "oauth2_pkce" && !authenticated);
+    let oauth_available = auth_type == "oauth2_pkce" || probe_oauth_available;
+    let suggested_scopes = if !scopes.is_empty() {
+        scopes.clone()
+    } else {
+        probe_scopes
+    };
+
     json_response(
         StatusCode::OK,
         &McpOAuthStatusResponse {
@@ -440,6 +526,9 @@ pub async fn handle_v1_mcp_oauth_status(
             authenticated,
             expires_at,
             scopes,
+            needs_login,
+            oauth_available,
+            suggested_scopes,
         },
     )
 }

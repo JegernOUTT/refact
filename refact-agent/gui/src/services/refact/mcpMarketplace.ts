@@ -111,6 +111,22 @@ export const mcpMarketplaceApi = createApi({
     },
   }),
   endpoints: (builder) => ({
+    importMcpConfig: builder.mutation<
+      McpImportResponse,
+      Record<string, unknown>
+    >({
+      invalidatesTags: ["MarketplaceServers", "InstalledServers"],
+      async queryFn(body, api, _extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildApiUrlFromState(state, "/v1/mcp/import"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as McpImportResponse };
+      },
+    }),
     getMarketplace: builder.query<
       MarketplaceResponse,
       MarketplaceQueryParams | undefined
@@ -247,7 +263,21 @@ export type AutoNameResponse = {
   config_prefix: string;
 };
 
+export type McpImportResultEntry = {
+  config_name?: string;
+  config_path?: string;
+  reason?: string;
+  error?: string;
+};
+
+export type McpImportResponse = {
+  imported: McpImportResultEntry[];
+  skipped: McpImportResultEntry[];
+  errors: McpImportResultEntry[];
+};
+
 export const {
+  useImportMcpConfigMutation,
   useGetMarketplaceQuery,
   useInstallServerMutation,
   useGetInstalledServersQuery,

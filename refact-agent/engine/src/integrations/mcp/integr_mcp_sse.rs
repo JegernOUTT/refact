@@ -109,6 +109,14 @@ impl MCPTransportInitializer for IntegrationMCPSse {
             .await
         }
     }
+
+    fn remote_probe_info(&self) -> Option<(String, HashMap<String, String>, MCPAuthSettings)> {
+        let url = self.cfg.mcp_url.trim().to_string();
+        if url.is_empty() {
+            return None;
+        }
+        Some((url, self.cfg.mcp_headers.clone(), self.cfg.auth.clone()))
+    }
 }
 
 impl_mcp_integration_trait!(IntegrationMCPSse, "mcp_sse_schema.yaml");

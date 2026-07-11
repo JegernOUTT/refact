@@ -112,6 +112,14 @@ impl MCPTransportInitializer for IntegrationMCPHttp {
             .await
         }
     }
+
+    fn remote_probe_info(&self) -> Option<(String, HashMap<String, String>, MCPAuthSettings)> {
+        let url = self.cfg.mcp_url.trim().to_string();
+        if url.is_empty() {
+            return None;
+        }
+        Some((url, self.cfg.mcp_headers.clone(), self.cfg.auth.clone()))
+    }
 }
 
 impl_mcp_integration_trait!(IntegrationMCPHttp, "mcp_http_schema.yaml");

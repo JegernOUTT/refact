@@ -239,13 +239,137 @@ fn apply_secrets_to_config(config: &mut HashMap<String, Value>, secrets: &HashMa
     }
 }
 
+fn sanitize_imported_server_name(name: &str) -> String {
+    let mut out: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    let out = out.trim_matches('_').to_string();
+    let out = if out.is_empty() {
+        "server".to_string()
+    } else {
+        out
+    };
+    out.chars().take(40).collect()
+}
+
+pub fn convert_mcp_servers_json_to_bundle(
+    mcp_servers: &serde_json::Map<String, Value>,
+) -> (Vec<ExportedServer>, Vec<Value>) {
+    let mut servers = Vec::new();
+    let mut errors = Vec::new();
+    let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (name, entry) in mcp_servers {
+        let base_name = sanitize_imported_server_name(name);
+        let mut config_name = base_name.clone();
+        let mut suffix = 2;
+        while used_names.contains(&config_name) {
+            config_name = format!("{}_{}", base_name, suffix);
+            suffix += 1;
+        }
+        used_names.insert(config_name.clone());
+        let obj = match entry.as_object() {
+            Some(o) => o,
+            None => {
+                errors
+                    .push(json!({ "config_name": name, "error": "server entry is not an object" }));
+                continue;
+            }
+        };
+        let mut config: HashMap<String, Value> = HashMap::new();
+        let transport;
+        if let Some(url) = obj.get("url").and_then(|v| v.as_str()) {
+            transport = if url.trim_end_matches('/').ends_with("/sse") {
+                "sse".to_string()
+            } else {
+                "http".to_string()
+            };
+            config.insert("url".to_string(), Value::String(url.to_string()));
+            if let Some(headers) = obj.get("headers").filter(|v| v.is_object()) {
+                config.insert("headers".to_string(), headers.clone());
+            }
+        } else if let Some(command) = obj.get("command").and_then(|v| v.as_str()) {
+            transport = "stdio".to_string();
+            let mut parts: Vec<String> = vec![command.to_string()];
+            if let Some(args) = obj.get("args").and_then(|v| v.as_array()) {
+                for a in args {
+                    match a.as_str() {
+                        Some(s) => parts.push(s.to_string()),
+                        None => parts.push(a.to_string()),
+                    }
+                }
+            }
+            config.insert(
+                "command".to_string(),
+                Value::String(shell_words::join(parts.iter().map(|s| s.as_str()))),
+            );
+            if let Some(env) = obj.get("env").filter(|v| v.is_object()) {
+                config.insert("env".to_string(), env.clone());
+            }
+        } else {
+            errors.push(json!({
+                "config_name": name,
+                "error": "server entry has neither 'command' nor 'url'"
+            }));
+            continue;
+        }
+        servers.push(ExportedServer {
+            config_name,
+            transport,
+            config,
+            tools_config: HashMap::new(),
+            confirmation: HashMap::new(),
+        });
+    }
+    (servers, errors)
+}
+
 pub async fn handle_v1_mcp_import(
     State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<Value>, ScratchError> {
     let gcx = app.gcx.clone();
-    let req = serde_json::from_slice::<ImportRequest>(&body_bytes)
+    let raw: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
+
+    let mut conversion_errors: Vec<Value> = Vec::new();
+    let raw = if raw.get("bundle").is_none()
+        && raw.get("mcpServers").is_none()
+        && raw.get("servers").map_or(false, |s| s.is_array())
+        && raw.get("version").is_some()
+    {
+        serde_json::json!({ "bundle": raw })
+    } else {
+        raw
+    };
+    let req: ImportRequest = if let Some(mcp_servers) = raw
+        .get("mcpServers")
+        .or_else(|| raw.get("bundle").and_then(|b| b.get("mcpServers")))
+        .and_then(|v| v.as_object())
+    {
+        let (servers, errors) = convert_mcp_servers_json_to_bundle(mcp_servers);
+        conversion_errors = errors;
+        ImportRequest {
+            bundle: ExportBundle {
+                version: 1,
+                exported_at: String::new(),
+                servers,
+            },
+            overwrite_existing: raw
+                .get("overwrite_existing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            secrets: HashMap::new(),
+        }
+    } else {
+        serde_json::from_value::<ImportRequest>(raw).map_err(|e| {
+            ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e))
+        })?
+    };
 
     let config_dir = gcx.config_dir.clone();
     let integrations_dir = config_dir.join("integrations.d");
@@ -260,7 +384,7 @@ pub async fn handle_v1_mcp_import(
 
     let mut imported = Vec::new();
     let mut skipped = Vec::new();
-    let mut errors: Vec<Value> = Vec::new();
+    let mut errors: Vec<Value> = conversion_errors;
 
     for server in &req.bundle.servers {
         if let Err(e) = mcp_naming::validate_config_filename(&server.config_name) {
@@ -636,5 +760,86 @@ mod tests {
             not_redacted["GITHUB_TOKEN"], "ghp_real_token",
             "original not modified"
         );
+    }
+
+    #[test]
+    fn test_convert_claude_desktop_stdio_and_url() {
+        let raw: Value = serde_json::json!({
+            "github": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-github"],
+                "env": {"GITHUB_TOKEN": "x"}
+            },
+            "Linear MCP": { "url": "https://mcp.linear.app/mcp" },
+            "legacy-sse": { "url": "https://old.example.com/sse" },
+            "broken": { "neither": true }
+        });
+        let (servers, errors) = convert_mcp_servers_json_to_bundle(raw.as_object().unwrap());
+        assert_eq!(servers.len(), 3);
+        assert_eq!(errors.len(), 1);
+
+        let github = servers.iter().find(|s| s.config_name == "github").unwrap();
+        assert_eq!(github.transport, "stdio");
+        assert_eq!(
+            github.config.get("command").and_then(|v| v.as_str()),
+            Some("npx -y @modelcontextprotocol/server-github")
+        );
+        assert!(github.config.get("env").is_some());
+
+        let linear = servers
+            .iter()
+            .find(|s| s.config_name == "linear_mcp")
+            .unwrap();
+        assert_eq!(linear.transport, "http");
+        assert_eq!(
+            linear.config.get("url").and_then(|v| v.as_str()),
+            Some("https://mcp.linear.app/mcp")
+        );
+
+        let sse = servers
+            .iter()
+            .find(|s| s.config_name == "legacy_sse")
+            .unwrap();
+        assert_eq!(sse.transport, "sse");
+    }
+
+    #[test]
+    fn test_sanitize_imported_server_name() {
+        assert_eq!(sanitize_imported_server_name("My Server!"), "my_server");
+        assert_eq!(sanitize_imported_server_name("___"), "server");
+        assert_eq!(
+            sanitize_imported_server_name("a".repeat(60).as_str()).len(),
+            40
+        );
+    }
+
+    #[test]
+    fn test_convert_colliding_names_are_deduplicated() {
+        let raw: Value = serde_json::json!({
+            "Linear MCP": { "url": "https://a.example.com/mcp" },
+            "linear-mcp": { "url": "https://b.example.com/mcp" },
+            "linear_mcp": { "url": "https://c.example.com/mcp" }
+        });
+        let (servers, errors) = convert_mcp_servers_json_to_bundle(raw.as_object().unwrap());
+        assert!(errors.is_empty());
+        assert_eq!(servers.len(), 3);
+        let mut names: Vec<String> = servers.iter().map(|s| s.config_name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["linear_mcp", "linear_mcp_2", "linear_mcp_3"]);
+    }
+
+    #[test]
+    fn test_convert_command_with_spaces_is_shell_quoted() {
+        let raw: Value = serde_json::json!({
+            "spacey": { "command": "/opt/my tools/bin/mcp", "args": ["--flag", "value with space"] }
+        });
+        let (servers, errors) = convert_mcp_servers_json_to_bundle(raw.as_object().unwrap());
+        assert!(errors.is_empty());
+        let cmd = servers[0]
+            .config
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(cmd, "'/opt/my tools/bin/mcp' --flag 'value with space'");
     }
 }

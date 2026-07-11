@@ -54,6 +54,7 @@ pub struct ToolMCP {
     pub mcp_client: Arc<AMutex<Option<McpRunningService>>>,
     pub mcp_tool: McpTool,
     pub request_timeout: u64,
+    pub auto_approve: bool,
 }
 
 #[async_trait]
@@ -444,7 +445,14 @@ impl Tool for ToolMCP {
     }
 
     fn confirm_deny_rules(&self) -> Option<IntegrationConfirmation> {
-        Some(self.common.confirmation.clone())
+        let mut confirmation = self.common.confirmation.clone();
+        if self.auto_approve {
+            let tool_name = self.mcp_tool.name.to_string();
+            confirmation
+                .ask_user
+                .retain(|p| p != &tool_name && p != "*");
+        }
+        Some(confirmation)
     }
 
     fn has_config_path(&self) -> Option<String> {
@@ -470,6 +478,7 @@ mod tests {
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             mcp_tool,
             request_timeout: 30,
+            auto_approve: false,
         }
     }
 
@@ -490,6 +499,7 @@ mod tests {
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             mcp_tool,
             request_timeout: 30,
+            auto_approve: false,
         }
     }
 

@@ -10,7 +10,9 @@ use rmcp::transport::auth::AuthorizationManager;
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
     Tool as McpTool, Resource as McpResource, Prompt as McpPrompt, ServerInfo, ClientInfo,
-    ClientCapabilities,
+    ClientCapabilities, CreateElicitationRequestParams, CreateElicitationResult, ElicitationAction,
+    ElicitationCapability, ProgressNotificationParam, LoggingMessageNotificationParam, Root,
+    ListRootsResult,
 };
 use rmcp::service::{Peer, RequestContext, NotificationContext};
 use tokio::time::{timeout, sleep, Duration};
@@ -47,6 +49,38 @@ pub enum MCPAuthStatus {
 }
 
 pub type McpRunningService = RunningService<RoleClient, McpClientHandler>;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MCPProgressInfo {
+    pub token: String,
+    pub progress: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub updated_at_ms: i64,
+}
+
+pub const PROGRESS_STALE_MS: i64 = 60_000;
+
+pub fn upsert_progress(list: &mut Vec<MCPProgressInfo>, incoming: MCPProgressInfo) {
+    let now = incoming.updated_at_ms;
+    list.retain(|p| now - p.updated_at_ms < PROGRESS_STALE_MS);
+    let completed = incoming
+        .total
+        .map(|t| t > 0.0 && incoming.progress >= t)
+        .unwrap_or(false);
+    if let Some(existing) = list.iter_mut().find(|p| p.token == incoming.token) {
+        if completed {
+            let token = incoming.token.clone();
+            list.retain(|p| p.token != token);
+        } else {
+            *existing = incoming;
+        }
+    } else if !completed {
+        list.push(incoming);
+    }
+}
 
 pub struct McpClientHandler {
     pub peer_arc: Arc<AMutex<Option<Peer<RoleClient>>>>,
@@ -106,7 +140,12 @@ pub fn redact_sensitive_json(value: &serde_json::Value) -> serde_json::Value {
 impl ClientHandler for McpClientHandler {
     fn get_info(&self) -> ClientInfo {
         let mut info = ClientInfo::default();
-        info.capabilities = ClientCapabilities::builder().enable_sampling().build();
+        let mut capabilities = ClientCapabilities::builder()
+            .enable_sampling()
+            .enable_roots()
+            .build();
+        capabilities.elicitation = Some(ElicitationCapability::default());
+        info.capabilities = capabilities;
         info
     }
 
@@ -118,7 +157,258 @@ impl ClientHandler for McpClientHandler {
     {
         let gcx_weak = self.gcx.clone();
         let debug_name = self.debug_name.clone();
-        async move { mcp_sampling_create_message(gcx_weak, params, &debug_name).await }
+        let session_arc = self.session_arc.clone();
+        let logs = self.logs.clone();
+        async move {
+            let (config_path, policy, already_approved) = {
+                let mut session_locked = session_arc.lock().await;
+                match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    Some(s) => (
+                        s.config_path.clone(),
+                        s.launched_cfg
+                            .get("sampling_policy")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("ask")
+                            .to_string(),
+                        s.sampling_session_approved,
+                    ),
+                    None => {
+                        return Err(rmcp::ErrorData::internal_error(
+                            "Session is not a SessionMCP",
+                            None,
+                        ))
+                    }
+                }
+            };
+
+            match policy.as_str() {
+                "deny" => {
+                    add_log_entry(
+                        logs.clone(),
+                        "Sampling request denied by policy (sampling_policy: deny)".to_string(),
+                    )
+                    .await;
+                    return Err(rmcp::ErrorData::internal_error(
+                        "Sampling is disabled for this server (sampling_policy: deny)",
+                        None,
+                    ));
+                }
+                "allow" => {}
+                _ => {
+                    if !already_approved {
+                        let preview = params
+                            .messages
+                            .last()
+                            .map(|m| {
+                                let text = match &m.content {
+                                    rmcp::model::SamplingContent::Single(c) => match c {
+                                        rmcp::model::SamplingMessageContent::Text(t) => {
+                                            t.text.clone()
+                                        }
+                                        _ => "[non-text content]".to_string(),
+                                    },
+                                    rmcp::model::SamplingContent::Multiple(_) => {
+                                        "[multiple content parts]".to_string()
+                                    }
+                                };
+                                text.chars().take(300).collect::<String>()
+                            })
+                            .unwrap_or_default();
+                        let (id, rx) = super::mcp_interactions::create_mcp_interaction(
+                            &config_path,
+                            super::mcp_interactions::MCPInteractionKind::SamplingApproval {
+                                message_count: params.messages.len(),
+                                max_tokens: params.max_tokens as u64,
+                                preview,
+                            },
+                        )
+                        .await;
+                        add_log_entry(
+                            logs.clone(),
+                            "Sampling request awaiting user approval".to_string(),
+                        )
+                        .await;
+                        let response = super::mcp_interactions::wait_for_mcp_interaction_response(
+                            &id,
+                            rx,
+                            super::mcp_interactions::MCP_INTERACTION_TIMEOUT_SECS,
+                        )
+                        .await;
+                        if response.action != "accept" {
+                            add_log_entry(
+                                logs.clone(),
+                                format!("Sampling request {} by user", response.action),
+                            )
+                            .await;
+                            return Err(rmcp::ErrorData::internal_error(
+                                "Sampling request was not approved by the user",
+                                None,
+                            ));
+                        }
+                        add_log_entry(
+                            logs.clone(),
+                            "Sampling approved for this session".to_string(),
+                        )
+                        .await;
+                        let mut session_locked = session_arc.lock().await;
+                        if let Some(s) = session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                            s.sampling_session_approved = true;
+                        }
+                    }
+                }
+            }
+
+            mcp_sampling_create_message(gcx_weak, params, &debug_name).await
+        }
+    }
+
+    fn list_roots(
+        &self,
+        _context: RequestContext<RoleClient>,
+    ) -> impl Future<Output = Result<ListRootsResult, rmcp::ErrorData>> + Send + '_ {
+        let gcx_weak = self.gcx.clone();
+        async move {
+            let gcx = match gcx_weak.upgrade() {
+                Some(gcx) => gcx,
+                None => return Ok(ListRootsResult::default()),
+            };
+            let folders = crate::files_correction::get_project_dirs(gcx).await;
+            let roots = folders
+                .into_iter()
+                .filter_map(|f| {
+                    url::Url::from_file_path(&f).ok().map(|u| {
+                        let mut root = Root::new(u.to_string());
+                        if let Some(name) = f.file_name().map(|n| n.to_string_lossy().to_string()) {
+                            root = root.with_name(name);
+                        }
+                        root
+                    })
+                })
+                .collect();
+            Ok(ListRootsResult::new(roots))
+        }
+    }
+
+    fn create_elicitation(
+        &self,
+        request: CreateElicitationRequestParams,
+        _context: RequestContext<RoleClient>,
+    ) -> impl Future<Output = Result<CreateElicitationResult, rmcp::ErrorData>> + Send + '_ {
+        let session_arc = self.session_arc.clone();
+        let logs = self.logs.clone();
+        let debug_name = self.debug_name.clone();
+        async move {
+            let config_path = {
+                let mut session_locked = session_arc.lock().await;
+                match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    Some(s) => s.config_path.clone(),
+                    None => {
+                        return Err(rmcp::ErrorData::internal_error(
+                            "Session is not a SessionMCP",
+                            None,
+                        ))
+                    }
+                }
+            };
+            let kind = match &request {
+                CreateElicitationRequestParams::FormElicitationParams {
+                    message,
+                    requested_schema,
+                    ..
+                } => super::mcp_interactions::MCPInteractionKind::Elicitation {
+                    message: message.clone(),
+                    requested_schema: serde_json::to_value(requested_schema).ok(),
+                    url: None,
+                    elicitation_id: None,
+                },
+                CreateElicitationRequestParams::UrlElicitationParams {
+                    message,
+                    url,
+                    elicitation_id,
+                    ..
+                } => super::mcp_interactions::MCPInteractionKind::Elicitation {
+                    message: message.clone(),
+                    requested_schema: None,
+                    url: Some(url.clone()),
+                    elicitation_id: Some(elicitation_id.clone()),
+                },
+            };
+            add_log_entry(
+                logs.clone(),
+                "Server requested user input (elicitation)".to_string(),
+            )
+            .await;
+            tracing::info!("MCP elicitation request from {}", debug_name);
+            let (id, rx) =
+                super::mcp_interactions::create_mcp_interaction(&config_path, kind).await;
+            let response = super::mcp_interactions::wait_for_mcp_interaction_response(
+                &id,
+                rx,
+                super::mcp_interactions::MCP_INTERACTION_TIMEOUT_SECS,
+            )
+            .await;
+            add_log_entry(
+                logs.clone(),
+                format!("Elicitation resolved: {}", response.action),
+            )
+            .await;
+            let action = match response.action.as_str() {
+                "accept" => ElicitationAction::Accept,
+                "cancel" => ElicitationAction::Cancel,
+                _ => ElicitationAction::Decline,
+            };
+            let mut result = CreateElicitationResult::new(action.clone());
+            if action == ElicitationAction::Accept {
+                if let Some(content) = response.content {
+                    result = result.with_content(content);
+                }
+            }
+            Ok(result)
+        }
+    }
+
+    fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        let session_arc = self.session_arc.clone();
+        async move {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            let info = MCPProgressInfo {
+                token: format!("{:?}", params.progress_token),
+                progress: params.progress,
+                total: params.total,
+                message: params.message.clone(),
+                updated_at_ms: now_ms,
+            };
+            let mut session_locked = session_arc.lock().await;
+            if let Some(s) = session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                upsert_progress(&mut s.active_progress, info);
+            }
+        }
+    }
+
+    fn on_logging_message(
+        &self,
+        params: LoggingMessageNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        let logs = self.logs.clone();
+        let debug_name = self.debug_name.clone();
+        async move {
+            let data_str = match &params.data {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let logger = params.logger.as_deref().unwrap_or("server");
+            let msg = format!("[{:?}] {}: {}", params.level, logger, data_str);
+            tracing::info!("MCP log from {}: {}", debug_name, msg);
+            add_log_entry(logs, msg).await;
+        }
     }
 
     fn on_tool_list_changed(
@@ -404,6 +694,9 @@ pub struct SessionMCP {
     pub auth_manager: Option<Arc<AMutex<AuthorizationManager>>>,
     pub auth_status: MCPAuthStatus,
     pub oauth_refresh_task_handle: Option<AbortHandle>,
+    pub oauth_probe: Option<super::mcp_auth::MCPAuthProbeResult>,
+    pub sampling_session_approved: bool,
+    pub active_progress: Vec<MCPProgressInfo>,
 }
 
 impl IntegrationSession for SessionMCP {
@@ -422,6 +715,7 @@ impl IntegrationSession for SessionMCP {
         Box::new(async move {
             let (
                 debug_name,
+                config_path,
                 client,
                 logs,
                 startup_task_handles,
@@ -436,6 +730,7 @@ impl IntegrationSession for SessionMCP {
                     .unwrap();
                 (
                     session_downcasted.debug_name.clone(),
+                    session_downcasted.config_path.clone(),
                     session_downcasted.mcp_client.clone(),
                     session_downcasted.logs.clone(),
                     session_downcasted.startup_task_handles.clone(),
@@ -444,6 +739,8 @@ impl IntegrationSession for SessionMCP {
                     session_downcasted.stderr_file_path.clone(),
                 )
             };
+
+            super::mcp_interactions::cancel_mcp_interactions_for_config(&config_path).await;
 
             if let Some((_, abort_handle)) = startup_task_handles {
                 add_log_entry(logs.clone(), "Aborted startup task".to_string()).await;
@@ -558,6 +855,9 @@ mod tests {
             auth_manager: None,
             auth_status: MCPAuthStatus::NotApplicable,
             oauth_refresh_task_handle: None,
+            oauth_probe: None,
+            sampling_session_approved: false,
+            active_progress: Vec::new(),
         }
     }
 

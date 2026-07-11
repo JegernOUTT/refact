@@ -21,6 +21,7 @@ mod tests {
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             mcp_tool,
             request_timeout: 30,
+            auto_approve: false,
         }
     }
 
@@ -187,6 +188,7 @@ mod tests {
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             mcp_tool,
             request_timeout: 30,
+            auto_approve: false,
         };
         let desc = tool.tool_description();
         assert_eq!(desc.description, "My special tool description");
@@ -205,6 +207,7 @@ mod tests {
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             mcp_tool,
             request_timeout: 30,
+            auto_approve: false,
         };
         let desc = tool.tool_description();
         assert_eq!(desc.description, "");

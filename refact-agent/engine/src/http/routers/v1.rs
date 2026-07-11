@@ -151,6 +151,7 @@ pub mod knowledge_ops;
 pub mod links;
 pub mod lsp_like_handlers;
 mod mcp_config_sharing;
+mod mcp_interactions;
 mod mcp_marketplace;
 mod mcp_marketplace_sources;
 mod mcp_oauth;
@@ -234,6 +235,9 @@ use crate::http::routers::v1::mcp_config_sharing::{
 use crate::http::routers::v1::mcp_oauth::{
     handle_v1_mcp_oauth_start, handle_v1_mcp_oauth_exchange, handle_v1_mcp_oauth_callback,
     handle_v1_mcp_oauth_logout, handle_v1_mcp_oauth_status, handle_v1_mcp_oauth_cancel,
+};
+use crate::http::routers::v1::mcp_interactions::{
+    handle_v1_mcp_interactions_list, handle_v1_mcp_interactions_respond,
 };
 use crate::http::routers::v1::v1_browser::{
     handle_browser_start, handle_browser_stop, handle_browser_screenshot, handle_browser_context,
@@ -882,6 +886,11 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/mcp/oauth/logout", post(handle_v1_mcp_oauth_logout))
         .route("/mcp/oauth/status", get(handle_v1_mcp_oauth_status))
         .route("/mcp/oauth/cancel", post(handle_v1_mcp_oauth_cancel))
+        .route("/mcp/interactions", get(handle_v1_mcp_interactions_list))
+        .route(
+            "/mcp/interactions/respond",
+            post(handle_v1_mcp_interactions_respond),
+        )
         .route("/buddy", get(buddy::handle_v1_buddy_snapshot))
         .route(
             "/buddy/user_action",

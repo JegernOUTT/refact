@@ -11,7 +11,9 @@ use oauth2::{StandardTokenResponse, basic::BasicTokenType, TokenResponse};
 use rmcp::transport::auth::{OAuthState, AuthorizationManager, VendorExtraTokenFields};
 use crate::integrations::sessions::IntegrationSession;
 
-fn deserialize_scopes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+pub fn deserialize_string_list<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<String>, D::Error> {
     use serde::de::Deserialize;
     #[derive(Deserialize)]
     #[serde(untagged)]
@@ -58,7 +60,7 @@ pub struct MCPAuthSettings {
     pub oauth2_client_secret: String,
     #[serde(default)]
     pub oauth2_token_url: String,
-    #[serde(default, deserialize_with = "deserialize_scopes")]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     pub oauth2_scopes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_tokens: Option<MCPOAuthTokens>,
@@ -150,6 +152,288 @@ pub async fn clear_tokens_from_config(config_path: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("rename {:?} -> {:?}: {}", tmp, path, e))?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WwwAuthenticateInfo {
+    pub scheme: String,
+    pub realm: Option<String>,
+    pub scope: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+    pub resource_metadata: Option<String>,
+}
+
+fn find_bearer_challenge(header_value: &str) -> Option<&str> {
+    let lower = header_value.to_lowercase();
+    let bytes = lower.as_bytes();
+    let mut idx = 0;
+    while let Some(pos) = lower[idx..].find("bearer") {
+        let abs = idx + pos;
+        let end = abs + "bearer".len();
+        let before_ok = abs == 0 || !bytes[abs - 1].is_ascii_alphanumeric();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return Some(&header_value[abs..]);
+        }
+        idx = end;
+    }
+    None
+}
+
+pub fn parse_www_authenticate(header_value: &str) -> Option<WwwAuthenticateInfo> {
+    let trimmed = header_value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (scheme, params_str) = match trimmed.split_once(char::is_whitespace) {
+        Some((s, rest)) => (s.to_string(), rest.trim()),
+        None => (trimmed.to_string(), ""),
+    };
+    let mut info = WwwAuthenticateInfo {
+        scheme,
+        ..Default::default()
+    };
+
+    let mut rest = params_str;
+    while !rest.is_empty() {
+        let eq = match rest.find('=') {
+            Some(i) => i,
+            None => break,
+        };
+        let key = rest[..eq]
+            .trim_matches(|c: char| c == ',' || c.is_whitespace())
+            .to_lowercase();
+        rest = rest[eq + 1..].trim_start();
+        let value: String;
+        if rest.starts_with('"') {
+            let mut out = String::new();
+            let mut chars = rest[1..].char_indices();
+            let mut consumed = rest.len();
+            let mut escaped = false;
+            for (i, c) in &mut chars {
+                if escaped {
+                    out.push(c);
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    consumed = i + 2;
+                    break;
+                } else {
+                    out.push(c);
+                }
+            }
+            value = out;
+            rest = rest
+                .get(consumed..)
+                .unwrap_or("")
+                .trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+        } else {
+            let end = rest.find(',').unwrap_or(rest.len());
+            value = rest[..end].trim().to_string();
+            rest = rest.get(end + 1..).unwrap_or("").trim_start();
+        }
+        match key.as_str() {
+            "realm" => info.realm = Some(value),
+            "scope" => info.scope = Some(value),
+            "error" => info.error = Some(value),
+            "error_description" => info.error_description = Some(value),
+            "resource_metadata" => info.resource_metadata = Some(value),
+            _ => {}
+        }
+    }
+    Some(info)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MCPAuthProbeResult {
+    pub needs_auth: bool,
+    pub oauth_available: bool,
+    #[serde(default)]
+    pub suggested_scopes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub www_authenticate: Option<WwwAuthenticateInfo>,
+}
+
+pub async fn probe_mcp_auth(
+    url: &str,
+    headers: &HashMap<String, String>,
+    auth: &MCPAuthSettings,
+) -> Result<MCPAuthProbeResult, String> {
+    let mut effective_headers = headers.clone();
+    if auth.auth_type == AuthType::Bearer && !auth.bearer_token.is_empty() {
+        effective_headers.insert(
+            "Authorization".to_string(),
+            format!("Bearer {}", auth.bearer_token),
+        );
+    }
+    let mut header_map = reqwest::header::HeaderMap::new();
+    for (k, v) in &effective_headers {
+        if let (Ok(name), Ok(value)) = (
+            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+            reqwest::header::HeaderValue::from_str(v),
+        ) {
+            header_map.insert(name, value);
+        }
+    }
+    header_map.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static("application/json, text/event-stream"),
+    );
+    header_map.insert(
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+
+    let client = reqwest::Client::builder()
+        .default_headers(header_map)
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("build probe client: {}", e))?;
+
+    let initialize_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "refact-auth-probe", "version": "0.1"}
+        }
+    });
+    let response = client
+        .post(url)
+        .json(&initialize_body)
+        .send()
+        .await
+        .map_err(|e| format!("probe request to {}: {}", url, e))?;
+
+    let status = response.status();
+    let needs_auth =
+        status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN;
+    let mut www_authenticate: Option<WwwAuthenticateInfo> = None;
+    for value in response
+        .headers()
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+        .iter()
+    {
+        let Ok(value_str) = value.to_str() else {
+            continue;
+        };
+        if let Some(bearer_part) = find_bearer_challenge(value_str) {
+            if let Some(parsed) = parse_www_authenticate(bearer_part) {
+                www_authenticate = Some(parsed);
+                break;
+            }
+        }
+    }
+    if www_authenticate.is_none() {
+        www_authenticate = response
+            .headers()
+            .get_all(reqwest::header::WWW_AUTHENTICATE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find_map(parse_www_authenticate);
+    }
+
+    if !needs_auth {
+        return Ok(MCPAuthProbeResult {
+            needs_auth: false,
+            oauth_available: false,
+            suggested_scopes: vec![],
+            www_authenticate,
+        });
+    }
+
+    let discovery = tokio::time::timeout(Duration::from_secs(10), async {
+        match AuthorizationManager::new(url).await {
+            Ok(manager) => match manager.discover_metadata().await {
+                Ok(metadata) => {
+                    let scopes = metadata.scopes_supported.clone().unwrap_or_default();
+                    (true, scopes)
+                }
+                Err(_) => (false, vec![]),
+            },
+            Err(_) => (false, vec![]),
+        }
+    })
+    .await;
+    let (oauth_available, suggested_scopes) = discovery.unwrap_or((false, vec![]));
+    let suggested_scopes = if suggested_scopes.is_empty() {
+        www_authenticate
+            .as_ref()
+            .and_then(|w| w.scope.as_ref())
+            .map(|s| {
+                s.split_whitespace()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        suggested_scopes
+    };
+
+    Ok(MCPAuthProbeResult {
+        needs_auth: true,
+        oauth_available,
+        suggested_scopes,
+        www_authenticate,
+    })
+}
+
+pub async fn ensure_oauth2_pkce_auth_type(config_path: &str) -> Result<bool, String> {
+    let path = PathBuf::from(config_path);
+    let existing = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("Failed to read config {}: {}", config_path, e))?;
+    let mapping: serde_yaml::Mapping = serde_yaml::from_str(&existing)
+        .map_err(|e| format!("Failed to parse config YAML {}: {}", config_path, e))?;
+    let auth_type_key = serde_yaml::Value::String("auth_type".to_string());
+    let current = mapping
+        .get(&auth_type_key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
+    if current == "oauth2_pkce" {
+        return Ok(false);
+    }
+
+    // Line-level edit to preserve comments (e.g. marketplace markers) and formatting.
+    let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
+    let mut replaced = false;
+    for line in lines.iter_mut() {
+        if line.starts_with("auth_type:") {
+            *line = "auth_type: oauth2_pkce".to_string();
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced {
+        lines.push("auth_type: oauth2_pkce".to_string());
+    }
+    let mut yaml_str = lines.join("\n");
+    if existing.ends_with('\n') || !replaced {
+        yaml_str.push('\n');
+    }
+    let tmp = path.with_extension("tmp");
+    tokio::fs::write(&tmp, &yaml_str)
+        .await
+        .map_err(|e| format!("write {:?}: {}", tmp, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
+    }
+    #[cfg(target_os = "windows")]
+    if path.exists() {
+        tokio::fs::remove_file(&path)
+            .await
+            .map_err(|e| format!("remove {:?}: {}", path, e))?;
+    }
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .map_err(|e| format!("rename {:?} -> {:?}: {}", tmp, path, e))?;
+    Ok(true)
 }
 
 struct TokenState {
@@ -1436,5 +1720,290 @@ mod tests {
         );
 
         MCPOAuthSessionManager::cancel_oauth_flow(&session_id).await;
+    }
+
+    #[test]
+    fn test_parse_www_authenticate_bearer_with_params() {
+        let info = parse_www_authenticate(
+            r#"Bearer realm="mcp", error="insufficient_scope", scope="read write", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource""#,
+        )
+        .unwrap();
+        assert_eq!(info.scheme, "Bearer");
+        assert_eq!(info.realm.as_deref(), Some("mcp"));
+        assert_eq!(info.error.as_deref(), Some("insufficient_scope"));
+        assert_eq!(info.scope.as_deref(), Some("read write"));
+        assert_eq!(
+            info.resource_metadata.as_deref(),
+            Some("https://mcp.example.com/.well-known/oauth-protected-resource")
+        );
+    }
+
+    #[test]
+    fn test_parse_www_authenticate_unquoted_and_bare() {
+        let info = parse_www_authenticate("Bearer realm=api, scope=mcp").unwrap();
+        assert_eq!(info.scheme, "Bearer");
+        assert_eq!(info.realm.as_deref(), Some("api"));
+        assert_eq!(info.scope.as_deref(), Some("mcp"));
+
+        let bare = parse_www_authenticate("Bearer").unwrap();
+        assert_eq!(bare.scheme, "Bearer");
+        assert!(bare.realm.is_none());
+        assert!(bare.scope.is_none());
+    }
+
+    #[test]
+    fn test_parse_www_authenticate_escaped_quotes_and_garbage() {
+        let info = parse_www_authenticate(r#"Bearer realm="a \"b\" c""#).unwrap();
+        assert_eq!(info.realm.as_deref(), Some(r#"a "b" c"#));
+
+        assert!(parse_www_authenticate("").is_none());
+        assert!(parse_www_authenticate("   ").is_none());
+
+        let basic = parse_www_authenticate(r#"Basic realm="host""#).unwrap();
+        assert_eq!(basic.scheme, "Basic");
+        assert_eq!(basic.realm.as_deref(), Some("host"));
+    }
+
+    #[tokio::test]
+    async fn test_ensure_oauth2_pkce_auth_type_upgrades_and_preserves() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "url: https://mcp.example.com/mcp\nauth_type: none\nbearer_token: \"\"\ninit_timeout: '60'"
+        )
+        .unwrap();
+        let path = file.path().to_string_lossy().to_string();
+
+        let changed = ensure_oauth2_pkce_auth_type(&path).await.unwrap();
+        assert!(changed, "should report a change from none to oauth2_pkce");
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        let value: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(
+            value.get("auth_type").and_then(|v| v.as_str()),
+            Some("oauth2_pkce")
+        );
+        assert_eq!(
+            value.get("url").and_then(|v| v.as_str()),
+            Some("https://mcp.example.com/mcp"),
+            "other fields must be preserved"
+        );
+        assert_eq!(
+            value.get("init_timeout").and_then(|v| v.as_str()),
+            Some("60")
+        );
+
+        let changed_again = ensure_oauth2_pkce_auth_type(&path).await.unwrap();
+        assert!(!changed_again, "already oauth2_pkce; no rewrite");
+    }
+
+    async fn spawn_probe_server(
+        status: axum::http::StatusCode,
+        www_authenticate: &'static [&'static str],
+        with_discovery: bool,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::routing::{get, post};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{}", addr);
+        let base_for_meta = base.clone();
+
+        let mcp = post(move || async move {
+            let mut headers = axum::http::HeaderMap::new();
+            for w in www_authenticate {
+                headers.append("WWW-Authenticate", axum::http::HeaderValue::from_static(w));
+            }
+            (status, headers, "{}")
+        });
+        let mut app = axum::Router::new().route("/mcp", mcp);
+        if with_discovery {
+            app = app.route(
+                "/.well-known/oauth-authorization-server",
+                get(move || {
+                    let base = base_for_meta.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "issuer": base,
+                            "authorization_endpoint": format!("{}/authorize", base),
+                            "token_endpoint": format!("{}/token", base),
+                            "scopes_supported": ["mcp.read", "mcp.write"],
+                            "response_types_supported": ["code"],
+                            "code_challenge_methods_supported": ["S256"]
+                        }))
+                    }
+                }),
+            );
+        }
+
+        listener.set_nonblocking(true).unwrap();
+        let handle = tokio::spawn(async move {
+            axum::Server::from_tcp(listener)
+                .unwrap()
+                .serve(app.into_make_service())
+                .await
+                .unwrap();
+        });
+        (format!("{}/mcp", base), handle)
+    }
+
+    #[tokio::test]
+    async fn test_probe_mcp_auth_200_no_auth_needed() {
+        let (url, handle) = spawn_probe_server(axum::http::StatusCode::OK, &[], false).await;
+        let result = probe_mcp_auth(&url, &HashMap::new(), &MCPAuthSettings::default())
+            .await
+            .unwrap();
+        assert!(!result.needs_auth);
+        assert!(!result.oauth_available);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_probe_mcp_auth_401_without_discovery() {
+        let (url, handle) = spawn_probe_server(
+            axum::http::StatusCode::UNAUTHORIZED,
+            &[r#"Bearer realm="mcp", scope="tools.read""#],
+            false,
+        )
+        .await;
+        let result = probe_mcp_auth(&url, &HashMap::new(), &MCPAuthSettings::default())
+            .await
+            .unwrap();
+        assert!(result.needs_auth);
+        assert!(!result.oauth_available);
+        assert_eq!(result.suggested_scopes, vec!["tools.read".to_string()]);
+        let www = result.www_authenticate.unwrap();
+        assert_eq!(www.scheme, "Bearer");
+        assert_eq!(www.scope.as_deref(), Some("tools.read"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_probe_mcp_auth_401_with_discovery() {
+        let (url, handle) =
+            spawn_probe_server(axum::http::StatusCode::UNAUTHORIZED, &["Bearer"], true).await;
+        let result = probe_mcp_auth(&url, &HashMap::new(), &MCPAuthSettings::default())
+            .await
+            .unwrap();
+        assert!(result.needs_auth);
+        assert!(
+            result.oauth_available,
+            "discovery metadata served; oauth should be available"
+        );
+        assert_eq!(
+            result.suggested_scopes,
+            vec!["mcp.read".to_string(), "mcp.write".to_string()]
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_probe_mcp_auth_forbidden_counts_as_needs_auth() {
+        let (url, handle) = spawn_probe_server(
+            axum::http::StatusCode::FORBIDDEN,
+            &[r#"Bearer error="insufficient_scope", scope="a b""#],
+            false,
+        )
+        .await;
+        let result = probe_mcp_auth(&url, &HashMap::new(), &MCPAuthSettings::default())
+            .await
+            .unwrap();
+        assert!(result.needs_auth);
+        assert_eq!(
+            result.suggested_scopes,
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert!(result
+            .www_authenticate
+            .as_ref()
+            .map(|w| w.error.as_deref() == Some("insufficient_scope"))
+            .unwrap_or(false));
+        handle.abort();
+    }
+
+    #[test]
+    fn test_find_bearer_challenge_multi_scheme() {
+        let multi = r#"Basic realm="host", Bearer scope="mcp.read", error="invalid_token""#;
+        let bearer = find_bearer_challenge(multi).unwrap();
+        assert!(bearer.starts_with("Bearer"));
+        let info = parse_www_authenticate(bearer).unwrap();
+        assert_eq!(info.scheme, "Bearer");
+        assert_eq!(info.scope.as_deref(), Some("mcp.read"));
+        assert_eq!(info.error.as_deref(), Some("invalid_token"));
+
+        assert!(find_bearer_challenge(r#"Basic realm="host""#).is_none());
+        assert!(
+            find_bearer_challenge("bearer scope=x").is_some(),
+            "case-insensitive"
+        );
+        assert!(
+            find_bearer_challenge("Bearerlike realm=x").is_none(),
+            "no match inside longer token"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_probe_mcp_auth_multiple_www_authenticate_headers() {
+        let (url, handle) = spawn_probe_server(
+            axum::http::StatusCode::UNAUTHORIZED,
+            &[r#"Basic realm="host""#, r#"Bearer scope="multi.scope""#],
+            false,
+        )
+        .await;
+        let result = probe_mcp_auth(&url, &HashMap::new(), &MCPAuthSettings::default())
+            .await
+            .unwrap();
+        assert!(result.needs_auth);
+        let www = result.www_authenticate.unwrap();
+        assert_eq!(www.scheme, "Bearer", "Bearer challenge must win over Basic");
+        assert_eq!(result.suggested_scopes, vec!["multi.scope".to_string()]);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_ensure_oauth2_pkce_auth_type_preserves_comments() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "# mcp_marketplace_source: community\n# mcp_marketplace_server: github\nurl: https://mcp.example.com/mcp\nauth_type: none\nheaders:\n  Accept: application/json"
+        )
+        .unwrap();
+        let path = file.path().to_string_lossy().to_string();
+
+        let changed = ensure_oauth2_pkce_auth_type(&path).await.unwrap();
+        assert!(changed);
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(
+            content.contains("# mcp_marketplace_source: community"),
+            "marketplace source comment must survive the rewrite, got: {}",
+            content
+        );
+        assert!(content.contains("# mcp_marketplace_server: github"));
+        assert!(content.contains("auth_type: oauth2_pkce"));
+        assert!(!content.contains("auth_type: none"));
+        assert!(
+            content.contains("  Accept: application/json"),
+            "nested formatting preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_oauth2_pkce_auth_type_appends_when_missing() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "# header comment\nurl: https://mcp.example.com/mcp").unwrap();
+        let path = file.path().to_string_lossy().to_string();
+
+        let changed = ensure_oauth2_pkce_auth_type(&path).await.unwrap();
+        assert!(changed);
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(content.contains("# header comment"));
+        assert!(content.contains("auth_type: oauth2_pkce"));
+        let value: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(
+            value.get("auth_type").and_then(|v| v.as_str()),
+            Some("oauth2_pkce")
+        );
     }
 }

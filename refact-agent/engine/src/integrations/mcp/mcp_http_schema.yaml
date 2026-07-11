@@ -45,6 +45,21 @@ fields:
     f_desc: "Timeout in seconds for MCP requests."
     f_default: "30"
     f_extra: true
+  sampling_policy:
+    f_type: string_short
+    f_desc: "What to do when the server requests LLM sampling: ask, allow, or deny."
+    f_default: "ask"
+    f_extra: true
+  disabled_tools:
+    f_type: string_long
+    f_desc: "Comma-separated tool names to hide from the model."
+    f_default: ""
+    f_extra: true
+  auto_approve_tools:
+    f_type: string_long
+    f_desc: "Comma-separated tool names that run without confirmation."
+    f_default: ""
+    f_extra: true
 description: |
   You can add here an MCP (Model Context Protocol) server, connecting via Streamable HTTP transport.
   This is the modern MCP transport protocol that supersedes the legacy SSE transport.

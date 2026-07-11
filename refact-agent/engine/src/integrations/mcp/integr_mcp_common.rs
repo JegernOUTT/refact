@@ -20,7 +20,7 @@ use super::session_mcp::{
 };
 use super::mcp_auth::{
     MCPAuthSettings, MCPTokenManager, AuthType, create_auth_manager_from_tokens,
-    load_tokens_from_config, mcp_oauth_refresh_task,
+    load_tokens_from_config, mcp_oauth_refresh_task, probe_mcp_auth,
 };
 use super::mcp_metrics::new_shared_metrics;
 use super::tool_mcp::ToolMCP;
@@ -53,6 +53,16 @@ pub struct CommonMCPSettings {
     pub reconnect_max_attempts: u64,
     #[serde(default = "default_reconnect_enabled")]
     pub reconnect_enabled: bool,
+    #[serde(default = "default_sampling_policy")]
+    pub sampling_policy: String,
+    #[serde(default, deserialize_with = "super::mcp_auth::deserialize_string_list")]
+    pub disabled_tools: Vec<String>,
+    #[serde(default, deserialize_with = "super::mcp_auth::deserialize_string_list")]
+    pub auto_approve_tools: Vec<String>,
+}
+
+pub fn default_sampling_policy() -> String {
+    "ask".to_string()
 }
 
 pub fn default_init_timeout() -> u64 {
@@ -83,6 +93,9 @@ impl Default for CommonMCPSettings {
             health_check_interval: default_health_check_interval(),
             reconnect_max_attempts: default_reconnect_max_attempts(),
             reconnect_enabled: default_reconnect_enabled(),
+            sampling_policy: default_sampling_policy(),
+            disabled_tools: Vec::new(),
+            auto_approve_tools: Vec::new(),
         }
     }
 }
@@ -98,14 +111,19 @@ pub trait MCPTransportInitializer: Send + Sync {
         session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
         handler: McpClientHandler,
     ) -> Option<McpRunningService>;
+
+    fn remote_probe_info(&self) -> Option<(String, HashMap<String, String>, MCPAuthSettings)> {
+        None
+    }
 }
 
 pub async fn mcp_integr_tools(
     gcx_option: Option<Weak<GlobalContext>>,
     config_path: &str,
     common: &IntegrationCommon,
-    request_timeout: u64,
+    mcp_common: &CommonMCPSettings,
 ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+    let request_timeout = mcp_common.request_timeout;
     let session_key = format!("{}", config_path);
 
     let gcx = match gcx_option {
@@ -154,12 +172,24 @@ pub async fn mcp_integr_tools(
             return vec![];
         }
         for tool in session_downcasted.mcp_tools.iter() {
+            if mcp_common
+                .disabled_tools
+                .iter()
+                .any(|d| d == tool.name.as_ref())
+            {
+                continue;
+            }
+            let auto_approve = mcp_common
+                .auto_approve_tools
+                .iter()
+                .any(|a| a == tool.name.as_ref());
             result.push(Box::new(ToolMCP {
                 common: common.clone(),
                 config_path: config_path.to_string(),
                 mcp_client: session_downcasted.mcp_client.clone().unwrap(),
                 mcp_tool: tool.clone(),
                 request_timeout,
+                auto_approve,
             }));
         }
     }
@@ -396,7 +426,7 @@ macro_rules! impl_mcp_integration_trait {
                     self.gcx_option.clone(),
                     &self.config_path,
                     &self.common,
-                    self.cfg.common.request_timeout,
+                    &self.cfg.common,
                 )
                 .await
             }
@@ -449,6 +479,9 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 auth_manager: None,
                 auth_status: MCPAuthStatus::NotApplicable,
                 oauth_refresh_task_handle: None,
+                oauth_probe: None,
+                sampling_session_approved: false,
+                active_progress: Vec::new(),
             })));
             tracing::info!("MCP START SESSION {:?}", session_key);
             integration_sessions.insert(session_key.clone(), new_session.clone());
@@ -502,6 +535,8 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 mcp_session.stderr_cursor = Arc::new(AMutex::new(0));
                 mcp_session.launched_cfg = new_cfg_value.clone();
                 mcp_session.connection_status = MCPConnectionStatus::Connecting;
+                mcp_session.oauth_probe = None;
+                mcp_session.sampling_session_approved = false;
                 (
                     std::mem::take(&mut mcp_session.mcp_client),
                     mcp_session.logs.clone(),
@@ -563,6 +598,37 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             {
                 Some(client) => client,
                 None => {
+                    let probe_result = match transport_initializer.remote_probe_info() {
+                        Some((url, headers, auth))
+                            if matches!(auth.auth_type, AuthType::None | AuthType::Bearer) =>
+                        {
+                            match probe_mcp_auth(&url, &headers, &auth).await {
+                                Ok(p) => Some(p),
+                                Err(e) => {
+                                    log(tracing::Level::WARN, format!("Auth probe failed: {}", e))
+                                        .await;
+                                    None
+                                }
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(p) = probe_result.as_ref().filter(|p| p.needs_auth) {
+                        if p.oauth_available {
+                            log(
+                                tracing::Level::WARN,
+                                "Server requires authentication and supports OAuth; login required"
+                                    .to_string(),
+                            )
+                            .await;
+                        } else {
+                            log(
+                                tracing::Level::WARN,
+                                "Server requires authentication (HTTP 401/403) but does not advertise OAuth metadata".to_string(),
+                            )
+                            .await;
+                        }
+                    }
                     let mut session_locked = session_arc_clone.lock().await;
                     let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>()
                     {
@@ -573,9 +639,24 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                         mcp_session.connection_status,
                         MCPConnectionStatus::NeedsAuth
                     ) {
-                        mcp_session.connection_status = MCPConnectionStatus::Failed {
-                            message: "Transport initialization failed".to_string(),
-                        };
+                        match probe_result {
+                            Some(p) if p.needs_auth && p.oauth_available => {
+                                mcp_session.connection_status = MCPConnectionStatus::NeedsAuth;
+                                mcp_session.auth_status = MCPAuthStatus::NeedsLogin;
+                                mcp_session.oauth_probe = Some(p);
+                            }
+                            Some(p) if p.needs_auth => {
+                                mcp_session.connection_status = MCPConnectionStatus::Failed {
+                                    message: "Server requires authentication (HTTP 401/403); OAuth is not advertised — configure a bearer token".to_string(),
+                                };
+                                mcp_session.oauth_probe = Some(p);
+                            }
+                            _ => {
+                                mcp_session.connection_status = MCPConnectionStatus::Failed {
+                                    message: "Transport initialization failed".to_string(),
+                                };
+                            }
+                        }
                     }
                     return;
                 }
@@ -1054,6 +1135,9 @@ mod tests {
                 auth_manager: None,
                 auth_status: super::super::session_mcp::MCPAuthStatus::NotApplicable,
                 oauth_refresh_task_handle: None,
+                oauth_probe: None,
+                sampling_session_approved: false,
+                active_progress: Vec::new(),
             }) as Box<dyn IntegrationSession>,
         ))
     }
@@ -1251,6 +1335,9 @@ mod tests {
                 auth_manager: None,
                 auth_status: MCPAuthStatus::NotApplicable,
                 oauth_refresh_task_handle: None,
+                oauth_probe: None,
+                sampling_session_approved: false,
+                active_progress: Vec::new(),
             }) as Box<dyn IntegrationSession>));
 
         let result = super::build_auth_client_for_mcp(

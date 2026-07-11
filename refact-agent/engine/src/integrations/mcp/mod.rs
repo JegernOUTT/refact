@@ -12,5 +12,6 @@ pub mod mcp_sampling;
 pub mod session_mcp;
 pub mod tool_mcp;
 
+pub mod mcp_interactions;
 #[cfg(test)]
 mod tests_mcp_tools;

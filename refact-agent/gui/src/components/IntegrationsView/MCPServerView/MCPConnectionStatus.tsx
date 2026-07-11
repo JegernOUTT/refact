@@ -23,7 +23,8 @@ function getStatusTone(
   const lower = label.toLowerCase();
   if (lower === "connected") return "success";
   if (lower === "connecting" || lower === "reconnecting") return "warning";
-  if (lower === "error") return "danger";
+  if (lower === "error" || lower === "failed" || lower === "needs_auth")
+    return "danger";
   if (lower === "disconnected") return "danger";
   return "muted";
 }
@@ -106,6 +107,13 @@ export const MCPConnectionStatus: React.FC<MCPConnectionStatusProps> = ({
         typeof status.error === "string" && (
           <Text as="p" size="1" color="red" className={styles.statusError}>
             {status.error}
+          </Text>
+        )}
+      {typeof status === "object" &&
+        "message" in status &&
+        typeof status.message === "string" && (
+          <Text as="p" size="1" color="red" className={styles.statusError}>
+            {status.message}
           </Text>
         )}
     </Flex>

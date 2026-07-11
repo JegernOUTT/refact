@@ -1080,7 +1080,7 @@ fn build_integration_yaml(
     );
     let mut confirmation = serde_yaml::Mapping::new();
     confirmation.insert(
-        serde_yaml::Value::String("ask_user_default".to_string()),
+        serde_yaml::Value::String("ask_user".to_string()),
         confirmation_list,
     );
     map.insert(
@@ -1499,10 +1499,7 @@ mod tests {
             yaml.contains("request_timeout"),
             "yaml must contain request_timeout"
         );
-        assert!(
-            yaml.contains("ask_user_default"),
-            "yaml must contain confirmation"
-        );
+        assert!(yaml.contains("ask_user"), "yaml must contain confirmation");
         assert!(
             yaml.contains("# mcp_marketplace_source: refact-bundled"),
             "yaml must have source comment"
@@ -1796,7 +1793,7 @@ mod tests {
         assert!(content.contains("test-key-123"));
         assert!(content.contains("init_timeout"));
         assert!(content.contains("request_timeout"));
-        assert!(content.contains("ask_user_default"));
+        assert!(content.contains("ask_user"));
     }
 
     #[tokio::test]

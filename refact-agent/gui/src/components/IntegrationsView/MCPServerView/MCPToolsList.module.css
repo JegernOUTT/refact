@@ -7,9 +7,22 @@
   border-bottom: none;
 }
 
+.toolRowDisabled {
+  background: var(--rf-surface-1);
+}
+
 .toolBody {
   flex: 1;
   min-width: 0;
+}
+
+.toolContentDisabled {
+  opacity: 0.55;
+}
+
+.controls {
+  flex-shrink: 0;
+  justify-content: flex-end;
 }
 
 .expandButton {

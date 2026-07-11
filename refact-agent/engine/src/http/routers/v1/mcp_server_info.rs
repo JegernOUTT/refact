@@ -65,6 +65,7 @@ struct McpServerInfoResponse {
     capabilities: serde_json::Value,
     logs_tail: Vec<String>,
     metrics: MCPServerMetrics,
+    active_progress: Vec<crate::integrations::mcp::session_mcp::MCPProgressInfo>,
 }
 
 pub async fn handle_v1_mcp_server_info(
@@ -94,6 +95,7 @@ pub async fn handle_v1_mcp_server_info(
         prompts_raw,
         logs_arc,
         metrics_arc,
+        active_progress,
     ) = {
         let mut session_locked = session.lock().await;
         let mcp_session = session_locked
@@ -113,6 +115,17 @@ pub async fn handle_v1_mcp_server_info(
             mcp_session.mcp_prompts.clone(),
             mcp_session.logs.clone(),
             mcp_session.metrics.clone(),
+            {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                mcp_session.active_progress.retain(|p| {
+                    now_ms - p.updated_at_ms
+                        < crate::integrations::mcp::session_mcp::PROGRESS_STALE_MS
+                });
+                mcp_session.active_progress.clone()
+            },
         )
     };
 
@@ -222,6 +235,7 @@ pub async fn handle_v1_mcp_server_info(
         capabilities: capabilities_json,
         logs_tail,
         metrics,
+        active_progress,
     };
 
     let payload = serde_json::to_string_pretty(&response).map_err(|e| {
@@ -355,6 +369,7 @@ mod tests {
             capabilities: serde_json::json!({"tools": true, "resources": false, "prompts": false, "sampling": true}),
             logs_tail: vec!["[12:00:00] Connected".to_string()],
             metrics: MCPServerMetrics::default(),
+            active_progress: vec![],
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -380,6 +395,7 @@ mod tests {
             capabilities: serde_json::json!({"tools": false, "resources": false, "prompts": false, "sampling": true}),
             logs_tail: vec![],
             metrics: MCPServerMetrics::default(),
+            active_progress: vec![],
         };
 
         let json = serde_json::to_value(&response).unwrap();
@@ -469,6 +485,9 @@ mod tests {
             auth_manager: None,
             auth_status: MCPAuthStatus::NotApplicable,
             oauth_refresh_task_handle: None,
+            oauth_probe: None,
+            sampling_session_approved: false,
+            active_progress: Vec::new(),
         };
         session.connection_status = MCPConnectionStatus::Connecting;
         assert!(matches!(
@@ -501,6 +520,9 @@ mod tests {
             auth_manager: None,
             auth_status: MCPAuthStatus::NotApplicable,
             oauth_refresh_task_handle: None,
+            oauth_probe: None,
+            sampling_session_approved: false,
+            active_progress: Vec::new(),
         };
         assert_ne!(session.launched_cfg, serde_json::Value::Null);
         session.launched_cfg = serde_json::Value::Null;
