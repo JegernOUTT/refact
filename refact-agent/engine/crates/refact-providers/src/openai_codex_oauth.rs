@@ -656,8 +656,14 @@ fn callback_html(success: bool, message: &str) -> String {
 mod tests {
     use super::*;
 
+    // Serializes tests that touch the process-global PENDING_SESSIONS map;
+    // without this, one test's clear_pending_sessions_for_test() can wipe
+    // another test's freshly registered session on a parallel test thread.
+    static PENDING_SESSIONS_TEST_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn pending_oauth_session_tracks_provider_instance_id() {
+        let _guard = PENDING_SESSIONS_TEST_GUARD.lock().await;
         clear_pending_sessions_for_test().await;
         let (session_id, authorize_url) =
             register_session("openai_codex_work".to_string(), CODEX_CALLBACK_PORT).await;
@@ -671,6 +677,7 @@ mod tests {
 
     #[tokio::test]
     async fn authorize_url_only_uses_hydra_allowlisted_ports() {
+        let _guard = PENDING_SESSIONS_TEST_GUARD.lock().await;
         clear_pending_sessions_for_test().await;
         let (_session_id, fallback_url) =
             register_session("openai_codex".to_string(), CODEX_FALLBACK_CALLBACK_PORT).await;
