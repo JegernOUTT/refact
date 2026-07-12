@@ -74,9 +74,26 @@ pub fn cron_pending_blocks_idle_stop(next_fire_ms: u64, now: u64) -> bool {
     next_fire_ms <= now.saturating_add(CRON_SOON_MS)
 }
 
+/// Parse an idle-check cadence override. Values <= 0 or unparseable fall back to
+/// the coarse 60s production default.
+fn parse_idle_tick_interval(raw: Option<String>) -> Duration {
+    raw.and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(TICK_INTERVAL)
+}
+
+/// Idle-check cadence, overridable via `REFACT_DAEMON_IDLE_TICK_MS` for tests so
+/// idle-stop is detected quickly and deterministically instead of on the coarse
+/// 60s production cadence.
+fn idle_tick_interval() -> Duration {
+    parse_idle_tick_interval(std::env::var("REFACT_DAEMON_IDLE_TICK_MS").ok())
+}
+
 pub fn spawn(state: Arc<DaemonState>) -> JoinHandle<()> {
+    let interval = idle_tick_interval();
     tokio::spawn(async move {
-        run(state, TICK_INTERVAL).await;
+        run(state, interval).await;
     })
 }
 
@@ -277,6 +294,23 @@ mod tests {
         assert_eq!(
             idle_decision(now, &disabled, &config(0)),
             IdleDecision::Keep
+        );
+    }
+
+    #[test]
+    fn idle_tick_interval_override_parsing() {
+        assert_eq!(
+            parse_idle_tick_interval(Some("500".to_string())),
+            Duration::from_millis(500)
+        );
+        assert_eq!(parse_idle_tick_interval(None), TICK_INTERVAL);
+        assert_eq!(
+            parse_idle_tick_interval(Some("0".to_string())),
+            TICK_INTERVAL
+        );
+        assert_eq!(
+            parse_idle_tick_interval(Some("not-a-number".to_string())),
+            TICK_INTERVAL
         );
     }
 

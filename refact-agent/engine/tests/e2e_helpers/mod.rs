@@ -65,6 +65,10 @@ impl DaemonProcess {
             .env("REFACT_DAEMON_DIR", &dirs.daemon_dir)
             .env("HOME", &dirs.home_dir)
             .env("NO_COLOR", "1")
+            // Poll idle workers sub-second so idle-stop is detected quickly and
+            // deterministically instead of on the coarse 60s production cadence.
+            // Tests using long idle_timeout_secs never idle-stop regardless.
+            .env("REFACT_DAEMON_IDLE_TICK_MS", "500")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
