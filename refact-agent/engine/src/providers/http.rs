@@ -2311,52 +2311,38 @@ pub async fn handle_v1_provider_oauth_start(
             )
         }
         "openai_codex" => {
-            let fallback_port = gcx.cmdline.http_port;
-            let (session_id, authorize_url, callback_port) =
-                crate::providers::openai_codex_oauth::start_oauth_session(
-                    fallback_port,
-                    params.name.clone(),
-                )
-                .await;
+            let (session_id, authorize_url, listener) =
+                crate::providers::openai_codex_oauth::start_oauth_session(params.name.clone())
+                    .await
+                    .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
 
-            if callback_port != fallback_port {
-                let http_client = gcx.http_client.clone();
-                match crate::providers::openai_codex_oauth::start_callback_listener(
-                    callback_port,
-                    http_client,
-                )
-                .await
+            let listener_handle = crate::providers::openai_codex_oauth::start_callback_listener(
+                listener,
+                gcx.http_client.clone(),
+            );
+            let gcx_clone = gcx.clone();
+            tokio::spawn(async move {
+                if let Some((tokens, provider_instance_id)) =
+                    listener_handle.await.ok().flatten()
                 {
-                    Ok(listener_handle) => {
-                        let gcx_clone = gcx.clone();
-                        tokio::spawn(async move {
-                            if let Some((tokens, provider_instance_id)) =
-                                listener_handle.await.ok().flatten()
-                            {
-                                let config_dir = gcx_clone.config_dir.clone();
-                                if let Ok(tokens_value) = serde_yaml::to_value(&tokens) {
-                                    if let Err(e) = save_provider_oauth_tokens(
-                                        &gcx_clone,
-                                        &config_dir,
-                                        &provider_instance_id,
-                                        "openai_codex",
-                                        &tokens_value,
-                                    )
-                                    .await
-                                    {
-                                        tracing::warn!("OpenAI Codex: failed to save OAuth tokens from callback listener: {:?}", e);
-                                    } else {
-                                        tracing::info!("OpenAI Codex: OAuth tokens saved successfully from callback listener");
-                                    }
-                                }
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!("OpenAI Codex: failed to start callback listener: {}", e);
+                    let config_dir = gcx_clone.config_dir.clone();
+                    if let Ok(tokens_value) = serde_yaml::to_value(&tokens) {
+                        if let Err(e) = save_provider_oauth_tokens(
+                            &gcx_clone,
+                            &config_dir,
+                            &provider_instance_id,
+                            "openai_codex",
+                            &tokens_value,
+                        )
+                        .await
+                        {
+                            tracing::warn!("OpenAI Codex: failed to save OAuth tokens from callback listener: {:?}", e);
+                        } else {
+                            tracing::info!("OpenAI Codex: OAuth tokens saved successfully from callback listener");
+                        }
                     }
                 }
-            }
+            });
 
             json_response(
                 StatusCode::OK,

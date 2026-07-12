@@ -15,7 +15,11 @@ const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const SCOPE: &str = "openid profile email offline_access";
 
 const CODEX_CALLBACK_PORT: u16 = 1455;
+const CODEX_FALLBACK_CALLBACK_PORT: u16 = 1457;
 const SESSION_TTL_SECS: i64 = 600;
+const BIND_RETRY_ATTEMPTS: u32 = 5;
+const BIND_RETRY_DELAY: Duration = Duration::from_millis(200);
+const MAX_CALLBACK_CONNECTIONS: usize = 16;
 
 const OAUTH_TOKEN_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -222,28 +226,10 @@ async fn prune_expired_sessions(sessions: &mut HashMap<String, PkceSession>) {
     sessions.retain(|_, s| now - s.created_at < SESSION_TTL_SECS);
 }
 
-/// Returns (session_id, authorize_url, callback_port).
-/// The callback_port is the port used in the redirect_uri (1455 if available, fallback otherwise).
-pub async fn start_oauth_session(
-    fallback_port: u16,
-    provider_instance_id: impl Into<String>,
-) -> (String, String, u16) {
+async fn register_session(provider_instance_id: String, callback_port: u16) -> (String, String) {
     let verifier = generate_code_verifier();
     let challenge = generate_code_challenge(&verifier);
     let session_id = uuid::Uuid::new_v4().to_string();
-    let provider_instance_id = provider_instance_id.into();
-
-    // Use port 1455 (Codex CLI default) as primary; fall back to app port
-    let callback_port = if port_available(CODEX_CALLBACK_PORT) {
-        CODEX_CALLBACK_PORT
-    } else {
-        tracing::warn!(
-            "OpenAI Codex OAuth: port {} unavailable, falling back to {}",
-            CODEX_CALLBACK_PORT,
-            fallback_port
-        );
-        fallback_port
-    };
 
     let redirect_uri = format!("http://localhost:{}/auth/callback", callback_port);
     let authorize_url = build_authorize_url(&challenge, &session_id, &redirect_uri);
@@ -259,7 +245,76 @@ pub async fn start_oauth_session(
     prune_expired_sessions(&mut sessions).await;
     sessions.insert(session_id.clone(), session);
 
-    (session_id, authorize_url, callback_port)
+    (session_id, authorize_url)
+}
+
+async fn try_bind(port: u16) -> Option<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(("127.0.0.1", port)).await.ok()
+}
+
+async fn send_cancel_request(port: u16) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const CANCEL_IO_TIMEOUT: Duration = Duration::from_secs(2);
+    let connect = tokio::net::TcpStream::connect(("127.0.0.1", port));
+    let mut stream = match tokio::time::timeout(CANCEL_IO_TIMEOUT, connect).await {
+        Ok(Ok(s)) => s,
+        _ => return,
+    };
+    let request = format!(
+        "GET /cancel HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        port
+    );
+    if tokio::time::timeout(CANCEL_IO_TIMEOUT, stream.write_all(request.as_bytes()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut buf = [0u8; 64];
+    let _ = tokio::time::timeout(CANCEL_IO_TIMEOUT, stream.read(&mut buf)).await;
+}
+
+async fn bind_callback_listener() -> Result<tokio::net::TcpListener, String> {
+    if let Some(listener) = try_bind(CODEX_CALLBACK_PORT).await {
+        return Ok(listener);
+    }
+
+    send_cancel_request(CODEX_CALLBACK_PORT).await;
+    for _ in 0..BIND_RETRY_ATTEMPTS {
+        tokio::time::sleep(BIND_RETRY_DELAY).await;
+        if let Some(listener) = try_bind(CODEX_CALLBACK_PORT).await {
+            return Ok(listener);
+        }
+    }
+
+    tracing::warn!(
+        "OpenAI Codex OAuth: port {} unavailable, falling back to {}",
+        CODEX_CALLBACK_PORT,
+        CODEX_FALLBACK_CALLBACK_PORT
+    );
+    if let Some(listener) = try_bind(CODEX_FALLBACK_CALLBACK_PORT).await {
+        return Ok(listener);
+    }
+
+    Err(format!(
+        "OpenAI login callback ports {} and {} are both in use. \
+         Close the application using them (for example a pending `codex` CLI login) and try again.",
+        CODEX_CALLBACK_PORT, CODEX_FALLBACK_CALLBACK_PORT
+    ))
+}
+
+pub async fn start_oauth_session(
+    provider_instance_id: impl Into<String>,
+) -> Result<(String, String, tokio::net::TcpListener), String> {
+    let listener = bind_callback_listener().await?;
+    let callback_port = listener
+        .local_addr()
+        .map_err(|e| format!("Cannot read OAuth callback port: {}", e))?
+        .port();
+    let (session_id, authorize_url) =
+        register_session(provider_instance_id.into(), callback_port).await;
+    Ok((session_id, authorize_url, listener))
 }
 
 #[cfg(test)]
@@ -274,10 +329,6 @@ pub async fn pending_session_provider_instance_id(session_id: &str) -> Option<St
 pub async fn clear_pending_sessions_for_test() {
     let mut sessions = PENDING_SESSIONS.lock().await;
     sessions.clear();
-}
-
-fn port_available(port: u16) -> bool {
-    std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok()
 }
 
 pub async fn exchange_code_for_session(
@@ -394,141 +445,163 @@ pub async fn refresh_access_token(
     })
 }
 
-pub async fn start_callback_listener(
-    port: u16,
+pub fn start_callback_listener(
+    listener: tokio::net::TcpListener,
     http_client: reqwest::Client,
-) -> Result<tokio::task::JoinHandle<Option<(OAuthTokens, String)>>, String> {
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
-        .await
-        .map_err(|e| format!("Cannot bind callback listener on port {}: {}", port, e))?;
-
+) -> tokio::task::JoinHandle<Option<(OAuthTokens, String)>> {
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or_default();
     tracing::info!(
         "OpenAI Codex OAuth: callback listener started on port {}",
         port
     );
 
-    let handle = tokio::spawn(async move {
-        let timeout = tokio::time::Duration::from_secs(SESSION_TTL_SECS as u64);
-        let accept_result = tokio::time::timeout(timeout, listener.accept()).await;
-
-        let (mut stream, _addr) = match accept_result {
-            Ok(Ok((s, a))) => (s, a),
-            Ok(Err(e)) => {
-                tracing::warn!("OpenAI Codex OAuth: callback accept error: {}", e);
-                return None;
-            }
-            Err(_) => {
-                tracing::info!("OpenAI Codex OAuth: callback listener timed out");
-                return None;
-            }
-        };
-
+    tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
 
-        const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
-        let mut buf = vec![0u8; 8192];
-        let n = match tokio::time::timeout(CALLBACK_READ_TIMEOUT, stream.read(&mut buf)).await {
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => {
-                tracing::warn!("OpenAI Codex OAuth: failed to read callback request: {}", e);
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(SESSION_TTL_SECS as u64);
+        let mut connections_served = 0usize;
+
+        while connections_served < MAX_CALLBACK_CONNECTIONS {
+            let (mut stream, _addr) =
+                match tokio::time::timeout_at(deadline, listener.accept()).await {
+                    Ok(Ok(pair)) => pair,
+                    Ok(Err(e)) => {
+                        tracing::warn!("OpenAI Codex OAuth: callback accept error: {}", e);
+                        return None;
+                    }
+                    Err(_) => {
+                        tracing::info!("OpenAI Codex OAuth: callback listener timed out");
+                        return None;
+                    }
+                };
+            connections_served += 1;
+
+            const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
+            let mut buf = vec![0u8; 8192];
+            let n = match tokio::time::timeout(CALLBACK_READ_TIMEOUT, stream.read(&mut buf)).await
+            {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => {
+                    tracing::debug!("OpenAI Codex OAuth: failed to read callback request: {}", e);
+                    continue;
+                }
+                Err(_) => {
+                    tracing::debug!("OpenAI Codex OAuth: callback request read timed out");
+                    continue;
+                }
+            };
+            if n == 0 {
+                continue;
+            }
+            let request_str = String::from_utf8_lossy(&buf[..n]);
+
+            let first_line = request_str.lines().next().unwrap_or("");
+            let path_and_query = first_line.split_whitespace().nth(1).unwrap_or("");
+
+            let parsed = match url::Url::parse(&format!("http://localhost{}", path_and_query)) {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::debug!("OpenAI Codex OAuth: failed to parse callback URL: {}", e);
+                    send_http_response(&mut stream, 400, "Bad Request").await;
+                    continue;
+                }
+            };
+
+            match parsed.path() {
+                "/cancel" => {
+                    tracing::info!("OpenAI Codex OAuth: login cancelled by a newer login attempt");
+                    send_http_response(&mut stream, 200, "Login cancelled").await;
+                    return None;
+                }
+                "/auth/callback" => {}
+                _ => {
+                    send_http_response(&mut stream, 404, "Not Found").await;
+                    continue;
+                }
+            }
+
+            let params: HashMap<String, String> = parsed.query_pairs().into_owned().collect();
+
+            if let Some(err) = params.get("error") {
+                let desc = params
+                    .get("error_description")
+                    .map(|s| s.as_str())
+                    .unwrap_or("Unknown error");
+                tracing::warn!("OpenAI Codex OAuth error: {} — {}", err, desc);
+                send_http_response(
+                    &mut stream,
+                    200,
+                    &callback_html(false, &format!("{}: {}", err, desc)),
+                )
+                .await;
                 return None;
             }
-            Err(_) => {
-                tracing::warn!("OpenAI Codex OAuth: callback request read timed out");
-                return None;
-            }
-        };
-        let request_str = String::from_utf8_lossy(&buf[..n]);
 
-        // Parse the GET request line to extract path + query
-        let first_line = request_str.lines().next().unwrap_or("");
-        let path_and_query = first_line.split_whitespace().nth(1).unwrap_or("");
+            let code = match params.get("code") {
+                Some(c) if !c.is_empty() => c.clone(),
+                _ => {
+                    send_http_response(
+                        &mut stream,
+                        200,
+                        &callback_html(false, "No authorization code received"),
+                    )
+                    .await;
+                    return None;
+                }
+            };
 
-        let parsed = match url::Url::parse(&format!("http://localhost{}", path_and_query)) {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::warn!("OpenAI Codex OAuth: failed to parse callback URL: {}", e);
-                send_http_response(&mut stream, 400, "Bad Request").await;
-                return None;
-            }
-        };
+            let session_id = match params.get("state") {
+                Some(s) if !s.is_empty() => s.clone(),
+                _ => {
+                    send_http_response(
+                        &mut stream,
+                        200,
+                        &callback_html(false, "Missing state parameter"),
+                    )
+                    .await;
+                    return None;
+                }
+            };
 
-        let params: HashMap<String, String> = parsed.query_pairs().into_owned().collect();
-
-        if let Some(err) = params.get("error") {
-            let desc = params
-                .get("error_description")
-                .map(|s| s.as_str())
-                .unwrap_or("Unknown error");
-            tracing::warn!("OpenAI Codex OAuth error: {} — {}", err, desc);
-            send_http_response(
-                &mut stream,
-                200,
-                &callback_html(false, &format!("{}: {}", err, desc)),
-            )
-            .await;
-            return None;
+            return match exchange_code_for_session(&http_client, &session_id, &code).await {
+                Ok((tokens, provider_instance_id)) => {
+                    send_http_response(
+                        &mut stream,
+                        200,
+                        &callback_html(
+                            true,
+                            "Authentication successful. You can close this window.",
+                        ),
+                    )
+                    .await;
+                    Some((tokens, provider_instance_id))
+                }
+                Err(e) => {
+                    tracing::warn!("OpenAI Codex OAuth: token exchange failed: {}", e);
+                    send_http_response(
+                        &mut stream,
+                        200,
+                        &callback_html(false, &format!("Token exchange failed: {}", e)),
+                    )
+                    .await;
+                    None
+                }
+            };
         }
 
-        let code = match params.get("code") {
-            Some(c) if !c.is_empty() => c.clone(),
-            _ => {
-                send_http_response(
-                    &mut stream,
-                    200,
-                    &callback_html(false, "No authorization code received"),
-                )
-                .await;
-                return None;
-            }
-        };
-
-        let session_id = match params.get("state") {
-            Some(s) if !s.is_empty() => s.clone(),
-            _ => {
-                send_http_response(
-                    &mut stream,
-                    200,
-                    &callback_html(false, "Missing state parameter"),
-                )
-                .await;
-                return None;
-            }
-        };
-
-        match exchange_code_for_session(&http_client, &session_id, &code).await {
-            Ok((tokens, provider_instance_id)) => {
-                send_http_response(
-                    &mut stream,
-                    200,
-                    &callback_html(
-                        true,
-                        "Authentication successful. You can close this window.",
-                    ),
-                )
-                .await;
-                Some((tokens, provider_instance_id))
-            }
-            Err(e) => {
-                tracing::warn!("OpenAI Codex OAuth: token exchange failed: {}", e);
-                send_http_response(
-                    &mut stream,
-                    200,
-                    &callback_html(false, &format!("Token exchange failed: {}", e)),
-                )
-                .await;
-                None
-            }
-        }
-    });
-
-    Ok(handle)
+        tracing::warn!(
+            "OpenAI Codex OAuth: too many connections without a login callback; giving up"
+        );
+        None
+    })
 }
 
 fn raw_http_response(status: u16, body: &str) -> String {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        404 => "Not Found",
         _ => "Error",
     };
     format!(
@@ -586,11 +659,22 @@ mod tests {
     #[tokio::test]
     async fn pending_oauth_session_tracks_provider_instance_id() {
         clear_pending_sessions_for_test().await;
-        let (session_id, _authorize_url, _callback_port) =
-            start_oauth_session(8001, "openai_codex_work").await;
+        let (session_id, authorize_url) =
+            register_session("openai_codex_work".to_string(), CODEX_CALLBACK_PORT).await;
 
         let provider_instance_id = pending_session_provider_instance_id(&session_id).await;
         assert_eq!(provider_instance_id.as_deref(), Some("openai_codex_work"));
+        assert!(authorize_url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
+
+        clear_pending_sessions_for_test().await;
+    }
+
+    #[tokio::test]
+    async fn authorize_url_only_uses_hydra_allowlisted_ports() {
+        clear_pending_sessions_for_test().await;
+        let (_session_id, fallback_url) =
+            register_session("openai_codex".to_string(), CODEX_FALLBACK_CALLBACK_PORT).await;
+        assert!(fallback_url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1457%2Fauth%2Fcallback"));
 
         clear_pending_sessions_for_test().await;
     }

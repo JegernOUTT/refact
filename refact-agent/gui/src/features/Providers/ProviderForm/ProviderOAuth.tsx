@@ -32,6 +32,23 @@ type ProviderOAuthProps = {
   authStatus: string;
 };
 
+function getErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null) {
+    const record = error as Record<string, unknown>;
+    const data = record.data;
+    if (typeof data === "object" && data !== null) {
+      const dataRecord = data as Record<string, unknown>;
+      if (typeof dataRecord.detail === "string") return dataRecord.detail;
+      if (typeof dataRecord.error === "string") return dataRecord.error;
+    }
+    if (typeof data === "string") return data;
+    if (typeof record.error === "string") return record.error;
+    if (typeof record.message === "string") return record.message;
+  }
+  return fallback;
+}
+
 function inferOAuthMode(
   providerName: string,
   response: OAuthStartResponse,
@@ -165,7 +182,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
         setIsDevicePolling(false);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to start OAuth");
+      setError(getErrorMessage(e, "Failed to start OAuth"));
     } finally {
       setIsLoading(false);
     }
@@ -192,9 +209,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
       setDevicePollTick((tick) => tick + 1);
     } catch (e) {
       setIsDevicePolling(false);
-      setError(
-        e instanceof Error ? e.message : "Failed to check authorization",
-      );
+      setError(getErrorMessage(e, "Failed to check authorization"));
     } finally {
       setIsLoading(false);
     }
@@ -264,7 +279,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
       resetOAuthState();
       invalidateProviderAndCaps();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to exchange code");
+      setError(getErrorMessage(e, "Failed to exchange code"));
     } finally {
       setIsLoading(false);
     }
@@ -277,7 +292,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
       await oauthLogout({ providerName }).unwrap();
       resetOAuthState();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to logout");
+      setError(getErrorMessage(e, "Failed to logout"));
     } finally {
       setIsLoading(false);
     }
