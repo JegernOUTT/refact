@@ -9,6 +9,7 @@ import * as zlib from "zlib";
 import { compareVersions, resolveBundledRefactPath } from "./refactDaemon";
 
 export const REFACT_RELEASE_BASE_URL = "https://github.com/JegernOUTT/refact/releases/download";
+export const REFACT_RELEASES_API_URL = "https://api.github.com/repos/JegernOUTT/refact/releases?per_page=100";
 const USER_AGENT_HEADER = "User-Agent";
 const INSTALL_LOCK_NAME = ".install.lock";
 const INSTALL_LOCK_RETRY_MS = 100;
@@ -21,6 +22,19 @@ export type RefactReleaseAsset = {
     archiveUrl: string;
     sha256Url: string;
 };
+
+export type ResolvedRefactBinary = {
+    binPath: string;
+    version?: string;
+    fallbackFromVersion?: string;
+};
+
+export class DownloadHttpError extends Error {
+    constructor(public readonly statusCode: number, message: string) {
+        super(message);
+        this.name = "DownloadHttpError";
+    }
+}
 
 export type RefactBinaryResolverOptions = {
     explicitPath?: string;
@@ -37,6 +51,8 @@ export type RefactBinaryResolverOptions = {
     downloadFile?: (url: string, destPath: string) => Promise<void>;
     extractArchive?: (archivePath: string, destDir: string, platform: string) => Promise<void>;
     chmod?: (binPath: string) => Promise<void>;
+    listPublishedEngineVersions?: () => Promise<string[]>;
+    onFallbackVersion?: (pinned: string, chosen: string) => void;
     installLockRetryMs?: number;
     installLockTimeoutMs?: number;
     installLockStaleMs?: number;
@@ -88,7 +104,11 @@ export function extractRefactVersion(output: string | undefined): string | undef
 }
 
 export async function resolveRefactBinary(options: RefactBinaryResolverOptions): Promise<string> {
-    const local = await resolveLocalRefactBinaryOrNull(options);
+    return (await resolveRefactBinaryDetailed(options)).binPath;
+}
+
+export async function resolveRefactBinaryDetailed(options: RefactBinaryResolverOptions): Promise<ResolvedRefactBinary> {
+    const local = await resolveLocalRefactBinaryDetailedOrNull(options);
     if (local) {
         return local;
     }
@@ -98,39 +118,47 @@ export async function resolveRefactBinary(options: RefactBinaryResolverOptions):
     const homeDir = options.homeDir ?? os.homedir();
     const runVersion = options.runVersion ?? readRefactVersion;
     try {
-        return await downloadPinnedRefactBinary({ ...options, platform, arch, homeDir, runVersion });
+        return await downloadRefactBinary({ ...options, platform, arch, homeDir, runVersion });
     } catch (error) {
         throw new Error(refactBinaryResolutionFailureMessage(options.pinnedVersion, error));
     }
 }
 
 export async function resolveLocalRefactBinaryOrNull(options: RefactBinaryResolverOptions): Promise<string | undefined> {
+    return (await resolveLocalRefactBinaryDetailedOrNull(options))?.binPath;
+}
+
+export async function resolveLocalRefactBinaryDetailedOrNull(options: RefactBinaryResolverOptions): Promise<ResolvedRefactBinary | undefined> {
+    const runVersion = options.runVersion ?? readRefactVersion;
     const explicitPath = options.explicitPath?.trim();
     if (explicitPath) {
-        return path.resolve(explicitPath);
+        const binPath = path.resolve(explicitPath);
+        const version = extractRefactVersion(await runVersion(binPath).catch(() => undefined));
+        return { binPath, version };
     }
 
     const minVersion = options.minVersion;
     const platform = options.platform ?? process.platform;
     const homeDir = options.homeDir ?? os.homedir();
-    const runVersion = options.runVersion ?? readRefactVersion;
     const bundledDir = options.bundledDir?.trim();
     if (bundledDir) {
         const bundledPath = resolveBundledRefactPath(bundledDir);
-        if (await isCompatibleRefactBinary(bundledPath, minVersion, runVersion)) {
-            return path.resolve(bundledPath);
+        const version = await compatibleRefactBinaryVersion(bundledPath, minVersion, runVersion);
+        if (version) {
+            return { binPath: path.resolve(bundledPath), version };
         }
     }
     for (const candidate of systemRefactCandidates(options.pathEnv ?? process.env.PATH ?? "", homeDir, platform)) {
-        if (await isCompatibleRefactBinary(candidate, minVersion, runVersion)) {
-            return candidate;
+        const version = await compatibleRefactBinaryVersion(candidate, minVersion, runVersion);
+        if (version) {
+            return { binPath: candidate, version };
         }
     }
     return undefined;
 }
 
 function refactBinaryResolutionFailureMessage(version: string, error: unknown): string {
-    return `Refact engine release ${version} is unavailable or failed to download. Set refactai.binaryPath to a compatible local refact binary. ${errorMessage(error)}`;
+    return `Refact engine release ${version} is unavailable or failed to download, and no published engine release could be used instead. Set refactai.binaryPath to a compatible local refact binary. ${errorMessage(error)}`;
 }
 
 function errorMessage(error: unknown): string {
@@ -151,22 +179,26 @@ function sharedRefactBinaryPath(homeDir: string, platform: string): string {
     return path.resolve(path.join(homeDir, ".refact", "bin", binaryNameForPlatform(platform)));
 }
 
-async function isCompatibleRefactBinary(
+async function compatibleRefactBinaryVersion(
     binPath: string,
     minVersion: string,
     runVersion: (binPath: string) => Promise<string | undefined>,
-): Promise<boolean> {
-    if (!fileExists(binPath)) { return false; }
-    const version = extractRefactVersion(await runVersion(binPath));
-    return !!version && compareVersions(version, minVersion) >= 0;
+): Promise<string | undefined> {
+    if (!fileExists(binPath)) { return undefined; }
+    const version = extractRefactVersion(await runVersion(binPath).catch(() => undefined));
+    if (!version || compareVersions(version, minVersion) < 0) {
+        return undefined;
+    }
+    return version;
 }
 
-async function downloadPinnedRefactBinary(options: DownloadRefactOptions): Promise<string> {
+async function downloadRefactBinary(options: DownloadRefactOptions): Promise<ResolvedRefactBinary> {
     const target = refactReleaseTarget(options.platform, options.arch);
     const binaryName = binaryNameForPlatform(options.platform);
     const binPath = sharedRefactBinaryPath(options.homeDir, options.platform);
-    if (await isCompatibleRefactBinary(binPath, options.minVersion, options.runVersion)) {
-        return binPath;
+    const preLockVersion = await compatibleRefactBinaryVersion(binPath, options.minVersion, options.runVersion);
+    if (preLockVersion) {
+        return { binPath, version: preLockVersion };
     }
 
     const lockPath = path.join(path.dirname(binPath), INSTALL_LOCK_NAME);
@@ -177,41 +209,139 @@ async function downloadPinnedRefactBinary(options: DownloadRefactOptions): Promi
         options.installLockStaleMs ?? INSTALL_LOCK_STALE_MS,
         options.installLockNowMs ?? Date.now,
         async () => {
-            if (await isCompatibleRefactBinary(binPath, options.minVersion, options.runVersion)) {
-                return binPath;
+            const lockedVersion = await compatibleRefactBinaryVersion(binPath, options.minVersion, options.runVersion);
+            if (lockedVersion) {
+                return { binPath, version: lockedVersion };
             }
 
-            const downloadFile = options.downloadFile ?? defaultDownloadFile;
-            const extractArchive = options.extractArchive ?? defaultExtractArchive;
-            const chmod = options.chmod ?? (candidate => defaultChmod(candidate, options.platform));
-            const asset = refactReleaseAsset(options.pinnedVersion, target, options.platform);
-            const tmpDir = path.join(options.cacheDir, options.pinnedVersion, target, `tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-            const archivePath = path.join(tmpDir, asset.archiveName);
-            const shaPath = `${archivePath}.sha256`;
-            const extractDir = path.join(tmpDir, "extract");
-            await fs.promises.mkdir(extractDir, { recursive: true });
             try {
-                options.onDownloadStart?.();
-                await downloadFile(asset.archiveUrl, archivePath);
-                await downloadFile(asset.sha256Url, shaPath);
-                await verifySha256(archivePath, shaPath);
-                await extractArchive(archivePath, extractDir, options.platform);
-                const extractedBin = path.join(extractDir, binaryName);
-                if (!fileExists(extractedBin)) {
-                    throw new Error(`downloaded Refact archive did not contain ${binaryName}`);
+                const version = await downloadRefactVersionToSharedPath(options, options.pinnedVersion, options.minVersion, target, binaryName, binPath);
+                return { binPath, version };
+            } catch (error) {
+                if (!(error instanceof DownloadHttpError) || error.statusCode !== 404) {
+                    throw error;
                 }
-                await chmod(extractedBin);
-                await promoteBinaryToSharedInstall(extractedBin, binPath, chmod);
-                await chmod(binPath);
-                if (!await isCompatibleRefactBinary(binPath, options.minVersion, options.runVersion)) {
-                    throw new Error(`downloaded Refact binary is older than ${options.minVersion}`);
-                }
-                return binPath;
-            } finally {
-                await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+                return resolveLatestPublishedRefactBinary(options, target, binaryName, binPath, error);
             }
         },
     );
+}
+
+async function resolveLatestPublishedRefactBinary(
+    options: DownloadRefactOptions,
+    target: string,
+    binaryName: string,
+    binPath: string,
+    pinnedError: DownloadHttpError,
+): Promise<ResolvedRefactBinary> {
+    const listVersions = options.listPublishedEngineVersions ?? fetchPublishedEngineVersions;
+    const versions = await listVersions().catch(() => undefined);
+    if (!versions) {
+        throw pinnedError;
+    }
+    const latest = versions
+        .map(version => version.trim())
+        .filter(version => version.length > 0)
+        .sort(compareVersions)
+        .pop();
+    if (!latest || compareVersions(latest, options.pinnedVersion) === 0) {
+        throw pinnedError;
+    }
+    options.onFallbackVersion?.(options.pinnedVersion, latest);
+
+    const reusableVersion = await compatibleRefactBinaryVersion(binPath, latest, options.runVersion);
+    if (reusableVersion) {
+        return { binPath, version: reusableVersion, fallbackFromVersion: options.pinnedVersion };
+    }
+
+    const version = await downloadRefactVersionToSharedPath(options, latest, latest, target, binaryName, binPath);
+    return { binPath, version, fallbackFromVersion: options.pinnedVersion };
+}
+
+async function downloadRefactVersionToSharedPath(
+    options: DownloadRefactOptions,
+    version: string,
+    minAcceptableVersion: string,
+    target: string,
+    binaryName: string,
+    binPath: string,
+): Promise<string> {
+    const downloadFile = options.downloadFile ?? defaultDownloadFile;
+    const extractArchive = options.extractArchive ?? defaultExtractArchive;
+    const chmod = options.chmod ?? (candidate => defaultChmod(candidate, options.platform));
+    const asset = refactReleaseAsset(version, target, options.platform);
+    const tmpDir = path.join(options.cacheDir, version, target, `tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const archivePath = path.join(tmpDir, asset.archiveName);
+    const shaPath = `${archivePath}.sha256`;
+    const extractDir = path.join(tmpDir, "extract");
+    await fs.promises.mkdir(extractDir, { recursive: true });
+    try {
+        options.onDownloadStart?.();
+        await downloadFile(asset.archiveUrl, archivePath);
+        await downloadFile(asset.sha256Url, shaPath);
+        await verifySha256(archivePath, shaPath);
+        await extractArchive(archivePath, extractDir, options.platform);
+        const extractedBin = path.join(extractDir, binaryName);
+        if (!fileExists(extractedBin)) {
+            throw new Error(`downloaded Refact archive did not contain ${binaryName}`);
+        }
+        await chmod(extractedBin);
+        await promoteBinaryToSharedInstall(extractedBin, binPath, chmod);
+        await chmod(binPath);
+        const actualVersion = await compatibleRefactBinaryVersion(binPath, minAcceptableVersion, options.runVersion);
+        if (!actualVersion) {
+            throw new Error(`downloaded Refact binary is older than ${minAcceptableVersion}`);
+        }
+        return actualVersion;
+    } finally {
+        await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+}
+
+export async function fetchPublishedEngineVersions(): Promise<string[]> {
+    const body = await httpGetText(REFACT_RELEASES_API_URL, {
+        [USER_AGENT_HEADER]: "refact-vscode",
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        Accept: "application/vnd.github+json",
+    });
+    return parsePublishedEngineVersions(body);
+}
+
+export function parsePublishedEngineVersions(json: string): string[] {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(json);
+    } catch {
+        return [];
+    }
+    if (!Array.isArray(parsed)) {
+        return [];
+    }
+    return parsed
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        .map(release => (release && typeof release === "object" ? (release as { tag_name?: unknown }).tag_name : undefined))
+        .filter((tag): tag is string => typeof tag === "string" && tag.startsWith("engine/v"))
+        .map(tag => tag.slice("engine/v".length))
+        .filter(version => version.length > 0);
+}
+
+function httpGetText(url: string, headers: Record<string, string>): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const client = url.startsWith("http:") ? http : https;
+        const request = client.get(url, { headers }, response => {
+            const statusCode = response.statusCode ?? 0;
+            if (statusCode !== 200) {
+                response.resume();
+                reject(new DownloadHttpError(statusCode, `request failed ${statusCode} ${url}`));
+                return;
+            }
+            const chunks: Buffer[] = [];
+            response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+            response.once("error", reject);
+            response.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+        });
+        request.once("error", reject);
+    });
 }
 
 async function withInstallLock<T>(
@@ -466,7 +596,7 @@ function downloadFileToPath(
         }
         if (statusCode !== 200) {
             response.resume();
-            reject(new Error(`download failed ${statusCode} ${url}`));
+            reject(new DownloadHttpError(statusCode, `download failed ${statusCode} ${url}`));
             return;
         }
         fs.mkdirSync(path.dirname(destPath), { recursive: true });

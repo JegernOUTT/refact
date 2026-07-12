@@ -140,6 +140,17 @@ tasks {
     withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
         compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(javaCompilerVersion))
     }
+
+    // Bundled engine binaries must be loose files in the plugin directory (refact/bin/...),
+    // not resources inside the jar, so RefactBinaryResolver can execute them directly.
+    processResources {
+        exclude("bin/**")
+    }
+    withType<org.jetbrains.intellij.platform.gradle.tasks.PrepareSandboxTask> {
+        from(layout.projectDirectory.dir("src/main/resources/bin")) {
+            into(pluginName.map { "$it/bin" })
+        }
+    }
 }
 
 fun runCommandOrNull(cmd: String): String? {

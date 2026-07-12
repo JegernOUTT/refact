@@ -182,6 +182,16 @@ fun emitChat(project: Project, msg: String, chatId: String? = null) {
     lastNotification = notification
 }
 
+fun emitWarning(msg: String) {
+    removeLastNotification()
+    val project = getLastUsedProject()
+    val notification = NotificationGroupManager.getInstance().getNotificationGroup("Refact AI Notification Group")
+        .createNotification(Resources.titleStr, msg, NotificationType.WARNING)
+    notification.icon = Resources.Icons.LOGO_RED_16x16
+    notification.notify(project)
+    lastNotification = notification
+}
+
 fun emitError(msg: String) {
     removeLastNotification()
     val project = getLastUsedProject()

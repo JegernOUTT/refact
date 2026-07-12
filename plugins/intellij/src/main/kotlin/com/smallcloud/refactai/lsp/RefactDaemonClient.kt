@@ -27,7 +27,8 @@ private const val DAEMON_SPAWN_EXIT_LOG_WAIT_MS = 500L
 
 interface RefactDaemonClient {
     fun status(): DaemonStatus
-    fun ensureDaemon(binPath: String): DaemonStatus
+    fun ensureDaemon(binPath: String): DaemonStatus = ensureDaemon(binPath, null)
+    fun ensureDaemon(binPath: String, requiredVersion: String?): DaemonStatus
     fun openProject(root: String, settings: LSPConfig, daemon: DaemonStatus): DaemonProject
     fun detachProject(project: DaemonProject)
 }
@@ -101,7 +102,7 @@ internal fun spawnDaemonCandidateUntilHealthy(
 
 internal fun ensureDaemonWithHealthGate(
     status: () -> DaemonStatus,
-    pluginVersion: String,
+    expectedVersion: String,
     expectedExecutableSha256: String?,
     commands: List<DaemonSpawnCommand>,
     spawnCandidate: (DaemonSpawnCommand) -> Unit,
@@ -111,43 +112,43 @@ internal fun ensureDaemonWithHealthGate(
 ): DaemonStatus {
     val current = runCatching { status() }.getOrNull()
     if (current != null) {
-        if (daemonStatusMatchesExpected(current, pluginVersion, expectedExecutableSha256)) {
+        if (daemonStatusMatchesExpected(current, expectedVersion, expectedExecutableSha256)) {
             return current
         }
         shutdown(current, "upgrade")
-        val compatible = waitUntilDown(current, pluginVersion, expectedExecutableSha256)
+        val compatible = waitUntilDown(current, expectedVersion, expectedExecutableSha256)
         if (compatible != null) return compatible
     }
     return spawnDaemonCandidateUntilHealthy(commands, spawnCandidate) {
-        pollCandidate(pluginVersion, current?.pid, expectedExecutableSha256)
+        pollCandidate(expectedVersion, current?.pid, expectedExecutableSha256)
     }
 }
 
 internal fun spawnedDaemonStatusAccepted(
     status: DaemonStatus,
-    pluginVersion: String,
+    expectedVersion: String,
     rejectedPid: Int?,
     expectedExecutableSha256: String?,
 ): Boolean {
-    if (!daemonStatusMatchesExpected(status, pluginVersion, expectedExecutableSha256)) return false
+    if (!daemonStatusMatchesExpected(status, expectedVersion, expectedExecutableSha256)) return false
     if (rejectedPid != null && status.pid == rejectedPid) return false
     return true
 }
 
 internal fun daemonStatusMatchesExpected(
     status: DaemonStatus,
-    pluginVersion: String,
+    expectedVersion: String,
     expectedExecutableSha256: String?,
 ): Boolean {
-    if (versionIsOlder(status.version, pluginVersion)) return false
-    if (status.version.trim() != pluginVersion.trim()) return true
+    if (versionIsOlder(status.version, expectedVersion)) return false
+    if (status.version.trim() != expectedVersion.trim()) return true
     val expected = expectedExecutableSha256?.trim()?.takeIf { it.isNotEmpty() } ?: return true
     val actual = status.executableSha256?.trim()?.takeIf { it.isNotEmpty() } ?: return true
     return actual == expected
 }
 
-internal fun shouldVerifyDaemonExecutableHash(status: DaemonStatus, pluginVersion: String): Boolean {
-    return status.version.trim() == pluginVersion.trim() && !status.executableSha256.isNullOrBlank()
+internal fun shouldVerifyDaemonExecutableHash(status: DaemonStatus, expectedVersion: String): Boolean {
+    return status.version.trim() == expectedVersion.trim() && !status.executableSha256.isNullOrBlank()
 }
 
 internal object RefactBinaryHashCache {
@@ -178,11 +179,11 @@ internal object RefactBinaryHashCache {
 internal fun daemonUpgradeWaitSatisfied(
     oldDaemon: DaemonStatus,
     discovered: DaemonStatus?,
-    pluginVersion: String,
+    expectedVersion: String,
     expectedExecutableSha256: String?,
 ): Boolean {
     if (discovered == null) return false
-    if (!daemonStatusMatchesExpected(discovered, pluginVersion, expectedExecutableSha256)) return false
+    if (!daemonStatusMatchesExpected(discovered, expectedVersion, expectedExecutableSha256)) return false
     return discovered.pid != oldDaemon.pid || discovered.port != oldDaemon.port
 }
 
@@ -190,10 +191,10 @@ internal fun daemonUpgradeWaitFinished(
     oldDaemon: DaemonStatus,
     discovered: DaemonStatus?,
     oldEndpointStatus: DaemonStatus?,
-    pluginVersion: String,
+    expectedVersion: String,
     expectedExecutableSha256: String?,
 ): Boolean {
-    if (daemonUpgradeWaitSatisfied(oldDaemon, discovered, pluginVersion, expectedExecutableSha256)) return true
+    if (daemonUpgradeWaitSatisfied(oldDaemon, discovered, expectedVersion, expectedExecutableSha256)) return true
     return oldEndpointStatus == null || oldEndpointStatus.pid != oldDaemon.pid
 }
 
@@ -251,11 +252,12 @@ class HttpRefactDaemonClient(
         throw IOException("daemon status request failed", lastError)
     }
 
-    override fun ensureDaemon(binPath: String): DaemonStatus {
+    override fun ensureDaemon(binPath: String, requiredVersion: String?): DaemonStatus {
+        val expectedVersion = requiredVersion?.trim()?.takeIf { it.isNotEmpty() } ?: pluginVersionProvider()
         val expectedExecutableSha256 = RefactBinaryHashCache.sha256OrNull(java.nio.file.Path.of(binPath))
         return ensureDaemonWithHealthGate(
             status = { status() },
-            pluginVersion = pluginVersionProvider(),
+            expectedVersion = expectedVersion,
             expectedExecutableSha256 = expectedExecutableSha256,
             commands = daemonCommandCandidates(binPath, currentDaemonSpawnOs()),
             spawnCandidate = { spawnDaemonProcess(it) },
@@ -318,17 +320,17 @@ class HttpRefactDaemonClient(
 
     private fun waitUntilDown(
         oldDaemon: DaemonStatus,
-        pluginVersion: String,
+        expectedVersion: String,
         expectedExecutableSha256: String?,
     ): DaemonStatus? {
         val oldEndpoint = DaemonEndpoint(oldDaemon.port, oldDaemon.authToken)
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(DAEMON_SHUTDOWN_TIMEOUT_SECONDS)
         while (System.nanoTime() < deadline) {
             val discovered = runCatching { statusWithDeadline(deadline) }.getOrNull()
-            if (daemonUpgradeWaitSatisfied(oldDaemon, discovered, pluginVersion, expectedExecutableSha256)) return discovered
+            if (daemonUpgradeWaitSatisfied(oldDaemon, discovered, expectedVersion, expectedExecutableSha256)) return discovered
             val oldTimeouts = timeoutsForDeadline(DAEMON_READ_TIMEOUT_MS, deadline)
             val oldStatus = oldTimeouts?.let { runCatching { statusForEndpoint(oldEndpoint, it) }.getOrNull() }
-            if (daemonUpgradeWaitFinished(oldDaemon, discovered, oldStatus, pluginVersion, expectedExecutableSha256)) return null
+            if (daemonUpgradeWaitFinished(oldDaemon, discovered, oldStatus, expectedVersion, expectedExecutableSha256)) return null
             sleepUntilNextPoll(deadline)
         }
         throw IOException("daemon pid=${oldDaemon.pid} on port ${oldDaemon.port} did not shut down before timeout")

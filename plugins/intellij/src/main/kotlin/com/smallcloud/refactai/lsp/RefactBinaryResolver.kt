@@ -21,6 +21,7 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.ZipInputStream
 
 internal const val REFACT_RELEASE_BASE_URL = "https://github.com/JegernOUTT/refact/releases/download"
+internal const val REFACT_RELEASES_API_URL = "https://api.github.com/repos/JegernOUTT/refact/releases?per_page=100"
 
 private const val INSTALL_LOCK_NAME = ".install.lock"
 private const val INSTALL_LOCK_RETRY_MS = 100L
@@ -36,6 +37,14 @@ internal data class RefactReleaseAsset(
     val sha256Url: String,
 )
 
+internal data class ResolvedRefactBinary(
+    val path: String,
+    val version: String?,
+    val fallbackFromVersion: String? = null,
+)
+
+internal class DownloadFailedException(val statusCode: Int, message: String) : IOException(message)
+
 internal data class RefactBinaryResolverOptions(
     val explicitPath: String? = null,
     val bundledDir: Path? = null,
@@ -49,6 +58,8 @@ internal data class RefactBinaryResolverOptions(
     val versionReader: (Path) -> String? = ::readRefactVersion,
     val onDownloadStart: () -> Unit = {},
     val downloader: (URI, Path) -> Unit = ::downloadFile,
+    val releaseVersionsProvider: () -> List<String> = ::fetchPublishedEngineVersions,
+    val onFallbackVersion: (pinned: String, chosen: String) -> Unit = { _, _ -> },
     val extractor: (Path, Path, Boolean) -> Unit = ::extractArchive,
     val chmod: (Path) -> Unit = ::makeExecutable,
     val installLockRetryMs: Long = INSTALL_LOCK_RETRY_MS,
@@ -59,24 +70,34 @@ internal data class RefactBinaryResolverOptions(
 
 internal object RefactBinaryResolver {
     fun resolve(options: RefactBinaryResolverOptions): String {
-        return resolveLocalOrNull(options) ?: downloadPinnedRefactBinary(options)
+        return resolveDetailed(options).path
+    }
+
+    fun resolveDetailed(options: RefactBinaryResolverOptions): ResolvedRefactBinary {
+        return resolveLocalDetailedOrNull(options) ?: downloadRefactBinary(options)
     }
 
     fun resolveLocalOrNull(options: RefactBinaryResolverOptions): String? {
+        return resolveLocalDetailedOrNull(options)?.path
+    }
+
+    fun resolveLocalDetailedOrNull(options: RefactBinaryResolverOptions): ResolvedRefactBinary? {
         val explicit = options.explicitPath?.trim()?.takeIf { it.isNotEmpty() }
         if (explicit != null) {
-            return Path.of(explicit).toAbsolutePath().normalize().toString()
+            val path = Path.of(explicit).toAbsolutePath().normalize()
+            val version = extractRefactVersion(runCatching { options.versionReader(path) }.getOrNull())
+            return ResolvedRefactBinary(path.toString(), version)
         }
 
         for (candidate in bundledRefactCandidates(options.bundledDir, options.osName, options.arch)) {
-            if (isCompatibleRefactBinary(candidate, options.minVersion, options.versionReader)) {
-                return candidate.toString()
+            compatibleRefactBinaryVersion(candidate, options.minVersion, options.versionReader)?.let {
+                return ResolvedRefactBinary(candidate.toString(), it)
             }
         }
 
         for (candidate in systemRefactCandidates(options.pathEnv, options.homeDir, options.osName)) {
-            if (isCompatibleRefactBinary(candidate, options.minVersion, options.versionReader)) {
-                return candidate.toString()
+            compatibleRefactBinaryVersion(candidate, options.minVersion, options.versionReader)?.let {
+                return ResolvedRefactBinary(candidate.toString(), it)
             }
         }
 
@@ -229,13 +250,21 @@ private fun pathSeparator(osName: String): String {
     return if (osName.lowercase().contains("win")) ";" else File.pathSeparator
 }
 
-private fun isCompatibleRefactBinary(binPath: Path, minVersion: String, versionReader: (Path) -> String?): Boolean {
-    if (!Files.isRegularFile(binPath)) return false
-    val version = extractRefactVersion(versionReader(binPath)) ?: return false
-    return compareRefactVersions(version, minVersion) >= 0
+private fun compatibleRefactBinaryVersion(
+    binPath: Path,
+    minVersion: String,
+    versionReader: (Path) -> String?,
+): String? {
+    if (!Files.isRegularFile(binPath)) return null
+    val version = extractRefactVersion(runCatching { versionReader(binPath) }.getOrNull()) ?: return null
+    return version.takeIf { compareRefactVersions(it, minVersion) >= 0 }
 }
 
-private fun downloadPinnedRefactBinary(options: RefactBinaryResolverOptions): String {
+private fun isCompatibleRefactBinary(binPath: Path, minVersion: String, versionReader: (Path) -> String?): Boolean {
+    return compatibleRefactBinaryVersion(binPath, minVersion, versionReader) != null
+}
+
+private fun downloadRefactBinary(options: RefactBinaryResolverOptions): ResolvedRefactBinary {
     val target = refactReleaseTarget(options.osName, options.arch)
     val binaryName = refactBinaryName(options.osName)
     val sharedBinPath = sharedRefactBinaryPath(options.homeDir, options.osName)
@@ -246,21 +275,59 @@ private fun downloadPinnedRefactBinary(options: RefactBinaryResolverOptions): St
         options.installLockStaleMs,
         options.installLockNowMs,
     ) {
-        if (isCompatibleRefactBinary(sharedBinPath, options.minVersion, options.versionReader)) {
-            return@withSharedInstallLock sharedBinPath.toString()
-        }
+        compatibleRefactBinaryVersion(sharedBinPath, options.minVersion, options.versionReader)
+            ?.let { return@withSharedInstallLock ResolvedRefactBinary(sharedBinPath.toString(), it) }
 
-        downloadPinnedRefactBinaryToSharedPath(options, target, binaryName, sharedBinPath)
+        try {
+            val actual = downloadRefactVersionToSharedPath(
+                options,
+                options.pinnedVersion,
+                options.minVersion,
+                target,
+                binaryName,
+                sharedBinPath,
+            )
+            ResolvedRefactBinary(sharedBinPath.toString(), actual)
+        } catch (error: DownloadFailedException) {
+            if (error.statusCode != HttpURLConnection.HTTP_NOT_FOUND) throw error
+            resolveLatestPublishedRefactBinary(options, target, binaryName, sharedBinPath, error)
+        }
     }
 }
 
-private fun downloadPinnedRefactBinaryToSharedPath(
+private fun resolveLatestPublishedRefactBinary(
     options: RefactBinaryResolverOptions,
     target: String,
     binaryName: String,
     sharedBinPath: Path,
+    pinnedError: DownloadFailedException,
+): ResolvedRefactBinary {
+    val versions = runCatching { options.releaseVersionsProvider() }.getOrElse { throw pinnedError }
+    val latest = versions
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .maxWithOrNull { left, right -> compareRefactVersions(left, right) }
+        ?: throw pinnedError
+    if (compareRefactVersions(latest, options.pinnedVersion) == 0) throw pinnedError
+    options.onFallbackVersion(options.pinnedVersion, latest)
+
+    compatibleRefactBinaryVersion(sharedBinPath, latest, options.versionReader)?.let {
+        return ResolvedRefactBinary(sharedBinPath.toString(), it, options.pinnedVersion)
+    }
+
+    val actual = downloadRefactVersionToSharedPath(options, latest, latest, target, binaryName, sharedBinPath)
+    return ResolvedRefactBinary(sharedBinPath.toString(), actual, options.pinnedVersion)
+}
+
+private fun downloadRefactVersionToSharedPath(
+    options: RefactBinaryResolverOptions,
+    version: String,
+    minAcceptableVersion: String,
+    target: String,
+    binaryName: String,
+    sharedBinPath: Path,
 ): String {
-    val asset = refactReleaseAsset(options.pinnedVersion, target, options.osName)
+    val asset = refactReleaseAsset(version, target, options.osName)
     val tmpDir = options.cacheDir.resolve("tmp-${ProcessHandle.current().pid()}-${System.nanoTime()}")
     val archivePath = tmpDir.resolve(asset.archiveName)
     val shaPath = tmpDir.resolve("${asset.archiveName}.sha256")
@@ -280,14 +347,41 @@ private fun downloadPinnedRefactBinaryToSharedPath(
             options.chmod(extractedBin)
         }
         promoteSharedBinary(extractedBin, sharedBinPath, options)
-        if (!isCompatibleRefactBinary(sharedBinPath, options.minVersion, options.versionReader)) {
-            throw IOException("downloaded Refact binary is older than ${options.minVersion}")
-        }
-        return sharedBinPath.toString()
+        return compatibleRefactBinaryVersion(sharedBinPath, minAcceptableVersion, options.versionReader)
+            ?: throw IOException("downloaded Refact binary is older than $minAcceptableVersion")
     } finally {
         deleteRecursively(tmpDir)
     }
 }
+
+internal fun fetchPublishedEngineVersions(): List<String> {
+    val connection = URI(REFACT_RELEASES_API_URL).toURL().openConnection() as HttpURLConnection
+    try {
+        connection.connectTimeout = DOWNLOAD_CONNECT_TIMEOUT_MS
+        connection.readTimeout = DOWNLOAD_READ_TIMEOUT_MS
+        connection.setRequestProperty("User-Agent", "refact-jetbrains")
+        connection.setRequestProperty("Accept", "application/vnd.github+json")
+        val status = connection.responseCode
+        if (status != 200) {
+            throw IOException("release list request failed $status")
+        }
+        val body = connection.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
+        return parsePublishedEngineVersions(body)
+    } finally {
+        connection.disconnect()
+    }
+}
+
+internal fun parsePublishedEngineVersions(json: String): List<String> {
+    val root = runCatching { com.google.gson.JsonParser.parseString(json) }.getOrNull() ?: return emptyList()
+    if (!root.isJsonArray) return emptyList()
+    return root.asJsonArray.mapNotNull { element ->
+        runCatching { element.asJsonObject.get("tag_name")?.asString }.getOrNull()
+    }.filter { it.startsWith("engine/v") }
+        .map { it.removePrefix("engine/v") }
+        .filter { it.isNotBlank() }
+}
+
 
 private fun <T> withSharedInstallLock(
     sharedBinPath: Path,
@@ -497,7 +591,7 @@ private fun downloadFile(url: URI, destPath: Path) {
                 }
             }
             if (status != 200) {
-                throw IOException("download failed $status $current")
+                throw DownloadFailedException(status, "download failed $status $current")
             }
             connection.inputStream.use { input ->
                 Files.copy(input, destPath, StandardCopyOption.REPLACE_EXISTING)

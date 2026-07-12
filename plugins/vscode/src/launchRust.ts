@@ -52,6 +52,7 @@ export class RustBinaryBlob {
     private openedProjects: Map<string, refactDaemon.OpenProjectResponse> = new Map();
     private attachState: RefactBackendConnectionStatus = "connecting";
     private workerHealthProbe: WorkerHealthProbe;
+    private warned_engine_fallbacks: Set<string> = new Set();
 
     constructor(asset_path: string, binary_cache_path?: string) {
         this.asset_path = asset_path;
@@ -308,22 +309,23 @@ export class RustBinaryBlob {
         this.warn_about_ignored_roots(rootSelection);
 
         const pluginVersion = this.plugin_version();
-        const localBinPath = await refactBinary.resolveLocalRefactBinaryOrNull({
+        const localResolved = await refactBinary.resolveLocalRefactBinaryDetailedOrNull({
             explicitPath: vscode.workspace.getConfiguration().get<string>("refactai.binaryPath")?.trim(),
             bundledDir: this.asset_path,
             minVersion: pluginVersion,
             pinnedVersion: pluginVersion,
             cacheDir: this.binary_cache_path,
         });
-        const expectedExecutableSha256 = localBinPath ? await refactDaemon.sha256OfFile(localBinPath) : undefined;
-        let daemon = await refactDaemon.findExistingDaemon({ port: daemonPort, pluginVersion, expectedExecutableSha256 });
+        const expectedExecutableSha256 = localResolved ? await refactDaemon.sha256OfFile(localResolved.binPath) : undefined;
+        const expectedEngineVersion = localResolved?.version ?? pluginVersion;
+        let daemon = await refactDaemon.findExistingDaemon({ port: daemonPort, pluginVersion: expectedEngineVersion, expectedExecutableSha256 });
         if (!this.is_current_generation(generation)) {
             return;
         }
         this.set_attach_state(attachStateForDaemonOpenProject());
         if (!daemon) {
             const configuredBinary = vscode.workspace.getConfiguration().get<string>("refactai.binaryPath")?.trim();
-            const binPath = await refactBinary.resolveRefactBinary({
+            const resolved = await refactBinary.resolveRefactBinaryDetailed({
                 explicitPath: configuredBinary,
                 bundledDir: this.asset_path,
                 minVersion: pluginVersion,
@@ -334,11 +336,15 @@ export class RustBinaryBlob {
                         this.set_attach_state("installing");
                     }
                 },
+                onFallbackVersion: (pinned, chosen) => this.warn_engine_version_fallback(pinned, chosen),
             });
             if (!this.is_current_generation(generation)) {
                 return;
             }
-            daemon = await refactDaemon.ensureDaemon(binPath, { port: daemonPort, pluginVersion });
+            daemon = await refactDaemon.ensureDaemon(resolved.binPath, {
+                port: daemonPort,
+                pluginVersion: resolved.version ?? pluginVersion,
+            });
         }
         if (!this.is_current_generation(generation)) {
             return;
@@ -824,6 +830,17 @@ export class RustBinaryBlob {
 
     private plugin_version(): string {
         return vscode.extensions.getExtension("smallcloud.codify")?.packageJSON?.version ?? "0.0.0";
+    }
+
+    private warn_engine_version_fallback(pinned: string, chosen: string): void {
+        const key = `${pinned}->${chosen}`;
+        if (this.warned_engine_fallbacks.has(key)) {
+            return;
+        }
+        this.warned_engine_fallbacks.add(key);
+        const message = `Refact engine v${pinned} is not published on GitHub releases; using the latest published engine v${chosen} instead.`;
+        console.log(message);
+        void vscode.window.showWarningMessage(message);
     }
 
     private workspace_roots(): string[] {

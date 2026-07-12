@@ -40,6 +40,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         val openProjectCalls = AtomicInteger(0)
         val detachProjectCalls = AtomicInteger(0)
         val ensureDaemonPaths = Collections.synchronizedList(mutableListOf<String>())
+        val ensureDaemonRequiredVersions = Collections.synchronizedList(mutableListOf<String?>())
         val detachedProjects = Collections.synchronizedList(mutableListOf<DaemonProject>())
         val openedSettings = Collections.synchronizedList(mutableListOf<LSPConfig>())
         val openedDaemons = Collections.synchronizedList(mutableListOf<DaemonStatus>())
@@ -61,9 +62,10 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             return DaemonStatus(version = statusVersion, port = port, authToken = authToken)
         }
 
-        override fun ensureDaemon(binPath: String): DaemonStatus {
+        override fun ensureDaemon(binPath: String, requiredVersion: String?): DaemonStatus {
             ensureDaemonCalls.incrementAndGet()
             ensureDaemonPaths.add(binPath)
+            ensureDaemonRequiredVersions.add(requiredVersion)
             statusError = null
             statusVersion = ensuredVersion
             return DaemonStatus(version = ensuredVersion, port = port, authToken = authToken)

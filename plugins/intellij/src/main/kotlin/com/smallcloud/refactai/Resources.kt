@@ -1,5 +1,6 @@
 package com.smallcloud.refactai
 
+import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.util.IconLoader
@@ -11,7 +12,7 @@ import javax.swing.Icon
 import javax.swing.UIManager
 
 private const val REFACT_PLUGIN_ID = "com.smallcloud.codify"
-private const val FALLBACK_PLUGIN_VERSION = "8.2.3"
+private const val UNKNOWN_PLUGIN_VERSION = "0.0.0"
 
 data class RefactPluginInfo(
     val pluginId: PluginId,
@@ -37,8 +38,12 @@ private fun getHomePath(): File? {
 }
 
 private fun getVersion(): String {
+    runCatching { PluginManagerCore.getPlugin(PluginId.getId(REFACT_PLUGIN_ID))?.version }
+        .getOrNull()
+        ?.takeIf { it.isNotBlank() }
+        ?.let { return it }
     return Resources::class.java.`package`?.implementationVersion?.takeIf { it.isNotBlank() }
-        ?: FALLBACK_PLUGIN_VERSION
+        ?: UNKNOWN_PLUGIN_VERSION
 }
 
 private fun getPluginId(): PluginId = PluginId.getId(REFACT_PLUGIN_ID)

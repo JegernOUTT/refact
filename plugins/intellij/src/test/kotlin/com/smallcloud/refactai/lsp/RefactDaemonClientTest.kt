@@ -427,7 +427,7 @@ class RefactDaemonClientTest {
 
         val status = ensureDaemonWithHealthGate(
             status = { current },
-            pluginVersion = "8.0.0",
+            expectedVersion = "8.0.0",
             expectedExecutableSha256 = null,
             commands = listOf(DaemonSpawnCommand(listOf("refact-lsp", "daemon"))),
             spawnCandidate = { spawns += 1 },
@@ -458,7 +458,7 @@ class RefactDaemonClientTest {
 
         val status = ensureDaemonWithHealthGate(
             status = { current },
-            pluginVersion = "8.2.0",
+            expectedVersion = "8.2.0",
             expectedExecutableSha256 = null,
             commands = listOf(DaemonSpawnCommand(listOf("refact", "daemon"))),
             spawnCandidate = { spawns += 1 },
@@ -497,7 +497,7 @@ class RefactDaemonClientTest {
 
         val status = ensureDaemonWithHealthGate(
             status = { current },
-            pluginVersion = "8.2.0",
+            expectedVersion = "8.2.0",
             expectedExecutableSha256 = null,
             commands = listOf(DaemonSpawnCommand(listOf("refact", "daemon"))),
             spawnCandidate = { spawns += 1 },
@@ -603,7 +603,7 @@ class RefactDaemonClientTest {
 
         val status = ensureDaemonWithHealthGate(
             status = { current },
-            pluginVersion = "8.2.3",
+            expectedVersion = "8.2.3",
             expectedExecutableSha256 = "aaa",
             commands = listOf(DaemonSpawnCommand(listOf("refact", "daemon"))),
             spawnCandidate = { spawns += 1 },
@@ -636,7 +636,7 @@ class RefactDaemonClientTest {
 
         val status = ensureDaemonWithHealthGate(
             status = { current },
-            pluginVersion = "8.2.3",
+            expectedVersion = "8.2.3",
             expectedExecutableSha256 = "aaa",
             commands = listOf(DaemonSpawnCommand(listOf("refact", "daemon"))),
             spawnCandidate = { spawns += 1 },
@@ -648,6 +648,38 @@ class RefactDaemonClientTest {
         assertEquals(current, status)
         assertEquals(0, spawns)
         assertEquals(0, shutdowns)
+    }
+
+    @Test
+    fun ensureDaemonAcceptsDaemonMatchingResolvedEngineVersionOlderThanPlugin() {
+        val root = Files.createTempDirectory("refact-daemon-required-version")
+        val originalHome = System.getProperty("user.home")
+        val server = MockWebServer()
+        try {
+            server.start()
+            System.setProperty("user.home", root.toString())
+            val binPath = root.resolve("refact")
+            Files.writeString(binPath, "fallback-engine")
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"pid\":55,\"version\":\"8.1.0\",\"port\":${server.port},\"workers\":1}")
+                    .build()
+            )
+
+            val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "9.9.9" })
+            val status = client.ensureDaemon(binPath.toString(), "8.1.0")
+
+            assertEquals(55, status.pid)
+            assertEquals("8.1.0", status.version)
+            assertEquals("/daemon/v1/status", server.takeRequest().path)
+            assertEquals(null, server.takeRequest(100, TimeUnit.MILLISECONDS))
+        } finally {
+            server.shutdown()
+            System.setProperty("user.home", originalHome)
+            root.deleteRecursively()
+        }
     }
 
     @Test

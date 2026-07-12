@@ -16,6 +16,7 @@ import com.smallcloud.refactai.getThisPlugin
 import com.smallcloud.refactai.io.ConnectionStatus
 import com.smallcloud.refactai.io.InferenceGlobalContextChangedNotifier
 import com.smallcloud.refactai.notifications.emitError
+import com.smallcloud.refactai.notifications.emitWarning
 import java.io.File
 import java.net.URI
 import java.net.URLEncoder
@@ -484,7 +485,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 }
                 clearBinaryResolutionFailure()
                 logger.debug("LSP daemon spawn/upgrade $bin ${newConfig.toSafeLogString()}")
-                daemonClient.ensureDaemon(bin)
+                daemonClient.ensureDaemon(bin, requiredDaemonVersion())
             } else {
                 clearBinaryResolutionFailure()
                 logger.debug("LSP daemon attach existing pid=${compatibleDaemonStatus.pid} version=${compatibleDaemonStatus.version} ${newConfig.toSafeLogString()}")
@@ -556,7 +557,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     }
 
     protected open fun requiredDaemonVersion(): String {
-        return Resources.version
+        return RESOLVED_ENGINE_VERSION ?: Resources.version
     }
 
     protected open fun refreshAttachedWorkerState() {
@@ -619,7 +620,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                     return false
                 }
                 clearBinaryResolutionFailure()
-                daemonClient.ensureDaemon(bin)
+                daemonClient.ensureDaemon(bin, requiredDaemonVersion())
             } else {
                 compatibleDaemonStatus
             }
@@ -874,6 +875,10 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         var BIN_PATH: String? = null
         @Volatile
         private var LAST_BINARY_RESOLUTION_ERROR: String? = null
+        @Volatile
+        var RESOLVED_ENGINE_VERSION: String? = null
+            private set
+        private val WARNED_ENGINE_FALLBACKS: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
         private var BIN_CACHE_DIR: Path = Path.of(PathManager.getSystemPath(), "refactai", "bin")
 
         @JvmStatic
@@ -887,12 +892,14 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             BIN_CACHE_DIR = path
             initialized.set(false)
             BIN_PATH = null
+            RESOLVED_ENGINE_VERSION = null
             LAST_BINARY_RESOLUTION_ERROR = null
         }
 
         fun resetBinaryResolution() {
             initialized.set(false)
             BIN_PATH = null
+            RESOLVED_ENGINE_VERSION = null
             LAST_BINARY_RESOLUTION_ERROR = null
         }
 
@@ -908,8 +915,8 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 return BIN_PATH
             }
             BIN_PATH?.let { return it }
-            val resolvedPath = try {
-                RefactBinaryResolver.resolve(
+            val resolved = try {
+                RefactBinaryResolver.resolveDetailed(
                     RefactBinaryResolverOptions(
                         explicitPath = InferenceGlobalContext.refactBinaryPath,
                         bundledDir = bundledDir,
@@ -917,20 +924,34 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                         pinnedVersion = Resources.version,
                         cacheDir = BIN_CACHE_DIR,
                         onDownloadStart = onDownloadStart,
+                        onFallbackVersion = { pinned, chosen -> warnAboutEngineVersionFallback(pinned, chosen) },
                     )
                 )
             } catch (e: Exception) {
-                val message = "Failed to download the Refact engine (version ${Resources.version}) from GitHub releases. " +
+                val message = "Failed to download the Refact engine (version ${Resources.version}) from GitHub releases, " +
+                    "and no published engine release could be used instead. " +
                     "Check network/proxy settings or set refactai.binaryPath to a compatible refact executable. ${e.message}"
                 LAST_BINARY_RESOLUTION_ERROR = message
                 emitError(message)
                 logger.warn("LSP binary resolution failed: ${e.message}", e)
                 return null
             }
-            BIN_PATH = resolvedPath
+            BIN_PATH = resolved.path
+            RESOLVED_ENGINE_VERSION = resolved.version
             LAST_BINARY_RESOLUTION_ERROR = null
-            logger.warn("LSP initialize BIN_PATH=$BIN_PATH")
-            return resolvedPath
+            logger.warn(
+                "LSP initialize BIN_PATH=$BIN_PATH engineVersion=${resolved.version}" +
+                    (resolved.fallbackFromVersion?.let { " fallbackFrom=v$it" } ?: "")
+            )
+            return resolved.path
+        }
+
+        private fun warnAboutEngineVersionFallback(pinned: String, chosen: String) {
+            if (!WARNED_ENGINE_FALLBACKS.add("$pinned->$chosen")) return
+            val message = "Refact engine v$pinned is not published on GitHub releases; " +
+                "using the latest published engine v$chosen instead."
+            logger.warn(message)
+            runCatching { emitWarning(message) }
         }
 
         @Synchronized

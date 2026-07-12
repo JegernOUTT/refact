@@ -35,11 +35,14 @@ import {
     type DaemonStatus,
 } from "./refactDaemon";
 import {
+    DownloadHttpError,
     INSTALL_LOCK_STALE_MS,
     extractRefactArchive,
     extractRefactVersion,
+    parsePublishedEngineVersions,
     refactReleaseAsset,
     resolveRefactBinary,
+    resolveRefactBinaryDetailed,
 } from "./refactBinaryResolver";
 import {
     backendConfigForStatus,
@@ -149,6 +152,7 @@ export async function runRefactDaemonTests() {
 
     await runBundledRefactSpawnTests();
     await runStandaloneResolutionTests();
+    await runFallbackVersionResolutionTests();
     await runArchiveTraversalRejectedTest();
     await runDaemonUpgradeWaitsForExitTest();
     await runDaemonExecutableHashMismatchUpgradeTest();
@@ -308,6 +312,170 @@ async function runBundledRefactSpawnTests() {
         assert.strictEqual(missingBundledRefactError(assetPath), `refact binary not found in ${assetPath} — reinstall the extension`);
     } finally {
         fs.rmSync(assetPath, { recursive: true, force: true });
+    }
+}
+
+async function runFallbackVersionResolutionTests() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-binary-fallback-test-"));
+    try {
+        const binaryName = "refact";
+        const fallbackDownloadFile = async (url: string, destPath: string) => {
+            if (url.includes("engine/v8.1.0/")) {
+                throw new DownloadHttpError(404, `download failed 404 ${url}`);
+            }
+            fs.mkdirSync(path.dirname(destPath), { recursive: true });
+            if (url.endsWith(".sha256")) {
+                fs.writeFileSync(destPath, `${sha256FileSync(destPath.slice(0, -".sha256".length))}  archive\n`);
+            } else {
+                fs.writeFileSync(destPath, "archive");
+            }
+        };
+
+        const fallbackHome = path.join(root, "fallback-home");
+        const fallbackShared = path.join(fallbackHome, ".refact", "bin", binaryName);
+        fs.mkdirSync(path.dirname(fallbackShared), { recursive: true });
+        fs.writeFileSync(fallbackShared, "refact 7.9.0");
+        const fallbackEvents: string[] = [];
+        const fallbackDownloads: string[] = [];
+        const fallbackResolved = await resolveRefactBinaryDetailed({
+            minVersion: "8.1.0",
+            pinnedVersion: "8.1.0",
+            cacheDir: path.join(root, "fallback-cache"),
+            pathEnv: "",
+            homeDir: fallbackHome,
+            platform: "linux",
+            arch: "x64",
+            runVersion: async binPath => fs.existsSync(binPath) ? fs.readFileSync(binPath, "utf8") : undefined,
+            downloadFile: async (url, destPath) => {
+                fallbackDownloads.push(url);
+                await fallbackDownloadFile(url, destPath);
+            },
+            extractArchive: async (_archivePath, destDir) => {
+                fs.writeFileSync(path.join(destDir, binaryName), "refact 8.0.5");
+            },
+            chmod: async () => undefined,
+            listPublishedEngineVersions: async () => ["8.0.1", "8.0.5", "7.5.0"],
+            onFallbackVersion: (pinned, chosen) => fallbackEvents.push(`${pinned}->${chosen}`),
+        });
+        assert.strictEqual(fallbackResolved.binPath, fallbackShared);
+        assert.strictEqual(fallbackResolved.version, "8.0.5");
+        assert.strictEqual(fallbackResolved.fallbackFromVersion, "8.1.0");
+        assert.deepStrictEqual(fallbackEvents, ["8.1.0->8.0.5"]);
+        assert.strictEqual(fs.readFileSync(fallbackShared, "utf8"), "refact 8.0.5");
+        assert.strictEqual(fallbackDownloads[0].includes("engine/v8.1.0/"), true);
+        assert.strictEqual(fallbackDownloads[fallbackDownloads.length - 1].includes("engine/v8.0.5/"), true);
+
+        const reuseHome = path.join(root, "reuse-home");
+        const reuseShared = path.join(reuseHome, ".refact", "bin", binaryName);
+        fs.mkdirSync(path.dirname(reuseShared), { recursive: true });
+        fs.writeFileSync(reuseShared, "refact 8.0.5");
+        const reuseDownloads: string[] = [];
+        const reuseResolved = await resolveRefactBinaryDetailed({
+            minVersion: "8.1.0",
+            pinnedVersion: "8.1.0",
+            cacheDir: path.join(root, "reuse-cache"),
+            pathEnv: "",
+            homeDir: reuseHome,
+            platform: "linux",
+            arch: "x64",
+            runVersion: async binPath => fs.existsSync(binPath) ? fs.readFileSync(binPath, "utf8") : undefined,
+            downloadFile: async url => {
+                reuseDownloads.push(url);
+                throw new DownloadHttpError(404, `download failed 404 ${url}`);
+            },
+            listPublishedEngineVersions: async () => ["8.0.5"],
+        });
+        assert.strictEqual(reuseResolved.binPath, reuseShared);
+        assert.strictEqual(reuseResolved.version, "8.0.5");
+        assert.strictEqual(reuseResolved.fallbackFromVersion, "8.1.0");
+        assert.strictEqual(reuseDownloads.length, 1);
+        assert.strictEqual(fs.readFileSync(reuseShared, "utf8"), "refact 8.0.5");
+
+        let onlyPinnedError: Error | undefined;
+        try {
+            await resolveRefactBinaryDetailed({
+                minVersion: "8.1.0",
+                pinnedVersion: "8.1.0",
+                cacheDir: path.join(root, "only-pinned-cache"),
+                pathEnv: "",
+                homeDir: path.join(root, "only-pinned-home"),
+                platform: "linux",
+                arch: "x64",
+                runVersion: async binPath => fs.existsSync(binPath) ? fs.readFileSync(binPath, "utf8") : undefined,
+                downloadFile: async url => {
+                    throw new DownloadHttpError(404, `download failed 404 ${url}`);
+                },
+                listPublishedEngineVersions: async () => ["8.1.0"],
+            });
+        } catch (error) {
+            onlyPinnedError = error instanceof Error ? error : new Error(String(error));
+        }
+        assert.strictEqual(onlyPinnedError?.message.includes("no published engine release could be used instead"), true);
+        assert.strictEqual(onlyPinnedError?.message.includes("download failed 404"), true);
+
+        let browsed = false;
+        let serverError: Error | undefined;
+        try {
+            await resolveRefactBinaryDetailed({
+                minVersion: "8.1.0",
+                pinnedVersion: "8.1.0",
+                cacheDir: path.join(root, "http-error-cache"),
+                pathEnv: "",
+                homeDir: path.join(root, "http-error-home"),
+                platform: "linux",
+                arch: "x64",
+                runVersion: async binPath => fs.existsSync(binPath) ? fs.readFileSync(binPath, "utf8") : undefined,
+                downloadFile: async url => {
+                    throw new DownloadHttpError(503, `download failed 503 ${url}`);
+                },
+                listPublishedEngineVersions: async () => {
+                    browsed = true;
+                    return ["8.0.5"];
+                },
+            });
+        } catch (error) {
+            serverError = error instanceof Error ? error : new Error(String(error));
+        }
+        assert.strictEqual(browsed, false);
+        assert.strictEqual(serverError?.message.includes("download failed 503"), true);
+
+        const prereleaseHome = path.join(root, "prerelease-home");
+        const prereleaseDownloads: string[] = [];
+        const prereleaseResolved = await resolveRefactBinaryDetailed({
+            minVersion: "8.1.0",
+            pinnedVersion: "8.1.0",
+            cacheDir: path.join(root, "prerelease-cache"),
+            pathEnv: "",
+            homeDir: prereleaseHome,
+            platform: "linux",
+            arch: "x64",
+            runVersion: async binPath => fs.existsSync(binPath) ? fs.readFileSync(binPath, "utf8") : undefined,
+            downloadFile: async (url, destPath) => {
+                prereleaseDownloads.push(url);
+                await fallbackDownloadFile(url, destPath);
+            },
+            extractArchive: async (_archivePath, destDir) => {
+                fs.writeFileSync(path.join(destDir, binaryName), "refact 8.0.5");
+            },
+            chmod: async () => undefined,
+            listPublishedEngineVersions: async () => ["8.0.5-rc-abc", "8.0.1"],
+        });
+        assert.strictEqual(prereleaseResolved.version, "8.0.5");
+        assert.strictEqual(prereleaseResolved.fallbackFromVersion, "8.1.0");
+        assert.strictEqual(prereleaseDownloads.some(url => url.includes("engine/v8.0.5-rc-abc/")), true);
+
+        assert.deepStrictEqual(parsePublishedEngineVersions(`[
+            {"tag_name": "release/v8.2.3"},
+            {"tag_name": "engine/v8.2.3"},
+            {"tag_name": "engine/v8.2.4-foo-abc", "prerelease": true},
+            {"tag_name": "v8.2.3-build-tag"},
+            {"name": "no tag"},
+            {"tag_name": "engine/v"}
+        ]`), ["8.2.3", "8.2.4-foo-abc"]);
+        assert.deepStrictEqual(parsePublishedEngineVersions("not json"), []);
+        assert.deepStrictEqual(parsePublishedEngineVersions("{\"tag_name\": \"engine/v1\"}"), []);
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
     }
 }
 

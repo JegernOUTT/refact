@@ -255,6 +255,201 @@ class RefactBinaryResolverTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun pinnedReleaseMissingFallsBackToLatestPublishedEngine() {
+        val root = Files.createTempDirectory("refact-binary-resolver-fallback-latest")
+        val shared = sharedRefactBinaryPath(root.resolve("home"), "Linux")
+        val downloads = mutableListOf<String>()
+        val fallbacks = mutableListOf<Pair<String, String>>()
+        try {
+            writeBinary(shared, "old-binary")
+
+            val resolved = RefactBinaryResolver.resolveDetailed(
+                options(
+                    root = root,
+                    versionReader = { path ->
+                        if (Files.isRegularFile(path) && Files.readString(path) == "new-binary") {
+                            "refact 8.0.5"
+                        } else {
+                            "refact 7.9.0"
+                        }
+                    },
+                    downloader = { uri, dest ->
+                        downloads.add(uri.toString())
+                        if (uri.toString().contains("8.1.0")) {
+                            throw DownloadFailedException(404, "download failed 404 $uri")
+                        }
+                        Files.createDirectories(dest.parent)
+                        if (uri.toString().endsWith(".sha256")) {
+                            val archive = dest.parent.resolve("refact-8.0.5-x86_64-unknown-linux-gnu.tar.gz")
+                            Files.writeString(dest, "${sha256(archive)}  archive\n")
+                        } else {
+                            Files.writeString(dest, "archive")
+                        }
+                    },
+                    extractor = { _, dest, _ -> Files.writeString(dest.resolve("refact"), "new-binary") },
+                    chmod = {},
+                    releaseVersionsProvider = { listOf("8.0.1", "8.0.5", "7.5.0") },
+                    onFallbackVersion = { pinned, chosen -> fallbacks.add(pinned to chosen) },
+                )
+            )
+
+            assertEquals(shared.toString(), resolved.path)
+            assertEquals("8.0.5", resolved.version)
+            assertEquals("8.1.0", resolved.fallbackFromVersion)
+            assertEquals(listOf("8.1.0" to "8.0.5"), fallbacks)
+            assertEquals("new-binary", Files.readString(shared))
+            assertTrue(downloads.first().contains("engine/v8.1.0"))
+            assertTrue(downloads.last().contains("engine/v8.0.5"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun pinnedReleaseMissingReusesSharedBinaryMatchingLatestPublished() {
+        val root = Files.createTempDirectory("refact-binary-resolver-fallback-reuse")
+        val shared = sharedRefactBinaryPath(root.resolve("home"), "Linux")
+        val downloads = mutableListOf<String>()
+        val fallbacks = mutableListOf<Pair<String, String>>()
+        try {
+            writeBinary(shared, "fallback-binary")
+
+            val resolved = RefactBinaryResolver.resolveDetailed(
+                options(
+                    root = root,
+                    versionReader = { "refact 8.0.5" },
+                    downloader = { uri, _ ->
+                        downloads.add(uri.toString())
+                        throw DownloadFailedException(404, "download failed 404 $uri")
+                    },
+                    releaseVersionsProvider = { listOf("8.0.5") },
+                    onFallbackVersion = { pinned, chosen -> fallbacks.add(pinned to chosen) },
+                )
+            )
+
+            assertEquals(shared.toString(), resolved.path)
+            assertEquals("8.0.5", resolved.version)
+            assertEquals("8.1.0", resolved.fallbackFromVersion)
+            assertEquals(listOf("8.1.0" to "8.0.5"), fallbacks)
+            assertEquals("fallback-binary", Files.readString(shared))
+            assertEquals(1, downloads.size)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun pinnedReleaseMissingWithNoOtherPublishedVersionRethrowsOriginalError() {
+        val root = Files.createTempDirectory("refact-binary-resolver-fallback-none")
+        try {
+            val error = runCatching {
+                RefactBinaryResolver.resolveDetailed(
+                    options(
+                        root = root,
+                        versionReader = { "refact 7.9.0" },
+                        downloader = { uri, _ -> throw DownloadFailedException(404, "download failed 404 $uri") },
+                        releaseVersionsProvider = { listOf("8.1.0") },
+                    )
+                )
+            }.exceptionOrNull()
+
+            assertTrue(error is DownloadFailedException)
+            assertEquals(404, (error as DownloadFailedException).statusCode)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun nonNotFoundDownloadErrorDoesNotBrowsePublishedReleases() {
+        val root = Files.createTempDirectory("refact-binary-resolver-fallback-503")
+        var browsed = false
+        try {
+            val error = runCatching {
+                RefactBinaryResolver.resolveDetailed(
+                    options(
+                        root = root,
+                        versionReader = { "refact 7.9.0" },
+                        downloader = { uri, _ -> throw DownloadFailedException(503, "download failed 503 $uri") },
+                        releaseVersionsProvider = {
+                            browsed = true
+                            listOf("8.0.5")
+                        },
+                    )
+                )
+            }.exceptionOrNull()
+
+            assertTrue(error is DownloadFailedException)
+            assertEquals(503, (error as DownloadFailedException).statusCode)
+            assertFalse(browsed)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun prereleaseTagFallbackAcceptsBaseVersionBinary() {
+        val root = Files.createTempDirectory("refact-binary-resolver-fallback-prerelease")
+        val shared = sharedRefactBinaryPath(root.resolve("home"), "Linux")
+        val downloads = mutableListOf<String>()
+        try {
+            val resolved = RefactBinaryResolver.resolveDetailed(
+                options(
+                    root = root,
+                    versionReader = { path ->
+                        if (Files.isRegularFile(path) && Files.readString(path) == "new-binary") {
+                            "refact 8.0.5"
+                        } else {
+                            null
+                        }
+                    },
+                    downloader = { uri, dest ->
+                        downloads.add(uri.toString())
+                        if (uri.toString().contains("8.1.0")) {
+                            throw DownloadFailedException(404, "download failed 404 $uri")
+                        }
+                        Files.createDirectories(dest.parent)
+                        if (uri.toString().endsWith(".sha256")) {
+                            val archive = dest.parent.resolve("refact-8.0.5-rc-abc-x86_64-unknown-linux-gnu.tar.gz")
+                            Files.writeString(dest, "${sha256(archive)}  archive\n")
+                        } else {
+                            Files.writeString(dest, "archive")
+                        }
+                    },
+                    extractor = { _, dest, _ -> Files.writeString(dest.resolve("refact"), "new-binary") },
+                    chmod = {},
+                    releaseVersionsProvider = { listOf("8.0.5-rc-abc", "8.0.1") },
+                )
+            )
+
+            assertEquals(shared.toString(), resolved.path)
+            assertEquals("8.0.5", resolved.version)
+            assertEquals("8.1.0", resolved.fallbackFromVersion)
+            assertTrue(downloads.any { it.contains("engine/v8.0.5-rc-abc") })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun parsePublishedEngineVersionsKeepsOnlyEngineTags() {
+        val json = """
+            [
+                {"tag_name": "release/v8.2.3", "prerelease": false},
+                {"tag_name": "engine/v8.2.3", "prerelease": false},
+                {"tag_name": "engine/v8.2.4-foo-abc", "prerelease": true},
+                {"tag_name": "v8.2.3-build-tag", "prerelease": false},
+                {"name": "no tag"},
+                {"tag_name": "engine/v"}
+            ]
+        """.trimIndent()
+
+        assertEquals(listOf("8.2.3", "8.2.4-foo-abc"), parsePublishedEngineVersions(json))
+        assertEquals(emptyList<String>(), parsePublishedEngineVersions("not json"))
+        assertEquals(emptyList<String>(), parsePublishedEngineVersions("{\"tag_name\": \"engine/v1\"}"))
+    }
 }
 
 private fun options(
@@ -267,6 +462,8 @@ private fun options(
     downloader: (URI, Path) -> Unit = { _, _ -> throw AssertionError("download should not run") },
     extractor: (Path, Path, Boolean) -> Unit = { _, _, _ -> },
     chmod: (Path) -> Unit = {},
+    releaseVersionsProvider: () -> List<String> = { throw AssertionError("release browsing should not run") },
+    onFallbackVersion: (String, String) -> Unit = { _, _ -> },
 ): RefactBinaryResolverOptions {
     return RefactBinaryResolverOptions(
         explicitPath = explicitPath,
@@ -283,6 +480,8 @@ private fun options(
         downloader = downloader,
         extractor = extractor,
         chmod = chmod,
+        releaseVersionsProvider = releaseVersionsProvider,
+        onFallbackVersion = onFallbackVersion,
     )
 }
 
