@@ -59,7 +59,7 @@ private class CefResourceHandlerInvocation(
             "readResponse", "read" -> handler.read(actualArgs[0] as ByteArray, actualArgs[1] as Int, actualArgs[2] as IntRef)
             "skip" -> {
                 val skipped = handler.skip(actualArgs[0] as Long)
-                setLongRef(actualArgs[2], skipped)
+                setLongRef(actualArgs[1], skipped)
                 skipped >= 0
             }
             "cancel" -> {

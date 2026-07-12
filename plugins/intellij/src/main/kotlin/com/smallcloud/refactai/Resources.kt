@@ -1,6 +1,5 @@
 package com.smallcloud.refactai
 
-import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.util.IconLoader
@@ -37,14 +36,30 @@ private fun getHomePath(): File? {
     return if (jarDir.name == "lib") jarDir.parentFile ?: jarDir else jarDir
 }
 
-private fun getVersion(): String {
-    runCatching { PluginManagerCore.getPlugin(PluginId.getId(REFACT_PLUGIN_ID))?.version }
-        .getOrNull()
-        ?.takeIf { it.isNotBlank() }
-        ?.let { return it }
-    return Resources::class.java.`package`?.implementationVersion?.takeIf { it.isNotBlank() }
+private val resolvedPluginVersion: String by lazy {
+    readOwnPluginXmlVersion()
+        ?: Resources::class.java.`package`?.implementationVersion?.takeIf { it.isNotBlank() }
         ?: UNKNOWN_PLUGIN_VERSION
 }
+
+// Reads the version stamped into this plugin's own META-INF/plugin.xml. All
+// PluginManager/PluginManagerCore descriptor lookups are @ApiStatus.Internal in 2026.2+.
+private fun readOwnPluginXmlVersion(): String? {
+    return runCatching {
+        val resources = Resources::class.java.classLoader.getResources("META-INF/plugin.xml")
+        for (url in resources) {
+            val xml = runCatching {
+                url.openStream().use { it.readBytes().toString(Charsets.UTF_8) }
+            }.getOrNull() ?: continue
+            if (!xml.contains("<id>$REFACT_PLUGIN_ID</id>")) continue
+            return Regex("<version>\\s*([^<]+?)\\s*</version>")
+                .find(xml)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
+        }
+        null
+    }.getOrNull()
+}
+
+private fun getVersion(): String = resolvedPluginVersion
 
 private fun getPluginId(): PluginId = PluginId.getId(REFACT_PLUGIN_ID)
 
