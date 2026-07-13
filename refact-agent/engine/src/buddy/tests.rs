@@ -6922,10 +6922,15 @@ async fn diagnostic_persisted_jsonl_is_redacted() {
         None,
         None,
     );
-    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-    let content = tokio::fs::read_to_string(root.join(".refact/buddy/diagnostics.jsonl"))
-        .await
-        .unwrap_or_default();
+    let jsonl_path = root.join(".refact/buddy/diagnostics.jsonl");
+    let mut content = String::new();
+    for _ in 0..100 {
+        content = tokio::fs::read_to_string(&jsonl_path).await.unwrap_or_default();
+        if !content.is_empty() {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
     assert!(
         !content.contains("sk-LEAK_THIS_TOKEN"),
         "secret must not be in jsonl: {}",
@@ -6933,7 +6938,8 @@ async fn diagnostic_persisted_jsonl_is_redacted() {
     );
     assert!(
         content.contains("[REDACTED"),
-        "redaction marker must be in jsonl"
+        "redaction marker must be in jsonl: {}",
+        content
     );
 }
 
