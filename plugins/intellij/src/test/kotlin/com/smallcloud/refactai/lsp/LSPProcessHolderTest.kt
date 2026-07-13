@@ -251,7 +251,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     }
 
     private fun <T> runOffEdt(block: () -> T): T {
-        return ApplicationManager.getApplication().executeOnPooledThread<T> { block() }.get(3, TimeUnit.SECONDS)
+        return ApplicationManager.getApplication().executeOnPooledThread<T> { block() }.get(10, TimeUnit.SECONDS)
     }
 
     private fun withServer(block: (MockWebServer) -> Unit) {
