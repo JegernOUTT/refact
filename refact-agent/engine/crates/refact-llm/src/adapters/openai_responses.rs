@@ -657,6 +657,21 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                 );
                 deltas.push(LlmStreamDelta::MergeExtra { extra });
             }
+            // Carries response headers such as x-codex-safety-buffering-enabled and
+            // x-codex-safety-buffering-faster-model (the internal draft model).
+            "codex.response.metadata" => {
+                let mut extra = serde_json::Map::new();
+                extra.insert(
+                    "codex_response_metadata".to_string(),
+                    json!([
+                        {
+                            "sequence_number": json.get("sequence_number").cloned().unwrap_or(Value::Null),
+                            "payload": json,
+                        }
+                    ]),
+                );
+                deltas.push(LlmStreamDelta::MergeExtra { extra });
+            }
 
             // ── Error events ──
             "response.failed" => {
@@ -696,28 +711,46 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
 
             // ── Unhandled events — preserve raw payload and make it visible ──
             _ => {
-                tracing::warn!("Unhandled Responses API event: {}", event_type);
-                // Keep an append-only array in extra (don't overwrite prior events).
-                // We still emit a visible server_content_block for every event.
-                let mut extra = serde_json::Map::new();
-                extra.insert(
-                    "unhandled_openai_responses_events".to_string(),
-                    json!([
-                        {
-                            "sequence_number": json.get("sequence_number").cloned().unwrap_or(Value::Null),
+                // Unknown codex.* events are server-side telemetry/metadata by contract:
+                // keep them in extra for diagnostics but never render a server block.
+                if event_type.starts_with("codex.") {
+                    tracing::info!("Codex metadata event (absorbed): {}", event_type);
+                    let mut extra = serde_json::Map::new();
+                    extra.insert(
+                        "codex_metadata_events".to_string(),
+                        json!([
+                            {
+                                "sequence_number": json.get("sequence_number").cloned().unwrap_or(Value::Null),
+                                "event_type": event_type,
+                                "payload": json,
+                            }
+                        ]),
+                    );
+                    deltas.push(LlmStreamDelta::MergeExtra { extra });
+                } else {
+                    tracing::warn!("Unhandled Responses API event: {}", event_type);
+                    // Keep an append-only array in extra (don't overwrite prior events).
+                    // We still emit a visible server_content_block for every event.
+                    let mut extra = serde_json::Map::new();
+                    extra.insert(
+                        "unhandled_openai_responses_events".to_string(),
+                        json!([
+                            {
+                                "sequence_number": json.get("sequence_number").cloned().unwrap_or(Value::Null),
+                                "event_type": event_type,
+                                "payload": json,
+                            }
+                        ]),
+                    );
+                    deltas.push(LlmStreamDelta::MergeExtra { extra });
+                    deltas.push(LlmStreamDelta::AddServerContentBlock {
+                        block: json!({
+                            "type": "unhandled_openai_responses_event",
                             "event_type": event_type,
                             "payload": json,
-                        }
-                    ]),
-                );
-                deltas.push(LlmStreamDelta::MergeExtra { extra });
-                deltas.push(LlmStreamDelta::AddServerContentBlock {
-                    block: json!({
-                        "type": "unhandled_openai_responses_event",
-                        "event_type": event_type,
-                        "payload": json,
-                    }),
-                });
+                        }),
+                    });
+                }
             }
         }
 
@@ -1703,6 +1736,63 @@ mod tests {
                 json!("pro")
             );
         }
+    }
+
+    #[test]
+    fn test_codex_response_metadata_is_metadata_only() {
+        let adapter = OpenAiResponsesAdapter;
+        let chunk = r#"{"type":"codex.response.metadata","headers":{"x-codex-safety-buffering-enabled":"true","x-codex-safety-buffering-faster-model":"gpt-5.6-luna"}}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+
+        assert!(
+            !deltas
+                .iter()
+                .any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })),
+            "codex.response.metadata should not create a visible server block"
+        );
+        let Some(LlmStreamDelta::MergeExtra { extra }) = deltas
+            .iter()
+            .find(|d| matches!(d, LlmStreamDelta::MergeExtra { .. }))
+        else {
+            panic!("codex.response.metadata should be preserved in message extra");
+        };
+        assert_eq!(
+            extra["codex_response_metadata"][0]["payload"]["headers"]
+                ["x-codex-safety-buffering-faster-model"],
+            json!("gpt-5.6-luna")
+        );
+        assert_eq!(
+            extra["codex_response_metadata"][0]["payload"]["headers"]
+                ["x-codex-safety-buffering-enabled"],
+            json!("true")
+        );
+    }
+
+    #[test]
+    fn test_unknown_codex_event_is_absorbed_without_server_block() {
+        let adapter = OpenAiResponsesAdapter;
+        let chunk = r#"{"type":"codex.future_telemetry","sequence_number":7,"anything":{"nested":true}}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+
+        assert!(
+            !deltas
+                .iter()
+                .any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })),
+            "unknown codex.* events should never create visible server blocks"
+        );
+        let Some(LlmStreamDelta::MergeExtra { extra }) = deltas
+            .iter()
+            .find(|d| matches!(d, LlmStreamDelta::MergeExtra { .. }))
+        else {
+            panic!("unknown codex.* events should be preserved in message extra");
+        };
+        assert_eq!(
+            extra["codex_metadata_events"][0]["event_type"],
+            json!("codex.future_telemetry")
+        );
+        assert_eq!(extra["codex_metadata_events"][0]["sequence_number"], json!(7));
     }
 
     #[test]

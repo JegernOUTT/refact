@@ -99,14 +99,21 @@ fn is_gpt5_subscription_model(id: &str) -> bool {
         return false;
     }
     let suffixes: Vec<&str> = parts.collect();
-    matches!(
-        suffixes.as_slice(),
-        [] | ["mini"] | ["sol"] | ["terra"] | ["luna"]
-    )
+    matches!(suffixes.as_slice(), [] | ["mini"] | ["sol"] | ["terra"])
+}
+
+// gpt-5.6-luna appears in /codex/models but /codex/responses rejects it with
+// 404 "Model not found gpt-5.6-luna" (verified live 2026-07-13): it is the
+// server-side safety-buffering draft model advertised through the
+// x-codex-safety-buffering-faster-model response metadata header, not a
+// user-requestable chat model. Keep it out of catalogs and live listings.
+fn is_codex_internal_only_model(id: &str) -> bool {
+    normalized_model_id(id) == "gpt-5.6-luna"
 }
 
 fn is_openai_codex_catalog_model(id: &str) -> bool {
-    is_codex_named_model(id) || is_gpt5_subscription_model(id)
+    !is_codex_internal_only_model(id)
+        && (is_codex_named_model(id) || is_gpt5_subscription_model(id))
 }
 
 fn is_chatgpt_codex_live_model(id: &str) -> bool {
@@ -120,7 +127,7 @@ fn is_openai_api_codex_live_model(id: &str) -> bool {
 
 fn codex_model_context_window_override(id: &str) -> Option<usize> {
     match normalized_model_id(id).as_str() {
-        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => Some(GPT_5_6_CODEX_CONTEXT_WINDOW),
+        "gpt-5.6-sol" | "gpt-5.6-terra" => Some(GPT_5_6_CODEX_CONTEXT_WINDOW),
         "gpt-5.5" => Some(GPT_5_5_CODEX_CONTEXT_WINDOW),
         _ => None,
     }
@@ -152,7 +159,7 @@ fn codex_builtin_fallback_caps(model_id: &str) -> Option<ModelCapabilities> {
 }
 
 fn codex_builtin_fallback_model_ids() -> &'static [&'static str] {
-    &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+    &["gpt-5.6-sol", "gpt-5.6-terra"]
 }
 
 fn openai_codex_catalog_model_id(capability_key: &str) -> Option<&str> {
@@ -1895,14 +1902,16 @@ mod tests {
         assert!(ids.contains(&"gpt-5.5"));
         assert!(ids.contains(&"gpt-5.6-sol"));
         assert!(ids.contains(&"gpt-5.6-terra"));
-        assert!(ids.contains(&"gpt-5.6-luna"));
+        // luna is the internal safety-buffering draft model; /codex/responses 404s it.
+        assert!(!ids.contains(&"gpt-5.6-luna"));
     }
 
     #[test]
     fn codex_model_filters_accept_known_gpt56_variants_only() {
         assert!(super::is_chatgpt_codex_live_model("gpt-5.6-sol"));
         assert!(super::is_chatgpt_codex_live_model("gpt-5.6-terra"));
-        assert!(super::is_chatgpt_codex_live_model("gpt-5.6-luna"));
+        // Listed by /codex/models but rejected by /codex/responses (internal draft model).
+        assert!(!super::is_chatgpt_codex_live_model("gpt-5.6-luna"));
         assert!(super::is_chatgpt_codex_live_model("gpt-5.6"));
         assert!(!super::is_chatgpt_codex_live_model("gpt-5.6-random"));
         assert!(!super::is_chatgpt_codex_live_model("gpt-5.6-sol-preview"));
@@ -1927,7 +1936,7 @@ mod tests {
         );
         assert_eq!(
             super::codex_model_context_window_override("gpt-5.6-luna"),
-            Some(372_000)
+            None
         );
         assert_eq!(
             super::codex_model_context_window_override("gpt-5.5"),
@@ -1943,7 +1952,8 @@ mod tests {
         let stale_caps = HashMap::from([("openai_codex/gpt-5.5".to_string(), codex_caps(405_000))]);
         let models = p.fetch_models_from_catalog(&stale_caps);
 
-        for model_id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+        assert!(models.iter().all(|m| m.id != "gpt-5.6-luna"));
+        for model_id in ["gpt-5.6-sol", "gpt-5.6-terra"] {
             let model = models.iter().find(|m| m.id == model_id).unwrap();
             assert_eq!(model.n_ctx, 372_000);
             assert_eq!(
