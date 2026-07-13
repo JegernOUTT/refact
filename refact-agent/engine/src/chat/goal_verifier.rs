@@ -699,7 +699,9 @@ pub fn apply_goal_verdict(
     match reply.verdict {
         GoalVerdict::Met => {
             session.goal_set_status(GoalStatus::Completed);
-            session.set_runtime_state(SessionState::Completed, None);
+            if trigger != "validate_goal" {
+                session.set_runtime_state(SessionState::Completed, None);
+            }
             GoalVerificationApplyOutcome::Finalized
         }
         GoalVerdict::Unmet(_) => {
@@ -1106,6 +1108,28 @@ mod tests {
                 .and_then(|event| event.get("payload"))
                 == Some(&json!({"kind": "verified", "at_ms": goal.attempts[0].at_ms, "gaps": []}))
         }));
+    }
+
+    #[test]
+    fn apply_goal_verdict_met_from_validate_goal_keeps_chat_running() {
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+
+        let outcome = apply_goal_verdict(
+            &mut session,
+            "validate_goal",
+            GoalVerifierReply {
+                verdict: GoalVerdict::Met,
+                verifier_reply: "GOAL: MET".to_string(),
+                tokens: 11,
+            },
+            None,
+        );
+
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Finalized);
+        assert_eq!(session.runtime.state, SessionState::ExecutingTools);
+        assert_eq!(session.goal_status, Some(GoalStatus::Completed));
+        assert!(session.command_queue.is_empty());
     }
 
     #[test]

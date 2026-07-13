@@ -70,40 +70,6 @@ pub enum ToolStepOutcome {
     Stop,
 }
 
-pub(super) fn validate_goal_result_state(
-    tool_calls: &[ChatToolCall],
-    tool_results: &[ChatMessage],
-) -> Option<SessionState> {
-    tool_calls.iter().find_map(|tool_call| {
-        if crate::llm::adapters::claude_code_compat::cc_normalize_internal_tool_name(
-            &tool_call.function.name,
-        ) != "validate_goal"
-        {
-            return None;
-        }
-        tool_results.iter().find_map(|message| {
-            if message.tool_call_id == tool_call.id && message.tool_failed != Some(true) {
-                validate_goal_state_from_extra(message)
-            } else {
-                None
-            }
-        })
-    })
-}
-
-fn validate_goal_state_from_extra(message: &ChatMessage) -> Option<SessionState> {
-    let verdict = message
-        .extra
-        .get("validate_goal")
-        .and_then(|value| value.get("verdict"))
-        .and_then(|value| value.as_str())?;
-    if verdict == "met" {
-        Some(SessionState::Completed)
-    } else {
-        None
-    }
-}
-
 use super::types::*;
 use super::trajectories::maybe_save_trajectory;
 use super::goal_verifier::{
@@ -849,87 +815,6 @@ source:
         );
     }
 
-    fn tool_call(id: &str, name: &str) -> ChatToolCall {
-        ChatToolCall {
-            id: id.to_string(),
-            index: Some(0),
-            function: crate::call_validation::ChatToolFunction {
-                name: name.to_string(),
-                arguments: "{}".to_string(),
-            },
-            tool_type: "function".to_string(),
-            extra_content: None,
-        }
-    }
-
-    fn tool_result(id: &str, content: &str, failed: Option<bool>) -> ChatMessage {
-        ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(content.to_string()),
-            tool_call_id: id.to_string(),
-            tool_failed: failed,
-            ..Default::default()
-        }
-    }
-
-    fn validate_goal_tool_result(id: &str, verdict: &str, failed: Option<bool>) -> ChatMessage {
-        let mut message = tool_result(id, "human-readable output can change", failed);
-        message.extra.insert(
-            "validate_goal".to_string(),
-            serde_json::json!({"verdict": verdict}),
-        );
-        message
-    }
-
-    #[test]
-    fn validate_goal_result_state_detects_terminal_outputs() {
-        let calls = vec![tool_call("tc", "validate_goal")];
-
-        assert_eq!(
-            validate_goal_result_state(
-                &calls,
-                &[validate_goal_tool_result("tc", "met", Some(false))],
-            ),
-            Some(SessionState::Completed)
-        );
-        assert_eq!(
-            validate_goal_result_state(
-                &calls,
-                &[validate_goal_tool_result("tc", "unmet", Some(false))],
-            ),
-            None
-        );
-        assert_eq!(
-            validate_goal_result_state(
-                &calls,
-                &[tool_result(
-                    "tc",
-                    "No active goal to validate.",
-                    Some(false)
-                )],
-            ),
-            None
-        );
-        assert_eq!(
-            validate_goal_result_state(
-                &calls,
-                &[tool_result(
-                    "tc",
-                    "GOAL MET — goal marked complete; pursuit disabled.",
-                    Some(false),
-                )],
-            ),
-            None
-        );
-        assert_eq!(
-            validate_goal_result_state(
-                &calls,
-                &[validate_goal_tool_result("tc", "met", Some(true),)],
-            ),
-            None
-        );
-    }
-
     #[test]
     fn test_corrections_aggregation() {
         // Test that corrections from multiple tools are properly aggregated
@@ -1446,7 +1331,6 @@ pub async fn process_tool_calls_once(
     // let the loop continue so the LLM can see the error and retry with correct arguments.
     let mut final_state = SessionState::Idle;
     let mut completion_trigger: Option<String> = None;
-    let validate_goal_state = validate_goal_result_state(&tools_to_execute, &tool_results);
     for tool_call in &tools_to_execute {
         let failed = tool_results
             .iter()
@@ -1470,9 +1354,6 @@ pub async fn process_tool_calls_once(
                 _ => {}
             }
         }
-    }
-    if let Some(state) = validate_goal_state {
-        final_state = state;
     }
 
     let tool_initiated_stop = matches!(

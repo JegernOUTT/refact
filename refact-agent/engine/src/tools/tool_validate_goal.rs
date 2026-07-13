@@ -476,7 +476,7 @@ mod tests {
         let content = validation_content(outcome, &verdict, &verifier_reply);
 
         assert_eq!(outcome, GoalVerificationApplyOutcome::Finalized);
-        assert_eq!(session.runtime.state, SessionState::Completed);
+        assert_eq!(session.runtime.state, SessionState::Idle);
         assert_eq!(session.goal_status, Some(GoalStatus::Completed));
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.post_tool_side_effects.len(), 1);
