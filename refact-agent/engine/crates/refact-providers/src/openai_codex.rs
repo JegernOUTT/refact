@@ -43,7 +43,7 @@ fn new_codex_session_id() -> String {
 }
 
 fn default_use_websocket() -> bool {
-    true
+    false
 }
 
 fn default_http_response_header_retry_enabled() -> bool {
@@ -1515,7 +1515,7 @@ fields:
     f_type: boolean
     f_desc: "Use WebSocket streaming for ChatGPT backend OAuth requests. When enabled, transient WebSocket failures are retried instead of falling back to HTTP SSE."
     f_label: "Use WebSocket streaming"
-    f_default: true
+    f_default: false
   http_response_header_retry_enabled:
     f_type: boolean
     f_desc: "Retry ChatGPT backend transport requests when no HTTP response headers or WebSocket connection arrive before the timeout."
@@ -2043,18 +2043,14 @@ mod tests {
     }
 
     #[test]
-    fn websocket_setting_adds_chatgpt_backend_runtime_marker_by_default() {
+    fn websocket_setting_is_opt_in_for_chatgpt_backend_runtime() {
         let mut p = provider_with_oauth("tok", "acct-123");
         p.enabled_models = vec!["gpt-5-codex".to_string()];
 
         let runtime = p.build_runtime().unwrap();
-        assert_eq!(
-            runtime
-                .extra_headers
-                .get(super::CODEX_WEBSOCKET_ENDPOINT_HEADER)
-                .map(String::as_str),
-            Some(super::CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL)
-        );
+        assert!(!runtime
+            .extra_headers
+            .contains_key(super::CODEX_WEBSOCKET_ENDPOINT_HEADER));
         assert_eq!(
             runtime
                 .extra_headers
@@ -2077,11 +2073,22 @@ mod tests {
             Some("10")
         );
 
-        p.use_websocket = false;
+        p.use_websocket = true;
         let runtime = p.build_runtime().unwrap();
-        assert!(!runtime
-            .extra_headers
-            .contains_key(super::CODEX_WEBSOCKET_ENDPOINT_HEADER));
+        assert_eq!(
+            runtime
+                .extra_headers
+                .get(super::CODEX_WEBSOCKET_ENDPOINT_HEADER)
+                .map(String::as_str),
+            Some(super::CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL)
+        );
+    }
+
+    #[test]
+    fn websocket_setting_defaults_off_when_missing_from_config() {
+        let provider: OpenAICodexProvider = serde_yaml::from_str("enabled_models: []").unwrap();
+
+        assert!(!provider.use_websocket);
     }
 
     #[test]
