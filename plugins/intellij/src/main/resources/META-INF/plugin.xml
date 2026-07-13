@@ -39,6 +39,11 @@
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.lang</depends>
     <depends>com.intellij.modules.vcs</depends>
+    <!-- JCEF moved out of the core classpath (com.intellij.modules.jcef plugin alias,
+         defined since 2025.3.1 in builds bundling JCEF). Optional: older builds (251+)
+         keep JCEF in the platform classpath and do not define this alias, and
+         JCEF-less IDEs must still load the plugin (chat degrades gracefully). -->
+    <depends optional="true" config-file="refact-jcef.xml">com.intellij.modules.jcef</depends>
 
     <!-- Extension points defined by the plugin.
          Read more: https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html -->
@@ -77,12 +82,14 @@
         <projectService serviceImplementation="com.smallcloud.refactai.io.NotificationSSEClient"/>
         </extensions>
     <actions>
+        <!-- overrides="true" replaces the platform action in place; it already sits in
+             the InlineCompletion group (LangActions.xml), so no add-to-group here —
+             re-adding it trips "Cannot add an action twice" since 2026.2. -->
         <action class="com.smallcloud.refactai.listeners.TabPressedAction"
                 id="InsertInlineCompletionAction"
                 text="Accept Inline Completion"
                 overrides="true"
                 description="Refact AI Accept Inline Completion">
-            <add-to-group group-id="InlineCompletion" anchor="first"/>
             <keyboard-shortcut first-keystroke="TAB" keymap="$default"/>
         </action>
         <action class="com.smallcloud.refactai.listeners.CancelPressedAction"

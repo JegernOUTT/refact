@@ -1,6 +1,5 @@
 package com.smallcloud.refactai
 
-import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ide.plugins.PluginInstaller
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
@@ -17,6 +16,7 @@ import com.smallcloud.refactai.notifications.notificationStartup
 import com.smallcloud.refactai.panes.sharedchat.ChatPaneInvokeAction
 import com.smallcloud.refactai.settings.AppSettingsState
 import com.smallcloud.refactai.settings.settingsStartup
+import com.smallcloud.refactai.utils.JcefSupport
 import com.smallcloud.refactai.utils.ResourceCache
 import java.util.concurrent.atomic.AtomicBoolean
 import com.smallcloud.refactai.lsp.LSPProcessHolder.Companion.getInstance as getLSPProcessHolder
@@ -50,7 +50,7 @@ class Initializer : ProjectActivity, Disposable {
     }
 
     private fun preWarmResources() {
-        if (!JBCefApp.isSupported()) return
+        if (!JcefSupport.isAvailable()) return
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val resources = listOf(
@@ -71,7 +71,7 @@ class Initializer : ProjectActivity, Disposable {
     }
 
     private fun checkJcefStatus() {
-        if (!JBCefApp.isSupported()) {
+        if (!JcefSupport.isAvailable()) {
             emitInfoWithDocLink(RefactAIBundle.message("notifications.chatCanNotStartWarning"), "https://github.com/JegernOUTT/refact/wiki/JetBrains-Troubleshooting", false)
             return
         }

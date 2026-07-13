@@ -1,0 +1,5 @@
+<!-- Loaded only when the IDE defines the com.intellij.modules.jcef plugin alias
+     (2025.3.1+ builds bundling JCEF). Its sole purpose is wiring the JCEF module
+     into this plugin's classpath; all JCEF usage is guarded by JcefSupport. -->
+<idea-plugin>
+</idea-plugin>

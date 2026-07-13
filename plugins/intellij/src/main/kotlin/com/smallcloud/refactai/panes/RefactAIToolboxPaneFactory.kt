@@ -1,7 +1,6 @@
 package com.smallcloud.refactai.panes
 
 import com.intellij.openapi.diagnostic.Logger
-import com.intellij.ui.jcef.JBCefApp
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.util.Key
@@ -14,6 +13,7 @@ import com.intellij.util.ui.JBUI
 import com.smallcloud.refactai.Resources
 import com.smallcloud.refactai.panes.sharedchat.ChatPanes
 import com.smallcloud.refactai.panes.sharedchat.browser.ChatWebView
+import com.smallcloud.refactai.utils.JcefSupport
 import com.smallcloud.refactai.utils.getLastUsedProject
 import java.awt.BorderLayout
 import java.awt.Desktop
@@ -29,7 +29,7 @@ class RefactAIToolboxPaneFactory : ToolWindowFactory {
         super.init(toolWindow)
     }
 
-    override suspend fun isApplicableAsync(project: Project): Boolean = JBCefApp.isSupported()
+    override suspend fun isApplicableAsync(project: Project): Boolean = JcefSupport.isAvailable()
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val contentFactory = ContentFactory.getInstance()

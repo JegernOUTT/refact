@@ -106,7 +106,7 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
         private val sessionCrashCount = AtomicInteger(0)
         private val osrFallbackTriggered = AtomicBoolean(false)
 
-        fun isSupported(): Boolean = JBCefApp.isSupported()
+        fun isSupported(): Boolean = com.smallcloud.refactai.utils.JcefSupport.isAvailable()
 
         fun getLastInitError(): String? = lastInitError.get()
         fun clearLastInitError() = lastInitError.set(null)
