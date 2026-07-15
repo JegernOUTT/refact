@@ -226,4 +226,49 @@ describe("Chat Streaming + Large History Stress", () => {
     expect(events[0].seq).toBe("1");
     expect(events[eventCount - 1].seq).toBe(String(eventCount));
   });
+
+  it("parses a 9 MiB initial snapshot split across chunks", async () => {
+    const encoder = new TextEncoder();
+    const largeContent = "x".repeat(9 * 1024 * 1024);
+    const snapshot = createSnapshotEvent("large-snapshot-chat", [
+      {
+        role: "user",
+        content: largeContent,
+        message_id: "large-message",
+      },
+    ]);
+    const payload = `data: ${JSON.stringify(snapshot)}\n\n`;
+    const chunkSize = 64 * 1024;
+    const chunks: Uint8Array[] = [];
+    for (let offset = 0; offset < payload.length; offset += chunkSize) {
+      chunks.push(encoder.encode(payload.slice(offset, offset + chunkSize)));
+    }
+    global.fetch = createMockFetch(chunks);
+
+    const onError = vi.fn<(error: Error) => void>();
+    let unsubscribe: () => void = () => undefined;
+    const received = new Promise<EventEnvelope>((resolve, reject) => {
+      unsubscribe = subscribeToChatEvents(
+        "large-snapshot-chat",
+        { host: "vscode", lspPort: 8001 },
+        {
+          onEvent: resolve,
+          onError: (error) => {
+            onError(error);
+            reject(error);
+          },
+        },
+      );
+    });
+
+    const event = await received;
+    unsubscribe();
+
+    expect(payload.length).toBeGreaterThan(8_000_000);
+    expect(onError).not.toHaveBeenCalled();
+    expect(event.type).toBe("snapshot");
+    if (event.type !== "snapshot") throw new Error("Expected snapshot event");
+    expect(event.messages).toHaveLength(1);
+    expect(event.messages[0].content).toBe(largeContent);
+  });
 });
