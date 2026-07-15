@@ -723,6 +723,9 @@ pub enum DeltaOp {
     AppendReasoning {
         text: String,
     },
+    SetReasoning {
+        text: String,
+    },
     SetToolCalls {
         tool_calls: Vec<serde_json::Value>,
     },
@@ -1576,6 +1579,9 @@ mod tests {
             },
             DeltaOp::AppendReasoning {
                 text: "thinking".into(),
+            },
+            DeltaOp::SetReasoning {
+                text: "completed reasoning".into(),
             },
             DeltaOp::SetToolCalls {
                 tool_calls: vec![json!({"id":"1"})],

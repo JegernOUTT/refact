@@ -148,6 +148,7 @@ type BackgroundAgentSummaryCamelCase = {
 export type DeltaOp =
   | { op: "append_content"; text: string }
   | { op: "append_reasoning"; text: string }
+  | { op: "set_reasoning"; text: string }
   | { op: "set_tool_calls"; tool_calls: unknown[] }
   | { op: "set_thinking_blocks"; blocks: unknown[] }
   | { op: "add_citation"; citation: unknown }
@@ -717,6 +718,7 @@ export function applyDeltaOps(
   // string concatenation and repeated array spreading.
   const contentChunks: string[] = [];
   const reasoningChunks: string[] = [];
+  let reasoningReplacement: string | undefined;
   const newCitations: unknown[] = [];
   const newServerBlocks: unknown[] = [];
   let lastToolCalls: unknown[] | undefined;
@@ -731,6 +733,10 @@ export function applyDeltaOps(
         break;
       case "append_reasoning":
         reasoningChunks.push(op.text);
+        break;
+      case "set_reasoning":
+        reasoningReplacement = op.text;
+        reasoningChunks.length = 0;
         break;
       case "set_tool_calls":
         lastToolCalls = op.tool_calls;
@@ -765,7 +771,9 @@ export function applyDeltaOps(
         : appended;
   }
 
-  if (reasoningChunks.length > 0) {
+  if (reasoningReplacement !== undefined) {
+    updated.reasoning_content = reasoningReplacement + reasoningChunks.join("");
+  } else if (reasoningChunks.length > 0) {
     updated.reasoning_content =
       (updated.reasoning_content ?? "") + reasoningChunks.join("");
   }

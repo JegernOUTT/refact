@@ -70,7 +70,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
 
         // ChatGPT backend (Codex-style) only accepts a minimal set of fields:
         // model, instructions, input, tools, tool_choice, parallel_tool_calls,
-        // reasoning, store, stream, include, text.
+        // reasoning, store, stream, stream_options, include, text.
         // It rejects max_output_tokens, temperature, frequency_penalty, stop, etc.
         let is_chatgpt_backend = settings.endpoint.contains("chatgpt.com/backend-api");
 
@@ -157,6 +157,11 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
         if settings.supports_reasoning {
             if let Some(effort) = req.reasoning.to_openai_effort() {
                 body["reasoning"] = json!({"effort": effort, "summary": "auto"});
+                if is_chatgpt_backend && req.stream {
+                    body["stream_options"] = json!({
+                        "reasoning_summary_delivery": "sequential_cutoff"
+                    });
+                }
             }
             body.as_object_mut().map(|obj| obj.remove("temperature"));
             body.as_object_mut().map(|obj| obj.remove("top_p"));
@@ -193,7 +198,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
             ];
             if let Some(obj) = body.as_object_mut() {
                 for (k, v) in extra {
-                    if PROTECTED_FIELDS.contains(&k.as_str()) {
+                    if PROTECTED_FIELDS.contains(&k.as_str())
+                        || (is_chatgpt_backend && k == "stream_options")
+                    {
                         tracing::warn!(
                             "extra_body attempted to override protected field '{}', ignoring",
                             k
@@ -297,13 +304,10 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                 tracing::trace!("output_text.done (redundant, text already streamed via deltas)");
             }
 
-            // ── Reasoning streaming (3 flavours) ──
+            // ── Reasoning streaming ──
             // 1. Legacy: response.reasoning.delta (older models)
             // 2. GPT-OSS: response.reasoning_text.delta (reasoning content)
-            // 3. Summary: response.reasoning_summary_text.delta (shareable summary)
-            "response.reasoning.delta"
-            | "response.reasoning_text.delta"
-            | "response.reasoning_summary_text.delta" => {
+            "response.reasoning.delta" | "response.reasoning_text.delta" => {
                 if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
                     deltas.push(LlmStreamDelta::AppendReasoning {
                         text: delta.to_string(),
@@ -312,15 +316,34 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                 }
             }
 
-            // Reasoning summary lifecycle events — content already streamed via *.delta above
+            // Summary deltas keep standard Responses streams live. Sequential-cutoff may only
+            // expose a partial heading here; reasoning_summary_text.done is authoritative.
+            "response.reasoning_summary_text.delta" => {
+                if let Some(delta) = json.get("delta").and_then(|value| value.as_str()) {
+                    deltas.push(LlmStreamDelta::AppendReasoning {
+                        text: delta.to_string(),
+                        block_index: json.get("summary_index").and_then(|value| value.as_u64()),
+                    });
+                }
+            }
+            "response.reasoning_summary_text.done" => {
+                if let Some(text) = json.get("text").and_then(|value| value.as_str()) {
+                    if !text.is_empty() {
+                        deltas.push(LlmStreamDelta::FinalizeReasoning {
+                            text: text.to_string(),
+                            block_index: json.get("summary_index").and_then(|value| value.as_u64()),
+                        });
+                    }
+                }
+            }
+
+            // Reasoning summary part lifecycle events carry boundaries, not authoritative text.
             "response.reasoning_summary_part.added" => {
-                tracing::trace!(
-                    "reasoning_summary_part.added (summary part opened, text arrives via delta)"
-                );
+                tracing::trace!("reasoning_summary_part.added (summary part opened)");
             }
             "response.reasoning_summary_part.done" => {
                 tracing::trace!(
-                    "reasoning_summary_part.done (redundant, text already streamed via deltas)"
+                    "reasoning_summary_part.done (summary text captured by reasoning_summary_text.done)"
                 );
             }
 
@@ -374,7 +397,6 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
 
             // ── Redundant lifecycle/done events — data already captured by deltas ──
             "response.reasoning_text.done"
-            | "response.reasoning_summary_text.done"
             | "response.refusal.done"
             | "response.content_part.added"
             | "response.content_part.done"
@@ -1409,6 +1431,25 @@ mod tests {
     }
 
     #[test]
+    fn test_chatgpt_backend_requests_sequential_cutoff_reasoning_summaries() {
+        let adapter = OpenAiResponsesAdapter;
+        let req = LlmRequest::new(
+            "gpt-5.4".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        )
+        .with_reasoning(crate::params::ReasoningIntent::Medium);
+
+        let http = adapter
+            .build_http(&req, &chatgpt_backend_settings())
+            .unwrap();
+
+        assert_eq!(
+            http.body["stream_options"]["reasoning_summary_delivery"],
+            json!("sequential_cutoff")
+        );
+    }
+
+    #[test]
     fn test_chatgpt_backend_adds_default_instructions_without_system() {
         let adapter = OpenAiResponsesAdapter;
         let req = LlmRequest::new(
@@ -1455,6 +1496,10 @@ mod tests {
         let mut extra = serde_json::Map::new();
         extra.insert("temperature".to_string(), json!(0.7));
         extra.insert("max_output_tokens".to_string(), json!(1000));
+        extra.insert(
+            "stream_options".to_string(),
+            json!({"reasoning_summary_delivery": "invalid"}),
+        );
         extra.insert("custom_field".to_string(), json!("allowed"));
         req.extra_body = Some(extra);
 
@@ -1470,6 +1515,7 @@ mod tests {
             http.body.get("max_output_tokens").is_none(),
             "extra_body max_output_tokens should be blocked on ChatGPT backend"
         );
+        assert!(http.body.get("stream_options").is_none());
         assert_eq!(
             http.body["custom_field"], "allowed",
             "non-rejected extra_body fields should still be passed"
@@ -2314,24 +2360,36 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_summary_text_delta() {
+    fn test_reasoning_summary_text_delta_streams_partial_summary() {
         let adapter = OpenAiResponsesAdapter;
         let chunk = r#"{"type":"response.reasoning_summary_text.delta","item_id":"rs_abc","output_index":0,"summary_index":0,"delta":"Thinking about"}"#;
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        assert!(
-            deltas
-                .iter()
-                .any(|d| matches!(d, LlmStreamDelta::AppendReasoning { .. })),
-            "reasoning_summary_text.delta should produce AppendReasoning"
-        );
-        if let Some(LlmStreamDelta::AppendReasoning { text, .. }) = deltas
-            .iter()
-            .find(|d| matches!(d, LlmStreamDelta::AppendReasoning { .. }))
-        {
-            assert_eq!(text, "Thinking about");
-        }
+        assert!(matches!(
+            deltas.as_slice(),
+            [LlmStreamDelta::AppendReasoning {
+                text,
+                block_index: Some(0)
+            }] if text == "Thinking about"
+        ));
+    }
+
+    #[test]
+    fn test_reasoning_summary_text_done_emits_complete_summary() {
+        let adapter = OpenAiResponsesAdapter;
+        let chunk = r#"{"type":"response.reasoning_summary_text.done","item_id":"rs_abc","output_index":0,"summary_index":0,"text":"**Checking parser**\n\nThe completed reasoning body."}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+
+        assert!(matches!(
+            deltas.as_slice(),
+            [LlmStreamDelta::FinalizeReasoning {
+                text,
+                block_index: Some(0)
+            }]
+                if text == "**Checking parser**\n\nThe completed reasoning body."
+        ));
     }
 
     #[test]

@@ -119,7 +119,7 @@ Fixture coverage:
 | Fixture | Coverage |
 |---|---|
 | `assistant_streaming.jsonl` | `snapshot`, assistant `stream_started`, split Markdown table/code-fence `append_content`, `stream_finished`, usage totals |
-| `reasoning.jsonl` | `append_reasoning` interleaved with assistant content |
+| `reasoning.jsonl` | `append_reasoning` interleaved with assistant content; `set_reasoning` replaces partial summaries |
 | `tool_calls.jsonl` | `set_tool_calls`, stable tool id, `message_added` tool result |
 | `approvals.jsonl` | `pause_required` and approval modal state |
 | `usage_updates.jsonl` | `runtime.usage`, `set_usage`, and final usage update |

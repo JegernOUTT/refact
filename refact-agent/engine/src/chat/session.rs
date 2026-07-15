@@ -1947,6 +1947,10 @@ impl ChatSession {
                                 applied = true;
                             }
                         }
+                        DeltaOp::SetReasoning { text } => {
+                            draft.reasoning_content = (!text.is_empty()).then(|| text.clone());
+                            applied = true;
+                        }
                         DeltaOp::SetToolCalls { tool_calls } => {
                             let had_tool_calls = draft
                                 .tool_calls
@@ -3635,6 +3639,24 @@ mod tests {
         session.emit_stream_delta(vec![DeltaOp::AppendReasoning { text: "ing".into() }]);
         let draft = session.draft_message.as_ref().unwrap();
         assert_eq!(draft.reasoning_content.as_ref().unwrap(), "thinking");
+    }
+
+    #[test]
+    fn test_emit_stream_delta_replaces_reasoning() {
+        let mut session = make_session();
+        session.start_stream();
+        session.emit_stream_delta(vec![DeltaOp::AppendReasoning {
+            text: "partial header".into(),
+        }]);
+        session.emit_stream_delta(vec![DeltaOp::SetReasoning {
+            text: "completed reasoning body".into(),
+        }]);
+
+        let draft = session.draft_message.as_ref().unwrap();
+        assert_eq!(
+            draft.reasoning_content.as_deref(),
+            Some("completed reasoning body")
+        );
     }
 
     #[test]

@@ -2197,6 +2197,9 @@ async fn run_streaming_generation(
                                 out.push(DeltaOp::AppendReasoning { text });
                             }
                         }
+                        DeltaOp::SetReasoning { text } => {
+                            out.push(DeltaOp::SetReasoning { text });
+                        }
                         other => out.push(other),
                     }
                 }
@@ -2239,6 +2242,19 @@ async fn run_streaming_generation(
                         DeltaOp::AppendReasoning { text } => {
                             for chunk in split_utf8_chunks(&text, max_text_bytes) {
                                 out.push(DeltaOp::AppendReasoning { text: chunk });
+                            }
+                        }
+                        DeltaOp::SetReasoning { text } => {
+                            let chunks = split_utf8_chunks(&text, max_text_bytes);
+                            if let Some((first, rest)) = chunks.split_first() {
+                                out.push(DeltaOp::SetReasoning {
+                                    text: first.clone(),
+                                });
+                                out.extend(
+                                    rest.iter()
+                                        .cloned()
+                                        .map(|text| DeltaOp::AppendReasoning { text }),
+                                );
                             }
                         }
                         other => out.push(other),

@@ -97,7 +97,7 @@ User sends → POST /v1/chats/{chatId}/commands {type: "user_message", content}
 
 ### Delta Operations
 
-`append_content` · `append_reasoning` · `set_tool_calls` · `set_thinking_blocks` · `add_citation` · `add_server_content_block` · `set_usage` · `merge_extra`
+`append_content` · `append_reasoning` · `set_reasoning` · `set_tool_calls` · `set_thinking_blocks` · `add_citation` · `add_server_content_block` · `set_usage` · `merge_extra`
 
 ### Command Types (POST /v1/chats/{chatId}/commands)
 

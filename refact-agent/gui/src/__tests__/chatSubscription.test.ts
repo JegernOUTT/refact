@@ -76,6 +76,43 @@ describe("chatSubscription", () => {
       expect(result.reasoning_content).toBe("thinking");
     });
 
+    it("should replace partial reasoning with the completed summary", () => {
+      const message: TestMessage = {
+        role: "assistant",
+        content: "",
+        reasoning_content: "**Checking parser**",
+      };
+
+      const ops: DeltaOp[] = [
+        {
+          op: "set_reasoning",
+          text: "**Checking parser**\n\nThe completed reasoning body.",
+        },
+      ];
+
+      const result = applyDeltaOps(message, ops) as TestMessage;
+      expect(result.reasoning_content).toBe(
+        "**Checking parser**\n\nThe completed reasoning body.",
+      );
+    });
+
+    it("should discard earlier reasoning appends when a replacement follows", () => {
+      const message: TestMessage = {
+        role: "assistant",
+        content: "",
+        reasoning_content: "Existing partial",
+      };
+
+      const ops: DeltaOp[] = [
+        { op: "append_reasoning", text: " streamed header" },
+        { op: "set_reasoning", text: "Completed summary" },
+        { op: "append_reasoning", text: " tail" },
+      ];
+
+      const result = applyDeltaOps(message, ops) as TestMessage;
+      expect(result.reasoning_content).toBe("Completed summary tail");
+    });
+
     it("should set tool calls", () => {
       const message: TestMessage = {
         role: "assistant",

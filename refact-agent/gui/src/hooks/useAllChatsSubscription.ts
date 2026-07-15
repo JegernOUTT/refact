@@ -313,7 +313,11 @@ export function useAllChatsSubscription() {
       // updated precisely after merge/replace — used for the force-flush cap.
       let deltaTextLen = 0;
       for (const op of envelope.ops) {
-        if (op.op === "append_content" || op.op === "append_reasoning") {
+        if (
+          op.op === "append_content" ||
+          op.op === "append_reasoning" ||
+          op.op === "set_reasoning"
+        ) {
           deltaTextLen += op.text.length;
         }
       }

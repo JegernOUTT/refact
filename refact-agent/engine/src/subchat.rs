@@ -452,6 +452,12 @@ impl StreamCollector for SubchatProgressCollector {
                         Self::append_tail(&mut self.reasoning_tail, &text, 50_000);
                     }
                 }
+                crate::chat::types::DeltaOp::SetReasoning { text } => {
+                    if self.thinking_tail.trim().is_empty() {
+                        self.reasoning_tail.clear();
+                        Self::append_tail(&mut self.reasoning_tail, &text, 50_000);
+                    }
+                }
                 crate::chat::types::DeltaOp::AppendContent { text } => {
                     if self.thinking_tail.trim().is_empty() && self.reasoning_tail.trim().is_empty()
                     {

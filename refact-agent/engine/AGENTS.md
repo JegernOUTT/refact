@@ -95,7 +95,7 @@ Variants (Rust enum names; on the wire they are flattened JSON objects with `typ
 
 ### Delta Operations
 
-`AppendContent`, `AppendReasoning`, `SetToolCalls`, `SetThinkingBlocks`, `AddCitation`, `AddServerContentBlock`, `SetUsage`, `MergeExtra`.
+`AppendContent`, `AppendReasoning`, `SetReasoning`, `SetToolCalls`, `SetThinkingBlocks`, `AddCitation`, `AddServerContentBlock`, `SetUsage`, `MergeExtra`.
 
 ### Message Flow
 

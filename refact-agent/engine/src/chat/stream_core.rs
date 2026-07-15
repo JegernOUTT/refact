@@ -875,6 +875,26 @@ fn process_stream_event_data<C: StreamCollector>(
                 flush_pending_think_parse(acc, &mut ops);
                 push_reasoning_delta(acc, &mut ops, text, block_index);
             }
+            LlmStreamDelta::FinalizeReasoning { text, block_index } => {
+                if let Some(block_index) = block_index {
+                    acc.finalized_reasoning_per_block
+                        .insert(block_index, text.clone());
+                } else {
+                    acc.finalized_reasoning = Some(text.clone());
+                }
+                let replacement = if !acc.finalized_reasoning_per_block.is_empty() {
+                    let mut blocks: Vec<_> = acc.finalized_reasoning_per_block.iter().collect();
+                    blocks.sort_by_key(|(block_index, _)| **block_index);
+                    blocks
+                        .into_iter()
+                        .map(|(_, text)| text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                } else {
+                    text
+                };
+                ops.push(DeltaOp::SetReasoning { text: replacement });
+            }
             LlmStreamDelta::SetToolCalls { tool_calls } => {
                 let tool_calls = if !auth_token.is_empty() {
                     tool_calls
@@ -1089,7 +1109,18 @@ fn finalize_accumulators<C: StreamCollector>(
         .enumerate()
         .map(|(idx, acc)| {
             collector.on_finish(idx, acc.finish_reason.clone());
-            let thinking_blocks = if !acc.thinking_blocks.is_empty() && !acc.reasoning.is_empty() {
+            let reasoning = if !acc.finalized_reasoning_per_block.is_empty() {
+                let mut blocks: Vec<_> = acc.finalized_reasoning_per_block.into_iter().collect();
+                blocks.sort_by_key(|(block_index, _)| *block_index);
+                blocks
+                    .into_iter()
+                    .map(|(_, text)| text)
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            } else {
+                acc.finalized_reasoning.unwrap_or(acc.reasoning)
+            };
+            let thinking_blocks = if !acc.thinking_blocks.is_empty() && !reasoning.is_empty() {
                 acc.thinking_blocks
                     .into_iter()
                     .map(|mut block| {
@@ -1104,7 +1135,7 @@ fn finalize_accumulators<C: StreamCollector>(
                                 let block_idx = obj.get("index").and_then(|v| v.as_u64());
                                 let reasoning_text = block_idx
                                     .and_then(|idx| acc.reasoning_per_block.get(&idx))
-                                    .unwrap_or(&acc.reasoning);
+                                    .unwrap_or(&reasoning);
                                 if !reasoning_text.is_empty() {
                                     obj.insert(
                                         "thinking".to_string(),
@@ -1116,10 +1147,10 @@ fn finalize_accumulators<C: StreamCollector>(
                         block
                     })
                     .collect()
-            } else if acc.thinking_blocks.is_empty() && !acc.reasoning.is_empty() {
+            } else if acc.thinking_blocks.is_empty() && !reasoning.is_empty() {
                 vec![json!({
                     "type": "reasoning",
-                    "summary": [{"type": "summary_text", "text": acc.reasoning.clone()}]
+                    "summary": [{"type": "summary_text", "text": reasoning.clone()}]
                 })]
             } else {
                 acc.thinking_blocks
@@ -1133,7 +1164,7 @@ fn finalize_accumulators<C: StreamCollector>(
             ChoiceFinal {
                 content: acc.content,
                 raw_content: raw_content,
-                reasoning: acc.reasoning,
+                reasoning,
                 thinking_blocks,
                 tool_calls_raw: acc.tool_calls.finalize(),
                 citations: acc.citations,
@@ -2520,6 +2551,8 @@ struct ChoiceAccumulator {
     /// Per-block reasoning text for Anthropic interleaved thinking.
     /// Key is the content block index from the stream.
     reasoning_per_block: HashMap<u64, String>,
+    finalized_reasoning: Option<String>,
+    finalized_reasoning_per_block: HashMap<u64, String>,
     thinking_blocks: Vec<serde_json::Value>,
     tool_calls: ToolCallAccumulator,
     citations: Vec<serde_json::Value>,
@@ -3478,7 +3511,18 @@ mod tests {
 
     /// Helper: simulate accumulator finalization (same logic as run_llm_stream).
     fn finalize_accumulator(acc: ChoiceAccumulator) -> ChoiceFinal {
-        let thinking_blocks = if !acc.thinking_blocks.is_empty() && !acc.reasoning.is_empty() {
+        let reasoning = if !acc.finalized_reasoning_per_block.is_empty() {
+            let mut blocks: Vec<_> = acc.finalized_reasoning_per_block.into_iter().collect();
+            blocks.sort_by_key(|(block_index, _)| *block_index);
+            blocks
+                .into_iter()
+                .map(|(_, text)| text)
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            acc.finalized_reasoning.unwrap_or(acc.reasoning)
+        };
+        let thinking_blocks = if !acc.thinking_blocks.is_empty() && !reasoning.is_empty() {
             acc.thinking_blocks
                 .into_iter()
                 .map(|mut block| {
@@ -3493,7 +3537,7 @@ mod tests {
                             let block_idx = obj.get("index").and_then(|v| v.as_u64());
                             let reasoning_text = block_idx
                                 .and_then(|idx| acc.reasoning_per_block.get(&idx))
-                                .unwrap_or(&acc.reasoning);
+                                .unwrap_or(&reasoning);
                             if !reasoning_text.is_empty() {
                                 obj.insert("thinking".to_string(), json!(reasoning_text.clone()));
                             }
@@ -3502,10 +3546,10 @@ mod tests {
                     block
                 })
                 .collect()
-        } else if acc.thinking_blocks.is_empty() && !acc.reasoning.is_empty() {
+        } else if acc.thinking_blocks.is_empty() && !reasoning.is_empty() {
             vec![json!({
                 "type": "reasoning",
-                "summary": [{"type": "summary_text", "text": acc.reasoning.clone()}]
+                "summary": [{"type": "summary_text", "text": reasoning.clone()}]
             })]
         } else {
             acc.thinking_blocks
@@ -3514,7 +3558,7 @@ mod tests {
         ChoiceFinal {
             content: acc.content,
             raw_content: String::new(),
-            reasoning: acc.reasoning,
+            reasoning,
             thinking_blocks,
             tool_calls_raw: acc.tool_calls.finalize(),
             citations: acc.citations,
@@ -3615,6 +3659,29 @@ mod tests {
             result.thinking_blocks[1]["thinking"].as_str().unwrap(),
             "Second thought...",
             "Block 4 should get only its own reasoning text"
+        );
+    }
+
+    #[test]
+    fn test_completed_reasoning_summary_replaces_partial_heading() {
+        let mut acc = ChoiceAccumulator::default();
+        acc.reasoning = "**Checking parser**".to_string();
+        acc.reasoning_per_block
+            .insert(0, "**Checking parser**".to_string());
+        acc.finalized_reasoning_per_block.insert(
+            0,
+            "**Checking parser**\n\nThe completed reasoning body.".to_string(),
+        );
+
+        let result = finalize_accumulator(acc);
+
+        assert_eq!(
+            result.reasoning,
+            "**Checking parser**\n\nThe completed reasoning body."
+        );
+        assert_eq!(
+            result.thinking_blocks[0]["summary"][0]["text"],
+            "**Checking parser**\n\nThe completed reasoning body."
         );
     }
 

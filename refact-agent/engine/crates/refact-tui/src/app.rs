@@ -4459,6 +4459,9 @@ impl App {
             match op {
                 DeltaOp::AppendContent { text } => self.append_assistant(text),
                 DeltaOp::AppendReasoning { text } => self.append_reasoning(text),
+                DeltaOp::SetReasoning { text } => {
+                    self.replace_reasoning_stream_with_final(text.clone(), true)
+                }
                 DeltaOp::SetUsage { usage } => self.update_usage_value(usage),
                 DeltaOp::AddCitation { citation } => {
                     self.push_history_item(TranscriptItem::Citation(value_to_compact_string(

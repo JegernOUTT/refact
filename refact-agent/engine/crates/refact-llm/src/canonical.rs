@@ -140,6 +140,10 @@ pub enum LlmStreamDelta {
         /// When set, the reasoning text is associated with a specific thinking block.
         block_index: Option<u64>,
     },
+    FinalizeReasoning {
+        text: String,
+        block_index: Option<u64>,
+    },
     SetToolCalls {
         tool_calls: Vec<Value>,
     },

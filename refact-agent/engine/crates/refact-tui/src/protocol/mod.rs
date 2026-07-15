@@ -167,6 +167,7 @@ impl SseEvent {
 pub enum DeltaOp {
     AppendContent { text: String },
     AppendReasoning { text: String },
+    SetReasoning { text: String },
     SetToolCalls { tool_calls: Vec<Value> },
     SetThinkingBlocks { blocks: Vec<Value> },
     AddCitation { citation: Value },
@@ -194,6 +195,7 @@ enum DeltaOpWire {
 enum KnownDeltaOp {
     AppendContent { text: String },
     AppendReasoning { text: String },
+    SetReasoning { text: String },
     SetToolCalls { tool_calls: Vec<Value> },
     SetThinkingBlocks { blocks: Vec<Value> },
     AddCitation { citation: Value },
@@ -228,6 +230,9 @@ impl From<KnownDeltaOp> for DeltaOp {
                 text: sanitize_tool_text(text),
             },
             KnownDeltaOp::AppendReasoning { text } => Self::AppendReasoning {
+                text: sanitize_tool_text(text),
+            },
+            KnownDeltaOp::SetReasoning { text } => Self::SetReasoning {
                 text: sanitize_tool_text(text),
             },
             KnownDeltaOp::SetToolCalls { tool_calls } => Self::SetToolCalls { tool_calls },
@@ -602,6 +607,7 @@ impl TranscriptState {
             match op {
                 DeltaOp::AppendContent { text } => self.messages[idx].content.push_str(text),
                 DeltaOp::AppendReasoning { text } => self.messages[idx].reasoning.push_str(text),
+                DeltaOp::SetReasoning { text } => self.messages[idx].reasoning.clone_from(text),
                 DeltaOp::SetToolCalls { tool_calls } => {
                     self.messages[idx].tool_calls = tool_calls.clone();
                 }
@@ -1027,7 +1033,8 @@ mod tests {
         state.start_assistant(Some("a1"));
         let ops = delta_ops_from_value(&json!([
             {"op":"append_content","text":"hello"},
-            {"op":"append_reasoning","text":"think"},
+            {"op":"append_reasoning","text":"partial"},
+            {"op":"set_reasoning","text":"think"},
             {"op":"set_tool_calls","tool_calls":[{"id":"call-1"}]},
             {"op":"set_thinking_blocks","blocks":[{"type":"thinking","signature":"sig"}]},
             {"op":"add_citation","citation":{"title":"README"}},
