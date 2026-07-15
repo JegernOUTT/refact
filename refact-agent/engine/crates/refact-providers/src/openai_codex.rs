@@ -99,21 +99,15 @@ fn is_gpt5_subscription_model(id: &str) -> bool {
         return false;
     }
     let suffixes: Vec<&str> = parts.collect();
-    matches!(suffixes.as_slice(), [] | ["mini"] | ["sol"] | ["terra"])
-}
-
-// gpt-5.6-luna appears in /codex/models but /codex/responses rejects it with
-// 404 "Model not found gpt-5.6-luna" (verified live 2026-07-13): it is the
-// server-side safety-buffering draft model advertised through the
-// x-codex-safety-buffering-faster-model response metadata header, not a
-// user-requestable chat model. Keep it out of catalogs and live listings.
-fn is_codex_internal_only_model(id: &str) -> bool {
-    normalized_model_id(id) == "gpt-5.6-luna"
+    if version == "6" {
+        matches!(suffixes.as_slice(), ["sol"] | ["terra"] | ["luna"])
+    } else {
+        matches!(suffixes.as_slice(), [] | ["mini"] | ["sol"] | ["terra"])
+    }
 }
 
 fn is_openai_codex_catalog_model(id: &str) -> bool {
-    !is_codex_internal_only_model(id)
-        && (is_codex_named_model(id) || is_gpt5_subscription_model(id))
+    is_codex_named_model(id) || is_gpt5_subscription_model(id)
 }
 
 fn is_chatgpt_codex_live_model(id: &str) -> bool {
@@ -127,10 +121,18 @@ fn is_openai_api_codex_live_model(id: &str) -> bool {
 
 fn codex_model_context_window_override(id: &str) -> Option<usize> {
     match normalized_model_id(id).as_str() {
-        "gpt-5.6-sol" | "gpt-5.6-terra" => Some(GPT_5_6_CODEX_CONTEXT_WINDOW),
+        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => Some(GPT_5_6_CODEX_CONTEXT_WINDOW),
         "gpt-5.5" => Some(GPT_5_5_CODEX_CONTEXT_WINDOW),
         _ => None,
     }
+}
+
+fn is_invalid_generic_gpt56_model(id: &str) -> bool {
+    normalized_model_id(id) == "gpt-5.6"
+}
+
+fn remove_invalid_enabled_models(models: &mut Vec<String>) {
+    models.retain(|model| !is_invalid_generic_gpt56_model(model));
 }
 
 fn apply_codex_model_overrides(model: &mut AvailableModel) {
@@ -141,25 +143,31 @@ fn apply_codex_model_overrides(model: &mut AvailableModel) {
 
 fn codex_builtin_fallback_caps(model_id: &str) -> Option<ModelCapabilities> {
     let n_ctx = codex_model_context_window_override(model_id)?;
+    let reasoning_effort_options = match normalized_model_id(model_id).as_str() {
+        "gpt-5.6-sol" | "gpt-5.6-terra" => {
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        }
+        "gpt-5.6-luna" => vec!["low", "medium", "high", "xhigh", "max"],
+        _ => return None,
+    };
     Some(ModelCapabilities {
         n_ctx,
-        max_output_tokens: 16_384,
+        max_output_tokens: 128_000,
         supports_tools: true,
         supports_parallel_tools: true,
         supports_vision: true,
-        reasoning_effort_options: Some(vec![
-            "minimal".to_string(),
-            "low".to_string(),
-            "medium".to_string(),
-            "high".to_string(),
-            "xhigh".to_string(),
-        ]),
+        reasoning_effort_options: Some(
+            reasoning_effort_options
+                .into_iter()
+                .map(ToString::to_string)
+                .collect(),
+        ),
         ..Default::default()
     })
 }
 
 fn codex_builtin_fallback_model_ids() -> &'static [&'static str] {
-    &["gpt-5.6-sol", "gpt-5.6-terra"]
+    &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
 }
 
 fn openai_codex_catalog_model_id(capability_key: &str) -> Option<&str> {
@@ -1114,11 +1122,16 @@ impl OpenAICodexProvider {
             let mut available =
                 if let Some(caps) = resolve_openai_codex_catalog_caps(model_caps, slug) {
                     AvailableModel::from_caps(slug, caps, enabled, pricing)
+                } else if let Some(caps) = codex_builtin_fallback_caps(slug) {
+                    AvailableModel::from_caps(slug, &caps, enabled, pricing)
                 } else {
                     self.unknown_live_codex_model(slug.to_string(), enabled, pricing, model)
                 };
             apply_codex_model_overrides(&mut available);
             available.display_name = display_name.or(available.display_name);
+            if let Some(reasoning_levels) = Self::live_model_reasoning_levels(model) {
+                available.reasoning_effort_options = Some(reasoning_levels);
+            }
             models_map.insert(slug.to_string(), available);
         }
 
@@ -1318,10 +1331,13 @@ impl OpenAICodexProvider {
             .and_then(Value::as_array)?
             .iter()
             .filter_map(|r| {
-                r.get("effort")
-                    .or_else(|| r.get("id"))
-                    .or_else(|| r.get("name"))
-                    .and_then(Value::as_str)
+                r.as_str()
+                    .or_else(|| {
+                        r.get("effort")
+                            .or_else(|| r.get("id"))
+                            .or_else(|| r.get("name"))
+                            .and_then(Value::as_str)
+                    })
                     .map(ToString::to_string)
             })
             .collect::<Vec<_>>();
@@ -1504,7 +1520,7 @@ impl ProviderTrait for OpenAICodexProvider {
 
     fn model_filter_regex(&self) -> Option<&'static str> {
         Some(
-            r"(?i)^(?:gpt[-_]5(?:\.[0-9]+)?(?:[-_](?:mini|sol|terra|luna))?|gpt[-_][a-z0-9.]+(?:[-_][a-z0-9.]+)*[-_]codex(?:[-_](?:latest|preview|mini|spark|max))?)$",
+            r"(?i)^(?:gpt[-_]5\.6[-_](?:sol|terra|luna)|gpt[-_]5(?:\.(?:[0-5]|[7-9]|[1-9][0-9]+))?(?:[-_](?:mini|sol|terra))?|gpt[-_][a-z0-9.]+(?:[-_][a-z0-9.]+)*[-_]codex(?:[-_](?:latest|preview|mini|spark|max))?)$",
         )
     }
 
@@ -1578,6 +1594,7 @@ available:
             self.http_response_header_retry_max_attempts = max_attempts.max(1);
         }
         parse_enabled_models(&yaml, &mut self.enabled_models);
+        remove_invalid_enabled_models(&mut self.enabled_models);
         parse_custom_models(&yaml, &mut self.custom_models);
         Ok(())
     }
@@ -1708,6 +1725,10 @@ available:
     }
 
     fn set_model_enabled(&mut self, model_id: &str, enabled: bool) {
+        if is_invalid_generic_gpt56_model(model_id) {
+            remove_invalid_enabled_models(&mut self.enabled_models);
+            return;
+        }
         set_model_enabled_impl(&mut self.enabled_models, model_id, enabled);
     }
 
@@ -1902,17 +1923,16 @@ mod tests {
         assert!(ids.contains(&"gpt-5.5"));
         assert!(ids.contains(&"gpt-5.6-sol"));
         assert!(ids.contains(&"gpt-5.6-terra"));
-        // luna is the internal safety-buffering draft model; /codex/responses 404s it.
-        assert!(!ids.contains(&"gpt-5.6-luna"));
+        assert!(ids.contains(&"gpt-5.6-luna"));
+        assert!(!ids.contains(&"gpt-5.6"));
     }
 
     #[test]
     fn codex_model_filters_accept_known_gpt56_variants_only() {
         assert!(super::is_chatgpt_codex_live_model("gpt-5.6-sol"));
         assert!(super::is_chatgpt_codex_live_model("gpt-5.6-terra"));
-        // Listed by /codex/models but rejected by /codex/responses (internal draft model).
-        assert!(!super::is_chatgpt_codex_live_model("gpt-5.6-luna"));
-        assert!(super::is_chatgpt_codex_live_model("gpt-5.6"));
+        assert!(super::is_chatgpt_codex_live_model("gpt-5.6-luna"));
+        assert!(!super::is_chatgpt_codex_live_model("gpt-5.6"));
         assert!(!super::is_chatgpt_codex_live_model("gpt-5.6-random"));
         assert!(!super::is_chatgpt_codex_live_model("gpt-5.6-sol-preview"));
 
@@ -1921,6 +1941,7 @@ mod tests {
         assert!(regex.is_match("gpt-5.6-sol"));
         assert!(regex.is_match("gpt-5.6-terra"));
         assert!(regex.is_match("gpt-5.6-luna"));
+        assert!(!regex.is_match("gpt-5.6"));
         assert!(!regex.is_match("gpt-5.6-random"));
     }
 
@@ -1936,7 +1957,7 @@ mod tests {
         );
         assert_eq!(
             super::codex_model_context_window_override("gpt-5.6-luna"),
-            None
+            Some(372_000)
         );
         assert_eq!(
             super::codex_model_context_window_override("gpt-5.5"),
@@ -1952,21 +1973,33 @@ mod tests {
         let stale_caps = HashMap::from([("openai_codex/gpt-5.5".to_string(), codex_caps(405_000))]);
         let models = p.fetch_models_from_catalog(&stale_caps);
 
-        assert!(models.iter().all(|m| m.id != "gpt-5.6-luna"));
-        for model_id in ["gpt-5.6-sol", "gpt-5.6-terra"] {
+        assert!(models.iter().all(|m| m.id != "gpt-5.6"));
+        for (model_id, expected_efforts) in [
+            (
+                "gpt-5.6-sol",
+                &["low", "medium", "high", "xhigh", "max", "ultra"][..],
+            ),
+            (
+                "gpt-5.6-terra",
+                &["low", "medium", "high", "xhigh", "max", "ultra"][..],
+            ),
+            (
+                "gpt-5.6-luna",
+                &["low", "medium", "high", "xhigh", "max"][..],
+            ),
+        ] {
             let model = models.iter().find(|m| m.id == model_id).unwrap();
             assert_eq!(model.n_ctx, 372_000);
+            assert_eq!(model.max_output_tokens, Some(128_000));
             assert_eq!(
                 model.reasoning_effort_options.as_deref(),
                 Some(
-                    &[
-                        "minimal".to_string(),
-                        "low".to_string(),
-                        "medium".to_string(),
-                        "high".to_string(),
-                        "xhigh".to_string(),
-                    ][..]
-                )
+                    &expected_efforts
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()[..]
+                ),
+                "{model_id}"
             );
         }
     }
@@ -1990,7 +2023,13 @@ mod tests {
                     "display_name": "GPT-5.6 Terra",
                     "max_context_window": 1_050_000,
                     "supported": true,
-                    "supported_reasoning_levels": ["low", "medium", "high", "xhigh"]
+                    "supported_reasoning_levels": ["low", "medium", "high", "xhigh", "max"]
+                }),
+                json!({
+                    "slug": "gpt-5.6-luna",
+                    "display_name": "GPT-5.6 Luna",
+                    "max_context_window": 1_050_000,
+                    "supported": true
                 }),
                 json!({
                     "slug": "gpt-5.6-random",
@@ -2007,7 +2046,40 @@ mod tests {
             .unwrap();
         assert_eq!(terra.n_ctx, 372_000);
         assert_eq!(terra.display_name.as_deref(), Some("GPT-5.6 Terra"));
+        assert_eq!(
+            terra.reasoning_effort_options.as_deref(),
+            Some(
+                &[
+                    "low".to_string(),
+                    "medium".to_string(),
+                    "high".to_string(),
+                    "xhigh".to_string(),
+                    "max".to_string(),
+                ][..]
+            )
+        );
+        let luna = live_models.iter().find(|m| m.id == "gpt-5.6-luna").unwrap();
+        assert_eq!(luna.n_ctx, 372_000);
+        assert_eq!(luna.display_name.as_deref(), Some("GPT-5.6 Luna"));
+        assert!(luna.supports_tools);
+        assert!(luna.supports_parallel_tools);
         assert!(!live_models.iter().any(|m| m.id == "gpt-5.6-random"));
+    }
+
+    #[test]
+    fn generic_gpt56_enabled_model_is_removed() {
+        let mut p = OpenAICodexProvider::default();
+        p.provider_settings_apply(
+            serde_yaml::from_str("enabled_models: [gpt-5.6, gpt-5.6-sol]").unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(p.enabled_models, vec!["gpt-5.6-sol"]);
+
+        p.set_model_enabled("gpt-5.6", false);
+        assert_eq!(p.enabled_models, vec!["gpt-5.6-sol"]);
+        p.set_model_enabled("gpt-5.6", true);
+        assert_eq!(p.enabled_models, vec!["gpt-5.6-sol"]);
     }
 
     #[test]

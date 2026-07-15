@@ -1270,20 +1270,48 @@ mod tests {
             name: "OpenAI Codex".to_string(),
             ..Default::default()
         };
-        let gpt56_sol = ModelsDevModel {
-            id: "gpt-5.6-sol".to_string(),
-            name: "gpt-5.6-sol".to_string(),
+        for (model_id, expected_efforts) in [
+            (
+                "gpt-5.6-sol",
+                &["low", "medium", "high", "xhigh", "max", "ultra"][..],
+            ),
+            (
+                "gpt-5.6-terra",
+                &["low", "medium", "high", "xhigh", "max", "ultra"][..],
+            ),
+            (
+                "gpt-5.6-luna",
+                &["low", "medium", "high", "xhigh", "max"][..],
+            ),
+        ] {
+            let model = ModelsDevModel {
+                id: model_id.to_string(),
+                name: model_id.to_string(),
+                reasoning: Some(true),
+                ..Default::default()
+            };
+            let controls =
+                reasoning_controls_for_model("openai_codex", &openai_codex_provider, &model);
+            assert_eq!(
+                controls.reasoning_effort_options,
+                effort(expected_efforts),
+                "{model_id}"
+            );
+            assert!(!controls.supports_adaptive_thinking_budget, "{model_id}");
+            assert!(!controls.supports_thinking_budget, "{model_id}");
+        }
+
+        let gpt55 = ModelsDevModel {
+            id: "gpt-5.5".to_string(),
+            name: "gpt-5.5".to_string(),
             reasoning: Some(true),
             ..Default::default()
         };
-        let controls =
-            reasoning_controls_for_model("openai_codex", &openai_codex_provider, &gpt56_sol);
+        let controls = reasoning_controls_for_model("openai_codex", &openai_codex_provider, &gpt55);
         assert_eq!(
             controls.reasoning_effort_options,
             effort(&["minimal", "low", "medium", "high", "xhigh"])
         );
-        assert!(!controls.supports_adaptive_thinking_budget);
-        assert!(!controls.supports_thinking_budget);
     }
 
     #[test]

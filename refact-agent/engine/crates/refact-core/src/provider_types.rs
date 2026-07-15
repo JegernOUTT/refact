@@ -124,6 +124,22 @@ pub struct ProviderDefaults {
 }
 
 impl ProviderDefaults {
+    fn clear_invalid_generic_gpt56_models(&mut self) -> bool {
+        let mut changed = false;
+        changed |= clear_invalid_generic_gpt56_model_field(&mut self.chat.model);
+        changed |= clear_invalid_generic_gpt56_model_field(&mut self.chat_model_2.model);
+        changed |=
+            clear_invalid_generic_gpt56_model_field(&mut self.task_planner_agent_model.model);
+        changed |= clear_invalid_generic_gpt56_model_field(&mut self.chat_light.model);
+        changed |= clear_invalid_generic_gpt56_model_field(&mut self.chat_thinking.model);
+        changed |= clear_invalid_generic_gpt56_model_field(&mut self.chat_buddy.model);
+        changed
+    }
+
+    fn normalize_model_references(&mut self) -> bool {
+        self.clear_legacy_refact_models() | self.clear_invalid_generic_gpt56_models()
+    }
+
     pub fn clear_legacy_refact_models(&mut self) -> bool {
         let mut changed = false;
         changed |= clear_legacy_refact_model_field(&mut self.chat.model);
@@ -191,9 +207,9 @@ impl ProviderDefaults {
             Ok(content) => {
                 let mut defaults: Self = serde_yaml::from_str(&content)
                     .map_err(|e| format!("Failed to parse defaults.yaml: {}", e))?;
-                if defaults.clear_legacy_refact_models() {
+                if defaults.normalize_model_references() {
                     tracing::warn!(
-                        "Legacy Cloud model defaults in providers.d/defaults.yaml were reset to none"
+                        "Outdated model defaults in providers.d/defaults.yaml were migrated"
                     );
                     if let Err(e) = defaults.save(config_dir).await {
                         tracing::warn!(
@@ -220,7 +236,7 @@ impl ProviderDefaults {
 
         let defaults_path = providers_dir.join("defaults.yaml");
         let mut normalized = self.clone();
-        normalized.clear_legacy_refact_models();
+        normalized.normalize_model_references();
         let content = serde_yaml::to_string(&normalized)
             .map_err(|e| format!("Failed to serialize defaults: {}", e))?;
 
@@ -265,6 +281,30 @@ fn clear_legacy_refact_model_field(model: &mut Option<String>) -> bool {
     }
 
     false
+}
+
+fn clear_invalid_generic_gpt56_model_field(model: &mut Option<String>) -> bool {
+    let Some(value) = model.as_mut() else {
+        return false;
+    };
+
+    let trimmed = value.trim();
+    let invalid = trimmed == "gpt-5.6"
+        || trimmed
+            .rsplit_once('/')
+            .is_some_and(|(provider, model_id)| {
+                provider
+                    .to_ascii_lowercase()
+                    .replace('-', "_")
+                    .starts_with("openai_codex")
+                    && model_id == "gpt-5.6"
+            });
+    if !invalid {
+        return false;
+    }
+
+    *value = String::new();
+    true
 }
 
 pub fn resolve_env_var(value: &str, fallback: &str, context: &str) -> String {
@@ -718,6 +758,42 @@ mod tests {
         assert_eq!(defaults.chat_light.model.as_deref(), Some(""));
         assert_eq!(defaults.chat_thinking.model.as_deref(), Some(""));
         assert_eq!(defaults.completion_model.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn provider_defaults_clear_invalid_generic_gpt56_models() {
+        let mut defaults = ProviderDefaults {
+            chat: ModelTypeDefaults {
+                model: Some("gpt-5.6".to_string()),
+                ..Default::default()
+            },
+            chat_model_2: ModelTypeDefaults {
+                model: Some("openai/gpt-5.6".to_string()),
+                ..Default::default()
+            },
+            chat_light: ModelTypeDefaults {
+                model: Some("openai_codex_personal/gpt-5.6".to_string()),
+                ..Default::default()
+            },
+            chat_thinking: ModelTypeDefaults {
+                model: Some("openai/gpt-5.6-sol".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(defaults.normalize_model_references());
+        assert_eq!(defaults.chat.model.as_deref(), Some(""));
+        assert_eq!(
+            defaults.chat_model_2.model.as_deref(),
+            Some("openai/gpt-5.6")
+        );
+        assert_eq!(defaults.chat_light.model.as_deref(), Some(""));
+        assert_eq!(
+            defaults.chat_thinking.model.as_deref(),
+            Some("openai/gpt-5.6-sol")
+        );
+        assert!(!defaults.normalize_model_references());
     }
 
     #[test]
