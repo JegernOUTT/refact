@@ -68,7 +68,7 @@ jobs:
             echo "body_path=$notes_path" >> "$GITHUB_OUTPUT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "Release notes file $notes_path not found; using generated notes with daemon warning."
+            echo "Release notes file $notes_path not found; using generated notes."
           fi
 
       - name: Publish engine release
@@ -93,10 +93,6 @@ jobs:
         with:
           tag_name: engine/v${{ steps.engine-assets.outputs.version }}
           name: Engine v${{ steps.engine-assets.outputs.version }}
-          body: |
-            > [!WARNING]
-            > **Breaking change — local daemon**
-            > The IDE plugins require and launch a local `refact daemon` (`127.0.0.1:8488`) that supervises per-project workers. The engine binary is downloaded on first run from GitHub releases instead of being bundled in the plugin, and the in-IDE webview connects over loopback. If you used a prior bundled-engine version, first start now downloads the engine.
           generate_release_notes: true
           prerelease: false
           make_latest: true
@@ -270,7 +266,7 @@ jobs:
             echo "body_path=$notes_path" >> "$GITHUB_OUTPUT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "Release notes file $notes_path not found; using generated notes with daemon warning."
+            echo "Release notes file $notes_path not found; using generated notes."
           fi
 
       - name: Upload JetBrains plugin to release
@@ -292,10 +288,6 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: v${{ steps.release_notes.outputs.version }}
-          body: |
-            > [!WARNING]
-            > **Breaking change — local daemon**
-            > The IDE plugins require and launch a local `refact daemon` (`127.0.0.1:8488`) that supervises per-project workers. The engine binary is downloaded on first run from GitHub releases instead of being bundled in the plugin, and the in-IDE webview connects over loopback. If you used a prior bundled-engine version, first start now downloads the engine.
           generate_release_notes: true
           overwrite_files: true
           fail_on_unmatched_files: true
@@ -392,7 +384,7 @@ jobs:
             echo "body_path=$notes_path" >> "$GITHUB_OUTPUT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "Release notes file $notes_path not found; using generated notes with daemon warning."
+            echo "Release notes file $notes_path not found; using generated notes."
           fi
 
       - name: Upload VS Code package to release
@@ -414,10 +406,6 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: v${{ steps.release_notes.outputs.version }}
-          body: |
-            > [!WARNING]
-            > **Breaking change — local daemon**
-            > The IDE plugins require and launch a local `refact daemon` (`127.0.0.1:8488`) that supervises per-project workers. The engine binary is downloaded on first run from GitHub releases instead of being bundled in the plugin, and the in-IDE webview connects over loopback. If you used a prior bundled-engine version, first start now downloads the engine.
           generate_release_notes: true
           overwrite_files: true
           fail_on_unmatched_files: true

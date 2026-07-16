@@ -6925,7 +6925,9 @@ async fn diagnostic_persisted_jsonl_is_redacted() {
     let jsonl_path = root.join(".refact/buddy/diagnostics.jsonl");
     let mut content = String::new();
     for _ in 0..100 {
-        content = tokio::fs::read_to_string(&jsonl_path).await.unwrap_or_default();
+        content = tokio::fs::read_to_string(&jsonl_path)
+            .await
+            .unwrap_or_default();
         if !content.is_empty() {
             break;
         }

@@ -2322,9 +2322,7 @@ pub async fn handle_v1_provider_oauth_start(
             );
             let gcx_clone = gcx.clone();
             tokio::spawn(async move {
-                if let Some((tokens, provider_instance_id)) =
-                    listener_handle.await.ok().flatten()
-                {
+                if let Some((tokens, provider_instance_id)) = listener_handle.await.ok().flatten() {
                     let config_dir = gcx_clone.config_dir.clone();
                     if let Ok(tokens_value) = serde_yaml::to_value(&tokens) {
                         if let Err(e) = save_provider_oauth_tokens(

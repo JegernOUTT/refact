@@ -103,6 +103,7 @@ def bump(version: str) -> list[Path]:
         ROOT / "refact-agent/gui/package.json",
         ROOT / "refact-agent/gui/package-lock.json",
         ROOT / "refact-agent/engine/Cargo.toml",
+        ROOT / "refact-agent/engine/Cargo.lock",
     ]
 
     replace_once(
@@ -115,6 +116,7 @@ def bump(version: str) -> list[Path]:
     replace_json_version_fields(files[3], "refact-chat-js", version, count=1)
     replace_json_version_fields(files[4], "refact-chat-js", version, count=2)
     replace_cargo_package_version(files[5], "refact-lsp", version)
+    replace_cargo_lock_version(files[6], "refact-lsp", version)
 
     return files
 

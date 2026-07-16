@@ -249,7 +249,9 @@ async fn register_session(provider_instance_id: String, callback_port: u16) -> (
 }
 
 async fn try_bind(port: u16) -> Option<tokio::net::TcpListener> {
-    tokio::net::TcpListener::bind(("127.0.0.1", port)).await.ok()
+    tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .ok()
 }
 
 async fn send_cancel_request(port: u16) {
@@ -458,8 +460,7 @@ pub fn start_callback_listener(
     tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
 
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_secs(SESSION_TTL_SECS as u64);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(SESSION_TTL_SECS as u64);
         let mut connections_served = 0usize;
 
         while connections_served < MAX_CALLBACK_CONNECTIONS {
@@ -479,8 +480,7 @@ pub fn start_callback_listener(
 
             const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
             let mut buf = vec![0u8; 8192];
-            let n = match tokio::time::timeout(CALLBACK_READ_TIMEOUT, stream.read(&mut buf)).await
-            {
+            let n = match tokio::time::timeout(CALLBACK_READ_TIMEOUT, stream.read(&mut buf)).await {
                 Ok(Ok(n)) => n,
                 Ok(Err(e)) => {
                     tracing::debug!("OpenAI Codex OAuth: failed to read callback request: {}", e);
@@ -670,7 +670,9 @@ mod tests {
 
         let provider_instance_id = pending_session_provider_instance_id(&session_id).await;
         assert_eq!(provider_instance_id.as_deref(), Some("openai_codex_work"));
-        assert!(authorize_url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
+        assert!(
+            authorize_url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback")
+        );
 
         clear_pending_sessions_for_test().await;
     }
@@ -681,7 +683,9 @@ mod tests {
         clear_pending_sessions_for_test().await;
         let (_session_id, fallback_url) =
             register_session("openai_codex".to_string(), CODEX_FALLBACK_CALLBACK_PORT).await;
-        assert!(fallback_url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1457%2Fauth%2Fcallback"));
+        assert!(
+            fallback_url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1457%2Fauth%2Fcallback")
+        );
 
         clear_pending_sessions_for_test().await;
     }

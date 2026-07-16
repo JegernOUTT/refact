@@ -1818,7 +1818,8 @@ mod tests {
     #[test]
     fn test_unknown_codex_event_is_absorbed_without_server_block() {
         let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"codex.future_telemetry","sequence_number":7,"anything":{"nested":true}}"#;
+        let chunk =
+            r#"{"type":"codex.future_telemetry","sequence_number":7,"anything":{"nested":true}}"#;
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
@@ -1838,7 +1839,10 @@ mod tests {
             extra["codex_metadata_events"][0]["event_type"],
             json!("codex.future_telemetry")
         );
-        assert_eq!(extra["codex_metadata_events"][0]["sequence_number"], json!(7));
+        assert_eq!(
+            extra["codex_metadata_events"][0]["sequence_number"],
+            json!(7)
+        );
     }
 
     #[test]

@@ -2,41 +2,12 @@
 
 Refact vX.Y.Z ships [one or two sentence summary of the release].
 
-> [!WARNING]
-> **Breaking change — local daemon**
-> The IDE plugins require and launch a local `refact daemon` (`127.0.0.1:8488`) that supervises per-project workers. The engine binary is downloaded on first run from GitHub releases instead of being bundled in the plugin, and the in-IDE webview connects over loopback. If you used a prior bundled-engine version, first start now downloads the engine.
-
-> [!IMPORTANT]
-> **Early preview**
-> The daemon and TUI are early preview and may be buggy. IDE plugins and the engine are the stable surfaces.
-
 ## Highlights
 
 - Highlight one.
 - Highlight two.
 - Highlight three.
 
-## Install
-
-Unix/macOS:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/JegernOUTT/refact/main/install.sh | sh
-```
-
-Windows PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/JegernOUTT/refact/main/install.ps1 | iex
-```
-
-Start Refact with:
-
-```sh
-refact
-refact tui
-```
-
 ## Release-note convention
 
-For each release, copy this file to `docs/release-notes/v{X.Y.Z}.md`, replace the summary and highlights, and keep the daemon breaking-change warning, early-preview callout, and install footer. Release workflows use that file as `body_path`; if it is absent, they fall back to generated release notes with the daemon warning header.
+For each release, copy this file to `docs/release-notes/v{X.Y.Z}.md` and replace the summary and highlights with focused user-visible changes from that release only. Do not carry forward legacy warnings, preview notices, installation instructions, or unrelated historical context. Release workflows use that file as `body_path`; if it is absent, they fall back to generated release notes.
