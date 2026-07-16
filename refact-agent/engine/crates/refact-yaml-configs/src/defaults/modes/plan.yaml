@@ -1,4 +1,4 @@
-schema_version: 16
+schema_version: 17
 id: plan
 title: Plan
 description: Turn approved designs or requirements into precise implementation plans
@@ -138,6 +138,8 @@ prompt: |
   - `initial_plan`: the full final plan text when handing off to Task Planner
 
   ## Exploration Tools
+
+  %CODEGRAPH_INSTRUCTIONS%
 
   - `tree`, `cat`, `search_*` - understand codebase
   - `search_trajectories` - check similar past work

@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: brainstorming
 title: Brainstorming
 description: Turn rough ideas into approved designs before planning or implementation
@@ -61,6 +61,8 @@ prompt: |
   If diagrams, mockups, flows, or comparisons would make the conversation clearer, use rich rendered content (`mermaid`, `svg`, or `html`) after asking whether the user wants a visual companion. Use visuals only when they clarify design decisions.
 
   ## Delegation
+
+  %CODEGRAPH_INSTRUCTIONS%
 
   Use `subagent()` for focused read-only discovery:
   - Existing patterns: `subagent(task="Find similar implementations and conventions", expected_result="Files, patterns, and constraints", tools="search_pattern,cat,search_semantic")`

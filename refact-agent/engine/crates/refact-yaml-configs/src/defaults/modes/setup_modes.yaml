@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: setup_modes
 title: Setup Modes
 description: Guided setup for project-specific chat modes
@@ -77,8 +77,9 @@ prompt: |
 
   ## Magic Variables (usable inside `prompt`/`plan_template`)
 
-  the Buddy personality marker, `%RICH_CONTENT_INSTRUCTIONS%`, `%SYSTEM_INFO%`, `%WORKSPACE_INFO%`, `%GIT_INFO%`,
-  `%PROJECT_TREE%`, `%MODE_NAME%`, `%TASK_BRIEF%`, `%SKILLS_INSTRUCTIONS%`, `%COMPRESS_HANDOFF_INSTRUCTIONS%`.
+  the Buddy personality marker, `%RICH_CONTENT_INSTRUCTIONS%`, `%CODEGRAPH_INSTRUCTIONS%`, `%SYSTEM_INFO%`,
+  `%WORKSPACE_INFO%`, `%GIT_INFO%`, `%PROJECT_TREE%`, `%MODE_NAME%`, `%TASK_BRIEF%`,
+  `%SKILLS_INSTRUCTIONS%`, `%COMPRESS_HANDOFF_INSTRUCTIONS%`.
   Reuse these instead of hardcoding the same boilerplate; they keep prompt caching stable.
 
   ## When to create a mode vs something else

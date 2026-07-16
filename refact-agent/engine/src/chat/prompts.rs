@@ -399,6 +399,28 @@ pub async fn system_prompt_add_extra_instructions(
         );
     }
 
+    if system_prompt.contains("%CODEGRAPH_INSTRUCTIONS%") {
+        let has_codegraph_tools = [
+            "codegraph_overview",
+            "code_health",
+            "git_risk",
+            "code_why",
+            "code_duplication",
+            "dead_code",
+            "security_scan",
+            "pr_blast",
+            "code_map",
+        ]
+        .iter()
+        .any(|tool| tool_names.contains(*tool));
+        let replacement = if has_codegraph_tools {
+            super::prompt_snippets::CODEGRAPH_INSTRUCTIONS
+        } else {
+            ""
+        };
+        system_prompt = system_prompt.replace("%CODEGRAPH_INSTRUCTIONS%", replacement);
+    }
+
     if system_prompt.contains("%AGENT_EXECUTION_INSTRUCTIONS%") {
         let has_edit_tools =
             tool_names.contains("create_textdoc") || tool_names.contains("update_textdoc");
@@ -1086,6 +1108,47 @@ mod tests {
             assert!(rendered.contains("You are Pixel, a Helper Sprite"));
             assert!(!rendered.contains(BUDDY_PERSONALITY_MARKER));
         }
+    }
+
+    #[tokio::test]
+    async fn codegraph_instructions_expand_only_when_codegraph_is_available() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let prompt = "%CODEGRAPH_INSTRUCTIONS%".to_string();
+        let rendered = system_prompt_add_extra_instructions(
+            app.clone(),
+            prompt.clone(),
+            HashSet::from(["codegraph_overview".to_string()]),
+            &ChatMeta::default(),
+            &None,
+            "explore",
+        )
+        .await;
+        assert!(rendered.contains("## CodeGraph Tools"));
+        assert!(rendered.contains("same workspace-relative, absolute, or active-worktree forms"));
+        assert!(!rendered.contains("%CODEGRAPH_INSTRUCTIONS%"));
+
+        let rendered_subset = system_prompt_add_extra_instructions(
+            app.clone(),
+            prompt.clone(),
+            HashSet::from(["code_health".to_string()]),
+            &ChatMeta::default(),
+            &None,
+            "explore",
+        )
+        .await;
+        assert!(rendered_subset.contains("## CodeGraph Tools"));
+
+        let without_codegraph = system_prompt_add_extra_instructions(
+            app,
+            prompt,
+            HashSet::new(),
+            &ChatMeta::default(),
+            &None,
+            "explore",
+        )
+        .await;
+        assert!(without_codegraph.is_empty());
     }
 
     #[tokio::test]

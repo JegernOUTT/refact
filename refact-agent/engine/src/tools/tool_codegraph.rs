@@ -13,8 +13,14 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
+use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_or_a_good_error};
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::files_correction::{
+    canonicalize_normalized_path, get_project_dirs, preprocess_path_for_normalization,
+    registered_worktree_path_mappings, resolve_codegraph_queue_path,
+};
 use crate::postprocessing::pp_command_output::OutputFilter;
+use crate::tools::scope_utils::resolve_existing_path_with_execution_scope;
 use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
@@ -301,6 +307,170 @@ fn optional_string_arg(args: &HashMap<String, Value>, key: &str) -> Result<Optio
         }
         Some(value) => Err(format!("argument `{key}` must be a string: {value:?}")),
     }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedCodegraphFile {
+    read_path: PathBuf,
+    indexed_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodegraphProjectRoots {
+    git_root: PathBuf,
+    indexed_root: PathBuf,
+}
+
+async fn resolve_codegraph_file(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    raw_path: &str,
+) -> Result<ResolvedCodegraphFile, String> {
+    let (gcx, top_n, execution_scope) = {
+        let ccx = ccx.lock().await;
+        (ccx.app.gcx.clone(), ccx.top_n, ccx.execution_scope.clone())
+    };
+    let read_path = if let Some(resolved) =
+        resolve_existing_path_with_execution_scope(gcx.clone(), execution_scope.as_ref(), raw_path)
+            .await?
+    {
+        if resolved.outside_absolute_path {
+            return Err(format!(
+                "Path '{}' is outside the active worktree; CodeGraph file analysis is limited to the current project",
+                resolved.path.display()
+            ));
+        }
+        resolved.path
+    } else {
+        let normalized = if PathBuf::from(raw_path).is_absolute() {
+            crate::files_correction::canonical_path(raw_path)
+                .to_string_lossy()
+                .to_string()
+        } else {
+            preprocess_path_for_normalization(raw_path.to_string())
+        };
+        let candidates = file_repair_candidates(gcx.clone(), &normalized, top_n, false).await;
+        let resolved = return_one_candidate_or_a_good_error(
+            gcx.clone(),
+            &normalized,
+            &candidates,
+            &get_project_dirs(gcx.clone()).await,
+            false,
+        )
+        .await?;
+        PathBuf::from(resolved)
+    };
+    if !read_path.is_file() {
+        return Err(format!("Path '{}' is not a file", read_path.display()));
+    }
+    crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &read_path).await?;
+    let indexed_path =
+        if let Some(scope) = execution_scope.as_ref().filter(|scope| scope.is_enforced()) {
+            scoped_indexed_path(scope, &read_path)?
+                .to_string_lossy()
+                .to_string()
+        } else {
+            let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+            resolve_codegraph_queue_path(&read_path, &mappings).store_path
+        };
+    Ok(ResolvedCodegraphFile {
+        read_path,
+        indexed_path,
+    })
+}
+
+async fn resolve_codegraph_filter_path(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    raw_path: &str,
+) -> Result<String, String> {
+    let normalized_raw = raw_path.trim().replace('\\', "/");
+    let (gcx, execution_scope) = {
+        let ccx = ccx.lock().await;
+        (ccx.app.gcx.clone(), ccx.execution_scope.clone())
+    };
+    if let Some(scope) = execution_scope.as_ref().filter(|scope| scope.is_enforced()) {
+        scope.ensure_active_root()?;
+        if !normalized_raw.contains('/') {
+            return Ok(normalized_raw);
+        }
+        let resolved = scope.resolve_creatable_path(Path::new(&normalized_raw))?;
+        if resolved.outside_absolute_path {
+            return Err(format!(
+                "Path '{}' is outside the active worktree; CodeGraph analysis is limited to the current project",
+                resolved.path.display()
+            ));
+        }
+        crate::files_in_workspace::check_file_privacy_for_send(gcx, &resolved.path).await?;
+        return Ok(scoped_indexed_path(scope, &resolved.path)?
+            .to_string_lossy()
+            .to_string());
+    }
+
+    if let Ok(resolved) = resolve_codegraph_file(ccx, &normalized_raw).await {
+        return Ok(resolved.indexed_path);
+    }
+
+    let normalized = PathBuf::from(&normalized_raw);
+    if normalized.is_absolute() {
+        let normalized = canonicalize_normalized_path(normalized);
+        let project_dirs = get_project_dirs(gcx.clone()).await;
+        if !project_dirs.iter().any(|root| normalized.starts_with(root)) {
+            return Err(format!(
+                "Path '{}' is outside of project directories:\n{:?}",
+                normalized.display(),
+                project_dirs
+            ));
+        }
+        crate::files_in_workspace::check_file_privacy_for_send(gcx, &normalized).await?;
+        return Ok(normalized.to_string_lossy().to_string());
+    }
+    Ok(preprocess_path_for_normalization(normalized_raw))
+}
+
+fn scoped_indexed_path(
+    scope: &crate::worktrees::scope::ExecutionScope,
+    scoped_path: &Path,
+) -> Result<PathBuf, String> {
+    let relative = scoped_path
+        .strip_prefix(scope.effective_root())
+        .map_err(|_| {
+            format!(
+                "Path '{}' is outside the active worktree '{}'",
+                scoped_path.display(),
+                scope.effective_root().display()
+            )
+        })?;
+    Ok(canonicalize_normalized_path(
+        scope.source_workspace_root().join(relative),
+    ))
+}
+
+fn scoped_codegraph_project_roots(
+    execution_scope: Option<&crate::worktrees::scope::ExecutionScope>,
+) -> Result<Option<CodegraphProjectRoots>, String> {
+    let Some(scope) = execution_scope.filter(|scope| scope.is_enforced()) else {
+        return Ok(None);
+    };
+    scope.ensure_active_root()?;
+    Ok(Some(CodegraphProjectRoots {
+        git_root: scope.effective_root().to_path_buf(),
+        indexed_root: scope.source_workspace_root().to_path_buf(),
+    }))
+}
+
+async fn codegraph_project_roots(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+) -> Result<Option<CodegraphProjectRoots>, String> {
+    let (gcx, execution_scope) = {
+        let ccx = ccx.lock().await;
+        (ccx.app.gcx.clone(), ccx.execution_scope.clone())
+    };
+    if let Some(roots) = scoped_codegraph_project_roots(execution_scope.as_ref())? {
+        return Ok(Some(roots));
+    }
+    Ok(project_dir(gcx).await.map(|root| CodegraphProjectRoots {
+        git_root: root.clone(),
+        indexed_root: root,
+    }))
 }
 
 pub(crate) async fn project_dir(gcx: Arc<crate::global_context::GlobalContext>) -> Option<PathBuf> {
@@ -631,6 +801,26 @@ pub(crate) async fn dead_code_report(
     path_filter: Option<&str>,
     min_confidence: f64,
 ) -> Result<DeadCodeReport, String> {
+    let repo_dir = project_dir(gcx.clone()).await;
+    dead_code_report_with_roots(
+        gcx,
+        limit,
+        path_filter,
+        min_confidence,
+        repo_dir.as_deref(),
+        repo_dir.as_deref(),
+    )
+    .await
+}
+
+async fn dead_code_report_with_roots(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    limit: usize,
+    path_filter: Option<&str>,
+    min_confidence: f64,
+    git_root: Option<&Path>,
+    indexed_root: Option<&Path>,
+) -> Result<DeadCodeReport, String> {
     let service = gcx
         .codegraph
         .lock()
@@ -641,12 +831,9 @@ pub(crate) async fn dead_code_report(
     let index_state = dead_code_index_state(&readiness);
     let warning = dead_code_partial_warning(&index_state);
     let dead = service.dead_code().await?;
-    let repo_dir = project_dir(gcx.clone()).await;
-    let intel = repo_dir
-        .as_deref()
-        .and_then(|dir| cached_mine_history(dir, DEAD_CODE_HISTORY_COMMITS).ok());
+    let intel = git_root.and_then(|dir| cached_mine_history(dir, DEAD_CODE_HISTORY_COMMITS).ok());
     let now_ts = current_unix_ts();
-    let facts = dead_code_git_facts_by_node(&dead, repo_dir.as_deref(), intel.as_ref(), now_ts);
+    let facts = dead_code_git_facts_by_node(&dead, indexed_root, intel.as_ref(), now_ts);
     let min_confidence = min_confidence.clamp(0.0, 1.0);
     let limit = limit.clamp(1, DEAD_CODE_MAX_LIMIT);
     let mut entries = enrich_dead_symbols_with_facts(dead, &facts)
@@ -2296,8 +2483,21 @@ impl Tool for ToolDeadCode {
             .clamp(1, DEAD_CODE_MAX_LIMIT);
         let min_confidence = optional_f64_arg(args, "min_confidence", 0.5)?.clamp(0.0, 1.0);
         let path = optional_string_arg(args, "path")?;
+        let path = match path {
+            Some(path) => Some(resolve_codegraph_filter_path(ccx.clone(), &path).await?),
+            None => None,
+        };
+        let roots = codegraph_project_roots(ccx.clone()).await?;
         let gcx = ccx.lock().await.app.gcx.clone();
-        let report = dead_code_report(gcx, limit, path.as_deref(), min_confidence).await?;
+        let report = dead_code_report_with_roots(
+            gcx,
+            limit,
+            path.as_deref(),
+            min_confidence,
+            roots.as_ref().map(|roots| roots.git_root.as_path()),
+            roots.as_ref().map(|roots| roots.indexed_root.as_path()),
+        )
+        .await?;
         Ok((
             false,
             tool_message(tool_call_id, dead_code_tool_text(&report)),
@@ -2318,7 +2518,11 @@ impl Tool for ToolDeadCode {
             input_schema: json_schema_from_params(
                 &[
                     ("limit", "integer", "Maximum number of candidates to return. Defaults to 50, max 500."),
-                    ("path", "string", "Optional path or basename filter."),
+                    (
+                        "path",
+                        "string",
+                        "Optional workspace-relative, absolute current-project, active-worktree, or basename filter; accepts the same path forms as cat.",
+                    ),
                     ("min_confidence", "number", "Minimum confidence threshold. Defaults to 0.5."),
                 ],
                 &[],
@@ -2390,19 +2594,22 @@ impl Tool for ToolCodeHealth {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let file_path = string_arg(args, "file_path")?;
+        let requested_file_path = string_arg(args, "file_path")?;
+        let resolved_file = resolve_codegraph_file(ccx.clone(), &requested_file_path).await?;
+        let file_path = resolved_file.indexed_path;
         let gcx = ccx.lock().await.app.gcx.clone();
         let text = crate::files_in_workspace::get_file_text_from_memory_or_disk(
             gcx.clone(),
-            &PathBuf::from(&file_path),
+            &resolved_file.read_path,
         )
         .await?
         .to_string();
         let coverage = match args.get("coverage_file") {
             Some(Value::String(cov_path)) if !cov_path.trim().is_empty() => {
+                let resolved_coverage = resolve_codegraph_file(ccx.clone(), cov_path).await?;
                 let rope = crate::files_in_workspace::get_file_text_from_memory_or_disk(
                     gcx.clone(),
-                    &PathBuf::from(cov_path),
+                    &resolved_coverage.read_path,
                 )
                 .await?;
                 refact_codehealth::coverage::detect_and_parse(&rope.to_string())
@@ -2410,9 +2617,11 @@ impl Tool for ToolCodeHealth {
             _ => None,
         };
         let service = gcx.codegraph.lock().await.clone();
-        let repo_root = project_dir(gcx.clone()).await;
-        let intel = repo_root
-            .as_deref()
+        let roots = codegraph_project_roots(ccx.clone()).await?;
+        let repo_root = roots.as_ref().map(|roots| roots.indexed_root.as_path());
+        let intel = roots
+            .as_ref()
+            .map(|roots| roots.git_root.as_path())
             .and_then(|dir| cached_mine_history(dir, GIT_HISTORY_MAX_COMMITS).ok());
         let snapshots = match service.as_deref() {
             Some(service) => load_health_snapshots(service).await,
@@ -2421,7 +2630,7 @@ impl Tool for ToolCodeHealth {
         let trend_findings = refact_codehealth::trends::evaluate_trends(&snapshots);
         let git_function_fact_paths = top_git_function_fact_paths(intel.as_ref());
         let ctx = HealthAnalysisContext {
-            repo_root: repo_root.as_deref(),
+            repo_root,
             intel: intel.as_ref(),
             service: service.as_ref(),
             coverage: coverage.as_ref(),
@@ -2435,7 +2644,7 @@ impl Tool for ToolCodeHealth {
                 tool_message(
                     tool_call_id,
                     format!(
-                        "No functions analyzed in `{file_path}` (lang: {}).",
+                        "No functions analyzed in `{requested_file_path}` (lang: {}).",
                         analysis.lang
                     ),
                 ),
@@ -2444,7 +2653,7 @@ impl Tool for ToolCodeHealth {
 
         let mut msg = format!(
             "Code health for `{}` (MI (0-100) {:.1}, max complexity {}):\n",
-            file_path, analysis.maintainability_index, analysis.max_complexity
+            requested_file_path, analysis.maintainability_index, analysis.max_complexity
         );
         let category =
             refact_codewiki::well_known::file_category(&file_path, &analysis.lang, false);
@@ -2540,7 +2749,7 @@ impl Tool for ToolCodeHealth {
                 let stored_path = health_stored_path_for_request(
                     cached.data.nodes.iter().map(|(_, _, path)| path.clone()),
                     &file_path,
-                    repo_root.as_deref(),
+                    repo_root,
                 );
                 if let Some(stored_path) = stored_path {
                     let calls = refact_codewiki::graph_intelligence::extract_call_graph(
@@ -2560,7 +2769,7 @@ impl Tool for ToolCodeHealth {
             }
         }
         if let Some(report) = coverage.as_ref() {
-            if let Some(file) = coverage_file_for_path(report, &file_path, repo_root.as_deref()) {
+            if let Some(file) = coverage_file_for_path(report, &file_path, repo_root) {
                 let single = refact_codehealth::coverage::CoverageReport {
                     format: report.format.clone(),
                     files: vec![file],
@@ -2592,11 +2801,15 @@ impl Tool for ToolCodeHealth {
             description: "Deterministic per-file health: function complexity/nesting/LOC/MI, duplication, structural/git/coverage/trend/performance findings, hot-path and fan-in graph enrichment, cached unchanged-file analysis, 1-10 defect/maintainability/performance scores with A-F grade, health-impact contributors, and refactoring targets.".to_string(),
             input_schema: json_schema_from_params(
                 &[
-                    ("file_path", "string", "Path to the file to analyze."),
+                    (
+                        "file_path",
+                        "string",
+                        "File to analyze; accepts the same workspace-relative, absolute current-project, and active-worktree path forms as cat.",
+                    ),
                     (
                         "coverage_file",
                         "string",
-                        "Optional path to an LCOV/Cobertura/Clover coverage report to fold in.",
+                        "Optional LCOV/Cobertura/Clover report; accepts the same path forms as cat.",
                     ),
                 ],
                 &["file_path"],
@@ -2623,11 +2836,11 @@ impl Tool for ToolGitRisk {
         tool_call_id: &String,
         _args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let gcx = ccx.lock().await.app.gcx.clone();
-        let dir = project_dir(gcx.clone())
-            .await
+        let roots = codegraph_project_roots(ccx.clone())
+            .await?
             .ok_or_else(|| "no project directory available".to_string())?;
-        let intel = cached_mine_history(&dir, 1000)?;
+        let gcx = ccx.lock().await.app.gcx.clone();
+        let intel = cached_mine_history(&roots.git_root, 1000)?;
         if intel.hotspots(1).is_empty() {
             return Ok((
                 false,
@@ -2635,7 +2848,8 @@ impl Tool for ToolGitRisk {
             ));
         }
         let service = gcx.codegraph.lock().await.clone();
-        let assembly = build_git_risk_assembly(&intel, &dir, service.as_ref(), 15, None).await;
+        let assembly =
+            build_git_risk_assembly(&intel, &roots.indexed_root, service.as_ref(), 15, None).await;
         Ok((
             false,
             tool_message(tool_call_id, git_risk_tool_output(&intel, &assembly)),
@@ -3246,12 +3460,12 @@ impl Tool for ToolCodeWhy {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let query = string_arg(args, "query")?;
-        let gcx = ccx.lock().await.app.gcx.clone();
-        let dir = project_dir(gcx.clone())
-            .await
+        let roots = codegraph_project_roots(ccx.clone())
+            .await?
             .ok_or_else(|| "no project directory available".to_string())?;
-        let intel = cached_mine_history(&dir, CODE_WHY_HISTORY_COMMITS)?;
-        let sources = assemble_code_why_sources(gcx, &dir, &intel).await;
+        let gcx = ccx.lock().await.app.gcx.clone();
+        let intel = cached_mine_history(&roots.git_root, CODE_WHY_HISTORY_COMMITS)?;
+        let sources = assemble_code_why_sources(gcx, &roots.git_root, &intel).await;
         let Some(msg) = code_why_output(&query, &sources, intel.commits_analyzed) else {
             return Ok((
                 false,
@@ -3312,13 +3526,14 @@ impl Tool for ToolCodeDuplication {
             ));
         }
         let dup_pct = analysis.duplication_pct * 100.0;
-        let project_root = project_dir(gcx.clone()).await;
-        let intel = project_root
-            .as_deref()
+        let roots = codegraph_project_roots(ccx.clone()).await?;
+        let project_root = roots.as_ref().map(|roots| roots.indexed_root.as_path());
+        let intel = roots
+            .as_ref()
+            .map(|roots| roots.git_root.as_path())
             .and_then(|dir| cached_mine_history(dir, 1000).ok());
-        let co_change = |a: &str, b: &str| -> u32 {
-            co_change_count(intel.as_ref(), a, b, project_root.as_deref())
-        };
+        let co_change =
+            |a: &str, b: &str| -> u32 { co_change_count(intel.as_ref(), a, b, project_root) };
         let mut msg = format!(
             "Cross-file duplication: {:.1}% of tokens are in cross-file clones ({} pairs).\n",
             dup_pct,
@@ -3461,11 +3676,13 @@ impl Tool for ToolSecurityScan {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let file_path = string_arg(args, "file_path")?;
+        let requested_file_path = string_arg(args, "file_path")?;
+        let resolved_file = resolve_codegraph_file(ccx.clone(), &requested_file_path).await?;
+        let file_path = resolved_file.indexed_path;
         let gcx = ccx.lock().await.app.gcx.clone();
         let text = crate::files_in_workspace::get_file_text_from_memory_or_disk(
             gcx.clone(),
-            &PathBuf::from(&file_path),
+            &resolved_file.read_path,
         )
         .await?
         .to_string();
@@ -3482,7 +3699,9 @@ impl Tool for ToolSecurityScan {
                 false,
                 tool_message(
                     tool_call_id,
-                    format!("Security scan for `{file_path}` found no findings (lang: {lang})."),
+                    format!(
+                        "Security scan for `{requested_file_path}` found no findings (lang: {lang})."
+                    ),
                 ),
             ));
         }
@@ -3493,7 +3712,7 @@ impl Tool for ToolSecurityScan {
         }
         let mut msg = format!(
             "Security scan for `{}` found {} findings (lang: {}).\n",
-            file_path,
+            requested_file_path,
             findings.len(),
             lang
         );
@@ -3507,7 +3726,7 @@ impl Tool for ToolSecurityScan {
         for finding in findings.iter().take(50) {
             msg.push_str(&format!(
                 "  {}:{} [{:?}] {} — {}\n",
-                file_path, finding.line, finding.severity, finding.rule, finding.snippet
+                requested_file_path, finding.line, finding.severity, finding.rule, finding.snippet
             ));
         }
         if findings.len() > 50 {
@@ -3531,7 +3750,11 @@ impl Tool for ToolSecurityScan {
             allow_parallel: true,
             description: "Security scan for one file using CodeGraph security heuristics: deduped findings for hardcoded secrets, dynamic SQL and command execution, dangerous eval/deserialization, TLS verification disabled, weak crypto, and insecure randomness.".to_string(),
             input_schema: json_schema_from_params(
-                &[("file_path", "string", "Path to the file to scan.")],
+                &[(
+                    "file_path",
+                    "string",
+                    "File to scan; accepts the same workspace-relative, absolute current-project, and active-worktree path forms as cat.",
+                )],
                 &["file_path"],
             ),
             output_schema: None,
@@ -3561,6 +3784,10 @@ impl Tool for ToolPrBlast {
             return Err("argument `changed_files` must not be empty".to_string());
         }
         let max_depth = optional_usize_arg(args, "max_depth", 3)?.clamp(1, 10);
+        let mut resolved_changed_files = Vec::with_capacity(changed_files.len());
+        for path in &changed_files {
+            resolved_changed_files.push(resolve_codegraph_filter_path(ccx.clone(), path).await?);
+        }
         let gcx = ccx.lock().await.app.gcx.clone();
         let service = gcx
             .codegraph
@@ -3571,12 +3798,17 @@ impl Tool for ToolPrBlast {
         let readiness = service.index_readiness().await?;
         let index_state = pr_blast_index_state(&readiness);
         let warning = pr_blast_partial_warning(&index_state);
-        let report = service.pr_blast(&changed_files, max_depth).await?;
-        let repo_dir = project_dir(gcx.clone()).await;
-        let intel = repo_dir
-            .as_deref()
+        let report = service.pr_blast(&resolved_changed_files, max_depth).await?;
+        let roots = codegraph_project_roots(ccx.clone()).await?;
+        let intel = roots
+            .as_ref()
+            .map(|roots| roots.git_root.as_path())
             .and_then(|dir| cached_mine_history(dir, 1000).ok());
-        let reviewers = pr_blast_suggested_reviewers(&report, repo_dir.as_deref(), intel.as_ref());
+        let reviewers = pr_blast_suggested_reviewers(
+            &report,
+            roots.as_ref().map(|roots| roots.indexed_root.as_path()),
+            intel.as_ref(),
+        );
 
         let mut msg = String::new();
         if let Some(warning) = warning {
@@ -3665,7 +3897,7 @@ impl Tool for ToolPrBlast {
                     "changed_files": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Changed file paths to analyze."
+                        "description": "Changed files to analyze; each accepts the same workspace-relative, absolute current-project, active-worktree, or basename forms as cat. Deleted paths are allowed."
                     },
                     "max_depth": {
                         "type": "integer",
@@ -4512,9 +4744,10 @@ impl Tool for ToolCodeMap {
         let cached = service.cached_graph_analytics().await?;
         let node_records = service.graph_node_records().await?;
         let readiness = service.index_readiness().await?;
-        let repo_dir = project_dir(gcx.clone()).await;
-        let intel = repo_dir
-            .as_deref()
+        let roots = codegraph_project_roots(ccx.clone()).await?;
+        let intel = roots
+            .as_ref()
+            .map(|roots| roots.git_root.as_path())
             .and_then(|dir| cached_mine_history(dir, 1000).ok());
         let msg = assemble_code_map_output(
             files_text,
@@ -4523,7 +4756,7 @@ impl Tool for ToolCodeMap {
             cached.analytics.file_centrality.truncated(5000),
             Some(pr_blast_index_state(&readiness)),
             intel.as_ref(),
-            repo_dir.as_deref(),
+            roots.as_ref().map(|roots| roots.indexed_root.as_path()),
             &args,
         );
         Ok((false, tool_message(tool_call_id, msg)))
@@ -4572,6 +4805,59 @@ impl Tool for ToolCodeMap {
 mod tests {
     use super::*;
     use git2::{Repository, Signature, Time};
+
+    #[test]
+    fn scoped_project_roots_use_worktree_for_git_and_source_for_graph_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree_root = temp.path().join("worktree");
+        let source_root = temp.path().join("source");
+        std::fs::create_dir_all(worktree_root.join("src")).unwrap();
+        std::fs::create_dir_all(source_root.join("src")).unwrap();
+        let worktree = crate::worktrees::types::WorktreeMeta {
+            id: "codegraph-scope".to_string(),
+            kind: "chat".to_string(),
+            root: worktree_root.clone(),
+            source_workspace_root: source_root.clone(),
+            repo_root: source_root.clone(),
+            branch: Some("feature/codegraph".to_string()),
+            base_branch: Some("main".to_string()),
+            base_commit: None,
+            task_id: None,
+            card_id: None,
+            agent_id: None,
+            enforce: true,
+        };
+        let scope = crate::worktrees::scope::ExecutionScope::from_worktree(&worktree);
+
+        let roots = scoped_codegraph_project_roots(Some(&scope))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            roots.git_root,
+            dunce::simplified(&std::fs::canonicalize(worktree_root).unwrap()).to_path_buf()
+        );
+        assert_eq!(
+            roots.indexed_root,
+            dunce::simplified(&std::fs::canonicalize(source_root).unwrap()).to_path_buf()
+        );
+
+        let missing_source_path = scope
+            .resolve_creatable_path(Path::new("src/deleted.rs"))
+            .unwrap();
+        assert_eq!(
+            scoped_indexed_path(&scope, &missing_source_path.path).unwrap(),
+            roots.indexed_root.join("src/deleted.rs")
+        );
+        let source_absolute = roots.indexed_root.join("src/deleted.rs");
+        let remapped_source_path = scope.resolve_creatable_path(&source_absolute).unwrap();
+        assert_eq!(remapped_source_path.path, missing_source_path.path);
+        assert_eq!(
+            scoped_indexed_path(&scope, &remapped_source_path.path).unwrap(),
+            source_absolute
+        );
+        assert!(scoped_indexed_path(&scope, temp.path().join("outside.rs").as_path()).is_err());
+    }
 
     fn commit_file(repo: &Repository, path: &str, contents: &str, msg: &str) -> git2::Oid {
         commit_file_at(

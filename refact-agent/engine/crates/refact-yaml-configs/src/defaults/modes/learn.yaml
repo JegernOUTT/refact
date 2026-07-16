@@ -1,4 +1,4 @@
-schema_version: 17
+schema_version: 18
 id: learn
 title: Learn
 description: Understand code with clear explanations
@@ -59,6 +59,8 @@ prompt: |
   Example: `ask_questions(questions='[{"id":"q1","type":"single_select","text":"Your familiarity with this topic?","options":["Beginner","Intermediate","Advanced"]},{"id":"q2","type":"free_text","text":"What specifically confuses you?"}]')`
 
   ## Guidelines
+  %CODEGRAPH_INSTRUCTIONS%
+
   - Adjust depth to user's questions
   - Use code snippets to illustrate points
   - Reference external docs with `web_search` for standard concepts

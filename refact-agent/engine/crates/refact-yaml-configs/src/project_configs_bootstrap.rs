@@ -464,4 +464,78 @@ tools:
             );
         }
     }
+
+    #[test]
+    fn read_only_modes_with_cat_include_codegraph_tools_and_guidance() {
+        const CODEGRAPH_TOOLS: [&str; 9] = [
+            "codegraph_overview",
+            "code_health",
+            "git_risk",
+            "code_why",
+            "code_duplication",
+            "dead_code",
+            "security_scan",
+            "pr_blast",
+            "code_map",
+        ];
+
+        for (filename, content) in get_defaults_for_kind("modes") {
+            let config: crate::customization_types::ModeConfig = serde_yaml::from_str(&content)
+                .unwrap_or_else(|err| panic!("{filename} should parse: {err}"));
+            let is_read_only = config.ui.tags.iter().any(|tag| tag == "read-only");
+            if !is_read_only || !config.tools.iter().any(|tool| tool == "cat") {
+                continue;
+            }
+
+            for tool in CODEGRAPH_TOOLS {
+                assert!(
+                    config.tools.iter().any(|configured| configured == tool),
+                    "{filename} is read-only and has cat, so it must also include {tool}"
+                );
+            }
+            assert!(
+                config.prompt.contains("%CODEGRAPH_INSTRUCTIONS%"),
+                "{filename} is read-only and has cat, so its prompt must include CodeGraph guidance"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_agent_overlay_inherits_base_codegraph_tools() {
+        const CODEGRAPH_TOOLS: [&str; 9] = [
+            "codegraph_overview",
+            "code_health",
+            "git_risk",
+            "code_why",
+            "code_duplication",
+            "dead_code",
+            "security_scan",
+            "pr_blast",
+            "code_map",
+        ];
+        let defaults = get_defaults_for_kind("modes");
+        let parse = |wanted: &str| {
+            let (_, content) = defaults
+                .iter()
+                .find(|(filename, _)| filename == wanted)
+                .unwrap_or_else(|| panic!("missing embedded mode {wanted}"));
+            serde_yaml::from_str::<crate::customization_types::ModeConfig>(content)
+                .unwrap_or_else(|err| panic!("{wanted} should parse: {err}"))
+        };
+        let agent = parse("agent.yaml");
+        let openai = parse("openai_agent.yaml");
+        let resolved = agent.apply_override(
+            openai
+                .override_config
+                .as_ref()
+                .expect("openai_agent should define an override"),
+        );
+
+        for tool in CODEGRAPH_TOOLS {
+            assert!(
+                resolved.tools.iter().any(|configured| configured == tool),
+                "openai_agent should inherit {tool} from agent"
+            );
+        }
+    }
 }

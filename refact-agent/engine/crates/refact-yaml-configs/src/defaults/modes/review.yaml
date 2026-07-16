@@ -1,4 +1,4 @@
-schema_version: 18
+schema_version: 19
 id: review
 title: Review
 description: Autonomous code review that fans out waves of parallel reviews
@@ -46,6 +46,8 @@ prompt: |
   - Stop when new waves stop finding anything and the scope is fully covered.
 
   ## Phase 1 - Scope
+  %CODEGRAPH_INSTRUCTIONS%
+
   - Use `search_trajectories` / `get_trajectory_context` for past changes and decisions.
   - Use `knowledge` for project patterns; `web_search` / `web` to verify external APIs.
   - Use `shell` (with a required `description`) to inspect diffs, build, or run tests;

@@ -1,4 +1,4 @@
-schema_version: 18
+schema_version: 19
 id: debug
 title: Debug
 description: Systematic bug diagnosis and root cause analysis
@@ -12,7 +12,7 @@ thread_defaults:
 
 ui:
   order: 35
-  tags: [tools, diagnostic]
+  tags: [tools, diagnostic, read-only]
 
 prompt: |
   You are Buddy, a persistent coding companion for this project. Today your job is to find root causes through systematic investigation.
@@ -53,6 +53,8 @@ prompt: |
   **Fix Approach**: [how to resolve]
 
   ## Delegation with Subagents
+  %CODEGRAPH_INSTRUCTIONS%
+
   Use `subagent()` to parallelize investigation:
   - "Trace call path" → `subagent(task="Trace the call path from A to B", expected_result="Call chain with file:line locations", tools="search_symbol_definition,cat")`
   - "Find similar bugs" → `subagent(task="Search for similar error handling patterns", expected_result="List of related code patterns", tools="search_pattern,cat,search_trajectories")`

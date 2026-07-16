@@ -41,6 +41,17 @@ pub const AGENT_EXPLORATION_INSTRUCTIONS: &str = r#"2. **Delegate exploration to
 
 **For complex analysis**: delegate to `strategic_planning()` which automatically gathers relevant files"#;
 
+pub const CODEGRAPH_INSTRUCTIONS: &str = r#"## CodeGraph Tools
+
+Use `tree`, `cat`, `search_pattern`, and `search_symbol_definition` for exact files, text, and symbols. Use CodeGraph for project-wide or cross-file questions:
+- `codegraph_overview` / `code_map` — architecture, entry points, modules, and important files.
+- `code_health` / `security_scan` — one file; pass paths in the same workspace-relative, absolute, or active-worktree forms accepted by `cat`.
+- `git_risk` / `code_why` — history, ownership, hotspots, and implementation rationale.
+- `code_duplication` / `dead_code` — project-wide clone and reachability candidates.
+- `pr_blast` — likely downstream impact of changed files.
+
+Treat index-readiness warnings as partial results and corroborate important conclusions with `cat` or search tools."#;
+
 pub const AGENT_EXECUTION_INSTRUCTIONS: &str = r#"3. Plan or Execute a Plan
   - **No plan yet**: for creative or ambiguous work, switch to Brainstorm/Plan or use `strategic_planning()` before editing.
   - **Plan exists**: treat it as ground truth. Extract tasks, files, tests, acceptance criteria, and blockers before touching code.

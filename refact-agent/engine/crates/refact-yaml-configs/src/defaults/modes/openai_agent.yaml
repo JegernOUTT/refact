@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: openai_agent
 title: OpenAI Agent
 description: Optimized for GPT-4o/GPT-5 models using OpenAI Codex-style agentic workflow
@@ -260,57 +260,26 @@ override:
 
     %PROJECT_TREE%
 
-  tools_replace:
-    - tree
-    - cat
-    - add_workspace_folder
-    - search_pattern
-    - search_symbol_definition
-    - search_semantic
-    - activate_skill
-    - deactivate_skill
-    - knowledge
-    - create_knowledge
-    - search_trajectories
-    - get_trajectory_context
-    - web
-    - web_search
-    - shell
-    - apply_patch
-    - rm
-    - mv
-    - subagent
-    - strategic_planning
-    - code_review
-    - deep_research
-    - tasks_set
-    - task_done
-    - ask_questions
-    - set_plan
-    - update_plan
-    - get_plan
-    - set_goal
-    - update_goal
-    - get_goal
-    - process_start
-    - process_list
-    - process_read
-    - process_wait
-    - process_kill
-    - process_write_stdin
-    - process_subscribe
-    - clean_background_processes
-    - sleep
-    - cron_create
-    - cron_list
-    - cron_delete
-    - cron_update
-    - compress_chat_probe
-    - compress_chat_apply
-    - handoff_to_mode
-
   tool_confirm:
     rules:
+      - match: "codegraph_overview"
+        action: auto
+      - match: "code_health"
+        action: auto
+      - match: "git_risk"
+        action: auto
+      - match: "code_why"
+        action: auto
+      - match: "code_duplication"
+        action: auto
+      - match: "dead_code"
+        action: auto
+      - match: "security_scan"
+        action: auto
+      - match: "pr_blast"
+        action: auto
+      - match: "code_map"
+        action: auto
       - match: "tree"
         action: auto
       - match: "cat"
