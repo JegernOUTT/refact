@@ -16,6 +16,7 @@ import {
   subscribeToChatEvents,
   type ChatEventEnvelope,
 } from "../services/refact/chatSubscription";
+import { invalidateChatParamsSyncState } from "../services/refact/chatCommands";
 import { processCompleted } from "../features/Notifications";
 
 const DEBUG =
@@ -435,6 +436,7 @@ export function useChatSubscription(
           callbacksRef.current.onConnected?.();
         },
         onDisconnected: () => {
+          invalidateChatParamsSyncState(chatId, subscriptionConfig);
           flushPendingStreamDelta();
           clearSubchatFlush();
           flushPendingSubchatUpdate();
@@ -444,6 +446,7 @@ export function useChatSubscription(
           scheduleReconnect(reconnectDelay);
         },
         onError: (err) => {
+          invalidateChatParamsSyncState(chatId, subscriptionConfig);
           flushPendingStreamDelta();
           clearSubchatFlush();
           flushPendingSubchatUpdate();

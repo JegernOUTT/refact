@@ -120,7 +120,7 @@ impl PreparedWorktree {
     pub(crate) async fn cleanup_unlinked(self, gcx: Arc<GlobalContext>) {
         let cache_dir = gcx.cache_dir.clone();
         if let Ok(service) =
-            WorktreeService::new(cache_dir, self.meta.source_workspace_root.clone())
+            WorktreeService::new_async(cache_dir, self.meta.source_workspace_root.clone()).await
         {
             if service
                 .delete_worktree(&self.meta.id, self.branch_was_created, true)
@@ -247,7 +247,7 @@ pub(crate) async fn prepare_agent_worktree_with_suffix(
         ));
     }
     let cache_dir = gcx.cache_dir.clone();
-    let service = WorktreeService::new(cache_dir, workspace_root.clone())?;
+    let service = WorktreeService::new_async(cache_dir, workspace_root.clone()).await?;
     let task_base_branch = task_meta.base_branch.clone();
     let current_branch = if task_base_branch.is_some() {
         current_branch_for_workspace(&workspace_root)?

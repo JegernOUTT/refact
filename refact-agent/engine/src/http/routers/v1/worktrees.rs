@@ -111,20 +111,29 @@ async fn resolve_source_root(
     match requested {
         Some(path) => {
             let requested_path = PathBuf::from(path);
-            let requested_canonical = requested_path.canonicalize().map_err(|e| {
-                api_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid source workspace root: {}", e),
-                )
-            })?;
+            let requested_canonical =
+                tokio::fs::canonicalize(&requested_path)
+                    .await
+                    .map_err(|e| {
+                        api_error(
+                            StatusCode::BAD_REQUEST,
+                            format!("Invalid source workspace root: {}", e),
+                        )
+                    })?;
             let requested_canonical = dunce::simplified(&requested_canonical).to_path_buf();
-            let matches = project_dirs.iter().any(|dir| {
-                dir.canonicalize()
+            let mut matches = false;
+            for dir in &project_dirs {
+                if tokio::fs::canonicalize(dir)
+                    .await
                     .map(|canonical| {
                         dunce::simplified(&canonical).to_path_buf() == requested_canonical
                     })
                     .unwrap_or(false)
-            });
+                {
+                    matches = true;
+                    break;
+                }
+            }
             if matches {
                 Ok(requested_canonical)
             } else {
@@ -134,18 +143,21 @@ async fn resolve_source_root(
                 ))
             }
         }
-        None => project_dirs
-            .into_iter()
-            .next()
-            .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "No project root available"))?
-            .canonicalize()
-            .map(|path| dunce::simplified(&path).to_path_buf())
-            .map_err(|e| {
-                api_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid project root: {}", e),
-                )
-            }),
+        None => {
+            let project_root = project_dirs
+                .into_iter()
+                .next()
+                .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "No project root available"))?;
+            tokio::fs::canonicalize(project_root)
+                .await
+                .map(|path| dunce::simplified(&path).to_path_buf())
+                .map_err(|e| {
+                    api_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid project root: {}", e),
+                    )
+                })
+        }
     }
 }
 
@@ -155,7 +167,9 @@ async fn service_for_request(
 ) -> Result<WorktreeService, (StatusCode, Json<Value>)> {
     let cache_dir = gcx.cache_dir.clone();
     let source_root = resolve_source_root(gcx, requested).await?;
-    WorktreeService::new(cache_dir, source_root).map_err(map_service_error)
+    WorktreeService::new_async(cache_dir, source_root)
+        .await
+        .map_err(map_service_error)
 }
 
 pub async fn handle_v1_worktrees_list(

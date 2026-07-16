@@ -52,13 +52,11 @@ import {
 
 function buildThreadParamsPatch(
   thread: ChatThread,
-  isNewChat: boolean,
+  _isNewChat: boolean,
 ): Record<string, unknown> {
-  const patch: Record<string, unknown> = {};
-  if (isNewChat) {
-    if (thread.tool_use) patch.tool_use = thread.tool_use;
-    if (thread.mode) patch.mode = thread.mode;
-  }
+  const patch: Record<string, unknown> = buildThreadScopePatch(thread);
+  if (thread.tool_use) patch.tool_use = thread.tool_use;
+  if (thread.mode) patch.mode = thread.mode;
   if (thread.model.trim()) patch.model = thread.model;
   if ("boost_reasoning" in thread)
     patch.boost_reasoning = thread.boost_reasoning;
@@ -80,7 +78,6 @@ function buildThreadParamsPatch(
     patch.auto_enrichment_enabled = thread.auto_enrichment_enabled;
   if ("auto_compact_enabled" in thread)
     patch.auto_compact_enabled = thread.auto_compact_enabled;
-  Object.assign(patch, buildThreadScopePatch(thread));
   return patch;
 }
 

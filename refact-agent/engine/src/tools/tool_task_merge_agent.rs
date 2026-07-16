@@ -619,7 +619,7 @@ async fn merge_registered_task_worktree(
         .clone()
         .ok_or("Task has no base branch set")?;
     let cache_dir = gcx.cache_dir.clone();
-    let service = WorktreeService::new(cache_dir, workspace_root.to_path_buf())?;
+    let service = WorktreeService::new_async(cache_dir, workspace_root.to_path_buf()).await?;
     worktree_id_is_valid_for_card(&service, &worktree_id, task_id, card).await?;
     let diff = service.diff_worktree(&worktree_id).await.ok();
     let changed_files = diff

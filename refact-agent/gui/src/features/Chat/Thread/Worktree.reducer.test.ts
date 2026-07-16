@@ -229,4 +229,29 @@ describe("Worktree chat thread reducer", () => {
     expect(patch).not.toHaveProperty("worktree");
     expect(patch).toHaveProperty("worktree_id", "wt-patch");
   });
+
+  test("established thread params patch includes desired scope for changed-only sync", () => {
+    const thread: ChatThread = {
+      id: "chat-existing",
+      messages: [],
+      model: "gpt-4",
+      mode: "agent",
+      tool_use: "agent",
+      new_chat_suggested: { wasSuggested: false },
+      task_meta: {
+        task_id: "task-1",
+        role: "agent",
+        card_id: "T-1",
+      },
+      worktree: makeWorktreeMeta("wt-existing"),
+    };
+
+    const patch = buildThreadParamsPatch(thread, false);
+
+    expect(patch).toHaveProperty("model", "gpt-4");
+    expect(patch).toHaveProperty("mode", "agent");
+    expect(patch).toHaveProperty("tool_use", "agent");
+    expect(patch).toHaveProperty("task_meta", thread.task_meta);
+    expect(patch).toHaveProperty("worktree_id", "wt-existing");
+  });
 });

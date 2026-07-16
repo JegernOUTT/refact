@@ -1253,14 +1253,17 @@ pub(crate) async fn remove_agent_worktree_and_branch(
         return (false, false);
     };
 
-    let mut worktree_removed = !Path::new(agent_worktree).exists();
+    let mut worktree_removed = !tokio::fs::try_exists(agent_worktree).await.unwrap_or(true);
     let mut branch_deleted = false;
 
     if let Some(worktree_id) = agent_worktree_name {
-        if let Ok(service) = WorktreeService::new(cache_dir.clone(), workspace_root.clone()) {
+        if let Ok(service) =
+            WorktreeService::new_async(cache_dir.clone(), workspace_root.clone()).await
+        {
             match service.delete_worktree(worktree_id, true, true).await {
                 Ok(deleted) => {
-                    worktree_removed = deleted.deleted && !Path::new(agent_worktree).exists();
+                    worktree_removed = deleted.deleted
+                        && !tokio::fs::try_exists(agent_worktree).await.unwrap_or(true);
                     branch_deleted = deleted.branch_deleted;
                     for warning in deleted.warnings {
                         tracing::warn!(

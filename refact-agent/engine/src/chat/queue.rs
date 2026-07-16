@@ -885,7 +885,7 @@ async fn worktree_service_from_gcx(
     }
     let source_root = match requested_source_root {
         Some(requested) => {
-            let requested = std::fs::canonicalize(requested).map_err(|e| {
+            let requested = tokio::fs::canonicalize(requested).await.map_err(|e| {
                 format!(
                     "Failed to resolve worktree source root '{}': {}",
                     requested.display(),
@@ -893,11 +893,17 @@ async fn worktree_service_from_gcx(
                 )
             })?;
             let requested = dunce::simplified(&requested).to_path_buf();
-            let matches = project_dirs.iter().any(|dir| {
-                std::fs::canonicalize(dir)
+            let mut matches = false;
+            for dir in &project_dirs {
+                if tokio::fs::canonicalize(dir)
+                    .await
                     .map(|canonical| dunce::simplified(&canonical).to_path_buf() == requested)
                     .unwrap_or(false)
-            });
+                {
+                    matches = true;
+                    break;
+                }
+            }
             if !matches {
                 return Err("Worktree source root is not a current workspace directory".to_string());
             }
@@ -905,7 +911,7 @@ async fn worktree_service_from_gcx(
         }
         None => project_dirs[0].clone(),
     };
-    WorktreeService::new(cache_dir, source_root)
+    WorktreeService::new_async(cache_dir, source_root).await
 }
 
 async fn remove_thread_reference(
@@ -972,6 +978,14 @@ pub async fn resolve_worktree_setparams_update(
             .as_str()
             .filter(|id| !id.trim().is_empty())
             .ok_or_else(|| "worktree_id must be a non-empty string".to_string())?;
+        if thread
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.id.as_str())
+            == Some(worktree_id)
+        {
+            return Ok(None);
+        }
         let service = worktree_service_from_gcx(app.clone(), None).await?;
         let view = service.get_worktree(worktree_id).await?;
         let reference = reference_for_thread(chat_id, thread, &view.meta.kind);
@@ -3007,6 +3021,25 @@ mod tests {
             registry.records[0].references[0].chat_id.as_deref(),
             Some("chat-attach")
         );
+    }
+
+    #[tokio::test]
+    async fn worktree_setparams_same_id_skips_registry_lookup() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let mut thread = ThreadParams::default();
+        thread.worktree = Some(sample_worktree("wt-existing"));
+
+        let update = resolve_worktree_setparams_update(
+            app,
+            "chat-existing",
+            &thread,
+            &json!({"worktree_id": "wt-existing"}),
+        )
+        .await
+        .unwrap();
+
+        assert!(update.is_none());
     }
 
     #[tokio::test]

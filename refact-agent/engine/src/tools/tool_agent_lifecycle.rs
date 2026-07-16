@@ -473,7 +473,8 @@ async fn prepare_cleanup_target(
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     if let Some(worktree_name) = snapshot.agent_worktree_name.as_deref() {
         for source_root in &project_dirs {
-            let Ok(service) = WorktreeService::new(gcx.cache_dir.clone(), source_root.clone())
+            let Ok(service) =
+                WorktreeService::new_async(gcx.cache_dir.clone(), source_root.clone()).await
             else {
                 continue;
             };

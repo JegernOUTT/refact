@@ -10,6 +10,8 @@ import {
   removeMessage,
   cancelQueuedItem,
   normalizeConnection,
+  resetChatParamsSyncState,
+  invalidateChatParamsSyncState,
   type ChatCommand,
 } from "../services/refact/chatCommands";
 import type { EngineApiConfig } from "../services/refact/apiUrl";
@@ -32,6 +34,7 @@ describe("chatCommands", () => {
   beforeEach(() => {
     global.fetch = mockFetch as unknown as typeof fetch;
     mockFetch.mockReset();
+    resetChatParamsSyncState();
   });
 
   afterEach(() => {
@@ -244,6 +247,155 @@ describe("chatCommands", () => {
       const calledBody = getRequestBody(mockFetch.mock.calls[0] as MockCall);
       expect(calledBody.type).toBe("set_params");
       expect(calledBody.patch).toEqual({ boost_reasoning: true });
+    });
+
+    it("sends initial params once and only changed values afterward", async () => {
+      mockFetch.mockResolvedValue({ ok: true } as Response);
+
+      await updateChatParams(
+        "test-chat",
+        { model: "gpt-4", temperature: 0.2 },
+        8001,
+      );
+      await updateChatParams(
+        "test-chat",
+        { model: "gpt-4", temperature: 0.2 },
+        8001,
+      );
+      await updateChatParams(
+        "test-chat",
+        { model: "gpt-4", temperature: 0.7 },
+        8001,
+      );
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(getRequestBody(mockFetch.mock.calls[0] as MockCall).patch).toEqual(
+        {
+          model: "gpt-4",
+          temperature: 0.2,
+        },
+      );
+      expect(getRequestBody(mockFetch.mock.calls[1] as MockCall).patch).toEqual(
+        {
+          temperature: 0.7,
+        },
+      );
+    });
+
+    it("serializes concurrent param syncs and removes duplicate requests", async () => {
+      mockFetch.mockResolvedValue({ ok: true } as Response);
+
+      await Promise.all([
+        updateChatParams("test-chat", { model: "gpt-4" }, 8001),
+        updateChatParams("test-chat", { model: "gpt-4" }, 8001),
+      ]);
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("resends the initial params after connection state is invalidated", async () => {
+      mockFetch.mockResolvedValue({ ok: true } as Response);
+
+      await updateChatParams("test-chat", { model: "gpt-4" }, 8001);
+      invalidateChatParamsSyncState("test-chat", 8001);
+      await updateChatParams("test-chat", { model: "gpt-4" }, 8001);
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(getRequestBody(mockFetch.mock.calls[1] as MockCall).patch).toEqual(
+        {
+          model: "gpt-4",
+        },
+      );
+    });
+
+    it("does not restore a stale baseline when invalidated during a request", async () => {
+      let resolveFirst: ((response: Response) => void) | undefined;
+      mockFetch
+        .mockImplementationOnce(
+          () =>
+            new Promise<Response>((resolve) => {
+              resolveFirst = resolve;
+            }),
+        )
+        .mockResolvedValueOnce({ ok: true } as Response);
+
+      const first = updateChatParams("test-chat", { model: "gpt-4" }, 8001);
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+      invalidateChatParamsSyncState("test-chat", 8001);
+      resolveFirst?.({ ok: true } as Response);
+      await first;
+      await updateChatParams("test-chat", { model: "gpt-4" }, 8001);
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("reapplies queued params after invalidation during an earlier request", async () => {
+      let resolveFirst: ((response: Response) => void) | undefined;
+      mockFetch
+        .mockImplementationOnce(
+          () =>
+            new Promise<Response>((resolve) => {
+              resolveFirst = resolve;
+            }),
+        )
+        .mockResolvedValueOnce({ ok: true } as Response);
+
+      const first = updateChatParams(
+        "test-chat",
+        { model: "gpt-4", temperature: 0.2 },
+        8001,
+      );
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+      const queued = updateChatParams(
+        "test-chat",
+        { model: "gpt-4", temperature: 0.7 },
+        8001,
+      );
+      invalidateChatParamsSyncState("test-chat", 8001);
+      resolveFirst?.({ ok: true } as Response);
+
+      await Promise.all([first, queued]);
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(getRequestBody(mockFetch.mock.calls[1] as MockCall).patch).toEqual(
+        {
+          model: "gpt-4",
+          temperature: 0.7,
+        },
+      );
+    });
+
+    it("reattaches the same worktree after an explicit detach", async () => {
+      mockFetch.mockResolvedValue({ ok: true } as Response);
+
+      await updateChatParams("test-chat", { worktree_id: "wt-1" }, 8001);
+      await updateChatParams("test-chat", { worktree: null }, 8001);
+      await updateChatParams("test-chat", { worktree_id: "wt-1" }, 8001);
+
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expect(getRequestBody(mockFetch.mock.calls[2] as MockCall).patch).toEqual(
+        {
+          worktree_id: "wt-1",
+        },
+      );
+    });
+
+    it("retries params that failed to apply", async () => {
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 500,
+          statusText: "Internal Server Error",
+          text: () => Promise.resolve("failed"),
+        } as Response)
+        .mockResolvedValueOnce({ ok: true } as Response);
+
+      await expect(
+        updateChatParams("test-chat", { model: "gpt-4" }, 8001),
+      ).rejects.toThrow("Failed to send command");
+      await updateChatParams("test-chat", { model: "gpt-4" }, 8001);
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
     });
   });
 

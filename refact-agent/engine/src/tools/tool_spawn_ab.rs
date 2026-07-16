@@ -379,7 +379,9 @@ async fn cleanup_ab_variant_with_timeout(
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
 
     if let Some(worktree_name) = variant.worktree_name.as_deref() {
-        if let Ok(service) = WorktreeService::new(gcx.cache_dir.clone(), workspace_root.clone()) {
+        if let Ok(service) =
+            WorktreeService::new_async(gcx.cache_dir.clone(), workspace_root.clone()).await
+        {
             if service
                 .delete_worktree(worktree_name, true, true)
                 .await

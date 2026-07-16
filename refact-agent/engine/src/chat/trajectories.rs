@@ -29,7 +29,10 @@ use refact_chat_api::{GoalLedgerEntry, GoalSnapshot, GoalStatus};
 pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
-        if dest_path.exists() {
+        if fs::try_exists(dest_path)
+            .await
+            .map_err(|e| format!("Failed to inspect destination file: {}", e))?
+        {
             let backup_extension = format!(
                 "{}.replace.{}",
                 dest_path
@@ -706,27 +709,33 @@ async fn persist_frozen_prefix(
     let content = tokio::fs::read_to_string(&file_path)
         .await
         .map_err(|e| format!("Failed to read trajectory: {}", e))?;
-    let mut trajectory = serde_json::from_str::<serde_json::Value>(&content)
-        .map_err(|e| format!("Failed to parse trajectory: {}", e))?;
-
-    if trajectory
-        .get("frozen_request_prefix")
-        .is_some_and(|value| !value.is_null())
-    {
+    let json_result = tokio::task::spawn_blocking(move || {
+        let mut trajectory = serde_json::from_str::<serde_json::Value>(&content)
+            .map_err(|e| format!("Failed to parse trajectory: {}", e))?;
+        if trajectory
+            .get("frozen_request_prefix")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Ok(None);
+        }
+        trajectory["frozen_request_prefix"] =
+            serde_json::to_value(frozen_request_prefix).map_err(|e| e.to_string())?;
+        trajectory["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+        serde_json::to_string_pretty(&trajectory)
+            .map(Some)
+            .map_err(|e| format!("Failed to serialize trajectory: {}", e))
+    })
+    .await
+    .map_err(|e| format!("Trajectory prefix persistence task failed: {}", e))??;
+    let Some(json) = json_result else {
         return Ok(());
-    }
-
-    trajectory["frozen_request_prefix"] =
-        serde_json::to_value(frozen_request_prefix).map_err(|e| e.to_string())?;
-    trajectory["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+    };
 
     let tmp_path = unique_trajectory_tmp_path(&file_path);
-    let json_result = serde_json::to_string_pretty(&trajectory)
-        .map_err(|e| format!("Failed to serialize trajectory: {}", e));
     atomic_write_json_with_tmp_path(
         &file_path,
         &tmp_path,
-        json_result,
+        Ok(json),
         Some("Failed to write trajectory"),
     )
     .await
@@ -863,11 +872,24 @@ async fn read_valid_trajectory_candidate(
             return None;
         }
     };
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(json) => json,
-        Err(e) => {
+    let parsed = tokio::task::spawn_blocking(move || {
+        serde_json::from_str(&content).map(|json| (content, json))
+    })
+    .await;
+    let (content, json): (String, serde_json::Value) = match parsed {
+        Ok(Ok(parsed)) => parsed,
+        Ok(Err(e)) => {
             warn!(
                 "Skipping trajectory candidate {} for chat {}: failed to parse: {}",
+                path.display(),
+                chat_id,
+                e
+            );
+            return None;
+        }
+        Err(e) => {
+            warn!(
+                "Skipping trajectory candidate {} for chat {}: parse task failed: {}",
                 path.display(),
                 chat_id,
                 e
@@ -1029,8 +1051,12 @@ async fn ensure_existing_trajectory_file_matches(path: &Path, chat_id: &str) -> 
     let content = fs::read_to_string(path)
         .await
         .map_err(|e| format!("Failed to read existing trajectory: {}", e))?;
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse existing trajectory: {}", e))?;
+    let json: serde_json::Value = tokio::task::spawn_blocking(move || {
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse existing trajectory: {}", e))
+    })
+    .await
+    .map_err(|e| format!("Existing trajectory parse task failed: {}", e))??;
     if trajectory_root_id_matches(&json, chat_id, path) {
         Ok(())
     } else {
@@ -1060,8 +1086,12 @@ async fn read_existing_trajectory_object(
     let content = fs::read_to_string(path)
         .await
         .map_err(|e| format!("Failed to read existing trajectory: {}", e))?;
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse existing trajectory: {}", e))?;
+    let json: serde_json::Value = tokio::task::spawn_blocking(move || {
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse existing trajectory: {}", e))
+    })
+    .await
+    .map_err(|e| format!("Existing trajectory parse task failed: {}", e))??;
     if !trajectory_root_id_matches(&json, chat_id, path) {
         return Err(format!(
             "Existing trajectory file id mismatch for {}",
@@ -1277,11 +1307,20 @@ async fn title_generation_backing_file_matches(
             return false;
         }
     };
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(json) => json,
-        Err(e) => {
+    let parsed = tokio::task::spawn_blocking(move || serde_json::from_str(&content)).await;
+    let json: serde_json::Value = match parsed {
+        Ok(Ok(json)) => json,
+        Ok(Err(e)) => {
             warn!(
                 "Skipping title update for {}: failed to parse backing trajectory: {}",
+                file_path.display(),
+                e
+            );
+            return false;
+        }
+        Err(e) => {
+            warn!(
+                "Skipping title update for {}: parse task failed: {}",
                 file_path.display(),
                 e
             );
@@ -1373,7 +1412,7 @@ async fn worktree_service_from_gcx(
     }
     let source_root = match requested_source_root {
         Some(requested) => {
-            let requested = std::fs::canonicalize(requested).map_err(|e| {
+            let requested = tokio::fs::canonicalize(requested).await.map_err(|e| {
                 format!(
                     "Failed to resolve worktree source root '{}': {}",
                     requested.display(),
@@ -1381,11 +1420,17 @@ async fn worktree_service_from_gcx(
                 )
             })?;
             let requested = dunce::simplified(&requested).to_path_buf();
-            let matches = project_dirs.iter().any(|dir| {
-                std::fs::canonicalize(dir)
+            let mut matches = false;
+            for dir in &project_dirs {
+                if tokio::fs::canonicalize(dir)
+                    .await
                     .map(|canonical| dunce::simplified(&canonical).to_path_buf() == requested)
                     .unwrap_or(false)
-            });
+                {
+                    matches = true;
+                    break;
+                }
+            }
             if !matches {
                 return Err("Worktree source root is not a current workspace directory".to_string());
             }
@@ -1393,7 +1438,7 @@ async fn worktree_service_from_gcx(
         }
         None => project_dirs[0].clone(),
     };
-    WorktreeService::new(cache_dir, source_root)
+    WorktreeService::new_async(cache_dir, source_root).await
 }
 
 async fn validate_loaded_worktree_strict(
@@ -1598,53 +1643,107 @@ async fn load_trajectory_candidate(
 ) -> Option<LoadedTrajectory> {
     let app = AppState::from_gcx(gcx.clone()).await;
     let traj_path = candidate.path;
-    let t = candidate.json;
+    let mut t = candidate.json;
 
-    let mut messages: Vec<ChatMessage> = t
-        .get("messages")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
+    let messages_value = t
+        .as_object_mut()
+        .and_then(|object| object.remove("messages"))
         .unwrap_or_default();
-    fix_tool_call_indexes(&mut messages);
+    let persisted_goal_value = t.as_object_mut().and_then(|object| object.remove("goal"));
+    let goal_ledger_value = t
+        .as_object_mut()
+        .and_then(|object| object.remove("goal_ledger"));
+    let (messages, goal_ledger, goal): (
+        Vec<ChatMessage>,
+        Vec<GoalLedgerEntry>,
+        Option<GoalSnapshot>,
+    ) = tokio::task::spawn_blocking(move || {
+        let mut messages: Vec<ChatMessage> =
+            serde_json::from_value(messages_value).unwrap_or_default();
+        fix_tool_call_indexes(&mut messages);
 
-    for (message_index, msg) in messages.iter_mut().enumerate() {
-        if msg.message_id.is_empty() {
-            let role = msg.role.clone();
-            let content = msg.content.content_text_only();
-            let source = msg
-                .extra
-                .get("event")
-                .and_then(|event| event.get("source"))
-                .and_then(|source| source.as_str())
-                .unwrap_or_default();
-            msg.message_id = format!(
-                "legacy:{}:{:x}",
-                role,
-                md5::compute(format!("{message_index}\n{role}\n{source}\n{content}").as_bytes())
-            );
-        }
-
-        if let Some(tool_calls) = &msg.tool_calls {
-            let filtered: Vec<_> = tool_calls
-                .iter()
-                .filter(|tc| !tc.function.name.is_empty())
-                .cloned()
-                .collect();
-
-            if filtered.len() != tool_calls.len() {
-                tracing::warn!(
-                    "Filtered out {} tool call(s) with empty names from message {}",
-                    tool_calls.len() - filtered.len(),
-                    msg.message_id
+        for (message_index, msg) in messages.iter_mut().enumerate() {
+            if msg.message_id.is_empty() {
+                let role = msg.role.clone();
+                let content = msg.content.content_text_only();
+                let source = msg
+                    .extra
+                    .get("event")
+                    .and_then(|event| event.get("source"))
+                    .and_then(|source| source.as_str())
+                    .unwrap_or_default();
+                msg.message_id = format!(
+                    "legacy:{}:{:x}",
+                    role,
+                    md5::compute(
+                        format!("{message_index}\n{role}\n{source}\n{content}").as_bytes()
+                    )
                 );
             }
 
-            msg.tool_calls = if filtered.is_empty() {
-                None
-            } else {
-                Some(filtered)
-            };
+            if let Some(tool_calls) = &msg.tool_calls {
+                let filtered: Vec<_> = tool_calls
+                    .iter()
+                    .filter(|tc| !tc.function.name.is_empty())
+                    .cloned()
+                    .collect();
+
+                if filtered.len() != tool_calls.len() {
+                    tracing::warn!(
+                        "Filtered out {} tool call(s) with empty names from message {}",
+                        tool_calls.len() - filtered.len(),
+                        msg.message_id
+                    );
+                }
+
+                msg.tool_calls = if filtered.is_empty() {
+                    None
+                } else {
+                    Some(filtered)
+                };
+            }
         }
-    }
+        let persisted_goal: Option<GoalSnapshot> = persisted_goal_value
+            .and_then(|value| serde_json::from_value(value).ok())
+            .map(clamp_goal_snapshot_for_load);
+        let goal_ledger: Vec<GoalLedgerEntry> = goal_ledger_value
+            .and_then(|value| value.as_array().cloned())
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .filter_map(|entry| match serde_json::from_value(entry) {
+                        Ok(parsed) => Some(parsed),
+                        Err(error) => {
+                            tracing::warn!("skipping unrecognized goal_ledger entry: {error}");
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let ledger_prior = refact_chat_api::reduce_goal_ledger(&goal_ledger).map(|state| {
+            let mut seed = persisted_goal.clone().unwrap_or_else(|| GoalSnapshot {
+                version: state.version,
+                budget: state.budget.clone(),
+                ..Default::default()
+            });
+            state.apply_to_snapshot(&mut seed);
+            seed
+        });
+        let goal_prior = persisted_goal.or(ledger_prior);
+        let goal = super::session::goal_snapshot_from_messages(&messages, goal_prior.as_ref())
+            .or(goal_prior)
+            .map(clamp_goal_snapshot_for_load);
+        (messages, goal_ledger, goal)
+    })
+    .await
+    .map_err(|e| {
+        warn!(
+            "Failed to deserialize trajectory messages for chat {}: {}",
+            chat_id, e
+        );
+    })
+    .ok()?;
 
     let task_meta: Option<super::types::TaskMeta> = t
         .get("task_meta")
@@ -1668,39 +1767,6 @@ async fn load_trajectory_candidate(
         .get("waiting_for_card_ids")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
-    let persisted_goal: Option<GoalSnapshot> = t
-        .get("goal")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .map(clamp_goal_snapshot_for_load);
-    let goal_ledger: Vec<GoalLedgerEntry> = t
-        .get("goal_ledger")
-        .and_then(|v| v.as_array())
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| match serde_json::from_value(entry.clone()) {
-                    Ok(parsed) => Some(parsed),
-                    Err(error) => {
-                        tracing::warn!("skipping unrecognized goal_ledger entry: {error}");
-                        None
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let ledger_prior = refact_chat_api::reduce_goal_ledger(&goal_ledger).map(|state| {
-        let mut seed = persisted_goal.clone().unwrap_or_else(|| GoalSnapshot {
-            version: state.version,
-            budget: state.budget.clone(),
-            ..Default::default()
-        });
-        state.apply_to_snapshot(&mut seed);
-        seed
-    });
-    let goal_prior = persisted_goal.or(ledger_prior);
-    let goal = super::session::goal_snapshot_from_messages(&messages, goal_prior.as_ref())
-        .or(goal_prior)
-        .map(clamp_goal_snapshot_for_load);
     let goal_verification_blocked_until_ms = t
         .get("goal_verification_blocked_until_ms")
         .and_then(|v| v.as_u64());
@@ -2223,7 +2289,7 @@ pub async fn save_trajectory_as(
 
 pub async fn save_trajectory_snapshot(
     gcx: Arc<GlobalContext>,
-    snapshot: TrajectorySnapshot,
+    mut snapshot: TrajectorySnapshot,
 ) -> Result<(), String> {
     validate_trajectory_id(&snapshot.chat_id).map_err(|e| e.message)?;
     let app = AppState::from_gcx(gcx.clone()).await;
@@ -2242,11 +2308,40 @@ pub async fn save_trajectory_snapshot(
         return Ok(());
     }
 
-    let messages_json: Vec<serde_json::Value> = snapshot
-        .messages
-        .iter()
-        .map(|m| serde_json::to_value(m).unwrap_or_default())
-        .collect();
+    let message_count = snapshot.messages.len();
+    let collect_metrics = snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none();
+    let should_generate_title =
+        is_placeholder_title(&snapshot.title) && !snapshot.is_title_generated && message_count > 0;
+    let should_generate_task_name = snapshot
+        .task_meta
+        .as_ref()
+        .is_some_and(|task_meta| task_meta.role == "planner");
+    let retain_background_messages = should_generate_title || should_generate_task_name;
+    let messages = std::mem::take(&mut snapshot.messages);
+    let (messages_json, background_messages_json, line_changes, task_progress, token_totals) =
+        tokio::task::spawn_blocking(move || {
+            let messages_json: Vec<serde_json::Value> = messages
+                .iter()
+                .map(|message| serde_json::to_value(message).unwrap_or_default())
+                .collect();
+            let background_messages_json =
+                retain_background_messages.then(|| messages_json.clone());
+            let line_changes =
+                collect_metrics.then(|| calculate_line_changes_from_chat_messages(&messages));
+            let task_progress =
+                collect_metrics.then(|| calculate_task_progress_from_chat_messages(&messages));
+            let token_totals =
+                collect_metrics.then(|| calculate_token_totals_from_chat_messages(&messages));
+            (
+                messages_json,
+                background_messages_json,
+                line_changes,
+                task_progress,
+                token_totals,
+            )
+        })
+        .await
+        .map_err(|e| format!("Trajectory message serialization task failed: {}", e))?;
 
     let mut trajectory = json!({
         "id": snapshot.chat_id,
@@ -2254,7 +2349,7 @@ pub async fn save_trajectory_snapshot(
         "model": snapshot.model,
         "mode": snapshot.mode,
         "tool_use": snapshot.tool_use,
-        "messages": messages_json.clone(),
+        "messages": messages_json,
         "created_at": snapshot.created_at,
         "boost_reasoning": snapshot.boost_reasoning,
         "checkpoints_enabled": snapshot.checkpoints_enabled,
@@ -2361,8 +2456,13 @@ pub async fn save_trajectory_snapshot(
     preserve_existing_trajectory_metadata(&mut trajectory, existing_trajectory);
 
     let tmp_path = unique_trajectory_tmp_path(&file_path);
-    let json_result = serde_json::to_string_pretty(&trajectory)
-        .map_err(|e| format!("Failed to serialize trajectory: {}", e));
+    let (trajectory, json_result) = tokio::task::spawn_blocking(move || {
+        let json_result = serde_json::to_string_pretty(&trajectory)
+            .map_err(|e| format!("Failed to serialize trajectory: {}", e));
+        (trajectory, json_result)
+    })
+    .await
+    .map_err(|e| format!("Trajectory serialization task failed: {}", e))?;
     atomic_write_json_with_tmp_path(
         &file_path,
         &tmp_path,
@@ -2373,9 +2473,7 @@ pub async fn save_trajectory_snapshot(
 
     info!(
         "Saved trajectory for chat {} ({} messages) to {:?}",
-        snapshot.chat_id,
-        snapshot.messages.len(),
-        file_path
+        snapshot.chat_id, message_count, file_path
     );
 
     if let Some(dir) = file_path.parent() {
@@ -2386,10 +2484,10 @@ pub async fn save_trajectory_snapshot(
         } else {
             Some(TrajectorySourceIdentity::Normal)
         };
-        trajectory_index::upsert_trajectory_index_entry_from_value(
+        trajectory_index::upsert_trajectory_index_entry_from_owned_value(
             dir,
             &file_path,
-            &trajectory,
+            trajectory,
             source_hint,
         )
         .await?;
@@ -2412,11 +2510,9 @@ pub async fn save_trajectory_snapshot(
         let source = TrajectorySourceIdentity::Normal;
         let (session_state, session_error, session_worktree) =
             get_session_runtime_for_trajectory_source(&sessions, &snapshot.chat_id, &source).await;
-        let (total_lines_added, total_lines_removed) =
-            calculate_line_changes_from_chat_messages(&snapshot.messages);
-        let (tasks_total, tasks_done, tasks_failed) =
-            calculate_task_progress_from_chat_messages(&snapshot.messages);
-        let token_totals = calculate_token_totals_from_chat_messages(&snapshot.messages);
+        let (total_lines_added, total_lines_removed) = line_changes.unwrap_or_default();
+        let (tasks_total, tasks_done, tasks_failed) = task_progress.unwrap_or_default();
+        let token_totals = token_totals.unwrap_or_default();
         let tx = &app.chat.trajectory_events_tx;
         {
             let event = TrajectoryEvent {
@@ -2427,7 +2523,7 @@ pub async fn save_trajectory_snapshot(
                 is_title_generated: Some(snapshot.is_title_generated),
                 session_state: Some(session_state),
                 error: session_error,
-                message_count: Some(snapshot.messages.len()),
+                message_count: Some(message_count),
                 parent_id: snapshot.parent_id.clone(),
                 link_type: snapshot.link_type.clone(),
                 root_chat_id: Some(effective_root),
@@ -2453,55 +2549,45 @@ pub async fn save_trajectory_snapshot(
             let _ = tx.send(event);
         }
 
-        let should_generate_title = is_placeholder_title(&snapshot.title)
-            && !snapshot.is_title_generated
-            && !snapshot.messages.is_empty();
-
         if should_generate_title {
             let _ = spawn_title_generation_task(
                 gcx.clone(),
                 snapshot.chat_id.clone(),
-                messages_json,
+                background_messages_json.unwrap_or_default(),
                 file_path.clone(),
                 TrajectorySourceIdentity::Normal,
             );
         }
     } else if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_some() {
-        let should_generate_title = is_placeholder_title(&snapshot.title)
-            && !snapshot.is_title_generated
-            && !snapshot.messages.is_empty();
-
         if should_generate_title {
             let _ = spawn_title_generation_task(
                 gcx.clone(),
                 snapshot.chat_id.clone(),
-                messages_json,
+                background_messages_json.unwrap_or_default(),
                 file_path.clone(),
                 TrajectorySourceIdentity::Buddy,
             );
         }
     } else if let Some(ref task_meta) = snapshot.task_meta {
-        let should_generate_title = is_placeholder_title(&snapshot.title)
-            && !snapshot.is_title_generated
-            && !snapshot.messages.is_empty();
+        let mut background_messages_json = background_messages_json.unwrap_or_default();
 
         if should_generate_title {
             let _ = spawn_title_generation_task(
                 gcx.clone(),
                 snapshot.chat_id.clone(),
-                messages_json.clone(),
+                background_messages_json.clone(),
                 file_path.clone(),
                 TrajectorySourceIdentity::from_task_meta(task_meta),
             );
         }
 
         if task_meta.role == "planner" {
-            let user_message_count = count_user_messages(&messages_json);
+            let user_message_count = count_user_messages(&background_messages_json);
             if user_message_count >= 1 {
                 spawn_task_name_generation_task(
                     gcx.clone(),
                     task_meta.task_id.clone(),
-                    messages_json,
+                    std::mem::take(&mut background_messages_json),
                 );
             }
         }
@@ -2693,8 +2779,13 @@ pub(crate) async fn persist_loaded_trajectory_repair_raw(
     );
 
     let tmp_path = unique_trajectory_tmp_path(file_path);
-    let json_result = serde_json::to_string_pretty(&trajectory)
-        .map_err(|e| format!("Failed to serialize trajectory: {}", e));
+    let (trajectory, json_result) = tokio::task::spawn_blocking(move || {
+        let json_result = serde_json::to_string_pretty(&trajectory)
+            .map_err(|e| format!("Failed to serialize trajectory: {}", e));
+        (trajectory, json_result)
+    })
+    .await
+    .map_err(|e| format!("Trajectory repair serialization task failed: {}", e))?;
     atomic_write_json_with_tmp_path(
         file_path,
         &tmp_path,
@@ -2707,10 +2798,10 @@ pub(crate) async fn persist_loaded_trajectory_repair_raw(
             &trajectory,
             None,
         ));
-        trajectory_index::upsert_trajectory_index_entry_from_value(
+        trajectory_index::upsert_trajectory_index_entry_from_owned_value(
             dir,
             file_path,
-            &trajectory,
+            trajectory,
             source_hint,
         )
         .await?;
@@ -3190,9 +3281,20 @@ async fn refresh_trajectory_index_entry_for_path(
     let content = fs::read_to_string(path)
         .await
         .map_err(|e| format!("Failed to read trajectory for index refresh: {}", e))?;
-    let value = serde_json::from_str::<serde_json::Value>(&content)
-        .map_err(|e| format!("Failed to parse trajectory for index refresh: {}", e))?;
-    trajectory_index::upsert_trajectory_index_entry_from_value(dir, path, &value, source_hint).await
+    let parse_path = path.to_path_buf();
+    let value = tokio::task::spawn_blocking(move || {
+        serde_json::from_str::<serde_json::Value>(&content).map_err(|e| {
+            format!(
+                "Failed to parse trajectory '{}' for index refresh: {}",
+                parse_path.display(),
+                e
+            )
+        })
+    })
+    .await
+    .map_err(|e| format!("Trajectory index refresh parse task failed: {}", e))??;
+    trajectory_index::upsert_trajectory_index_entry_from_owned_value(dir, path, value, source_hint)
+        .await
 }
 
 async fn remove_stale_trajectory_index_entries(gcx: Arc<GlobalContext>, chat_id: &str) {
@@ -4388,6 +4490,7 @@ fn calculate_task_progress_from_chat_messages(messages: &[ChatMessage]) -> (i32,
     (0, 0, 0)
 }
 
+#[derive(Default)]
 pub(crate) struct TokenTotals {
     pub(crate) prompt_tokens: u64,
     pub(crate) completion_tokens: u64,
@@ -4908,18 +5011,18 @@ async fn is_real_file(path: &Path) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn allowed_real_dir_symlink_target(path: &Path) -> Option<PathBuf> {
+async fn allowed_real_dir_symlink_target(path: &Path) -> Option<PathBuf> {
     let expected_target = match path.to_str()? {
         "/tmp" => Path::new("/private/tmp"),
         "/var" => Path::new("/private/var"),
         _ => return None,
     };
-    let resolved = std::fs::canonicalize(path).ok()?;
+    let resolved = fs::canonicalize(path).await.ok()?;
     (resolved == expected_target).then_some(resolved)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn allowed_real_dir_symlink_target(_path: &Path) -> Option<PathBuf> {
+async fn allowed_real_dir_symlink_target(_path: &Path) -> Option<PathBuf> {
     None
 }
 
@@ -4946,7 +5049,7 @@ async fn ensure_real_dir_tree(path: &Path) -> Result<(), String> {
         match fs::symlink_metadata(&current).await {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() {
-                    if let Some(resolved) = allowed_real_dir_symlink_target(&current) {
+                    if let Some(resolved) = allowed_real_dir_symlink_target(&current).await {
                         current = resolved;
                         continue;
                     }
@@ -5000,14 +5103,16 @@ async fn ensure_real_dir_tree(path: &Path) -> Result<(), String> {
 }
 
 async fn canonical_child_path_under_root(root: &Path, child: &Path) -> Result<PathBuf, String> {
-    let root_canonical = std::fs::canonicalize(root)
+    let root_canonical = fs::canonicalize(root)
+        .await
         .map_err(|e| format!("Failed to resolve root {}: {}", root.display(), e))?;
     if !is_real_dir(root).await {
         return Err(format!("Root is not a real directory: {}", root.display()));
     }
 
     if is_real_file(child).await {
-        let child_canonical = std::fs::canonicalize(child)
+        let child_canonical = fs::canonicalize(child)
+            .await
             .map_err(|e| format!("Failed to resolve child {}: {}", child.display(), e))?;
         if child_canonical.starts_with(&root_canonical) {
             return Ok(child.to_path_buf());
@@ -5029,7 +5134,8 @@ async fn canonical_child_path_under_root(root: &Path, child: &Path) -> Result<Pa
     let parent = child
         .parent()
         .ok_or_else(|| format!("Child has no parent: {}", child.display()))?;
-    let parent_canonical = std::fs::canonicalize(parent)
+    let parent_canonical = fs::canonicalize(parent)
+        .await
         .map_err(|e| format!("Failed to resolve child parent {}: {}", parent.display(), e))?;
     if parent_canonical.starts_with(&root_canonical) {
         Ok(child.to_path_buf())

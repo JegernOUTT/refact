@@ -887,16 +887,17 @@ async fn register_stateful_subchat_worktree(
     };
 
     let cache_dir = { gcx.cache_dir.clone() };
-    let service = match WorktreeService::new(cache_dir, worktree.source_workspace_root.clone()) {
-        Ok(service) => service,
-        Err(e) => {
-            warn!(
-                "Failed to resolve worktree service while registering subchat '{}': {}",
-                chat_id, e
-            );
-            return;
-        }
-    };
+    let service =
+        match WorktreeService::new_async(cache_dir, worktree.source_workspace_root.clone()).await {
+            Ok(service) => service,
+            Err(e) => {
+                warn!(
+                    "Failed to resolve worktree service while registering subchat '{}': {}",
+                    chat_id, e
+                );
+                return;
+            }
+        };
 
     match service.add_reference(&worktree.id, reference).await {
         Ok(view) => thread.worktree = Some(view.meta),

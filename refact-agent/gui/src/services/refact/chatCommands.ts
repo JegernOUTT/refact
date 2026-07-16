@@ -1,5 +1,9 @@
 import { v4 as uuidv4 } from "uuid";
-import { buildApiUrl, type EngineApiConfig } from "./apiUrl";
+import {
+  buildApiUrl,
+  getEngineEndpointIdentity,
+  type EngineApiConfig,
+} from "./apiUrl";
 
 export type EngineApiConnection = EngineApiConfig;
 export type PortOrConnection = number | EngineApiConnection;
@@ -118,6 +122,98 @@ export type ChatCommand = ChatCommandBase & {
 
 export type GoalControlAction = "pause" | "resume" | "stop";
 
+const appliedChatParams = new Map<string, Record<string, unknown>>();
+const chatParamsSyncTails = new Map<string, Promise<void>>();
+const chatParamsSyncEpochs = new Map<string, number>();
+
+function chatParamsKey(chatId: string, connection: PortOrConnection): string {
+  return `${getEngineEndpointIdentity(
+    normalizeConnection(connection),
+  )}\n${chatId}`;
+}
+
+function normalizeParamsPatch(
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(patch)) as Record<string, unknown>;
+}
+
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right)) return false;
+    return (
+      left.length === right.length &&
+      left.every((value, index) => jsonValuesEqual(value, right[index]))
+    );
+  }
+  if (
+    left === null ||
+    right === null ||
+    typeof left !== "object" ||
+    typeof right !== "object"
+  ) {
+    return false;
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord).sort();
+  const rightKeys = Object.keys(rightRecord).sort();
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key, index) =>
+        key === rightKeys[index] &&
+        jsonValuesEqual(leftRecord[key], rightRecord[key]),
+    )
+  );
+}
+
+function changedParams(
+  applied: Record<string, unknown>,
+  requested: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(requested).filter(
+      ([key, value]) =>
+        !Object.prototype.hasOwnProperty.call(applied, key) ||
+        !jsonValuesEqual(applied[key], value),
+    ),
+  );
+}
+
+function mergeAppliedParams(
+  applied: Record<string, unknown>,
+  delta: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...applied, ...delta };
+  if (Object.prototype.hasOwnProperty.call(delta, "worktree_id")) {
+    delete next.worktree;
+  } else if (delta.worktree === null) {
+    delete next.worktree_id;
+  }
+  return next;
+}
+
+export function resetChatParamsSyncState(): void {
+  appliedChatParams.clear();
+  chatParamsSyncTails.clear();
+  chatParamsSyncEpochs.clear();
+}
+
+export function invalidateChatParamsSyncState(
+  chatId: string,
+  connection: PortOrConnection,
+): void {
+  const key = chatParamsKey(chatId, connection);
+  appliedChatParams.delete(key);
+  if (chatParamsSyncTails.has(key)) {
+    chatParamsSyncEpochs.set(key, (chatParamsSyncEpochs.get(key) ?? 0) + 1);
+  } else {
+    chatParamsSyncEpochs.delete(key);
+  }
+}
+
 function commandUrl(connection: PortOrConnection, chatId: string): string {
   return buildApiUrl(
     normalizeConnection(connection),
@@ -138,7 +234,7 @@ function queueItemUrl(
   );
 }
 
-export async function sendChatCommand(
+async function sendRawChatCommand(
   chatId: string,
   connection: PortOrConnection,
   apiKey: string | undefined,
@@ -171,6 +267,71 @@ export async function sendChatCommand(
       `Failed to send command: ${response.status} ${response.statusText} - ${text}`,
     );
   }
+}
+
+async function sendChangedChatParams(
+  chatId: string,
+  connection: PortOrConnection,
+  apiKey: string | undefined,
+  patch: Record<string, unknown>,
+  priority?: boolean,
+): Promise<void> {
+  const normalizedPatch = normalizeParamsPatch(patch);
+  if (Object.keys(normalizedPatch).length === 0) return;
+
+  const key = chatParamsKey(chatId, connection);
+  const previousTail = chatParamsSyncTails.get(key) ?? Promise.resolve();
+  const currentSync = previousTail
+    .catch(() => undefined)
+    .then(async () => {
+      const epoch = chatParamsSyncEpochs.get(key) ?? 0;
+      const applied = appliedChatParams.get(key) ?? {};
+      const delta = changedParams(applied, normalizedPatch);
+      if (Object.keys(delta).length === 0) return;
+
+      await sendRawChatCommand(
+        chatId,
+        connection,
+        apiKey,
+        { type: "set_params", patch: delta },
+        priority,
+      );
+      if ((chatParamsSyncEpochs.get(key) ?? 0) === epoch) {
+        appliedChatParams.set(key, mergeAppliedParams(applied, delta));
+      }
+    });
+  chatParamsSyncTails.set(key, currentSync);
+
+  try {
+    await currentSync;
+  } finally {
+    if (chatParamsSyncTails.get(key) === currentSync) {
+      chatParamsSyncTails.delete(key);
+      if (!appliedChatParams.has(key)) {
+        chatParamsSyncEpochs.delete(key);
+      }
+    }
+  }
+}
+
+export async function sendChatCommand(
+  chatId: string,
+  connection: PortOrConnection,
+  apiKey: string | undefined,
+  command: ChatCommandBase,
+  priority?: boolean,
+): Promise<void> {
+  if (command.type === "set_params") {
+    await sendChangedChatParams(
+      chatId,
+      connection,
+      apiKey,
+      command.patch,
+      priority,
+    );
+    return;
+  }
+  await sendRawChatCommand(chatId, connection, apiKey, command, priority);
 }
 
 export async function sendUserMessage(

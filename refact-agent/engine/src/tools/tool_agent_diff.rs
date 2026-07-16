@@ -196,7 +196,8 @@ async fn base_from_worktree_meta(
 ) -> (Option<String>, Option<String>) {
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     for source_root in project_dirs {
-        let Ok(service) = WorktreeService::new(gcx.cache_dir.clone(), source_root) else {
+        let Ok(service) = WorktreeService::new_async(gcx.cache_dir.clone(), source_root).await
+        else {
             continue;
         };
         let Ok(registry) = service.load_registry().await else {
@@ -351,7 +352,8 @@ async fn registered_worktree_path(
 ) -> Result<PathBuf, String> {
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     for source_root in project_dirs {
-        let Ok(service) = WorktreeService::new(gcx.cache_dir.clone(), source_root) else {
+        let Ok(service) = WorktreeService::new_async(gcx.cache_dir.clone(), source_root).await
+        else {
             continue;
         };
         let Ok(view) = service.get_worktree(worktree_name).await else {
@@ -390,7 +392,8 @@ async fn registered_worktree_path_for_card(
 ) -> Result<Option<PathBuf>, String> {
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     for source_root in project_dirs {
-        let Ok(service) = WorktreeService::new(gcx.cache_dir.clone(), source_root) else {
+        let Ok(service) = WorktreeService::new_async(gcx.cache_dir.clone(), source_root).await
+        else {
             continue;
         };
         let Ok(registry) = service.load_registry().await else {

@@ -330,8 +330,13 @@ pub async fn read_trajectory_index(dir: &Path) -> Result<Option<TrajectoryIndex>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("Failed to read trajectory index {:?}: {e}", path)),
     };
-    let index = serde_json::from_str::<TrajectoryIndex>(&content)
-        .map_err(|e| format!("Failed to parse trajectory index {:?}: {e}", path))?;
+    let parse_path = path.clone();
+    let index = tokio::task::spawn_blocking(move || {
+        serde_json::from_str::<TrajectoryIndex>(&content)
+            .map_err(|e| format!("Failed to parse trajectory index {:?}: {e}", parse_path))
+    })
+    .await
+    .map_err(|e| format!("Trajectory index parse task failed for {:?}: {e}", path))??;
     if index.schema_version != TRAJECTORY_INDEX_SCHEMA_VERSION {
         return Err(format!(
             "Unsupported trajectory index schema version {} in {:?}",
@@ -345,13 +350,34 @@ pub async fn write_trajectory_index_atomic(
     dir: &Path,
     index: &TrajectoryIndex,
 ) -> Result<(), String> {
+    write_trajectory_index_atomic_owned(dir, index.clone()).await
+}
+
+async fn write_trajectory_index_atomic_owned(
+    dir: &Path,
+    index: TrajectoryIndex,
+) -> Result<(), String> {
     fs::create_dir_all(dir)
         .await
         .map_err(|e| format!("Failed to create trajectory directory {:?}: {e}", dir))?;
     let path = trajectory_index_path(dir);
     let tmp_path = dir.join(format!(".{}.tmp-{}", TRAJECTORY_INDEX_FILE, Uuid::new_v4()));
-    let content = serde_json::to_string_pretty(index)
-        .map_err(|e| format!("Failed to serialize trajectory index {:?}: {e}", path))?;
+    let serialization_path = path.clone();
+    let content = tokio::task::spawn_blocking(move || {
+        serde_json::to_string_pretty(&index).map_err(|e| {
+            format!(
+                "Failed to serialize trajectory index {:?}: {e}",
+                serialization_path
+            )
+        })
+    })
+    .await
+    .map_err(|e| {
+        format!(
+            "Trajectory index serialization task failed for {:?}: {e}",
+            path
+        )
+    })??;
     fs::write(&tmp_path, content).await.map_err(|e| {
         format!(
             "Failed to write temporary trajectory index {:?}: {e}",
@@ -408,7 +434,7 @@ pub async fn upsert_trajectory_index_entry(
     index.entries.retain(|existing| existing.id != entry.id);
     index.entries.push(entry);
     index.updated_at = Utc::now().to_rfc3339();
-    write_trajectory_index_atomic(dir, &index).await
+    write_trajectory_index_atomic_owned(dir, index).await
 }
 
 pub async fn upsert_trajectory_index_entry_from_value(
@@ -418,6 +444,22 @@ pub async fn upsert_trajectory_index_entry_from_value(
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<(), String> {
     let entry = entry_from_trajectory_value(dir, path, value, source_hint)?;
+    upsert_trajectory_index_entry(dir, entry).await
+}
+
+pub async fn upsert_trajectory_index_entry_from_owned_value(
+    dir: &Path,
+    path: &Path,
+    value: serde_json::Value,
+    source_hint: Option<TrajectorySourceIdentity>,
+) -> Result<(), String> {
+    let dir_owned = dir.to_path_buf();
+    let path_owned = path.to_path_buf();
+    let entry = tokio::task::spawn_blocking(move || {
+        entry_from_trajectory_value(&dir_owned, &path_owned, &value, source_hint)
+    })
+    .await
+    .map_err(|e| format!("Trajectory index entry task failed for {:?}: {e}", path))??;
     upsert_trajectory_index_entry(dir, entry).await
 }
 
@@ -434,7 +476,7 @@ pub async fn remove_trajectory_index_entry(dir: &Path, chat_id: &str) -> Result<
         return Ok(());
     }
     index.updated_at = Utc::now().to_rfc3339();
-    write_trajectory_index_atomic(dir, &index).await
+    write_trajectory_index_atomic_owned(dir, index).await
 }
 
 async fn scan_trajectory_entries(
@@ -479,16 +521,21 @@ async fn scan_trajectory_entries(
             Ok(content) => content,
             Err(_) => continue,
         };
-        let value = match serde_json::from_str::<serde_json::Value>(&content) {
-            Ok(value) => value,
-            Err(e) => {
+        let parse_path = path.clone();
+        let parse_dir = dir.to_path_buf();
+        let candidate_source_hint = source_hint.clone();
+        let parsed = tokio::task::spawn_blocking(move || {
+            let value = serde_json::from_str::<serde_json::Value>(&content)
+                .map_err(|e| format!("Failed to parse trajectory {:?}: {}", parse_path, e))?;
+            entry_from_trajectory_value(&parse_dir, &parse_path, &value, candidate_source_hint)
+        })
+        .await;
+        match parsed {
+            Ok(Ok(entry)) => indexed_entries.push(entry),
+            Ok(Err(e)) => {
                 tracing::warn!("Failed to parse trajectory {:?}: {}", path, e);
-                continue;
             }
-        };
-        match entry_from_trajectory_value(dir, &path, &value, source_hint.clone()) {
-            Ok(entry) => indexed_entries.push(entry),
-            Err(e) => tracing::warn!("Failed to index trajectory {:?}: {}", path, e),
+            Err(e) => tracing::warn!("Trajectory indexing task failed for {:?}: {}", path, e),
         }
     }
     Ok(indexed_entries)
@@ -559,20 +606,19 @@ async fn read_and_index_single_trajectory(
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Option<TrajectoryIndexEntry> {
     let content = fs::read_to_string(path).await.ok()?;
-    let value = match serde_json::from_str::<serde_json::Value>(&content) {
-        Ok(value) => value,
-        Err(e) => {
+    let dir = dir.to_path_buf();
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let value = serde_json::from_str::<serde_json::Value>(&content).map_err(|e| {
             tracing::warn!("Failed to parse trajectory {:?}: {}", path, e);
-            return None;
-        }
-    };
-    match entry_from_trajectory_value(dir, path, &value, source_hint) {
-        Ok(entry) => Some(entry),
-        Err(e) => {
+        })?;
+        entry_from_trajectory_value(&dir, &path, &value, source_hint).map_err(|e| {
             tracing::debug!("Skipping non-indexable trajectory {:?}: {}", path, e);
-            None
-        }
-    }
+        })
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
 }
 
 async fn persist_reconciled_trajectory_index(
@@ -586,7 +632,7 @@ async fn persist_reconciled_trajectory_index(
         updated_at: Utc::now().to_rfc3339(),
         entries: entries.to_vec(),
     };
-    write_trajectory_index_atomic(dir, &index).await
+    write_trajectory_index_atomic_owned(dir, index).await
 }
 
 pub async fn rebuild_trajectory_index_from_disk(
@@ -601,7 +647,7 @@ pub async fn rebuild_trajectory_index_from_disk(
         updated_at: Utc::now().to_rfc3339(),
         entries: entries.clone(),
     };
-    write_trajectory_index_atomic(dir, &index).await?;
+    write_trajectory_index_atomic_owned(dir, index).await?;
     Ok(entries)
 }
 

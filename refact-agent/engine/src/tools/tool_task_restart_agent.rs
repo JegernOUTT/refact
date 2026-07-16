@@ -35,7 +35,7 @@ async fn cleanup_old_worktree(
         let cache_dir = gcx.cache_dir.clone();
         let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
         if let Some(source_root) = project_dirs.first() {
-            if let Ok(service) = WorktreeService::new(cache_dir, source_root.clone()) {
+            if let Ok(service) = WorktreeService::new_async(cache_dir, source_root.clone()).await {
                 if service.delete_worktree(wt_name, true, true).await.is_ok() {
                     return;
                 }
@@ -171,7 +171,7 @@ async fn get_worktree_meta_for_resume(
         .first()
         .cloned()
         .ok_or("No workspace folder found")?;
-    let service = WorktreeService::new(cache_dir, source_root)?;
+    let service = WorktreeService::new_async(cache_dir, source_root).await?;
     let view = service.get_worktree(wt_name).await.map_err(|e| {
         format!(
             "Retained worktree '{}' is no longer registered: {}. Use mode=fresh.",

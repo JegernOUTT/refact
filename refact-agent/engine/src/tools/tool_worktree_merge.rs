@@ -252,7 +252,7 @@ async fn service_from_gcx(
     }
     let source_root = if let Some(requested) = requested_source_root {
         let requested = std::path::PathBuf::from(requested);
-        let requested = std::fs::canonicalize(&requested).map_err(|e| {
+        let requested = tokio::fs::canonicalize(&requested).await.map_err(|e| {
             format!(
                 "Failed to resolve source workspace root '{}': {}",
                 requested.display(),
@@ -260,11 +260,17 @@ async fn service_from_gcx(
             )
         })?;
         let requested = dunce::simplified(&requested).to_path_buf();
-        let matches = project_dirs.iter().any(|dir| {
-            std::fs::canonicalize(dir)
+        let mut matches = false;
+        for dir in &project_dirs {
+            if tokio::fs::canonicalize(dir)
+                .await
                 .map(|canonical| dunce::simplified(&canonical).to_path_buf() == requested)
                 .unwrap_or(false)
-        });
+            {
+                matches = true;
+                break;
+            }
+        }
         if !matches {
             return Err("Worktree source root is not a current workspace directory".to_string());
         }
@@ -272,7 +278,7 @@ async fn service_from_gcx(
     } else {
         project_dirs[0].clone()
     };
-    WorktreeService::new(cache_dir, source_root)
+    WorktreeService::new_async(cache_dir, source_root).await
 }
 
 pub struct ToolWorktreeMerge;

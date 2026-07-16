@@ -349,8 +349,11 @@ async fn build_diagnostics_pulse(gcx: AppState) -> DiagnosticPulse {
 
 async fn build_worktree_pulse(gcx: AppState, project_root: &std::path::Path) -> WorktreePulse {
     let cache_dir = gcx.paths.cache_dir.clone();
-    let Ok(service) =
-        crate::worktrees::service::WorktreeService::new(cache_dir, project_root.to_path_buf())
+    let Ok(service) = crate::worktrees::service::WorktreeService::new_async(
+        cache_dir,
+        project_root.to_path_buf(),
+    )
+    .await
     else {
         return WorktreePulse::default();
     };

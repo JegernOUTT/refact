@@ -18,6 +18,7 @@ import {
   type EngineApiConfig,
 } from "../services/refact/apiUrl";
 import { subscribeToChatEvents } from "../services/refact/chatSubscription";
+import { invalidateChatParamsSyncState } from "../services/refact/chatCommands";
 import {
   setSseStatus,
   sseEventReceived,
@@ -477,6 +478,7 @@ export function useAllChatsSubscription() {
             dispatch(setSseStatus({ chatId, status: "connected" }));
           },
           onError: (error) => {
+            invalidateChatParamsSyncState(chatId, configRef.current);
             clearStreamDeltaFlushForChatRef.current?.(chatId);
             flushPendingStreamDeltaForChatRef.current?.(chatId);
             clearSubchatFlushForChat(chatId);
@@ -498,6 +500,7 @@ export function useAllChatsSubscription() {
             }
           },
           onDisconnected: () => {
+            invalidateChatParamsSyncState(chatId, configRef.current);
             clearStreamDeltaFlushForChatRef.current?.(chatId);
             flushPendingStreamDeltaForChatRef.current?.(chatId);
             clearSubchatFlushForChat(chatId);
