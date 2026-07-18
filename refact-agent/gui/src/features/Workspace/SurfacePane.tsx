@@ -3,10 +3,17 @@ import { MessageSquare } from "lucide-react";
 import { useCallback } from "react";
 
 import { EmptyState } from "../../components/ui";
-import { useConfig } from "../../hooks";
+import { useAppSelector, useConfig } from "../../hooks";
 import { Chat } from "../Chat/Chat";
 import { ChatThreadProvider } from "../Chat/Thread";
-import { parseSurfaceKey, type SurfaceKey } from "./surfaceKey";
+import { selectCapabilities } from "../Config/configSlice";
+import { PANEL_COMPONENTS } from "./panels/panelRegistry";
+import {
+  isPanelKind,
+  panelCapabilityKey,
+  parseSurfaceKey,
+  type SurfaceKey,
+} from "./surfaceKey";
 import styles from "./SurfacePane.module.css";
 
 export type SurfacePaneProps = {
@@ -15,6 +22,7 @@ export type SurfacePaneProps = {
 
 export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
   const config = useConfig();
+  const capabilities = useAppSelector(selectCapabilities);
   const backFromChat = useCallback(() => undefined, []);
 
   if (!surfaceKey) {
@@ -44,6 +52,19 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
               chatId={parsed.id}
             />
           </ChatThreadProvider>
+        </div>
+      );
+    }
+
+    if (isPanelKind(parsed.kind)) {
+      if (!capabilities[panelCapabilityKey(parsed.kind)]) return null;
+      const PanelComponent = PANEL_COMPONENTS[parsed.kind];
+      return (
+        <div
+          className={classNames(styles.surfacePane, styles.panelSurface)}
+          data-surface-key={surfaceKey}
+        >
+          <PanelComponent />
         </div>
       );
     }

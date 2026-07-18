@@ -44,6 +44,11 @@
   height: 100%;
 }
 
+.panelLauncher {
+  flex: 0 0 auto;
+  margin-inline-start: var(--rf-space-1);
+}
+
 .tabList {
   position: relative;
   display: flex;

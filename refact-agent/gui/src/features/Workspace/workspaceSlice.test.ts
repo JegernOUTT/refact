@@ -34,6 +34,10 @@ import {
 } from "./workspaceSlice";
 import {
   isChatSurface,
+  isFilesSurface,
+  isGitSurface,
+  isPanelSurface,
+  isTerminalSurface,
   makeSurfaceKey,
   parseSurfaceKey,
   type SurfaceKey,
@@ -43,6 +47,9 @@ const reducer = workspaceSlice.reducer;
 
 const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
 const task = (id: string): SurfaceKey => makeSurfaceKey("task", id);
+const files = makeSurfaceKey("files", "main");
+const git = makeSurfaceKey("git", "main");
+const terminal = makeSurfaceKey("terminal", "main");
 
 const leaf = (
   id: string,
@@ -88,6 +95,9 @@ describe("surfaceKey helpers", () => {
     expect(makeSurfaceKey("task", "task-a")).toBe("task:task-a");
     expect(makeSurfaceKey("buddy", "home")).toBe("buddy:home");
     expect(makeSurfaceKey("dashboard")).toBe("dashboard");
+    expect(files).toBe("files:main");
+    expect(git).toBe("git:main");
+    expect(terminal).toBe("terminal:main");
     expect(parseSurfaceKey("chat:thread-a")).toEqual({
       kind: "chat",
       id: "thread-a",
@@ -98,11 +108,61 @@ describe("surfaceKey helpers", () => {
     });
     expect(isChatSurface("chat:thread-a")).toBe(true);
     expect(isChatSurface("task:task-a")).toBe(false);
+    expect(parseSurfaceKey(files)).toEqual({ kind: "files", id: "main" });
+    expect(isPanelSurface(files)).toBe(true);
+    expect(isFilesSurface(files)).toBe(true);
+    expect(isGitSurface(git)).toBe(true);
+    expect(isTerminalSurface(terminal)).toBe(true);
+    expect(() => makeSurfaceKey("files", "other" as "main")).toThrow(
+      "invalid files surface id",
+    );
+    expect(() => parseSurfaceKey("terminal:other")).toThrow(
+      "invalid surface key",
+    );
     expect(() => parseSurfaceKey("chat:")).toThrow("invalid surface key");
   });
 });
 
 describe("workspaceSlice", () => {
+  test("opens, focuses, and closes singleton panel tabs", () => {
+    const chatA = chat("a");
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(state, openTab(files));
+    state = reducer(state, openTab(terminal));
+    state = reducer(state, openTab(files));
+
+    expect(state.tabs).toEqual([chatA, files, terminal]);
+    expect(state.activeTabId).toBe(files);
+
+    state = reducer(state, closeTab(files));
+    expect(state.tabs).toEqual([chatA, terminal]);
+    expect(state.activeTabId).toBe(terminal);
+
+    const beforeSplit = state;
+    state = reducer(state, splitTab({ tabId: terminal, dir: "row" }));
+    expect(state).toEqual(beforeSplit);
+  });
+
+  test("drops disabled panel tabs while hydrating persisted workspace state", () => {
+    const chatA = chat("a");
+    const hydrated = reducer(
+      undefined,
+      hydrateWorkspace({
+        tabs: [chatA, files, terminal],
+        activeTabId: terminal,
+        groups: {},
+        panelCapabilities: {
+          filesPanel: true,
+          gitPanel: true,
+          terminalPanel: false,
+        },
+      }),
+    );
+
+    expect(hydrated.tabs).toEqual([chatA, files]);
+    expect(hydrated.activeTabId).toBe(chatA);
+  });
+
   test("opens, activates, reorders, and closes tabs", () => {
     const chatA = chat("a");
     const chatB = chat("b");

@@ -279,6 +279,25 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedWorkspace()).toEqual(workspace);
   });
 
+  it("round-trips singleton panel tabs under the project namespace", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a"],
+      currentThreadId: "chat-a",
+      tabs: [{ id: "chat-a" }],
+    });
+    const files = makeSurfaceKey("files", "main");
+    const terminal = makeSurfaceKey("terminal", "main");
+    const workspace = {
+      tabs: [chatSurface("chat-a"), files, terminal],
+      activeTabId: terminal,
+      groups: {},
+    };
+
+    savePersistedWorkspace(workspace);
+
+    expect(loadPersistedWorkspace()).toEqual(workspace);
+  });
+
   it("derives task and buddy navigation tabs outside persisted workspace panes", () => {
     savePersistedChatTabs({
       openThreadIds: ["chat-a", "chat-b"],

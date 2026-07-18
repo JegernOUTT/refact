@@ -1,5 +1,12 @@
 import classNames from "classnames";
-import { Layers, X } from "lucide-react";
+import {
+  Files,
+  GitBranch,
+  Layers,
+  Plus,
+  SquareTerminal,
+  X,
+} from "lucide-react";
 import {
   ComponentProps,
   DragEvent,
@@ -13,8 +20,9 @@ import {
   useState,
 } from "react";
 
-import { Badge, Icon, StatusDot } from "../../components/ui";
+import { Badge, Icon, IconButton, Menu, StatusDot } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
+import { selectCapabilities } from "../Config/configSlice";
 import {
   popBackTo,
   push,
@@ -52,6 +60,7 @@ import {
 } from "../Tasks/tasksSlice";
 import {
   closeTab,
+  openTab,
   reorderTabs,
   selectActiveTabId,
   selectTabs,
@@ -59,13 +68,27 @@ import {
   setActiveTab,
   type PaneGroup,
 } from "./workspaceSlice";
-import { makeSurfaceKey, parseSurfaceKey, type SurfaceKey } from "./surfaceKey";
+import {
+  isPanelKind,
+  makeSurfaceKey,
+  PANEL_KINDS,
+  panelCapabilityKey,
+  parseSurfaceKey,
+  type PanelKind,
+  type SurfaceKey,
+} from "./surfaceKey";
 import { getStatusFromSessionState } from "../../utils/sessionStatus";
 import styles from "./TabBar.module.css";
 
 const BUDDY_SURFACE_KEY = makeSurfaceKey("buddy", "home");
 
-type TabSurfaceKind = "chat" | "task" | "buddy" | "dashboard";
+type TabSurfaceKind = "chat" | "task" | "buddy" | "dashboard" | PanelKind;
+
+const PANEL_INFO = {
+  files: { title: "Files", icon: Files },
+  git: { title: "Git", icon: GitBranch },
+  terminal: { title: "Terminal", icon: SquareTerminal },
+} as const;
 
 type DisplayInfo = {
   title: string;
@@ -142,7 +165,7 @@ function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
 } {
   try {
     const parsed = parseSurfaceKey(surfaceKey);
-    if (parsed.kind === "dashboard") {
+    if (parsed.kind === "dashboard" || isPanelKind(parsed.kind)) {
       return { type: "surface", id: surfaceKey };
     }
     return { type: parsed.kind, id: parsed.id };
@@ -194,6 +217,14 @@ function displayInfoForSurface(
     };
   }
 
+  if (isPanelKind(parsed.kind)) {
+    return {
+      title: PANEL_INFO[parsed.kind].title,
+      kind: parsed.kind,
+      unreadNotificationCount: 0,
+    };
+  }
+
   const chatId = surfaceKey.slice("chat:".length);
   const tab = tabsById.get(chatId);
   if (tab) {
@@ -225,6 +256,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
   const currentPage = useAppSelector(selectCurrentPage);
   const pages = useAppSelector(selectPages);
+  const capabilities = useAppSelector(selectCapabilities);
   const [draggingTabId, setDraggingTabId] = useState<SurfaceKey | null>(null);
   const [dragTargetTabId, setDragTargetTabId] = useState<SurfaceKey | null>(
     null,
@@ -256,6 +288,9 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
       ? makeSurfaceKey("task", currentPage.taskId)
       : null;
   const buddySurfaceOpen = pages.some((page) => page.name === "buddy");
+  const openablePanelKinds = PANEL_KINDS.filter(
+    (kind) => capabilities[panelCapabilityKey(kind)],
+  );
 
   const visibleTabKeys = useMemo(
     () =>
@@ -339,6 +374,13 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
         if (currentPage?.name !== "buddy") {
           dispatch(push({ name: "buddy" }));
         }
+        return;
+      }
+      if (isPanelKind(parsed.kind)) {
+        dispatch(setActiveTab(tabId));
+        if (currentPage?.name !== "chat") {
+          dispatch(push({ name: "chat" }));
+        }
       }
     },
     [currentPage, dispatch],
@@ -383,6 +425,17 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     [],
   );
 
+  const handleOpenPanel = useCallback(
+    (kind: PanelKind) => {
+      const surfaceKey = makeSurfaceKey(kind, "main");
+      dispatch(openTab(surfaceKey));
+      if (currentPage?.name !== "chat") {
+        dispatch(push({ name: "chat" }));
+      }
+    },
+    [currentPage?.name, dispatch],
+  );
+
   const stopCloseDragEvent = useCallback(
     (event: DragEvent<HTMLButtonElement>) => {
       event.preventDefault();
@@ -414,15 +467,18 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
   const handleTabDragOver = useCallback(
     (event: DragEvent, targetKey: SurfaceKey) => {
       const target = parseSurfaceKey(targetKey);
-      const chatReorder =
-        target.kind === "chat" &&
+      const sourceKey = surfaceKeyFromTabDragPayload(
+        readTabDragData(event.dataTransfer),
+      );
+      const workspaceReorder =
         tabs.includes(targetKey) &&
-        hasTabDragType(event.dataTransfer, "chat");
+        sourceKey !== null &&
+        tabs.includes(sourceKey);
       const taskReorder =
         target.kind === "task" &&
         taskSurfaceKeys.includes(targetKey) &&
         hasTabDragType(event.dataTransfer, "task");
-      if (!chatReorder && !taskReorder) {
+      if (!workspaceReorder && !taskReorder) {
         return;
       }
       event.preventDefault();
@@ -483,7 +539,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     (payload: TabDragPayload, targetKey: SurfaceKey) => {
       const sourceKey = surfaceKeyFromTabDragPayload(payload);
       if (!sourceKey || sourceKey === targetKey) return false;
-      if (payload.type === "chat") {
+      if (tabs.includes(sourceKey) && tabs.includes(targetKey)) {
         return tabs.includes(sourceKey) && tabs.includes(targetKey);
       }
       if (payload.type === "task") {
@@ -710,6 +766,31 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
           })}
         </div>
       </div>
+      {openablePanelKinds.length > 0 ? (
+        <Menu>
+          <Menu.Trigger asChild>
+            <IconButton
+              aria-label="Open workspace panel"
+              className={styles.panelLauncher}
+              icon={Plus}
+              size="sm"
+              variant="plain"
+            />
+          </Menu.Trigger>
+          <Menu.Content align="end" maxWidth="240px">
+            <Menu.Label>Workspace panels</Menu.Label>
+            {openablePanelKinds.map((kind) => {
+              const panel = PANEL_INFO[kind];
+              return (
+                <Menu.Item key={kind} onSelect={() => handleOpenPanel(kind)}>
+                  <Icon icon={panel.icon} size="sm" tone="muted" />
+                  {panel.title}
+                </Menu.Item>
+              );
+            })}
+          </Menu.Content>
+        </Menu>
+      ) : null}
     </nav>
   );
 }

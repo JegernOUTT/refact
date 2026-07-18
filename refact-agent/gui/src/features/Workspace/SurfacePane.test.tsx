@@ -38,6 +38,20 @@ describe("SurfacePane", () => {
     expect(screen.queryByText("No surface selected")).not.toBeInTheDocument();
   });
 
+  it("renders the registered placeholder for a files panel surface", () => {
+    const surfaceKey = makeSurfaceKey("files", "main");
+
+    render(<SurfacePane surfaceKey={surfaceKey} />);
+
+    expect(screen.getByText("Files panel")).toBeInTheDocument();
+    expect(
+      screen.getByText("This workspace panel is coming soon."),
+    ).toBeInTheDocument();
+    expect(
+      document.querySelector(`[data-surface-key="${surfaceKey}"]`),
+    ).toBeInTheDocument();
+  });
+
   it("renders nothing for non-chat surface keys", () => {
     const surfaceKey = makeSurfaceKey("task", "task-a");
 

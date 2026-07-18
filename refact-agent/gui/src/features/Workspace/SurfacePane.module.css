@@ -8,6 +8,12 @@
   overflow: hidden;
 }
 
+.panelSurface {
+  align-items: center;
+  justify-content: center;
+  padding: var(--rf-space-4);
+}
+
 .placeholder {
   display: flex;
   align-items: center;

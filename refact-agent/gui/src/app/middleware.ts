@@ -79,7 +79,11 @@ import {
 } from "../features/Errors/errorsSlice";
 import { reportBuddyFrontendError } from "../features/Buddy/reportBuddyFrontendError";
 import { setBackendStatus } from "../features/Connection";
-import { setThemeMode, updateConfig } from "../features/Config/configSlice";
+import {
+  selectCapabilities,
+  setThemeMode,
+  updateConfig,
+} from "../features/Config/configSlice";
 import { setCurrentProjectInfo } from "../features/Chat/currentProject";
 import { resetSidebarState } from "../features/Sidebar/sidebarSlice";
 import { nextTip } from "../features/TipOfTheDay";
@@ -231,10 +235,14 @@ function hydratePersistedChatUi(listenerApi: {
 
   listenerApi.dispatch(hydratePersistedChatTabs());
   if (trustedWorkspace) {
-    listenerApi.dispatch(hydrateWorkspace(trustedWorkspace));
+    const panelCapabilities = selectCapabilities(listenerApi.getState());
+    listenerApi.dispatch(
+      hydrateWorkspace({ ...trustedWorkspace, panelCapabilities }),
+    );
     listenerApi.dispatch(
       reconcileWorkspace({
         openThreadIds: listenerApi.getState().chat.open_thread_ids,
+        panelCapabilities,
       }),
     );
     switchToFocusedWorkspaceChat(listenerApi);

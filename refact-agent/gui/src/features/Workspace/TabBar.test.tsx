@@ -16,6 +16,7 @@ import {
 import { notificationAdded } from "../Notifications";
 import type { ProcessCompletedNotification } from "../Notifications/notificationsSlice";
 import { push } from "../Pages/pagesSlice";
+import { updateConfig } from "../Config/configSlice";
 import { openTask, reorderOpenTasks } from "../Tasks/tasksSlice";
 import {
   addSurfaceToPane,
@@ -126,6 +127,41 @@ function getTabWrap(name: RegExp): HTMLElement {
 }
 
 describe("TabBar", () => {
+  it("shows all enabled workspace panels in the web launcher", async () => {
+    const store = createStoreWithChatTabs();
+    const view = renderTabBar(store);
+
+    await view.user.click(
+      screen.getByRole("button", { name: "Open workspace panel" }),
+    );
+
+    expect(screen.getByRole("menuitem", { name: "Files" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Git" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "Terminal" }),
+    ).toBeInTheDocument();
+
+    await view.user.click(screen.getByRole("menuitem", { name: "Files" }));
+    expect(store.getState().workspace.tabs).toContain(
+      makeSurfaceKey("files", "main"),
+    );
+    expect(store.getState().workspace.activeTabId).toBe(
+      makeSurfaceKey("files", "main"),
+    );
+  });
+
+  it("renders the existing tab UI without panel chrome for IDE hosts", () => {
+    const store = createStoreWithChatTabs();
+    store.dispatch(updateConfig({ host: "vscode" }));
+    renderTabBar(store);
+
+    expect(
+      screen.queryByRole("button", { name: "Open workspace panel" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByRole("tab")).toHaveLength(3);
+    expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();
+  });
+
   it("renders all open tabs in one tablist with status and unread badges", () => {
     const store = createStoreWithChatTabs();
     store.dispatch({

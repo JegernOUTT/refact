@@ -14,6 +14,7 @@ import {
 } from "../../features/Chat/Thread";
 import { popBackTo, push, selectPages } from "../../features/Pages/pagesSlice";
 import { openTask, selectOpenTasksFromRoot } from "../../features/Tasks";
+import { selectCapabilities } from "../../features/Config/configSlice";
 import {
   selectFocusedWorkspaceChatId,
   selectTabs,
@@ -168,6 +169,11 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const workspaceTabs = useAppSelector(selectTabs);
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
   const pages = useAppSelector(selectPages);
+  const capabilities = useAppSelector(selectCapabilities);
+  const hasPanelLauncher =
+    capabilities.filesPanel ||
+    capabilities.gitPanel ||
+    capabilities.terminalPanel;
   const { openSettings } = useEventsBusForIDE();
   const toolbarChatId =
     activeTab.type === "chat"
@@ -178,7 +184,8 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const showTabBar =
     workspaceTabs.length > 0 ||
     openTasks.length > 0 ||
-    pages.some((page) => page.name === "buddy");
+    pages.some((page) => page.name === "buddy") ||
+    hasPanelLauncher;
   const [createTask] = useCreateTaskMutation();
 
   const goHome = useCallback(() => {

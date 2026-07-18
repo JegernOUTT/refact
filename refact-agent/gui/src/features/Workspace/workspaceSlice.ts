@@ -10,7 +10,14 @@ import {
   type SplitPlacement,
   type SplitNode,
 } from "../ChatPanes/panesTree";
-import { isChatSurface, type SurfaceKey } from "./surfaceKey";
+import {
+  isChatSurface,
+  isPanelSurface,
+  isPanelSurfaceEnabled,
+  isWorkspaceSurface,
+  type PanelCapabilities,
+  type SurfaceKey,
+} from "./surfaceKey";
 
 export type PaneGroup = {
   root: PaneNode;
@@ -33,6 +40,12 @@ const initialState: WorkspaceState = {
   tabs: [],
   activeTabId: null,
   groups: {},
+};
+
+const DEFAULT_PANEL_CAPABILITIES: PanelCapabilities = {
+  filesPanel: true,
+  gitPanel: true,
+  terminalPanel: true,
 };
 
 const createLeaf = (
@@ -679,15 +692,20 @@ const workspaceStatesEqual = (
 
 export const sanitizeWorkspaceSurfaceUniqueness = (
   state: WorkspaceState,
+  panelCapabilities: PanelCapabilities = DEFAULT_PANEL_CAPABILITIES,
 ): WorkspaceState => {
   const tabs = unique(state.tabs)
-    .filter(isChatSurface)
+    .filter(
+      (key) =>
+        isChatSurface(key) || isPanelSurfaceEnabled(key, panelCapabilities),
+    )
     .slice(0, MAX_WORKSPACE_TABS);
   const topLevelSurfaces = new Set(tabs);
   const claimedGroupSurfaces = new Set<SurfaceKey>();
   const groups: WorkspaceGroups = {};
 
   for (const tabId of tabs) {
+    if (!isChatSurface(tabId)) continue;
     const group = state.groups[tabId];
     if (!group) continue;
 
@@ -718,7 +736,8 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
 
   const activeTabId =
     state.activeTabId &&
-    isChatSurface(state.activeTabId) &&
+    (isChatSurface(state.activeTabId) ||
+      isPanelSurfaceEnabled(state.activeTabId, panelCapabilities)) &&
     tabs.includes(state.activeTabId)
       ? state.activeTabId
       : tabs[0] ?? null;
@@ -730,11 +749,16 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
 export const reconcileWorkspaceState = (
   state: WorkspaceState,
   openThreadIds: string[],
+  panelCapabilities: PanelCapabilities = DEFAULT_PANEL_CAPABILITIES,
 ): WorkspaceState => {
   const openThreads = new Set(openThreadIds);
   const nextState: WorkspaceState = {
     tabs: unique(state.tabs)
-      .filter((key) => openChatSurface(key, openThreads))
+      .filter(
+        (key) =>
+          openChatSurface(key, openThreads) ||
+          isPanelSurfaceEnabled(key, panelCapabilities),
+      )
       .slice(0, MAX_WORKSPACE_TABS),
     activeTabId: state.activeTabId,
     groups: {},
@@ -761,7 +785,10 @@ export const reconcileWorkspaceState = (
     nextState.activeTabId = nextState.tabs[0] ?? null;
   }
 
-  const sanitizedState = sanitizeWorkspaceSurfaceUniqueness(nextState);
+  const sanitizedState = sanitizeWorkspaceSurfaceUniqueness(
+    nextState,
+    panelCapabilities,
+  );
 
   return workspaceStatesEqual(state, sanitizedState) ? state : sanitizedState;
 };
@@ -772,7 +799,7 @@ export const workspaceSlice = createSlice({
   initialState,
   reducers: {
     openTab: (state, action: PayloadAction<SurfaceKey>) => {
-      if (!isChatSurface(action.payload)) return;
+      if (!isWorkspaceSurface(action.payload)) return;
       if (!state.tabs.includes(action.payload)) {
         if (state.tabs.length >= MAX_WORKSPACE_TABS) return;
         state.tabs.push(action.payload);
@@ -1051,11 +1078,29 @@ export const workspaceSlice = createSlice({
     },
     reconcileWorkspace: (
       state,
-      action: PayloadAction<{ openThreadIds: string[] }>,
-    ) => reconcileWorkspaceState(state, action.payload.openThreadIds),
-    hydrateWorkspace: (_state, action: PayloadAction<WorkspaceState>) => {
+      action: PayloadAction<{
+        openThreadIds: string[];
+        panelCapabilities?: PanelCapabilities;
+      }>,
+    ) =>
+      reconcileWorkspaceState(
+        state,
+        action.payload.openThreadIds,
+        action.payload.panelCapabilities,
+      ),
+    hydrateWorkspace: (
+      _state,
+      action: PayloadAction<
+        WorkspaceState & { panelCapabilities?: PanelCapabilities }
+      >,
+    ) => {
+      const panelCapabilities =
+        action.payload.panelCapabilities ?? DEFAULT_PANEL_CAPABILITIES;
       const tabs = unique(action.payload.tabs)
-        .filter(isChatSurface)
+        .filter(
+          (key) =>
+            isChatSurface(key) || isPanelSurfaceEnabled(key, panelCapabilities),
+        )
         .slice(0, MAX_WORKSPACE_TABS);
       const groups: Record<SurfaceKey, PaneGroup> = {};
 
@@ -1069,16 +1114,19 @@ export const workspaceSlice = createSlice({
 
       const activeTabId = action.payload.activeTabId;
 
-      return sanitizeWorkspaceSurfaceUniqueness({
-        tabs,
-        activeTabId:
-          activeTabId &&
-          isChatSurface(activeTabId) &&
-          tabs.includes(activeTabId)
-            ? activeTabId
-            : tabs[0] ?? null,
-        groups,
-      });
+      return sanitizeWorkspaceSurfaceUniqueness(
+        {
+          tabs,
+          activeTabId:
+            activeTabId &&
+            (isChatSurface(activeTabId) || isPanelSurface(activeTabId)) &&
+            tabs.includes(activeTabId)
+              ? activeTabId
+              : tabs[0] ?? null,
+          groups,
+        },
+        panelCapabilities,
+      );
     },
   },
 });

@@ -43,7 +43,10 @@ import { setupStatusApi } from "../services/refact/setupStatus";
 import { extensionsApi } from "../services/refact/extensions";
 import { pluginsApi } from "../services/refact/plugins";
 import { tipOfTheDaySlice } from "../features/TipOfTheDay";
-import { reducer as configReducer } from "../features/Config/configSlice";
+import {
+  reducer as configReducer,
+  selectCapabilities,
+} from "../features/Config/configSlice";
 import { activeFileReducer } from "../features/Chat/activeFile";
 import { selectedSnippetReducer } from "../features/Chat/selectedSnippet";
 import { chatReducer } from "../features/Chat/Thread/reducer";
@@ -171,9 +174,11 @@ const rootPersistConfig = {
 const APPLY_CHAT_EVENT_ACTION = "chatThread/applyChatEvent";
 
 const workspaceInvariantReducer = (state: ReturnType<typeof rootReducer>) => {
+  const capabilities = selectCapabilities(state as RootState);
   const nextWorkspace = reconcileWorkspaceState(
     state.workspace,
     state.chat.open_thread_ids,
+    capabilities,
   );
 
   if (nextWorkspace === state.workspace) {

@@ -21,7 +21,12 @@ import {
 } from "../ChatPanes/usePointerDrag";
 import { GroupSplitView } from "./GroupSplitView";
 import { SurfacePane } from "./SurfacePane";
-import { isChatSurface, makeSurfaceKey } from "./surfaceKey";
+import {
+  isChatSurface,
+  isPanelSurface,
+  makeSurfaceKey,
+  type PanelSurfaceKey,
+} from "./surfaceKey";
 import {
   openTab,
   selectActiveTabId,
@@ -41,6 +46,9 @@ export function WorkspaceView() {
   const openThreadIds = useAppSelector(selectOpenThreadIds);
   const tabs = useAppSelector(selectTabs);
   const groups = useAppSelector(selectWorkspaceGroups);
+  const [mountedPanelKeys, setMountedPanelKeys] = useState<PanelSurfaceKey[]>(
+    () => (activeTabId && isPanelSurface(activeTabId) ? [activeTabId] : []),
+  );
   const currentSurfaceKey = currentThreadId
     ? makeSurfaceKey("chat", currentThreadId)
     : null;
@@ -61,6 +69,16 @@ export function WorkspaceView() {
     activeTabId ? selectIsTabSplit(state, activeTabId) : false,
   );
   const activeTabCanSplit = activeTabId ? isChatSurface(activeTabId) : false;
+
+  useEffect(() => {
+    setMountedPanelKeys((current) => {
+      const openPanels = current.filter((key) => tabs.includes(key));
+      if (!activeTabId || !isPanelSurface(activeTabId)) return openPanels;
+      return openPanels.includes(activeTabId)
+        ? openPanels
+        : [...openPanels, activeTabId];
+    });
+  }, [activeTabId, tabs]);
 
   useEffect(() => {
     if (
@@ -218,7 +236,24 @@ export function WorkspaceView() {
               activeTabCanSplit ? "true" : undefined
             }
           >
-            <SurfacePane surfaceKey={activeTabId} />
+            {activeTabId && isPanelSurface(activeTabId) ? null : (
+              <SurfacePane surfaceKey={activeTabId} />
+            )}
+            {mountedPanelKeys.map((panelKey) => {
+              const active = panelKey === activeTabId;
+              return (
+                <div
+                  key={panelKey}
+                  className={classNames(
+                    styles.panelMount,
+                    active ? styles.panelMountActive : styles.panelMountHidden,
+                  )}
+                  aria-hidden={!active}
+                >
+                  <SurfacePane surfaceKey={panelKey} />
+                </div>
+              );
+            })}
             {unsplitDropActive ? (
               <div
                 className={classNames(styles.unsplitDropOverlay, "rf-enter")}

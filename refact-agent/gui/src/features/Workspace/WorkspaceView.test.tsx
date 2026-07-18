@@ -125,6 +125,28 @@ describe("WorkspaceView", () => {
     ).toBeNull();
   });
 
+  it("lazy-mounts a panel and keeps it mounted while a chat is active", async () => {
+    const store = createWorkspaceStore();
+    const files = makeSurfaceKey("files", "main");
+
+    expect(screen.queryByText("Files panel")).not.toBeInTheDocument();
+    store.dispatch(openTab(files));
+    renderWorkspaceView(store);
+
+    const mountedPanel = await screen.findByText("Files panel");
+    const panelSurface = mountedPanel.closest(`[data-surface-key="${files}"]`);
+    expect(panelSurface).toBeInTheDocument();
+
+    store.dispatch(setActiveTab(chat("chat-a")));
+    await waitFor(() => {
+      expect(screen.getByText("Files panel")).toBe(mountedPanel);
+      expect(panelSurface?.parentElement).toHaveAttribute(
+        "aria-hidden",
+        "true",
+      );
+    });
+  });
+
   it("reconciles current thread to the active workspace chat on entry", async () => {
     const store = createWorkspaceStore();
     store.dispatch(

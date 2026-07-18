@@ -10,6 +10,7 @@ import {
 } from "../features/Workspace/workspaceSlice";
 import {
   isChatSurface,
+  isPanelSurface,
   parseSurfaceKey,
   type SurfaceKey,
 } from "../features/Workspace/surfaceKey";
@@ -392,10 +393,10 @@ function isOpenWorkspaceSurface(
   surfaceKey: SurfaceKey,
   openThreadIds: ReadonlySet<string>,
 ): boolean {
-  return (
-    isChatSurface(surfaceKey) &&
-    openThreadIds.has(surfaceKey.slice("chat:".length))
-  );
+  return isPanelSurface(surfaceKey)
+    ? true
+    : isChatSurface(surfaceKey) &&
+        openThreadIds.has(surfaceKey.slice("chat:".length));
 }
 
 type WorkspaceNodeValidationContext = {
@@ -432,6 +433,7 @@ function normalizePersistedWorkspaceNode(
     for (const rawSurfaceKey of value.tabIds) {
       const surfaceKey = normalizeSurfaceKey(rawSurfaceKey);
       if (!surfaceKey) return null;
+      if (!isChatSurface(surfaceKey)) return null;
       context.surfacePlacementCount.value += 1;
       if (context.surfacePlacementCount.value > MAX_WORKSPACE_TABS) return null;
       if (tabIds.includes(surfaceKey)) continue;
