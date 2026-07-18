@@ -341,9 +341,7 @@ elif [ -n "$modified_path_files" ]; then
 else
     info "$install_dir is already configured in PATH startup files."
 fi
-info "Start Refact with:"
-info "  refact"
-info "  refact tui"
-info "  refact daemon"
+info "Open Refact with:"
+info "  refact ui"
 info "Update Refact with:"
 info "  refact self-update"

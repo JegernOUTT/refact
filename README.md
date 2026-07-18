@@ -28,16 +28,14 @@
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/JegernOUTT/refact/main/install.sh | sh
-refact
-refact tui
+refact ui
 ```
 
 **Windows PowerShell**
 
 ```powershell
 irm https://raw.githubusercontent.com/JegernOUTT/refact/main/install.ps1 | iex
-refact
-refact tui
+refact ui
 ```
 
 > [!WARNING]
@@ -201,17 +199,16 @@ One `refact` binary becomes the whole control room. Running `refact` opens the f
 
 Use the one-line installer at the top of this README, or download a binary manually from [GitHub Releases](https://github.com/JegernOUTT/refact/releases). The standalone binary gives you the daemon, TUI, in-browser GUI, worker supervisor, and CLI controls in one local package.
 
-After installation, open Refact from a workspace:
+After installation, open the Refact dashboard:
 
 ```sh
-refact
+refact ui
 ```
 
-That launches the interactive TUI and starts or reuses the local daemon. You can also register the current project explicitly before opening the TUI:
+That starts or reuses the local daemon and opens the dashboard in your default browser. To open a project's workspace directly, pass its path:
 
 ```sh
-refact projects open .
-refact
+refact ui .
 ```
 
 IDE plugins are optional clients for the same daemon-backed projects:

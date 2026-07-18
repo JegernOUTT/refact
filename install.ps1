@@ -215,9 +215,7 @@ if ($NoModifyPath) {
 } else {
     Write-Host "$InstallDir is already in your user PATH."
 }
-Write-Host "Start Refact with:"
-Write-Host "  refact"
-Write-Host "  refact tui"
-Write-Host "  refact daemon"
+Write-Host "Open Refact with:"
+Write-Host "  refact ui"
 Write-Host "Update Refact with:"
 Write-Host "  refact self-update"

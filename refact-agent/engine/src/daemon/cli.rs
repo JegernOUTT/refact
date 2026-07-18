@@ -38,6 +38,11 @@ const API_PATH_SEGMENT: &AsciiSet = &CONTROLS
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
+    Ui {
+        path: Option<PathBuf>,
+        json: bool,
+        no_open: bool,
+    },
     Ps {
         json: bool,
     },
@@ -144,7 +149,8 @@ pub struct CliOptions {
 impl CliOptions {
     fn json_output(&self) -> bool {
         match &self.command {
-            CliCommand::Ps { json }
+            CliCommand::Ui { json, .. }
+            | CliCommand::Ps { json }
             | CliCommand::Cron { json, .. }
             | CliCommand::Projects { json, .. }
             | CliCommand::Restart { json, .. }
@@ -234,6 +240,7 @@ pub fn parse_cli_args(args: &[std::ffi::OsString]) -> Result<CliOptions, String>
     }
     let subcommand = args.remove(0);
     let options = match subcommand.as_str() {
+        "ui" => parse_ui(&mut args)?,
         "ps" => CliOptions {
             command: CliCommand::Ps {
                 json: take_flag(&mut args, "--json")?,
@@ -275,6 +282,25 @@ pub fn parse_cli_args(args: &[std::ffi::OsString]) -> Result<CliOptions, String>
         ));
     }
     Ok(options)
+}
+
+fn parse_ui(args: &mut Vec<String>) -> Result<CliOptions, String> {
+    let json = take_flag(args, "--json")?;
+    let no_open = take_flag(args, "--no-open")?;
+    let path = if args.is_empty() {
+        None
+    } else if args[0].starts_with('-') {
+        return Err(format!("unknown ui option `{}`", args[0]));
+    } else {
+        Some(PathBuf::from(args.remove(0)))
+    };
+    Ok(CliOptions {
+        command: CliCommand::Ui {
+            path,
+            json,
+            no_open,
+        },
+    })
 }
 
 fn parse_cron(args: &mut Vec<String>) -> Result<CliOptions, String> {
@@ -584,6 +610,11 @@ pub async fn run_with_io(
 
 async fn run_inner(options: CliOptions, out: &mut dyn Write) -> Result<i32, CliError> {
     match options.command {
+        CliCommand::Ui {
+            path,
+            json,
+            no_open,
+        } => run_ui(path, json, no_open, out).await,
         CliCommand::Doctor { json } => {
             let report = doctor_report().await;
             if json {
@@ -664,11 +695,7 @@ async fn run_projects(
             }
         }
         ProjectsCommand::Open { path } => {
-            let root = canonicalize_existing_dir(&path)?;
-            let value: Value =
-                client::post_json(&daemon, "/daemon/v1/projects/open", &json!({"root": root}))
-                    .await
-                    .map_err(client_error)?;
+            let value = open_project(&daemon, &path).await?;
             print_value(out, json_output, &value, "opened")?;
         }
         ProjectsCommand::Pin { target } => {
@@ -687,6 +714,108 @@ async fn run_projects(
         }
     }
     Ok(0)
+}
+
+async fn run_ui(
+    path: Option<PathBuf>,
+    json_output: bool,
+    no_open: bool,
+    out: &mut dyn Write,
+) -> Result<i32, CliError> {
+    let daemon = ensure_daemon().await?;
+    let project_id = match path {
+        Some(path) => {
+            let value = open_project(&daemon, &path).await?;
+            Some(
+                value
+                    .get("project_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        CliError::runtime("daemon project open response missing project_id")
+                    })?
+                    .to_string(),
+            )
+        }
+        None => None,
+    };
+    let url = ui_url(
+        daemon.port,
+        project_id.as_deref(),
+        daemon.auth_token.as_deref(),
+    );
+    if json_output {
+        print_json(out, &json!({"url": url}))?;
+        return Ok(0);
+    }
+    writeln!(out, "{url}").map_err(write_error)?;
+    out.flush().map_err(write_error)?;
+    if !no_open {
+        if let Err(error) = open_browser(&url) {
+            writeln!(
+                out,
+                "Could not open the browser: {error}. Open the URL above manually."
+            )
+            .map_err(write_error)?;
+        }
+    }
+    Ok(0)
+}
+
+async fn open_project(daemon: &DaemonInfo, path: &Path) -> Result<Value, CliError> {
+    let root = canonicalize_existing_dir(path)?;
+    client::post_json(daemon, "/daemon/v1/projects/open", &json!({"root": root}))
+        .await
+        .map_err(client_error)
+}
+
+fn ui_url(port: u16, project_id: Option<&str>, auth_token: Option<&str>) -> String {
+    let mut url = match project_id {
+        Some(project_id) => format!("http://127.0.0.1:{port}/p/{}/", path_segment(project_id)),
+        None => format!("http://127.0.0.1:{port}/"),
+    };
+    if let Some(token) = auth_token {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair(crate::daemon::auth::DAEMON_AUTH_QUERY, token)
+            .finish();
+        url.push('?');
+        url.push_str(&query);
+    }
+    url
+}
+
+fn run_browser_command(mut command: std::process::Command) -> Result<(), String> {
+    let status = command.status().map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("browser launcher exited with {status}"))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_browser(url: &str) -> Result<(), String> {
+    let mut command = std::process::Command::new("open");
+    command.arg(url);
+    run_browser_command(command)
+}
+
+#[cfg(target_os = "linux")]
+fn open_browser(url: &str) -> Result<(), String> {
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(url);
+    run_browser_command(command)
+}
+
+#[cfg(windows)]
+fn open_browser(url: &str) -> Result<(), String> {
+    let mut command = std::process::Command::new("cmd");
+    command.args(["/C", "start", "", url]);
+    run_browser_command(command)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn open_browser(_: &str) -> Result<(), String> {
+    Err("browser launch is unsupported on this platform".to_string())
 }
 
 async fn run_cron(
@@ -1850,11 +1979,12 @@ pub fn doctor_exit_code(checks: &[DoctorCheck]) -> i32 {
 }
 
 pub fn usage_text() -> &'static str {
-    "refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ps [--json]\n    projects [--json] [open <path>|pin <id|path>|unpin <id|path>|forget <id|path>]\n    cron [--json] <list|add|run|rm|pause|resume> [--project <id|path>]\n    restart [--json] (--daemon|<id|path>)\n    stop [--json] (--daemon|<id|path>)\n    logs [--json] [-f] [--daemon|<id|path>]\n    events [--json] [-f] [--kind <kind>]\n    status [--json]\n    doctor [--json]\n    version [--json]"
+    "refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ui [<path>] [--json] [--no-open]\n    ps [--json]\n    projects [--json] [open <path>|pin <id|path>|unpin <id|path>|forget <id|path>]\n    cron [--json] <list|add|run|rm|pause|resume> [--project <id|path>]\n    restart [--json] (--daemon|<id|path>)\n    stop [--json] (--daemon|<id|path>)\n    logs [--json] [-f] [--daemon|<id|path>]\n    events [--json] [-f] [--kind <kind>]\n    status [--json]\n    doctor [--json]\n    version [--json]"
 }
 
 pub fn subcommand_usage_text(subcommand: &str) -> Option<&'static str> {
     match subcommand {
+        "ui" => Some("refact ui [<path>] [--json] [--no-open]\n\nOpen the dashboard or a project workspace in the default browser.\n\nOPTIONS:\n    --json                      Emit the URL as JSON without opening a browser\n    --no-open                   Print the URL without opening a browser"),
         "ps" => Some("refact ps [--json]\n\nList daemon workers."),
         "projects" => Some("refact projects [--json] [open <path>|pin <id|path>|unpin <id|path>|forget <id|path>]\n\nManage daemon project registry."),
         "cron" => Some("refact cron [--json] <list|add|run|rm|pause|resume> [--project <id|path>]\n\nManage worker scheduler jobs through the daemon proxy."),
@@ -1937,6 +2067,51 @@ mod tests {
 
         let error = parse_cli_args(&["events".into(), "--json".into(), "-f".into()]).unwrap_err();
         assert!(error.contains("incompatible"));
+    }
+
+    #[test]
+    fn parse_ui_variants_and_rejects_unknown_flag() {
+        for (args, expected_path, expected_json, expected_no_open) in [
+            (vec!["ui".into()], None, false, false),
+            (
+                vec!["ui".into(), "/tmp/x".into()],
+                Some(PathBuf::from("/tmp/x")),
+                false,
+                false,
+            ),
+            (vec!["ui".into(), "--json".into()], None, true, false),
+            (vec!["ui".into(), "--no-open".into()], None, false, true),
+        ] {
+            let options = parse_cli_args(&args).unwrap();
+            assert_eq!(
+                options.command,
+                CliCommand::Ui {
+                    path: expected_path,
+                    json: expected_json,
+                    no_open: expected_no_open,
+                }
+            );
+        }
+
+        let error = parse_cli_args(&["ui".into(), "--bogus".into()]).unwrap_err();
+        assert!(error.contains("unknown ui option `--bogus`"));
+    }
+
+    #[test]
+    fn ui_url_without_auth_uses_dashboard_or_project_path() {
+        assert_eq!(ui_url(8488, None, None), "http://127.0.0.1:8488/");
+        assert_eq!(
+            ui_url(8488, Some("project-id"), None),
+            "http://127.0.0.1:8488/p/project-id/"
+        );
+    }
+
+    #[test]
+    fn ui_url_with_auth_encodes_bootstrap_token() {
+        assert_eq!(
+            ui_url(8488, Some("project-id"), Some("secret token&more")),
+            "http://127.0.0.1:8488/p/project-id/?daemon_token=secret+token%26more"
+        );
     }
 
     #[test]
