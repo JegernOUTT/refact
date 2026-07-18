@@ -151,6 +151,7 @@ export type DaemonFolderBrowseResponse = {
   parent: string | null;
   dirs: DaemonFolderEntry[];
   can_open: boolean;
+  truncated: boolean;
 };
 
 function validPort(port: number | undefined): port is number {
@@ -184,6 +185,16 @@ export function resolveDaemonBaseUrl(config: EngineApiConfig): string {
 
   const port = validPort(config.lspPort) ? config.lspPort : DEFAULT_DAEMON_PORT;
   return `http://127.0.0.1:${port}`;
+}
+
+export function projectApiUrl(
+  daemonBase: string,
+  projectId: string,
+  path: string,
+): string {
+  const base = daemonBase.replace(/\/+$/, "");
+  const suffix = path.startsWith("/") ? path : `/${path}`;
+  return `${base}/p/${encodeURIComponent(projectId)}/v1${suffix}`;
 }
 
 function isWorkersEmptyBody(error: FetchBaseQueryError): boolean {

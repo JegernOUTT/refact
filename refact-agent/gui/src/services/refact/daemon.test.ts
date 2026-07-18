@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { setUpStore } from "../../app/store";
 import { server } from "../../utils/mockServer";
-import { daemonApi, resolveDaemonBaseUrl } from "./daemon";
+import { daemonApi, projectApiUrl, resolveDaemonBaseUrl } from "./daemon";
 
 const status = {
   pid: 123,
@@ -40,6 +40,16 @@ const workers = [
 ];
 
 describe("daemonApi", () => {
+  it("builds encoded project proxy API URLs", () => {
+    expect(
+      projectApiUrl(
+        "https://daemon.example.test/",
+        "project / one",
+        "rag-status",
+      ),
+    ).toBe("https://daemon.example.test/p/project%20%2F%20one/v1/rag-status");
+  });
+
   it("derives daemon root from lspUrl origin and omits the model apiKey", async () => {
     const requested: { url: string; authorization: string | null }[] = [];
     server.use(

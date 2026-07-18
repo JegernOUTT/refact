@@ -6,7 +6,7 @@ import { ActivityPlaceholderPage } from "./Activity/PlaceholderPage";
 import { DashboardNav } from "./DashboardNav";
 import { DoctorPlaceholderPage } from "./Doctor/PlaceholderPage";
 import { HomePlaceholderPage } from "./Home/PlaceholderPage";
-import { ProjectsPlaceholderPage } from "./Projects/PlaceholderPage";
+import { ProjectsPage } from "./Projects/ProjectsPage";
 import { SchedulerPlaceholderPage } from "./Scheduler/PlaceholderPage";
 import { SettingsPage } from "./Settings/SettingsPage";
 import { UsagePlaceholderPage } from "./Usage/PlaceholderPage";
@@ -28,7 +28,7 @@ function DashboardPageContent() {
   const page = useAppSelector(selectDashboardPage);
   switch (page) {
     case "projects":
-      return <ProjectsPlaceholderPage />;
+      return <ProjectsPage />;
     case "activity":
       return <ActivityPlaceholderPage />;
     case "scheduler":
