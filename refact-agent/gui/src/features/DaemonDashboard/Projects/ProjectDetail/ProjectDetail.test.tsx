@@ -191,6 +191,15 @@ const trajectories = [
     mode: "agent",
     message_count: 12,
   },
+  {
+    id: "chat-2",
+    title: "Improve tests",
+    created_at: "2026-07-17T00:00:00Z",
+    updated_at: "2026-07-17T01:00:00Z",
+    model: "claude",
+    mode: "agent",
+    message_count: 4,
+  },
 ];
 
 const tasks = [
@@ -361,9 +370,15 @@ describe("ProjectDetailPage", () => {
 
     await view.user.click(screen.getByRole("tab", { name: "Chats" }));
     expect(await screen.findByText("Fix the parser")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Resume" })).toHaveAttribute(
+    const resumeLinks = screen.getAllByRole("link", { name: "Resume" });
+    expect(resumeLinks).toHaveLength(2);
+    expect(resumeLinks[0]).toHaveAttribute(
       "href",
-      `${BASE}/p/${PROJECT}/`,
+      `${BASE}/p/${PROJECT}/?chat=chat-1`,
+    );
+    expect(resumeLinks[1]).toHaveAttribute(
+      "href",
+      `${BASE}/p/${PROJECT}/?chat=chat-2`,
     );
 
     await view.user.click(screen.getByRole("tab", { name: "Tasks" }));

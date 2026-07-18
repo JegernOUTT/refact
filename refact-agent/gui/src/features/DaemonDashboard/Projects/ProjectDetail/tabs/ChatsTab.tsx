@@ -82,7 +82,11 @@ function ChatsContent({
                       </span>
                     </span>
                     <span className={styles.rowMeta}>
-                      <a href={openUrl}>Resume</a>
+                      <a
+                        href={`${openUrl}?chat=${encodeURIComponent(chat.id)}`}
+                      >
+                        Resume
+                      </a>
                     </span>
                   </li>
                 ))}

@@ -59,7 +59,9 @@ export function ContinueWidget({
             <li key={`${chat.projectId}:${chat.id}`}>
               <a
                 className={styles.listLink}
-                href={`/p/${encodeURIComponent(chat.projectId)}/`}
+                href={`/p/${encodeURIComponent(
+                  chat.projectId,
+                )}/?chat=${encodeURIComponent(chat.id)}`}
               >
                 <span className={styles.rowCopy}>
                   <strong>{chat.title}</strong>

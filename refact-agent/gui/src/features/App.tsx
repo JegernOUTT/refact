@@ -29,6 +29,7 @@ import {
   useResizeObserverOnRef,
 } from "../hooks";
 import { useBrowserOnlineStatus } from "../hooks/useBrowserOnlineStatus";
+import { useChatDeepLink } from "../hooks/useChatDeepLink";
 import { store } from "../app/store";
 import { Provider } from "react-redux";
 import { Theme } from "../components/Theme";
@@ -293,6 +294,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
     isPageInHistory("task agent");
 
   const canAccessApp = providerBootstrap.canAccessApp;
+  useChatDeepLink(canAccessApp && isLoggedIn);
   const hadAppAccessRef = useRef(canAccessApp);
   const [startupResolved, setStartupResolved] = useState(false);
   const [startupDeadlineReached, setStartupDeadlineReached] = useState(false);
