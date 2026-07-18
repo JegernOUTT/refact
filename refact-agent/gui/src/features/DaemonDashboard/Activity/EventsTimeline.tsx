@@ -81,15 +81,26 @@ function EventRow({ event, projectSlug }: EventRowProps) {
 }
 
 type EventsTimelineProps = {
+  projectIdParam?: string;
   workers: DaemonWorker[];
 };
 
-export function EventsTimeline({ workers }: EventsTimelineProps) {
+export function EventsTimeline({
+  projectIdParam,
+  workers,
+}: EventsTimelineProps) {
   const events = useAppSelector(selectDaemonEvents);
   const streamStatus = useAppSelector(selectDaemonStreamStatus);
   const [selectedKinds, setSelectedKinds] = useState<Set<string>>(new Set());
-  const [projectId, setProjectId] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(
+    projectIdParam ?? null,
+  );
   const [following, setFollowing] = useState(true);
+
+  useEffect(() => {
+    if (projectIdParam) setProjectId(projectIdParam);
+  }, [projectIdParam]);
+
   const listRef = useRef<VirtualListHandle>(null);
   const kinds = useMemo(
     () => [...new Set(events.map((event) => event.kind))].sort(),

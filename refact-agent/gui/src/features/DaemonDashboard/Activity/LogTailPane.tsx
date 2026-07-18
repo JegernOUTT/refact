@@ -10,12 +10,13 @@ import { appendLogLine, MAX_LOG_LINES, mergeLogLines } from "./activityState";
 import styles from "./ActivityPage.module.css";
 
 type LogTailPaneProps = {
+  projectIdParam?: string;
   workers: DaemonWorker[];
 };
 
-export function LogTailPane({ workers }: LogTailPaneProps) {
+export function LogTailPane({ projectIdParam, workers }: LogTailPaneProps) {
   const config = useConfig();
-  const [target, setTarget] = useState("daemon");
+  const [target, setTarget] = useState(projectIdParam ?? "daemon");
   const [lines, setLines] = useState<string[]>([]);
   const [paused, setPaused] = useState(false);
   const [streamStatus, setStreamStatus] = useState<
@@ -30,6 +31,10 @@ export function LogTailPane({ workers }: LogTailPaneProps) {
   const selectedWorker = workers.find(
     (worker) => worker.project_id === projectId,
   );
+
+  useEffect(() => {
+    if (projectIdParam) setTarget(projectIdParam);
+  }, [projectIdParam]);
 
   useEffect(() => {
     pausedRef.current = paused;
