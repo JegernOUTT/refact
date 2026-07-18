@@ -69,8 +69,8 @@ describe("dashboardSlice", () => {
     });
   });
 
-  it("deduplicates daemon events and caps the ring at 500", () => {
-    const events = Array.from({ length: 505 }, (_, index) => ({
+  it("deduplicates daemon events and caps the ring at 1000", () => {
+    const events = Array.from({ length: 1_005 }, (_, index) => ({
       seq: index + 1,
       ts_ms: index,
       kind: "worker_status",
@@ -79,10 +79,10 @@ describe("dashboardSlice", () => {
     }));
     const state = dashboardSlice.reducer(
       undefined,
-      daemonEventsReceived([...events, { ...events[504], kind: "latest" }]),
+      daemonEventsReceived([...events, { ...events[1_004], kind: "latest" }]),
     );
 
-    expect(state.events).toHaveLength(500);
+    expect(state.events).toHaveLength(1_000);
     expect(state.events[0].seq).toBe(6);
     expect(state.events.at(-1)?.kind).toBe("latest");
   });
@@ -117,6 +117,13 @@ describe("App dashboard surface", () => {
         }),
       ),
       http.get("*/daemon/v1/workers", () => HttpResponse.json([])),
+      http.get(
+        "*/daemon/v1/events",
+        () =>
+          new HttpResponse("", {
+            headers: { "Content-Type": "text/event-stream" },
+          }),
+      ),
     );
   });
 

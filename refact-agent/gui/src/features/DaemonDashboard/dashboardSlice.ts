@@ -25,7 +25,7 @@ export type DashboardState = {
   streamStatus: DashboardStreamStatus;
 };
 
-const MAX_DAEMON_EVENTS = 500;
+const MAX_DAEMON_EVENTS = 1_000;
 
 const initialState: DashboardState = {
   navigation: { page: "home", params: {} },

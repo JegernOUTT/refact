@@ -187,6 +187,18 @@ export function resolveDaemonBaseUrl(config: EngineApiConfig): string {
   return `http://127.0.0.1:${port}`;
 }
 
+export function resolveDaemonLogsUrl(
+  config: EngineApiConfig,
+  projectId: string | null,
+  stream: boolean,
+  tail: number,
+): string {
+  const params = new URLSearchParams({ tail: String(tail) });
+  if (projectId) params.set("project_id", projectId);
+  const path = stream ? "/daemon/v1/logs/stream" : "/daemon/v1/logs";
+  return `${resolveDaemonBaseUrl(config)}${path}?${params.toString()}`;
+}
+
 export function projectApiUrl(
   daemonBase: string,
   projectId: string,
@@ -569,6 +581,7 @@ export const {
   useGetDaemonUpdateStatusQuery,
   useInstallDaemonUpdateMutation,
   useLazyCheckDaemonUpdateQuery,
+  useLazyGetDaemonEventsQuery,
   useListProjectsQuery,
   useOpenProjectMutation,
   usePinProjectMutation,

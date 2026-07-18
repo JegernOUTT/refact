@@ -2,7 +2,7 @@ import { Badge } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import { useDaemonEventsStream } from "../../hooks/useDaemonEventsStream";
 import { useGetDaemonInfoQuery } from "../../services/refact/daemon";
-import { ActivityPlaceholderPage } from "./Activity/PlaceholderPage";
+import { ActivityPage } from "./Activity/ActivityPage";
 import { DashboardNav } from "./DashboardNav";
 import { DoctorPlaceholderPage } from "./Doctor/PlaceholderPage";
 import { HomePlaceholderPage } from "./Home/PlaceholderPage";
@@ -30,7 +30,7 @@ function DashboardPageContent() {
     case "projects":
       return <ProjectsPage />;
     case "activity":
-      return <ActivityPlaceholderPage />;
+      return <ActivityPage />;
     case "scheduler":
       return <SchedulerPlaceholderPage />;
     case "usage":
@@ -45,11 +45,11 @@ function DashboardPageContent() {
 }
 
 export function DaemonDashboardShell() {
-  useDaemonEventsStream();
   const { data, error } = useGetDaemonInfoQuery(undefined, {
     pollingInterval: DAEMON_POLLING_INTERVAL_MS,
   });
   const status = data?.status;
+  useDaemonEventsStream({ daemonStartedAtMs: status?.started_at_ms });
   const live = status !== undefined && error === undefined;
 
   return (

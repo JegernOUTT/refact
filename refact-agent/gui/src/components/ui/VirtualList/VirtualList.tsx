@@ -1,7 +1,7 @@
 import classNames from "classnames";
 import React from "react";
 import { Virtuoso } from "react-virtuoso";
-import type { Components } from "react-virtuoso";
+import type { Components, VirtuosoHandle } from "react-virtuoso";
 
 import styles from "./VirtualList.module.css";
 
@@ -14,7 +14,12 @@ export interface VirtualListProps<T>
   footer?: React.ReactNode;
   emptyMessage?: React.ReactNode;
   height?: string | number;
+  listRef?: React.Ref<VirtuosoHandle>;
+  onListScroll?: React.UIEventHandler<HTMLDivElement>;
+  onListWheel?: React.WheelEventHandler<HTMLDivElement>;
 }
+
+export type VirtualListHandle = VirtuosoHandle;
 
 export function VirtualList<T>({
   className,
@@ -24,6 +29,9 @@ export function VirtualList<T>({
   header,
   height = 360,
   items,
+  listRef,
+  onListScroll,
+  onListWheel,
   renderItem,
   ...props
 }: VirtualListProps<T>) {
@@ -55,6 +63,9 @@ export function VirtualList<T>({
           computeItemKey={
             getItemKey ? (index, item) => getItemKey(item, index) : undefined
           }
+          onScroll={onListScroll}
+          onWheel={onListWheel}
+          ref={listRef}
         />
       ) : (
         <div className={styles.empty}>{emptyMessage}</div>

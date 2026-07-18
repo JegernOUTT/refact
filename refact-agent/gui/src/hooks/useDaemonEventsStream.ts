@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 
 import {
   daemonEventsReceived,
+  daemonEventsReset,
   daemonStreamStatusChanged,
   selectDaemonEvents,
 } from "../features/DaemonDashboard/dashboardSlice";
@@ -11,10 +12,38 @@ import { useConfig } from "./useConfig";
 import {
   resolveDaemonBaseUrl,
   type DaemonEvent,
+  useLazyGetDaemonEventsQuery,
 } from "../services/refact/daemon";
 
 const MAX_RECONNECT_DELAY_MS = 10_000;
 const INITIAL_RECONNECT_DELAY_MS = 250;
+
+export type DaemonEventsStreamOptions = {
+  backfill?: (afterSequence: number) => Promise<DaemonEvent[]>;
+  daemonStartedAtMs?: number | null;
+};
+
+type FlushHandle =
+  | { type: "frame"; id: number }
+  | { type: "timeout"; id: ReturnType<typeof setTimeout> };
+
+function scheduleFrame(callback: () => void): FlushHandle {
+  if (typeof globalThis.requestAnimationFrame === "function") {
+    return {
+      type: "frame",
+      id: globalThis.requestAnimationFrame(callback),
+    };
+  }
+  return { type: "timeout", id: setTimeout(callback, 16) };
+}
+
+function cancelFrame(handle: FlushHandle) {
+  if (handle.type === "frame") {
+    globalThis.cancelAnimationFrame(handle.id);
+    return;
+  }
+  clearTimeout(handle.id);
+}
 
 function parseDaemonEvent(data: string): DaemonEvent | null {
   try {
@@ -39,12 +68,15 @@ function parseDaemonEvent(data: string): DaemonEvent | null {
   }
 }
 
-export function useDaemonEventsStream() {
+export function useDaemonEventsStream(options: DaemonEventsStreamOptions = {}) {
   const dispatch = useAppDispatch();
   const config = useConfig();
   const events = useAppSelector(selectDaemonEvents);
+  const [getBackfill] = useLazyGetDaemonEventsQuery();
+  const backfillOverride = options.backfill;
   const initialSequence = events.at(-1)?.seq ?? 0;
   const lastSequenceRef = useRef(initialSequence);
+  const daemonStartedAtRef = useRef(options.daemonStartedAtMs);
 
   useEffect(() => {
     lastSequenceRef.current = Math.max(
@@ -54,10 +86,39 @@ export function useDaemonEventsStream() {
   }, [initialSequence]);
 
   useEffect(() => {
+    const previous = daemonStartedAtRef.current;
+    const current = options.daemonStartedAtMs;
+    daemonStartedAtRef.current = current;
+    if (previous == null || current == null || previous === current) return;
+    lastSequenceRef.current = 0;
+    dispatch(daemonEventsReset());
+  }, [dispatch, options.daemonStartedAtMs]);
+
+  useEffect(() => {
     let eventSource: EventSource | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let flushHandle: FlushHandle | null = null;
     let stopped = false;
     let reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+    let connectGeneration = 0;
+    let bufferedEvents: DaemonEvent[] = [];
+
+    function flushEvents() {
+      flushHandle = null;
+      if (stopped || bufferedEvents.length === 0) return;
+      const eventsToDispatch = bufferedEvents;
+      bufferedEvents = [];
+      dispatch(daemonEventsReceived(eventsToDispatch));
+    }
+
+    function bufferEvent(event: DaemonEvent) {
+      bufferedEvents.push(event);
+      flushHandle ??= scheduleFrame(flushEvents);
+    }
+
+    function connectionIsCurrent(generation: number) {
+      return !stopped && generation === connectGeneration;
+    }
 
     function scheduleReconnect(immediate: boolean) {
       eventSource?.close();
@@ -70,7 +131,7 @@ export function useDaemonEventsStream() {
       }
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
-        connect();
+        void connect(true);
       }, delay);
     }
 
@@ -78,19 +139,31 @@ export function useDaemonEventsStream() {
       const event = parseDaemonEvent(message.data);
       if (!event || event.seq <= lastSequenceRef.current) return;
 
-      const expectedSequence = lastSequenceRef.current + 1;
-      const resyncMarker = event.kind === "daemon_events_resync_required";
-      if (event.seq !== expectedSequence && !resyncMarker) {
-        scheduleReconnect(true);
-        return;
-      }
-
       lastSequenceRef.current = event.seq;
-      dispatch(daemonEventsReceived([event]));
+      bufferEvent(event);
     }
 
-    function connect() {
+    async function connect(reconnecting: boolean) {
       if (stopped) return;
+      const generation = ++connectGeneration;
+      dispatch(
+        daemonStreamStatusChanged(reconnecting ? "reconnecting" : "connecting"),
+      );
+      try {
+        const backfill = backfillOverride
+          ? await backfillOverride(lastSequenceRef.current)
+          : await getBackfill(lastSequenceRef.current, false).unwrap();
+        if (!connectionIsCurrent(generation)) return;
+        if (backfill.length > 0) {
+          lastSequenceRef.current = Math.max(
+            lastSequenceRef.current,
+            ...backfill.map((event) => event.seq),
+          );
+          dispatch(daemonEventsReceived(backfill));
+        }
+      } catch {
+        if (!connectionIsCurrent(generation)) return;
+      }
       const params = new URLSearchParams({
         after_seq: String(lastSequenceRef.current),
         follow: "true",
@@ -98,7 +171,6 @@ export function useDaemonEventsStream() {
       const url = `${resolveDaemonBaseUrl(
         config,
       )}/daemon/v1/events?${params.toString()}`;
-      dispatch(daemonStreamStatusChanged("connecting"));
       eventSource = new EventSource(url);
       eventSource.onopen = () => {
         reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
@@ -109,12 +181,20 @@ export function useDaemonEventsStream() {
       eventSource.onerror = () => scheduleReconnect(false);
     }
 
-    connect();
+    void connect(false);
 
     return () => {
       stopped = true;
+      connectGeneration += 1;
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      if (flushHandle !== null) cancelFrame(flushHandle);
       eventSource?.close();
     };
-  }, [config, dispatch]);
+  }, [
+    backfillOverride,
+    config,
+    dispatch,
+    getBackfill,
+    options.daemonStartedAtMs,
+  ]);
 }
