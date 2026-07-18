@@ -1,9 +1,12 @@
-import { useMemo, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 
+import { ideRequestLogs } from "../../hooks/useEventBusForIDE";
+import { usePostMessage } from "../../hooks/usePostMessage";
 import {
   useGetBugReportErrorsQuery,
   useGetBugReportLogsQuery,
 } from "../../services/refact/bugReport";
+import { getIdeLogEntries, subscribeIdeLog, type IdeLogEntry } from "./ideLog";
 import {
   getWebuiLogEntries,
   subscribeWebuiLog,
@@ -36,6 +39,8 @@ export type AggregatedError = {
   level: "error" | "warn";
   message: string;
   at?: number;
+  count?: number;
+  location?: string;
 };
 
 export const LOG_TAIL_LINES = 400;
@@ -44,15 +49,30 @@ const LOGS_POLL_MS = 2000;
 const ERRORS_POLL_MS = 5000;
 
 const LEVEL_TOKEN = /\b(ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE)\b/;
+const ENGINE_HEADER = /^\d{5,6}\.\d{1,3} (ERROR|WARN|INFO|DEBUG|TRACE)\b/;
+const DAEMON_HEADER =
+  /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+(ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE)\b/;
+const IDEA_LOG_HEADER =
+  /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ \[\s*\d+\]\s+(ERROR|WARN|INFO|DEBUG|TRACE)\b/;
+const SIMPLE_TIME_HEADER = /^\d{2}:\d{2}:\d{2} (ERROR|WARN|INFO|DEBUG)\b/;
 
-export function detectLineLevel(text: string): LogLevel {
-  const match = LEVEL_TOKEN.exec(text);
-  if (!match) return "unknown";
-  const token = match[1];
+function levelFromToken(token: string): LogLevel {
   if (token === "ERROR") return "error";
   if (token.startsWith("WARN")) return "warn";
   if (token === "INFO") return "info";
   return "debug";
+}
+
+export function detectLineLevel(text: string): LogLevel {
+  const positionalMatch =
+    ENGINE_HEADER.exec(text) ??
+    DAEMON_HEADER.exec(text) ??
+    IDEA_LOG_HEADER.exec(text) ??
+    SIMPLE_TIME_HEADER.exec(text);
+  if (positionalMatch) return levelFromToken(positionalMatch[1]);
+  const match = LEVEL_TOKEN.exec(text);
+  if (!match) return "unknown";
+  return levelFromToken(match[1]);
 }
 
 export function lineMatchesFilter(
@@ -67,16 +87,38 @@ export function lineMatchesFilter(
   return true;
 }
 
-function toLogLines(lines: string[]): LogLine[] {
-  return lines.map((text) => ({ text, level: detectLineLevel(text) }));
+export function toLogLines(lines: string[]): LogLine[] {
+  let previousLevel: LogLevel = "unknown";
+  return lines.map((text) => {
+    const detectedLevel = detectLineLevel(text);
+    const level =
+      detectedLevel === "unknown" && previousLevel !== "unknown"
+        ? previousLevel
+        : detectedLevel;
+    previousLevel = level;
+    return { text, level };
+  });
+}
+
+function formatTime(at: number): string {
+  return new Date(at).toTimeString().slice(0, 8);
 }
 
 function formatWebuiEntry(entry: WebuiLogEntry): LogLine {
-  const time = new Date(entry.at).toTimeString().slice(0, 8);
   return {
-    text: `${time} ${entry.level.toUpperCase()} ${entry.message}`,
+    text: `${formatTime(entry.at)} ${entry.level.toUpperCase()} ${
+      entry.message
+    }`,
     level: entry.level,
   };
+}
+
+function formatIdeEntry(entry: IdeLogEntry): LogLine {
+  const text =
+    entry.at === undefined
+      ? `${entry.level.toUpperCase()} ${entry.message}`
+      : `${formatTime(entry.at)} ${entry.level.toUpperCase()} ${entry.message}`;
+  return { text, level: entry.level };
 }
 
 function countErrors(lines: LogLine[]): number {
@@ -90,13 +132,23 @@ function normalizeBackendSource(source: string): BugReportSourceKey {
   return source === "daemon" ? "daemon" : "engine";
 }
 
-export function useBugReportSources(paused: boolean): {
+function isIdeAvailable(host: string): boolean {
+  return host === "vscode" || host === "jetbrains" || host === "ide";
+}
+
+export function useBugReportSources(
+  paused: boolean,
+  host: string,
+): {
   sources: BugReportSource[];
   aggregatedErrors: AggregatedError[];
   webuiLines: string[];
+  ideLines: string[];
 } {
   const pollingLogs = paused ? 0 : LOGS_POLL_MS;
   const pollingErrors = paused ? 0 : ERRORS_POLL_MS;
+  const postMessage = usePostMessage();
+  const ideAvailable = isIdeAvailable(host);
   const engineLogs = useGetBugReportLogsQuery(
     { source: "engine", tail: LOG_TAIL_LINES },
     { pollingInterval: pollingLogs },
@@ -113,11 +165,27 @@ export function useBugReportSources(paused: boolean): {
     getWebuiLogEntries,
     getWebuiLogEntries,
   );
+  const ideEntries = useSyncExternalStore(
+    subscribeIdeLog,
+    getIdeLogEntries,
+    getIdeLogEntries,
+  );
+
+  useEffect(() => {
+    if (!ideAvailable || paused) return undefined;
+    const requestLogs = () => {
+      postMessage(ideRequestLogs({ limit: LOG_TAIL_LINES }));
+    };
+    requestLogs();
+    const interval = window.setInterval(requestLogs, LOGS_POLL_MS);
+    return () => window.clearInterval(interval);
+  }, [ideAvailable, paused, postMessage]);
 
   const sources = useMemo<BugReportSource[]>(() => {
     const daemonLines = toLogLines(daemonLogs.data?.lines ?? []);
     const engineLines = toLogLines(engineLogs.data?.lines ?? []);
-    const webuiLines = webuiEntries.map(formatWebuiEntry);
+    const webuiLogLines = webuiEntries.map(formatWebuiEntry);
+    const ideLogLines = ideAvailable ? ideEntries.map(formatIdeEntry) : [];
     return [
       {
         key: "daemon",
@@ -144,19 +212,25 @@ export function useBugReportSources(paused: boolean): {
         label: "Web UI",
         available: true,
         exists: true,
-        lines: webuiLines,
-        errorCount: countErrors(webuiLines),
+        lines: webuiLogLines,
+        errorCount: countErrors(webuiLogLines),
       },
       {
         key: "ide",
         label: "IDE",
-        available: false,
-        exists: false,
-        lines: [],
-        errorCount: 0,
+        available: ideAvailable,
+        exists: ideAvailable,
+        lines: ideLogLines,
+        errorCount: countErrors(ideLogLines),
       },
     ];
-  }, [daemonLogs.data, engineLogs.data, webuiEntries]);
+  }, [
+    daemonLogs.data,
+    engineLogs.data,
+    ideAvailable,
+    ideEntries,
+    webuiEntries,
+  ]);
 
   const aggregatedErrors = useMemo<AggregatedError[]>(() => {
     const backend = (backendErrors.data?.errors ?? []).map(
@@ -164,26 +238,46 @@ export function useBugReportSources(paused: boolean): {
         source: normalizeBackendSource(entry.source),
         level: entry.level === "warn" ? "warn" : "error",
         message: entry.message,
+        count: entry.count,
+        location: entry.location,
       }),
     );
     const webui = [...webuiEntries]
       .reverse()
-      .filter((entry) => entry.level === "error")
+      .filter((entry) => entry.level === "error" || entry.level === "warn")
       .map(
         (entry): AggregatedError => ({
           source: "webui",
-          level: "error",
+          level: entry.level === "warn" ? "warn" : "error",
           message: entry.message,
           at: entry.at,
         }),
       );
-    return [...backend, ...webui].slice(0, MAX_AGGREGATED_ERRORS);
-  }, [backendErrors.data, webuiEntries]);
+    const ide = ideAvailable
+      ? [...ideEntries]
+          .reverse()
+          .filter((entry) => entry.level === "error" || entry.level === "warn")
+          .map(
+            (entry): AggregatedError => ({
+              source: "ide",
+              level: entry.level === "warn" ? "warn" : "error",
+              message: entry.message,
+              at: entry.at,
+            }),
+          )
+      : [];
+    return [...backend, ...webui, ...ide].slice(0, MAX_AGGREGATED_ERRORS);
+  }, [backendErrors.data, ideAvailable, ideEntries, webuiEntries]);
 
   const webuiLines = useMemo(
     () => webuiEntries.map((entry) => formatWebuiEntry(entry).text),
     [webuiEntries],
   );
+  const ideLines = useMemo(
+    () =>
+      ideAvailable ? ideEntries.map((entry) => formatIdeEntry(entry).text) : [],
+    [ideAvailable, ideEntries],
+  );
 
-  return { sources, aggregatedErrors, webuiLines };
+  return { sources, aggregatedErrors, webuiLines, ideLines };
 }

@@ -60,6 +60,7 @@ import {
 } from "./nativeDiff";
 import { backendConfigForStatus, effectiveLspPortForStatus, type RefactBackendConfig } from "./backendStatus";
 import { webviewEndpointConfig } from "./sidebarConfig";
+import { getIdeLogSnapshot } from "./ideLogBuffer";
 
 const OPEN_CHAT_IN_BROWSER_EVENT = "ide/openChatInBrowser";
 
@@ -605,13 +606,18 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     }
 
     private async handleEvents(e: any) {
-        console.log("sidebar event", e);
         if(!e || typeof e !== "object") {
             return;
         }
         if(!("type" in e)) {
             return;
         }
+        if(e.type === "ide/requestLogs") {
+            const requestedLimit = typeof e.payload?.limit === "number" && Number.isFinite(e.payload.limit) ? e.payload.limit : 400;
+            const limit = Math.min(500, Math.max(1, Math.floor(requestedLimit)));
+            return this._view?.webview.postMessage({ type: "ide/logLines", payload: { lines: getIdeLogSnapshot(limit) } });
+        }
+        console.log("sidebar event", e);
         // FIM Data from IDE
         if(fim.ready.match(e)|| fim.request.match(e)) {
             if(global.fim_data_cache) {

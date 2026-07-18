@@ -54,6 +54,7 @@ export type ReportFormProps = {
   context?: BugReportContext;
   errors: AggregatedError[];
   webuiLines: string[];
+  ideLines: string[];
   host: string;
 };
 
@@ -61,6 +62,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
   context,
   errors,
   webuiLines,
+  ideLines,
   host,
 }) => {
   const openUrl = useOpenUrl();
@@ -70,6 +72,7 @@ export const ReportForm: React.FC<ReportFormProps> = ({
   const [destDir, setDestDir] = useState("");
   const [redact, setRedact] = useState(true);
   const [attachWebui, setAttachWebui] = useState(true);
+  const [attachIde, setAttachIde] = useState(true);
   const [previewOpen, setPreviewOpen] = useState(false);
   const bodyTouchedRef = useRef(false);
 
@@ -97,9 +100,19 @@ export const ReportForm: React.FC<ReportFormProps> = ({
     void createBundle({
       dest_dir: destDir.trim() || undefined,
       redact,
-      webui_lines: attachWebui ? webuiLines : undefined,
+      webui_lines:
+        attachWebui && webuiLines.length > 0 ? webuiLines : undefined,
+      ide_lines: attachIde && ideLines.length > 0 ? ideLines : undefined,
     });
-  }, [attachWebui, createBundle, destDir, redact, webuiLines]);
+  }, [
+    attachIde,
+    attachWebui,
+    createBundle,
+    destDir,
+    ideLines,
+    redact,
+    webuiLines,
+  ]);
 
   const githubUrl = useMemo(
     () => buildGithubIssueUrl({ title, labels, body }),
@@ -167,6 +180,13 @@ export const ReportForm: React.FC<ReportFormProps> = ({
             label="Include Web UI captured errors in the bundle"
             onCheckedChange={setAttachWebui}
           />
+          {host !== "web" && (
+            <Switch
+              checked={attachIde}
+              label="Include IDE captured logs in the bundle"
+              onCheckedChange={setAttachIde}
+            />
+          )}
           <Switch
             checked={redact}
             label="Redact secrets & tokens"

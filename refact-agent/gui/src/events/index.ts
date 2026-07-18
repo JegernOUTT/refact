@@ -81,9 +81,11 @@ export {
   ideTaskDone,
   ideAskQuestions,
   ideSwitchToThread,
+  ideRequestLogs,
 } from "../hooks/useEventBusForIDE";
 
 export { ideAttachFileToChat } from "../hooks/useEventBusForApp";
+export { ideLogLines } from "../features/BugReport/ideLog";
 export { toPascalCase } from "../utils/toPascalCase";
 export const fim = {
   request,

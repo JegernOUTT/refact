@@ -45,6 +45,13 @@
   background: var(--rf-color-accent-soft);
 }
 
+.viewFrame {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
 .view {
   flex: 1;
   min-height: 0;
@@ -63,6 +70,20 @@
 
 .line:hover {
   background: var(--rf-surface-1);
+}
+
+.latestPill {
+  position: absolute;
+  right: var(--rf-space-3);
+  bottom: var(--rf-space-3);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border: 1px solid var(--rf-hairline);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-glass);
+  color: var(--rf-color-accent);
+  box-shadow: var(--rf-elev-panel);
+  cursor: pointer;
+  font: inherit;
 }
 
 .lineError {

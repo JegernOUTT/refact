@@ -97,6 +97,10 @@ export const ideSwitchToThread = createAction<{
   chatId: string;
 }>("ide/switchToThread");
 
+export const ideRequestLogs = createAction<{ limit: number }>(
+  "ide/requestLogs",
+);
+
 export const useEventsBusForIDE = () => {
   const postMessage = usePostMessage();
   // const canPaste = useAppSelector((state) => state.active_file.can_paste);
@@ -310,6 +314,14 @@ export const useEventsBusForIDE = () => {
     [postMessage],
   );
 
+  const queryIdeLogs = useCallback(
+    (limit: number) => {
+      const action = ideRequestLogs({ limit });
+      postMessage(action);
+    },
+    [postMessage],
+  );
+
   return {
     diffPasteBack,
     openSettings,
@@ -335,5 +347,6 @@ export const useEventsBusForIDE = () => {
     setLoginMessage,
     notifyTaskDone,
     notifyAskQuestions,
+    queryIdeLogs,
   };
 };

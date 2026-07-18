@@ -106,6 +106,13 @@
   color: var(--rf-color-faint);
 }
 
+.location {
+  max-width: var(--rf-nav-w-min);
+  font-size: var(--rf-text-1);
+  font-family: var(--rf-font-mono);
+  color: var(--rf-color-faint);
+}
+
 .message {
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-1);

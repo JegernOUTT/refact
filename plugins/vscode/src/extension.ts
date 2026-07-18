@@ -20,6 +20,7 @@ import { ChatTab } from './chatTab';
 import { FimDebugData } from 'refact-chat-js/dist/events/index.js';
 import { code_lens_execute } from './codeLens';
 import { registerRefactDiffContentProvider } from './nativeDiff';
+import { installIdeConsoleCapture } from './ideLogBuffer';
 
 
 declare global {
@@ -44,6 +45,7 @@ declare global {
     var comment_file_uri: vscode.Uri|undefined;
     var is_chat_streaming: boolean | undefined;
     var open_chat_panels: Record<string, vscode.WebviewPanel>;
+    var ide_log_capture_uninstall: (() => void) | undefined;
 
     var toolbox_config: launchRust.ToolboxConfig | undefined;
     var toolbox_command_disposables: vscode.Disposable[];
@@ -198,6 +200,7 @@ export async function inline_accepted(this_completion_serial_number: number)
 
 export function activate(context: vscode.ExtensionContext)
 {
+    global.ide_log_capture_uninstall = installIdeConsoleCapture();
     global.global_context = context;
     global.enable_longthink_completion = false;
     global.last_positive_result = 0;
@@ -470,6 +473,10 @@ export async function deactivate(context: vscode.ExtensionContext)
     if (global.rust_binary_blob) {
         await global.rust_binary_blob.terminate();
         global.rust_binary_blob = undefined;
+    }
+    if (global.ide_log_capture_uninstall) {
+        global.ide_log_capture_uninstall();
+        global.ide_log_capture_uninstall = undefined;
     }
 }
 

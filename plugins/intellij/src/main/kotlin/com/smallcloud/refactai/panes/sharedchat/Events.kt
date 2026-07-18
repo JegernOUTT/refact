@@ -38,7 +38,8 @@ class EventNames {
         SET_CODE_COMPLETION_MODEL("ide/setCodeCompletionModel"),
         DROPDOWN_STATE_CHANGED("ide/dropdownStateChanged"),
         TASK_DONE("ide/taskDone"),
-        ASK_QUESTIONS("ide/askQuestions")
+        ASK_QUESTIONS("ide/askQuestions"),
+        REQUEST_LOGS("ide/requestLogs")
     }
 
     enum class ToChat(val value: String) {
@@ -64,7 +65,9 @@ class EventNames {
         @SerializedName("currentProjectInfo/setCurrentProjectInfo")
         SET_CURRENT_PROJECT("currentProjectInfo/setCurrentProjectInfo"),
         @SerializedName("ide/switchToThread")
-        SWITCH_TO_THREAD("ide/switchToThread")
+        SWITCH_TO_THREAD("ide/switchToThread"),
+        @SerializedName("ide/logLines")
+        IDE_LOG_LINES("ide/logLines")
     }
 }
 
@@ -160,6 +163,12 @@ class Events {
                 EventNames.FromChat.ASK_QUESTIONS.value -> {
                     val questionPayload = p2?.deserialize<AskQuestionsPayload>(payload, AskQuestionsPayload::class.java) ?: return null
                     AskQuestions(questionPayload)
+                }
+
+                EventNames.FromChat.REQUEST_LOGS.value -> {
+                    val requestLogsPayload = p2?.deserialize<RequestLogsPayload>(payload, RequestLogsPayload::class.java)
+                        ?: RequestLogsPayload()
+                    RequestLogs(requestLogsPayload)
                 }
 
                 else -> null
@@ -505,6 +514,16 @@ class Events {
     ) : Payload()
 
     data class AskQuestions(override val payload: AskQuestionsPayload) : FromChat(EventNames.FromChat.ASK_QUESTIONS, payload)
+
+    data class RequestLogsPayload(val limit: Int? = null) : Payload()
+
+    data class RequestLogs(override val payload: RequestLogsPayload) : FromChat(EventNames.FromChat.REQUEST_LOGS, payload)
+
+    class IdeLogs {
+        data class LogLinesPayload(val lines: List<IdeLogLine>) : Payload()
+
+        class LogLines(payload: LogLinesPayload) : ToChat<Payload>(EventNames.ToChat.IDE_LOG_LINES, payload)
+    }
 
     data class SwitchToThreadPayload(val chatId: String) : Payload()
 

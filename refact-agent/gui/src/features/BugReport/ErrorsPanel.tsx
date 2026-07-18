@@ -70,6 +70,19 @@ export const ErrorsPanel: React.FC<ErrorsPanelProps> = ({ errors, onJump }) => {
                 >
                   {error.level.toUpperCase()}
                 </span>
+                {error.count !== undefined && error.count > 1 && (
+                  <Badge
+                    tone={error.level === "error" ? "danger" : "default"}
+                    size="xs"
+                  >
+                    ×{error.count}
+                  </Badge>
+                )}
+                {error.location && (
+                  <span className={classNames(styles.location, "rf-truncate")}>
+                    {error.location}
+                  </span>
+                )}
                 {error.at !== undefined && (
                   <span className={styles.ago}>{formatAgo(error.at)}</span>
                 )}

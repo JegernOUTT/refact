@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { ArrowDownToLine, Eraser, Pause, Play } from "lucide-react";
 import classNames from "classnames";
 
@@ -26,16 +32,22 @@ const LEVEL_FILTERS: { value: LevelFilter; label: string }[] = [
   { value: "debug", label: "DBG" },
 ];
 
+const BOTTOM_THRESHOLD_PX = 16;
+
+function isScrolledToBottom(view: HTMLDivElement): boolean {
+  const distanceFromBottom =
+    view.scrollHeight - view.clientHeight - view.scrollTop;
+  return distanceFromBottom <= BOTTOM_THRESHOLD_PX;
+}
+
 export type LogViewerProps = {
   source: BugReportSource;
   filter: string;
   levelFilter: LevelFilter;
   paused: boolean;
-  follow: boolean;
   onFilterChange: (value: string) => void;
   onLevelFilterChange: (value: LevelFilter) => void;
   onTogglePaused: () => void;
-  onToggleFollow: () => void;
   onClear?: () => void;
 };
 
@@ -44,14 +56,17 @@ export const LogViewer: React.FC<LogViewerProps> = ({
   filter,
   levelFilter,
   paused,
-  follow,
   onFilterChange,
   onLevelFilterChange,
   onTogglePaused,
-  onToggleFollow,
   onClear,
 }) => {
   const viewRef = useRef<HTMLDivElement>(null);
+  const programmaticScrollRef = useRef(false);
+  const previousSourceLengthRef = useRef(source.lines.length);
+  const previousSourceKeyRef = useRef(source.key);
+  const [follow, setFollow] = useState(true);
+  const [newLineCount, setNewLineCount] = useState(0);
 
   const visibleLines = useMemo(
     () =>
@@ -61,12 +76,84 @@ export const LogViewer: React.FC<LogViewerProps> = ({
     [source.lines, filter, levelFilter],
   );
 
-  useEffect(() => {
-    if (!follow) return;
+  const scrollToBottom = useCallback(() => {
     const view = viewRef.current;
     if (!view) return;
+    if (view.scrollTop === view.scrollHeight) return;
+    programmaticScrollRef.current = true;
     view.scrollTop = view.scrollHeight;
-  }, [visibleLines, follow]);
+    window.setTimeout(() => {
+      programmaticScrollRef.current = false;
+    }, 0);
+  }, []);
+
+  useEffect(() => {
+    if (previousSourceKeyRef.current !== source.key) {
+      previousSourceKeyRef.current = source.key;
+      previousSourceLengthRef.current = source.lines.length;
+      setFollow(true);
+      setNewLineCount(0);
+      scrollToBottom();
+    }
+  }, [scrollToBottom, source.key, source.lines.length]);
+
+  useEffect(() => {
+    const previousLength = previousSourceLengthRef.current;
+    const growth = Math.max(0, source.lines.length - previousLength);
+    previousSourceLengthRef.current = source.lines.length;
+
+    if (follow) {
+      setNewLineCount(0);
+      return;
+    }
+
+    if (growth > 0) {
+      setNewLineCount((count) => Math.max(0, count + growth));
+    }
+  }, [follow, source.key, source.lines.length]);
+
+  useEffect(() => {
+    if (!follow) return;
+    scrollToBottom();
+  }, [visibleLines, follow, scrollToBottom]);
+
+  const handleScroll = useCallback(() => {
+    if (programmaticScrollRef.current) {
+      programmaticScrollRef.current = false;
+      return;
+    }
+
+    const view = viewRef.current;
+    if (!view) return;
+
+    if (isScrolledToBottom(view)) {
+      previousSourceLengthRef.current = source.lines.length;
+      setNewLineCount(0);
+      setFollow(true);
+      return;
+    }
+
+    setFollow(false);
+  }, [source.lines.length]);
+
+  const handleToggleFollow = useCallback(() => {
+    if (follow) {
+      setFollow(false);
+      return;
+    }
+
+    previousSourceLengthRef.current = source.lines.length;
+    setNewLineCount(0);
+    setFollow(true);
+    scrollToBottom();
+  }, [follow, scrollToBottom, source.lines.length]);
+
+  const handleJumpToLatest = useCallback(() => {
+    previousSourceLengthRef.current = source.lines.length;
+    setNewLineCount(0);
+    setFollow(true);
+    scrollToBottom();
+  }, [scrollToBottom, source.lines.length]);
 
   const emptyDescription = !source.available
     ? "IDE logs aren't exposed by this host yet."
@@ -128,9 +215,10 @@ export const LogViewer: React.FC<LogViewerProps> = ({
             <Tooltip.Trigger asChild>
               <IconButton
                 aria-label="Follow tail"
+                aria-pressed={follow}
                 className={classNames(follow && styles.actionActive)}
                 icon={ArrowDownToLine}
-                onClick={onToggleFollow}
+                onClick={handleToggleFollow}
                 size="sm"
                 variant="plain"
               />
@@ -158,26 +246,41 @@ export const LogViewer: React.FC<LogViewerProps> = ({
         </div>
       </div>
 
-      <div
-        className={styles.view}
-        ref={viewRef}
-        data-testid="bug-report-log-view"
-      >
-        {visibleLines.length === 0 ? (
-          <EmptyState description={emptyDescription} title="Nothing to show" />
-        ) : (
-          visibleLines.map((line, index) => (
-            <div
-              className={classNames(
-                styles.line,
-                line.level === "error" && styles.lineError,
-                line.level === "warn" && styles.lineWarn,
-              )}
-              key={`${index}-${line.text.slice(0, 24)}`}
-            >
-              {line.text}
-            </div>
-          ))
+      <div className={styles.viewFrame}>
+        <div
+          className={styles.view}
+          ref={viewRef}
+          data-testid="bug-report-log-view"
+          onScroll={handleScroll}
+        >
+          {visibleLines.length === 0 ? (
+            <EmptyState
+              description={emptyDescription}
+              title="Nothing to show"
+            />
+          ) : (
+            visibleLines.map((line, index) => (
+              <div
+                className={classNames(
+                  styles.line,
+                  line.level === "error" && styles.lineError,
+                  line.level === "warn" && styles.lineWarn,
+                )}
+                key={`${index}-${line.text.slice(0, 24)}`}
+              >
+                {line.text}
+              </div>
+            ))
+          )}
+        </div>
+        {!follow && (
+          <button
+            className={styles.latestPill}
+            onClick={handleJumpToLatest}
+            type="button"
+          >
+            {newLineCount > 0 ? `↓ ${newLineCount} new lines` : "↓ latest"}
+          </button>
         )}
       </div>
 

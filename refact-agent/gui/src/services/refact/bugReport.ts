@@ -50,6 +50,8 @@ export type BugReportErrorEntry = {
   source: string;
   level: string;
   message: string;
+  count?: number;
+  location?: string;
 };
 
 export type BugReportErrorsResponse = {
@@ -114,7 +116,9 @@ export function isBugReportErrorsResponse(
         isRecord(entry) &&
         typeof entry.source === "string" &&
         typeof entry.level === "string" &&
-        typeof entry.message === "string",
+        typeof entry.message === "string" &&
+        (entry.count === undefined || typeof entry.count === "number") &&
+        (entry.location === undefined || typeof entry.location === "string"),
     )
   );
 }

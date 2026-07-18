@@ -38,6 +38,7 @@ import {
     // QuestionFromChat
 } from "refact-chat-js/dist/events";
 import { backendConfigForStatus, effectiveLspPortForStatus } from "./backendStatus";
+import { getIdeLogSnapshot } from "./ideLogBuffer";
 
 
 
@@ -526,6 +527,11 @@ export class ChatTab {
     }
 
     async handleEvents({ type, ...data }: any) {
+        if(type === "ide/requestLogs") {
+            const requestedLimit = typeof data.payload?.limit === "number" && Number.isFinite(data.payload.limit) ? data.payload.limit : 400;
+            const limit = Math.min(500, Math.max(1, Math.floor(requestedLimit)));
+            return this.web_panel.webview.postMessage({ type: "ide/logLines", payload: { lines: getIdeLogSnapshot(limit) } });
+        }
         // switch (type) {
 
         //     case EVENT_NAMES_FROM_CHAT.ASK_QUESTION: {

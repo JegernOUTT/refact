@@ -1071,6 +1071,14 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
         }
     }
 
+    private suspend fun handleRequestLogs(payload: Events.RequestLogsPayload) {
+        val limit = payload.limit?.coerceIn(1, 500) ?: 400
+        val lines = withContext(Dispatchers.IO) {
+            IdeaLogReader.collectRefactLogLines(limit)
+        }
+        postMessage(Events.IdeLogs.LogLines(Events.IdeLogs.LogLinesPayload(lines)))
+    }
+
     fun switchToThread(chatId: String) {
         val action = Events.SwitchToThread(chatId)
         postMessage(action)
@@ -1133,6 +1141,10 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
 
             is Events.AskQuestions -> {
                 handleAskQuestions(event.payload)
+            }
+
+            is Events.RequestLogs -> {
+                handleRequestLogs(event.payload)
             }
 
             else -> Unit

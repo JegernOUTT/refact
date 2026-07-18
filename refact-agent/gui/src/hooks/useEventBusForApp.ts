@@ -19,6 +19,11 @@ import { ideToolCallResponse, ideSwitchToThread } from "./useEventBusForIDE";
 import { createAction } from "@reduxjs/toolkit";
 import { switchToThread } from "../features/Chat/Thread/actions";
 import { usePostUserAction } from "./usePostUserAction";
+import {
+  ideLogLines,
+  normalizeIdeLogLines,
+  setIdeLogEntries,
+} from "../features/BugReport/ideLog";
 
 export const ideAttachFileToChat = createAction<string>("ide/attachFileToChat");
 
@@ -79,6 +84,10 @@ export function useEventBusForApp() {
           dispatch(push({ name: "chat" }));
         }
         dispatch(switchToThread({ id: event.data.payload.chatId }));
+      }
+
+      if (ideLogLines.match(event.data)) {
+        setIdeLogEntries(normalizeIdeLogLines(event.data.payload.lines));
       }
 
       // TODO: ideToolEditResponse.

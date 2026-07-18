@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   detectLineLevel,
   lineMatchesFilter,
+  toLogLines,
   type LogLine,
 } from "./useBugReportSources";
 
@@ -19,8 +20,49 @@ describe("detectLineLevel", () => {
     expect(detectLineLevel("plain line")).toBe("unknown");
   });
 
+  it("detects positional headers before fallback tokens", () => {
+    expect(
+      detectLineLevel(
+        "141901.740 WARN src/chat/trajectories.rs:1498 Rejecting trajectory ...",
+      ),
+    ).toBe("warn");
+    expect(
+      detectLineLevel(
+        "2026-07-14T06:48:51.702625Z  WARN refact_lsp::daemon::cron_clock: skipping",
+      ),
+    ).toBe("warn");
+    expect(
+      detectLineLevel("141901.740 INFO message mentions ERROR but is info"),
+    ).toBe("info");
+    expect(
+      detectLineLevel(
+        "2026-07-14 06:48:51,702 [  123] ERROR - com.refact.Plugin - failed",
+      ),
+    ).toBe("error");
+  });
+
   it("does not match level tokens inside words", () => {
     expect(detectLineLevel("PROCESSERROR5 something")).toBe("unknown");
+  });
+});
+
+describe("toLogLines", () => {
+  it("inherits previous level for continuation lines", () => {
+    expect(
+      toLogLines([
+        "first continuation",
+        "12:00:00 ERROR boom",
+        "stack line",
+        "12:00:01 WARN careful",
+        "detail line",
+      ]),
+    ).toEqual([
+      { text: "first continuation", level: "unknown" },
+      { text: "12:00:00 ERROR boom", level: "error" },
+      { text: "stack line", level: "error" },
+      { text: "12:00:01 WARN careful", level: "warn" },
+      { text: "detail line", level: "warn" },
+    ]);
   });
 });
 

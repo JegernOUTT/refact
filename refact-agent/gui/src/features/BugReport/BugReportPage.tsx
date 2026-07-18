@@ -35,10 +35,10 @@ export const BugReportPage: React.FC<BugReportPageProps> = ({ onBack }) => {
   const [filter, setFilter] = useState("");
   const [levelFilter, setLevelFilter] = useState<LevelFilter>("all");
   const [paused, setPaused] = useState(false);
-  const [follow, setFollow] = useState(true);
 
   const contextQuery = useGetBugReportContextQuery(undefined);
-  const { sources, aggregatedErrors, webuiLines } = useBugReportSources(paused);
+  const { sources, aggregatedErrors, webuiLines, ideLines } =
+    useBugReportSources(paused, config.host);
 
   const active =
     sources.find((source) => source.key === activeSource) ?? sources[0];
@@ -161,12 +161,10 @@ export const BugReportPage: React.FC<BugReportPageProps> = ({ onBack }) => {
           </Tabs>
           <LogViewer
             filter={filter}
-            follow={follow}
             levelFilter={levelFilter}
             onClear={active.key === "webui" ? clearWebuiLogEntries : undefined}
             onFilterChange={setFilter}
             onLevelFilterChange={setLevelFilter}
-            onToggleFollow={() => setFollow((value) => !value)}
             onTogglePaused={() => setPaused((value) => !value)}
             paused={paused}
             source={active}
@@ -179,6 +177,7 @@ export const BugReportPage: React.FC<BugReportPageProps> = ({ onBack }) => {
             context={context}
             errors={aggregatedErrors}
             host={config.host}
+            ideLines={ideLines}
             webuiLines={webuiLines}
           />
         </div>
