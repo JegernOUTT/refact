@@ -84,6 +84,7 @@ import { notificationsSlice } from "../features/Notifications";
 import { schedulerSlice } from "../features/Scheduler";
 import { schedulerApi } from "../services/refact/schedulerApi";
 import { reconcileWorkspaceState, workspaceSlice } from "../features/Workspace";
+import { terminalSlice } from "../features/Workspace/TerminalPanel";
 import { dashboardSlice } from "../features/DaemonDashboard/dashboardSlice";
 
 const tipOfTheDayPersistConfig = {
@@ -165,6 +166,7 @@ const rootReducer = combineSlices(
   notificationsSlice,
   schedulerSlice,
   workspaceSlice,
+  terminalSlice,
   dashboardSlice,
 );
 

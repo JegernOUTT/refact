@@ -1,0 +1,149 @@
+.panel {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  background: var(--rf-bg);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-height: var(--rf-control-h-lg);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.tabs {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.tab,
+.tabActive {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
+  border-radius: var(--rf-radius-ctl);
+}
+
+.tabActive {
+  background: var(--rf-color-accent-soft);
+}
+
+.tabSelect {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-xs);
+  min-width: 0;
+  min-height: var(--rf-control-h-sm);
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.tabActive .tabSelect {
+  color: var(--rf-color-fg);
+}
+
+.tabTitle {
+  max-width: var(--rf-overlay-popover-min);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.closeButton {
+  color: var(--rf-color-muted);
+}
+
+.body {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sessionActive,
+.sessionHidden {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.sessionHidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.session {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--rf-space-2);
+  overflow: hidden;
+}
+
+.terminal {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.connectionNotice,
+.errorNotice,
+.panelError {
+  position: absolute;
+  right: var(--rf-space-3);
+  bottom: var(--rf-space-3);
+  max-width: var(--rf-overlay-popover-max);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  background: var(--rf-surface-overlay);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-ctl);
+  box-shadow: var(--rf-elev-overlay);
+}
+
+.errorNotice,
+.panelError {
+  color: var(--rf-color-danger);
+}
+
+.panelError {
+  z-index: var(--rf-z-popover);
+}
+
+.loading {
+  margin: auto;
+  color: var(--rf-color-muted);
+  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.fullState {
+  display: flex;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}

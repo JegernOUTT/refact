@@ -1,25 +1,21 @@
-import {
-  Files,
-  GitBranch,
-  SquareTerminal,
-  type LucideIcon,
-} from "lucide-react";
+import { Files, GitBranch, type LucideIcon } from "lucide-react";
 
 import { EmptyState } from "../../../components/ui";
 import type { PanelKind } from "../surfaceKey";
+
+type PlaceholderPanelKind = Exclude<PanelKind, "terminal">;
 
 type PanelDefinition = {
   icon: LucideIcon;
   title: string;
 };
 
-const PANEL_DEFINITIONS: Record<PanelKind, PanelDefinition> = {
+const PANEL_DEFINITIONS: Record<PlaceholderPanelKind, PanelDefinition> = {
   files: { icon: Files, title: "Files" },
   git: { icon: GitBranch, title: "Git" },
-  terminal: { icon: SquareTerminal, title: "Terminal" },
 };
 
-export function PanelPlaceholder({ kind }: { kind: PanelKind }) {
+export function PanelPlaceholder({ kind }: { kind: PlaceholderPanelKind }) {
   const panel = PANEL_DEFINITIONS[kind];
 
   return (
@@ -33,6 +29,4 @@ export function PanelPlaceholder({ kind }: { kind: PanelKind }) {
 }
 
 const FilesPanel = () => <PanelPlaceholder kind="files" />;
-const TerminalPanel = () => <PanelPlaceholder kind="terminal" />;
-
-export { FilesPanel, TerminalPanel };
+export { FilesPanel };
