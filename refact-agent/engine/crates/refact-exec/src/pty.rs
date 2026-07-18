@@ -9,9 +9,13 @@ pub struct PtyHandle {
 }
 
 pub fn default_pty_size() -> PtySize {
+    pty_size(24, 80)
+}
+
+pub fn pty_size(rows: u16, cols: u16) -> PtySize {
     PtySize {
-        rows: 24,
-        cols: 80,
+        rows,
+        cols,
         pixel_width: 0,
         pixel_height: 0,
     }
@@ -65,9 +69,7 @@ pub fn spawn_pty(
 mod tests {
     use std::time::Duration;
 
-    use tokio::time::timeout;
-
-    use crate::types::{ExecOutputStream, ExecSpawnRequest, ExecStatus};
+    use crate::types::{ExecOutputStream, ExecSpawnRequest};
     use crate::ExecRegistry;
 
     #[cfg(unix)]

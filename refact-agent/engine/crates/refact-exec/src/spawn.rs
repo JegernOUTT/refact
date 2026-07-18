@@ -40,7 +40,7 @@ pub struct ExecSpawnResult {
 struct PtyRuntimeProcess {
     child: Box<dyn portable_pty::Child + Send>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    _master: Box<dyn MasterPty + Send>,
+    master: Box<dyn MasterPty + Send>,
 }
 
 enum RuntimeChild {
@@ -71,6 +71,16 @@ impl RuntimeChild {
                     .kill()
                     .map_err(|error| format!("failed to kill process: {error}"))
             }
+        }
+    }
+
+    fn resize(&self, rows: u16, cols: u16) -> Result<(), String> {
+        match self {
+            RuntimeChild::Pty(process) => process
+                .master
+                .resize(crate::pty::pty_size(rows, cols))
+                .map_err(|error| format!("failed to resize pty: {error}")),
+            RuntimeChild::Tokio(_) => Err("process is not PTY-backed".to_string()),
         }
     }
 
@@ -156,7 +166,8 @@ fn build_process_meta(
 ) -> Result<(ExecProcessMeta, ExecProcessId), String> {
     let owner = request.owner.clone().with_normalized_workspace();
     let mut meta = ExecProcessMeta::new(request.mode.clone(), request.command.clone())
-        .with_owner(owner.clone());
+        .with_owner(owner.clone())
+        .with_tty(request.tty);
     if matches!(request.mode, ExecMode::Service) {
         let service_name = request
             .owner
@@ -435,6 +446,11 @@ async fn monitor_process(
                             Some(ExecProcessCommand::Finish { status, response }) => {
                                 break (status, Some(response));
                             }
+                            Some(ExecProcessCommand::Resize { rows, cols, response }) => {
+                                let result = child.lock().await.resize(rows, cols);
+                                let _ = response.send(result);
+                                continue;
+                            }
                             None => {
                                 let status = status_or_killed(&child).await;
                                 break (status, None);
@@ -465,6 +481,11 @@ async fn monitor_process(
                             }
                             Some(ExecProcessCommand::Finish { status, response }) => {
                                 break (status, Some(response));
+                            }
+                            Some(ExecProcessCommand::Resize { rows, cols, response }) => {
+                                let result = child.lock().await.resize(rows, cols);
+                                let _ = response.send(result);
+                                continue;
                             }
                             None => {
                                 let status = status_or_killed(&child).await;
@@ -658,12 +679,13 @@ impl ExecRegistry {
         let command = pty_command(&request)?;
         let (meta, process_id) = build_process_meta(&request)?;
         let startup_wait = request.startup_wait;
-        let (pty_handle, child) = crate::pty::spawn_pty(command, crate::pty::default_pty_size())?;
+        let (pty_handle, child) =
+            crate::pty::spawn_pty(command, crate::pty::pty_size(request.rows, request.cols))?;
         let stdin_writer = Arc::new(Mutex::new(pty_handle.writer));
         let child = Arc::new(Mutex::new(RuntimeChild::Pty(PtyRuntimeProcess {
             child,
             writer: stdin_writer.clone(),
-            _master: pty_handle.master,
+            master: pty_handle.master,
         })));
         let (control_tx, control_rx) = mpsc::channel(8);
         let terminal = Arc::new(Notify::new());
@@ -818,6 +840,25 @@ mod tests {
             .filter(|chunk| chunk.stream == ExecOutputStream::Stdout)
             .map(|chunk| chunk.text.as_str())
             .collect::<String>()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tty_process_can_be_resized() {
+        let registry = ExecRegistry::new();
+        let result = registry
+            .spawn(
+                ExecSpawnRequest::interactive("cat")
+                    .with_tty(true)
+                    .with_pty_size(24, 80),
+            )
+            .await
+            .unwrap();
+        let process_id = result.snapshot.meta.process_id;
+
+        registry.resize(&process_id, 40, 120).await.unwrap();
+
+        registry.kill(&process_id).await.unwrap();
     }
 
     fn env_test_request(mode: ExecMode, command: &str) -> ExecSpawnRequest {

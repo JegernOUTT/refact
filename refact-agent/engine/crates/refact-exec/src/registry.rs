@@ -46,6 +46,11 @@ pub(crate) enum ExecProcessCommand {
         status: ExecStatus,
         response: oneshot::Sender<Result<ExecProcessSnapshot, String>>,
     },
+    Resize {
+        rows: u16,
+        cols: u16,
+        response: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 pub(crate) struct ExecProcessRuntime {
@@ -740,6 +745,45 @@ impl ExecRegistry {
             chunks_returned: read.chunks.len(),
             read,
         })
+    }
+
+    pub async fn resize(
+        &self,
+        process_id: &ExecProcessId,
+        rows: u16,
+        cols: u16,
+    ) -> Result<(), String> {
+        if rows == 0 || cols == 0 {
+            return Err("PTY rows and cols must be greater than zero".to_string());
+        }
+        let control_tx = {
+            let records = self.records.lock().await;
+            let record = records
+                .get(process_id)
+                .ok_or_else(|| format!("process not found: {process_id}"))?;
+            if record.snapshot.status.is_terminal() {
+                return Err(format!("process is not running: {process_id}"));
+            }
+            if !record.snapshot.meta.tty {
+                return Err(format!("process is not PTY-backed: {process_id}"));
+            }
+            record
+                .runtime
+                .as_ref()
+                .map(|runtime| runtime.control_tx.clone())
+                .ok_or_else(|| format!("process is not running: {process_id}"))?
+        };
+        let (response, rx) = oneshot::channel();
+        control_tx
+            .send(ExecProcessCommand::Resize {
+                rows,
+                cols,
+                response,
+            })
+            .await
+            .map_err(|_| format!("process is not running: {process_id}"))?;
+        rx.await
+            .map_err(|_| format!("process is not running: {process_id}"))?
     }
 
     async fn wait_for_output_since(

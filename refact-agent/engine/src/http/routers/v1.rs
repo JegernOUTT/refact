@@ -660,7 +660,19 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/project-information/preview",
             post(handle_v1_project_information_preview),
         )
+        .route("/exec/spawn", post(exec::handle_v1_exec_spawn))
+        .route("/exec/list", get(exec::handle_v1_exec_list))
+        .route("/exec/:process_id/read", get(exec::handle_v1_exec_read))
+        .route("/exec/:process_id/kill", post(exec::handle_v1_exec_kill))
+        .route(
+            "/exec/:process_id/resize",
+            post(exec::handle_v1_exec_resize),
+        )
         .route("/exec/:process_id/stdin", post(exec::handle_v1_exec_stdin))
+        .route(
+            "/exec/:process_id/subscribe",
+            get(exec::handle_v1_exec_subscribe),
+        )
         .route(
             "/scheduler/cron",
             get(handle_v1_scheduler_cron_get).post(handle_v1_scheduler_cron_post),

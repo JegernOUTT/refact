@@ -259,6 +259,8 @@ pub struct ExecSpawnRequest {
     pub env: HashMap<String, String>,
     pub mode: ExecMode,
     pub tty: bool,
+    pub rows: u16,
+    pub cols: u16,
     pub timeout: Option<Duration>,
     pub startup_wait: Option<Duration>,
     pub readiness: Option<ExecReadinessProbe>,
@@ -277,6 +279,8 @@ impl ExecSpawnRequest {
             env: HashMap::new(),
             mode,
             tty: false,
+            rows: 24,
+            cols: 80,
             timeout: None,
             startup_wait: None,
             readiness: None,
@@ -321,6 +325,12 @@ impl ExecSpawnRequest {
 
     pub fn with_tty(mut self, tty: bool) -> Self {
         self.tty = tty;
+        self
+    }
+
+    pub fn with_pty_size(mut self, rows: u16, cols: u16) -> Self {
+        self.rows = rows;
+        self.cols = cols;
         self
     }
 
@@ -486,6 +496,8 @@ pub struct ExecProcessMeta {
     pub cwd: Option<PathBuf>,
     pub command: String,
     pub short_description: String,
+    #[serde(default)]
+    pub tty: bool,
     pub created_at_ms: u64,
     pub started_at_ms: Option<u64>,
     pub ended_at_ms: Option<u64>,
@@ -501,6 +513,7 @@ impl ExecProcessMeta {
             cwd: None,
             command,
             short_description,
+            tty: false,
             created_at_ms: current_timestamp_ms(),
             started_at_ms: None,
             ended_at_ms: None,
@@ -539,6 +552,11 @@ impl ExecProcessMeta {
 
     pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
         self.cwd = Some(cwd);
+        self
+    }
+
+    pub fn with_tty(mut self, tty: bool) -> Self {
+        self.tty = tty;
         self
     }
 
@@ -978,6 +996,7 @@ mod tests {
             cwd: Some(PathBuf::from("/workspace/app")),
             command: "sleep 10".to_string(),
             short_description: "sleep 10".to_string(),
+            tty: false,
             created_at_ms: 1_000_000,
             started_at_ms: Some(1_000_010),
             ended_at_ms: None,
