@@ -1,7 +1,7 @@
 import { useState } from "react";
 import classNames from "classnames";
 import { Dialog, Button, SegmentedControl } from "../../components/ui";
-import { useCheckpoints, useEventsBusForIDE } from "../../hooks";
+import { useCheckpoints, useOpenFileInApp } from "../../hooks";
 import { TruncateLeft } from "../../components/Text";
 import { Link } from "../../components/Link";
 import { ScrollArea } from "../../components/ScrollArea";
@@ -15,7 +15,7 @@ import { ErrorCallout } from "../../components/Callout";
 export type RestoreMode = "files_only" | "files_and_messages";
 
 export const Checkpoints = () => {
-  const { openFile } = useEventsBusForIDE();
+  const { canOpen, openFile } = useOpenFileInApp();
   const {
     shouldCheckpointsPopupBeShown,
     handleFix,
@@ -73,20 +73,35 @@ export const Checkpoints = () => {
                   >
                     <div className={styles.fileInfo}>
                       <TruncateLeft size="2" className={styles.filePathWrap}>
-                        <Link
-                          title="Open file"
-                          onClick={(event) => {
-                            event.preventDefault();
-                            openFile({ file_path: file.absolute_path });
-                          }}
-                          className={
-                            file.status === "DELETED"
-                              ? styles.deletedLink
-                              : undefined
-                          }
-                        >
-                          {formatPathName(file.absolute_path)}
-                        </Link>
+                        {canOpen ? (
+                          <Link
+                            title="Open file"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              openFile({
+                                path: file.absolute_path,
+                                resolved: true,
+                              });
+                            }}
+                            className={
+                              file.status === "DELETED"
+                                ? styles.deletedLink
+                                : undefined
+                            }
+                          >
+                            {formatPathName(file.absolute_path)}
+                          </Link>
+                        ) : (
+                          <span
+                            className={
+                              file.status === "DELETED"
+                                ? styles.deletedLink
+                                : undefined
+                            }
+                          >
+                            {formatPathName(file.absolute_path)}
+                          </span>
+                        )}
                       </TruncateLeft>
                       <span className={styles.workspaceFolder}>
                         {formattedWorkspaceFolder}

@@ -62,6 +62,13 @@
   text-decoration: underline;
 }
 
+.fileNamePlain {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--rf-font-mono);
+}
+
 .relevance {
   flex-shrink: 0;
   color: var(--rf-color-muted);

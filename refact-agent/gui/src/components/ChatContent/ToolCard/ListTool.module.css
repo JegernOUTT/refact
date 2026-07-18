@@ -9,6 +9,11 @@
   text-decoration: underline;
 }
 
+.pathPlain {
+  font-family: var(--rf-font-mono);
+  font-size: 0.95em;
+}
+
 .resultContent {
   composes: resultPanel from "./ToolCardBody.module.css";
 }

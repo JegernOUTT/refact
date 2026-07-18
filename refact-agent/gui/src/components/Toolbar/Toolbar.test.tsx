@@ -148,11 +148,16 @@ describe("Dropdown navigation", () => {
     expect(store.getState().pages.at(-1)?.name).toBe("general settings");
   });
 
-  it("clicking Extension Settings sends openSettings postMessage", async () => {
+  it("clicking Extension Settings sends openSettings postMessage on an IDE host", async () => {
     useToolbarHandlers();
     const postMessageSpy = vi.spyOn(window, "postMessage");
 
-    renderToolbar({ type: "dashboard" });
+    render(<Toolbar activeTab={{ type: "dashboard" }} />, {
+      preloadedState: {
+        config: { ...baseConfig, host: "vscode" as const },
+        pages: pagesForActiveTab({ type: "dashboard" }),
+      },
+    });
 
     await userEvent.click(screen.getByRole("button", { name: "Menu" }));
     await userEvent.click(
@@ -163,6 +168,24 @@ describe("Dropdown navigation", () => {
       expect.objectContaining({ type: "ide/openSettings" }),
       "*",
     );
+  });
+
+  it("hides IDE-only menu items on the web host", async () => {
+    useToolbarHandlers();
+    renderToolbar({ type: "dashboard" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Menu" }));
+    await screen.findByRole("menuitem", { name: "Settings" });
+
+    expect(
+      screen.queryByRole("menuitem", { name: "Extension Settings" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: "Plugin Settings" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: "Edit privacy.yaml" }),
+    ).not.toBeInTheDocument();
   });
 });
 

@@ -22,7 +22,8 @@ import type { ModelType } from "../../../../services/refact";
 import type { UiModel } from "./utils/groupModelsWithPricing";
 
 import styles from "./ModelCard.module.css";
-import { useEventsBusForIDE } from "../../../../hooks";
+import { useAppSelector, useEventsBusForIDE } from "../../../../hooks";
+import { selectHost } from "../../../../features/Config/configSlice";
 
 export type ModelCardProps = {
   model: UiModel;
@@ -59,6 +60,7 @@ export const ModelCard: FC<ModelCardProps> = ({
   });
 
   const { setCodeCompletionModel } = useEventsBusForIDE();
+  const host = useAppSelector(selectHost);
 
   const handleSetCompletionModelForIDE = useCallback(() => {
     const formattedModelName = `${providerName}/${model.name}`;
@@ -91,12 +93,13 @@ export const ModelCard: FC<ModelCardProps> = ({
       {
         label: "Use as completion model in IDE",
         onClick: handleSetCompletionModelForIDE,
-        visible: modelType === "completion",
+        visible: modelType === "completion" && host !== "web",
       },
     ];
   }, [
     isReadonlyProvider,
     isSavingModel,
+    host,
     enabled,
     removable,
     user_configured,

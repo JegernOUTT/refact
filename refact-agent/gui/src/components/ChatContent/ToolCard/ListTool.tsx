@@ -4,7 +4,7 @@ import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { ContextFileList } from "./ContextFileList";
-import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
+import { useAppSelector, useOpenFileInApp } from "../../../hooks";
 import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ChatContextFile, ToolCall } from "../../../services/refact/types";
@@ -28,7 +28,7 @@ export const ListTool: React.FC<ListToolProps> = ({
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
-  const { queryPathThenOpenFile } = useEventsBusForIDE();
+  const { canOpen, openFile } = useOpenFileInApp();
 
   const threadId = useThreadId();
   const maybeResult = useAppSelector((state) =>
@@ -59,10 +59,10 @@ export const ListTool: React.FC<ListToolProps> = ({
     (e: React.MouseEvent) => {
       e.stopPropagation();
       if (args.path) {
-        void queryPathThenOpenFile({ file_path: args.path });
+        openFile({ path: args.path });
       }
     },
-    [queryPathThenOpenFile, args.path],
+    [openFile, args.path],
   );
 
   const content =
@@ -75,12 +75,15 @@ export const ListTool: React.FC<ListToolProps> = ({
     return (
       <>
         List{" "}
-        <span className={styles.path} onClick={handlePathClick}>
+        <span
+          className={canOpen ? styles.path : styles.pathPlain}
+          onClick={canOpen ? handlePathClick : undefined}
+        >
           {path}
         </span>
       </>
     );
-  }, [args.path, handlePathClick]);
+  }, [args.path, canOpen, handlePathClick]);
 
   const meta = useMemo(() => {
     const parts: string[] = [];

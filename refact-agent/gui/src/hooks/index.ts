@@ -6,6 +6,7 @@ export * from "./usePostMessage";
 export * from "./useUndoRedo";
 export * from "./useMutationObserver";
 export * from "./useEventBusForIDE";
+export * from "./useOpenFileInApp";
 export * from "./useDiffFileReload";
 export * from "./useGetCapsQuery";
 export * from "./useHasCaps";

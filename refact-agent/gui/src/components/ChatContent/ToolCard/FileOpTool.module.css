@@ -9,6 +9,11 @@
   text-decoration: underline;
 }
 
+.filenamePlain {
+  font-family: var(--rf-font-mono);
+  font-size: inherit;
+}
+
 .meta {
   color: var(--rf-color-muted);
 }

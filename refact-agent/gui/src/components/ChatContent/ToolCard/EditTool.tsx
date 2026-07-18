@@ -2,7 +2,12 @@ import { CircleCheck, LoaderCircle, RotateCcw } from "lucide-react";
 import React, { useMemo, useCallback } from "react";
 import { Flex, Box } from "@radix-ui/themes";
 import { Icon } from "../../ui";
-import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
+import {
+  useAppSelector,
+  useEventsBusForIDE,
+  useOpenFileInApp,
+} from "../../../hooks";
+import { selectCapabilities } from "../../../features/Config/configSlice";
 import {
   selectManyDiffMessageByThreadAndIds,
   selectIsStreamingById,
@@ -45,7 +50,7 @@ function getFilePath(toolCall: ToolCall): string | null {
 interface FileEditItemProps {
   fileName: string;
   diffs: DiffChunk[];
-  onOpenFile: (fileName: string) => void;
+  onOpenFile?: (fileName: string) => void;
   actions?: DiffHeaderAction[];
 }
 
@@ -63,7 +68,7 @@ const FileEditItem: React.FC<FileEditItemProps> = ({
             key={i}
             diff={diff}
             fileName={fileName}
-            onOpenFile={() => onOpenFile(fileName)}
+            onOpenFile={onOpenFile ? () => onOpenFile(fileName) : undefined}
             actions={actions}
           />
         ))}
@@ -77,8 +82,9 @@ export const EditTool: React.FC<EditToolProps> = ({
   diffs = [],
   isActiveTool = true,
 }) => {
-  const { queryPathThenOpenFile, diffPasteBack, sendToolCallToIde } =
-    useEventsBusForIDE();
+  const { diffPasteBack, sendToolCallToIde } = useEventsBusForIDE();
+  const { canOpen, openFile } = useOpenFileInApp();
+  const capabilities = useAppSelector(selectCapabilities);
   const [requestDryRun, dryRunResult] = toolsApi.useDryRunForEditToolMutation();
   const chatId = useThreadId();
   const isStreaming = useAppSelector((state) =>
@@ -181,6 +187,8 @@ export const EditTool: React.FC<EditToolProps> = ({
   const isSingleFile = fileNames.length <= 1;
 
   const diffActions = useMemo(() => {
+    if (!capabilities.ideDiffPasteBack) return [];
+
     const actions: DiffHeaderAction[] = [
       {
         label: "Apply diff",
@@ -206,6 +214,7 @@ export const EditTool: React.FC<EditToolProps> = ({
     return actions;
   }, [
     canPaste,
+    capabilities.ideDiffPasteBack,
     dryRunResult.isLoading,
     handleApplyDiff,
     handleReplace,
@@ -223,10 +232,10 @@ export const EditTool: React.FC<EditToolProps> = ({
           key={i}
           diff={diff}
           fileName={filePath ?? diff.file_name}
-          onOpenFile={() =>
-            void queryPathThenOpenFile({
-              file_path: filePath ?? diff.file_name,
-            })
+          onOpenFile={
+            canOpen
+              ? () => openFile({ path: filePath ?? diff.file_name })
+              : undefined
           }
           actions={diffActions}
         />
@@ -239,7 +248,7 @@ export const EditTool: React.FC<EditToolProps> = ({
           key={fileName}
           fileName={fileName}
           diffs={filesByName[fileName] ?? []}
-          onOpenFile={(path) => void queryPathThenOpenFile({ file_path: path })}
+          onOpenFile={canOpen ? (path) => openFile({ path }) : undefined}
           actions={diffActions}
         />
       ))}

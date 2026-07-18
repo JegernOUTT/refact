@@ -3,7 +3,7 @@ import React, { useMemo, useCallback } from "react";
 import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
-import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
+import { useAppSelector, useOpenFileInApp } from "../../../hooks";
 import {
   selectToolResultByThreadAndId,
   selectManyDiffMessageByThreadAndIds,
@@ -63,7 +63,7 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
-  const { queryPathThenOpenFile } = useEventsBusForIDE();
+  const { canOpen, openFile } = useOpenFileInApp();
   const threadId = useThreadId();
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, threadId),
@@ -131,9 +131,9 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
   const handleFileClick = useCallback(
     (e: React.MouseEvent, filePath: string) => {
       e.stopPropagation();
-      void queryPathThenOpenFile({ file_path: filePath });
+      openFile({ path: filePath });
     },
-    [queryPathThenOpenFile],
+    [openFile],
   );
 
   const content =
@@ -152,15 +152,15 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
           <>
             Move{" "}
             <span
-              className={styles.filename}
-              onClick={(e) => handleFileClick(e, src)}
+              className={canOpen ? styles.filename : styles.filenamePlain}
+              onClick={canOpen ? (e) => handleFileClick(e, src) : undefined}
             >
               {basename(src)}
             </span>
             {" → "}
             <span
-              className={styles.filename}
-              onClick={(e) => handleFileClick(e, dest)}
+              className={canOpen ? styles.filename : styles.filenamePlain}
+              onClick={canOpen ? (e) => handleFileClick(e, dest) : undefined}
             >
               {basename(dest)}
             </span>
@@ -203,7 +203,7 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
         </>
       ),
     };
-  }, [toolType, args, handleFileClick, allDiffs]);
+  }, [toolType, args, canOpen, handleFileClick, allDiffs]);
 
   return (
     <ToolCard

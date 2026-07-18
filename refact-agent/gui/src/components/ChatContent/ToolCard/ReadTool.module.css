@@ -17,6 +17,12 @@
   text-decoration: underline;
 }
 
+.filenamePlain {
+  font-family: var(--rf-font-mono);
+  font-size: inherit;
+  vertical-align: baseline;
+}
+
 .resultContent {
   composes: resultPanel from "./ToolCardBody.module.css";
 }

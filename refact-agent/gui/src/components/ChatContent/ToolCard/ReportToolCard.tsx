@@ -23,6 +23,7 @@ import {
 } from "../useChatScrollAnchor";
 import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
 import { useEventsBusForIDE } from "../../../hooks";
+import { useOpenFileInApp } from "../../../hooks";
 import { isIdeHost } from "../../../utils/isIdeHost";
 import { basename } from "./utils";
 import { useStreamingMarkdown } from "../../Markdown/useStreamingMarkdown";
@@ -85,7 +86,8 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   unboundedContent = false,
 }) => {
   const copyToClipboard = useCopyToClipboard();
-  const { newFile, queryPathThenOpenFile } = useEventsBusForIDE();
+  const { newFile } = useEventsBusForIDE();
+  const { canOpen, openFile } = useOpenFileInApp();
   const [copied, setCopied] = useState(false);
 
   const threadId = useThreadId();
@@ -155,9 +157,9 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   const handleFileClick = useCallback(
     (e: React.MouseEvent, filePath: string) => {
       e.stopPropagation();
-      void queryPathThenOpenFile({ file_path: filePath });
+      openFile({ path: filePath });
     },
-    [queryPathThenOpenFile],
+    [openFile],
   );
 
   const entertainmentText = useMemo(() => {
@@ -387,8 +389,8 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
                 <Text
                   key={f}
                   size="1"
-                  className={styles.fileLink}
-                  onClick={(e) => handleFileClick(e, f)}
+                  className={canOpen ? styles.fileLink : styles.fileLinkPlain}
+                  onClick={canOpen ? (e) => handleFileClick(e, f) : undefined}
                 >
                   {basename(f)}
                 </Text>

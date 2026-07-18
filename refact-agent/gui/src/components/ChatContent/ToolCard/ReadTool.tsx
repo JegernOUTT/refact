@@ -4,7 +4,7 @@ import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { ContextFileList } from "./ContextFileList";
-import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
+import { useAppSelector, useOpenFileInApp } from "../../../hooks";
 import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ChatContextFile, ToolCall } from "../../../services/refact/types";
@@ -32,7 +32,7 @@ export const ReadTool: React.FC<ReadToolProps> = ({
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
-  const { queryPathThenOpenFile } = useEventsBusForIDE();
+  const { canOpen, openFile } = useOpenFileInApp();
 
   const threadId = useThreadId();
   const maybeResult = useAppSelector((state) =>
@@ -65,9 +65,9 @@ export const ReadTool: React.FC<ReadToolProps> = ({
   const handleFileClick = useCallback(
     (e: React.MouseEvent, filePath: string) => {
       e.stopPropagation();
-      void queryPathThenOpenFile({ file_path: filePath });
+      openFile({ path: filePath });
     },
-    [queryPathThenOpenFile],
+    [openFile],
   );
 
   const content =
@@ -82,8 +82,8 @@ export const ReadTool: React.FC<ReadToolProps> = ({
         <>
           Read{" "}
           <span
-            className={styles.filename}
-            onClick={(e) => handleFileClick(e, paths[0])}
+            className={canOpen ? styles.filename : styles.filenamePlain}
+            onClick={canOpen ? (e) => handleFileClick(e, paths[0]) : undefined}
           >
             {basename(paths[0])}
           </span>
@@ -97,8 +97,8 @@ export const ReadTool: React.FC<ReadToolProps> = ({
           <React.Fragment key={`${p}:${i}`}>
             {i > 0 && ", "}
             <span
-              className={styles.filename}
-              onClick={(e) => handleFileClick(e, p)}
+              className={canOpen ? styles.filename : styles.filenamePlain}
+              onClick={canOpen ? (e) => handleFileClick(e, p) : undefined}
             >
               {basename(p)}
             </span>
@@ -106,7 +106,7 @@ export const ReadTool: React.FC<ReadToolProps> = ({
         ))}
       </>
     );
-  }, [paths, handleFileClick]);
+  }, [paths, canOpen, handleFileClick]);
 
   return (
     <ToolCard

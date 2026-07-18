@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { useEventsBusForIDE } from "./useEventBusForIDE";
+import { useOpenFileInApp } from "./useOpenFileInApp";
 import { isAbsolutePath } from "../utils/isAbsolutePath";
 import { useAppDispatch } from "./useAppDispatch";
 import { popBackTo, push } from "../features/Pages/pagesSlice";
@@ -17,7 +17,7 @@ import {
 
 export function useGoToLink() {
   const dispatch = useAppDispatch();
-  const { queryPathThenOpenFile } = useEventsBusForIDE();
+  const { openFile } = useOpenFileInApp();
   const maybeIntegration = useAppSelector(selectIntegration);
   const chatId = useAppSelector(selectChatId);
 
@@ -29,7 +29,7 @@ export function useGoToLink() {
       const payload = payloadParts.join(":");
       switch (action.toLowerCase()) {
         case "editor": {
-          void queryPathThenOpenFile({ file_path: payload });
+          openFile({ path: payload });
           return;
         }
         case "settings": {
@@ -81,7 +81,7 @@ export function useGoToLink() {
         }
       }
     },
-    [dispatch, chatId, maybeIntegration, queryPathThenOpenFile],
+    [dispatch, chatId, maybeIntegration, openFile],
   );
 
   return { handleGoTo };

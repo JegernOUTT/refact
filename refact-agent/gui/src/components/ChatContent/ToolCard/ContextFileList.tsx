@@ -2,7 +2,7 @@ import { FileText } from "lucide-react";
 import React, { useState, useCallback } from "react";
 import { Box, Text } from "@radix-ui/themes";
 import { ChatContextFile } from "../../../services/refact/types";
-import { useEventsBusForIDE } from "../../../hooks";
+import { useOpenFileInApp } from "../../../hooks";
 import { ShikiCodeBlock } from "../../Markdown";
 import { AnimatedCollapsible } from "../shared/AnimatedCollapsible";
 import styles from "./ContextFileList.module.css";
@@ -32,12 +32,14 @@ function getExtensionFromName(name: string): string {
 
 interface ContextFileItemProps {
   file: ChatContextFile;
-  onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>;
+  onOpenFile: (file: { path: string; line?: number }) => void;
+  canOpen: boolean;
 }
 
 const ContextFileItem: React.FC<ContextFileItemProps> = ({
   file,
   onOpenFile,
+  canOpen,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const displayName = formatFileName(file.file_name, file.line1, file.line2);
@@ -46,7 +48,7 @@ const ContextFileItem: React.FC<ContextFileItemProps> = ({
   const handleFileClick = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
-      void onOpenFile({ file_path: file.file_name, line: file.line1 });
+      onOpenFile({ path: file.file_name, line: file.line1 });
     },
     [onOpenFile, file.file_name, file.line1],
   );
@@ -59,7 +61,11 @@ const ContextFileItem: React.FC<ContextFileItemProps> = ({
     <AnimatedCollapsible
       className={styles.item}
       header={
-        <Text size="1" className={styles.filename} onClick={handleFileClick}>
+        <Text
+          size="1"
+          className={canOpen ? styles.filename : styles.filenamePlain}
+          onClick={canOpen ? handleFileClick : undefined}
+        >
           {displayName}
         </Text>
       }
@@ -85,7 +91,7 @@ interface ContextFileListProps {
 }
 
 export const ContextFileList: React.FC<ContextFileListProps> = ({ files }) => {
-  const { queryPathThenOpenFile } = useEventsBusForIDE();
+  const { canOpen, openFile } = useOpenFileInApp();
 
   if (files.length === 0) return null;
 
@@ -95,7 +101,8 @@ export const ContextFileList: React.FC<ContextFileListProps> = ({ files }) => {
         <ContextFileItem
           key={`${file.file_name}-${file.line1}-${file.line2}-${index}`}
           file={file}
-          onOpenFile={queryPathThenOpenFile}
+          onOpenFile={openFile}
+          canOpen={canOpen}
         />
       ))}
     </div>

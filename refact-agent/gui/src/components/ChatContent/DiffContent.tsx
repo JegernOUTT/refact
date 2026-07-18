@@ -8,7 +8,7 @@ import * as Collapsible from "@radix-ui/react-collapsible";
 import { Chevron } from "../Collapsible";
 import groupBy from "lodash.groupby";
 import { TruncateLeft } from "../Text";
-import { useHideScroll, useEventsBusForIDE } from "../../hooks";
+import { useHideScroll, useOpenFileInApp } from "../../hooks";
 import { FadedButton } from "../Buttons";
 
 type DiffType = "apply" | "unapply" | "error" | "can not apply";
@@ -252,7 +252,7 @@ export type DiffWithStatus = DiffChunk & {
 export const DiffForm: React.FC<{
   diffs: Record<string, DiffChunk[]>;
 }> = ({ diffs }) => {
-  const { openFile } = useEventsBusForIDE();
+  const { canOpen, openFile } = useOpenFileInApp();
   return (
     <Flex direction="column" maxWidth="100%" py="2" gap="2">
       {Object.entries(diffs).map(([fullFilePath, diffsForFile], index) => {
@@ -267,20 +267,37 @@ export const DiffForm: React.FC<{
           <Box key={key} my="2">
             <Flex justify="between" align="center" p="1">
               <TruncateLeft size="1">
-                <Link
-                  // TODO: check how ides treat this being "", undefined, or "#"
-                  href=""
-                  onClick={(event) => {
-                    event.preventDefault();
-                    const startLine = Math.min(
-                      ...diffsForFile.map((diff) => diff.line1),
-                    );
-                    openFile({
-                      file_path: fullFilePath,
-                      line: startLine,
-                    });
-                  }}
-                >
+                {canOpen ? (
+                  <Link
+                    // TODO: check how ides treat this being "", undefined, or "#"
+                    href=""
+                    onClick={(event) => {
+                      event.preventDefault();
+                      const startLine = Math.min(
+                        ...diffsForFile.map((diff) => diff.line1),
+                      );
+                      openFile({
+                        path: fullFilePath,
+                        line: startLine,
+                        resolved: true,
+                      });
+                    }}
+                  >
+                    <Text
+                      as="span"
+                      className={classNames({
+                        [styles.diffRenameText]: Boolean(
+                          renameAction?.file_name_rename,
+                        ),
+                        [styles.diffFilePath]: !renameAction?.file_name_rename,
+                      })}
+                    >
+                      {renameAction?.file_name_rename
+                        ? renameAction.file_name_rename
+                        : fullFilePath}
+                    </Text>
+                  </Link>
+                ) : (
                   <Text
                     as="span"
                     className={classNames({
@@ -294,7 +311,7 @@ export const DiffForm: React.FC<{
                       ? renameAction.file_name_rename
                       : fullFilePath}
                   </Text>
-                </Link>
+                )}
               </TruncateLeft>
             </Flex>
             <Box className="scrollX">

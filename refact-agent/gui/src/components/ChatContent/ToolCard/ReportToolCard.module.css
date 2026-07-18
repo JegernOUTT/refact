@@ -187,6 +187,10 @@
   color: var(--rf-color-accent);
 }
 
+.fileLinkPlain {
+  color: var(--rf-color-muted);
+}
+
 .knowledgePath {
   padding: 0 var(--rf-space-1) 0 var(--rf-toolcard-indent);
 }

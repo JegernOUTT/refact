@@ -4,7 +4,7 @@ import {
   useAppSelector,
   useEventsBusForIDE,
 } from "../../hooks";
-import { selectFeatures, changeFeature } from "./configSlice";
+import { selectFeatures, selectHost, changeFeature } from "./configSlice";
 import { Link } from "../../components/Link";
 import { Button, Dialog, FieldSwitch, SettingItem } from "../../components/ui";
 import styles from "./FeatureMenu.module.css";
@@ -67,6 +67,8 @@ export const FeatureMenu: React.FC = () => {
   const { success, reset } = useKonamiCode();
   const dispatch = useAppDispatch();
   const features = useAppSelector(selectFeatures);
+  const host = useAppSelector(selectHost);
+  const isWebHost = host === "web";
 
   const { openSettings } = useEventsBusForIDE();
 
@@ -113,7 +115,13 @@ export const FeatureMenu: React.FC = () => {
                         {setInSettings ? (
                           <span className={styles.featureHint}>
                             Option set in{" "}
-                            <Link onClick={handleSettingsClick}>settings</Link>
+                            {isWebHost ? (
+                              "settings"
+                            ) : (
+                              <Link onClick={handleSettingsClick}>
+                                settings
+                              </Link>
+                            )}
                           </span>
                         ) : null}
                       </div>

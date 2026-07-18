@@ -36,6 +36,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
 }: DropdownProps) => {
   const host = useAppSelector(selectHost);
   const { openPrivacyFile } = useEventsBusForIDE();
+  const isWebHost = host === "web";
 
   const refactProductType = useMemo(() => {
     if (host === "jetbrains") return "Plugin";
@@ -68,13 +69,17 @@ export const Dropdown: React.FC<DropdownProps> = ({
         <Menu.Item onSelect={() => handleNavigation("code intel")}>
           <Icon icon={BrainCircuit} size="sm" /> Code Intelligence
         </Menu.Item>
-        <Menu.Item onSelect={() => handleNavigation("settings")}>
-          <Icon icon={SlidersHorizontal} size="sm" /> {refactProductType}{" "}
-          Settings
-        </Menu.Item>
-        <Menu.Item onSelect={() => void openPrivacyFile()}>
-          <Icon icon={FileText} size="sm" /> Edit privacy.yaml
-        </Menu.Item>
+        {!isWebHost && (
+          <Menu.Item onSelect={() => handleNavigation("settings")}>
+            <Icon icon={SlidersHorizontal} size="sm" /> {refactProductType}{" "}
+            Settings
+          </Menu.Item>
+        )}
+        {!isWebHost && (
+          <Menu.Item onSelect={() => void openPrivacyFile()}>
+            <Icon icon={FileText} size="sm" /> Edit privacy.yaml
+          </Menu.Item>
+        )}
         <Menu.Separator />
         <Menu.Item onSelect={() => handleNavigation("bug report")}>
           <Icon icon={Bug} size="sm" /> Report a bug

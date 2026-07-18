@@ -27,13 +27,20 @@ import {
   parseRawTextDocToolCall,
 } from "./types";
 import { Box, Card, Flex, Button } from "../LongTailPrimitives";
+import { Text } from "@radix-ui/themes";
 import { TruncateLeft } from "../Text";
 import { Link } from "../Link";
 import { filename } from "../../utils/filename";
 import styles from "./Texdoc.module.css";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { Reveal } from "../Reveal";
-import { useAppSelector, useHideScroll, useEventsBusForIDE } from "../../hooks";
+import {
+  useAppSelector,
+  useHideScroll,
+  useEventsBusForIDE,
+  useOpenFileInApp,
+} from "../../hooks";
+import { selectCapabilities } from "../../features/Config/configSlice";
 import { selectCanPaste, selectChatId } from "../../features/Chat";
 import { toolsApi } from "../../services/refact";
 import { ErrorCallout } from "../Callout";
@@ -99,8 +106,9 @@ function getToolCallPath(toolCall: TextDocToolCall): string | null {
 type TextDocHeaderProps = { toolCall: TextDocToolCall };
 const TextDocHeader = forwardRef<HTMLDivElement, TextDocHeaderProps>(
   ({ toolCall }, ref) => {
-    const { queryPathThenOpenFile, diffPasteBack, sendToolCallToIde } =
-      useEventsBusForIDE();
+    const { diffPasteBack, sendToolCallToIde } = useEventsBusForIDE();
+    const { canOpen, openFile } = useOpenFileInApp();
+    const capabilities = useAppSelector(selectCapabilities);
     const [requestDryRun, dryRunResult] =
       toolsApi.useDryRunForEditToolMutation();
     const [errorMessage, setErrorMessage] = useState<string>("");
@@ -111,12 +119,10 @@ const TextDocHeader = forwardRef<HTMLDivElement, TextDocHeaderProps>(
 
     const clearErrorMessage = useCallback(() => setErrorMessage(""), []);
 
-    const handleOpenFile = useCallback(async () => {
+    const handleOpenFile = useCallback(() => {
       if (!toolCallPath) return;
-      await queryPathThenOpenFile({
-        file_path: toolCallPath,
-      });
-    }, [toolCallPath, queryPathThenOpenFile]);
+      openFile({ path: toolCallPath });
+    }, [toolCallPath, openFile]);
 
     const handleReplace = useCallback(
       (content: string) => {
@@ -171,30 +177,36 @@ const TextDocHeader = forwardRef<HTMLDivElement, TextDocHeaderProps>(
       >
         <Flex gap="2" py="2" pl="2" justify="between">
           <TruncateLeft>
-            <Link
-              title="Open file"
-              onClick={(event) => {
-                event.preventDefault();
-                void handleOpenFile();
-              }}
-            >
-              {toolCallPath ?? "apply_patch"}
-            </Link>
+            {canOpen ? (
+              <Link
+                title="Open file"
+                onClick={(event) => {
+                  event.preventDefault();
+                  handleOpenFile();
+                }}
+              >
+                {toolCallPath ?? "apply_patch"}
+              </Link>
+            ) : (
+              <Text as="span">{toolCallPath ?? "apply_patch"}</Text>
+            )}
           </TruncateLeft>{" "}
           <div style={{ flexGrow: 1 }} />
-          <Button
-            size="1"
-            onClick={handleApplyToolResult}
-            disabled={dryRunResult.isLoading}
-            // title={`Apply`}
-            className={classNames(styles.apply_button)}
-          >
-            <Flex as="span" align="center" gap="1">
-              <PlusIcon />
-              Diff
-            </Flex>
-          </Button>
-          {replaceContent && (
+          {capabilities.ideDiffPasteBack && (
+            <Button
+              size="1"
+              onClick={handleApplyToolResult}
+              disabled={dryRunResult.isLoading}
+              // title={`Apply`}
+              className={classNames(styles.apply_button)}
+            >
+              <Flex as="span" align="center" gap="1">
+                <PlusIcon />
+                Diff
+              </Flex>
+            </Button>
+          )}
+          {capabilities.ideDiffPasteBack && replaceContent && (
             <Button
               size="1"
               // this one can directly dismiss the tool confirmation.

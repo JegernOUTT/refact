@@ -7,7 +7,7 @@ import { Icon } from "../ui";
 import { ChatContextFile } from "../../services/refact";
 import { ShikiCodeBlock } from "../Markdown/ShikiCodeBlock";
 import { filename } from "../../utils";
-import { useEventsBusForIDE, useAppDispatch } from "../../hooks";
+import { useOpenFileInApp, useAppDispatch } from "../../hooks";
 import { push } from "../../features/Pages/pagesSlice";
 import { AnimatedCollapsible } from "./shared/AnimatedCollapsible";
 import styles from "./ContextFiles.module.css";
@@ -145,14 +145,19 @@ function extractProjectContextDisplayName(filePath: string): string {
 
 const FileItem: React.FC<{
   file: ChatContextFile;
-  onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>;
+  onOpenFile: (file: { file_path: string; line?: number }) => void;
+  canOpen: boolean;
   variant: ContextVariant;
-}> = ({ file, onOpenFile, variant }) => {
+}> = ({ file, onOpenFile, canOpen, variant }) => {
   const storeKey = `ctxfile:${file.file_name}:${file.line1 || 0}-${
     file.line2 || 0
   }`;
   const [isOpen, , setIsOpen] = useStoredOpen(storeKey, false);
   const extension = getExtensionFromName(file.file_name);
+  const isClickable =
+    canOpen ||
+    file.file_name.startsWith("skill://") ||
+    file.file_name.startsWith("skills://");
 
   const displayName =
     variant === "enrichment"
@@ -173,7 +178,7 @@ const FileItem: React.FC<{
   const handleFileClick = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
-      void onOpenFile({
+      onOpenFile({
         file_path: file.file_name,
         line: file.line1,
       });
@@ -185,7 +190,11 @@ const FileItem: React.FC<{
     <AnimatedCollapsible
       className={styles.fileItem}
       header={
-        <Text size="1" className={styles.fileName} onClick={handleFileClick}>
+        <Text
+          size="1"
+          className={isClickable ? styles.fileName : styles.fileNamePlain}
+          onClick={isClickable ? handleFileClick : undefined}
+        >
           {displayName}
         </Text>
       }
@@ -213,9 +222,10 @@ const FileSection: React.FC<{
   icon: React.ReactNode;
   title: string;
   files: ChatContextFile[];
-  onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>;
+  onOpenFile: (file: { file_path: string; line?: number }) => void;
+  canOpen: boolean;
   variant: ContextVariant;
-}> = ({ icon, title, files, onOpenFile, variant }) => {
+}> = ({ icon, title, files, onOpenFile, canOpen, variant }) => {
   return (
     <Box className={styles.section}>
       <Flex align="center" gap="2" className={styles.sectionHeader}>
@@ -230,6 +240,7 @@ const FileSection: React.FC<{
             key={file.file_name + index}
             file={file}
             onOpenFile={onOpenFile}
+            canOpen={canOpen}
             variant={variant}
           />
         ))}
@@ -240,9 +251,10 @@ const FileSection: React.FC<{
 
 const FilesContent: React.FC<{
   files: ChatContextFile[];
-  onOpenFile: (file: { file_path: string; line?: number }) => Promise<void>;
+  onOpenFile: (file: { file_path: string; line?: number }) => void;
+  canOpen: boolean;
   variant: ContextVariant;
-}> = ({ files, onOpenFile, variant }) => {
+}> = ({ files, onOpenFile, canOpen, variant }) => {
   if (files.length === 0) return null;
 
   if (variant === "enrichment") {
@@ -266,6 +278,7 @@ const FilesContent: React.FC<{
             title="Knowledge"
             files={memories}
             onOpenFile={onOpenFile}
+            canOpen={canOpen}
             variant={variant}
           />
         )}
@@ -275,6 +288,7 @@ const FilesContent: React.FC<{
             title="Past Conversations"
             files={trajectories}
             onOpenFile={onOpenFile}
+            canOpen={canOpen}
             variant={variant}
           />
         )}
@@ -284,6 +298,7 @@ const FilesContent: React.FC<{
             title="Related"
             files={other}
             onOpenFile={onOpenFile}
+            canOpen={canOpen}
             variant={variant}
           />
         )}
@@ -306,6 +321,7 @@ const FilesContent: React.FC<{
             title="Instructions"
             files={instructions}
             onOpenFile={onOpenFile}
+            canOpen={canOpen}
             variant={variant}
           />
         )}
@@ -315,6 +331,7 @@ const FilesContent: React.FC<{
             title="IDE Settings"
             files={ideSettings}
             onOpenFile={onOpenFile}
+            canOpen={canOpen}
             variant={variant}
           />
         )}
@@ -324,6 +341,7 @@ const FilesContent: React.FC<{
             title="Other"
             files={other}
             onOpenFile={onOpenFile}
+            canOpen={canOpen}
             variant={variant}
           />
         )}
@@ -338,6 +356,7 @@ const FilesContent: React.FC<{
           key={file.file_name + index}
           file={file}
           onOpenFile={onOpenFile}
+          canOpen={canOpen}
           variant={variant}
         />
       ))}
@@ -352,11 +371,11 @@ const _ContextFiles: React.FC<{
   onOpenChange?: (open: boolean) => void;
 }> = ({ files, toolCallId, open: controlledOpen, onOpenChange }) => {
   const [internalOpen, setInternalOpen] = useState(false);
-  const { queryPathThenOpenFile } = useEventsBusForIDE();
+  const { canOpen, openFile } = useOpenFileInApp();
   const dispatch = useAppDispatch();
 
   const handleOpenFile = useCallback(
-    async (file: { file_path: string; line?: number }) => {
+    (file: { file_path: string; line?: number }) => {
       if (file.file_path.startsWith("skill://")) {
         const skillName = file.file_path.slice("skill://".length);
         dispatch(
@@ -368,9 +387,9 @@ const _ContextFiles: React.FC<{
         dispatch(push({ name: "extensions", tab: "skills" }));
         return;
       }
-      await queryPathThenOpenFile(file);
+      openFile({ path: file.file_path, line: file.line });
     },
-    [dispatch, queryPathThenOpenFile],
+    [dispatch, openFile],
   );
 
   const isControlled = controlledOpen !== undefined;
@@ -435,6 +454,7 @@ const _ContextFiles: React.FC<{
         <FilesContent
           files={files}
           onOpenFile={handleOpenFile}
+          canOpen={canOpen}
           variant={variant}
         />
       </Box>

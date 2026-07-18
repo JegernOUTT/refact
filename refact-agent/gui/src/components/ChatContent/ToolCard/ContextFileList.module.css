@@ -29,6 +29,11 @@
   text-decoration: underline;
 }
 
+.filenamePlain {
+  font-family: var(--rf-font-mono);
+  font-size: 0.9em;
+}
+
 .content {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   max-height: 200px;

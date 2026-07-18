@@ -30,6 +30,12 @@ server.use(
   }),
 );
 
+const ideConfig = {
+  host: "vscode" as const,
+  lspPort: 8001,
+  themeProps: { appearance: "dark" as const },
+};
+
 describe("EditTool", () => {
   it("renders edit hunks expanded by default with one line-number column", () => {
     const diff: DiffChunk = {
@@ -151,11 +157,39 @@ describe("EditTool", () => {
         diffs={diffs}
         isActiveTool={false}
       />,
+      { preloadedState: { config: ideConfig } },
     );
 
     expect(screen.getAllByRole("button", { name: "Apply diff" })).toHaveLength(
       2,
     );
+  });
+
+  it("hides Apply diff actions when the host lacks ideDiffPasteBack", () => {
+    const diff: DiffChunk = {
+      file_name: "src/web.ts",
+      file_action: "edit",
+      line1: 1,
+      line2: 1,
+      lines_remove: "old-web\n",
+      lines_add: "new-web\n",
+    };
+
+    render(
+      <EditTool
+        toolCall={makeToolCall("edit-web")}
+        diffs={[diff]}
+        isActiveTool={false}
+      />,
+    );
+
+    expect(screen.getByText("old-web")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Apply diff" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Replace selection" }),
+    ).not.toBeInTheDocument();
   });
 
   it("caps very large edit hunks behind a show-more control", async () => {
