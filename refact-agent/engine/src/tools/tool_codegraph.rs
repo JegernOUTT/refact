@@ -139,7 +139,7 @@ pub(crate) struct HealthFileAnalysis {
 pub(crate) struct HealthAnalysisContext<'a> {
     pub(crate) repo_root: Option<&'a Path>,
     pub(crate) intel: Option<&'a refact_git_intel::GitIntel>,
-    pub(crate) service: Option<&'a Arc<refact_codegraph::CodeGraphService>>,
+    pub(crate) graph: Option<&'a HealthGraphSnapshot>,
     pub(crate) coverage: Option<&'a refact_codehealth::coverage::CoverageReport>,
     pub(crate) trend_findings: &'a [refact_codehealth::biomarkers::Finding],
     pub(crate) git_function_fact_paths: &'a HashSet<String>,
@@ -195,6 +195,53 @@ fn git_cache() -> &'static StdMutex<GitMiningCache> {
 fn clone_analysis_cache() -> &'static AMutex<CrossFileCloneCache> {
     static CACHE: OnceLock<AMutex<CrossFileCloneCache>> = OnceLock::new();
     CACHE.get_or_init(|| AMutex::new(CrossFileCloneCache::default()))
+}
+
+#[derive(Default)]
+struct BlameFactsCache {
+    repo_head: Option<(PathBuf, Option<Oid>)>,
+    facts: HashMap<(String, u64), Vec<refact_git_intel::blame::RangeGitFacts>>,
+}
+
+fn blame_facts_cache() -> &'static StdMutex<BlameFactsCache> {
+    static CACHE: OnceLock<StdMutex<BlameFactsCache>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(BlameFactsCache::default()))
+}
+
+fn blame_ranges_hash(ranges: &[(String, usize, usize)]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    ranges.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn cached_blame_range_facts(
+    repo_root: &Path,
+    file: &str,
+    ranges: &[(String, usize, usize)],
+) -> Vec<refact_git_intel::blame::RangeGitFacts> {
+    let Ok(head) = git_head_oid(repo_root) else {
+        return refact_git_intel::blame::range_facts(repo_root, file, ranges).unwrap_or_default();
+    };
+    let key = (file.to_string(), blame_ranges_hash(ranges));
+    {
+        let mut cache = blame_facts_cache().lock().unwrap();
+        let head_key = Some((repo_root.to_path_buf(), head));
+        if cache.repo_head != head_key {
+            cache.repo_head = head_key;
+            cache.facts.clear();
+        } else if let Some(facts) = cache.facts.get(&key) {
+            return facts.clone();
+        }
+    }
+    let facts = refact_git_intel::blame::range_facts(repo_root, file, ranges).unwrap_or_default();
+    {
+        let mut cache = blame_facts_cache().lock().unwrap();
+        if cache.repo_head == Some((repo_root.to_path_buf(), head)) {
+            cache.facts.insert(key, facts.clone());
+        }
+    }
+    facts
 }
 
 fn health_analysis_cache() -> &'static StdMutex<HealthAnalysisCache> {
@@ -505,6 +552,16 @@ pub(crate) fn cached_mine_history(
     })
 }
 
+pub(crate) async fn cached_mine_history_async(
+    repo_path: &Path,
+    max_commits: usize,
+) -> Result<refact_git_intel::GitIntel, String> {
+    let repo_path = repo_path.to_path_buf();
+    tokio::task::spawn_blocking(move || cached_mine_history(&repo_path, max_commits))
+        .await
+        .map_err(|e| format!("git history mining join: {e}"))?
+}
+
 fn cached_mine_history_with<F>(
     repo_path: &Path,
     max_commits: usize,
@@ -648,46 +705,38 @@ pub(crate) async fn cached_cross_file_clones(
         }
 
         let files_text = service.all_files_with_text().await?;
-        let triples = files_text
-            .iter()
-            .map(|(path, text)| {
-                (
-                    path.clone(),
-                    refact_codegraph::lang_from_path(path).to_string(),
-                    text.clone(),
-                )
+        let rebuilt = tokio::task::spawn_blocking(move || {
+            let triples = files_text
+                .iter()
+                .map(|(path, text)| {
+                    (
+                        path.clone(),
+                        refact_codegraph::lang_from_path(path).to_string(),
+                        text.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let analysis = refact_codehealth::duplication::cross_file_analysis(&triples);
+            let files = files_text.len();
+            let text_by_path = files_text
+                .into_iter()
+                .map(|(path, text)| {
+                    let lang = refact_codegraph::lang_from_path(&path).to_string();
+                    (path, (lang, text))
+                })
+                .collect::<HashMap<_, _>>();
+            Arc::new(CloneAnalysis {
+                generation,
+                clones: analysis.clones,
+                duplication_pct: analysis.duplication_pct,
+                files,
+                text_by_path,
+                tokens_by_path: analysis.tokens_by_path,
+                duplicated_tokens_by_path: analysis.duplicated_tokens_by_path,
             })
-            .collect::<Vec<_>>();
-        let clones = refact_codehealth::duplication::detect_cross_file_clones(&triples);
-        let duplication_pct = refact_codehealth::duplication::cross_file_duplication_pct(&triples);
-        let duplicated_tokens_by_path =
-            refact_codehealth::duplication::per_file_duplicated_token_counts(&triples);
-        let files = files_text.len();
-        let text_by_path = files_text
-            .into_iter()
-            .map(|(path, text)| {
-                let lang = refact_codegraph::lang_from_path(&path).to_string();
-                (path, (lang, text))
-            })
-            .collect::<HashMap<_, _>>();
-        let tokens_by_path = text_by_path
-            .iter()
-            .map(|(path, (lang, text))| {
-                (
-                    path.clone(),
-                    refact_codehealth::duplication::tokenize(lang, text).len(),
-                )
-            })
-            .collect();
-        let rebuilt = Arc::new(CloneAnalysis {
-            generation,
-            clones,
-            duplication_pct,
-            files,
-            text_by_path,
-            tokens_by_path,
-            duplicated_tokens_by_path,
-        });
+        })
+        .await
+        .map_err(|e| format!("cross-file clone analysis join: {e}"))?;
 
         let mut cache = clone_analysis_cache().lock().await;
         cache
@@ -831,9 +880,23 @@ async fn dead_code_report_with_roots(
     let index_state = dead_code_index_state(&readiness);
     let warning = dead_code_partial_warning(&index_state);
     let dead = service.dead_code().await?;
-    let intel = git_root.and_then(|dir| cached_mine_history(dir, DEAD_CODE_HISTORY_COMMITS).ok());
+    let intel = match git_root {
+        Some(dir) => cached_mine_history_async(dir, DEAD_CODE_HISTORY_COMMITS)
+            .await
+            .ok(),
+        None => None,
+    };
     let now_ts = current_unix_ts();
-    let facts = dead_code_git_facts_by_node(&dead, indexed_root, intel.as_ref(), now_ts);
+    let facts = {
+        let dead = dead.clone();
+        let indexed_root = indexed_root.map(Path::to_path_buf);
+        let intel = intel.clone();
+        tokio::task::spawn_blocking(move || {
+            dead_code_git_facts_by_node(&dead, indexed_root.as_deref(), intel.as_ref(), now_ts)
+        })
+        .await
+        .map_err(|e| format!("dead code git facts join: {e}"))?
+    };
     let min_confidence = min_confidence.clamp(0.0, 1.0);
     let limit = limit.clamp(1, DEAD_CODE_MAX_LIMIT);
     let mut entries = enrich_dead_symbols_with_facts(dead, &facts)
@@ -945,6 +1008,22 @@ fn dead_code_git_facts_by_node(
     intel: Option<&refact_git_intel::GitIntel>,
     now_ts: i64,
 ) -> HashMap<i64, DeadCodeGitFacts> {
+    let last_touch_by_path = intel.map(|intel| {
+        let mut map: HashMap<String, i64> = HashMap::new();
+        for commit in &intel.commit_records {
+            if commit.ts <= 0 {
+                continue;
+            }
+            for (path, _, _) in &commit.files {
+                let normalized = refact_git_intel::paths::normalize_separators(path);
+                let entry = map.entry(normalized).or_insert(commit.ts);
+                if commit.ts > *entry {
+                    *entry = commit.ts;
+                }
+            }
+        }
+        map
+    });
     let mut facts_by_node = HashMap::new();
     let mut ranges_by_path: HashMap<String, Vec<(String, usize, usize)>> = HashMap::new();
     for symbol in dead {
@@ -954,7 +1033,10 @@ fn dead_code_git_facts_by_node(
             file_churn: intel
                 .and_then(|intel| intel.file_churn.get(&key).copied())
                 .unwrap_or(0),
-            recent_churn_days: intel.and_then(|intel| recent_churn_days(intel, &key, now_ts)),
+            recent_churn_days: last_touch_by_path
+                .as_ref()
+                .and_then(|map| map.get(&key))
+                .and_then(|ts| days_since_ts(now_ts, *ts)),
         };
         facts_by_node.insert(symbol.node_id, facts);
         if repo_root.is_some() {
@@ -969,11 +1051,7 @@ fn dead_code_git_facts_by_node(
         return facts_by_node;
     };
     for (path, ranges) in ranges_by_path {
-        let Ok(range_facts) = refact_git_intel::blame::range_facts(repo_root, &path, &ranges)
-        else {
-            continue;
-        };
-        for range in range_facts {
+        for range in cached_blame_range_facts(repo_root, &path, &ranges) {
             let Ok(node_id) = range.name.parse::<i64>() else {
                 continue;
             };
@@ -992,26 +1070,6 @@ fn dead_code_git_key(path: &str, repo_root: Option<&Path>) -> String {
         }
         None => refact_git_intel::paths::normalize_separators(path),
     }
-}
-
-fn recent_churn_days(
-    intel: &refact_git_intel::GitIntel,
-    git_key: &str,
-    now_ts: i64,
-) -> Option<u64> {
-    intel
-        .commit_records
-        .iter()
-        .filter(|commit| commit_touches_path(commit, git_key))
-        .filter_map(|commit| days_since_ts(now_ts, commit.ts))
-        .min()
-}
-
-fn commit_touches_path(commit: &refact_git_intel::CommitRecord, git_key: &str) -> bool {
-    commit
-        .files
-        .iter()
-        .any(|(path, _, _)| refact_git_intel::paths::normalize_separators(path) == git_key)
 }
 
 fn days_since_ts(now_ts: i64, ts: i64) -> Option<u64> {
@@ -1093,7 +1151,7 @@ pub(crate) fn push_health_snapshot(
     refact_codehealth::trends::push_snapshot(history, snapshot, HEALTH_SNAPSHOT_LIMIT);
 }
 
-pub(crate) async fn analyze_health_file_shared(
+pub(crate) fn analyze_health_file_shared(
     path: String,
     text: String,
     ctx: &HealthAnalysisContext<'_>,
@@ -1113,7 +1171,7 @@ pub(crate) async fn analyze_health_file_shared(
         return Ok(health_analysis_from_core(core, true));
     }
 
-    let core = compute_health_core(path, text, lang, ctx).await?;
+    let core = compute_health_core(path, text, lang, ctx)?;
     health_cache_store(
         &core.path,
         content_hash,
@@ -1205,7 +1263,7 @@ fn health_cache_store(
     );
 }
 
-async fn compute_health_core(
+fn compute_health_core(
     path: String,
     text: String,
     lang: String,
@@ -1218,7 +1276,7 @@ async fn compute_health_core(
     let dry_findings = health_dry_findings(&path, &lang, &text, duplication_pct);
     let dry_violation = !dry_findings.is_empty();
     findings.extend(dry_findings);
-    findings.extend(health_git_findings(&path, ctx, &health).await?);
+    findings.extend(health_git_findings(&path, ctx, &health)?);
     findings.extend(health_coverage_findings(
         &path,
         ctx.coverage,
@@ -1232,7 +1290,7 @@ async fn compute_health_core(
         ctx.repo_root,
     ));
     sort_health_findings(&mut findings);
-    let findings = enrich_health_findings(ctx.service, &path, &health.functions, findings).await;
+    let findings = enrich_health_findings(ctx.graph, &path, &health.functions, findings);
 
     let mut functions = health.functions.clone();
     functions.sort_by(|a, b| {
@@ -1389,7 +1447,7 @@ fn health_dry_findings(
     refact_codehealth::dry::dry_violation(&input)
 }
 
-async fn health_git_findings(
+fn health_git_findings(
     path: &str,
     ctx: &HealthAnalysisContext<'_>,
     health: &refact_codehealth::FileHealth,
@@ -1419,10 +1477,9 @@ async fn health_git_findings(
         intel,
         repo_root,
         &path_key,
-        ctx.service,
+        ctx.graph,
         (!ranges.is_empty()).then_some(ranges.as_slice()),
-    )
-    .await;
+    );
     Ok(refact_codehealth::git_biomarkers::git_biomarkers(&meta))
 }
 
@@ -1594,11 +1651,11 @@ fn health_cache_stats_for_tests() -> (usize, usize) {
     (cache.hits, cache.misses)
 }
 
-pub(crate) async fn build_git_meta(
+pub(crate) fn build_git_meta(
     intel: &refact_git_intel::GitIntel,
     repo_root: &Path,
     path_repo_relative: &str,
-    service: Option<&Arc<refact_codegraph::CodeGraphService>>,
+    graph: Option<&HealthGraphSnapshot>,
     function_ranges: Option<&[(String, usize, usize)]>,
 ) -> refact_codehealth::git_biomarkers::GitMeta {
     let now_ts = current_unix_ts();
@@ -1612,12 +1669,10 @@ pub(crate) async fn build_git_meta(
         None => Vec::new(),
     };
     let repo_function_mod_p80 = function_mod_p80(&functions);
-    let import_edges = match service {
-        Some(service) => git_meta_import_edges(service, repo_root, path_repo_relative)
-            .await
-            .unwrap_or_default(),
-        None => HashSet::new(),
-    };
+    let import_edges = graph
+        .and_then(|graph| graph.import_index.as_ref())
+        .map(|index| index.import_edges(&repo_root.to_string_lossy(), path_repo_relative))
+        .unwrap_or_default();
 
     refact_codehealth::git_biomarkers::GitMeta {
         file_path: path_repo_relative.to_string(),
@@ -1676,6 +1731,35 @@ pub(crate) async fn build_git_risk_assembly(
     limit: usize,
     filter: Option<&str>,
 ) -> GitRiskAssembly {
+    let graph = health_graph_snapshot(service, Some(repo_root))
+        .await
+        .map(Arc::new);
+    let intel_owned = intel.clone();
+    let repo_root = repo_root.to_path_buf();
+    let filter = filter.map(str::to_string);
+    tokio::task::spawn_blocking(move || {
+        build_git_risk_assembly_blocking(
+            &intel_owned,
+            &repo_root,
+            graph.as_deref(),
+            limit,
+            filter.as_deref(),
+        )
+    })
+    .await
+    .unwrap_or_else(|_| GitRiskAssembly {
+        files: Vec::new(),
+        recent_commit_risks: Vec::new(),
+    })
+}
+
+fn build_git_risk_assembly_blocking(
+    intel: &refact_git_intel::GitIntel,
+    repo_root: &Path,
+    graph: Option<&HealthGraphSnapshot>,
+    limit: usize,
+    filter: Option<&str>,
+) -> GitRiskAssembly {
     let now_ts = current_unix_ts();
     let all_hotspots = intel.hotspots(intel.file_churn.len().max(1));
     let mut selected = all_hotspots
@@ -1714,10 +1798,9 @@ pub(crate) async fn build_git_risk_assembly(
             intel,
             repo_root,
             &hotspot.path,
-            service,
+            graph,
             (!ranges.is_empty()).then_some(ranges.as_slice()),
-        )
-        .await;
+        );
         meta.is_hotspot = true;
         let findings = refact_codehealth::git_biomarkers::git_biomarkers(&meta);
         files.push(GitRiskFileAssembly {
@@ -1804,8 +1887,7 @@ fn build_function_git_facts(
     ranges: &[(String, usize, usize)],
     now_ts: i64,
 ) -> Vec<refact_codehealth::git_biomarkers::FunctionGitFacts> {
-    let range_facts = refact_git_intel::blame::range_facts(repo_root, path_repo_relative, ranges)
-        .unwrap_or_default();
+    let range_facts = cached_blame_range_facts(repo_root, path_repo_relative, ranges);
     let health_by_range = function_health_by_range(repo_root, path_repo_relative);
     range_facts
         .into_iter()
@@ -1868,44 +1950,62 @@ fn function_mod_p80(
     counts.get(index).copied()
 }
 
-async fn git_meta_import_edges(
-    service: &Arc<refact_codegraph::CodeGraphService>,
-    repo_root: &Path,
-    path_repo_relative: &str,
-) -> Result<HashSet<String>, String> {
-    let cached = service.cached_graph_analytics().await?;
-    let repo_root = repo_root.to_string_lossy();
-    let mut path_by_id = HashMap::new();
-    let mut source_paths = HashSet::new();
-    for (id, _name, path) in &cached.data.nodes {
-        path_by_id.insert(*id, path.clone());
-        if refact_git_intel::paths::paths_refer_to_same_file(path, path_repo_relative, &repo_root) {
-            source_paths.insert(path.clone());
+struct HealthImportIndex {
+    distinct_paths: Vec<String>,
+    import_dsts_by_src_path: HashMap<String, BTreeSet<String>>,
+}
+
+impl HealthImportIndex {
+    fn build(cached: &refact_codegraph::CachedGraphAnalytics, repo_root: &Path) -> Self {
+        let repo_root = repo_root.to_string_lossy();
+        let mut path_by_id = HashMap::new();
+        let mut distinct_paths = BTreeSet::new();
+        for (id, _name, path) in &cached.data.nodes {
+            path_by_id.insert(*id, path.as_str());
+            distinct_paths.insert(path.clone());
+        }
+
+        let mut import_dsts_by_src_path: HashMap<String, BTreeSet<String>> = HashMap::new();
+        for (src, dst, kind) in &cached.data.edges {
+            if kind != "calls" && kind != "imports" {
+                continue;
+            }
+            let (Some(src_path), Some(dst_path)) = (path_by_id.get(src), path_by_id.get(dst))
+            else {
+                continue;
+            };
+            if refact_git_intel::paths::paths_refer_to_same_file(src_path, dst_path, &repo_root) {
+                continue;
+            }
+            import_dsts_by_src_path
+                .entry((*src_path).to_string())
+                .or_default()
+                .insert(refact_git_intel::paths::repo_relative_or_basename(
+                    dst_path, &repo_root,
+                ));
+        }
+
+        Self {
+            distinct_paths: distinct_paths.into_iter().collect(),
+            import_dsts_by_src_path,
         }
     }
 
-    let mut out = HashSet::new();
-    for (src, dst, kind) in &cached.data.edges {
-        if kind != "calls" && kind != "imports" {
-            continue;
+    fn import_edges(&self, repo_root: &str, path_repo_relative: &str) -> HashSet<String> {
+        let mut out = HashSet::new();
+        for path in &self.distinct_paths {
+            if refact_git_intel::paths::paths_refer_to_same_file(
+                path,
+                path_repo_relative,
+                repo_root,
+            ) {
+                if let Some(dsts) = self.import_dsts_by_src_path.get(path) {
+                    out.extend(dsts.iter().cloned());
+                }
+            }
         }
-        let Some(src_path) = path_by_id.get(src) else {
-            continue;
-        };
-        if !source_paths.contains(src_path) {
-            continue;
-        }
-        let Some(dst_path) = path_by_id.get(dst) else {
-            continue;
-        };
-        if refact_git_intel::paths::paths_refer_to_same_file(src_path, dst_path, &repo_root) {
-            continue;
-        }
-        out.insert(refact_git_intel::paths::repo_relative_or_basename(
-            dst_path, &repo_root,
-        ));
+        out
     }
-    Ok(out)
 }
 
 fn path_matches_git_filter(path: &str, filter: &str) -> bool {
@@ -2245,31 +2345,89 @@ struct HealthGraphContext {
     hot_path: HashSet<FunctionKey>,
 }
 
-pub(crate) async fn enrich_health_findings(
-    service: Option<&Arc<refact_codegraph::CodeGraphService>>,
-    file_path: &str,
-    functions: &[refact_codehealth::FunctionHealth],
-    findings: Vec<refact_codehealth::biomarkers::Finding>,
-) -> Vec<HealthFinding> {
-    let graph = match service {
-        Some(service) => service.cached_graph_analytics().await.ok(),
-        None => None,
-    };
-    enrich_health_findings_with_graph(
-        graph.as_ref().map(|cached| &cached.data),
-        file_path,
-        functions,
-        findings,
-    )
+pub(crate) struct HealthGraphSnapshot {
+    cached: Arc<refact_codegraph::CachedGraphAnalytics>,
+    node_indices_by_basename: HashMap<String, Vec<usize>>,
+    call_sources_by_dst: HashMap<i64, Vec<i64>>,
+    hot_node_ids: BTreeSet<i64>,
+    import_index: Option<HealthImportIndex>,
 }
 
-pub(crate) fn enrich_health_findings_with_graph(
-    graph: Option<&refact_codegraph::analytics::GraphData>,
+impl HealthGraphSnapshot {
+    pub(crate) fn build(
+        cached: Arc<refact_codegraph::CachedGraphAnalytics>,
+        repo_root: Option<&Path>,
+    ) -> Self {
+        let mut node_indices_by_basename: HashMap<String, Vec<usize>> = HashMap::new();
+        for (index, (_id, _name, path)) in cached.data.nodes.iter().enumerate() {
+            node_indices_by_basename
+                .entry(graph_path_basename(path))
+                .or_default()
+                .push(index);
+        }
+
+        let mut call_sources_by_dst: HashMap<i64, Vec<i64>> = HashMap::new();
+        for (src, dst, kind) in &cached.data.edges {
+            if kind == "calls" {
+                call_sources_by_dst.entry(*dst).or_default().push(*src);
+            }
+        }
+        for sources in call_sources_by_dst.values_mut() {
+            sources.sort_unstable();
+            sources.dedup();
+        }
+
+        let hot_node_ids = hot_path_node_ids(&cached.data, 3);
+        let import_index = repo_root.map(|repo_root| HealthImportIndex::build(&cached, repo_root));
+
+        Self {
+            cached,
+            node_indices_by_basename,
+            call_sources_by_dst,
+            hot_node_ids,
+            import_index,
+        }
+    }
+
+    fn file_nodes(&self, file_path: &str) -> Vec<&refact_codegraph::analytics::GraphNode> {
+        self.node_indices_by_basename
+            .get(&graph_path_basename(file_path))
+            .map(|indices| {
+                indices
+                    .iter()
+                    .map(|index| &self.cached.data.nodes[*index])
+                    .filter(|(_, _, path)| graph_path_matches(path, file_path))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+fn graph_path_basename(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    normalized
+        .rsplit('/')
+        .next()
+        .unwrap_or(normalized.as_str())
+        .to_string()
+}
+
+pub(crate) async fn health_graph_snapshot(
+    service: Option<&Arc<refact_codegraph::CodeGraphService>>,
+    repo_root: Option<&Path>,
+) -> Option<HealthGraphSnapshot> {
+    let service = service?;
+    let cached = service.cached_graph_analytics().await.ok()?;
+    Some(HealthGraphSnapshot::build(cached, repo_root))
+}
+
+pub(crate) fn enrich_health_findings(
+    snapshot: Option<&HealthGraphSnapshot>,
     file_path: &str,
     functions: &[refact_codehealth::FunctionHealth],
     findings: Vec<refact_codehealth::biomarkers::Finding>,
 ) -> Vec<HealthFinding> {
-    let context = graph.map(|graph| health_graph_context(graph, file_path, functions));
+    let context = snapshot.map(|snapshot| health_graph_context(snapshot, file_path, functions));
     findings
         .into_iter()
         .map(|finding| enrich_health_finding(finding, functions, context.as_ref()))
@@ -2305,54 +2463,37 @@ fn enrich_health_finding(
 }
 
 fn health_graph_context(
-    graph: &refact_codegraph::analytics::GraphData,
+    snapshot: &HealthGraphSnapshot,
     file_path: &str,
     functions: &[refact_codehealth::FunctionHealth],
 ) -> HealthGraphContext {
+    let file_nodes = snapshot.file_nodes(file_path);
     let mut node_ids_by_key = HashMap::<FunctionKey, BTreeSet<i64>>::new();
-    let mut key_by_node_id = HashMap::<i64, Vec<FunctionKey>>::new();
     for function in functions {
         let key = function_key(function);
-        for (id, name, path) in &graph.nodes {
-            if graph_path_matches(path, file_path) && graph_name_matches(name, &function.name) {
+        for (id, name, _path) in &file_nodes {
+            if graph_name_matches(name, &function.name) {
                 node_ids_by_key.entry(key.clone()).or_default().insert(*id);
-                key_by_node_id.entry(*id).or_default().push(key.clone());
             }
         }
     }
 
-    let mut sources_by_key = HashMap::<FunctionKey, BTreeSet<i64>>::new();
-    for (src, dst, kind) in &graph.edges {
-        if kind != "calls" {
-            continue;
-        }
-        if let Some(keys) = key_by_node_id.get(dst) {
-            for key in keys {
-                sources_by_key.entry(key.clone()).or_default().insert(*src);
+    let mut fan_in = HashMap::new();
+    let mut hot_path = HashSet::new();
+    for (key, ids) in &node_ids_by_key {
+        let mut sources = BTreeSet::new();
+        for id in ids {
+            if let Some(node_sources) = snapshot.call_sources_by_dst.get(id) {
+                sources.extend(node_sources.iter().copied());
             }
         }
+        fan_in.insert(key.clone(), sources.len());
+        if ids.iter().any(|id| snapshot.hot_node_ids.contains(id)) {
+            hot_path.insert(key.clone());
+        }
     }
 
-    let hot_node_ids = hot_path_node_ids(graph, 3);
-    let hot_path = node_ids_by_key
-        .iter()
-        .filter_map(|(key, ids)| {
-            ids.iter()
-                .any(|id| hot_node_ids.contains(id))
-                .then(|| key.clone())
-        })
-        .collect();
-
-    HealthGraphContext {
-        fan_in: node_ids_by_key
-            .into_keys()
-            .map(|key| {
-                let fan_in = sources_by_key.get(&key).map(BTreeSet::len).unwrap_or(0);
-                (key, fan_in)
-            })
-            .collect(),
-        hot_path,
-    }
+    HealthGraphContext { fan_in, hot_path }
 }
 
 fn hot_path_node_ids(
@@ -2618,26 +2759,44 @@ impl Tool for ToolCodeHealth {
         };
         let service = gcx.codegraph.lock().await.clone();
         let roots = codegraph_project_roots(ccx.clone()).await?;
-        let repo_root = roots.as_ref().map(|roots| roots.indexed_root.as_path());
-        let intel = roots
-            .as_ref()
-            .map(|roots| roots.git_root.as_path())
-            .and_then(|dir| cached_mine_history(dir, GIT_HISTORY_MAX_COMMITS).ok());
+        let repo_root = roots.as_ref().map(|roots| roots.indexed_root.clone());
+        let intel = match roots.as_ref().map(|roots| roots.git_root.as_path()) {
+            Some(dir) => cached_mine_history_async(dir, GIT_HISTORY_MAX_COMMITS)
+                .await
+                .ok()
+                .map(Arc::new),
+            None => None,
+        };
         let snapshots = match service.as_deref() {
             Some(service) => load_health_snapshots(service).await,
             None => Vec::new(),
         };
         let trend_findings = refact_codehealth::trends::evaluate_trends(&snapshots);
-        let git_function_fact_paths = top_git_function_fact_paths(intel.as_ref());
-        let ctx = HealthAnalysisContext {
-            repo_root,
-            intel: intel.as_ref(),
-            service: service.as_ref(),
-            coverage: coverage.as_ref(),
-            trend_findings: &trend_findings,
-            git_function_fact_paths: &git_function_fact_paths,
+        let git_function_fact_paths = top_git_function_fact_paths(intel.as_deref());
+        let graph = health_graph_snapshot(service.as_ref(), repo_root.as_deref())
+            .await
+            .map(Arc::new);
+        let coverage = coverage.map(Arc::new);
+        let analysis = {
+            let file_path = file_path.clone();
+            let repo_root = repo_root.clone();
+            let intel = intel.clone();
+            let graph = graph.clone();
+            let coverage = coverage.clone();
+            tokio::task::spawn_blocking(move || {
+                let ctx = HealthAnalysisContext {
+                    repo_root: repo_root.as_deref(),
+                    intel: intel.as_deref(),
+                    graph: graph.as_deref(),
+                    coverage: coverage.as_deref(),
+                    trend_findings: &trend_findings,
+                    git_function_fact_paths: &git_function_fact_paths,
+                };
+                analyze_health_file_shared(file_path, text, &ctx)
+            })
+            .await
+            .map_err(|e| format!("health analysis join: {e}"))??
         };
-        let analysis = analyze_health_file_shared(file_path.clone(), text, &ctx).await?;
         if analysis.functions.is_empty() {
             return Ok((
                 false,
@@ -2749,7 +2908,7 @@ impl Tool for ToolCodeHealth {
                 let stored_path = health_stored_path_for_request(
                     cached.data.nodes.iter().map(|(_, _, path)| path.clone()),
                     &file_path,
-                    repo_root,
+                    repo_root.as_deref(),
                 );
                 if let Some(stored_path) = stored_path {
                     let calls = refact_codewiki::graph_intelligence::extract_call_graph(
@@ -2768,8 +2927,8 @@ impl Tool for ToolCodeHealth {
                 }
             }
         }
-        if let Some(report) = coverage.as_ref() {
-            if let Some(file) = coverage_file_for_path(report, &file_path, repo_root) {
+        if let Some(report) = coverage.as_deref() {
+            if let Some(file) = coverage_file_for_path(report, &file_path, repo_root.as_deref()) {
                 let single = refact_codehealth::coverage::CoverageReport {
                     format: report.format.clone(),
                     files: vec![file],
@@ -2840,7 +2999,7 @@ impl Tool for ToolGitRisk {
             .await?
             .ok_or_else(|| "no project directory available".to_string())?;
         let gcx = ccx.lock().await.app.gcx.clone();
-        let intel = cached_mine_history(&roots.git_root, 1000)?;
+        let intel = cached_mine_history_async(&roots.git_root, 1000).await?;
         if intel.hotspots(1).is_empty() {
             return Ok((
                 false,
@@ -3464,7 +3623,7 @@ impl Tool for ToolCodeWhy {
             .await?
             .ok_or_else(|| "no project directory available".to_string())?;
         let gcx = ccx.lock().await.app.gcx.clone();
-        let intel = cached_mine_history(&roots.git_root, CODE_WHY_HISTORY_COMMITS)?;
+        let intel = cached_mine_history_async(&roots.git_root, CODE_WHY_HISTORY_COMMITS).await?;
         let sources = assemble_code_why_sources(gcx, &roots.git_root, &intel).await;
         let Some(msg) = code_why_output(&query, &sources, intel.commits_analyzed) else {
             return Ok((
@@ -3528,10 +3687,10 @@ impl Tool for ToolCodeDuplication {
         let dup_pct = analysis.duplication_pct * 100.0;
         let roots = codegraph_project_roots(ccx.clone()).await?;
         let project_root = roots.as_ref().map(|roots| roots.indexed_root.as_path());
-        let intel = roots
-            .as_ref()
-            .map(|roots| roots.git_root.as_path())
-            .and_then(|dir| cached_mine_history(dir, 1000).ok());
+        let intel = match roots.as_ref().map(|roots| roots.git_root.as_path()) {
+            Some(dir) => cached_mine_history_async(dir, 1000).await.ok(),
+            None => None,
+        };
         let co_change =
             |a: &str, b: &str| -> u32 { co_change_count(intel.as_ref(), a, b, project_root) };
         let mut msg = format!(
@@ -3800,10 +3959,10 @@ impl Tool for ToolPrBlast {
         let warning = pr_blast_partial_warning(&index_state);
         let report = service.pr_blast(&resolved_changed_files, max_depth).await?;
         let roots = codegraph_project_roots(ccx.clone()).await?;
-        let intel = roots
-            .as_ref()
-            .map(|roots| roots.git_root.as_path())
-            .and_then(|dir| cached_mine_history(dir, 1000).ok());
+        let intel = match roots.as_ref().map(|roots| roots.git_root.as_path()) {
+            Some(dir) => cached_mine_history_async(dir, 1000).await.ok(),
+            None => None,
+        };
         let reviewers = pr_blast_suggested_reviewers(
             &report,
             roots.as_ref().map(|roots| roots.indexed_root.as_path()),
@@ -4745,14 +4904,14 @@ impl Tool for ToolCodeMap {
         let node_records = service.graph_node_records().await?;
         let readiness = service.index_readiness().await?;
         let roots = codegraph_project_roots(ccx.clone()).await?;
-        let intel = roots
-            .as_ref()
-            .map(|roots| roots.git_root.as_path())
-            .and_then(|dir| cached_mine_history(dir, 1000).ok());
+        let intel = match roots.as_ref().map(|roots| roots.git_root.as_path()) {
+            Some(dir) => cached_mine_history_async(dir, 1000).await.ok(),
+            None => None,
+        };
         let msg = assemble_code_map_output(
             files_text,
             node_records,
-            cached.data.edges,
+            cached.data.edges.clone(),
             cached.analytics.file_centrality.truncated(5000),
             Some(pr_blast_index_state(&readiness)),
             intel.as_ref(),
@@ -5585,8 +5744,9 @@ mod tests {
             .unwrap()
             .severity;
 
+        let snapshot = health_graph_snapshot(Some(&service), None).await;
         let enriched =
-            enrich_health_findings(Some(&service), "src/a.rs", &health.functions, findings).await;
+            enrich_health_findings(snapshot.as_ref(), "src/a.rs", &health.functions, findings);
         let brain = enriched
             .iter()
             .find(|finding| finding.finding.biomarker == "brain_method")
@@ -5608,8 +5768,9 @@ mod tests {
             .unwrap()
             .severity;
 
+        let snapshot = health_graph_snapshot(Some(&service), None).await;
         let enriched =
-            enrich_health_findings(Some(&service), "src/a.rs", &health.functions, findings).await;
+            enrich_health_findings(snapshot.as_ref(), "src/a.rs", &health.functions, findings);
         let brain = enriched
             .iter()
             .find(|finding| finding.finding.biomarker == "brain_method")
@@ -5654,8 +5815,9 @@ def orphan():
             .find(|function| function.name == "orphan")
             .unwrap();
 
+        let snapshot = health_graph_snapshot(Some(&service), None).await;
         let enriched =
-            enrich_health_findings(Some(&service), "src/api.py", &health.functions, findings).await;
+            enrich_health_findings(snapshot.as_ref(), "src/api.py", &health.functions, findings);
 
         assert!(enriched.iter().any(|finding| {
             finding.hot_path
@@ -5707,7 +5869,7 @@ def orphan():
         let intel = refact_git_intel::mine_history(dir.path(), 20).unwrap();
         let ranges = vec![("hot".to_string(), 1, 11)];
 
-        let meta = build_git_meta(&intel, dir.path(), "src/a.rs", None, Some(&ranges)).await;
+        let meta = build_git_meta(&intel, dir.path(), "src/a.rs", None, Some(&ranges));
 
         assert_eq!(meta.prior_defect_count, 1);
         assert!(meta.is_stable);
@@ -5741,7 +5903,7 @@ def orphan():
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/a.rs"), "fn a() {}\n").unwrap();
 
-        let meta = build_git_meta(&intel, dir.path(), "src/a.rs", None, None).await;
+        let meta = build_git_meta(&intel, dir.path(), "src/a.rs", None, None);
         let findings = refact_codehealth::git_biomarkers::git_biomarkers(&meta);
 
         assert!(findings
@@ -5781,7 +5943,8 @@ def orphan():
             .unwrap();
         service.connect_usages().await.unwrap();
 
-        let meta = build_git_meta(&intel, dir.path(), "src/a.rs", Some(&service), None).await;
+        let snapshot = health_graph_snapshot(Some(&service), Some(dir.path())).await;
+        let meta = build_git_meta(&intel, dir.path(), "src/a.rs", snapshot.as_ref(), None);
         let findings = refact_codehealth::git_biomarkers::git_biomarkers(&meta);
 
         assert!(meta.import_edges.contains("src/b.rs"));
@@ -5927,7 +6090,7 @@ def orphan():
         HealthAnalysisContext {
             repo_root: None,
             intel: None,
-            service: None,
+            graph: None,
             coverage: None,
             trend_findings,
             git_function_fact_paths,
@@ -5985,9 +6148,8 @@ def orphan():
         let git_paths = HashSet::new();
         let ctx = empty_health_ctx(&trends, &git_paths);
 
-        let analysis = analyze_health_file_shared("src/a.rs".to_string(), src.to_string(), &ctx)
-            .await
-            .unwrap();
+        let analysis =
+            analyze_health_file_shared("src/a.rs".to_string(), src.to_string(), &ctx).unwrap();
         let mut expected_findings = refact_codehealth::biomarkers::detect_biomarkers("rust", src);
         expected_findings.extend(refact_codehealth::perf::detect_perf("rust", src));
         let expected = refact_codehealth::scoring::score_file(&expected_findings);
@@ -6010,18 +6172,15 @@ def orphan():
             src.clone(),
             &ctx,
         )
-        .await
         .unwrap();
         let second =
             analyze_health_file_shared("src/health_cache_probe_unique.rs".to_string(), src, &ctx)
-                .await
                 .unwrap();
         let third = analyze_health_file_shared(
             "src/health_cache_probe_unique.rs".to_string(),
             "fn a() -> i32 { if true { 1 } else { 0 } }\n".to_string(),
             &ctx,
         )
-        .await
         .unwrap();
 
         assert!(!first.cache_hit);
@@ -6048,15 +6207,13 @@ def orphan():
         let ctx = HealthAnalysisContext {
             repo_root: Some(dir.path()),
             intel: Some(&intel),
-            service: None,
+            graph: None,
             coverage: None,
             trend_findings: &trends,
             git_function_fact_paths: &git_paths,
         };
 
-        let analysis = analyze_health_file_shared("src/a.rs".to_string(), src, &ctx)
-            .await
-            .unwrap();
+        let analysis = analyze_health_file_shared("src/a.rs".to_string(), src, &ctx).unwrap();
         let categories = analysis
             .findings
             .iter()
@@ -6093,7 +6250,6 @@ def orphan():
             "fn a() -> i32 { 1 }\n".to_string(),
             &ctx,
         )
-        .await
         .unwrap();
 
         assert!(analysis.findings.iter().all(|finding| {
@@ -6125,7 +6281,6 @@ def orphan():
             "fn a() -> i32 { 1 }\n".to_string(),
             &ctx,
         )
-        .await
         .unwrap();
         persist_health_snapshots(&service, &loaded).await.unwrap();
         let snapshots = load_health_snapshots(&service).await;

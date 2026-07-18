@@ -623,30 +623,32 @@ pub async fn handle_v1_code_intel_graph(
         .cached_graph_analytics()
         .await
         .map_err(store_error)?;
-    let nodes = cached.data.nodes;
-    let edges = cached.data.edges;
     let node_centrality = cached.analytics.node_centrality.truncated(limit);
-    let selected = select_graph_node_ids(&nodes, &node_centrality, limit);
+    let selected = select_graph_node_ids(&cached.data.nodes, &node_centrality, limit);
 
-    let mut response_nodes = nodes
-        .into_iter()
+    let mut response_nodes = cached
+        .data
+        .nodes
+        .iter()
         .filter(|(id, _, _)| selected.contains(id))
         .map(|(id, name, path)| GraphNodeResponse {
-            id,
-            name,
-            path,
+            id: *id,
+            name: name.clone(),
+            path: path.clone(),
             kind: None,
         })
         .collect::<Vec<_>>();
     response_nodes.sort_by(|a, b| a.id.cmp(&b.id));
 
-    let mut response_edges = edges
-        .into_iter()
+    let mut response_edges = cached
+        .data
+        .edges
+        .iter()
         .filter(|(source, target, _)| selected.contains(source) && selected.contains(target))
         .map(|(source, target, kind)| GraphEdgeResponse {
-            source,
-            target,
-            kind,
+            source: *source,
+            target: *target,
+            kind: kind.clone(),
         })
         .collect::<Vec<_>>();
     response_edges.sort_by(|a, b| {
@@ -708,11 +710,11 @@ pub async fn handle_v1_code_intel_communities(
         return codegraph_off_response();
     };
     let index_state = codegraph_index_state(&service).await?;
-    let mut communities = service
+    let cached = service
         .cached_graph_analytics()
         .await
-        .map_err(store_error)?
-        .communities;
+        .map_err(store_error)?;
+    let mut communities = cached.communities.iter().collect::<Vec<_>>();
     communities.sort_by(|a, b| {
         b.members
             .len()
@@ -723,7 +725,7 @@ pub async fn handle_v1_code_intel_communities(
         .into_iter()
         .map(|community| CommunityResponse {
             id: community.id,
-            label: community.label,
+            label: community.label.clone(),
             member_count: community.members.len(),
             cohesion: community.cohesion,
             index_state: index_state.clone(),
@@ -763,9 +765,21 @@ pub async fn handle_v1_code_intel_health(
     let filter = path_filter(query.path);
     let index_state = codegraph_index_state(&service).await?;
     let project_root = crate::tools::tool_codegraph::project_dir(app.gcx.clone()).await;
-    let intel = project_root.as_deref().and_then(|dir| {
-        crate::tools::tool_codegraph::cached_mine_history(dir, GIT_HISTORY_MAX_COMMITS).ok()
-    });
+    let intel = match project_root.as_deref() {
+        Some(dir) => {
+            crate::tools::tool_codegraph::cached_mine_history_async(dir, GIT_HISTORY_MAX_COMMITS)
+                .await
+                .ok()
+                .map(Arc::new)
+        }
+        None => None,
+    };
+    let graph = crate::tools::tool_codegraph::health_graph_snapshot(
+        Some(&service),
+        project_root.as_deref(),
+    )
+    .await
+    .map(Arc::new);
     let mut snapshots = crate::tools::tool_codegraph::load_health_snapshots(&service).await;
     let mut trend_findings = if filter.is_some() {
         refact_codehealth::trends::evaluate_trends(&snapshots)
@@ -773,16 +787,16 @@ pub async fn handle_v1_code_intel_health(
         Vec::new()
     };
     let git_function_fact_paths =
-        crate::tools::tool_codegraph::top_git_function_fact_paths(intel.as_ref());
-    let files_text = service.all_files_with_text().await.map_err(store_error)?;
+        crate::tools::tool_codegraph::top_git_function_fact_paths(intel.as_deref());
+    let files_text = Arc::new(service.all_files_with_text().await.map_err(store_error)?);
     let mut analyses = analyze_health_files_for_response(
-        &files_text,
-        filter.as_deref(),
-        project_root.as_deref(),
-        intel.as_ref(),
-        &service,
-        &trend_findings,
-        &git_function_fact_paths,
+        files_text.clone(),
+        filter.clone(),
+        project_root.clone(),
+        intel.clone(),
+        graph.clone(),
+        trend_findings.clone(),
+        git_function_fact_paths.clone(),
     )
     .await?;
 
@@ -797,13 +811,13 @@ pub async fn handle_v1_code_intel_health(
         trend_findings = refact_codehealth::trends::evaluate_trends(&trend_history);
         if !trend_findings.is_empty() {
             analyses = analyze_health_files_for_response(
-                &files_text,
+                files_text.clone(),
                 None,
-                project_root.as_deref(),
-                intel.as_ref(),
-                &service,
-                &trend_findings,
-                &git_function_fact_paths,
+                project_root.clone(),
+                intel.clone(),
+                graph.clone(),
+                trend_findings.clone(),
+                git_function_fact_paths.clone(),
             )
             .await?;
         }
@@ -835,44 +849,47 @@ pub async fn handle_v1_code_intel_health(
 }
 
 async fn analyze_health_files_for_response(
-    files_text: &[(String, String)],
-    filter: Option<&str>,
-    project_root: Option<&Path>,
-    intel: Option<&refact_git_intel::GitIntel>,
-    service: &Arc<refact_codegraph::CodeGraphService>,
-    trend_findings: &[refact_codehealth::biomarkers::Finding],
-    git_function_fact_paths: &HashSet<String>,
+    files_text: Arc<Vec<(String, String)>>,
+    filter: Option<String>,
+    project_root: Option<PathBuf>,
+    intel: Option<Arc<refact_git_intel::GitIntel>>,
+    graph: Option<Arc<crate::tools::tool_codegraph::HealthGraphSnapshot>>,
+    trend_findings: Vec<refact_codehealth::biomarkers::Finding>,
+    git_function_fact_paths: HashSet<String>,
 ) -> Result<Vec<crate::tools::tool_codegraph::HealthFileAnalysis>, ScratchError> {
-    let ctx = crate::tools::tool_codegraph::HealthAnalysisContext {
-        repo_root: project_root,
-        intel,
-        service: Some(service),
-        coverage: None,
-        trend_findings,
-        git_function_fact_paths,
-    };
-    let mut analyses = Vec::new();
-    for (path, text) in files_text {
-        if filter.is_some_and(|filter| {
-            !crate::tools::tool_codegraph::health_paths_refer_to_same_file(
-                path,
-                filter,
-                project_root,
-            )
-        }) {
-            continue;
+    tokio::task::spawn_blocking(move || {
+        let ctx = crate::tools::tool_codegraph::HealthAnalysisContext {
+            repo_root: project_root.as_deref(),
+            intel: intel.as_deref(),
+            graph: graph.as_deref(),
+            coverage: None,
+            trend_findings: &trend_findings,
+            git_function_fact_paths: &git_function_fact_paths,
+        };
+        let mut analyses = Vec::new();
+        for (path, text) in files_text.iter() {
+            if filter.as_deref().is_some_and(|filter| {
+                !crate::tools::tool_codegraph::health_paths_refer_to_same_file(
+                    path,
+                    filter,
+                    project_root.as_deref(),
+                )
+            }) {
+                continue;
+            }
+            analyses.push(
+                crate::tools::tool_codegraph::analyze_health_file_shared(
+                    path.clone(),
+                    text.clone(),
+                    &ctx,
+                )
+                .map_err(store_error)?,
+            );
         }
-        analyses.push(
-            crate::tools::tool_codegraph::analyze_health_file_shared(
-                path.clone(),
-                text.clone(),
-                &ctx,
-            )
-            .await
-            .map_err(store_error)?,
-        );
-    }
-    Ok(analyses)
+        Ok(analyses)
+    })
+    .await
+    .map_err(|e| store_error(format!("health analysis join: {e}")))?
 }
 pub async fn handle_v1_code_intel_git_risk(
     State(app): State<AppState>,
@@ -886,8 +903,10 @@ pub async fn handle_v1_code_intel_git_risk(
     let Some(dir) = crate::tools::tool_codegraph::project_dir(app.gcx.clone()).await else {
         return detail_response("no project directory available");
     };
-    let intel = crate::tools::tool_codegraph::cached_mine_history(&dir, GIT_HISTORY_MAX_COMMITS)
-        .map_err(store_error)?;
+    let intel =
+        crate::tools::tool_codegraph::cached_mine_history_async(&dir, GIT_HISTORY_MAX_COMMITS)
+            .await
+            .map_err(store_error)?;
     let assembly = crate::tools::tool_codegraph::build_git_risk_assembly(
         &intel,
         &dir,
@@ -1063,9 +1082,14 @@ pub async fn handle_v1_code_intel_duplication(
     let clone_pair_count = clones.len();
     let duplication_pct = duplication_pct_for_scope(&analysis, filter.as_deref());
     let project_root = crate::tools::tool_codegraph::project_dir(app.gcx.clone()).await;
-    let intel = project_root.as_deref().and_then(|dir| {
-        crate::tools::tool_codegraph::cached_mine_history(dir, GIT_HISTORY_MAX_COMMITS).ok()
-    });
+    let intel = match project_root.as_deref() {
+        Some(dir) => {
+            crate::tools::tool_codegraph::cached_mine_history_async(dir, GIT_HISTORY_MAX_COMMITS)
+                .await
+                .ok()
+        }
+        None => None,
+    };
 
     let clone_responses = clones
         .iter()
@@ -1238,9 +1262,14 @@ pub async fn handle_v1_code_intel_pr_blast(
         .await
         .map_err(store_error)?;
     let repo_dir = crate::tools::tool_codegraph::project_dir(app.gcx.clone()).await;
-    let intel = repo_dir.as_deref().and_then(|dir| {
-        crate::tools::tool_codegraph::cached_mine_history(dir, GIT_HISTORY_MAX_COMMITS).ok()
-    });
+    let intel = match repo_dir.as_deref() {
+        Some(dir) => {
+            crate::tools::tool_codegraph::cached_mine_history_async(dir, GIT_HISTORY_MAX_COMMITS)
+                .await
+                .ok()
+        }
+        None => None,
+    };
     let suggested_reviewers = crate::tools::tool_codegraph::pr_blast_suggested_reviewers(
         &report,
         repo_dir.as_deref(),

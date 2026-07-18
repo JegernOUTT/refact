@@ -24,7 +24,18 @@ struct Reachability {
 }
 
 pub fn dead_code(store: &Store) -> Result<Vec<DeadSymbol>, String> {
-    let reachability = analyze_reachability(store)?;
+    let symbols = store.symbol_records()?;
+    let dcp_pairs = store.all_symbols()?;
+    let edges = store.graph_edges()?;
+    Ok(dead_code_from_parts(symbols, dcp_pairs, &edges))
+}
+
+pub fn dead_code_from_parts(
+    symbols: Vec<SymbolRecord>,
+    dcp_pairs: Vec<(String, i64)>,
+    edges: &[(i64, i64, String)],
+) -> Vec<DeadSymbol> {
+    let reachability = analyze_reachability_from_parts(symbols, dcp_pairs, edges);
     let mut dead = Vec::new();
 
     for (node_id, symbol) in &reachability.symbols {
@@ -65,17 +76,23 @@ pub fn dead_code(store: &Store) -> Result<Vec<DeadSymbol>, String> {
             .then_with(|| a.node_id.cmp(&b.node_id))
     });
     dead.truncate(500);
-    Ok(dead)
+    dead
 }
 
 pub fn reachable_count(store: &Store) -> Result<(usize, usize), String> {
-    let reachability = analyze_reachability(store)?;
+    let symbols = store.symbol_records()?;
+    let dcp_pairs = store.all_symbols()?;
+    let edges = store.graph_edges()?;
+    let reachability = analyze_reachability_from_parts(symbols, dcp_pairs, &edges);
     Ok((reachability.reachable.len(), reachability.symbols.len()))
 }
 
-fn analyze_reachability(store: &Store) -> Result<Reachability, String> {
-    let symbols: BTreeMap<i64, SymbolRecord> = store
-        .symbol_records()?
+fn analyze_reachability_from_parts(
+    symbols: Vec<SymbolRecord>,
+    dcp_pairs: Vec<(String, i64)>,
+    edges: &[(i64, i64, String)],
+) -> Reachability {
+    let symbols: BTreeMap<i64, SymbolRecord> = symbols
         .into_iter()
         .map(|symbol| (symbol.node_id, symbol))
         .collect();
@@ -86,14 +103,15 @@ fn analyze_reachability(store: &Store) -> Result<Reachability, String> {
     let mut incoming_edges = BTreeMap::<i64, usize>::new();
     let mut route_targets = BTreeSet::<i64>::new();
 
-    for (src, dst, kind) in store.graph_edges()? {
+    for (src, dst, kind) in edges {
+        let (src, dst) = (*src, *dst);
         if known_ids.contains(&dst) {
             *incoming_edges.entry(dst).or_default() += 1;
             if kind == "calls" {
                 *incoming_calls.entry(dst).or_default() += 1;
             }
         }
-        if !is_reachability_edge(&kind) {
+        if !is_reachability_edge(kind) {
             continue;
         }
         if kind == "route_handler" && known_ids.contains(&dst) {
@@ -114,8 +132,7 @@ fn analyze_reachability(store: &Store) -> Result<Reachability, String> {
         targets.dedup();
     }
 
-    let dcp_by_id: HashMap<i64, String> = store
-        .all_symbols()?
+    let dcp_by_id: HashMap<i64, String> = dcp_pairs
         .into_iter()
         .map(|(dcp, node_id)| (node_id, dcp))
         .collect();
@@ -146,12 +163,12 @@ fn analyze_reachability(store: &Store) -> Result<Reachability, String> {
     }
 
     let reachable = reachable_from(&roots, &out);
-    Ok(Reachability {
+    Reachability {
         symbols,
         reachable,
         incoming_calls,
         incoming_edges,
-    })
+    }
 }
 
 fn is_excluded_symbol(symbol: &SymbolRecord) -> bool {

@@ -2,7 +2,6 @@ use std::collections::{HashMap, VecDeque};
 
 use petgraph::algo::{connected_components, tarjan_scc};
 use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::Direction;
 use serde::{Deserialize, Serialize};
 
 use crate::store::Store;
@@ -55,34 +54,37 @@ pub fn pagerank(g: &DiGraph<i64, ()>, damping: f64, iters: usize) -> HashMap<Nod
         return HashMap::new();
     }
     let nf = n as f64;
-    let base = 1.0 / nf;
-    let mut rank: HashMap<NodeIndex, f64> = g.node_indices().map(|i| (i, base)).collect();
-    let outdeg: HashMap<NodeIndex, usize> = g
-        .node_indices()
-        .map(|i| (i, g.neighbors_directed(i, Direction::Outgoing).count()))
-        .collect();
 
+    let mut in_adj: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut outdeg: Vec<usize> = vec![0; n];
+    for edge in g.raw_edges() {
+        let src = edge.source().index();
+        let dst = edge.target().index();
+        outdeg[src] += 1;
+        in_adj[dst].push(src as u32);
+    }
+
+    let mut rank: Vec<f64> = vec![1.0 / nf; n];
+    let mut next: Vec<f64> = vec![0.0; n];
     for _ in 0..iters {
-        let dangling: f64 = g
-            .node_indices()
-            .filter(|i| outdeg[i] == 0)
-            .map(|i| rank[&i])
+        let dangling: f64 = (0..n)
+            .filter(|idx| outdeg[*idx] == 0)
+            .map(|idx| rank[idx])
             .sum();
-        let mut next: HashMap<NodeIndex, f64> = HashMap::with_capacity(n);
-        for v in g.node_indices() {
+        for v in 0..n {
             let mut incoming = 0.0;
-            for u in g.neighbors_directed(v, Direction::Incoming) {
-                let od = outdeg[&u];
+            for u in &in_adj[v] {
+                let u = *u as usize;
+                let od = outdeg[u];
                 if od > 0 {
-                    incoming += rank[&u] / od as f64;
+                    incoming += rank[u] / od as f64;
                 }
             }
-            let score = (1.0 - damping) / nf + damping * (dangling / nf + incoming);
-            next.insert(v, score);
+            next[v] = (1.0 - damping) / nf + damping * (dangling / nf + incoming);
         }
-        rank = next;
+        std::mem::swap(&mut rank, &mut next);
     }
-    rank
+    g.node_indices().map(|i| (i, rank[i.index()])).collect()
 }
 
 pub fn betweenness_centrality(g: &DiGraph<i64, ()>) -> HashMap<NodeIndex, f64> {
@@ -113,45 +115,68 @@ fn betweenness_centrality_for_sources(
     sources: &[NodeIndex],
     scale: f64,
 ) -> HashMap<NodeIndex, f64> {
-    let mut cb: HashMap<NodeIndex, f64> = g.node_indices().map(|i| (i, 0.0)).collect();
+    let n = g.node_count();
+    if n == 0 {
+        return HashMap::new();
+    }
+    let mut out_adj: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for edge in g.raw_edges() {
+        out_adj[edge.source().index()].push(edge.target().index() as u32);
+    }
+
+    let mut cb: Vec<f64> = vec![0.0; n];
+    let mut sigma: Vec<f64> = vec![0.0; n];
+    let mut dist: Vec<i64> = vec![-1; n];
+    let mut delta: Vec<f64> = vec![0.0; n];
+    let mut pred: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut stack: Vec<u32> = Vec::with_capacity(n);
+    let mut queue: VecDeque<u32> = VecDeque::new();
+
     for &s in sources {
-        let mut stack: Vec<NodeIndex> = Vec::new();
-        let mut pred: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
-        let mut sigma: HashMap<NodeIndex, f64> = g.node_indices().map(|i| (i, 0.0)).collect();
-        let mut dist: HashMap<NodeIndex, i64> = g.node_indices().map(|i| (i, -1)).collect();
-        sigma.insert(s, 1.0);
-        dist.insert(s, 0);
-        let mut queue: VecDeque<NodeIndex> = VecDeque::new();
-        queue.push_back(s);
+        let s = s.index();
+        stack.clear();
+        queue.clear();
+        sigma[s] = 1.0;
+        dist[s] = 0;
+        queue.push_back(s as u32);
         while let Some(v) = queue.pop_front() {
             stack.push(v);
-            for w in g.neighbors_directed(v, Direction::Outgoing) {
-                if dist[&w] < 0 {
+            let v = v as usize;
+            let dist_v = dist[v];
+            for &w in &out_adj[v] {
+                let wi = w as usize;
+                if dist[wi] < 0 {
                     queue.push_back(w);
-                    dist.insert(w, dist[&v] + 1);
+                    dist[wi] = dist_v + 1;
                 }
-                if dist[&w] == dist[&v] + 1 {
-                    *sigma.get_mut(&w).unwrap() += sigma[&v];
-                    pred.entry(w).or_default().push(v);
+                if dist[wi] == dist_v + 1 {
+                    sigma[wi] += sigma[v];
+                    pred[wi].push(v as u32);
                 }
             }
         }
-        let mut delta: HashMap<NodeIndex, f64> = g.node_indices().map(|i| (i, 0.0)).collect();
-        while let Some(w) = stack.pop() {
-            if let Some(ps) = pred.get(&w) {
-                for &v in ps {
-                    if sigma[&w] > 0.0 {
-                        let contrib = (sigma[&v] / sigma[&w]) * (1.0 + delta[&w]);
-                        *delta.get_mut(&v).unwrap() += contrib;
-                    }
+        for &w in stack.iter().rev() {
+            let wi = w as usize;
+            let sigma_w = sigma[wi];
+            if sigma_w > 0.0 {
+                let coefficient = (1.0 + delta[wi]) / sigma_w;
+                for &v in &pred[wi] {
+                    delta[v as usize] += sigma[v as usize] * coefficient;
                 }
             }
-            if w != s {
-                *cb.get_mut(&w).unwrap() += delta[&w] * scale;
+            if wi != s {
+                cb[wi] += delta[wi] * scale;
             }
+        }
+        for &w in &stack {
+            let wi = w as usize;
+            sigma[wi] = 0.0;
+            dist[wi] = -1;
+            delta[wi] = 0.0;
+            pred[wi].clear();
         }
     }
-    cb
+    g.node_indices().map(|i| (i, cb[i.index()])).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

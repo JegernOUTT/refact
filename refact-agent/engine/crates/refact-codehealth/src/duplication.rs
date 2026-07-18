@@ -165,9 +165,15 @@ pub fn detect_cross_file_clones(files: &[(String, String, String)]) -> Vec<Cross
 
     let mut matches = detect_cross_file_clone_matches(&tokenized);
     matches.truncate(MAX_CLONE_PAIRS);
+    clone_pairs_from_matches(&tokenized, &matches)
+}
 
+fn clone_pairs_from_matches(
+    tokenized: &[(&str, Vec<Token>)],
+    matches: &[CrossFileCloneMatch],
+) -> Vec<CrossFileClonePair> {
     matches
-        .into_iter()
+        .iter()
         .map(|m| {
             let (path_a, tokens_a) = &tokenized[m.file_a];
             let (path_b, tokens_b) = &tokenized[m.file_b];
@@ -187,6 +193,70 @@ pub fn detect_cross_file_clones(files: &[(String, String, String)]) -> Vec<Cross
             }
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CrossFileDuplication {
+    pub clones: Vec<CrossFileClonePair>,
+    pub duplication_pct: f64,
+    pub duplicated_tokens_by_path: HashMap<String, usize>,
+    pub tokens_by_path: HashMap<String, usize>,
+}
+
+pub fn cross_file_analysis(files: &[(String, String, String)]) -> CrossFileDuplication {
+    let tokenized: Vec<(&str, Vec<Token>)> = files
+        .iter()
+        .map(|(path, lang, text)| (path.as_str(), tokenize(lang, text)))
+        .collect();
+
+    let matches = detect_cross_file_clone_matches(&tokenized);
+    let clones =
+        clone_pairs_from_matches(&tokenized, &matches[..matches.len().min(MAX_CLONE_PAIRS)]);
+
+    let mut duplicated: Vec<Vec<bool>> = tokenized
+        .iter()
+        .map(|(_, tokens)| vec![false; tokens.len()])
+        .collect();
+    for m in &matches {
+        for idx in m.start_a..(m.start_a + m.token_len).min(duplicated[m.file_a].len()) {
+            duplicated[m.file_a][idx] = true;
+        }
+        for idx in m.start_b..(m.start_b + m.token_len).min(duplicated[m.file_b].len()) {
+            duplicated[m.file_b][idx] = true;
+        }
+    }
+
+    let total_tokens: usize = tokenized.iter().map(|(_, tokens)| tokens.len()).sum();
+    let duplicated_count: usize = duplicated
+        .iter()
+        .map(|file| file.iter().filter(|is_dup| **is_dup).count())
+        .sum();
+    let duplication_pct = if total_tokens == 0 {
+        0.0
+    } else {
+        duplicated_count as f64 / total_tokens as f64
+    };
+
+    let mut duplicated_tokens_by_path = HashMap::new();
+    let mut tokens_by_path = HashMap::new();
+    for ((path, tokens), duplicated) in tokenized.iter().zip(duplicated) {
+        let duplicated_count = duplicated.into_iter().filter(|is_dup| *is_dup).count();
+        duplicated_tokens_by_path
+            .entry((*path).to_string())
+            .and_modify(|count| *count += duplicated_count)
+            .or_insert(duplicated_count);
+        tokens_by_path
+            .entry((*path).to_string())
+            .and_modify(|count| *count += tokens.len())
+            .or_insert(tokens.len());
+    }
+
+    CrossFileDuplication {
+        clones,
+        duplication_pct,
+        duplicated_tokens_by_path,
+        tokens_by_path,
+    }
 }
 
 fn detect_cross_file_clone_matches(tokenized: &[(&str, Vec<Token>)]) -> Vec<CrossFileCloneMatch> {
@@ -1048,6 +1118,43 @@ fn {name}({param}: i32) -> i32 {{
                 && clone.token_len >= MIN_CLONE_TOKENS),
             "got {clones:?}"
         );
+    }
+
+    #[test]
+    fn cross_file_analysis_matches_individual_passes() {
+        let files = vec![
+            (
+                "a.rs".to_string(),
+                "rust".to_string(),
+                cross_file_rust_source("compute_alpha", "input"),
+            ),
+            (
+                "b.rs".to_string(),
+                "rust".to_string(),
+                cross_file_rust_source("compute_beta", "value"),
+            ),
+            (
+                "unique.rs".to_string(),
+                "rust".to_string(),
+                "fn unique(value: i32) -> i32 { value + 1 }\n".to_string(),
+            ),
+        ];
+
+        let combined = cross_file_analysis(&files);
+
+        assert_eq!(combined.clones, detect_cross_file_clones(&files));
+        assert_eq!(combined.duplication_pct, cross_file_duplication_pct(&files));
+        assert_eq!(
+            combined.duplicated_tokens_by_path,
+            per_file_duplicated_token_counts(&files)
+        );
+        for (path, lang, text) in &files {
+            assert_eq!(
+                combined.tokens_by_path.get(path).copied(),
+                Some(tokenize(lang, text).len()),
+                "token totals must match for {path}"
+            );
+        }
     }
 
     #[test]

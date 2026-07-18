@@ -159,20 +159,18 @@ fn local_moving(graph: &LouvainGraph) -> Vec<usize> {
             let old = comm[node];
             totals[old] -= degree[node];
 
-            let mut candidates: BTreeSet<usize> = BTreeSet::new();
-            candidates.insert(old);
-            for &neighbor in graph.adj[node].keys() {
-                candidates.insert(comm[neighbor]);
+            let mut candidate_weights: BTreeMap<usize, f64> = BTreeMap::new();
+            candidate_weights.insert(old, 0.0);
+            for (&neighbor, &w) in &graph.adj[node] {
+                if neighbor == node {
+                    continue;
+                }
+                *candidate_weights.entry(comm[neighbor]).or_insert(0.0) += w;
             }
 
             let mut best_comm = old;
             let mut best_gain = 0.0;
-            for candidate in candidates {
-                let k_i_in = graph.adj[node]
-                    .iter()
-                    .filter(|&(&neighbor, _)| neighbor != node && comm[neighbor] == candidate)
-                    .map(|(_, &w)| w)
-                    .sum::<f64>();
+            for (&candidate, &k_i_in) in &candidate_weights {
                 let gain = (k_i_in / m) - (totals[candidate] * degree[node]) / (2.0 * m * m);
                 if gain > best_gain + 1e-12
                     || ((gain - best_gain).abs() <= 1e-12 && candidate < best_comm)
@@ -444,6 +442,24 @@ mod tests {
         assert!(
             communities.len() >= 2 && multi_member >= 2,
             "expected at least two communities, got {:?}",
+            communities
+        );
+    }
+
+    #[test]
+    fn self_loops_do_not_change_cluster_assignment() {
+        let store = store_with(
+            "fn a() { b(); a(); }\nfn b() { a(); }\nfn x() { y(); x(); }\nfn y() { x(); }\n",
+        );
+        let communities = detect_communities(&store).unwrap();
+        let clusters: Vec<&Vec<i64>> = communities
+            .iter()
+            .filter(|c| c.members.len() >= 2)
+            .map(|c| &c.members)
+            .collect();
+        assert!(
+            clusters.len() >= 2,
+            "self-loops must not merge or dissolve clusters, got {:?}",
             communities
         );
     }
