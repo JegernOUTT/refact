@@ -76,6 +76,7 @@ use crate::http::routers::v1::v1_integrations::{
     handle_v1_integrations_mcp_logs,
 };
 use crate::http::routers::v1::file_edit_tools::handle_v1_file_edit_tool_dry_run;
+use crate::http::routers::v1::files::{handle_v1_files_read, handle_v1_files_tree};
 use crate::http::routers::v1::code_edit::handle_v1_code_edit;
 use crate::http::routers::v1::workspace::handle_v1_get_app_searchable_id;
 use crate::chat::{
@@ -141,6 +142,7 @@ pub mod exec;
 pub mod ext_management;
 mod ext_marketplace_sources;
 mod file_edit_tools;
+mod files;
 mod git;
 pub mod graceful_shutdown;
 mod gui_help_handlers;
@@ -373,6 +375,8 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/file_edit_tool_dry_run",
             post(handle_v1_file_edit_tool_dry_run),
         )
+        .route("/files/tree", get(handle_v1_files_tree))
+        .route("/files/read", get(handle_v1_files_read))
         .route("/code-edit", post(handle_v1_code_edit))
         .route("/models", get(handle_v1_models))
         .route("/providers", get(handle_v1_providers_list))
