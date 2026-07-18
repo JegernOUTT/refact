@@ -325,6 +325,33 @@ describe("ProjectDetailPage", () => {
     expect(restarted).toBe(true);
   });
 
+  it("surfaces restart failure in the worker gate and keeps retry available", async () => {
+    let attempts = 0;
+    registerProxyHandlers(() => [worker("stopped")]);
+    server.use(
+      http.post(`${BASE}/daemon/v1/projects/${PROJECT}/restart`, () => {
+        attempts += 1;
+        return HttpResponse.json(
+          { error: "spawn failed: binary missing" },
+          { status: 500 },
+        );
+      }),
+    );
+
+    const { view } = renderDetail();
+
+    expect(await screen.findByText("Worker is stopped")).toBeInTheDocument();
+    await view.user.click(screen.getByRole("button", { name: "Start worker" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "spawn failed: binary missing",
+    );
+    expect(screen.getByRole("button", { name: "Start worker" })).toBeEnabled();
+
+    await view.user.click(screen.getByRole("button", { name: "Start worker" }));
+    await waitFor(() => expect(attempts).toBe(2));
+  });
+
   it("renders overview, health, git, chats, tasks, activity, and settings tabs from fixtures", async () => {
     registerProxyHandlers(() => [worker("ready")]);
     const { store, view } = renderDetail();

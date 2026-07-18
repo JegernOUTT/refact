@@ -171,6 +171,14 @@
   margin-top: var(--rf-space-4);
 }
 
+.gateAction {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
 .workerError {
   margin: 0;
   color: var(--rf-color-danger);
