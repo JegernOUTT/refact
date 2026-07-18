@@ -3046,6 +3046,97 @@ fn apply_loaded_external_update_to_session(
     session.emit(snapshot);
     transition_identity_repaired.then_some(session.trajectory_version)
 }
+fn session_is_passive_child_view(session: &ChatSession) -> bool {
+    session.thread.buddy_meta.is_some()
+        || (session.thread.parent_id.is_some()
+            && session
+                .thread
+                .link_type
+                .as_deref()
+                .map_or(true, |lt| !matches!(lt, "handoff" | "mode_transition" | "branch")))
+}
+
+fn session_is_stale_refresh_candidate(
+    session: &ChatSession,
+    allow_replacing_messages: bool,
+) -> bool {
+    if session.closed {
+        return false;
+    }
+    if !can_apply_external_reload(session) {
+        return false;
+    }
+    if !session.command_queue.is_empty() || session.draft_message.is_some() {
+        return false;
+    }
+    if session
+        .queue_processor_running
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return false;
+    }
+    if !allow_replacing_messages
+        && !session_is_passive_child_view(session)
+        && !session.messages.is_empty()
+    {
+        return false;
+    }
+    true
+}
+
+pub async fn refresh_session_from_trajectory_if_stale(
+    app: AppState,
+    chat_id: &str,
+    allow_replacing_messages: bool,
+) -> bool {
+    let session_arc = {
+        let sessions_read = app.chat.sessions.read().await;
+        sessions_read.get(chat_id).cloned()
+    };
+    let Some(session_arc) = session_arc else {
+        return false;
+    };
+    {
+        let session = session_arc.lock().await;
+        if !session_is_stale_refresh_candidate(&session, allow_replacing_messages) {
+            return false;
+        }
+    }
+    let Some(mut loaded) = load_trajectory_for_chat(app.gcx.clone(), chat_id).await else {
+        return false;
+    };
+    if loaded.messages.is_empty() {
+        return false;
+    }
+    apply_mode_defaults_to_thread(
+        app.gcx.clone(),
+        &mut loaded.thread,
+        loaded.auto_approve_editing_tools_present,
+        loaded.auto_approve_dangerous_commands_present,
+    )
+    .await;
+    let transition_identity_repaired = loaded.transition_identity_repaired;
+    let mut session = session_arc.lock().await;
+    if !session_is_stale_refresh_candidate(&session, allow_replacing_messages) {
+        return false;
+    }
+    let session_has_identity = !session.messages.is_empty()
+        || session.thread.task_meta.is_some()
+        || session.thread.buddy_meta.is_some();
+    if session_has_identity {
+        let loaded_source = TrajectorySourceIdentity::from_session_parts(&loaded.thread);
+        if !loaded_source.matches_session(&session) {
+            return false;
+        }
+    }
+    info!(
+        "Refreshing stale session {} from trajectory ({} messages)",
+        chat_id,
+        loaded.messages.len()
+    );
+    apply_loaded_external_update_to_session(&mut session, loaded, transition_identity_repaired);
+    true
+}
 
 async fn apply_loaded_external_update_with_repair(
     gcx: Arc<GlobalContext>,
@@ -9494,6 +9585,284 @@ mod tests {
         assert_eq!(session.thread.id, "safe");
         assert_ne!(session.thread.title, "Mismatched");
         assert!(session.messages.is_empty());
+    }
+    #[tokio::test]
+    async fn pristine_session_is_born_clean_and_heals_from_late_trajectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "subchat-late-trajectory";
+
+        let session_arc = crate::chat::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            chat_id,
+        )
+        .await;
+        let mut chat_rx = {
+            let session = session_arc.lock().await;
+            assert!(session.messages.is_empty());
+            assert!(!session.trajectory_dirty);
+            session.subscribe()
+        };
+
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(&path, chat_id, "Child Chat", "child work").await;
+
+        let reopened = crate::chat::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            chat_id,
+        )
+        .await;
+        assert!(Arc::ptr_eq(&session_arc, &reopened));
+        {
+            let session = reopened.lock().await;
+            assert_eq!(session.messages.len(), 1);
+            assert_eq!(session.thread.title, "Child Chat");
+        }
+
+        let json = chat_rx.recv().await.unwrap();
+        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+        match envelope.event {
+            ChatEvent::Snapshot { messages, .. } => {
+                assert_eq!(messages.len(), 1);
+            }
+            other => panic!("expected Snapshot, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pristine_session_save_does_not_overwrite_late_trajectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "subchat-cleanup-no-clobber";
+
+        let session_arc = crate::chat::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            chat_id,
+        )
+        .await;
+
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(&path, chat_id, "Child Chat", "child work").await;
+
+        let saved = try_save_trajectory(app.clone(), session_arc.clone())
+            .await
+            .unwrap();
+        assert!(saved);
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_refresh_skips_busy_dirty_or_drafting_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "subchat-refresh-guards";
+
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(&path, chat_id, "Child Chat", "child work").await;
+
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        {
+            let mut session = session_arc.lock().await;
+            session.trajectory_dirty = true;
+        }
+        assert!(!refresh_session_from_trajectory_if_stale(app.clone(), chat_id, false).await);
+
+        {
+            let mut session = session_arc.lock().await;
+            session.trajectory_dirty = false;
+            session.runtime.state = SessionState::Generating;
+        }
+        assert!(!refresh_session_from_trajectory_if_stale(app.clone(), chat_id, false).await);
+
+        {
+            let mut session = session_arc.lock().await;
+            session.runtime.state = SessionState::Idle;
+            session.draft_message = Some(ChatMessage::new("user".to_string(), "draft".to_string()));
+        }
+        assert!(!refresh_session_from_trajectory_if_stale(app.clone(), chat_id, false).await);
+
+        {
+            let mut session = session_arc.lock().await;
+            session.draft_message = None;
+        }
+        assert!(refresh_session_from_trajectory_if_stale(app.clone(), chat_id, false).await);
+        let session = session_arc.lock().await;
+        assert_eq!(session.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn completed_subchat_refresh_replaces_seed_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "subchat-refresh-final";
+
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(&path, chat_id, "Child Chat", "seed prompt").await;
+
+        let session_arc = crate::chat::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            chat_id,
+        )
+        .await;
+        {
+            let session = session_arc.lock().await;
+            assert_eq!(session.messages.len(), 1);
+            assert!(!session.trajectory_dirty);
+        }
+
+        let mut trajectory = sample_trajectory(chat_id, "Child Chat", "2024-01-01T00:00:02Z");
+        trajectory["messages"] = json!([
+            { "role": "user", "content": "seed prompt" },
+            { "role": "assistant", "content": "final answer" }
+        ]);
+        tokio::fs::write(&path, serde_json::to_string(&trajectory).unwrap())
+            .await
+            .unwrap();
+
+        assert!(!refresh_session_from_trajectory_if_stale(app.clone(), chat_id, false).await);
+        assert!(refresh_session_from_trajectory_if_stale(app.clone(), chat_id, true).await);
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.messages.len(), 2);
+    }
+    #[tokio::test]
+    async fn buddy_child_refresh_replaces_seed_after_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "buddy-refresh-final";
+
+        let buddy_path = dir
+            .path()
+            .join(".refact")
+            .join("buddy")
+            .join("chats")
+            .join("conversations")
+            .join(format!("{chat_id}.json"));
+        write_buddy_conversation_file(&buddy_path, chat_id, "Buddy Child").await;
+
+        let session_arc = crate::chat::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            chat_id,
+        )
+        .await;
+        {
+            let session = session_arc.lock().await;
+            assert_eq!(session.messages.len(), 1);
+            assert!(session.thread.buddy_meta.is_some());
+        }
+
+        tokio::fs::write(
+            &buddy_path,
+            serde_json::to_string(&json!({
+                "id": chat_id,
+                "chat_id": chat_id,
+                "title": "Buddy Child",
+                "model": "model",
+                "mode": "buddy",
+                "tool_use": "agent",
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:02Z",
+                "include_project_info": true,
+                "checkpoints_enabled": false,
+                "messages": [
+                    {"role":"user","content":"hello buddy"},
+                    {"role":"assistant","content":"buddy final answer"}
+                ],
+                "buddy_meta": {"is_buddy_chat": true, "buddy_chat_kind": "investigation"}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert!(refresh_session_from_trajectory_if_stale(app.clone(), chat_id, true).await);
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.messages.len(), 2);
+        assert!(session.thread.buddy_meta.is_some());
+    }
+
+    #[tokio::test]
+    async fn reopening_child_chat_replaces_stale_seed_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "subchat-reopen-refresh";
+
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        let mut trajectory = sample_trajectory(chat_id, "Child Chat", "2024-01-01T00:00:01Z");
+        trajectory["parent_id"] = json!("parent-chat");
+        trajectory["link_type"] = json!("subagent");
+        trajectory["messages"] = json!([{ "role": "user", "content": "seed prompt" }]);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, serde_json::to_string(&trajectory).unwrap())
+            .await
+            .unwrap();
+
+        let session_arc = crate::chat::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            chat_id,
+        )
+        .await;
+        {
+            let session = session_arc.lock().await;
+            assert_eq!(session.messages.len(), 1);
+            assert_eq!(session.thread.parent_id.as_deref(), Some("parent-chat"));
+        }
+
+        trajectory["messages"] = json!([
+            { "role": "user", "content": "seed prompt" },
+            { "role": "assistant", "content": "final answer" }
+        ]);
+        tokio::fs::write(&path, serde_json::to_string(&trajectory).unwrap())
+            .await
+            .unwrap();
+
+        let reopened = crate::chat::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            chat_id,
+        )
+        .await;
+        assert!(Arc::ptr_eq(&session_arc, &reopened));
+        let session = reopened.lock().await;
+        assert_eq!(session.messages.len(), 2);
     }
 
     #[tokio::test]

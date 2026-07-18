@@ -134,6 +134,12 @@ pub async fn get_or_create_session_with_trajectory(
             session.closed
         };
         if !is_closed {
+            super::trajectories::refresh_session_from_trajectory_if_stale(
+                app.clone(),
+                chat_id,
+                false,
+            )
+            .await;
             return session_arc;
         }
         let mut sessions_write = sessions.write().await;
@@ -181,6 +187,7 @@ pub async fn get_or_create_session_with_trajectory(
     } else {
         let mut s = ChatSession::new(chat_id.to_string());
         s.increment_version();
+        s.trajectory_dirty = false;
         (s, true, None)
     };
 

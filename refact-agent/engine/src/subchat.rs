@@ -1088,6 +1088,10 @@ pub async fn run_subchat(
         .unwrap_or_else(|| format!("subchat-{}", Uuid::new_v4()));
 
     let messages = sanitize_messages_for_new_thread(&messages);
+    if config.stateful {
+        let thread = stateful_thread_from_config(&chat_id, &config);
+        save_trajectory_as(gcx.clone(), &thread, &messages).await;
+    }
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new_with_abort(
             AppState::from_gcx(gcx.clone()).await,
@@ -1145,6 +1149,9 @@ pub async fn run_subchat(
         let mut thread = stateful_thread_from_config(&chat_id, &config);
         register_stateful_subchat_worktree(gcx.clone(), &chat_id, &mut thread).await;
         save_trajectory_as(gcx.clone(), &thread, &current_messages).await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, &chat_id, true)
+            .await;
     } else if current_messages
         .iter()
         .any(crate::chat::diagnostics::is_ui_only_message)
