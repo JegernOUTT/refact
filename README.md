@@ -199,6 +199,10 @@ One `refact` binary becomes the whole control room. Running `refact` opens the f
 
 Use the one-line installer at the top of this README, or download a binary manually from [GitHub Releases](https://github.com/JegernOUTT/refact/releases). The standalone binary gives you the daemon, TUI, in-browser GUI, worker supervisor, and CLI controls in one local package.
 
+
+
+Alternatively, use Refact entirely from the terminal — no editor or plugin required. See [Refact without an IDE](docs/refact-without-ide.md) for the full headless, TUI, browser, and LAN-access guide.
+
 After installation, open the Refact dashboard:
 
 ```sh
