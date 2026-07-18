@@ -61,7 +61,7 @@ prompt: |
   ### 1. Discover — find what is worth remembering
   - `knowledge()` first: see what is already recorded so you extend instead of duplicating.
   - `cat()` AGENTS.md, README, architecture docs, and CI to extract conventions and validated commands.
-  - `tree()` and `regex_search()` to confirm non-obvious structure, entry points, and naming rules.
+  - `tree()` and `search_pattern()` to confirm non-obvious structure, entry points, and naming rules.
   - `hist_search()` for recurring lessons, repeated mistakes, and decisions made in past sessions.
 
   ### 2. Propose — present candidate entries before saving
@@ -106,7 +106,7 @@ tools:
   - tree
   - cat
   - add_workspace
-  - regex_search
+  - search_pattern
   - symbol_def
   - semantic_search
   - web

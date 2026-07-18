@@ -463,6 +463,28 @@ pub async fn upsert_trajectory_index_entry_from_owned_value(
     upsert_trajectory_index_entry(dir, entry).await
 }
 
+pub async fn remove_trajectory_index_entries(
+    dir: &Path,
+    chat_ids: &HashSet<String>,
+) -> Result<(), String> {
+    if chat_ids.is_empty() {
+        return Ok(());
+    }
+    let lock = get_trajectory_index_lock(dir).await;
+    let _guard = lock.lock().await;
+    let mut index = match read_trajectory_index(dir).await? {
+        Some(index) => index,
+        None => return Ok(()),
+    };
+    let before = index.entries.len();
+    index.entries.retain(|entry| !chat_ids.contains(&entry.id));
+    if index.entries.len() == before {
+        return Ok(());
+    }
+    index.updated_at = Utc::now().to_rfc3339();
+    write_trajectory_index_atomic_owned(dir, index).await
+}
+
 pub async fn remove_trajectory_index_entry(dir: &Path, chat_id: &str) -> Result<(), String> {
     let lock = get_trajectory_index_lock(dir).await;
     let _guard = lock.lock().await;

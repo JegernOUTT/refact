@@ -48,6 +48,6 @@ messages:
 
 tools:
   - cat
-  - regex_search
+  - search_pattern
   - buddy_runtime_event
   - buddy_open_issue

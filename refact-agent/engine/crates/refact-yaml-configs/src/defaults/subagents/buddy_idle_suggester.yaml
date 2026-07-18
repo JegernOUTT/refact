@@ -27,4 +27,4 @@ messages:
     Project root: {{project_root}}
     Evidence:
     {{evidence}}
-tools: [cat, regex_search, buddy_speak, buddy_runtime_event]
+tools: [cat, search_pattern, buddy_speak, buddy_runtime_event]

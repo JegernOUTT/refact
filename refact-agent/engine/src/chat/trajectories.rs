@@ -556,6 +556,134 @@ async fn get_or_create_buddy_conversations_dir(gcx: Arc<GlobalContext>) -> Resul
     Ok(dir)
 }
 
+pub(crate) const BUDDY_CONVERSATIONS_KEEP: usize = 500;
+const BUDDY_CONVERSATIONS_PRUNE_INTERVAL_SECS: u64 = 3600;
+const BUDDY_CONVERSATIONS_PRUNE_MIN_AGE_SECS: u64 = 86_400;
+
+async fn prune_buddy_conversations_throttled(gcx: Arc<GlobalContext>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_PRUNE_UNIX_SECS: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let last = LAST_PRUNE_UNIX_SECS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < BUDDY_CONVERSATIONS_PRUNE_INTERVAL_SECS {
+        return;
+    }
+    if LAST_PRUNE_UNIX_SECS
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let dir = match get_buddy_conversations_dir(gcx).await {
+        Ok(dir) => dir,
+        Err(_) => return,
+    };
+    match prune_buddy_conversations_in_dir(&dir, BUDDY_CONVERSATIONS_KEEP).await {
+        Ok(0) => {}
+        Ok(removed) => info!("pruned {} old buddy conversations from {:?}", removed, dir),
+        Err(e) => {
+            warn!("buddy conversations prune failed: {}", e);
+            let _ = LAST_PRUNE_UNIX_SECS.compare_exchange(
+                now,
+                last,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
+    }
+}
+
+pub(crate) async fn prune_buddy_conversations_in_dir(
+    dir: &Path,
+    keep: usize,
+) -> Result<usize, String> {
+    let mut entries = match fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => {
+            return Err(format!(
+                "Failed to read buddy conversations dir {:?}: {e}",
+                dir
+            ))
+        }
+    };
+    let mut files: Vec<(i64, PathBuf, String)> = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !path.extension().map(|e| e == "json").unwrap_or(false) {
+            continue;
+        }
+        if path
+            .file_name()
+            .is_some_and(|name| name == trajectory_index::TRAJECTORY_INDEX_FILE)
+        {
+            continue;
+        }
+        let Some(stem) = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let metadata = match entry.metadata().await {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let modified_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_millis() as i64)
+            .unwrap_or(0);
+        files.push((modified_ms, path, stem));
+    }
+    if files.len() <= keep {
+        return Ok(0);
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    let min_age_cutoff_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+        .saturating_sub((BUDDY_CONVERSATIONS_PRUNE_MIN_AGE_SECS as i64).saturating_mul(1000));
+    let mut removed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (scanned_modified_ms, path, stem) in files.drain(keep..) {
+        if scanned_modified_ms >= min_age_cutoff_ms {
+            continue;
+        }
+        let current_modified_ms = match fs::symlink_metadata(&path).await {
+            Ok(metadata) => metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|elapsed| elapsed.as_millis() as i64)
+                .unwrap_or(i64::MAX),
+            Err(_) => continue,
+        };
+        if current_modified_ms != scanned_modified_ms {
+            continue;
+        }
+        match fs::remove_file(&path).await {
+            Ok(()) => {
+                removed_ids.insert(stem);
+            }
+            Err(e) => warn!("failed to remove old buddy conversation {:?}: {}", path, e),
+        }
+    }
+    let removed = removed_ids.len();
+    if removed > 0 {
+        trajectory_index::remove_trajectory_index_entries(dir, &removed_ids).await?;
+    }
+    Ok(removed)
+}
+
 fn normalize_system_prompt(system_prompt: Option<String>) -> Option<String> {
     system_prompt.filter(|text| !text.trim().is_empty())
 }
@@ -2491,6 +2619,10 @@ pub async fn save_trajectory_snapshot(
             source_hint,
         )
         .await?;
+    }
+
+    if snapshot.buddy_meta.is_some() {
+        prune_buddy_conversations_throttled(gcx.clone()).await;
     }
 
     let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
@@ -5656,6 +5788,121 @@ mod tests {
 
     fn assert_same_path_str(left: &str, right: &Path) {
         assert_same_path(Path::new(left), right);
+    }
+
+    async fn write_conversation_file(dir: &Path, id: &str, age_secs: u64) -> PathBuf {
+        let path = dir.join(format!("{id}.json"));
+        tokio::fs::write(
+            &path,
+            serde_json::json!({
+                "id": id,
+                "chat_id": id,
+                "title": id,
+                "created_at": "2026-01-01T00:00:00Z",
+                "messages": [{"role": "user", "content": "hi"}]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        let modified = SystemTime::now() - std::time::Duration::from_secs(age_secs);
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_modified(modified).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn prune_buddy_conversations_keeps_newest_and_updates_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("conversations");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let old_a = write_conversation_file(&dir, "old-a", 4 * 86_400).await;
+        let old_b = write_conversation_file(&dir, "old-b", 3 * 86_400).await;
+        let new_a = write_conversation_file(&dir, "new-a", 2000).await;
+        let new_b = write_conversation_file(&dir, "new-b", 1000).await;
+        let index_path = dir.join("index.json");
+        let index_entries = ["old-a", "old-b", "new-a", "new-b"]
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "file_name": format!("{id}.json"),
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                    "title": id,
+                    "model": "test-model",
+                    "mode": "AGENT",
+                    "message_count": 1
+                })
+            })
+            .collect::<Vec<_>>();
+        tokio::fs::write(
+            &index_path,
+            serde_json::json!({
+                "schema_version": 1,
+                "updated_at": "2026-01-01T00:00:00Z",
+                "entries": index_entries
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let removed = prune_buddy_conversations_in_dir(&dir, 2).await.unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(!old_a.exists());
+        assert!(!old_b.exists());
+        assert!(new_a.exists());
+        assert!(new_b.exists());
+        assert!(index_path.exists());
+        let index = trajectory_index::read_trajectory_index(&dir)
+            .await
+            .unwrap()
+            .unwrap();
+        let ids: Vec<&str> = index
+            .entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"new-a"));
+        assert!(ids.contains(&"new-b"));
+    }
+
+    #[tokio::test]
+    async fn prune_buddy_conversations_spares_recently_modified_overflow() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("conversations");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let newest = write_conversation_file(&dir, "newest", 100).await;
+        let recent_overflow = write_conversation_file(&dir, "recent-overflow", 2 * 3600).await;
+        let old_overflow = write_conversation_file(&dir, "old-overflow", 3 * 86_400).await;
+
+        let removed = prune_buddy_conversations_in_dir(&dir, 1).await.unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(newest.exists());
+        assert!(recent_overflow.exists());
+        assert!(!old_overflow.exists());
+    }
+
+    #[tokio::test]
+    async fn prune_buddy_conversations_noop_under_keep_limit_and_for_missing_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("conversations");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let kept = write_conversation_file(&dir, "chat-a", 100).await;
+
+        let removed = prune_buddy_conversations_in_dir(&dir, 2).await.unwrap();
+
+        assert_eq!(removed, 0);
+        assert!(kept.exists());
+
+        let missing = prune_buddy_conversations_in_dir(&temp.path().join("nope"), 2)
+            .await
+            .unwrap();
+        assert_eq!(missing, 0);
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {

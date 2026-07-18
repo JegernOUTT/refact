@@ -31,7 +31,7 @@ messages:
        e.g. pattern "^id:|^system_prompt:|^tools:".
     3. refact_engine_cat on a specific prompt file using its mirror-relative path, e.g.
        "refact-agent/engine/crates/refact-yaml-configs/src/defaults/subagents/refact_self_critic.yaml".
-       The local workspace also contains this source, so cat/tree/regex_search on the same
+       The local workspace also contains this source, so cat/tree/search_pattern on the same
        relative path work too and are a fine fallback.
     4. Identify 1-3 concrete improvements (prompt tightening, tool clarification, missing
        edge case). For each finding name: file:line | observation | proposed change |
@@ -46,4 +46,4 @@ messages:
     Engine source mirror: clone via refact_engine_clone only if a read fails.
     Prompt files root (mirror-relative): refact-agent/engine/crates/refact-yaml-configs/src/defaults/
     Workflow: {{workflow_id}}
-tools: [refact_engine_clone, refact_engine_cat, refact_engine_search, cat, tree, regex_search, buddy_memory_search, buddy_memory_create, buddy_runtime_event, buddy_speak]
+tools: [refact_engine_clone, refact_engine_cat, refact_engine_search, cat, tree, search_pattern, buddy_memory_search, buddy_memory_create, buddy_runtime_event, buddy_speak]

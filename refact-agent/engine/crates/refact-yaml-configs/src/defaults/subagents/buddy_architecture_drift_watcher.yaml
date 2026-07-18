@@ -44,7 +44,7 @@ messages:
 tools:
   - cat
   - tree
-  - regex_search
+  - search_pattern
   - symbol_def
   - buddy_runtime_event
   - buddy_memory_create

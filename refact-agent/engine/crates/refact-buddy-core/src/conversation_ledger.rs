@@ -13,6 +13,15 @@ use crate::types::BuddyConversationEntry;
 
 const MAX_BUDDY_LEDGER_JSON_BYTES: u64 = 1_024 * 1_024;
 
+const TRAJECTORY_INDEX_FILE_NAME: &str = "index.json";
+
+fn is_ledger_json_candidate(path: &Path) -> bool {
+    path.extension().map(|e| e == "json").unwrap_or(false)
+        && !path
+            .file_name()
+            .is_some_and(|name| name == TRAJECTORY_INDEX_FILE_NAME)
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LedgerDiagnostics {
     pub invalid_json: u32,
@@ -310,7 +319,7 @@ pub async fn list_all_buddy_conversations_with_diagnostics(
     if let Ok(mut rd) = fs::read_dir(&conv_dir).await {
         while let Ok(Some(entry)) = rd.next_entry().await {
             let path = entry.path();
-            if !path.extension().map(|e| e == "json").unwrap_or(false) {
+            if !is_ledger_json_candidate(&path) {
                 continue;
             }
             let mut val = match read_buddy_ledger_json(&path, "conversation").await {
@@ -375,7 +384,7 @@ pub async fn list_all_buddy_conversations_with_diagnostics(
     if let Ok(mut rd) = fs::read_dir(&wf_dir).await {
         while let Ok(Some(entry)) = rd.next_entry().await {
             let path = entry.path();
-            if !path.extension().map(|e| e == "json").unwrap_or(false) {
+            if !is_ledger_json_candidate(&path) {
                 continue;
             }
             let stem = path
@@ -535,7 +544,7 @@ pub async fn list_recent_buddy_conversations(
         };
         while let Ok(Some(entry)) = rd.next_entry().await {
             let path = entry.path();
-            if !path.extension().map(|e| e == "json").unwrap_or(false) {
+            if !is_ledger_json_candidate(&path) {
                 continue;
             }
             let mtime = match entry.metadata().await {
@@ -699,6 +708,46 @@ mod tests {
         assert!(entries.iter().any(|entry| entry.id == "buddy_humor"));
         assert!(!entries.iter().any(|entry| entry.id == "huge"));
         assert!(!entries.iter().any(|entry| entry.id == "huge_workflow"));
+    }
+
+    #[tokio::test]
+    async fn trajectory_index_json_is_never_listed_or_quarantined() {
+        let dir = tempfile::tempdir().unwrap();
+        let conv_dir = dir.path().join(".refact/buddy/chats/conversations");
+        let wf_dir = dir.path().join(".refact/buddy/chats/workflows");
+        tokio::fs::create_dir_all(&conv_dir).await.unwrap();
+        tokio::fs::create_dir_all(&wf_dir).await.unwrap();
+        write_valid_conversation(&conv_dir, "chat-valid", "2026-01-01T00:00:01Z").await;
+        let conv_index_path = conv_dir.join("index.json");
+        tokio::fs::write(
+            &conv_index_path,
+            serde_json::json!({
+                "schema_version": 1,
+                "updated_at": "2026-01-01T00:00:00Z",
+                "entries": []
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        let wf_index_path = wf_dir.join("index.json");
+        tokio::fs::write(&wf_index_path, "{\"entries\":[]}")
+            .await
+            .unwrap();
+
+        let (entries, diagnostics) =
+            list_all_buddy_conversations_with_diagnostics(dir.path(), None).await;
+
+        assert!(entries.iter().any(|entry| entry.id == "chat-valid"));
+        assert!(!entries.iter().any(|entry| entry.id == "index"));
+        assert_eq!(diagnostics, LedgerDiagnostics::default());
+        assert!(conv_index_path.exists());
+        assert!(wf_index_path.exists());
+        assert!(!conv_dir.join("index.json.corrupt").exists());
+
+        let recent = list_recent_buddy_conversations(dir.path(), 10).await;
+        assert!(recent.iter().any(|entry| entry.id == "chat-valid"));
+        assert!(!recent.iter().any(|entry| entry.id == "index"));
     }
 
     #[tokio::test]

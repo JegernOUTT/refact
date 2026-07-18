@@ -997,6 +997,12 @@ async fn enqueue_resolved_docs(
     workspace_files_changed: bool,
     force: bool,
 ) {
+    let queue_paths = queue_paths
+        .into_iter()
+        .filter(|path| {
+            !crate::file_filter::is_transient_tmp_path(Path::new(path.store_path.as_str()))
+        })
+        .collect::<Vec<_>>();
     let normalized_paths = queue_paths
         .iter()
         .map(|path| path.store_path.clone())

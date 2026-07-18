@@ -48,7 +48,7 @@ messages:
 
 tools:
   - cat
-  - regex_search
+  - search_pattern
   - web_search
   - buddy_runtime_event
   - buddy_open_issue

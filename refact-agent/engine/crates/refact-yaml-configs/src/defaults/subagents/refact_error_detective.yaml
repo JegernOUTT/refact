@@ -23,7 +23,7 @@ messages:
     Prefer narrow evidence, concrete file paths, and small fixes over broad guesses.
 
     Engine source access:
-    - Prefer local workspace files via cat/regex_search/tree first.
+    - Prefer local workspace files via cat/search_pattern/tree first.
     - Use refact_engine_* only when the workspace lacks the engine code. Every
       refact_engine_* path is RELATIVE to the monorepo root (e.g.
       "refact-agent/engine/src/..."), never absolute and never "yaml_configs/defaults/".
@@ -60,7 +60,7 @@ messages:
 
 tools:
   - cat
-  - regex_search
+  - search_pattern
   - symbol_def
   - tree
   - refact_engine_clone

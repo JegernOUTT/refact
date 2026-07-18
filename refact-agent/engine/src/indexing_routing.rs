@@ -33,12 +33,17 @@ pub async fn route_index_enqueue(
     process_immediately: bool,
     vecdb_only: bool,
 ) {
+    let paths: Vec<String> = paths
+        .iter()
+        .filter(|path| !crate::file_filter::is_transient_tmp_path(Path::new(path.as_str())))
+        .cloned()
+        .collect();
     if paths.is_empty() {
         return;
     }
 
     let roots = memory_plane_roots(gcx.clone()).await;
-    let (memory_paths, code_paths) = partition_paths(paths, &roots);
+    let (memory_paths, code_paths) = partition_paths(&paths, &roots);
 
     let vec_db = gcx.vec_db.clone();
 
@@ -332,6 +337,52 @@ mod tests {
         assert_eq!(queued.len(), 2);
         assert!(queued.contains(&knowledge_source.to_string_lossy().to_string()));
         assert!(queued.contains(&task_trajectory_tool.to_string_lossy().to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn transient_tmp_paths_are_never_enqueued() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+        let project_root = get_project_dirs(gcx.clone())
+            .await
+            .into_iter()
+            .next()
+            .expect("test workspace must resolve to a project dir");
+        let enqueue_calls = Arc::new(AtomicUsize::new(0));
+        let vecdb_documents = Arc::new(Mutex::new(Vec::new()));
+        *gcx.vec_db.lock().await = Some(Arc::new(RecordingVecdb {
+            enqueue_calls: enqueue_calls.clone(),
+            documents: vecdb_documents.clone(),
+        }));
+        let codegraph = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        *gcx.codegraph.lock().await = Some(codegraph.clone());
+
+        let buddy_state_tmp = project_root
+            .join(".refact")
+            .join("buddy")
+            .join("state.json.tmp");
+        let knowledge_note_tmp = project_root
+            .join(".refact")
+            .join("knowledge")
+            .join("note.md.tmp");
+        let index_write_tmp = project_root
+            .join(".refact")
+            .join("trajectories")
+            .join(".index.json.tmp-0a1b2c3d");
+        let paths = vec![
+            buddy_state_tmp.to_string_lossy().to_string(),
+            knowledge_note_tmp.to_string_lossy().to_string(),
+            index_write_tmp.to_string_lossy().to_string(),
+        ];
+
+        route_index_enqueue(gcx, &paths, false, false).await;
+
+        assert_eq!(enqueue_calls.load(Ordering::SeqCst), 0);
+        assert!(vecdb_documents.lock().unwrap().is_empty());
+        assert!(codegraph.drain_batch(10).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

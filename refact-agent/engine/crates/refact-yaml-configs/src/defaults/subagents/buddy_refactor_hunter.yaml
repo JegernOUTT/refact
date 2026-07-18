@@ -10,7 +10,7 @@ subchat:
   max_steps: 10
   model_type: buddy
   n_ctx: 32000
-  max_new_tokens: 1500
+  max_new_tokens: 3000
   temperature: 0.3
   tokens_for_rag: 0
   autonomous_no_confirm: true
@@ -19,7 +19,7 @@ messages:
   system_prompt: |
     %BUDDY_PERSONALITY%
 
-    You are hunting for low-risk refactor wins. Use tree + regex_search to find duplicated code patterns or long functions, then:
+    You are hunting for low-risk refactor wins. Use tree + search_pattern to find duplicated code patterns or long functions, then:
     1. Pick 1 high-confidence candidate.
     2. Describe the proposed refactor precisely (file, symbol, before/after sketch); never edit files.
     3. If you found a generalizable lesson, use buddy_memory_create with kind=lesson.
@@ -35,6 +35,6 @@ tools:
   - tree
   - cat
   - symbol_def
-  - regex_search
+  - search_pattern
   - buddy_runtime_event
   - buddy_memory_create

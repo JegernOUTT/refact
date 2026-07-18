@@ -150,6 +150,14 @@ pub fn is_refact_codegraph_path(path: &Path) -> bool {
     false
 }
 
+pub fn is_transient_tmp_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.ends_with(".tmp") || name.contains(".tmp-") || name.contains(".tmp.")
+        })
+}
+
 fn is_in_allowed_hidden_folder(path: &PathBuf) -> bool {
     path.ancestors().any(|ancestor| {
         ancestor
@@ -170,6 +178,10 @@ pub fn is_valid_file(
 
     if is_refact_codegraph_path(path) {
         return Err(".refact/codegraph is internal".into());
+    }
+
+    if is_transient_tmp_path(path) {
+        return Err("Transient tmp file".into());
     }
 
     let in_allowed_hidden = is_in_allowed_hidden_folder(path);
@@ -209,8 +221,38 @@ pub fn is_valid_file(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_generated_index_path, is_generated_index_path_with_global_config_roots};
+    use super::{
+        is_generated_index_path, is_generated_index_path_with_global_config_roots,
+        is_transient_tmp_path,
+    };
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn transient_tmp_paths_are_detected() {
+        for path in [
+            "/repo/.refact/buddy/state.json.tmp",
+            "/repo/.refact/buddy/runtime_queue.jsonl.tmp",
+            "/repo/.refact/buddy/chats/workflows/memo_extraction.json.tmp",
+            "/repo/.refact/trajectories/.index.json.tmp-0a1b2c3d",
+            "/repo/.refact/trajectories/chat-1.json.tmp.0a1b2c3d",
+            "/repo/anything.tmp",
+        ] {
+            assert!(is_transient_tmp_path(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn regular_paths_are_not_transient_tmp() {
+        for path in [
+            "/repo/src/main.rs",
+            "/repo/tmp.rs",
+            "/repo/templates/foo.tmpl",
+            "/repo/.refact/buddy/state.json",
+            "/repo/docs/tmp/readme.md",
+        ] {
+            assert!(!is_transient_tmp_path(Path::new(path)), "{path}");
+        }
+    }
 
     #[test]
     fn generated_refact_index_paths_match_exact_generated_shapes() {
