@@ -34,6 +34,10 @@ use crate::http::routers::v1::chat_based_handlers::{
 use crate::http::routers::v1::git::{
     handle_v1_git_commit, handle_v1_checkpoints_preview, handle_v1_checkpoints_restore,
 };
+use crate::http::routers::v1::git_read::{
+    handle_v1_git_branches, handle_v1_git_diff, handle_v1_git_log, handle_v1_git_stage,
+    handle_v1_git_status, handle_v1_git_unstage,
+};
 use crate::http::routers::v1::graceful_shutdown::handle_v1_graceful_shutdown;
 use crate::http::routers::v1::hooks::handle_v1_hooks_fire;
 use crate::http::routers::v1::links::handle_v1_links;
@@ -144,6 +148,7 @@ mod ext_marketplace_sources;
 mod file_edit_tools;
 mod files;
 mod git;
+mod git_read;
 pub mod graceful_shutdown;
 mod gui_help_handlers;
 mod hooks;
@@ -343,6 +348,12 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             post(handle_v1_sync_files_extract_tar),
         )
         .route("/git-commit", post(handle_v1_git_commit))
+        .route("/git/status", get(handle_v1_git_status))
+        .route("/git/diff", get(handle_v1_git_diff))
+        .route("/git/log", get(handle_v1_git_log))
+        .route("/git/branches", get(handle_v1_git_branches))
+        .route("/git/stage", post(handle_v1_git_stage))
+        .route("/git/unstage", post(handle_v1_git_unstage))
         .route(
             "/prepend-system-prompt-and-maybe-more-initial-messages",
             post(handle_v1_prepend_system_prompt_and_maybe_more_initial_messages),

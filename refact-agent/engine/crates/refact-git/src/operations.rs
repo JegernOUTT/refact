@@ -20,6 +20,13 @@ const MAX_GIT_HISTORY_COCHANGE_COMMITS: usize = 10;
 const MAX_GIT_HISTORY_MESSAGE_CHARS: usize = 320;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitBranchInfo {
+    pub name: String,
+    pub is_head: bool,
+    pub upstream: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHistoryOptions {
     pub max_commits: usize,
     pub since: Option<DateTime<Utc>>,
@@ -193,6 +200,33 @@ pub fn get_or_create_branch<'repo>(
                 .map_err_with_prefix("Failed to create branch:")
         }
     }
+}
+
+pub fn list_branches(repository: &Repository) -> Result<Vec<GitBranchInfo>, String> {
+    let branches = repository
+        .branches(Some(git2::BranchType::Local))
+        .map_err_with_prefix("Failed to list branches:")?;
+    let mut result = Vec::new();
+    for branch_result in branches {
+        let (branch, _) = branch_result.map_err_with_prefix("Failed to read branch:")?;
+        let Some(name) = branch
+            .name()
+            .map_err_with_prefix("Failed to read branch name:")?
+        else {
+            continue;
+        };
+        let upstream = branch
+            .upstream()
+            .ok()
+            .and_then(|upstream| upstream.name().ok().flatten().map(ToString::to_string));
+        result.push(GitBranchInfo {
+            name: name.to_string(),
+            is_head: branch.is_head(),
+            upstream,
+        });
+    }
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(result)
 }
 
 fn is_changed_in_wt(status: git2::Status) -> bool {
@@ -370,6 +404,44 @@ pub fn stage_changes(
         .write()
         .map_err_with_prefix("Failed to write index:")?;
     Ok(skipped)
+}
+
+pub fn unstage_changes(repository: &Repository, paths: &[PathBuf]) -> Result<usize, String> {
+    if paths.is_empty() {
+        return Ok(0);
+    }
+
+    match repository
+        .head()
+        .and_then(|head| head.peel(git2::ObjectType::Commit))
+    {
+        Ok(head_object) => repository
+            .reset_default(Some(&head_object), paths.iter())
+            .map_err_with_prefix("Failed to unstage changes:")?,
+        Err(error)
+            if matches!(
+                error.code(),
+                git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound
+            ) =>
+        {
+            let mut index = repository
+                .index()
+                .map_err_with_prefix("Failed to get index:")?;
+            for path in paths {
+                match index.remove_path(path) {
+                    Ok(()) => {}
+                    Err(error) if error.code() == git2::ErrorCode::NotFound => {}
+                    Err(error) => return Err(format!("Failed to unstage changes: {}", error)),
+                }
+            }
+            index
+                .write()
+                .map_err_with_prefix("Failed to write index:")?;
+        }
+        Err(error) => return Err(format!("Failed to resolve HEAD: {}", error)),
+    }
+
+    Ok(paths.len())
 }
 
 pub fn get_configured_author_email_and_name(
@@ -1284,5 +1356,49 @@ mod tests {
 
         assert_eq!(report.commits.len(), 3);
         assert!(report.commit_cap_hit);
+    }
+
+    #[test]
+    fn list_branches_marks_current_branch() {
+        let (dir, repo) = init_repo();
+        let oid = commit_file(&repo, dir.path(), "file.txt", "base\n", "initial");
+        let commit = repo.find_commit(oid).unwrap();
+        repo.branch("feature", &commit, false).unwrap();
+
+        let branches = list_branches(&repo).unwrap();
+
+        assert_eq!(branches.len(), 2);
+        assert!(branches
+            .iter()
+            .any(|branch| branch.name == "feature" && !branch.is_head));
+        assert_eq!(branches.iter().filter(|branch| branch.is_head).count(), 1);
+    }
+
+    #[test]
+    fn unstage_changes_moves_staged_modification_to_workdir() {
+        let (dir, repo) = init_repo();
+        commit_file(&repo, dir.path(), "file.txt", "base\n", "initial");
+        fs::write(dir.path().join("file.txt"), "changed\n").unwrap();
+        let change = FileChange {
+            relative_path: PathBuf::from("file.txt"),
+            absolute_path: dir.path().join("file.txt"),
+            status: FileChangeStatus::MODIFIED,
+        };
+        stage_changes(&repo, &[change], &Arc::new(AtomicBool::new(false))).unwrap();
+        let (staged, unstaged) =
+            get_diff_statuses(git2::StatusShow::IndexAndWorkdir, &repo, false).unwrap();
+        assert_eq!(staged.len(), 1);
+        assert!(unstaged.is_empty());
+
+        assert_eq!(
+            unstage_changes(&repo, &[PathBuf::from("file.txt")]).unwrap(),
+            1
+        );
+
+        let (staged, unstaged) =
+            get_diff_statuses(git2::StatusShow::IndexAndWorkdir, &repo, false).unwrap();
+        assert!(staged.is_empty());
+        assert_eq!(unstaged.len(), 1);
+        assert_eq!(unstaged[0].relative_path, PathBuf::from("file.txt"));
     }
 }
