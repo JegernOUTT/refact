@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { http, HttpResponse } from "msw";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { render, screen } from "../../utils/test-utils";
+import { server } from "../../utils/mockServer";
 import * as ChatModule from "../Chat/Chat";
 import { SurfacePane } from "./SurfacePane";
 import { makeSurfaceKey, parseSurfaceKey } from "./surfaceKey";
@@ -12,6 +14,14 @@ vi.spyOn(ChatModule, "Chat").mockImplementation(({ chatId }) => (
 ));
 
 describe("SurfacePane", () => {
+  beforeEach(() => {
+    server.use(
+      http.get("*/v1/files/tree", () =>
+        HttpResponse.json({ path: "", entries: [], truncated: false }),
+      ),
+    );
+  });
+
   it("renders an empty placeholder when no surface is selected", () => {
     render(<SurfacePane surfaceKey={null} />);
 
@@ -38,15 +48,13 @@ describe("SurfacePane", () => {
     expect(screen.queryByText("No surface selected")).not.toBeInTheDocument();
   });
 
-  it("renders the registered placeholder for a files panel surface", () => {
+  it("renders the registered files panel surface", () => {
     const surfaceKey = makeSurfaceKey("files", "main");
 
     render(<SurfacePane surfaceKey={surfaceKey} />);
 
-    expect(screen.getByText("Files panel")).toBeInTheDocument();
-    expect(
-      screen.getByText("This workspace panel is coming soon."),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Explorer")).toBeInTheDocument();
+    expect(screen.getByText("Select a file")).toBeInTheDocument();
     expect(
       document.querySelector(`[data-surface-key="${surfaceKey}"]`),
     ).toBeInTheDocument();

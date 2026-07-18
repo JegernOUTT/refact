@@ -86,6 +86,8 @@ import { schedulerApi } from "../services/refact/schedulerApi";
 import { reconcileWorkspaceState, workspaceSlice } from "../features/Workspace";
 import { terminalSlice } from "../features/Workspace/TerminalPanel";
 import { dashboardSlice } from "../features/DaemonDashboard/dashboardSlice";
+import { filesApi } from "../services/refact/files";
+import { filesPanelSlice } from "../features/Workspace/FilesPanel";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -149,6 +151,7 @@ const rootReducer = combineSlices(
     [extensionsMarketplaceApi.reducerPath]: extensionsMarketplaceApi.reducer,
     [memoryEnrichmentApi.reducerPath]: memoryEnrichmentApi.reducer,
     [buddyApi.reducerPath]: buddyApi.reducer,
+    [filesApi.reducerPath]: filesApi.reducer,
   },
   historySlice,
   buddySlice,
@@ -168,6 +171,7 @@ const rootReducer = combineSlices(
   workspaceSlice,
   terminalSlice,
   dashboardSlice,
+  filesPanelSlice,
 );
 
 const rootPersistConfig = {
@@ -284,6 +288,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           extensionsMarketplaceApi.middleware,
           memoryEnrichmentApi.middleware,
           buddyApi.middleware,
+          filesApi.middleware,
         )
         .prepend(historyMiddleware.middleware)
         .prepend(listenerMiddleware.middleware);

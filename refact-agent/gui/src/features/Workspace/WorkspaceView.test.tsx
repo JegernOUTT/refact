@@ -129,17 +129,17 @@ describe("WorkspaceView", () => {
     const store = createWorkspaceStore();
     const files = makeSurfaceKey("files", "main");
 
-    expect(screen.queryByText("Files panel")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("File explorer")).not.toBeInTheDocument();
     store.dispatch(openTab(files));
     renderWorkspaceView(store);
 
-    const mountedPanel = await screen.findByText("Files panel");
+    const mountedPanel = await screen.findByLabelText("File explorer");
     const panelSurface = mountedPanel.closest(`[data-surface-key="${files}"]`);
     expect(panelSurface).toBeInTheDocument();
 
     store.dispatch(setActiveTab(chat("chat-a")));
     await waitFor(() => {
-      expect(screen.getByText("Files panel")).toBe(mountedPanel);
+      expect(screen.getByLabelText("File explorer")).toBe(mountedPanel);
       expect(panelSurface?.parentElement).toHaveAttribute(
         "aria-hidden",
         "true",

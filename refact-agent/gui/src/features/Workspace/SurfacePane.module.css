@@ -13,6 +13,12 @@
   justify-content: stretch;
 }
 
+.fullPanelSurface {
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 0;
+}
+
 .placeholder {
   display: flex;
   align-items: center;

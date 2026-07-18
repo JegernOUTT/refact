@@ -61,7 +61,11 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
       const PanelComponent = PANEL_COMPONENTS[parsed.kind];
       return (
         <div
-          className={classNames(styles.surfacePane, styles.panelSurface)}
+          className={classNames(
+            styles.surfacePane,
+            styles.panelSurface,
+            parsed.kind === "files" && styles.fullPanelSurface,
+          )}
           data-surface-key={surfaceKey}
         >
           <Suspense
