@@ -293,7 +293,9 @@ function NetworkAccessCard() {
 
   const lanAuthHint =
     form?.lan_enabled === true &&
-    (!form.auth_enabled || form.username.trim().length === 0 || form.password.length === 0) &&
+    (!form.auth_enabled ||
+      form.username.trim().length === 0 ||
+      form.password.length === 0) &&
     !(settings?.has_password === true && form.password.length === 0);
 
   async function saveSettings() {
@@ -558,7 +560,9 @@ function UpdatesCard({
   async function install(versionTarget?: string) {
     setInstallError(null);
     try {
-      await installUpdate(versionTarget ? { version: versionTarget } : {}).unwrap();
+      await installUpdate(
+        versionTarget ? { version: versionTarget } : {},
+      ).unwrap();
       setShouldPollUpdates(true);
       void statusQuery.refetch();
     } catch (error) {
@@ -585,9 +589,7 @@ function UpdatesCard({
         <StatItem
           label="Executable SHA"
           value={
-            executableSha256
-              ? executableSha256.slice(0, SHORT_SHA_LENGTH)
-              : "—"
+            executableSha256 ? executableSha256.slice(0, SHORT_SHA_LENGTH) : "—"
           }
         />
       </dl>
@@ -606,7 +608,9 @@ function UpdatesCard({
       ) : null}
       {checkState.data ? (
         <div className={styles.updateSummary}>
-          <p>Latest version: {checkState.data.latest_version ?? "None reported"}</p>
+          <p>
+            Latest version: {checkState.data.latest_version ?? "None reported"}
+          </p>
           {checkState.data.update_available ? (
             <Button
               size="sm"
@@ -627,7 +631,9 @@ function UpdatesCard({
             <li key={release.version}>
               <div>
                 <span>{release.version}</span>
-                <span className={styles.mutedValue}>{formatDate(release.published_at)}</span>
+                <span className={styles.mutedValue}>
+                  {formatDate(release.published_at)}
+                </span>
                 {release.prerelease ? (
                   <Badge tone="warning" size="xs" variant="soft">
                     Prerelease

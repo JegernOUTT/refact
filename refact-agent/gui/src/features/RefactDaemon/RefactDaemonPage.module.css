@@ -256,7 +256,10 @@
 }
 
 .actionStack {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--rf-nav-w)), max-content));
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, var(--rf-nav-w)), max-content)
+  );
   align-items: center;
 }
 
