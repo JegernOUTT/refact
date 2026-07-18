@@ -116,6 +116,34 @@
   font-size: var(--rf-text-1);
 }
 
+.fixColumn {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.fixHint {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.infoDetails {
+  min-width: 0;
+}
+
+.infoSummary {
+  color: var(--rf-color-muted);
+  cursor: pointer;
+  font-size: var(--rf-text-3);
+  font-weight: 600;
+}
+
+.infoDetails[open] .infoSummary {
+  margin-bottom: var(--rf-space-2);
+}
+
 .command {
   overflow: hidden;
   max-width: calc(var(--rf-space-6) * 8);

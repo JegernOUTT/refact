@@ -47,7 +47,7 @@ export type DoctorFix =
   | { kind: "restart_worker"; projectId: string }
   | { kind: "run_update" }
   | { kind: "open_settings" }
-  | { kind: "copy_command"; command: string }
+  | { kind: "copy_command"; command: string; label?: string; hint?: string }
   | { kind: "open_project_providers"; projectId: string; projectSlug: string };
 
 export type DoctorFinding = {

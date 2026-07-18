@@ -20,6 +20,8 @@ import { DoctorPage } from "./DoctorPage";
 import {
   buildDefaultsUpdate,
   PRUNE_CACHES_COMMAND,
+  PRUNE_CACHES_HINT,
+  PRUNE_CACHES_LABEL,
   resolveServerFixAction,
 } from "./fixActions";
 
@@ -208,9 +210,19 @@ describe("Doctor fix actions", () => {
     expect(resolveServerFixAction("prune_caches")).toEqual({
       kind: "copy_command",
       command: PRUNE_CACHES_COMMAND,
+      label: PRUNE_CACHES_LABEL,
+      hint: PRUNE_CACHES_HINT,
     });
     expect(resolveServerFixAction("something_else")).toBeNull();
     expect(resolveServerFixAction(null)).toBeNull();
+  });
+
+  it("keeps the prune affordance honest: inspect label plus manual prune hint", () => {
+    expect(PRUNE_CACHES_LABEL).toBe("Inspect cache usage");
+    expect(PRUNE_CACHES_COMMAND).toContain("du -sh");
+    expect(PRUNE_CACHES_HINT).toContain("Nothing is deleted automatically");
+    expect(PRUNE_CACHES_HINT).toContain("worktrees of merged branches");
+    expect(PRUNE_CACHES_HINT).toContain("old logs");
   });
 
   it("patches only the stale slot when building the defaults update", () => {
@@ -346,10 +358,25 @@ describe("Doctor page", () => {
     );
   });
 
-  it("shows the all-green state when every check passes", async () => {
+  it("shows the healthy state when the daemon reports only info findings", async () => {
     server.use(
       workersHandler([worker("refact", "ready")]),
-      doctorHandler(),
+      doctorHandler([
+        {
+          id: "cache_size",
+          severity: "info",
+          message: "Cache directory uses 4.2 GiB",
+          detail: null,
+          fix_action: "prune_caches",
+        },
+        {
+          id: "daemon_version",
+          severity: "info",
+          message: "Daemon is up to date",
+          detail: null,
+          fix_action: null,
+        },
+      ]),
       http.get("https://daemon.example.test/p/refact/v1/providers", () =>
         HttpResponse.json({ providers: [providerItem("openai")] }),
       ),
@@ -364,9 +391,61 @@ describe("Doctor page", () => {
     renderDoctor();
 
     expect(await screen.findByText("All checks passed 🩺")).toBeInTheDocument();
+    const infoSummary = screen.getByText("Informational (2)");
+    expect(infoSummary).toBeInTheDocument();
+    expect(infoSummary.closest("details")?.open).toBe(false);
+    expect(
+      screen.getByText("Cache directory uses 4.2 GiB"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Inspect cache usage")).toBeInTheDocument();
+    expect(screen.getByText(PRUNE_CACHES_HINT)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Warnings" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Critical" })).toBeNull();
   });
 
-  it("degrades a failing client check to an info finding", async () => {
+  it("flips to the attention state when a warning finding is present", async () => {
+    server.use(
+      workersHandler([worker("refact", "ready")]),
+      doctorHandler([
+        {
+          id: "cache_size",
+          severity: "info",
+          message: "Cache directory uses 4.2 GiB",
+          detail: null,
+          fix_action: "prune_caches",
+        },
+        {
+          id: "worker_crash",
+          severity: "warning",
+          message: "Worker refact crashed",
+          detail: null,
+          fix_action: "restart_worker:refact",
+        },
+      ]),
+      http.get("https://daemon.example.test/p/refact/v1/providers", () =>
+        HttpResponse.json({ providers: [providerItem("openai")] }),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/defaults", () =>
+        HttpResponse.json(makeDefaults("openai/gpt-4o")),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/models", () =>
+        HttpResponse.json(modelsResponse(["gpt-4o"])),
+      ),
+    );
+
+    renderDoctor();
+
+    expect(
+      await screen.findByText("Worker refact crashed"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Warnings" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("All checks passed 🩺")).toBeNull();
+    expect(screen.getByText("Informational (1)")).toBeInTheDocument();
+  });
+
+  it("degrades a failing client check to a collapsed info finding", async () => {
     server.use(
       workersHandler([worker("refact", "ready")]),
       doctorHandler(),
@@ -381,6 +460,7 @@ describe("Doctor page", () => {
     expect(
       await screen.findByText("Check failed: provider list on refact"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Info" })).toBeInTheDocument();
+    expect(screen.getByText("Informational (1)")).toBeInTheDocument();
+    expect(screen.getByText("All checks passed 🩺")).toBeInTheDocument();
   });
 });

@@ -3,6 +3,9 @@ import { projectApiUrl } from "../../../services/refact/daemon";
 import type { DoctorFix, StaleModelFix } from "./clientChecks";
 
 export const PRUNE_CACHES_COMMAND = "du -sh ~/.cache/refact/*";
+export const PRUNE_CACHES_LABEL = "Inspect cache usage";
+export const PRUNE_CACHES_HINT =
+  "Nothing is deleted automatically. After inspecting, it is safe to manually remove worktrees of merged branches under ~/.cache/refact/worktrees and old logs under ~/.cache/refact/logs.";
 
 const RESTART_WORKER_PREFIX = "restart_worker:";
 
@@ -20,7 +23,12 @@ export function resolveServerFixAction(
     case "open_settings":
       return { kind: "open_settings" };
     case "prune_caches":
-      return { kind: "copy_command", command: PRUNE_CACHES_COMMAND };
+      return {
+        kind: "copy_command",
+        command: PRUNE_CACHES_COMMAND,
+        label: PRUNE_CACHES_LABEL,
+        hint: PRUNE_CACHES_HINT,
+      };
     default:
       return null;
   }
