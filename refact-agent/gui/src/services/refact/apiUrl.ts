@@ -46,6 +46,7 @@ const ENGINE_V1_ENDPOINT_SEGMENTS = new Set([
   "customization",
   "docker-container-action",
   "docker-container-list",
+  "git",
   "git-commit",
   "graceful-shutdown",
   "integration-get",

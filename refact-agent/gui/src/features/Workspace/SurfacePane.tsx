@@ -1,8 +1,8 @@
 import classNames from "classnames";
 import { MessageSquare } from "lucide-react";
-import { useCallback } from "react";
+import { Suspense, useCallback } from "react";
 
-import { EmptyState } from "../../components/ui";
+import { EmptyState, Spinner } from "../../components/ui";
 import { useAppSelector, useConfig } from "../../hooks";
 import { Chat } from "../Chat/Chat";
 import { ChatThreadProvider } from "../Chat/Thread";
@@ -64,7 +64,11 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
           className={classNames(styles.surfacePane, styles.panelSurface)}
           data-surface-key={surfaceKey}
         >
-          <PanelComponent />
+          <Suspense
+            fallback={<Spinner label={`Loading ${parsed.kind} panel`} />}
+          >
+            <PanelComponent />
+          </Suspense>
         </div>
       );
     }

@@ -1,0 +1,321 @@
+.panel {
+  display: flex;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: auto;
+  color: var(--rf-color-fg);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.panelHeader,
+.panelTitle,
+.sectionHeader,
+.statusGroupHeader,
+.statusRow,
+.fileButton,
+.actionsRow,
+.branchList li,
+.commitList li,
+.worktreeList li,
+.worktreeIdentity,
+.worktreeActions {
+  display: flex;
+  min-width: 0;
+}
+
+.panelHeader {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-3) var(--rf-space-4);
+  border-bottom: 1px solid var(--rf-border);
+  background: var(--rf-surface-overlay);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.panelTitle {
+  align-items: center;
+  gap: var(--rf-space-3);
+}
+
+.panelTitle h1,
+.sectionHeader h2 {
+  margin: 0;
+  color: var(--rf-color-fg);
+}
+
+.panelTitle h1 {
+  font-size: var(--rf-text-5);
+}
+
+.panelTitle p,
+.sectionHeader p,
+.emptyText,
+.mutedText,
+.inlineState p {
+  margin: 0;
+  color: var(--rf-color-muted);
+}
+
+.rootTabs {
+  display: flex;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2) var(--rf-space-4) 0;
+  overflow-x: auto;
+}
+
+.rootTab {
+  min-height: var(--rf-control-h-sm);
+  padding: 0 var(--rf-space-3);
+  border: 0;
+  border-radius: var(--rf-radius-pill);
+  background: transparent;
+  color: var(--rf-color-muted);
+  cursor: pointer;
+  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  white-space: nowrap;
+}
+
+.rootTab:hover {
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
+}
+
+.rootTab[aria-selected="true"] {
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
+}
+
+.rootTab:focus-visible,
+.fileButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-space-2xs);
+}
+
+.contentGrid {
+  display: grid;
+  grid-template-columns: minmax(calc(var(--rf-content-max) / 2), 0.8fr) minmax(
+      0,
+      1.6fr
+    );
+  gap: var(--rf-space-4);
+  min-width: 0;
+  padding: var(--rf-space-4);
+}
+
+.sidebar,
+.mainColumn,
+.statusGroups,
+.statusGroup,
+.section,
+.worktreeIdentity {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.sidebar,
+.mainColumn,
+.statusGroups {
+  gap: var(--rf-space-4);
+}
+
+.section {
+  gap: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+}
+
+.sectionHeader,
+.statusGroupHeader {
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+}
+
+.sectionHeader h2 {
+  font-size: var(--rf-text-4);
+}
+
+.statusGroup {
+  gap: var(--rf-space-2);
+}
+
+.statusGroupHeader,
+.logHeader {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.statusList,
+.branchList,
+.commitList,
+.worktreeList {
+  display: flex;
+  margin: 0;
+  padding: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  list-style: none;
+}
+
+.statusRow {
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.statusRow:hover,
+.statusRow[data-selected="true"] {
+  background: var(--rf-surface-2);
+}
+
+.statusRow[data-selected="true"] {
+  box-shadow: inset var(--rf-focus-ring-w) 0 0 var(--rf-color-accent);
+}
+
+.fileButton {
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-1) 0;
+  border: 0;
+  background: transparent;
+  color: var(--rf-color-fg);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.filePath,
+.branchName,
+.commitMessage {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diffScroller {
+  min-width: 0;
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-2);
+}
+
+.diffScroller > div {
+  min-width: max-content;
+}
+
+.loadingBlock,
+.inlineState {
+  display: flex;
+  min-height: calc(var(--rf-control-h-lg) * 2);
+  align-items: center;
+  justify-content: center;
+  gap: var(--rf-space-2);
+}
+
+.actionsRow {
+  justify-content: flex-end;
+}
+
+.branchList li,
+.commitList li {
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-row-pad);
+  border-bottom: 1px solid var(--rf-border);
+}
+
+.commitList code {
+  flex: 0 0 auto;
+  color: var(--rf-color-accent);
+  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
+}
+
+.commitMessage {
+  flex: 1 1 auto;
+}
+
+.worktreeList li {
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+  padding: var(--rf-row-pad);
+  border-bottom: 1px solid var(--rf-border);
+}
+
+.worktreeIdentity {
+  flex: 1 1 auto;
+  gap: var(--rf-space-1);
+}
+
+.worktreeActions {
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.errorText,
+.successText,
+.successBanner {
+  margin: 0;
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.errorText {
+  background: color-mix(in oklab, var(--rf-color-danger) 10%, transparent);
+  color: var(--rf-color-danger);
+}
+
+.successText,
+.successBanner {
+  background: color-mix(in oklab, var(--rf-color-success) 10%, transparent);
+  color: var(--rf-color-success);
+}
+
+.successBanner {
+  position: fixed;
+  right: var(--rf-space-4);
+  bottom: var(--rf-space-4);
+  z-index: var(--rf-z-overlay);
+  max-width: var(--rf-content-max);
+  border: 1px solid var(--rf-border-strong);
+  box-shadow: var(--rf-elev-overlay);
+}
+
+@media (max-width: 840px) {
+  .contentGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .worktreeList li {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .worktreeActions {
+    flex-wrap: wrap;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .panelHeader {
+  background: var(--rf-surface-overlay);
+  backdrop-filter: none;
+}

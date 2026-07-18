@@ -76,6 +76,7 @@ import { mcpInteractionsApi } from "../services/refact/mcpInteractions";
 import { mcpMarketplaceApi } from "../services/refact/mcpMarketplace";
 import { extensionsMarketplaceApi } from "../services/refact/extensionsMarketplace";
 import { memoryEnrichmentApi } from "../services/refact/memoryEnrichment";
+import { gitReadApi } from "../services/refact/gitRead";
 import { buddySlice } from "../features/Buddy/buddySlice";
 import { sidebarReducer } from "../features/Sidebar/sidebarSlice";
 import { buddyApi } from "../services/refact/buddy";
@@ -132,6 +133,7 @@ const rootReducer = combineSlices(
     [taskDocumentsApi.reducerPath]: taskDocumentsApi.reducer,
     [browserApi.reducerPath]: browserApi.reducer,
     [worktreesApi.reducerPath]: worktreesApi.reducer,
+    [gitReadApi.reducerPath]: gitReadApi.reducer,
     [daemonApi.reducerPath]: daemonApi.reducer,
     [skillsStatusApi.reducerPath]: skillsStatusApi.reducer,
     [mcpServerInfoApi.reducerPath]: mcpServerInfoApi.reducer,
@@ -265,6 +267,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           taskDocumentsApi.middleware,
           browserApi.middleware,
           worktreesApi.middleware,
+          gitReadApi.middleware,
           daemonApi.middleware,
           skillsStatusApi.middleware,
           chatModesApi.middleware,

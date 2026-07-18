@@ -9,9 +9,7 @@
 }
 
 .panelSurface {
-  align-items: center;
-  justify-content: center;
-  padding: var(--rf-space-4);
+  align-items: stretch;
 }
 
 .placeholder {

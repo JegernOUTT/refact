@@ -33,7 +33,6 @@ export function PanelPlaceholder({ kind }: { kind: PanelKind }) {
 }
 
 const FilesPanel = () => <PanelPlaceholder kind="files" />;
-const GitPanel = () => <PanelPlaceholder kind="git" />;
 const TerminalPanel = () => <PanelPlaceholder kind="terminal" />;
 
-export { FilesPanel, GitPanel, TerminalPanel };
+export { FilesPanel, TerminalPanel };

@@ -29,5 +29,6 @@ export * from "./sidebarSubscription";
 export * from "./browser";
 export * from "./skillsStatus";
 export * from "./worktrees";
+export * from "./gitRead";
 export * from "./mcpMarketplace";
 export * from "./extensionsMarketplace";
