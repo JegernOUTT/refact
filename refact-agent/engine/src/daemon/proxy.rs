@@ -767,6 +767,19 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn sse_request_detected_for_exec_subscribe_worker_path() {
+        let uri: Uri = "/p/proj/v1/exec/abc123/subscribe".parse().unwrap();
+        let worker_path = worker_v1_path("proj", &uri);
+
+        assert_eq!(worker_path, "/v1/exec/abc123/subscribe");
+        assert!(is_sse_request(&HeaderMap::new(), &worker_path));
+        assert!(is_sse_request(
+            &HeaderMap::new(),
+            "/v1/exec/abc123/subscribe?since_seq=5"
+        ));
+    }
+
     #[tokio::test]
     async fn limited_body_bytes_rejects_proxy_bodies_over_limit() {
         let body = Body::from(vec![b'x'; PROXY_BODY_LIMIT + 1]);

@@ -568,6 +568,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
     async fn spawn_requires_exactly_one_command_shape() {
         let (_temp, app) = test_app().await;
         let router = make_refact_http_server(app);
@@ -590,8 +591,54 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
+    async fn auth_matrix_spawn_rejects_cwd_outside_workspace() {
+        let (_temp, app) = test_app().await;
+        let outside = tempfile::tempdir().unwrap();
+        let router = make_refact_http_server(app);
+
+        let (status, json) = json_response(
+            router,
+            post_json(
+                "/v1/exec/spawn",
+                json!({ "command": "echo hi", "pty": false, "cwd": outside.path() }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["detail"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(exec_http_env)]
+    async fn auth_matrix_spawn_forbidden_when_exec_http_disabled() {
+        let (_temp, app) = test_app().await;
+        let router = make_refact_http_server(app);
+
+        std::env::set_var("REFACT_DISABLE_EXEC_HTTP", "1");
+        let result = json_response(
+            router,
+            post_json(
+                "/v1/exec/spawn",
+                json!({ "command": "echo hi", "pty": false }),
+            ),
+        )
+        .await;
+        std::env::remove_var("REFACT_DISABLE_EXEC_HTTP");
+
+        let (status, json) = result;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(json["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("exec HTTP is disabled"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
     async fn exec_http_lifecycle_is_workspace_scoped() {
         let (_temp, app) = test_app().await;
         let router = make_refact_http_server(app.clone());
@@ -648,6 +695,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
     async fn write_stdin_to_running_tty_process_succeeds() {
         let (_temp, app_state) = test_app().await;
         let router = make_refact_http_server(app_state.clone());
@@ -734,6 +782,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
     async fn subscribe_streams_snapshot_output_and_exit() {
         let (_temp, app) = test_app().await;
         let router = make_refact_http_server(app);

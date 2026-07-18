@@ -646,4 +646,44 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.0, StatusCode::NOT_FOUND);
     }
+
+    #[tokio::test]
+    async fn auth_matrix_git_stage_rejects_non_relative_paths() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let active = tempfile::tempdir().unwrap();
+        Repository::init(active.path()).unwrap();
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() =
+            vec![active.path().to_path_buf()];
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let router = crate::http::routers::make_refact_http_server(app);
+
+        for bad_path in ["../evil", "/etc/passwd"] {
+            let body = json!({
+                "root": active.path().to_string_lossy(),
+                "paths": [bad_path],
+            })
+            .to_string();
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/git/stage")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let payload: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad_path}");
+            assert_eq!(payload["code"], "bad_request", "{bad_path}");
+        }
+    }
 }

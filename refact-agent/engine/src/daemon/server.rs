@@ -1129,6 +1129,188 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_matrix_project_cookie_cannot_reach_fs_browse_or_doctor() {
+        use crate::daemon::config::AuthConfig;
+        use axum::extract::ConnectInfo;
+        use hyper::{Body, Request, StatusCode};
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            auth: AuthConfig {
+                enabled: true,
+                token: Some("secret".to_string()),
+                ..Default::default()
+            },
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(
+            config,
+            EventBus::new(dir.path().join("events.jsonl")),
+            Some("secret".to_string()),
+        );
+        let cookie = format!(
+            "{}={}",
+            crate::daemon::auth::DAEMON_AUTH_COOKIE,
+            crate::daemon::auth::project_cookie_value("project-a", "secret")
+        );
+        let router = make_router(state, 8488);
+        let remote = || ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000)));
+
+        let mut browse = Request::builder()
+            .method("POST")
+            .uri("/daemon/v1/fs/browse")
+            .header("content-type", "application/json")
+            .header("cookie", &cookie)
+            .body(Body::from(r#"{}"#))
+            .unwrap();
+        browse.extensions_mut().insert(remote());
+        let browse = router.clone().oneshot(browse).await.unwrap();
+        assert_eq!(browse.status(), StatusCode::UNAUTHORIZED);
+
+        let mut doctor = Request::builder()
+            .uri("/daemon/v1/doctor")
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap();
+        doctor.extensions_mut().insert(remote());
+        let doctor = router.oneshot(doctor).await.unwrap();
+        assert_eq!(doctor.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_matrix_fs_browse_loopback_allowed_when_auth_off() {
+        use axum::extract::ConnectInfo;
+        use hyper::{Body, Request, StatusCode};
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let body = serde_json::json!({"path": dir.path()}).to_string();
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/daemon/v1/fs/browse")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
+        let response = make_router(state, 8488).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_matrix_project_cookie_scopes_proxied_v1_routes() {
+        use crate::daemon::config::AuthConfig;
+        use axum::extract::ConnectInfo;
+        use hyper::{Body, Request, StatusCode};
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            auth: AuthConfig {
+                enabled: true,
+                token: Some("secret".to_string()),
+                ..Default::default()
+            },
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(
+            config,
+            EventBus::new(dir.path().join("events.jsonl")),
+            Some("secret".to_string()),
+        );
+        let cookie = format!(
+            "{}={}",
+            crate::daemon::auth::DAEMON_AUTH_COOKIE,
+            crate::daemon::auth::project_cookie_value("project-a", "secret")
+        );
+        let router = make_router(state, 8488);
+        let remote = || ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000)));
+
+        let mut own_project = Request::builder()
+            .uri("/p/project-a/v1/files/read?path=%2Ftmp%2Fx")
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap();
+        own_project.extensions_mut().insert(remote());
+        let own_project = router.clone().oneshot(own_project).await.unwrap();
+        assert_eq!(own_project.status(), StatusCode::NOT_FOUND);
+        let body = hyper::body::to_bytes(own_project.into_body())
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"], "project not found");
+
+        for (method, uri) in [
+            ("GET", "/p/project-b/v1/files/read?path=%2Ftmp%2Fx"),
+            ("GET", "/p/project-b/v1/git/status"),
+            ("POST", "/p/project-b/v1/exec/spawn"),
+        ] {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .body(Body::from(r#"{}"#))
+                .unwrap();
+            request.extensions_mut().insert(remote());
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri} must not accept another project's cookie"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_daemon_events_replay_streams_and_terminates() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        state
+            .events
+            .emit("sse_smoke_event", None, json!({"n": 1}))
+            .await
+            .unwrap();
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/daemon/v1/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+        let body = tokio::time::timeout(
+            Duration::from_secs(5),
+            hyper::body::to_bytes(response.into_body()),
+        )
+        .await
+        .expect("events stream without follow must terminate")
+        .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("event:daemon"), "body: {text:?}");
+        assert!(text.contains("sse_smoke_event"), "body: {text:?}");
+        assert!(text.contains("id:1"), "body: {text:?}");
+    }
+
+    #[tokio::test]
     async fn daemon_cron_status_reports_pending_clock_shape() {
         use hyper::{Body, Request, StatusCode};
         use tower::ServiceExt;

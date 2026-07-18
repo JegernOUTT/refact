@@ -992,4 +992,39 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
     }
+
+    #[test]
+    fn auth_matrix_public_exemptions_cover_only_status_and_static_assets() {
+        assert!(is_public_request(&request("/daemon/v1/status")));
+        assert!(is_public_request(&request("/dist/chat/style.css")));
+        assert!(is_public_request(&request("/dist/chat/index.umd.cjs")));
+
+        let post_status = Request::builder()
+            .method(Method::POST)
+            .uri("/daemon/v1/status")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_public_request(&post_status));
+
+        for uri in [
+            "/",
+            "/picker",
+            "/daemon/v1/doctor",
+            "/daemon/v1/fs/browse",
+            "/daemon/v1/events",
+            "/daemon/v1/projects",
+            "/daemon/v1/settings",
+            "/daemon/v1/logs",
+            "/p/project/v1/files/read",
+            "/p/project/v1/files/tree",
+            "/p/project/v1/git/status",
+            "/p/project/v1/exec/spawn",
+            "/p/project/v1/exec/abc/subscribe",
+        ] {
+            assert!(
+                !is_public_request(&request(uri)),
+                "{uri} must not be auth-exempt"
+            );
+        }
+    }
 }

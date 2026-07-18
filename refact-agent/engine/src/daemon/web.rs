@@ -921,6 +921,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_matrix_wrong_query_token_rejected_without_cookie_or_redirect() {
+        use axum::extract::ConnectInfo;
+        use std::net::SocketAddr;
+
+        let state = test_state_with_auth(Some("secret-token")).await.state;
+        let router = crate::daemon::server::make_router(state, 8488);
+        for uri in [
+            "/?daemon_token=wrong-token",
+            "/p/abc/?daemon_token=wrong-token",
+        ] {
+            let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000))));
+            let response = router.clone().oneshot(request).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            assert!(
+                response.headers().get(header::SET_COOKIE).is_none(),
+                "{uri}"
+            );
+            assert!(response.headers().get(header::LOCATION).is_none(), "{uri}");
+        }
+    }
+
+    #[tokio::test]
     async fn auth_enabled_dist_chat_assets_are_public() {
         let state = test_state_with_auth(Some("secret-token")).await.state;
         let response = crate::daemon::server::make_router(state, 8488)
