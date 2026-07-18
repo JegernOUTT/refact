@@ -5,7 +5,7 @@ import { useGetDaemonInfoQuery } from "../../services/refact/daemon";
 import { ActivityPage } from "./Activity/ActivityPage";
 import { DashboardNav } from "./DashboardNav";
 import { DoctorPlaceholderPage } from "./Doctor/PlaceholderPage";
-import { HomePlaceholderPage } from "./Home/PlaceholderPage";
+import { HomePage } from "./Home/HomePage";
 import { ProjectsPage } from "./Projects/ProjectsPage";
 import { SchedulerPlaceholderPage } from "./Scheduler/PlaceholderPage";
 import { SettingsPage } from "./Settings/SettingsPage";
@@ -40,7 +40,7 @@ function DashboardPageContent() {
     case "settings":
       return <SettingsPage />;
     case "home":
-      return <HomePlaceholderPage />;
+      return <HomePage />;
   }
 }
 
