@@ -236,11 +236,14 @@ describe("Toolbar single workspace tab row", () => {
     ).toBeInTheDocument();
   });
 
-  it("does not render an empty tab strip on dashboard", () => {
+  it("renders only the panel launcher in the tab strip on dashboard with no tabs", () => {
     useToolbarHandlers();
     renderToolbar({ type: "dashboard" });
 
-    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open workspace panel" }),
+    ).toBeInTheDocument();
   });
 
   it("opens the Refact Daemon page from the connection area", async () => {
@@ -256,14 +259,12 @@ describe("Toolbar single workspace tab row", () => {
     });
   });
 
-  it("renders a flex spacer instead of the tab bar when no tabs are open", () => {
+  it("renders a launcher-only tab strip instead of a spacer when no tabs are open", () => {
     useToolbarHandlers();
-    const view = renderToolbar({ type: "dashboard" });
+    renderToolbar({ type: "dashboard" });
 
-    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
-    expect(
-      view.container.querySelector('[data-element="ToolbarSpacer"]'),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(screen.getByRole("tablist")).toBeInTheDocument();
   });
 
   it("drops the spacer when the workspace tab bar takes over the row", () => {
