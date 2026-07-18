@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::daemon::config::DaemonConfig;
 use crate::daemon::events::EventBus;
@@ -87,8 +87,43 @@ pub struct DaemonState {
     pub events: EventBus,
     pub daemon_dir: PathBuf,
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
+    pub update_state: Mutex<DaemonUpdateState>,
+    pub update_check_cache:
+        Mutex<Option<(std::time::Instant, refact_self_update::UpdateCheckInfo)>>,
+    pub update_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown_tx: broadcast::Sender<String>,
     shutdown_requested: AtomicBool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdatePhase {
+    Idle,
+    Checking,
+    Downloading,
+    Restarting,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonUpdateState {
+    pub phase: UpdatePhase,
+    pub detail: Option<String>,
+    pub target_version: Option<String>,
+    pub started_at_ms: Option<u64>,
+    pub finished_at_ms: Option<u64>,
+}
+
+impl Default for DaemonUpdateState {
+    fn default() -> Self {
+        Self {
+            phase: UpdatePhase::Idle,
+            detail: None,
+            target_version: None,
+            started_at_ms: None,
+            finished_at_ms: None,
+        }
+    }
 }
 
 pub fn executable_sha256_for_path(path: &Path) -> Result<String, String> {
@@ -202,6 +237,9 @@ impl DaemonState {
             daemon_dir,
 
             cron_pending,
+            update_state: Mutex::new(DaemonUpdateState::default()),
+            update_check_cache: Mutex::new(None),
+            update_task: Mutex::new(None),
             shutdown_tx,
             shutdown_requested: AtomicBool::new(false),
         })

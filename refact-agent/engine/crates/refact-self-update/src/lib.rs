@@ -57,8 +57,29 @@ struct AssetUrls {
     pub sha256_url: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ReleaseInfo {
+    pub version: String,
+    pub published_at: Option<String>,
+    pub prerelease: bool,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateCheckInfo {
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub releases: Vec<ReleaseInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateInstallOutcome {
+    pub installed_version: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ReleaseInfo {
+struct EngineReleaseInfo {
     pub version: String,
     pub tag: String,
     assets: HashMap<String, String>,
@@ -106,6 +127,8 @@ struct UpdateOutput<'a> {
 #[derive(Debug, Deserialize)]
 struct GitHubRelease {
     tag_name: String,
+    html_url: Option<String>,
+    published_at: Option<String>,
     #[serde(default)]
     draft: bool,
     #[serde(default)]
@@ -120,11 +143,11 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-type ReleaseFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, SelfUpdateError>> + 'a>>;
+type ReleaseFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, SelfUpdateError>> + Send + 'a>>;
 
-trait ReleaseSource {
-    fn latest_release<'a>(&'a self) -> ReleaseFuture<'a, ReleaseInfo>;
-    fn release_for_version<'a>(&'a self, version: &'a str) -> ReleaseFuture<'a, ReleaseInfo>;
+trait ReleaseSource: Sync {
+    fn latest_release<'a>(&'a self) -> ReleaseFuture<'a, EngineReleaseInfo>;
+    fn release_for_version<'a>(&'a self, version: &'a str) -> ReleaseFuture<'a, EngineReleaseInfo>;
     fn download<'a>(&'a self, url: &'a str, label: &'static str) -> ReleaseFuture<'a, Vec<u8>>;
 }
 
@@ -165,8 +188,13 @@ impl ReqwestReleaseSource {
         Ok(release)
     }
 
-    async fn get_latest_engine_release(&self) -> Result<ReleaseInfo, SelfUpdateError> {
-        let url = format!("{GITHUB_API_BASE}?per_page=20");
+    async fn get_latest_engine_release(&self) -> Result<EngineReleaseInfo, SelfUpdateError> {
+        let releases = self.get_releases(20).await?;
+        latest_engine_release_from(releases)
+    }
+
+    async fn get_releases(&self, per_page: usize) -> Result<Vec<GitHubRelease>, SelfUpdateError> {
+        let url = format!("{GITHUB_API_BASE}?per_page={}", per_page.clamp(1, 100));
         let response = self.client.get(&url).send().await.map_err(|error| {
             SelfUpdateError::runtime(format!(
                 "failed to contact GitHub Releases at {url}: {error}. Check your network connection and try again."
@@ -186,7 +214,7 @@ impl ReqwestReleaseSource {
             .map_err(|error| {
                 SelfUpdateError::runtime(format!("GitHub Releases returned invalid JSON: {error}"))
             })?;
-        latest_engine_release_from(releases)
+        Ok(releases)
     }
 
     async fn get_bytes(&self, url: &str, label: &str) -> Result<Vec<u8>, SelfUpdateError> {
@@ -211,11 +239,11 @@ impl ReqwestReleaseSource {
 }
 
 impl ReleaseSource for ReqwestReleaseSource {
-    fn latest_release<'a>(&'a self) -> ReleaseFuture<'a, ReleaseInfo> {
+    fn latest_release<'a>(&'a self) -> ReleaseFuture<'a, EngineReleaseInfo> {
         Box::pin(async move { self.get_latest_engine_release().await })
     }
 
-    fn release_for_version<'a>(&'a self, version: &'a str) -> ReleaseFuture<'a, ReleaseInfo> {
+    fn release_for_version<'a>(&'a self, version: &'a str) -> ReleaseFuture<'a, EngineReleaseInfo> {
         Box::pin(async move {
             let version = normalize_version(version).map_err(SelfUpdateError::runtime)?;
             let tag = default_release_tag(&version);
@@ -272,6 +300,31 @@ pub fn parse_self_update_args(args: &[OsString]) -> Result<SelfUpdateOptions, St
 
 pub async fn run(options: SelfUpdateOptions) -> i32 {
     run_for_current_version(options, env!("REFACT_ENGINE_VERSION")).await
+}
+
+pub async fn check_update_info(limit: usize) -> Result<UpdateCheckInfo, String> {
+    let current_version = env!("REFACT_ENGINE_VERSION");
+    let source = ReqwestReleaseSource::new(current_version).map_err(|error| error.message)?;
+    let releases = source
+        .get_releases(limit.max(1))
+        .await
+        .map_err(|error| error.message)?;
+    Ok(update_check_info_from_releases(
+        current_version,
+        releases,
+        limit,
+    ))
+}
+
+pub async fn install_update_version(
+    version: Option<&str>,
+    force: bool,
+) -> Result<UpdateInstallOutcome, String> {
+    let current_version = env!("REFACT_ENGINE_VERSION");
+    let source = ReqwestReleaseSource::new(current_version).map_err(|error| error.message)?;
+    install_update_with_source(current_version, &source, version, force, None)
+        .await
+        .map_err(|error| error.message)
 }
 
 async fn run_for_current_version(options: SelfUpdateOptions, current_version: &str) -> i32 {
@@ -367,6 +420,64 @@ async fn run_with_source_for_current_version(
         }
         return Ok(0);
     };
+    let exe_path = install_release(source, target, &urls, exe_path).await?;
+    if options.json {
+        print_json(
+            out,
+            &UpdateOutput {
+                ok: true,
+                old_version: current_version,
+                new_version,
+                target,
+                binary_path: exe_path.display().to_string(),
+                restart_hint: restart_hint(),
+            },
+        )?;
+    } else if !options.quiet {
+        writeln!(out, "refact updated {current_version} -> {new_version}")
+            .map_err(write_error_io)?;
+        writeln!(out, "{}", restart_hint()).map_err(write_error_io)?;
+    }
+    Ok(0)
+}
+
+async fn install_update_with_source(
+    current_version: &str,
+    source: &dyn ReleaseSource,
+    version: Option<&str>,
+    force: bool,
+    exe_path: Option<PathBuf>,
+) -> Result<UpdateInstallOutcome, SelfUpdateError> {
+    let target = current_target_triple().ok_or_else(|| {
+        SelfUpdateError::runtime(format!(
+            "unsupported self-update target: {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+    })?;
+    let release = match version {
+        Some(version) => source.release_for_version(version).await?,
+        None => source.latest_release().await?,
+    };
+    let decision = decide_update(current_version, &release.version, force, version);
+    let UpdateDecision::Update { version, .. } = decision else {
+        return Err(SelfUpdateError::runtime(format!(
+            "refact is up to date ({current_version})"
+        )));
+    };
+    let urls = release.asset_urls(target);
+    install_release(source, target, &urls, exe_path).await?;
+    Ok(UpdateInstallOutcome {
+        installed_version: version,
+    })
+}
+
+async fn install_release(
+    source: &dyn ReleaseSource,
+    target: &str,
+    urls: &AssetUrls,
+    exe_path: Option<PathBuf>,
+) -> Result<PathBuf, SelfUpdateError> {
     let exe_path = match exe_path {
         Some(path) => path,
         None => std::env::current_exe().map_err(|error| {
@@ -388,24 +499,7 @@ async fn run_with_source_for_current_version(
     let temp_path = temp_binary_path(&exe_path);
     extract_binary_to_path(&archive, archive_kind_for_target(target), &temp_path)?;
     replace_binary(&exe_path, &temp_path)?;
-    if options.json {
-        print_json(
-            out,
-            &UpdateOutput {
-                ok: true,
-                old_version: current_version,
-                new_version,
-                target,
-                binary_path: exe_path.display().to_string(),
-                restart_hint: restart_hint(),
-            },
-        )?;
-    } else if !options.quiet {
-        writeln!(out, "refact updated {current_version} -> {new_version}")
-            .map_err(write_error_io)?;
-        writeln!(out, "{}", restart_hint()).map_err(write_error_io)?;
-    }
-    Ok(0)
+    Ok(exe_path)
 }
 
 fn decide_update(
@@ -466,7 +560,7 @@ fn asset_urls_for_version(version: &str, target: &str) -> AssetUrls {
     release_asset_urls(&default_release_tag(&version), &version, target)
 }
 
-impl ReleaseInfo {
+impl EngineReleaseInfo {
     #[cfg(test)]
     fn from_tag(tag: &str) -> Result<Self, SelfUpdateError> {
         let version = parse_version_from_tag(tag)?;
@@ -489,14 +583,14 @@ impl ReleaseInfo {
     }
 }
 
-fn release_info_from_github(release: GitHubRelease) -> Result<ReleaseInfo, SelfUpdateError> {
+fn release_info_from_github(release: GitHubRelease) -> Result<EngineReleaseInfo, SelfUpdateError> {
     let version = parse_version_from_tag(&release.tag_name)?;
     let assets = release
         .assets
         .into_iter()
         .map(|asset| (asset.name, asset.browser_download_url))
         .collect::<HashMap<_, _>>();
-    Ok(ReleaseInfo {
+    Ok(EngineReleaseInfo {
         version,
         tag: release.tag_name,
         assets,
@@ -505,7 +599,7 @@ fn release_info_from_github(release: GitHubRelease) -> Result<ReleaseInfo, SelfU
 
 fn latest_engine_release_from(
     releases: Vec<GitHubRelease>,
-) -> Result<ReleaseInfo, SelfUpdateError> {
+) -> Result<EngineReleaseInfo, SelfUpdateError> {
     releases
         .into_iter()
         .filter(|release| {
@@ -516,6 +610,54 @@ fn latest_engine_release_from(
         .ok_or_else(|| {
             SelfUpdateError::runtime("GitHub Releases did not include an engine/v* release")
         })
+}
+
+fn update_check_info_from_releases(
+    current_version: &str,
+    releases: Vec<GitHubRelease>,
+    limit: usize,
+) -> UpdateCheckInfo {
+    let mut public_releases = Vec::new();
+    let mut latest_version = None::<String>;
+    for release in releases {
+        if release.draft || !release.tag_name.starts_with("engine/v") {
+            continue;
+        }
+        let Ok(version) = parse_version_from_tag(&release.tag_name) else {
+            continue;
+        };
+        if !release.prerelease {
+            latest_version = match latest_version {
+                Some(previous)
+                    if refact_core::semver::compare_versions(&previous, &version)
+                        != Ordering::Less =>
+                {
+                    Some(previous)
+                }
+                _ => Some(version.clone()),
+            };
+        }
+        if public_releases.len() < limit {
+            public_releases.push(ReleaseInfo {
+                version,
+                published_at: release.published_at,
+                prerelease: release.prerelease,
+                url: release.html_url,
+            });
+        }
+    }
+    let update_available = latest_version
+        .as_deref()
+        .map(|version| {
+            refact_core::semver::compare_versions(current_version, version) == Ordering::Less
+        })
+        .unwrap_or(false);
+    UpdateCheckInfo {
+        current_version: current_version.to_string(),
+        latest_version,
+        update_available,
+        releases: public_releases,
+    }
 }
 
 fn release_asset_urls(tag: &str, version: &str, target: &str) -> AssetUrls {
@@ -570,7 +712,7 @@ fn write_check_output(
     options: &SelfUpdateOptions,
     out: &mut dyn Write,
     current_version: &str,
-    release: &ReleaseInfo,
+    release: &EngineReleaseInfo,
     decision: &UpdateDecision,
     target: &str,
     urls: &AssetUrls,
@@ -948,35 +1090,35 @@ fn restart_hint() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
-    use std::rc::Rc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     struct MockReleaseSource {
-        release: ReleaseInfo,
-        downloads: Rc<Cell<usize>>,
+        release: EngineReleaseInfo,
+        downloads: Arc<AtomicUsize>,
     }
 
     impl MockReleaseSource {
-        fn new(release: ReleaseInfo) -> Self {
+        fn new(release: EngineReleaseInfo) -> Self {
             Self {
                 release,
-                downloads: Rc::new(Cell::new(0)),
+                downloads: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
 
     impl ReleaseSource for MockReleaseSource {
-        fn latest_release<'a>(&'a self) -> ReleaseFuture<'a, ReleaseInfo> {
+        fn latest_release<'a>(&'a self) -> ReleaseFuture<'a, EngineReleaseInfo> {
             Box::pin(async move { Ok(self.release.clone()) })
         }
 
-        fn release_for_version<'a>(&'a self, _: &'a str) -> ReleaseFuture<'a, ReleaseInfo> {
+        fn release_for_version<'a>(&'a self, _: &'a str) -> ReleaseFuture<'a, EngineReleaseInfo> {
             Box::pin(async move { Ok(self.release.clone()) })
         }
 
         fn download<'a>(&'a self, _: &'a str, _: &'static str) -> ReleaseFuture<'a, Vec<u8>> {
             Box::pin(async move {
-                self.downloads.set(self.downloads.get() + 1);
+                self.downloads.fetch_add(1, Ordering::Relaxed);
                 Ok(Vec::new())
             })
         }
@@ -1067,6 +1209,8 @@ mod tests {
     fn release_json_can_override_contract_asset_urls() {
         let release = release_info_from_github(GitHubRelease {
             tag_name: "engine/v8.2.0".to_string(),
+            html_url: None,
+            published_at: None,
             draft: false,
             prerelease: false,
             assets: vec![
@@ -1092,24 +1236,32 @@ mod tests {
         let release = latest_engine_release_from(vec![
             GitHubRelease {
                 tag_name: "v9.0.0".to_string(),
+                html_url: None,
+                published_at: None,
                 draft: false,
                 prerelease: false,
                 assets: Vec::new(),
             },
             GitHubRelease {
                 tag_name: "engine/v8.2.0".to_string(),
+                html_url: None,
+                published_at: None,
                 draft: false,
                 prerelease: false,
                 assets: Vec::new(),
             },
             GitHubRelease {
                 tag_name: "engine/v8.3.0".to_string(),
+                html_url: None,
+                published_at: None,
                 draft: true,
                 prerelease: false,
                 assets: Vec::new(),
             },
             GitHubRelease {
                 tag_name: "engine/v8.1.0".to_string(),
+                html_url: None,
+                published_at: None,
                 draft: false,
                 prerelease: false,
                 assets: Vec::new(),
@@ -1135,7 +1287,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_mode_prints_without_downloading() {
-        let source = MockReleaseSource::new(ReleaseInfo::from_tag("engine/v99.0.0").unwrap());
+        let source = MockReleaseSource::new(EngineReleaseInfo::from_tag("engine/v99.0.0").unwrap());
         let downloads = source.downloads.clone();
         let mut out = Vec::new();
         let code = run_with_source(
@@ -1153,7 +1305,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(code, 0);
-        assert_eq!(downloads.get(), 0);
+        assert_eq!(downloads.load(Ordering::Relaxed), 0);
         let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(value["ok"], true);
         assert_eq!(value["latest_version"], "99.0.0");

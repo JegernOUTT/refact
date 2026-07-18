@@ -302,6 +302,10 @@ pub(crate) async fn run_daemon_entry_with_paths(
     }
     cron_clock_task.abort();
     idle_task.abort();
+    if let Some(update_task) = state.update_task.lock().await.take() {
+        update_task.abort();
+        let _ = update_task.await;
+    }
     if !workers_stopped {
         state.supervisor.stop_all().await;
     }

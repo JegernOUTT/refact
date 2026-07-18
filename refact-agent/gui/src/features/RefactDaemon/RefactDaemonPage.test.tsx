@@ -69,7 +69,7 @@ describe("RefactDaemonPage", () => {
     expect(
       await screen.findByRole("heading", { name: "Refact Daemon" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("0.9.1")).toBeInTheDocument();
+    expect(screen.getAllByText("0.9.1").length).toBeGreaterThan(0);
     expect(screen.getByText("1h 5m")).toBeInTheDocument();
     expect(
       screen.getAllByText("https://daemon.example.test")[0],

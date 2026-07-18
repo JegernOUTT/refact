@@ -8,6 +8,7 @@ const DEFAULT_DAEMON_PORT = 8488;
 export type DaemonStatus = {
   pid: number;
   version: string;
+  executable_sha256?: string;
   port: number;
   started_at_ms: number;
   uptime_secs: number;
@@ -36,6 +37,66 @@ export type DaemonWorker = {
 };
 
 export type DaemonWorkersAccess = "visible" | "auth_hidden";
+
+export type DaemonSettingsAccess = "visible" | "auth_hidden";
+
+export type DaemonSettings = {
+  bind: string;
+  lan_enabled: boolean;
+  mdns_enabled: boolean;
+  auth_enabled: boolean;
+  username: string | null;
+  has_password: boolean;
+  hostname_local: string;
+  urls: DaemonUrls;
+};
+
+export type DaemonUrls = {
+  loopback: string;
+  mdns: string;
+};
+
+export type DaemonSettingsResponse =
+  | { settings: DaemonSettings; access: "visible" }
+  | { settings: null; access: "auth_hidden" };
+
+export type DaemonSettingsUpdate = {
+  lan_enabled: boolean;
+  mdns_enabled: boolean;
+  auth_enabled: boolean;
+  username?: string;
+  password?: string;
+};
+
+export type DaemonRelease = {
+  version: string;
+  published_at: string | null;
+  prerelease: boolean;
+  url: string | null;
+};
+
+export type DaemonUpdateCheck = {
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  releases: DaemonRelease[];
+  checked_at_ms: number;
+};
+
+export type DaemonUpdatePhase =
+  | "idle"
+  | "checking"
+  | "downloading"
+  | "restarting"
+  | "failed";
+
+export type DaemonUpdateStatus = {
+  phase: DaemonUpdatePhase;
+  detail: string | null;
+  target_version: string | null;
+  started_at_ms: number | null;
+  finished_at_ms: number | null;
+};
 
 export type DaemonInfo = {
   status: DaemonStatus;
@@ -133,7 +194,152 @@ export const daemonApi = createApi({
         };
       },
     }),
+    getDaemonSettings: builder.query<DaemonSettingsResponse, undefined>({
+      providesTags: ["Daemon"],
+      queryFn: async (_args, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const root = resolveDaemonBaseUrl(state.config);
+        const result = await baseQuery({
+          url: `${root}/daemon/v1/settings`,
+        });
+
+        if (result.error) {
+          if (result.error.status === 401) {
+            return { data: { settings: null, access: "auth_hidden" } };
+          }
+
+          return { error: result.error };
+        }
+
+        return {
+          data: {
+            settings: result.data as DaemonSettings,
+            access: "visible",
+          },
+        };
+      },
+    }),
+    updateDaemonSettings: builder.mutation<
+      { success: boolean; restarting: boolean },
+      DaemonSettingsUpdate
+    >({
+      invalidatesTags: ["Daemon"],
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const root = resolveDaemonBaseUrl(state.config);
+        const result = await baseQuery({
+          url: `${root}/daemon/v1/settings`,
+          method: "POST",
+          body,
+        });
+
+        if (result.error) return { error: result.error };
+
+        return {
+          data: result.data as { success: boolean; restarting: boolean },
+        };
+      },
+    }),
+    restartDaemon: builder.mutation<
+      { success: boolean; restarting: boolean },
+      undefined
+    >({
+      invalidatesTags: ["Daemon"],
+      queryFn: async (_args, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const root = resolveDaemonBaseUrl(state.config);
+        const result = await baseQuery({
+          url: `${root}/daemon/v1/restart`,
+          method: "POST",
+        });
+
+        if (result.error) return { error: result.error };
+
+        return {
+          data: result.data as { success: boolean; restarting: boolean },
+        };
+      },
+    }),
+    shutdownDaemon: builder.mutation<unknown, { reason: string }>({
+      invalidatesTags: ["Daemon"],
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const root = resolveDaemonBaseUrl(state.config);
+        const result = await baseQuery({
+          url: `${root}/daemon/v1/shutdown`,
+          method: "POST",
+          body,
+        });
+
+        if (result.error) return { error: result.error };
+
+        return { data: result.data };
+      },
+    }),
+    checkDaemonUpdate: builder.query<
+      DaemonUpdateCheck,
+      { refresh?: boolean } | undefined
+    >({
+      queryFn: async (args, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const root = resolveDaemonBaseUrl(state.config);
+        const refresh = args?.refresh === true ? "true" : "false";
+        const result = await baseQuery({
+          url: `${root}/daemon/v1/update/check?refresh=${refresh}`,
+        });
+
+        if (result.error) return { error: result.error };
+
+        return { data: result.data as DaemonUpdateCheck };
+      },
+    }),
+    installDaemonUpdate: builder.mutation<
+      { started: boolean; target_version: string | null },
+      { version?: string }
+    >({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const root = resolveDaemonBaseUrl(state.config);
+        const result = await baseQuery({
+          url: `${root}/daemon/v1/update/install`,
+          method: "POST",
+          body,
+        });
+
+        if (result.error) return { error: result.error };
+
+        return {
+          data: result.data as {
+            started: boolean;
+            target_version: string | null;
+          },
+        };
+      },
+    }),
+    getDaemonUpdateStatus: builder.query<DaemonUpdateStatus, undefined>({
+      queryFn: async (_args, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const root = resolveDaemonBaseUrl(state.config);
+        const result = await baseQuery({
+          url: `${root}/daemon/v1/update/status`,
+        });
+
+        if (result.error) return { error: result.error };
+
+        return { data: result.data as DaemonUpdateStatus };
+      },
+    }),
   }),
 });
 
-export const { useGetDaemonInfoQuery } = daemonApi;
+export const {
+  useCheckDaemonUpdateQuery,
+  useGetDaemonInfoQuery,
+  useGetDaemonSettingsQuery,
+  useGetDaemonUpdateStatusQuery,
+  useInstallDaemonUpdateMutation,
+  useLazyCheckDaemonUpdateQuery,
+  useRestartDaemonMutation,
+  useShutdownDaemonMutation,
+  useUpdateDaemonSettingsMutation,
+} = daemonApi;

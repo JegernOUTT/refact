@@ -80,7 +80,8 @@
 }
 
 .statusCard,
-.workersCard {
+.workersCard,
+.controlCard {
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -196,6 +197,99 @@
   color: var(--rf-color-muted);
 }
 
+.formStack,
+.actionStack,
+.updateSummary,
+.updateStatus,
+.urlList {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-3);
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, var(--rf-nav-w)), 1fr)
+  );
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.helperText,
+.notice,
+.confirmBox p,
+.updateSummary p,
+.updateStatus,
+.urlList,
+.releaseList {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.notice {
+  color: var(--rf-color-accent);
+  font-weight: 650;
+}
+
+.sectionLabel {
+  color: var(--rf-color-fg);
+  font: 650 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  text-transform: uppercase;
+}
+
+.urlList ul,
+.releaseList {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.urlList li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.actionStack {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--rf-nav-w)), max-content));
+  align-items: center;
+}
+
+.confirmBox {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+}
+
+.releaseList li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--rf-space-2);
+  align-items: center;
+  padding: var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+}
+
+.releaseList li > div,
+.updateStatus {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
 @media (width <= 720px) {
   .page {
     overflow-y: auto;
@@ -217,5 +311,10 @@
 
   .cardHeader {
     flex-direction: column;
+  }
+
+  .actionStack,
+  .releaseList li {
+    grid-template-columns: 1fr;
   }
 }

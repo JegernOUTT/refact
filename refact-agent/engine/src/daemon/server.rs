@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::HeaderMap;
@@ -18,7 +18,9 @@ use serde_json::json;
 use tower_http::cors::{AllowCredentials, AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 use crate::daemon::config::DaemonConfig;
-use crate::daemon::state::DaemonState;
+use crate::daemon::state::{DaemonState, DaemonUpdateState, UpdatePhase};
+
+const UPDATE_CHECK_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Serialize)]
 struct StatusResponse {
@@ -35,6 +37,17 @@ struct StatusResponse {
 #[derive(Debug, Deserialize)]
 struct ShutdownRequest {
     reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateCheckQuery {
+    #[serde(default)]
+    refresh: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateInstallRequest {
+    version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +129,10 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         .route("/daemon/v1/status", get(status))
         .route("/daemon/v1/settings", get(get_settings))
         .route("/daemon/v1/settings", post(update_settings))
+        .route("/daemon/v1/restart", post(restart))
+        .route("/daemon/v1/update/check", get(update_check))
+        .route("/daemon/v1/update/install", post(update_install))
+        .route("/daemon/v1/update/status", get(update_status))
         .route("/daemon/v1/shutdown", post(shutdown))
         .route("/daemon/v1/events", get(events))
         .route("/daemon/v1/workers", get(workers))
@@ -233,6 +250,156 @@ async fn shutdown(
 ) -> Json<serde_json::Value> {
     state.request_shutdown(request.reason);
     Json(json!({"success": true}))
+}
+
+async fn restart(State((state, _)): State<(Arc<DaemonState>, u16)>) -> Response {
+    if let Err(error) = spawn_daemon_relaunch() {
+        tracing::warn!("daemon restart relaunch failed: {error}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("daemon restart failed: {error}")})),
+        )
+            .into_response();
+    }
+    state.request_shutdown("restart_requested".to_string());
+    Json(json!({"success": true, "restarting": true})).into_response()
+}
+
+async fn update_check(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    Query(query): Query<UpdateCheckQuery>,
+) -> Response {
+    let now = Instant::now();
+    if !query.refresh {
+        let cached = {
+            let cache = state.update_check_cache.lock().await;
+            cache
+                .as_ref()
+                .filter(|(checked_at, _)| now.duration_since(*checked_at) < UPDATE_CHECK_CACHE_TTL)
+                .map(|(_, info)| info.clone())
+        };
+        if let Some(info) = cached {
+            return update_check_response(info).into_response();
+        }
+    }
+    let info = match refact_self_update::check_update_info(10).await {
+        Ok(info) => info,
+        Err(error) => {
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": error}))).into_response();
+        }
+    };
+    {
+        let mut cache = state.update_check_cache.lock().await;
+        *cache = Some((now, info.clone()));
+    }
+    update_check_response(info).into_response()
+}
+
+fn update_check_response(info: refact_self_update::UpdateCheckInfo) -> Json<serde_json::Value> {
+    Json(json!({
+        "current_version": info.current_version,
+        "latest_version": info.latest_version,
+        "update_available": info.update_available,
+        "releases": info.releases,
+        "checked_at_ms": crate::daemon::state::now_ms(),
+    }))
+}
+
+async fn update_install(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    Json(request): Json<UpdateInstallRequest>,
+) -> Response {
+    let target_version = request.version.clone();
+    {
+        let mut update_state = state.update_state.lock().await;
+        if update_phase_active(&update_state.phase) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "update already in progress"})),
+            )
+                .into_response();
+        }
+        *update_state = DaemonUpdateState {
+            phase: UpdatePhase::Checking,
+            detail: None,
+            target_version: target_version.clone(),
+            started_at_ms: Some(crate::daemon::state::now_ms()),
+            finished_at_ms: None,
+        };
+    }
+    let task_state = state.clone();
+    let task_version = target_version.clone();
+    let handle = tokio::spawn(async move {
+        set_update_phase(
+            &task_state,
+            UpdatePhase::Downloading,
+            None,
+            task_version.clone(),
+        )
+        .await;
+        match refact_self_update::install_update_version(task_version.as_deref(), false).await {
+            Ok(outcome) => {
+                {
+                    let mut update_state = task_state.update_state.lock().await;
+                    update_state.phase = UpdatePhase::Restarting;
+                    update_state.detail = Some(format!("installed {}", outcome.installed_version));
+                    update_state.finished_at_ms = Some(crate::daemon::state::now_ms());
+                }
+                match spawn_daemon_relaunch() {
+                    Ok(()) => task_state.request_shutdown("self_update".to_string()),
+                    Err(error) => {
+                        let mut update_state = task_state.update_state.lock().await;
+                        update_state.phase = UpdatePhase::Failed;
+                        update_state.detail = Some(format!(
+                            "update installed, but daemon relaunch failed: {error}; restart the daemon manually"
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                let mut update_state = task_state.update_state.lock().await;
+                update_state.phase = UpdatePhase::Failed;
+                update_state.detail = Some(error);
+                update_state.finished_at_ms = Some(crate::daemon::state::now_ms());
+            }
+        }
+    });
+    {
+        let mut update_task = state.update_task.lock().await;
+        *update_task = Some(handle);
+    }
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"started": true, "target_version": target_version})),
+    )
+        .into_response()
+}
+
+async fn update_status(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+) -> Json<DaemonUpdateState> {
+    Json(state.update_state.lock().await.clone())
+}
+
+fn update_phase_active(phase: &UpdatePhase) -> bool {
+    matches!(
+        phase,
+        UpdatePhase::Checking | UpdatePhase::Downloading | UpdatePhase::Restarting
+    )
+}
+
+async fn set_update_phase(
+    state: &DaemonState,
+    phase: UpdatePhase,
+    detail: Option<String>,
+    target_version: Option<String>,
+) {
+    let mut update_state = state.update_state.lock().await;
+    update_state.phase = phase;
+    update_state.detail = detail;
+    if target_version.is_some() {
+        update_state.target_version = target_version;
+    }
 }
 
 async fn workers(
@@ -377,7 +544,16 @@ async fn update_settings(
         )
             .into_response();
     }
-    spawn_settings_relaunch();
+    if let Err(error) = spawn_daemon_relaunch() {
+        tracing::warn!("settings relaunch failed: {error}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": format!("settings saved, but daemon restart failed: {error}")
+            })),
+        )
+            .into_response();
+    }
     state.request_shutdown("settings_changed".to_string());
     Json(json!({"success": true, "restarting": true})).into_response()
 }
@@ -386,14 +562,15 @@ fn settings_error(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({"error": message}))).into_response()
 }
 
-fn spawn_settings_relaunch() {
-    let exe = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(error) => {
-            tracing::warn!("settings relaunch: cannot resolve current executable: {error}");
-            return;
-        }
-    };
+#[cfg(test)]
+fn spawn_daemon_relaunch() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn spawn_daemon_relaunch() -> Result<(), String> {
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("cannot resolve current executable: {error}"))?;
     let mut command = std::process::Command::new(exe);
     command
         .arg("daemon")
@@ -406,9 +583,10 @@ fn spawn_settings_relaunch() {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    if let Err(error) = command.spawn() {
-        tracing::warn!("settings relaunch spawn failed: {error}");
-    }
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("spawn failed: {error}"))
 }
 
 async fn logs_stream(
@@ -891,6 +1069,115 @@ mod tests {
         assert_eq!(json["enabled"], true);
         assert_eq!(json["jobs"], 2);
         assert_eq!(json["next_wake_ms"], 60_000);
+    }
+
+    #[tokio::test]
+    async fn daemon_router_restart_returns_success_and_requests_shutdown() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let mut shutdown_rx = state.shutdown_receiver();
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/daemon/v1/restart")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, json) = response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], true);
+        assert_eq!(json["restarting"], true);
+        assert_eq!(shutdown_rx.recv().await.unwrap(), "restart_requested");
+    }
+
+    #[tokio::test]
+    async fn daemon_router_update_status_is_idle_initially() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/daemon/v1/update/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, json) = response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["phase"], "idle");
+        assert_eq!(json["detail"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn daemon_router_update_check_serves_fresh_cache_without_network() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        {
+            let mut cache = state.update_check_cache.lock().await;
+            *cache = Some((
+                std::time::Instant::now(),
+                refact_self_update::UpdateCheckInfo {
+                    current_version: "1.2.3".to_string(),
+                    latest_version: Some("9.9.9".to_string()),
+                    update_available: true,
+                    releases: Vec::new(),
+                },
+            ));
+        }
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/daemon/v1/update/check")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, json) = response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["current_version"], "1.2.3");
+        assert_eq!(json["latest_version"], "9.9.9");
+        assert_eq!(json["update_available"], true);
+    }
+
+    #[tokio::test]
+    async fn daemon_router_update_install_conflicts_when_active() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        {
+            let mut update_state = state.update_state.lock().await;
+            update_state.phase = UpdatePhase::Downloading;
+        }
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/daemon/v1/update/install")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, json) = response_json(response).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(json["error"], "update already in progress");
     }
 
     #[tokio::test]
