@@ -10,7 +10,7 @@ import { ProjectDetailPage } from "./Projects/ProjectDetail/ProjectDetailPage";
 import { ProjectsPage } from "./Projects/ProjectsPage";
 import { SchedulerPlaceholderPage } from "./Scheduler/PlaceholderPage";
 import { SettingsPage } from "./Settings/SettingsPage";
-import { UsagePlaceholderPage } from "./Usage/PlaceholderPage";
+import { UsagePage } from "./Usage/UsagePage";
 import { selectDashboardNavigation } from "./dashboardSlice";
 import styles from "./DaemonDashboard.module.css";
 
@@ -40,7 +40,7 @@ function DashboardPageContent() {
     case "scheduler":
       return <SchedulerPlaceholderPage />;
     case "usage":
-      return <UsagePlaceholderPage />;
+      return <UsagePage />;
     case "doctor":
       return <DoctorPage />;
     case "settings":
