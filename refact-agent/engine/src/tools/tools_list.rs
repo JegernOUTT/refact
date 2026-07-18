@@ -1087,6 +1087,79 @@ mod tests {
     async fn task_agent_prompt_references_only_available_tools() {
         assert_task_mode_prompt_tool_contract("task_agent").await;
     }
+
+    /// `get_tools_for_mode` filters mode YAML `tools:` lists by exact match against
+    /// registered `ToolDesc.name` values and silently drops anything that does not
+    /// match. A YAML entry with a wrong name (e.g. a Claude-Code-facing alias such
+    /// as `regex_search` instead of the canonical `search_pattern`) therefore
+    /// removes the tool from the mode without any warning. This test covers every
+    /// default mode, not just the task modes.
+    #[tokio::test]
+    async fn all_default_mode_tools_reference_registered_tools() {
+        let modes_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates")
+            .join("refact-yaml-configs")
+            .join("src")
+            .join("defaults")
+            .join("modes");
+        let gcx = task_prompt_contract_gcx().await;
+        let registered = get_available_tools(gcx)
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect::<HashSet<_>>();
+
+        let mut failures = Vec::new();
+        let mut checked_modes = 0usize;
+        for entry in std::fs::read_dir(&modes_dir).expect("failed to read default modes dir") {
+            let path = entry.expect("failed to read modes dir entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("yaml") {
+                continue;
+            }
+            let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+            let value: serde_yaml::Value = serde_yaml::from_str(&raw)
+                .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
+            // Model-specific overlays patch a base mode and carry no standalone tools list.
+            if value
+                .get("specific")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                && value.get("tools").is_none()
+            {
+                continue;
+            }
+            let Some(tools) = value.get("tools").and_then(|v| v.as_sequence()) else {
+                continue;
+            };
+            checked_modes += 1;
+            for tool in tools {
+                let Some(name) = tool.as_str() else {
+                    failures.push(format!("{file_name}: non-string tools entry {tool:?}"));
+                    continue;
+                };
+                // Dynamically-registered tool families that depend on user config.
+                if name.starts_with("cmdline_")
+                    || name.starts_with("service_")
+                    || name.starts_with("mcp_")
+                {
+                    continue;
+                }
+                if !registered.contains(name) {
+                    failures.push(format!("{file_name}: {name}"));
+                }
+            }
+        }
+        assert!(
+            checked_modes > 10,
+            "expected to check most default modes, only found {checked_modes}"
+        );
+        assert!(
+            failures.is_empty(),
+            "mode YAML tools lists reference unregistered tool names (get_tools_for_mode silently drops them): {failures:?}"
+        );
+    }
 }
 
 pub async fn get_available_tool_groups(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {

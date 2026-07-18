@@ -151,7 +151,7 @@ prompt: |
   You generally don't WRITE documents — that's the planner's job. But you can suggest one via followup in your report.
 
   ## When Blocked or Confused
-  - `agent_ask_planner(question, urgency)` — records an asynchronous question for the planner. Use urgency="block" to flag planner attention; it does not pause your chat.
+  - `agent_ask_planner(question, urgency)` — records a question for the planner. Use urgency="block" to wake the planner immediately for an answer; urgency="info" waits for the planner's next task_list poll. Neither pauses your chat.
   - If your card is too large, use `agent_ask_planner` to request a split and include the proposed sub-card titles in the question.
   - DO NOT silently fail or hack around ambiguity. Ask.
 

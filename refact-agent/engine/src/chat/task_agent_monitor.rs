@@ -7,7 +7,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::sync::Mutex as AMutex;
 
 use chrono::Utc;
 use serde_json::json;
@@ -62,6 +65,138 @@ fn regenerate_request(client_request_prefix: &str) -> CommandRequest {
         priority: true,
         command: ChatCommand::Regenerate {},
     }
+}
+
+/// A legitimate planner session can come back without `task_meta` when its first
+/// trajectory write raced a restart/eviction, or when the stored `task_meta` JSON
+/// failed to deserialize after a schema change; both load the trajectory fine
+/// otherwise. Every caller here already knows the planner chat id and task id, so
+/// re-verify against durable task storage and self-heal the metadata instead of
+/// silently dropping the notification. When the chat id is not a known planner
+/// trajectory for the task, record a durable trace on the card (when known) so the
+/// failure is visible to the planner via task_list rather than only in logs.
+async fn ensure_planner_task_meta(
+    app: AppState,
+    planner_session: &Arc<AMutex<ChatSession>>,
+    task_id: &str,
+    planner_chat_id: &str,
+    card_id: Option<&str>,
+    notification_kind: &str,
+) -> Result<(), String> {
+    {
+        let session = planner_session.lock().await;
+        if session.thread.task_meta.is_some() {
+            return Ok(());
+        }
+    }
+    let known_planner = storage::list_task_trajectories(app.gcx.clone(), task_id, "planner", None)
+        .await
+        .map(|trajectories| {
+            trajectories
+                .iter()
+                .any(|trajectory| trajectory.id == planner_chat_id)
+        })
+        .unwrap_or(false);
+    if known_planner || planner_chat_id.starts_with(&format!("planner-{}-", task_id)) {
+        tracing::error!(
+            "Planner session {} for task {} lost its task_meta (missing trajectory or schema drift); self-healing planner metadata before '{}' notification",
+            planner_chat_id,
+            task_id,
+            notification_kind
+        );
+        let mut session = planner_session.lock().await;
+        session.thread.task_meta = Some(TaskMeta {
+            task_id: task_id.to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some(planner_chat_id.to_string()),
+        });
+        return Ok(());
+    }
+    let error = format!(
+        "Cannot notify task planner {} for task {}: chat is not a known planner trajectory; '{}' notification dropped",
+        planner_chat_id, task_id, notification_kind
+    );
+    tracing::error!("{}", error);
+    if let Some(card_id) = card_id {
+        let card_id = card_id.to_string();
+        let trace = format!(
+            "[NOTIFY-FAILED:{}] planner {} unreachable (no planner metadata); notification dropped",
+            notification_kind, planner_chat_id
+        );
+        let _ = storage::update_board_atomic(app.gcx.clone(), task_id, move |board| {
+            if let Some(card) = board.get_card_mut(&card_id) {
+                card.status_updates.push(StatusUpdate {
+                    timestamp: Utc::now().to_rfc3339(),
+                    message: trace,
+                });
+            }
+            Ok(())
+        })
+        .await;
+    }
+    Err(error)
+}
+
+/// Wake the planner for a blocking question raised via `agent_ask_planner`.
+/// The question itself is already durably recorded on the card as an `[ASK:...]`
+/// status update; this push makes `urgency=block` interrupt the planner's idle
+/// wait instead of relying on its next `task_list` poll.
+pub(crate) async fn notify_planner_blocking_question(
+    app: AppState,
+    task_id: &str,
+    card_id: &str,
+    planner_chat_id: &str,
+    question_id: &str,
+    question: &str,
+) -> Result<bool, String> {
+    let notice = task_agent_monitor_notice(
+        json!({
+            "kind": "blocking_question",
+            "task_id": task_id,
+            "card_id": card_id,
+            "question_id": question_id,
+        }),
+        format!(
+            "Task agent raised a BLOCKING question on card {} (question {}). Answer it with planner_reply(card_id=\"{}\", question_id=\"{}\", answer=\"...\").\n\nQuestion:\n{}",
+            card_id, question_id, card_id, question_id, question
+        ),
+    );
+
+    let sessions = app.chat.sessions.clone();
+    let planner_session =
+        get_or_create_session_with_trajectory(app.clone(), &sessions, planner_chat_id).await;
+
+    ensure_planner_task_meta(
+        app.clone(),
+        &planner_session,
+        task_id,
+        planner_chat_id,
+        Some(card_id),
+        "blocking_question",
+    )
+    .await?;
+
+    let processor_flag = {
+        let mut session = planner_session.lock().await;
+        let request = regenerate_request("task-agent-blocking-question");
+        if session.enqueue_priority_command(request) != EnqueueCommandOutcome::Accepted {
+            return Ok(false);
+        }
+        session.add_message(notice);
+        session.queue_processor_running.clone()
+    };
+
+    if !processor_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        tokio::spawn(process_command_queue(
+            app.clone(),
+            planner_session.clone(),
+            processor_flag,
+        ));
+    }
+
+    Ok(true)
 }
 
 fn make_runtime_event(
@@ -253,15 +388,18 @@ async fn notify_planner_about_reasoning_token_limit(
     let planner_session =
         get_or_create_session_with_trajectory(app.clone(), &sessions, planner_chat_id).await;
 
+    if ensure_planner_task_meta(
+        app.clone(),
+        &planner_session,
+        task_id,
+        planner_chat_id,
+        Some(card_id),
+        "reasoning_token_limit",
+    )
+    .await
+    .is_err()
     {
-        let session = planner_session.lock().await;
-        if session.thread.task_meta.is_none() {
-            tracing::warn!(
-                "Cannot notify task planner {}: trajectory is missing or deleted",
-                planner_chat_id
-            );
-            return Ok(false);
-        }
+        return Ok(false);
     }
 
     if !record_stall_planner_notification(
@@ -531,15 +669,18 @@ async fn notify_planner_about_stalled_agent(
     let planner_session =
         get_or_create_session_with_trajectory(app.clone(), &sessions, planner_chat_id).await;
 
+    if ensure_planner_task_meta(
+        app.clone(),
+        &planner_session,
+        task_id,
+        planner_chat_id,
+        Some(card_id),
+        "stalled_agent",
+    )
+    .await
+    .is_err()
     {
-        let session = planner_session.lock().await;
-        if session.thread.task_meta.is_none() {
-            tracing::warn!(
-                "Cannot notify task planner {}: trajectory is missing or deleted",
-                planner_chat_id
-            );
-            return Ok(false);
-        }
+        return Ok(false);
     }
 
     if !record_stall_planner_notification(
@@ -1093,16 +1234,15 @@ pub(crate) async fn notify_planner_agents_finished(
     };
     let planner_session =
         get_or_create_session_with_trajectory(app.clone(), &sessions, &planner_chat_id).await;
-    {
-        let session = planner_session.lock().await;
-        if session.thread.task_meta.is_none() {
-            tracing::warn!(
-                "Cannot notify task planner {}: trajectory is missing or deleted",
-                planner_chat_id
-            );
-            return Ok(());
-        }
-    }
+    ensure_planner_task_meta(
+        app.clone(),
+        &planner_session,
+        task_id,
+        &planner_chat_id,
+        None,
+        "agents_finished",
+    )
+    .await?;
 
     let processor_flag = {
         let mut session = planner_session.lock().await;

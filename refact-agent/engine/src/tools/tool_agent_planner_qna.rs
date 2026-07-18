@@ -133,7 +133,7 @@ fn required_question_id(args: &HashMap<String, Value>) -> Result<String, String>
 
 async fn agent_scope(
     ccx: &Arc<AMutex<AtCommandsContext>>,
-) -> Result<(Arc<GlobalContext>, String, String), String> {
+) -> Result<(Arc<GlobalContext>, String, String, Option<String>), String> {
     let ccx_lock = ccx.lock().await;
     let meta = ccx_lock
         .task_meta
@@ -146,7 +146,12 @@ async fn agent_scope(
         .card_id
         .clone()
         .ok_or_else(|| "agent_ask_planner requires a bound card_id.".to_string())?;
-    Ok((ccx_lock.app.gcx.clone(), meta.task_id.clone(), card_id))
+    Ok((
+        ccx_lock.app.gcx.clone(),
+        meta.task_id.clone(),
+        card_id,
+        meta.planner_chat_id.clone(),
+    ))
 }
 
 async fn require_planner_role(
@@ -308,7 +313,7 @@ impl Tool for ToolAgentAskPlanner {
             source: make_source(),
             experimental: false,
             allow_parallel: false,
-            description: "Task-agent-only tool for recording an asynchronous question for the task planner on the current card.".to_string(),
+            description: "Task-agent-only tool for recording a question for the task planner on the current card. urgency=block additionally wakes the planner immediately; urgency=info waits for the planner's next task_list poll.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -319,7 +324,7 @@ impl Tool for ToolAgentAskPlanner {
                     "urgency": {
                         "type": "string",
                         "enum": ["info", "block"],
-                        "description": "Question urgency. block only flags planner attention; it does not pause the agent. Default: info"
+                        "description": "Question urgency. block wakes the planner immediately to answer; info waits for the planner's next task_list poll. Neither pauses the agent. Default: info"
                     }
                 },
                 "required": ["question", "urgency"]
@@ -335,7 +340,7 @@ impl Tool for ToolAgentAskPlanner {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, task_id, card_id) = agent_scope(&ccx).await?;
+        let (gcx, task_id, card_id, planner_chat_id) = agent_scope(&ccx).await?;
         let question = truncate_chars(&required_string(args, "question")?, QUESTION_LIMIT);
         let urgency = QuestionUrgency::parse(args.get("urgency"))?;
         let question_id = make_question_id();
@@ -355,7 +360,7 @@ impl Tool for ToolAgentAskPlanner {
         };
         let card_id_for_update = card_id.clone();
         let timestamp = Utc::now().to_rfc3339();
-        storage::update_board_atomic(gcx, &task_id, move |board| {
+        storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
             let card = board
                 .get_card_mut(&card_id_for_update)
                 .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
@@ -373,13 +378,51 @@ impl Tool for ToolAgentAskPlanner {
         })
         .await?;
 
+        let wake_note = if urgency == QuestionUrgency::Block {
+            match planner_chat_id {
+                Some(planner_chat_id) => {
+                    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+                    match crate::chat::task_agent_monitor::notify_planner_blocking_question(
+                        app,
+                        &task_id,
+                        &card_id,
+                        &planner_chat_id,
+                        &question_id,
+                        &question,
+                    )
+                    .await
+                    {
+                        Ok(true) => "\n\nPlanner has been woken up for this blocking question.",
+                        Ok(false) => {
+                            "\n\nPlanner wake-up was skipped (planner busy); it will see the question on its next task_list call."
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "agent_ask_planner: failed to wake planner for blocking question {} on card {}: {}",
+                                question_id,
+                                card_id,
+                                error
+                            );
+                            "\n\nPlanner wake-up failed; the question is durably recorded and will surface on the planner's next task_list call."
+                        }
+                    }
+                }
+                None => {
+                    "\n\nNo planner_chat_id bound to this agent; the question will surface on the planner's next task_list call."
+                }
+            }
+        } else {
+            ""
+        };
+
         let output = format!(
-            "Question recorded for planner.\n\n- card_id: `{}`\n- question_id: `{}`\n- urgency: `{}`\n\nPlanner reply instruction: call `planner_reply(card_id=\"{}\", question_id=\"{}\", answer=\"...\")`.",
+            "Question recorded for planner.\n\n- card_id: `{}`\n- question_id: `{}`\n- urgency: `{}`\n\nPlanner reply instruction: call `planner_reply(card_id=\"{}\", question_id=\"{}\", answer=\"...\")`.{}",
             card_id,
             question_id,
             urgency.as_str(),
             card_id,
-            question_id
+            question_id,
+            wake_note
         );
         Ok((false, vec![tool_message(tool_call_id, output)]))
     }
@@ -803,7 +846,10 @@ mod tests {
 
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-40").unwrap();
-        assert_eq!(card.status_updates.len(), 2);
+        // Two [ASK:...] updates plus a [NOTIFY-FAILED:...] trace: the fixture's
+        // planner_chat_id ("planner-chat") is not a known planner trajectory, so
+        // the blocking wake-up records its failure durably on the card.
+        assert_eq!(card.status_updates.len(), 3);
         assert!(card.status_updates[0].message.starts_with("[ASK:"));
         assert!(card.status_updates[0]
             .message
@@ -811,6 +857,10 @@ mod tests {
         assert!(card.status_updates[1]
             .message
             .ends_with(":block] agent flagged for planner attention"));
+        assert!(card.status_updates[2]
+            .message
+            .starts_with("[NOTIFY-FAILED:blocking_question]"));
         assert!(output.contains("question_id"));
+        assert!(output.contains("Planner wake-up failed"));
     }
 }
