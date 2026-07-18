@@ -22,6 +22,7 @@ use crate::http::{gui_public_origin_candidates, GuiPublicOriginCandidates};
 
 const PICKER_TEMPLATE: &str = include_str!("web_picker.html");
 const DAEMON_GUI_BOOTSTRAP_SENTINEL: &str = "__REFACT_DAEMON_PROJECT_API_PREFIX__";
+const GUI_BOOTSTRAP_CONFIG_ASSIGNMENT: &str = "window.__REFACT_BOOTSTRAP_CONFIG__ = ";
 
 #[derive(Debug, Serialize)]
 struct PickerData {
@@ -63,6 +64,27 @@ pub(crate) async fn handle_project_picker(
     }
     let data = picker_data(state, port).await;
     html_response(StatusCode::OK, render_picker_html(&data))
+}
+
+pub(crate) async fn handle_dashboard_index(
+    OriginalUri(uri): OriginalUri,
+    State((state, port)): State<(Arc<DaemonState>, u16)>,
+) -> Response {
+    if let Some(response) = daemon_auth_redirect(&state, &uri) {
+        return response;
+    }
+    let data = picker_data(state, port).await;
+    match ChatGuiAsset::get(INDEX_PATH) {
+        Some(asset) => asset_response(
+            INDEX_PATH,
+            dashboard_gui_index_body(asset.data, &data, port),
+            StatusCode::OK,
+        ),
+        None => html_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            missing_gui_index_html().as_bytes().to_vec().into(),
+        ),
+    }
 }
 
 pub(crate) async fn handle_project_gui_redirect(OriginalUri(uri): OriginalUri) -> Response {
@@ -354,7 +376,57 @@ fn project_gui_index_body(
     let Ok(html) = std::str::from_utf8(body.as_ref()) else {
         return body;
     };
-    Cow::Owned(inject_daemon_gui_bootstrap(html, project_id, &candidates).into_bytes())
+    let html = inject_daemon_gui_bootstrap(html, project_id, &candidates);
+    Cow::Owned(inject_gui_bootstrap_config(&html, "workspace").into_bytes())
+}
+
+fn dashboard_gui_index_body(
+    body: Cow<'static, [u8]>,
+    data: &PickerData,
+    port: u16,
+) -> Cow<'static, [u8]> {
+    let candidates = daemon_root_origin_candidates(port);
+    let body = crate::http::routers::gui::inject_gui_origin_candidates(body, &candidates);
+    let Ok(html) = std::str::from_utf8(body.as_ref()) else {
+        return body;
+    };
+    let html = inject_gui_bootstrap_config(html, "dashboard");
+    Cow::Owned(inject_dashboard_noscript(&html, &data.projects).into_bytes())
+}
+
+fn inject_gui_bootstrap_config(html: &str, surface: &str) -> String {
+    if html.contains(GUI_BOOTSTRAP_CONFIG_ASSIGNMENT) {
+        return html.to_string();
+    }
+    let config = serde_json::json!({"surface": surface});
+    let script = format!(
+        "    <script>{GUI_BOOTSTRAP_CONFIG_ASSIGNMENT}{};</script>",
+        json_for_script(&config)
+    );
+    insert_head_script(html, &script)
+}
+
+fn inject_dashboard_noscript(html: &str, projects: &[PickerProject]) -> String {
+    let project_list = if projects.is_empty() {
+        "<p>No projects registered.</p>".to_string()
+    } else {
+        let links = projects
+            .iter()
+            .map(|project| {
+                format!(
+                    "<li><a href=\"{}\">{}</a></li>",
+                    project_gui_path(&project.id),
+                    html_escape(&project.slug)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!("<ul>{links}</ul>")
+    };
+    let noscript = format!(
+        "    <noscript><h1>Refact projects</h1>{project_list}<p><a href=\"/picker\">Open the legacy project picker</a></p></noscript>"
+    );
+    insert_body_html(html, &noscript)
 }
 
 fn inject_daemon_gui_bootstrap(
@@ -453,6 +525,43 @@ fn insert_head_script(html: &str, script: &str) -> String {
         return format!("{}{}\n{}", &html[..index], script, &html[index..]);
     }
     format!("{}\n{}", script, html)
+}
+
+fn insert_body_html(html: &str, body_html: &str) -> String {
+    if let Some(index) = html.find("<body>") {
+        let insert_at = index + "<body>".len();
+        return format!(
+            "{}\n{}{}",
+            &html[..insert_at],
+            body_html,
+            &html[insert_at..]
+        );
+    }
+    if let Some(index) = html.find("<body ") {
+        if let Some(offset) = html[index..].find('>') {
+            let insert_at = index + offset + 1;
+            return format!(
+                "{}\n{}{}",
+                &html[..insert_at],
+                body_html,
+                &html[insert_at..]
+            );
+        }
+    }
+    if let Some(index) = html.find("</body>") {
+        return format!("{}{}\n{}", &html[..index], body_html, &html[index..]);
+    }
+    format!("{}\n{}", html, body_html)
+}
+
+fn daemon_root_origin_candidates(port: u16) -> GuiPublicOriginCandidates {
+    let mut origins = vec![format!("http://127.0.0.1:{port}")];
+    for origin in gui_public_origin_candidates(port).origins {
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    GuiPublicOriginCandidates { origins }
 }
 
 fn daemon_origin_candidates(port: u16, project_id: &str) -> GuiPublicOriginCandidates {
@@ -692,6 +801,68 @@ mod tests {
         assert_eq!(data.projects[0].busy_chats, 2);
         assert_eq!(data.projects[0].exec_running, 1);
         assert_eq!(data.projects[0].cron_next_fire_ms, Some(12345));
+    }
+
+    #[tokio::test]
+    async fn dashboard_index_serves_spa_bootstrap_and_noscript_projects() {
+        let test = test_state().await;
+        let state = test.state;
+        let root = tempfile::Builder::new()
+            .prefix("dashboard-project")
+            .tempdir()
+            .unwrap();
+        let entry = {
+            let mut registry = state.projects.write().await;
+            registry.open(root.path().to_path_buf()).await.unwrap()
+        };
+
+        let response = crate::daemon::server::make_router(state, 8488)
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("window.__REFACT_BOOTSTRAP_CONFIG__ = {\"surface\":\"dashboard\"};"));
+        assert!(body.contains("<noscript>"));
+        assert!(body.contains(&html_escape(&entry.slug)));
+        assert!(body.contains(&format!("href=\"/p/{}/\"", entry.id)));
+        assert!(body.contains("href=\"/picker\""));
+        assert!(body.contains("http://127.0.0.1:8488"));
+        assert!(!body.contains(DAEMON_GUI_BOOTSTRAP_SENTINEL));
+    }
+
+    #[tokio::test]
+    async fn picker_route_serves_legacy_picker() {
+        let test = test_state().await;
+        let state = test.state;
+        let root = tempfile::Builder::new()
+            .prefix("picker-project")
+            .tempdir()
+            .unwrap();
+        let entry = {
+            let mut registry = state.projects.write().await;
+            registry.open(root.path().to_path_buf()).await.unwrap()
+        };
+
+        let response = crate::daemon::server::make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/picker")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("<title>Refact daemon projects</title>"));
+        assert!(body.contains(&html_escape(&entry.slug)));
+        assert!(body.contains(&format!("href=\"/p/{}/\"", entry.id)));
+        assert!(!body.contains("__REFACT_BOOTSTRAP_CONFIG__"));
     }
 
     #[tokio::test]
@@ -996,6 +1167,7 @@ mod tests {
         assert!(body.contains("window.__REFACT_DAEMON_PROJECT_API_PREFIX__"));
         assert!(body.contains("window.fetch = function"));
         assert!(body.contains("window.EventSource = function"));
+        assert!(body.contains("window.__REFACT_BOOTSTRAP_CONFIG__ = {\"surface\":\"workspace\"};"));
         assert!(body.contains(&format!("/p/{}", entry.id)));
         assert!(body.contains(&format!("http://127.0.0.1:8488/p/{}", entry.id)));
     }

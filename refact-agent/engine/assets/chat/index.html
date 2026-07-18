@@ -48,6 +48,7 @@
         };
 
         window.__INITIAL_STATE__ = initialState;
+        const bootstrapConfig = window.__REFACT_BOOTSTRAP_CONFIG__ || {};
 
         window.addEventListener("load", function () {
           const root = document.getElementById("refact-chat");
@@ -58,7 +59,10 @@
             return;
           }
 
-          window.RefactChat.render(root, initialState.config);
+          window.RefactChat.render(root, {
+            ...initialState.config,
+            ...bootstrapConfig,
+          });
         });
       })();
     </script>
