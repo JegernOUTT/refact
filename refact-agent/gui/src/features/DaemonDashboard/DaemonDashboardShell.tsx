@@ -6,11 +6,12 @@ import { ActivityPage } from "./Activity/ActivityPage";
 import { DashboardNav } from "./DashboardNav";
 import { DoctorPlaceholderPage } from "./Doctor/PlaceholderPage";
 import { HomePage } from "./Home/HomePage";
+import { ProjectDetailPage } from "./Projects/ProjectDetail/ProjectDetailPage";
 import { ProjectsPage } from "./Projects/ProjectsPage";
 import { SchedulerPlaceholderPage } from "./Scheduler/PlaceholderPage";
 import { SettingsPage } from "./Settings/SettingsPage";
 import { UsagePlaceholderPage } from "./Usage/PlaceholderPage";
-import { selectDashboardPage } from "./dashboardSlice";
+import { selectDashboardNavigation } from "./dashboardSlice";
 import styles from "./DaemonDashboard.module.css";
 
 const DAEMON_POLLING_INTERVAL_MS = 5_000;
@@ -25,10 +26,15 @@ function formatUptime(totalSeconds: number): string {
 }
 
 function DashboardPageContent() {
-  const page = useAppSelector(selectDashboardPage);
+  const navigation = useAppSelector(selectDashboardNavigation);
+  const page = navigation.page;
   switch (page) {
     case "projects":
-      return <ProjectsPage />;
+      return navigation.params.projectId ? (
+        <ProjectDetailPage projectId={navigation.params.projectId} />
+      ) : (
+        <ProjectsPage />
+      );
     case "activity":
       return <ActivityPage />;
     case "scheduler":

@@ -22,8 +22,10 @@ import {
   useStopProjectMutation,
   type DaemonWorker,
 } from "../../../services/refact/daemon";
+import { useAppDispatch } from "../../../hooks";
+import { navigateDashboard } from "../dashboardSlice";
 import type { ProjectRagStatus } from "./projectRagStatus";
-import { workerStateName } from "./projectRagStatus";
+import { workerPresentation, workerStateName } from "./projectRagStatus";
 import styles from "./Projects.module.css";
 
 type ProjectCardProps = {
@@ -32,27 +34,6 @@ type ProjectCardProps = {
   ragStatus?: ProjectRagStatus;
   onMutated: () => void;
 };
-
-type WorkerPresentation = {
-  label: string;
-  tone: "success" | "warning" | "danger" | "muted";
-};
-
-function workerPresentation(worker: DaemonWorker): WorkerPresentation {
-  switch (workerStateName(worker)) {
-    case "ready":
-      return { label: "Ready", tone: "success" };
-    case "starting":
-      return { label: "Starting", tone: "warning" };
-    case "stopping":
-      return { label: "Stopping", tone: "warning" };
-    case "crashed":
-    case "failed":
-      return { label: "Crashed", tone: "danger" };
-    default:
-      return { label: "Stopped", tone: "muted" };
-  }
-}
 
 function mutationError(error: unknown): string | null {
   if (!error || typeof error !== "object") return null;
@@ -113,6 +94,7 @@ export function ProjectCard({
   ragStatus,
   onMutated,
 }: ProjectCardProps) {
+  const dispatch = useAppDispatch();
   const [forgetOpen, setForgetOpen] = useState(false);
   const [restart, restartState] = useRestartProjectMutation();
   const [stop, stopState] = useStopProjectMutation();
@@ -154,7 +136,24 @@ export function ProjectCard({
     >
       <div className={styles.cardHeader}>
         <div className={styles.cardIdentity}>
-          <h3 className={styles.cardTitle}>{worker.slug}</h3>
+          <h3 className={styles.cardTitle}>
+            <button
+              aria-label={`Open ${worker.slug} details`}
+              className={styles.cardTitleButton}
+              disabled={optimistic}
+              onClick={() =>
+                dispatch(
+                  navigateDashboard({
+                    page: "projects",
+                    params: { projectId: worker.project_id },
+                  }),
+                )
+              }
+              type="button"
+            >
+              {worker.slug}
+            </button>
+          </h3>
           <span className={styles.path} title={worker.root}>
             {worker.root}
           </span>

@@ -24,6 +24,9 @@ export type DaemonWorker = {
   last_active_ms: number | null;
   state: string;
   pid: number | null;
+  rss_bytes?: number | null;
+  cpu_percent?: number | null;
+  uptime_secs?: number | null;
   http_port: number | null;
   lsp_port: number | null;
   lsp_clients: number;

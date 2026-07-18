@@ -82,6 +82,29 @@
   white-space: nowrap;
 }
 
+.cardTitleButton {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cardTitleButton:hover:not(:disabled) {
+  color: var(--rf-color-accent);
+}
+
+.cardTitleButton:disabled {
+  cursor: default;
+}
+
 .path {
   display: block;
   min-width: 0;

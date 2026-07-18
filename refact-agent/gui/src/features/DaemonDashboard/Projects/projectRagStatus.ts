@@ -21,6 +21,27 @@ export function isReadyWorker(worker: DaemonWorker): boolean {
   return workerStateName(worker) === "ready";
 }
 
+export type WorkerPresentation = {
+  label: string;
+  tone: "success" | "warning" | "danger" | "muted";
+};
+
+export function workerPresentation(worker: DaemonWorker): WorkerPresentation {
+  switch (workerStateName(worker)) {
+    case "ready":
+      return { label: "Ready", tone: "success" };
+    case "starting":
+      return { label: "Starting", tone: "warning" };
+    case "stopping":
+      return { label: "Stopping", tone: "warning" };
+    case "crashed":
+    case "failed":
+      return { label: "Crashed", tone: "danger" };
+    default:
+      return { label: "Stopped", tone: "muted" };
+  }
+}
+
 async function fetchProjectStatus(
   daemonBase: string,
   worker: DaemonWorker,
