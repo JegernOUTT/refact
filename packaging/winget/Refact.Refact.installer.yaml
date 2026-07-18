@@ -1,0 +1,19 @@
+PackageIdentifier: Refact.Refact
+PackageVersion: __REFACT_VERSION__
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: refact.exe
+    PortableCommandAlias: refact
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/JegernOUTT/refact/releases/download/engine/v__REFACT_VERSION__/refact-__REFACT_VERSION__-x86_64-pc-windows-msvc.zip
+    InstallerSha256: __REFACT_SHA256_X86_64_PC_WINDOWS_MSVC__
+  - Architecture: x86
+    InstallerUrl: https://github.com/JegernOUTT/refact/releases/download/engine/v__REFACT_VERSION__/refact-__REFACT_VERSION__-i686-pc-windows-msvc.zip
+    InstallerSha256: __REFACT_SHA256_I686_PC_WINDOWS_MSVC__
+  - Architecture: arm64
+    InstallerUrl: https://github.com/JegernOUTT/refact/releases/download/engine/v__REFACT_VERSION__/refact-__REFACT_VERSION__-aarch64-pc-windows-msvc.zip
+    InstallerSha256: __REFACT_SHA256_AARCH64_PC_WINDOWS_MSVC__
+ManifestType: installer
+ManifestVersion: 1.9.0

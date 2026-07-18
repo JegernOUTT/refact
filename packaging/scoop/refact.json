@@ -1,0 +1,48 @@
+{
+  "version": "__REFACT_VERSION__",
+  "description": "Open-source, local-first agentic coding engine",
+  "homepage": "https://github.com/JegernOUTT/refact",
+  "license": "BSD-3-Clause",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/JegernOUTT/refact/releases/download/engine/v__REFACT_VERSION__/refact-__REFACT_VERSION__-x86_64-pc-windows-msvc.zip",
+      "hash": "__REFACT_SHA256_X86_64_PC_WINDOWS_MSVC__"
+    },
+    "32bit": {
+      "url": "https://github.com/JegernOUTT/refact/releases/download/engine/v__REFACT_VERSION__/refact-__REFACT_VERSION__-i686-pc-windows-msvc.zip",
+      "hash": "__REFACT_SHA256_I686_PC_WINDOWS_MSVC__"
+    },
+    "arm64": {
+      "url": "https://github.com/JegernOUTT/refact/releases/download/engine/v__REFACT_VERSION__/refact-__REFACT_VERSION__-aarch64-pc-windows-msvc.zip",
+      "hash": "__REFACT_SHA256_AARCH64_PC_WINDOWS_MSVC__"
+    }
+  },
+  "bin": "refact.exe",
+  "checkver": {
+    "url": "https://api.github.com/repos/JegernOUTT/refact/releases/latest",
+    "jsonpath": "$.tag_name",
+    "regex": "^engine/v([0-9A-Za-z.+-]+)$"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/JegernOUTT/refact/releases/download/engine/v$version/refact-$version-x86_64-pc-windows-msvc.zip",
+        "hash": {
+          "url": "$url.sha256"
+        }
+      },
+      "32bit": {
+        "url": "https://github.com/JegernOUTT/refact/releases/download/engine/v$version/refact-$version-i686-pc-windows-msvc.zip",
+        "hash": {
+          "url": "$url.sha256"
+        }
+      },
+      "arm64": {
+        "url": "https://github.com/JegernOUTT/refact/releases/download/engine/v$version/refact-$version-aarch64-pc-windows-msvc.zip",
+        "hash": {
+          "url": "$url.sha256"
+        }
+      }
+    }
+  }
+}

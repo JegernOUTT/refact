@@ -1,0 +1,17 @@
+PackageIdentifier: Refact.Refact
+PackageVersion: __REFACT_VERSION__
+PackageLocale: en-US
+Publisher: Small Magellanic Cloud AI Ltd.
+PublisherUrl: https://github.com/JegernOUTT
+PackageName: Refact
+PackageUrl: https://github.com/JegernOUTT/refact
+License: BSD-3-Clause
+LicenseUrl: https://github.com/JegernOUTT/refact/blob/main/LICENSE
+ShortDescription: Open-source, local-first agentic coding engine
+Tags:
+  - ai
+  - cli
+  - coding
+  - developer-tools
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

@@ -1,0 +1,31 @@
+{
+  "name": "refact-ai",
+  "version": "__REFACT_VERSION__",
+  "description": "Open-source, local-first agentic coding engine",
+  "license": "BSD-3-Clause",
+  "homepage": "https://github.com/JegernOUTT/refact",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JegernOUTT/refact.git",
+    "directory": "packaging/npm"
+  },
+  "bugs": {
+    "url": "https://github.com/JegernOUTT/refact/issues"
+  },
+  "bin": {
+    "refact": "bin/refact.js"
+  },
+  "files": [
+    "bin/refact.js",
+    "postinstall.js",
+    "README.md",
+    "vendor"
+  ],
+  "scripts": {
+    "postinstall": "node postinstall.js",
+    "test": "node --test test/postinstall.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
