@@ -139,6 +139,10 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         .route("/daemon/v1/workers", get(workers))
         .route("/daemon/v1/logs", get(logs))
         .route("/daemon/v1/logs/stream", get(logs_stream))
+        .route(
+            "/daemon/v1/fs/browse",
+            post(crate::daemon::fs_browse::browse),
+        )
         .route("/daemon/v1/worker-status", post(worker_status))
         .route(
             "/daemon/v1/projects/open",
