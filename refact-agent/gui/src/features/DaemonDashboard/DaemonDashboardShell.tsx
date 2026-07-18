@@ -4,7 +4,7 @@ import { useDaemonEventsStream } from "../../hooks/useDaemonEventsStream";
 import { useGetDaemonInfoQuery } from "../../services/refact/daemon";
 import { ActivityPage } from "./Activity/ActivityPage";
 import { DashboardNav } from "./DashboardNav";
-import { DoctorPlaceholderPage } from "./Doctor/PlaceholderPage";
+import { DoctorPage } from "./Doctor/DoctorPage";
 import { HomePage } from "./Home/HomePage";
 import { ProjectDetailPage } from "./Projects/ProjectDetail/ProjectDetailPage";
 import { ProjectsPage } from "./Projects/ProjectsPage";
@@ -42,7 +42,7 @@ function DashboardPageContent() {
     case "usage":
       return <UsagePlaceholderPage />;
     case "doctor":
-      return <DoctorPlaceholderPage />;
+      return <DoctorPage />;
     case "settings":
       return <SettingsPage />;
     case "home":

@@ -1,0 +1,140 @@
+.page {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  flex-direction: column;
+  gap: var(--rf-space-5);
+}
+
+.pageHeader {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+}
+
+.pageHeader h2,
+.pageHeader p,
+.group h3,
+.findingCopy p,
+.muted {
+  margin: 0;
+}
+
+.pageHeader h2 {
+  font-size: var(--rf-text-5);
+  font-weight: 600;
+}
+
+.pageHeader p,
+.findingCopy p,
+.muted {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+}
+
+.pageHeader p {
+  margin-top: var(--rf-space-1);
+}
+
+.group {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-4);
+}
+
+.group h3 {
+  font-size: var(--rf-text-4);
+  font-weight: 600;
+}
+
+.findingList {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  flex-direction: column;
+  list-style: none;
+}
+
+.findingList li + li {
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+
+.finding {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-3) var(--rf-space-2);
+}
+
+.findingCopy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.findingHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.findingHeader strong {
+  font-size: var(--rf-text-3);
+  font-weight: 500;
+}
+
+.findingAction {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.fixRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.fixSuccess {
+  color: var(--rf-color-success);
+  font-size: var(--rf-text-1);
+}
+
+.fixError {
+  color: var(--rf-color-danger);
+  font-size: var(--rf-text-1);
+}
+
+.command {
+  overflow: hidden;
+  max-width: calc(var(--rf-space-6) * 8);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.providerLink {
+  color: var(--rf-color-accent);
+  font-size: var(--rf-text-2);
+  text-decoration: underline;
+}
+
+@media (max-width: 560px) {
+  .pageHeader,
+  .finding {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
