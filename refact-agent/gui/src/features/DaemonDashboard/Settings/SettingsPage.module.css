@@ -1,0 +1,123 @@
+.page {
+  align-self: start;
+  justify-self: stretch;
+}
+
+.sectionSurface,
+.dangerSurface {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-row-gap);
+  padding: var(--rf-panel-pad);
+}
+
+.dangerSurface {
+  border-color: var(--rf-color-danger);
+}
+
+.value {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--rf-color-fg);
+  font: 550 var(--rf-text-2) / var(--rf-line) var(--rf-font-mono);
+}
+
+.sectionCopy,
+.muted,
+.notice,
+.successNotice {
+  margin: 0;
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.sectionCopy {
+  color: var(--rf-color-fg);
+}
+
+.muted {
+  color: var(--rf-color-muted);
+}
+
+.notice {
+  color: var(--rf-color-warning);
+}
+
+.successNotice {
+  color: var(--rf-color-success);
+}
+
+.reachable {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-4);
+  padding-top: var(--rf-space-3);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+
+.urlList {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
+.urlList a {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--rf-color-accent);
+}
+
+.qrCode {
+  width: calc(var(--rf-control-h-lg) * 3);
+  max-width: 100%;
+  overflow: hidden;
+  border: var(--rf-space-1) solid var(--rf-color-fg);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-color-fg);
+}
+
+.qrCode svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.projectControl,
+.shutdownControl {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.projectControl {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.shutdownControl {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.updateProgress {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) 0;
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+@media (width <= 640px) {
+  .projectControl,
+  .shutdownControl {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+}

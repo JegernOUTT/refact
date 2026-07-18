@@ -8,7 +8,7 @@ import { DoctorPlaceholderPage } from "./Doctor/PlaceholderPage";
 import { HomePlaceholderPage } from "./Home/PlaceholderPage";
 import { ProjectsPlaceholderPage } from "./Projects/PlaceholderPage";
 import { SchedulerPlaceholderPage } from "./Scheduler/PlaceholderPage";
-import { SettingsPlaceholderPage } from "./Settings/PlaceholderPage";
+import { SettingsPage } from "./Settings/SettingsPage";
 import { UsagePlaceholderPage } from "./Usage/PlaceholderPage";
 import { selectDashboardPage } from "./dashboardSlice";
 import styles from "./DaemonDashboard.module.css";
@@ -38,7 +38,7 @@ function DashboardPageContent() {
     case "doctor":
       return <DoctorPlaceholderPage />;
     case "settings":
-      return <SettingsPlaceholderPage />;
+      return <SettingsPage />;
     case "home":
       return <HomePlaceholderPage />;
   }
