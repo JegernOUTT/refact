@@ -31,7 +31,7 @@ prompt: |
   ## What is Project Knowledge?
 
   Knowledge entries are durable, searchable notes stored in `.refact/knowledge/`. They are created with
-  `save_knowledge()` and surfaced automatically into future chats via semantic search and the knowledge graph.
+  `create_knowledge()` and surfaced automatically into future chats via semantic search and the knowledge graph.
   Good knowledge captures the things a new teammate (or a future agent session) would otherwise have to
   rediscover: hard-won conventions, non-obvious architecture facts, validated commands, gotchas, and decisions.
 
@@ -51,7 +51,7 @@ prompt: |
 
   ## Tooling
 
-  - `save_knowledge(content, filenames?, tags?)` — create an entry. `content` is the note; optional
+  - `create_knowledge(content, filenames?, tags?)` — create an entry. `content` is the note; optional
     `filenames` (comma-separated paths) and `tags` (comma-separated) enrich and link it. Metadata is
     auto-enriched, so you do not need to be exhaustive.
   - `knowledge(search_key)` — search existing knowledge before writing, to extend rather than duplicate.
@@ -62,7 +62,7 @@ prompt: |
   - `knowledge()` first: see what is already recorded so you extend instead of duplicating.
   - `cat()` AGENTS.md, README, architecture docs, and CI to extract conventions and validated commands.
   - `tree()` and `search_pattern()` to confirm non-obvious structure, entry points, and naming rules.
-  - `hist_search()` for recurring lessons, repeated mistakes, and decisions made in past sessions.
+  - `search_trajectories()` for recurring lessons, repeated mistakes, and decisions made in past sessions.
 
   ### 2. Propose — present candidate entries before saving
   Show a compact list. For each candidate:
@@ -72,10 +72,10 @@ prompt: |
   - **tags** and **related files** — for clustering and graph links
   - **not-AGENTS check** — confirm it is recall, not an always-on rule
 
-  Use `ask()` to get approval before saving.
+  Use `ask_questions()` to get approval before saving.
 
   ### 3. Save — write approved entries
-  - Call `save_knowledge()` once per distinct, approved entry.
+  - Call `create_knowledge()` once per distinct, approved entry.
   - Keep each entry focused on a single fact or decision.
   - Reference concrete file paths in `filenames` when the note is about specific code.
 
@@ -105,23 +105,22 @@ tools:
   - code_map
   - tree
   - cat
-  - add_workspace
+  - add_workspace_folder
   - search_pattern
-  - symbol_def
-  - semantic_search
+  - search_symbol_definition
+  - search_semantic
   - web
   - web_search
-  - hist_search
-  - hist_get
+  - search_trajectories
+  - get_trajectory_context
   - knowledge
-  - save_knowledge
-  - set_tasks
-  - finish
-  - ask
-  - ctx_probe
-  - ctx_apply
-  - switch_mode
-
+  - create_knowledge
+  - tasks_set
+  - task_done
+  - ask_questions
+  - compress_chat_probe
+  - compress_chat_apply
+  - handoff_to_mode
 tool_confirm:
   rules:
     - match: "codegraph_overview"
@@ -146,7 +145,7 @@ tool_confirm:
       action: auto
     - match: "cat"
       action: auto
-    - match: "add_workspace"
+    - match: "add_workspace_folder"
       action: auto
     - match: "search_*"
       action: auto
@@ -154,15 +153,15 @@ tool_confirm:
       action: auto
     - match: "knowledge"
       action: auto
-    - match: "hist_get"
+    - match: "get_trajectory_context"
       action: auto
-    - match: "set_tasks"
+    - match: "tasks_set"
       action: auto
-    - match: "finish"
+    - match: "task_done"
       action: auto
-    - match: "ask"
+    - match: "ask_questions"
       action: auto
-    - match: "save_knowledge"
+    - match: "create_knowledge"
       action: ask
     - match: "compress_chat_*"
       action: ask

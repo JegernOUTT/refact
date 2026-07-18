@@ -103,7 +103,7 @@ prompt: |
   ### 1. Discover — find what is worth automating
   - `cat()` any existing `.refact/hooks.yaml` and `~/.config/refact/hooks.yaml`.
   - `tree()` and read AGENTS.md / CI to learn formatters, linters, protected paths, and required guards.
-  - `hist_search()` for repeated manual steps (run fmt before finishing, block edits to generated files).
+  - `search_trajectories()` for repeated manual steps (run fmt before finishing, block edits to generated files).
   - Decide the right scope: global (machine-wide policy) vs project (repo-specific, requires a trust entry).
 
   ### 2. Propose — present each hook before writing
@@ -114,7 +114,7 @@ prompt: |
   - **effect** — especially whether a `PreToolUse` hook can block (exit 2) and when
   - **why** — the concrete problem it solves
 
-  Use `ask()` to get approval before writing.
+  Use `ask_questions()` to get approval before writing.
 
   ### 3. Validate — prove the command works
   - Use `shell()` to dry-run the hook command in this repo before documenting it.
@@ -155,31 +155,30 @@ tools:
   - code_map
   - tree
   - cat
-  - add_workspace
+  - add_workspace_folder
   - search_pattern
-  - symbol_def
-  - semantic_search
+  - search_symbol_definition
+  - search_semantic
   - web
   - web_search
   - shell
-  - hist_search
-  - hist_get
+  - search_trajectories
+  - get_trajectory_context
   - knowledge
-  - save_knowledge
-  - apply
-  - write
-  - patch
-  - patch_at
-  - patch_ln
-  - patch_re
-  - undo
-  - set_tasks
-  - finish
-  - ask
-  - ctx_probe
-  - ctx_apply
-  - switch_mode
-
+  - create_knowledge
+  - apply_patch
+  - create_textdoc
+  - update_textdoc
+  - update_textdoc_anchored
+  - update_textdoc_by_lines
+  - update_textdoc_regex
+  - undo_textdoc
+  - tasks_set
+  - task_done
+  - ask_questions
+  - compress_chat_probe
+  - compress_chat_apply
+  - handoff_to_mode
 tool_confirm:
   rules:
     - match: "codegraph_overview"
@@ -204,7 +203,7 @@ tool_confirm:
       action: auto
     - match: "cat"
       action: auto
-    - match: "add_workspace"
+    - match: "add_workspace_folder"
       action: auto
     - match: "search_*"
       action: auto
@@ -212,21 +211,21 @@ tool_confirm:
       action: auto
     - match: "knowledge"
       action: auto
-    - match: "hist_get"
+    - match: "get_trajectory_context"
       action: auto
-    - match: "set_tasks"
+    - match: "tasks_set"
       action: auto
-    - match: "finish"
+    - match: "task_done"
       action: auto
-    - match: "ask"
+    - match: "ask_questions"
       action: auto
     - match: "shell"
       action: ask
-    - match: "write"
+    - match: "create_textdoc"
       action: ask
-    - match: "patch*"
+    - match: "update_textdoc*"
       action: ask
-    - match: "save_knowledge"
+    - match: "create_knowledge"
       action: ask
     - match: "compress_chat_*"
       action: ask

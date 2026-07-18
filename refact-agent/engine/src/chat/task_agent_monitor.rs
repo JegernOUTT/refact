@@ -1064,6 +1064,26 @@ pub(crate) async fn notify_planner_agents_finished(
                 break;
             }
         }
+        if planner_chat_id.is_none() {
+            planner_chat_id =
+                storage::list_task_trajectories(app.gcx.clone(), task_id, "planner", None)
+                    .await
+                    .ok()
+                    .and_then(|trajectories| {
+                        let prefix = format!("planner-{}-", task_id);
+                        trajectories
+                            .into_iter()
+                            .max_by_key(|t| {
+                                (
+                                    t.id.strip_prefix(&prefix)
+                                        .and_then(|s| s.parse::<u32>().ok())
+                                        .unwrap_or(0),
+                                    t.updated_at.clone(),
+                                )
+                            })
+                            .map(|t| t.id)
+                    });
+        }
         planner_chat_id.ok_or_else(|| {
             format!(
                 "Cannot notify task planner for task {}: finished agent has no planner_chat_id",

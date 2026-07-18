@@ -97,7 +97,7 @@ prompt: |
   ### 1. Discover — understand the existing mode surface
   - `cat()` shipped modes you want to resemble and any existing `.refact/modes/*.yaml`.
   - `tree()` the repo to understand the kinds of work this project repeats.
-  - `hist_search()` for recurring requests that would benefit from a dedicated behavior profile.
+  - `search_trajectories()` for recurring requests that would benefit from a dedicated behavior profile.
   - `knowledge()` for recorded conventions worth baking into a mode.
   - Check that the proposed `id` does not collide with a built-in or an existing local/global mode.
 
@@ -112,7 +112,7 @@ prompt: |
   - **model preferences** — only if intentionally tuning the model
   - for overlays: **base** and **match_models** patterns, plus the exact `override` fields
 
-  Use `ask()` to get approval before writing.
+  Use `ask_questions()` to get approval before writing.
 
   ### 3. Write — create the mode file
   Path: `.refact/modes/<id>.yaml`
@@ -144,7 +144,7 @@ prompt: |
         action: auto
       - match: "cat"
         action: auto
-      - match: "write"
+      - match: "create_textdoc"
         action: ask
   ```
 
@@ -199,30 +199,29 @@ tools:
   - code_map
   - tree
   - cat
-  - add_workspace
+  - add_workspace_folder
   - search_pattern
-  - symbol_def
-  - semantic_search
+  - search_symbol_definition
+  - search_semantic
   - web
   - web_search
-  - hist_search
-  - hist_get
+  - search_trajectories
+  - get_trajectory_context
   - knowledge
-  - save_knowledge
-  - apply
-  - write
-  - patch
-  - patch_at
-  - patch_ln
-  - patch_re
-  - undo
-  - set_tasks
-  - finish
-  - ask
-  - ctx_probe
-  - ctx_apply
-  - switch_mode
-
+  - create_knowledge
+  - apply_patch
+  - create_textdoc
+  - update_textdoc
+  - update_textdoc_anchored
+  - update_textdoc_by_lines
+  - update_textdoc_regex
+  - undo_textdoc
+  - tasks_set
+  - task_done
+  - ask_questions
+  - compress_chat_probe
+  - compress_chat_apply
+  - handoff_to_mode
 tool_confirm:
   rules:
     - match: "codegraph_overview"
@@ -247,7 +246,7 @@ tool_confirm:
       action: auto
     - match: "cat"
       action: auto
-    - match: "add_workspace"
+    - match: "add_workspace_folder"
       action: auto
     - match: "search_*"
       action: auto
@@ -255,19 +254,19 @@ tool_confirm:
       action: auto
     - match: "knowledge"
       action: auto
-    - match: "hist_get"
+    - match: "get_trajectory_context"
       action: auto
-    - match: "set_tasks"
+    - match: "tasks_set"
       action: auto
-    - match: "finish"
+    - match: "task_done"
       action: auto
-    - match: "ask"
+    - match: "ask_questions"
       action: auto
-    - match: "write"
+    - match: "create_textdoc"
       action: ask
-    - match: "patch*"
+    - match: "update_textdoc*"
       action: ask
-    - match: "save_knowledge"
+    - match: "create_knowledge"
       action: ask
     - match: "compress_chat_*"
       action: ask
