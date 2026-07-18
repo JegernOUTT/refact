@@ -86,6 +86,8 @@ import { MCPInteractionCenter } from "../components/MCPInteractionCenter";
 import { hasUsableEngineEndpoint } from "../services/refact/apiUrl";
 import { isPointerDragHost } from "./ChatPanes/pointerDrag";
 import { PointerDragGhost } from "./ChatPanes/PointerDragGhost";
+import { selectSurface } from "./Config/configSlice";
+import { DaemonDashboardShell } from "./DaemonDashboard";
 
 const STARTUP_SPLASH_DEADLINE_MS = 12_000;
 const APP_ACCESS_LOSS_GRACE_MS = 3_000;
@@ -94,7 +96,7 @@ export interface AppProps {
   style?: React.CSSProperties;
 }
 
-export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
+const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const dispatch = useAppDispatch();
   const rootRef = useRef<HTMLDivElement>(null);
   const sawZeroHeightRef = useRef(false);
@@ -659,6 +661,12 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       )}
     </Flex>
   );
+};
+
+export const InnerApp: React.FC<AppProps> = (props) => {
+  const surface = useAppSelector(selectSurface);
+  if (surface === "dashboard") return <DaemonDashboardShell />;
+  return <WorkspaceApp {...props} />;
 };
 
 // TODO: move this to the `app` directory.

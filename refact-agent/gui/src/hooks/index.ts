@@ -46,3 +46,4 @@ export * from "./useLoadMoreHistory";
 export * from "./useThinking";
 export * from "./useReducedMotion";
 export * from "./useShiki";
+export * from "./useDaemonEventsStream";

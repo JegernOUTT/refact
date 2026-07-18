@@ -104,11 +104,68 @@ export type DaemonInfo = {
   workersAccess: DaemonWorkersAccess;
 };
 
+export type DaemonEvent = {
+  seq: number;
+  ts_ms: number;
+  kind: string;
+  project_id: string | null;
+  payload: unknown;
+};
+
+export type DaemonProjectOpenRequest = {
+  root: string;
+  client_kind?: string;
+};
+
+export type DaemonProjectWorker = {
+  project_id: string;
+  pid: number | null;
+  http_port: number;
+  lsp_port: number;
+  state: string | { failed: { reason: string } };
+  last_error?: string;
+};
+
+export type DaemonProjectOpenResponse = {
+  project_id: string;
+  slug: string;
+  root: string;
+  pinned: boolean;
+  worker: DaemonProjectWorker | null;
+  cron_pending: number | null;
+};
+
+export type DaemonCronStatus = {
+  enabled: boolean;
+  jobs: number;
+  next_wake_ms: number | null;
+};
+
+export type DaemonFolderEntry = {
+  name: string;
+  has_git: boolean;
+};
+
+export type DaemonFolderBrowseResponse = {
+  path: string;
+  parent: string | null;
+  dirs: DaemonFolderEntry[];
+  can_open: boolean;
+};
+
 function validPort(port: number | undefined): port is number {
   return port !== undefined && Number.isFinite(port) && port > 0;
 }
 
 export function resolveDaemonBaseUrl(config: EngineApiConfig): string {
+  if (
+    config.host === "web" &&
+    config.engineServed === true &&
+    typeof window !== "undefined"
+  ) {
+    return window.location.origin;
+  }
+
   const rawLspUrl = config.lspUrl?.trim();
   if (rawLspUrl) {
     try {
@@ -132,6 +189,31 @@ export function resolveDaemonBaseUrl(config: EngineApiConfig): string {
 function isWorkersEmptyBody(error: FetchBaseQueryError): boolean {
   if (error.status !== "PARSING_ERROR") return false;
   return error.originalStatus === 200 || error.originalStatus === 204;
+}
+
+function parseDaemonEvents(body: string): DaemonEvent[] {
+  const events: DaemonEvent[] = [];
+  for (const block of body.split(/\r?\n\r?\n/)) {
+    const data = block
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    if (!data) continue;
+    try {
+      const event = JSON.parse(data) as DaemonEvent;
+      if (
+        typeof event.seq === "number" &&
+        typeof event.ts_ms === "number" &&
+        typeof event.kind === "string"
+      ) {
+        events.push(event);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return events;
 }
 
 export const daemonApi = createApi({
@@ -192,6 +274,139 @@ export const daemonApi = createApi({
             workersAccess: "visible",
           },
         };
+      },
+    }),
+    listProjects: builder.query<DaemonWorker[], undefined>({
+      providesTags: ["Daemon"],
+      queryFn: async (_args, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const result = await baseQuery({
+          url: `${resolveDaemonBaseUrl(state.config)}/daemon/v1/workers`,
+        });
+        if (result.error) return { error: result.error };
+        return {
+          data: Array.isArray(result.data)
+            ? (result.data as DaemonWorker[])
+            : [],
+        };
+      },
+    }),
+    openProject: builder.mutation<
+      DaemonProjectOpenResponse,
+      DaemonProjectOpenRequest
+    >({
+      invalidatesTags: ["Daemon"],
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const result = await baseQuery({
+          url: `${resolveDaemonBaseUrl(state.config)}/daemon/v1/projects/open`,
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as DaemonProjectOpenResponse };
+      },
+    }),
+    forgetProject: builder.mutation<unknown, string>({
+      invalidatesTags: ["Daemon"],
+      queryFn: async (projectId, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const result = await baseQuery({
+          url: `${resolveDaemonBaseUrl(
+            state.config,
+          )}/daemon/v1/projects/${encodeURIComponent(projectId)}`,
+          method: "DELETE",
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data };
+      },
+    }),
+    pinProject: builder.mutation<
+      unknown,
+      { projectId: string; pinned: boolean }
+    >({
+      invalidatesTags: ["Daemon"],
+      queryFn: async ({ projectId, pinned }, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const result = await baseQuery({
+          url: `${resolveDaemonBaseUrl(
+            state.config,
+          )}/daemon/v1/projects/${encodeURIComponent(projectId)}/pin`,
+          method: "POST",
+          body: { pinned },
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data };
+      },
+    }),
+    restartProject: builder.mutation<DaemonProjectWorker, string>({
+      invalidatesTags: ["Daemon"],
+      queryFn: async (projectId, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const result = await baseQuery({
+          url: `${resolveDaemonBaseUrl(
+            state.config,
+          )}/daemon/v1/projects/${encodeURIComponent(projectId)}/restart`,
+          method: "POST",
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as DaemonProjectWorker };
+      },
+    }),
+    stopProject: builder.mutation<unknown, string>({
+      invalidatesTags: ["Daemon"],
+      queryFn: async (projectId, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const result = await baseQuery({
+          url: `${resolveDaemonBaseUrl(
+            state.config,
+          )}/daemon/v1/projects/${encodeURIComponent(projectId)}/stop`,
+          method: "POST",
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data };
+      },
+    }),
+    getDaemonEvents: builder.query<DaemonEvent[], number | undefined>({
+      queryFn: async (afterSequence, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const params = new URLSearchParams({
+          after_seq: String(afterSequence ?? 0),
+          follow: "false",
+        });
+        const result = await baseQuery({
+          url: `${resolveDaemonBaseUrl(
+            state.config,
+          )}/daemon/v1/events?${params.toString()}`,
+          responseHandler: "text",
+        });
+        if (result.error) return { error: result.error };
+        return { data: parseDaemonEvents(String(result.data ?? "")) };
+      },
+    }),
+    getCronStatus: builder.query<DaemonCronStatus, undefined>({
+      queryFn: async (_args, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const result = await baseQuery({
+          url: `${resolveDaemonBaseUrl(state.config)}/cron/status`,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as DaemonCronStatus };
+      },
+    }),
+    browseFolders: builder.mutation<
+      DaemonFolderBrowseResponse,
+      { path?: string }
+    >({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as { config: EngineApiConfig };
+        const result = await baseQuery({
+          url: `${resolveDaemonBaseUrl(state.config)}/daemon/v1/fs/browse`,
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as DaemonFolderBrowseResponse };
       },
     }),
     getDaemonSettings: builder.query<DaemonSettingsResponse, undefined>({
@@ -333,13 +548,22 @@ export const daemonApi = createApi({
 });
 
 export const {
+  useBrowseFoldersMutation,
   useCheckDaemonUpdateQuery,
+  useForgetProjectMutation,
+  useGetCronStatusQuery,
+  useGetDaemonEventsQuery,
   useGetDaemonInfoQuery,
   useGetDaemonSettingsQuery,
   useGetDaemonUpdateStatusQuery,
   useInstallDaemonUpdateMutation,
   useLazyCheckDaemonUpdateQuery,
+  useListProjectsQuery,
+  useOpenProjectMutation,
+  usePinProjectMutation,
   useRestartDaemonMutation,
+  useRestartProjectMutation,
   useShutdownDaemonMutation,
+  useStopProjectMutation,
   useUpdateDaemonSettingsMutation,
 } = daemonApi;

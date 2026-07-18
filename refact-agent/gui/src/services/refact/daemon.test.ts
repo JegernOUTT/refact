@@ -155,9 +155,7 @@ describe("daemonApi", () => {
       workersAccess: "visible",
     });
   });
-});
 
-describe("resolveDaemonBaseUrl", () => {
   it("uses the lspUrl origin before loopback fallback", () => {
     expect(
       resolveDaemonBaseUrl({
@@ -178,9 +176,184 @@ describe("resolveDaemonBaseUrl", () => {
     ).toBe(window.location.origin);
   });
 
+  it("uses same-origin when the daemon serves the GUI", () => {
+    expect(
+      resolveDaemonBaseUrl({
+        host: "web",
+        engineServed: true,
+        lspPort: 8001,
+      }),
+    ).toBe(window.location.origin);
+  });
+
   it("uses daemon default port when lspPort is not usable", () => {
     expect(resolveDaemonBaseUrl({ host: "vscode", lspPort: 0 })).toBe(
       "http://127.0.0.1:8488",
     );
+  });
+
+  it("uses the daemon control-plane endpoint shapes", async () => {
+    const requested: { url: string; method: string; body: unknown }[] = [];
+    const record = async (request: Request) => {
+      const bodyText =
+        request.method === "POST" ? await request.clone().text() : "";
+      requested.push({
+        url: request.url,
+        method: request.method,
+        body: bodyText ? (JSON.parse(bodyText) as unknown) : undefined,
+      });
+      return HttpResponse.json({ success: true });
+    };
+    server.use(
+      http.get("https://daemon.example.test/daemon/v1/workers", () =>
+        HttpResponse.json(workers),
+      ),
+      http.post(
+        "https://daemon.example.test/daemon/v1/projects/open",
+        ({ request }) => record(request),
+      ),
+      http.delete(
+        "https://daemon.example.test/daemon/v1/projects/:id",
+        ({ request }) => record(request),
+      ),
+      http.post(
+        "https://daemon.example.test/daemon/v1/projects/:id/pin",
+        ({ request }) => record(request),
+      ),
+      http.post(
+        "https://daemon.example.test/daemon/v1/projects/:id/restart",
+        ({ request }) => record(request),
+      ),
+      http.post(
+        "https://daemon.example.test/daemon/v1/projects/:id/stop",
+        ({ request }) => record(request),
+      ),
+      http.get("https://daemon.example.test/cron/status", ({ request }) => {
+        requested.push({
+          url: request.url,
+          method: request.method,
+          body: undefined,
+        });
+        return HttpResponse.json({ enabled: true, jobs: 2, next_wake_ms: 3 });
+      }),
+      http.post(
+        "https://daemon.example.test/daemon/v1/fs/browse",
+        ({ request }) => record(request),
+      ),
+    );
+    const store = setUpStore({
+      config: {
+        host: "web",
+        lspPort: 8488,
+        lspUrl: "https://daemon.example.test",
+        themeProps: {},
+      },
+    });
+
+    const listed = await store.dispatch(
+      daemonApi.endpoints.listProjects.initiate(undefined),
+    );
+    expect(listed.data).toEqual(workers);
+    await store.dispatch(
+      daemonApi.endpoints.openProject.initiate({ root: "/work/refact" }),
+    );
+    await store.dispatch(
+      daemonApi.endpoints.forgetProject.initiate("project / one"),
+    );
+    await store.dispatch(
+      daemonApi.endpoints.pinProject.initiate({
+        projectId: "project / one",
+        pinned: true,
+      }),
+    );
+    await store.dispatch(
+      daemonApi.endpoints.restartProject.initiate("project / one"),
+    );
+    await store.dispatch(
+      daemonApi.endpoints.stopProject.initiate("project / one"),
+    );
+    await store.dispatch(daemonApi.endpoints.getCronStatus.initiate(undefined));
+    await store.dispatch(
+      daemonApi.endpoints.browseFolders.initiate({ path: "/work" }),
+    );
+
+    expect(requested).toEqual([
+      {
+        url: "https://daemon.example.test/daemon/v1/projects/open",
+        method: "POST",
+        body: { root: "/work/refact" },
+      },
+      {
+        url: "https://daemon.example.test/daemon/v1/projects/project%20%2F%20one",
+        method: "DELETE",
+        body: undefined,
+      },
+      {
+        url: "https://daemon.example.test/daemon/v1/projects/project%20%2F%20one/pin",
+        method: "POST",
+        body: { pinned: true },
+      },
+      {
+        url: "https://daemon.example.test/daemon/v1/projects/project%20%2F%20one/restart",
+        method: "POST",
+        body: undefined,
+      },
+      {
+        url: "https://daemon.example.test/daemon/v1/projects/project%20%2F%20one/stop",
+        method: "POST",
+        body: undefined,
+      },
+      {
+        url: "https://daemon.example.test/cron/status",
+        method: "GET",
+        body: undefined,
+      },
+      {
+        url: "https://daemon.example.test/daemon/v1/fs/browse",
+        method: "POST",
+        body: { path: "/work" },
+      },
+    ]);
+  });
+
+  it("requests and parses daemon event backfill", async () => {
+    let requestedUrl = "";
+    server.use(
+      http.get(
+        "https://daemon.example.test/daemon/v1/events",
+        ({ request }) => {
+          requestedUrl = request.url;
+          return new HttpResponse(
+            'id: 8\nevent: daemon\ndata: {"seq":8,"ts_ms":10,"kind":"ready","project_id":null,"payload":{}}\n\n',
+            { headers: { "Content-Type": "text/event-stream" } },
+          );
+        },
+      ),
+    );
+    const store = setUpStore({
+      config: {
+        host: "web",
+        lspPort: 8488,
+        lspUrl: "https://daemon.example.test",
+        themeProps: {},
+      },
+    });
+
+    const result = await store.dispatch(
+      daemonApi.endpoints.getDaemonEvents.initiate(7),
+    );
+
+    expect(requestedUrl).toBe(
+      "https://daemon.example.test/daemon/v1/events?after_seq=7&follow=false",
+    );
+    expect(result.data).toEqual([
+      {
+        seq: 8,
+        ts_ms: 10,
+        kind: "ready",
+        project_id: null,
+        payload: {},
+      },
+    ]);
   });
 });
