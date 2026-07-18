@@ -128,6 +128,7 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         )
         .route("/cron/status", get(cron_status))
         .route("/daemon/v1/status", get(status))
+        .route("/daemon/v1/doctor", get(crate::daemon::doctor::handle))
         .route("/daemon/v1/settings", get(get_settings))
         .route("/daemon/v1/settings", post(update_settings))
         .route("/daemon/v1/restart", post(restart))
@@ -274,8 +275,21 @@ async fn update_check(
     State((state, _)): State<(Arc<DaemonState>, u16)>,
     Query(query): Query<UpdateCheckQuery>,
 ) -> Response {
+    let info = match cached_update_check(&state, query.refresh).await {
+        Ok(info) => info,
+        Err(error) => {
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": error}))).into_response();
+        }
+    };
+    update_check_response(info).into_response()
+}
+
+pub(crate) async fn cached_update_check(
+    state: &DaemonState,
+    refresh: bool,
+) -> Result<refact_self_update::UpdateCheckInfo, String> {
     let now = Instant::now();
-    if !query.refresh {
+    if !refresh {
         let cached = {
             let cache = state.update_check_cache.lock().await;
             cache
@@ -284,20 +298,13 @@ async fn update_check(
                 .map(|(_, info)| info.clone())
         };
         if let Some(info) = cached {
-            return update_check_response(info).into_response();
+            return Ok(info);
         }
     }
-    let info = match refact_self_update::check_update_info(10).await {
-        Ok(info) => info,
-        Err(error) => {
-            return (StatusCode::BAD_GATEWAY, Json(json!({"error": error}))).into_response();
-        }
-    };
-    {
-        let mut cache = state.update_check_cache.lock().await;
-        *cache = Some((now, info.clone()));
-    }
-    update_check_response(info).into_response()
+    let info = refact_self_update::check_update_info(10).await?;
+    let mut cache = state.update_check_cache.lock().await;
+    *cache = Some((now, info.clone()));
+    Ok(info)
 }
 
 fn update_check_response(info: refact_self_update::UpdateCheckInfo) -> Json<serde_json::Value> {
@@ -1048,6 +1055,77 @@ mod tests {
             .as_str()
             .expect("daemon status must report executable_sha256 for staleness detection");
         assert_eq!(executable_sha256.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn daemon_doctor_router_returns_findings_shape() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        {
+            let mut cache = state.update_check_cache.lock().await;
+            *cache = Some((
+                std::time::Instant::now(),
+                refact_self_update::UpdateCheckInfo {
+                    current_version: "1.2.3".to_string(),
+                    latest_version: Some("1.2.3".to_string()),
+                    update_available: false,
+                    releases: Vec::new(),
+                },
+            ));
+        }
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/daemon/v1/doctor")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, json) = response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["generated_at_ms"].as_u64().unwrap() > 0);
+        assert!(json["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| { finding["id"] == "port_conflict" && finding["severity"] == "info" }));
+    }
+
+    #[tokio::test]
+    async fn daemon_doctor_router_is_not_an_auth_exemption() {
+        use crate::daemon::config::AuthConfig;
+        use axum::extract::ConnectInfo;
+        use hyper::{Body, Request, StatusCode};
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            auth: AuthConfig {
+                enabled: true,
+                token: Some("secret".to_string()),
+                ..Default::default()
+            },
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(
+            config,
+            EventBus::new(dir.path().join("events.jsonl")),
+            Some("secret".to_string()),
+        );
+        let mut request = Request::builder()
+            .uri("/daemon/v1/doctor")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000))));
+        let response = make_router(state, 8488).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

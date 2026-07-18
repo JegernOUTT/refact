@@ -313,6 +313,21 @@ impl Supervisor {
         Some(info)
     }
 
+    pub async fn worker_infos(&self) -> Vec<WorkerInfo> {
+        let slots = self
+            .workers
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut infos = Vec::with_capacity(slots.len());
+        for slot in slots {
+            infos.push(slot.record.lock().await.info.clone());
+        }
+        infos
+    }
+
     async fn worker_generation_for_proxy_failure(
         &self,
         project_id: &str,

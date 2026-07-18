@@ -51,7 +51,7 @@ pub struct ProxyActivity {
     pub live_proxy_streams: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkerRow {
     pub project_id: String,
     pub slug: String,
@@ -60,6 +60,9 @@ pub struct WorkerRow {
     pub last_active_ms: u64,
     pub state: WorkerState,
     pub pid: Option<u32>,
+    pub rss_bytes: Option<u64>,
+    pub cpu_percent: Option<f32>,
+    pub uptime_secs: Option<u64>,
     pub http_port: Option<u16>,
     pub lsp_port: Option<u16>,
     pub lsp_clients: usize,
@@ -574,6 +577,9 @@ impl DaemonState {
                     .map(|worker| worker.state.clone())
                     .unwrap_or(WorkerState::Stopped),
                 pid: worker.as_ref().and_then(|worker| worker.pid),
+                rss_bytes: None,
+                cpu_percent: None,
+                uptime_secs: None,
                 http_port: worker.as_ref().map(|worker| worker.http_port),
                 lsp_port: worker.as_ref().map(|worker| worker.lsp_port),
                 lsp_clients: status.map(|status| status.report.lsp_clients).unwrap_or(0),
@@ -591,6 +597,19 @@ impl DaemonState {
                     .to_string_lossy()
                     .to_string(),
             });
+        }
+        let pids = rows.iter().filter_map(|row| row.pid).collect::<Vec<_>>();
+        let resources =
+            tokio::task::spawn_blocking(move || crate::daemon::resources::worker_resources(&pids))
+                .await
+                .unwrap_or_default();
+        for row in &mut rows {
+            let Some(sample) = row.pid.and_then(|pid| resources.get(&pid)) else {
+                continue;
+            };
+            row.rss_bytes = Some(sample.rss_bytes);
+            row.cpu_percent = Some(sample.cpu_percent);
+            row.uptime_secs = Some(sample.uptime_secs);
         }
         rows.sort_by(|a, b| {
             a.slug

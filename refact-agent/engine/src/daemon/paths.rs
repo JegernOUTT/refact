@@ -14,6 +14,10 @@ fn daemon_cache_root() -> PathBuf {
     home_dir().join(".cache").join("refact")
 }
 
+pub fn cache_root() -> PathBuf {
+    daemon_cache_root()
+}
+
 fn daemon_config_root() -> PathBuf {
     #[cfg(test)]
     if let Ok(path) = std::env::var("REFACT_DAEMON_CONFIG_DIR") {
