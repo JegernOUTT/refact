@@ -1,0 +1,193 @@
+.page {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  flex-direction: column;
+  gap: var(--rf-space-5);
+}
+
+.pageHeader {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+}
+
+.pageHeader h2,
+.pageHeader p,
+.muted,
+.groupEmpty,
+.groupError {
+  margin: 0;
+}
+
+.pageHeader h2 {
+  font-size: var(--rf-text-5);
+  font-weight: 600;
+}
+
+.pageHeader p,
+.muted,
+.groupEmpty {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+}
+
+.pageHeader p {
+  margin-top: var(--rf-space-1);
+}
+
+.headerSide {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.groupList {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.group {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3) var(--rf-space-4);
+}
+
+.groupHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+}
+
+.groupToggle {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: none;
+  gap: var(--rf-space-2);
+  color: inherit;
+  cursor: pointer;
+}
+
+.groupTitle {
+  font-size: var(--rf-text-3);
+  font-weight: 600;
+}
+
+.groupBadges {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.groupError {
+  color: var(--rf-color-danger);
+  font-size: var(--rf-text-2);
+}
+
+.jobList {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  flex-direction: column;
+  list-style: none;
+}
+
+.jobList li + li {
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+
+.jobRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-3) var(--rf-space-1);
+}
+
+.jobCopy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.jobHeadline {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.jobHeadline strong {
+  font-size: var(--rf-text-3);
+  font-weight: 500;
+}
+
+.jobSchedule {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.jobBadges {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.jobNextFire {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.jobActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.dialogBody {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  margin-top: var(--rf-space-3);
+}
+
+.wakeHint {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+@media (max-width: 560px) {
+  .pageHeader,
+  .jobRow {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

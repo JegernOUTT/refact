@@ -8,7 +8,7 @@ import { DoctorPage } from "./Doctor/DoctorPage";
 import { HomePage } from "./Home/HomePage";
 import { ProjectDetailPage } from "./Projects/ProjectDetail/ProjectDetailPage";
 import { ProjectsPage } from "./Projects/ProjectsPage";
-import { SchedulerPlaceholderPage } from "./Scheduler/PlaceholderPage";
+import { SchedulerPage } from "./Scheduler/SchedulerPage";
 import { SettingsPage } from "./Settings/SettingsPage";
 import { UsagePage } from "./Usage/UsagePage";
 import { selectDashboardNavigation } from "./dashboardSlice";
@@ -38,7 +38,7 @@ function DashboardPageContent() {
     case "activity":
       return <ActivityPage />;
     case "scheduler":
-      return <SchedulerPlaceholderPage />;
+      return <SchedulerPage />;
     case "usage":
       return <UsagePage />;
     case "doctor":
