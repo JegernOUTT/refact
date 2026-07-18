@@ -1,6 +1,7 @@
 import { createReducer, createAction, createSelector } from "@reduxjs/toolkit";
 import { type ThemeProps } from "../../components/Theme";
 import { RootState } from "../../app/store";
+import { resolveCapabilities } from "../../utils/capabilities";
 
 export type RefactBackendConnectionStatus =
   | "connecting"
@@ -9,9 +10,23 @@ export type RefactBackendConnectionStatus =
   | "ready"
   | "failed";
 
+export type Surface = "dashboard" | "workspace";
+
+export type Capabilities = {
+  filesPanel: boolean;
+  gitPanel: boolean;
+  terminalPanel: boolean;
+  openFileInApp: boolean;
+  openFileInIde: boolean;
+  ideDiffPasteBack: boolean;
+  folderPicker: boolean;
+};
+
 export type Config = {
   host: "web" | "ide" | "vscode" | "jetbrains";
   lspPort: number;
+  surface?: Surface;
+  capabilities?: Partial<Capabilities>;
   tabbed?: boolean;
   lspUrl?: string;
   browserUrl?: string;
@@ -102,6 +117,20 @@ export const reducer = createReducer<Config>(initialState, (builder) => {
       : state.features;
 
     state.host = action.payload.host ?? state.host;
+    if (hasConfigProperty(action.payload, "surface")) {
+      if (action.payload.surface === undefined) {
+        delete state.surface;
+      } else {
+        state.surface = action.payload.surface;
+      }
+    }
+    if (hasConfigProperty(action.payload, "capabilities")) {
+      if (action.payload.capabilities === undefined) {
+        delete state.capabilities;
+      } else {
+        state.capabilities = action.payload.capabilities;
+      }
+    }
     if (hasConfigProperty(action.payload, "lspUrl")) {
       if (
         action.payload.lspUrl === undefined ||
@@ -173,5 +202,16 @@ export const selectCodegraph = createSelector(
 
 export const selectApiKey = (state: RootState) => state.config.apiKey;
 export const selectHost = (state: RootState) => state.config.host;
+const selectConfiguredSurface = (state: RootState) => state.config.surface;
+const selectCapabilityOverrides = (state: RootState) =>
+  state.config.capabilities;
+export const selectSurface = createSelector(
+  selectConfiguredSurface,
+  (surface): Surface => (surface === "dashboard" ? "dashboard" : "workspace"),
+);
+export const selectCapabilities = createSelector(
+  [selectHost, selectCapabilityOverrides],
+  (host, overrides) => resolveCapabilities(host, overrides),
+);
 export const selectSubmitOption = (state: RootState) =>
   state.config.shiftEnterToSubmit ?? false;
