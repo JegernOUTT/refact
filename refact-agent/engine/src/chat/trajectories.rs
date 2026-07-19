@@ -15303,6 +15303,7 @@ mod tests {
         save_trajectory_snapshot(gcx.clone(), snapshot)
             .await
             .unwrap();
+        wait_for_file_title(&path, "hello from global").await;
 
         let raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
