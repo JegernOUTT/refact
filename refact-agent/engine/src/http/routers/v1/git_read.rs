@@ -639,7 +639,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0], active.path().canonicalize().unwrap());
+        assert_eq!(selected[0], dunce::canonicalize(active.path()).unwrap());
 
         let error = selected_roots(gcx, Some(other.path().to_string_lossy().to_string()))
             .await
