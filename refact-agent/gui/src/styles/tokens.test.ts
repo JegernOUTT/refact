@@ -7,7 +7,24 @@ const tokensCss = readFileSync(
   "utf8",
 );
 
+const tokenValue = (name: string) => {
+  const match = tokensCss.match(new RegExp(`${name}:\\s*(\\d+);`));
+  return match ? Number(match[1]) : Number.NaN;
+};
+
 describe("design tokens", () => {
+  it("elevates only modal-owned transient overlays above modal content", () => {
+    expect(tokenValue("--rf-z-popover")).toBeLessThan(
+      tokenValue("--rf-z-modal"),
+    );
+    expect(tokenValue("--rf-z-popover-modal")).toBeGreaterThan(
+      tokenValue("--rf-z-modal"),
+    );
+    expect(tokenValue("--rf-z-tooltip-modal")).toBeGreaterThan(
+      tokenValue("--rf-z-popover-modal"),
+    );
+  });
+
   it("uses a softer dark accent value and matching soft tint", () => {
     expect(tokensCss).toContain("--rf-color-accent: #7f93d8;");
     expect(tokensCss).toContain(

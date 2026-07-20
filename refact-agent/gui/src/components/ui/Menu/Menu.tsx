@@ -3,6 +3,7 @@ import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import classNames from "classnames";
 
 import { Portal } from "../../Portal";
+import { useIsInsideModalOverlay } from "../ModalOverlayContext";
 import { overlayStyle } from "../overlayTypes";
 import type {
   AnchoredOverlayContentProps,
@@ -40,6 +41,8 @@ const MenuContent = React.forwardRef<HTMLDivElement, MenuContentProps>(
     },
     ref,
   ) => {
+    const isInsideModalOverlay = useIsInsideModalOverlay();
+
     return (
       <DropdownMenuPrimitive.Portal container={document.body}>
         <Portal>
@@ -51,6 +54,7 @@ const MenuContent = React.forwardRef<HTMLDivElement, MenuContentProps>(
             collisionPadding={collisionPadding}
             className={classNames(
               styles.content,
+              isInsideModalOverlay && styles.contentInModal,
               "rf-popover-motion",
               className,
             )}

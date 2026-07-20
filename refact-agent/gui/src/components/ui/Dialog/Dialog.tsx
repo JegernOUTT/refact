@@ -3,6 +3,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import classNames from "classnames";
 
 import { Portal } from "../../Portal";
+import { ModalOverlayProvider } from "../ModalOverlayContext";
 import { overlayStyle } from "../overlayTypes";
 import type {
   ModalOverlayContentProps,
@@ -41,7 +42,9 @@ const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
             )}
             style={overlayStyle(maxWidth, maxHeight)}
           >
-            <div className={styles.inner}>{children}</div>
+            <ModalOverlayProvider value>
+              <div className={styles.inner}>{children}</div>
+            </ModalOverlayProvider>
           </DialogPrimitive.Content>
         </Portal>
       </DialogPrimitive.Portal>

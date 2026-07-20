@@ -5,6 +5,7 @@ import { Check, ChevronDown } from "lucide-react";
 
 import { Portal } from "../../Portal";
 import { Icon } from "../Icon";
+import { useIsInsideModalOverlay } from "../ModalOverlayContext";
 import { overlayStyle } from "../overlayTypes";
 import type { AnchoredOverlayContentProps } from "../overlayTypes";
 import styles from "./Select.module.css";
@@ -65,6 +66,8 @@ const SelectContent = React.forwardRef<HTMLDivElement, SelectContentProps>(
     },
     ref,
   ) => {
+    const isInsideModalOverlay = useIsInsideModalOverlay();
+
     return (
       <SelectPrimitive.Portal container={document.body}>
         <Portal>
@@ -73,6 +76,7 @@ const SelectContent = React.forwardRef<HTMLDivElement, SelectContentProps>(
             align={align}
             className={classNames(
               styles.content,
+              isInsideModalOverlay && styles.contentInModal,
               "rf-popover-motion",
               className,
             )}

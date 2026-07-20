@@ -3,6 +3,7 @@ import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import classNames from "classnames";
 
 import { Portal } from "../../Portal";
+import { useIsInsideModalOverlay } from "../ModalOverlayContext";
 import { overlayStyle } from "../overlayTypes";
 import type {
   AnchoredOverlayContentProps,
@@ -62,6 +63,8 @@ const TooltipContent = React.forwardRef<HTMLDivElement, TooltipContentProps>(
     },
     ref,
   ) => {
+    const isInsideModalOverlay = useIsInsideModalOverlay();
+
     return (
       <TooltipPrimitive.Portal container={document.body}>
         <Portal>
@@ -73,6 +76,7 @@ const TooltipContent = React.forwardRef<HTMLDivElement, TooltipContentProps>(
             collisionPadding={collisionPadding}
             className={classNames(
               styles.content,
+              isInsideModalOverlay && styles.contentInModal,
               "rf-popover-motion",
               className,
             )}

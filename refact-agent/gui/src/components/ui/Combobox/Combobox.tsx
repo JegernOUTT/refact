@@ -10,6 +10,7 @@ import { Check, ChevronDown } from "lucide-react";
 
 import { Portal } from "../../Portal";
 import { Icon } from "../Icon";
+import { useIsInsideModalOverlay } from "../ModalOverlayContext";
 import { overlayStyle } from "../overlayTypes";
 import type { OverlaySide } from "../overlayTypes";
 import styles from "./Combobox.module.css";
@@ -50,6 +51,7 @@ export function Combobox({
   value,
   ...props
 }: ComboboxProps) {
+  const isInsideModalOverlay = useIsInsideModalOverlay();
   const store = useComboboxStore({
     defaultOpen: false,
     placement: `${side}-${align}`,
@@ -87,7 +89,10 @@ export function Combobox({
       <Portal>
         <ComboboxPopover
           store={store}
-          className={styles.popover}
+          className={classNames(
+            styles.popover,
+            isInsideModalOverlay && styles.popoverInModal,
+          )}
           gutter={8}
           sameWidth
           style={overlayStyle(maxWidth, maxHeight)}

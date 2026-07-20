@@ -345,6 +345,7 @@ Refact UI rules are contributor contracts. Any change that introduces a new desi
 - Overlay blur uses `--rf-blur-overlay` and must have a reduced-transparency fallback; JetBrains host mode disables blur.
 - The stabilized UI kit overlay set is exported from `src/components/ui`: `Dialog`, `Menu`, `Popover`, `Sheet`, and `Tooltip`. They share `open`, `defaultOpen`, `onOpenChange`, anchored `side`/`align`/`sideOffset`/`collisionPadding` where applicable, `modal` where applicable, and content `maxWidth`/`maxHeight` props.
 - Overlay content clamps with `width: min(ideal, calc(100vw - 2 * var(--rf-space-3)))` and `max-height: min(ideal, calc(100dvh - var(--rf-space-5)))`; vertical overflow stays inside the overlay and horizontal overflow must use explicit `.scrollX` islands.
+- Portaled transient overlays opened from inside `Dialog` or `Sheet` use modal-layer context and the modal overlay tokens so they remain above their owning modal without lifting unrelated page overlays above every modal.
 - `Popover` is responsive by default and renders as a bottom `Sheet` below the narrow viewport threshold; callers may set `responsive={false}` or `forceSheet` for deterministic behavior.
 
 ### Model selector

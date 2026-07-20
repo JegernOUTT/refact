@@ -64,6 +64,8 @@
   --rf-z-fixed: 400;
   --rf-z-overlay: 600;
   --rf-z-modal: 700;
+  --rf-z-popover-modal: 800;
+  --rf-z-tooltip-modal: 900;
   --rf-elev-overlay: 0 14px 40px rgba(0, 0, 0, 0.4);
   --rf-elev-panel: 0 1px 2px rgba(0, 0, 0, 0.18);
   --rf-blur-overlay: 14px;

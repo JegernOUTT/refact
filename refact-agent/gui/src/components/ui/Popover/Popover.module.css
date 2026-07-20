@@ -36,6 +36,10 @@
   overflow: hidden;
 }
 
+.contentInModal {
+  z-index: var(--rf-z-popover-modal);
+}
+
 .content:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: var(--rf-space-1);

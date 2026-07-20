@@ -30,3 +30,7 @@
   backdrop-filter: blur(var(--rf-blur-overlay));
   font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
 }
+
+.contentInModal {
+  z-index: var(--rf-z-tooltip-modal);
+}

@@ -32,6 +32,10 @@
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
+.contentInModal {
+  z-index: var(--rf-z-popover-modal);
+}
+
 .item {
   display: flex;
   min-width: 0;

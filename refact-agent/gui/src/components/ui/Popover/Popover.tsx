@@ -3,6 +3,7 @@ import * as PopoverPrimitive from "@radix-ui/react-popover";
 import classNames from "classnames";
 
 import { Portal } from "../../Portal";
+import { useIsInsideModalOverlay } from "../ModalOverlayContext";
 import { Sheet } from "../Sheet";
 import { overlayStyle } from "../overlayTypes";
 import type {
@@ -111,6 +112,7 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
     ref,
   ) => {
     const context = React.useContext(PopoverContext);
+    const isInsideModalOverlay = useIsInsideModalOverlay();
     const isNarrow = useMediaQuery(narrowQuery);
     const renderSheet = Boolean(
       context && (context.forceSheet || (context.responsive && isNarrow)),
@@ -144,6 +146,7 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
             collisionPadding={collisionPadding}
             className={classNames(
               styles.content,
+              isInsideModalOverlay && styles.contentInModal,
               !scrollable && styles.contentNoScroll,
               "rf-popover-motion",
               className,

@@ -3,6 +3,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import classNames from "classnames";
 
 import { Portal } from "../../Portal";
+import { ModalOverlayProvider } from "../ModalOverlayContext";
 import { overlayStyle } from "../overlayTypes";
 import type {
   ModalOverlayContentProps,
@@ -60,14 +61,16 @@ const SheetContent = React.forwardRef<HTMLDivElement, SheetContentProps>(
             )}
             style={{ ...overlayStyle(maxWidth, maxHeight), ...style }}
           >
-            <div
-              className={classNames(
-                styles.inner,
-                !scrollable && styles.innerNoScroll,
-              )}
-            >
-              {children}
-            </div>
+            <ModalOverlayProvider value>
+              <div
+                className={classNames(
+                  styles.inner,
+                  !scrollable && styles.innerNoScroll,
+                )}
+              >
+                {children}
+              </div>
+            </ModalOverlayProvider>
           </DialogPrimitive.Content>
         </Portal>
       </DialogPrimitive.Portal>

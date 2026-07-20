@@ -74,6 +74,10 @@
   outline-offset: var(--rf-space-1);
 }
 
+.contentInModal {
+  z-index: var(--rf-z-popover-modal);
+}
+
 .viewport {
   max-height: inherit;
   min-width: 0;
