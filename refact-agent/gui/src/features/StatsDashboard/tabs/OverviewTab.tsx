@@ -43,6 +43,7 @@ import {
   formatQuotaMeta,
   formatResetAt,
   formatUsagePercent,
+  getClaudeUsageWindowRows,
 } from "../../../utils/providerQuota";
 import type { DateRange } from "../types";
 import styles from "./OverviewTab.module.css";
@@ -154,7 +155,8 @@ const ClaudeCodeInstanceCard: React.FC<{
   );
   const data = claudeUsage?.data;
   if (!data) return null;
-  if (!data.five_hour && !data.seven_day) return null;
+  const windowRows = getClaudeUsageWindowRows(data);
+  if (windowRows.length === 0 && !data.extra_usage) return null;
 
   return (
     <Card animated="rise" className={styles.quotaCard}>
@@ -165,26 +167,16 @@ const ClaudeCodeInstanceCard: React.FC<{
         </div>
         <span className={styles.quotaProvider}>{providerName}</span>
       </div>
-      {data.five_hour && (
-        <div>
+      {windowRows.map(({ key, label, window }) => (
+        <div key={key}>
           <QuotaLine
-            label="Session (5h)"
-            pct={data.five_hour.percent_used}
-            resetAt={data.five_hour.resets_at}
+            label={label}
+            pct={window.percent_used}
+            resetAt={window.resets_at}
           />
-          <UsageBar pct={data.five_hour.percent_used} />
+          <UsageBar pct={window.percent_used} />
         </div>
-      )}
-      {data.seven_day && (
-        <div>
-          <QuotaLine
-            label="Weekly"
-            pct={data.seven_day.percent_used}
-            resetAt={data.seven_day.resets_at}
-          />
-          <UsageBar pct={data.seven_day.percent_used} />
-        </div>
-      )}
+      ))}
       {data.extra_usage && (
         <span className={styles.quotaExtra}>
           Extra: {formatClaudeExtraUsage(data.extra_usage)}

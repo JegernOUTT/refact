@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import type { ClaudeCodeUsageData } from "../services/refact/providers";
+
 import {
   formatClaudeExtraUsage,
   formatCodexCreditsDetails,
@@ -7,6 +9,7 @@ import {
   formatCodexSpendControl,
   formatLimitWindowSeconds,
   formatResetAfterSeconds,
+  getClaudeUsageWindowRows,
 } from "./providerQuota";
 
 describe("provider quota formatting", () => {
@@ -29,6 +32,52 @@ describe("provider quota formatting", () => {
     ).toBe(
       "disabled · admin_disabled · spent not reported · limit not reported",
     );
+  });
+
+  it("includes model-scoped Claude usage windows", () => {
+    expect(
+      getClaudeUsageWindowRows({
+        five_hour: { percent_used: 12, resets_at: "2026-07-20T00:00:00Z" },
+        seven_day: { percent_used: 40 },
+        scoped_windows: [
+          {
+            label: "Fable 5 Max",
+            model_id: "claude-fable-5",
+            window: {
+              percent_used: 68,
+              resets_at: "2026-07-21T00:00:00Z",
+            },
+          },
+          {
+            label: "Duplicate Fable",
+            model_id: "CLAUDE-FABLE-5",
+            window: { percent_used: 99 },
+          },
+          null,
+          { label: null, window: { percent_used: 80 } },
+          { label: "Malformed window", window: { percent_used: "80" } },
+        ],
+      } as unknown as ClaudeCodeUsageData),
+    ).toEqual([
+      {
+        key: "five_hour",
+        label: "Current session",
+        window: { percent_used: 12, resets_at: "2026-07-20T00:00:00Z" },
+      },
+      {
+        key: "seven_day",
+        label: "Current week — all models",
+        window: { percent_used: 40 },
+      },
+      {
+        key: "scoped:claude-fable-5",
+        label: "Current week — Fable 5 Max",
+        window: {
+          percent_used: 68,
+          resets_at: "2026-07-21T00:00:00Z",
+        },
+      },
+    ]);
   });
 
   it("formats Codex credit and spend-control details", () => {

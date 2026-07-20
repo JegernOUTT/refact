@@ -1,8 +1,85 @@
 import type {
   ClaudeCodeExtraUsage,
+  ClaudeCodeScopedUsageWindow,
+  ClaudeCodeUsageData,
+  ClaudeCodeUsageWindow,
   OpenAICodexCredits,
   OpenAICodexSpendControl,
 } from "../services/refact/providers";
+
+const CLAUDE_USAGE_WINDOWS = [
+  { key: "five_hour", label: "Current session" },
+  { key: "seven_day", label: "Current week — all models" },
+  { key: "seven_day_sonnet", label: "Current week — Sonnet" },
+  { key: "seven_day_opus", label: "Current week — Opus" },
+  { key: "seven_day_oauth_apps", label: "Current week — OAuth apps" },
+  { key: "seven_day_cowork", label: "Current week — cowork" },
+  { key: "seven_day_omelette", label: "Current week — Omelette" },
+] as const;
+
+export type ClaudeUsageWindowRow = {
+  key: string;
+  label: string;
+  window: ClaudeCodeUsageWindow;
+};
+
+function isClaudeUsageWindow(window: unknown): window is ClaudeCodeUsageWindow {
+  if (typeof window !== "object" || window === null) return false;
+  const candidate = window as Partial<ClaudeCodeUsageWindow>;
+  return (
+    typeof candidate.percent_used === "number" &&
+    Number.isFinite(candidate.percent_used)
+  );
+}
+
+function isClaudeScopedUsageWindow(
+  value: unknown,
+): value is ClaudeCodeScopedUsageWindow {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<ClaudeCodeScopedUsageWindow>;
+  return (
+    typeof candidate.label === "string" &&
+    (candidate.model_id == null || typeof candidate.model_id === "string") &&
+    isClaudeUsageWindow(candidate.window)
+  );
+}
+
+export function getClaudeUsageWindowRows(
+  data: ClaudeCodeUsageData,
+): ClaudeUsageWindowRow[] {
+  const rows: ClaudeUsageWindowRow[] = [];
+  const scopedIdentities = new Set<string>();
+
+  const appendScopedWindows = () => {
+    const scopedWindows = Array.isArray(data.scoped_windows)
+      ? data.scoped_windows
+      : [];
+    for (const scoped of scopedWindows) {
+      if (!isClaudeScopedUsageWindow(scoped)) continue;
+      const label = scoped.label.trim();
+      if (!label) continue;
+      const modelId = scoped.model_id?.trim();
+      const identity = (modelId ? modelId : label).toLocaleLowerCase();
+      if (scopedIdentities.has(identity)) continue;
+      scopedIdentities.add(identity);
+      rows.push({
+        key: `scoped:${identity}`,
+        label: `Current week — ${label}`,
+        window: scoped.window,
+      });
+    }
+  };
+
+  for (const { key, label } of CLAUDE_USAGE_WINDOWS) {
+    const window = data[key];
+    if (isClaudeUsageWindow(window)) {
+      rows.push({ key, label, window });
+    }
+    if (key === "seven_day") appendScopedWindows();
+  }
+
+  return rows;
+}
 
 export function clampPercent(value: number): number {
   return Math.max(0, Math.min(value, 100));

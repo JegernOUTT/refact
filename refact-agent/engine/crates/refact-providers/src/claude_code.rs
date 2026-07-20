@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -112,6 +112,13 @@ pub struct ClaudeCodeUsageWindow {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ClaudeCodeScopedUsageWindow {
+    pub label: String,
+    pub model_id: Option<String>,
+    pub window: ClaudeCodeUsageWindow,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ClaudeCodeExtraUsage {
     pub is_enabled: bool,
     pub used_credits: Option<f64>,
@@ -130,6 +137,7 @@ pub struct ClaudeCodeUsage {
     pub seven_day_opus: Option<ClaudeCodeUsageWindow>,
     pub seven_day_cowork: Option<ClaudeCodeUsageWindow>,
     pub seven_day_omelette: Option<ClaudeCodeUsageWindow>,
+    pub scoped_windows: Vec<ClaudeCodeScopedUsageWindow>,
     pub extra_usage: Option<ClaudeCodeExtraUsage>,
     pub cinder_cove: Option<Value>,
     pub iguana_necktie: Option<Value>,
@@ -180,6 +188,9 @@ impl ClaudeCodeProvider {
                 "seven_day_opus",
                 "seven_day_cowork",
                 "seven_day_omelette",
+                "fable_weekly",
+                "fable_seven_day",
+                "seven_day_fable",
                 "extra_usage",
                 "cinder_cove",
                 "iguana_necktie",
@@ -196,6 +207,7 @@ impl ClaudeCodeProvider {
             seven_day_opus: parse_claude_usage_window(data, "seven_day_opus"),
             seven_day_cowork: parse_claude_usage_window(data, "seven_day_cowork"),
             seven_day_omelette: parse_claude_usage_window(data, "seven_day_omelette"),
+            scoped_windows: parse_claude_scoped_usage_windows(data),
             extra_usage: data.get("extra_usage").and_then(parse_claude_extra_usage),
             cinder_cove: data.get("cinder_cove").cloned(),
             iguana_necktie: data.get("iguana_necktie").cloned(),
@@ -227,16 +239,179 @@ fn parse_claude_usage_window(data: &Value, key: &str) -> Option<ClaudeCodeUsageW
     let percent_used = w
         .get("utilization")
         .and_then(as_f64_loose)
-        .or_else(|| w.get("percent_used").and_then(as_f64_loose))?;
-    let resets_at = w
-        .get("resets_at")
-        .or_else(|| w.get("reset_at"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .or_else(|| w.get("percent_used").and_then(as_f64_loose))
+        .or_else(|| w.get("used_percentage").and_then(as_f64_loose))?;
+    if !percent_used.is_finite() {
+        return None;
+    }
+    let resets_at =
+        parse_claude_reset_at_from_object(w, &["resets_at", "resetsAt", "reset_at", "resetAt"]);
     Some(ClaudeCodeUsageWindow {
         percent_used,
         resets_at,
     })
+}
+
+fn normalize_claude_limit_token(value: Option<&Value>) -> Option<String> {
+    let raw = value?.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let mut normalized = String::with_capacity(raw.len());
+    let mut previous_was_separator = true;
+    for character in raw.chars() {
+        if character.is_ascii_alphanumeric() {
+            if character.is_ascii_uppercase()
+                && !previous_was_separator
+                && !normalized.ends_with('_')
+            {
+                normalized.push('_');
+            }
+            normalized.push(character.to_ascii_lowercase());
+            previous_was_separator = false;
+        } else if !previous_was_separator {
+            normalized.push('_');
+            previous_was_separator = true;
+        }
+    }
+
+    let normalized = normalized.trim_matches('_').to_string();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn parse_non_empty_string(obj: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        obj.get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
+fn parse_claude_reset_at(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(raw) = value.as_str() {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        if let Ok(timestamp) = raw.parse::<f64>() {
+            return format_claude_reset_timestamp(timestamp);
+        }
+        return Some(raw.to_string());
+    }
+    as_f64_loose(value).and_then(format_claude_reset_timestamp)
+}
+
+fn parse_claude_reset_at_from_object(obj: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| obj.get(*key))
+        .find_map(|value| parse_claude_reset_at(Some(value)))
+}
+
+fn format_claude_reset_timestamp(timestamp: f64) -> Option<String> {
+    if !timestamp.is_finite() {
+        return None;
+    }
+    let millis = if timestamp.abs() < 10_000_000_000.0 {
+        timestamp * 1_000.0
+    } else {
+        timestamp
+    };
+    if millis < i64::MIN as f64 || millis > i64::MAX as f64 {
+        return None;
+    }
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis.round() as i64)
+        .map(|date| date.to_rfc3339())
+}
+
+fn parse_claude_scoped_usage_windows(data: &Value) -> Vec<ClaudeCodeScopedUsageWindow> {
+    let mut windows = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(limits) = data.get("limits").and_then(Value::as_array) {
+        for limit in limits {
+            let Some(limit) = limit.as_object() else {
+                continue;
+            };
+            let kind = normalize_claude_limit_token(limit.get("kind"));
+            let group = normalize_claude_limit_token(limit.get("group"));
+            let is_weekly_scoped = matches!(
+                kind.as_deref(),
+                Some("weekly_scoped" | "weekly_model_scoped")
+            ) || (kind.as_deref() == Some("model_scoped")
+                && group.as_deref() == Some("weekly"));
+            if !is_weekly_scoped
+                || group.as_deref().is_some_and(|group| group != "weekly")
+                || limit
+                    .get("is_active")
+                    .or_else(|| limit.get("isActive"))
+                    .and_then(Value::as_bool)
+                    == Some(false)
+            {
+                continue;
+            }
+
+            let Some(model) = limit
+                .get("scope")
+                .and_then(Value::as_object)
+                .and_then(|scope| scope.get("model"))
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            let Some(label) = parse_non_empty_string(model, &["display_name", "displayName"])
+            else {
+                continue;
+            };
+            let Some(percent_used) = limit.get("percent").and_then(as_f64_loose) else {
+                continue;
+            };
+            if !percent_used.is_finite() {
+                continue;
+            }
+            let model_id = parse_non_empty_string(model, &["id", "model_id", "modelId"]);
+            let identity = model_id.as_deref().unwrap_or(&label).trim().to_lowercase();
+            if !seen.insert(identity) {
+                continue;
+            }
+
+            windows.push(ClaudeCodeScopedUsageWindow {
+                label,
+                model_id,
+                window: ClaudeCodeUsageWindow {
+                    percent_used,
+                    resets_at: parse_claude_reset_at_from_object(
+                        limit,
+                        &["resets_at", "resetsAt", "reset_at", "resetAt"],
+                    ),
+                },
+            });
+        }
+    }
+
+    if !windows.iter().any(|window| {
+        window.label.to_lowercase().starts_with("fable")
+            || window
+                .model_id
+                .as_deref()
+                .is_some_and(|model_id| model_id.to_lowercase().contains("fable"))
+    }) {
+        let legacy_window = ["fable_weekly", "fable_seven_day", "seven_day_fable"]
+            .iter()
+            .find_map(|key| parse_claude_usage_window(data, key));
+        if let Some(window) = legacy_window {
+            windows.push(ClaudeCodeScopedUsageWindow {
+                label: "Fable".to_string(),
+                model_id: None,
+                window,
+            });
+        }
+    }
+
+    windows
 }
 
 fn parse_optional_string_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
@@ -719,6 +894,53 @@ mod tests {
             "seven_day_opus": { "utilization": 55 },
             "seven_day_cowork": { "utilization": 0 },
             "seven_day_omelette": { "utilization": 1 },
+            "limits": [
+                {
+                    "kind": "weekly_scoped",
+                    "group": "weekly",
+                    "percent": 68,
+                    "resets_at": "2026-06-11T00:00:00Z",
+                    "scope": {
+                        "model": {
+                            "id": "claude-fable-5",
+                            "display_name": "Fable"
+                        }
+                    }
+                },
+                {
+                    "kind": "weeklyModelScoped",
+                    "percent": "27.5",
+                    "resets_at": null,
+                    "resetAt": 1781222400,
+                    "scope": { "model": { "displayName": "Future model" } }
+                },
+                {
+                    "kind": "weekly_scoped",
+                    "percent": 99,
+                    "scope": {
+                        "model": {
+                            "id": "claude-fable-5",
+                            "display_name": "Duplicate Fable"
+                        }
+                    }
+                },
+                null,
+                "malformed",
+                { "kind": "weekly_scoped", "percent": "not-a-number" },
+                {
+                    "kind": "weekly_scoped",
+                    "percent": 80,
+                    "is_active": false,
+                    "scope": { "model": { "display_name": "Inactive" } }
+                },
+                {
+                    "kind": "weekly_scoped",
+                    "group": "monthly",
+                    "percent": 90,
+                    "scope": { "model": { "display_name": "Wrong group" } }
+                }
+            ],
+            "fable_weekly": { "utilization": 100 },
             "extra_usage": {
                 "is_enabled": false,
                 "used_credits": null,
@@ -742,6 +964,20 @@ mod tests {
         assert_eq!(usage.seven_day_cowork.unwrap().percent_used, 0.0);
         assert_eq!(usage.seven_day_omelette.unwrap().percent_used, 1.0);
 
+        assert_eq!(usage.scoped_windows.len(), 2);
+        assert_eq!(usage.scoped_windows[0].label, "Fable");
+        assert_eq!(
+            usage.scoped_windows[0].model_id.as_deref(),
+            Some("claude-fable-5")
+        );
+        assert_eq!(usage.scoped_windows[0].window.percent_used, 68.0);
+        assert_eq!(usage.scoped_windows[1].label, "Future model");
+        assert_eq!(usage.scoped_windows[1].window.percent_used, 27.5);
+        assert_eq!(
+            usage.scoped_windows[1].window.resets_at.as_deref(),
+            Some("2026-06-12T00:00:00+00:00")
+        );
+
         let extra = usage.extra_usage.unwrap();
         assert!(!extra.is_enabled);
         assert_eq!(extra.used_credits, None);
@@ -755,6 +991,22 @@ mod tests {
         assert!(usage.omelette_promotional.unwrap().is_null());
         assert_eq!(usage.tangelo.unwrap()["value"], json!(1));
         assert_eq!(usage.raw_extra["future_window"]["utilization"], json!(99.0));
+        assert!(usage.raw_extra["limits"].is_array());
+    }
+
+    #[test]
+    fn claude_code_usage_parser_supports_legacy_fable_window() {
+        let usage = ClaudeCodeProvider::parse_usage_payload(&json!({
+            "fable_weekly": {
+                "utilization": 42,
+                "resets_at": "2026-06-13T00:00:00Z"
+            }
+        }));
+
+        assert_eq!(usage.scoped_windows.len(), 1);
+        assert_eq!(usage.scoped_windows[0].label, "Fable");
+        assert_eq!(usage.scoped_windows[0].window.percent_used, 42.0);
+        assert!(!usage.raw_extra.contains_key("fable_weekly"));
     }
 
     #[test]

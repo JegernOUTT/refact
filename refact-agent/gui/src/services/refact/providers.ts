@@ -137,6 +137,12 @@ export type ClaudeCodeUsageWindow = {
   resets_at?: string | null;
 };
 
+export type ClaudeCodeScopedUsageWindow = {
+  label: string;
+  model_id?: string | null;
+  window: ClaudeCodeUsageWindow;
+};
+
 export type ClaudeCodeExtraUsage = {
   is_enabled: boolean;
   used_credits?: number | null;
@@ -154,6 +160,7 @@ export type ClaudeCodeUsageData = {
   seven_day_opus?: ClaudeCodeUsageWindow | null;
   seven_day_cowork?: ClaudeCodeUsageWindow | null;
   seven_day_omelette?: ClaudeCodeUsageWindow | null;
+  scoped_windows?: ClaudeCodeScopedUsageWindow[] | null;
   extra_usage?: ClaudeCodeExtraUsage | null;
   cinder_cove?: unknown;
   iguana_necktie?: unknown;

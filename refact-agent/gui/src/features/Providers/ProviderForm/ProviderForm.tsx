@@ -41,6 +41,7 @@ import {
   formatResetAt,
   formatUsagePercent,
   formatWindowLabel,
+  getClaudeUsageWindowRows,
 } from "../../../utils/providerQuota";
 
 export type ProviderFormProps = {
@@ -118,30 +119,6 @@ const CodexWindowRow: React.FC<{
   );
 };
 
-type ClaudeUsageWindowKey = keyof Pick<
-  ClaudeCodeUsageData,
-  | "five_hour"
-  | "seven_day"
-  | "seven_day_sonnet"
-  | "seven_day_oauth_apps"
-  | "seven_day_opus"
-  | "seven_day_cowork"
-  | "seven_day_omelette"
->;
-
-const CLAUDE_USAGE_WINDOWS: {
-  key: ClaudeUsageWindowKey;
-  label: string;
-}[] = [
-  { key: "five_hour", label: "Current session" },
-  { key: "seven_day", label: "Current week — all models" },
-  { key: "seven_day_sonnet", label: "Current week — Sonnet" },
-  { key: "seven_day_opus", label: "Current week — Opus" },
-  { key: "seven_day_oauth_apps", label: "Current week — OAuth apps" },
-  { key: "seven_day_cowork", label: "Current week — cowork" },
-  { key: "seven_day_omelette", label: "Current week — Omelette" },
-];
-
 const InfoRow: React.FC<{ label: string; value: string }> = ({
   label,
   value,
@@ -155,19 +132,7 @@ const InfoRow: React.FC<{ label: string; value: string }> = ({
 const ClaudeUsagePanel: React.FC<{ data: ClaudeCodeUsageData }> = ({
   data,
 }) => {
-  const windowRows = CLAUDE_USAGE_WINDOWS.map(({ key, label }) => ({
-    key,
-    label,
-    window: data[key],
-  })).filter(
-    (
-      row,
-    ): row is {
-      key: ClaudeUsageWindowKey;
-      label: string;
-      window: ClaudeCodeUsageWindow;
-    } => Boolean(row.window),
-  );
+  const windowRows = getClaudeUsageWindowRows(data);
 
   return (
     <Surface className={styles.usagePanel} variant="glass" animated="rise">

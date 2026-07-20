@@ -12,8 +12,6 @@ import {
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
   useGetOpenCodeUsageQuery,
-  type ClaudeCodeUsageData,
-  type ClaudeCodeUsageWindow,
   type OpenAICodexAdditionalRateLimit,
   type OpenAICodexRateLimit,
   type OpenCodeUsageData,
@@ -40,6 +38,7 @@ import {
   formatResetAt,
   formatUsagePercent,
   formatWindowLabel,
+  getClaudeUsageWindowRows,
 } from "../../../../utils/providerQuota";
 import type { DashboardBreakpoint } from "../../types";
 import type { ConversationStats } from "../../../StatsDashboard/types";
@@ -170,30 +169,6 @@ function WindowRow({
     </div>
   );
 }
-
-type ClaudeUsageWindowKey = keyof Pick<
-  ClaudeCodeUsageData,
-  | "five_hour"
-  | "seven_day"
-  | "seven_day_sonnet"
-  | "seven_day_oauth_apps"
-  | "seven_day_opus"
-  | "seven_day_cowork"
-  | "seven_day_omelette"
->;
-
-const CLAUDE_USAGE_WINDOWS: {
-  key: ClaudeUsageWindowKey;
-  label: string;
-}[] = [
-  { key: "five_hour", label: "Current session" },
-  { key: "seven_day", label: "Current week" },
-  { key: "seven_day_sonnet", label: "Sonnet week" },
-  { key: "seven_day_opus", label: "Opus week" },
-  { key: "seven_day_oauth_apps", label: "OAuth apps week" },
-  { key: "seven_day_cowork", label: "Cowork week" },
-  { key: "seven_day_omelette", label: "Omelette week" },
-];
 
 type OpenCodeUsageWindowKey = keyof Pick<
   OpenCodeUsageData,
@@ -432,19 +407,7 @@ function ClaudeCodeInstanceRow({
   );
   const data = claudeUsage?.data;
   if (!data) return null;
-  const windowRows = CLAUDE_USAGE_WINDOWS.map(({ key, label }) => ({
-    key,
-    label,
-    window: data[key],
-  })).filter(
-    (
-      row,
-    ): row is {
-      key: ClaudeUsageWindowKey;
-      label: string;
-      window: ClaudeCodeUsageWindow;
-    } => Boolean(row.window),
-  );
+  const windowRows = getClaudeUsageWindowRows(data);
   if (windowRows.length === 0 && !data.extra_usage) return null;
 
   return (
