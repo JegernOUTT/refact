@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::config_store;
-use crate::identity::{provider_identity_from_yaml, validate_provider_instance_id};
+use crate::identity::provider_identity_from_yaml;
 use crate::instance::ProviderInstance;
 use crate::traits::ProviderTrait;
 use crate::{
@@ -254,17 +254,7 @@ pub async fn save_provider_config(
 }
 
 pub async fn delete_provider_config(config_dir: &Path, name: &str) -> Result<(), String> {
-    validate_provider_instance_id(name)?;
-
-    let path = config_dir
-        .join("providers.d")
-        .join(format!("{}.yaml", name));
-    if !path.exists() {
-        return Ok(());
-    }
-    tokio::fs::remove_file(&path)
-        .await
-        .map_err(|e| format!("Failed to delete config: {}", e))
+    config_store::delete_provider_config(config_dir, name).await
 }
 
 #[cfg(test)]

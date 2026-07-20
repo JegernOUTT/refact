@@ -44,15 +44,15 @@ pub fn validate_provider_instance_id(instance_id: &str) -> Result<(), String> {
     let Some(first) = chars.next() else {
         return Err("provider instance id cannot be empty".to_string());
     };
-    if !first.is_ascii_alphanumeric() {
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
         return Err(format!(
-            "provider instance id '{}' must start with an ASCII letter or digit",
+            "provider instance id '{}' must start with a lowercase ASCII letter or digit",
             instance_id
         ));
     }
-    if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+    if !chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-') {
         return Err(format!(
-            "provider instance id '{}' contains invalid characters",
+            "provider instance id '{}' must use only lowercase ASCII letters, digits, '_' or '-'",
             instance_id
         ));
     }
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn provider_instance_id_validation_accepts_expected_shape() {
-        for id in ["openai", "openai_2", "openai-work", "A1_b-C"] {
+        for id in ["openai", "openai_2", "openai-work", "a1_b-c"] {
             validate_provider_instance_id(id).unwrap();
         }
     }
@@ -140,6 +140,8 @@ mod tests {
             "openai/2",
             "openai\\2",
             "openai 2",
+            "OpenAI",
+            "openAI_2",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
             assert!(validate_provider_instance_id(id).is_err(), "{id}");

@@ -343,8 +343,30 @@ fn should_commit_cache_guard_after_http_success(status: reqwest::StatusCode, tex
 fn openai_codex_instance_id(model_rec: &BaseModelRecord) -> Option<&str> {
     let (provider_name, _) = model_rec.id.split_once('/')?;
     (model_rec.endpoint.contains("chatgpt.com/backend-api")
-        && (provider_name == "openai_codex" || provider_name.starts_with("openai_codex_")))
+        && (provider_name == "openai_codex"
+            || model_rec
+                .extra_headers
+                .get(crate::caps::caps::MODEL_BASE_PROVIDER_HEADER)
+                .is_some_and(|base_provider| base_provider == "openai_codex")))
     .then_some(provider_name)
+}
+
+fn claude_code_instance_id(model_rec: &BaseModelRecord) -> Option<&str> {
+    let (provider_name, _) = model_rec.id.split_once('/')?;
+    (model_rec.wire_format == crate::llm::WireFormat::AnthropicMessages
+        && (provider_name == "claude_code"
+            || model_rec
+                .extra_headers
+                .get(crate::caps::caps::MODEL_BASE_PROVIDER_HEADER)
+                .is_some_and(|base_provider| base_provider == "claude_code")))
+    .then_some(provider_name)
+}
+
+fn claude_code_request_expires_at(model_rec: &BaseModelRecord) -> Option<i64> {
+    model_rec
+        .extra_headers
+        .get(crate::providers::claude_code::CLAUDE_CODE_OAUTH_EXPIRES_AT_HEADER)
+        .and_then(|expires_at| expires_at.parse::<i64>().ok())
 }
 
 fn is_openai_codex_chatgpt_backend(model_rec: &BaseModelRecord) -> bool {
@@ -401,7 +423,7 @@ fn set_bearer_authorization_header(
     access_token: &str,
 ) -> Result<(), String> {
     let auth_value = reqwest::header::HeaderValue::from_str(&format!("Bearer {access_token}"))
-        .map_err(|e| format!("OpenAI Codex refreshed token cannot be used: {e}"))?;
+        .map_err(|e| format!("Refreshed OAuth token cannot be used: {e}"))?;
     headers.insert(reqwest::header::AUTHORIZATION, auth_value);
     Ok(())
 }
@@ -495,6 +517,26 @@ async fn force_refresh_openai_codex_for_retry(
     }
 
     refresh_result
+}
+
+async fn force_refresh_claude_code_for_retry(
+    app: AppState,
+    http_client: &reqwest::Client,
+    provider_instance_id: &str,
+    status: reqwest::StatusCode,
+    current_access_token: &str,
+    current_expires_at: Option<i64>,
+) -> Result<Option<String>, String> {
+    crate::providers::oauth_refresh::force_refresh_claude_code_for_retry(
+        &app.gcx,
+        http_client,
+        provider_instance_id,
+        current_access_token,
+        current_expires_at,
+        Some(status),
+    )
+    .await
+    .map(|provider| provider.and_then(|provider| provider.resolve_auth().ok()))
 }
 
 #[derive(Default, Clone)]
@@ -2299,6 +2341,63 @@ pub async fn run_llm_stream<C: StreamCollector>(
     .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
     let mut status = response.status();
     if !status.is_success()
+        && matches!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        )
+    {
+        if let Some(provider_instance_id) = claude_code_instance_id(&params.model_rec) {
+            let refresh_outcome = tokio::select! {
+                result = force_refresh_claude_code_for_retry(
+                    app.clone(),
+                    &client,
+                    provider_instance_id,
+                    status,
+                    &params.model_rec.auth_token,
+                    claude_code_request_expires_at(&params.model_rec),
+                ) => result,
+                _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) => {
+                    return Err(LlmStreamError::new(ABORT_ERROR_MESSAGE, partial_output_emitted));
+                }
+            };
+            if let Some(new_access_token) = refresh_outcome
+                .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?
+            {
+                let mut retry_parts = HttpParts {
+                    url: http_parts.url.clone(),
+                    headers: http_parts.headers.clone(),
+                    body: http_parts.body.clone(),
+                };
+                set_bearer_authorization_header(&mut retry_parts.headers, &new_access_token)
+                    .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+                response =
+                    if let Some((response_header_timeout, max_attempts)) = header_retry_config {
+                        send_llm_http_request_with_header_timeout(
+                            &client,
+                            &retry_parts,
+                            wire_format,
+                            params.abort_flag.clone(),
+                            params.abort_notify.clone(),
+                            response_header_timeout,
+                            max_attempts,
+                        )
+                        .await
+                    } else {
+                        send_llm_http_request(
+                            &client,
+                            &retry_parts,
+                            wire_format,
+                            params.abort_flag.clone(),
+                            params.abort_notify.clone(),
+                        )
+                        .await
+                    }
+                    .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+                status = response.status();
+            }
+        }
+    }
+    if !status.is_success()
         && is_openai_codex_chatgpt_backend(&params.model_rec)
         && matches!(
             status,
@@ -2773,6 +2872,73 @@ mod tests {
         };
 
         assert_eq!(llm_http_header_retry_config(&model), None);
+    }
+
+    #[test]
+    fn claude_code_instance_id_accepts_base_and_named_instances() {
+        let model = |provider_name: &str, base_provider: &str| {
+            let mut model = BaseModelRecord {
+                id: format!("{provider_name}/claude-sonnet-4"),
+                wire_format: crate::llm::WireFormat::AnthropicMessages,
+                ..Default::default()
+            };
+            model.extra_headers.insert(
+                crate::caps::caps::MODEL_BASE_PROVIDER_HEADER.to_string(),
+                base_provider.to_string(),
+            );
+            model
+        };
+        let base = BaseModelRecord {
+            id: "claude_code/claude-sonnet-4".to_string(),
+            wire_format: crate::llm::WireFormat::AnthropicMessages,
+            ..Default::default()
+        };
+        let named = model("work", "claude_code");
+        let hyphenated = model("claude-code-work", "claude_code");
+        let plain_anthropic = BaseModelRecord {
+            id: "anthropic/claude-sonnet-4".to_string(),
+            wire_format: crate::llm::WireFormat::AnthropicMessages,
+            ..Default::default()
+        };
+
+        assert_eq!(claude_code_instance_id(&base), Some("claude_code"));
+        assert_eq!(claude_code_instance_id(&named), Some("work"));
+        assert_eq!(
+            claude_code_instance_id(&hyphenated),
+            Some("claude-code-work")
+        );
+        assert_eq!(claude_code_instance_id(&plain_anthropic), None);
+    }
+
+    #[test]
+    fn openai_codex_instance_id_accepts_singleton_and_arbitrary_alias() {
+        let singleton = BaseModelRecord {
+            id: "openai_codex/gpt-5.6-codex".to_string(),
+            endpoint: "https://chatgpt.com/backend-api/codex/responses".to_string(),
+            ..Default::default()
+        };
+        let mut alias = BaseModelRecord {
+            id: "codex-prod/gpt-5.6-codex".to_string(),
+            endpoint: "https://chatgpt.com/backend-api/codex/responses".to_string(),
+            ..Default::default()
+        };
+        alias.extra_headers.insert(
+            crate::caps::caps::MODEL_BASE_PROVIDER_HEADER.to_string(),
+            "openai_codex".to_string(),
+        );
+
+        assert_eq!(openai_codex_instance_id(&singleton), Some("openai_codex"));
+        assert_eq!(openai_codex_instance_id(&alias), Some("codex-prod"));
+    }
+
+    #[test]
+    fn claude_code_request_expiry_uses_internal_model_header() {
+        let mut model = BaseModelRecord::default();
+        model.extra_headers.insert(
+            crate::providers::claude_code::CLAUDE_CODE_OAUTH_EXPIRES_AT_HEADER.to_string(),
+            "12345".to_string(),
+        );
+        assert_eq!(claude_code_request_expires_at(&model), Some(12345));
     }
 
     #[test]

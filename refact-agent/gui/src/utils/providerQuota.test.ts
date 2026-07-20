@@ -34,6 +34,26 @@ describe("provider quota formatting", () => {
     );
   });
 
+  it("formats normalized Claude extra usage currency", () => {
+    const formatted = formatClaudeExtraUsage({
+      is_enabled: true,
+      used_credits: 13,
+      monthly_limit: 300,
+      utilization: 4.333,
+      currency: "USD",
+    });
+    const currency = new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 2,
+    });
+    expect(formatted).toBe(
+      `enabled · ${currency.format(13)} spent · ${currency.format(
+        300,
+      )} limit · 4% used`,
+    );
+  });
+
   it("includes model-scoped Claude usage windows", () => {
     expect(
       getClaudeUsageWindowRows({

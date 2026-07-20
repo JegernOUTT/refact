@@ -40,7 +40,7 @@ pub struct PkceSession {
     pub created_at: i64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct OAuthTokens {
     #[serde(default)]
     pub access_token: String,

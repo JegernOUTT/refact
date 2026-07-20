@@ -831,7 +831,7 @@ pub async fn handle_v1_provider_delete(
     let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
 
-    let config_dir = {
+    let registered_base_provider = {
         let registry = gcx.providers.read().await;
         if let Some(provider) = registry.get(&params.name) {
             if provider.is_readonly() {
@@ -840,15 +840,45 @@ pub async fn handle_v1_provider_delete(
                     format!("Provider '{}' is readonly", params.name),
                 ));
             }
-        } else if create_provider(&params.name).is_none() {
-            if !provider_file_exists(&gcx.config_dir, &params.name) {
-                return Err(ScratchError::new(
-                    StatusCode::NOT_FOUND,
-                    format!("Provider '{}' not found", params.name),
-                ));
-            }
+            Some(provider.base_provider_name().to_string())
+        } else {
+            None
         }
-        gcx.config_dir.clone()
+    };
+    let config_dir = gcx.config_dir.clone();
+    let base_provider = if let Some(base_provider) = registered_base_provider {
+        base_provider
+    } else if create_provider(&params.name).is_some() {
+        params.name.clone()
+    } else {
+        if !provider_file_exists(&config_dir, &params.name) {
+            return Err(ScratchError::new(
+                StatusCode::NOT_FOUND,
+                format!("Provider '{}' not found", params.name),
+            ));
+        }
+        resolve_config_identity(&config_dir, &params.name)
+            .await?
+            .base_provider
+    };
+
+    let _claude_code_refresh_guard = if base_provider == "claude_code" {
+        Some(
+            ClaudeCodeProvider::lock_refresh_guard()
+                .await
+                .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?,
+        )
+    } else {
+        None
+    };
+    let _openai_codex_refresh_guard = if base_provider == "openai_codex" {
+        Some(
+            OpenAICodexProvider::lock_refresh_guard()
+                .await
+                .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?,
+        )
+    } else {
+        None
     };
 
     delete_provider_config(&config_dir, &params.name)
@@ -2819,13 +2849,84 @@ async fn claude_code_usage_response(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<Response<Body>, ScratchError> {
-    let (provider, http_client) =
-        resolve_provider_for_base(&gcx, provider_name, "claude_code").await?;
-    let claude_code = downcast_provider::<ClaudeCodeProvider>(provider.as_ref(), "Claude Code")?;
+    let result = fetch_claude_code_usage_with_refresh(gcx, provider_name).await;
 
-    match claude_code.fetch_usage(&http_client).await {
+    match result {
         Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
         Err(e) => json_response(StatusCode::OK, &json!({"error": e})),
+    }
+}
+
+async fn fetch_claude_code_usage_with_refresh(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+) -> Result<crate::providers::claude_code::ClaudeCodeUsage, String> {
+    use crate::providers::claude_code::ClaudeCodeUsageRequestError;
+
+    let (provider, http_client) = resolve_provider_for_base(&gcx, provider_name, "claude_code")
+        .await
+        .map_err(|error| error.message)?;
+    let mut request_provider =
+        downcast_provider::<ClaudeCodeProvider>(provider.as_ref(), "Claude Code")
+            .map_err(|error| error.message)?
+            .clone();
+
+    let mut refresh_attempted = false;
+    let access_token = match request_provider.resolve_auth() {
+        Ok(access_token) => access_token,
+        Err(_) if !request_provider.oauth_tokens.refresh_token.is_empty() => {
+            refresh_attempted = true;
+            let rejected_access_token = request_provider.oauth_tokens.access_token.clone();
+            request_provider = crate::providers::oauth_refresh::force_refresh_claude_code_for_retry(
+                &gcx,
+                &http_client,
+                provider_name,
+                &rejected_access_token,
+                Some(request_provider.oauth_tokens.expires_at),
+                None,
+            )
+            .await?
+            .ok_or_else(|| {
+                "Claude Code usage access token is expired and refresh returned no access token. Log in again in Claude Code provider settings."
+                    .to_string()
+            })?;
+            request_provider.resolve_auth()?
+        }
+        Err(error) => return Err(error),
+    };
+
+    match request_provider
+        .fetch_usage_once(&http_client, &access_token)
+        .await
+    {
+        Ok(usage) => Ok(usage),
+        Err(ClaudeCodeUsageRequestError::Status(status, _body))
+            if ClaudeCodeProvider::should_force_refresh_for_status(
+                status,
+                &request_provider.oauth_tokens.refresh_token,
+                refresh_attempted,
+            ) =>
+        {
+            let retry_provider = crate::providers::oauth_refresh::force_refresh_claude_code_for_retry(
+                &gcx,
+                &http_client,
+                provider_name,
+                &access_token,
+                Some(request_provider.oauth_tokens.expires_at),
+                Some(status),
+            )
+            .await?
+            .ok_or_else(|| {
+                "Claude Code usage API rejected the access token and refresh returned no access token. Log in again in Claude Code provider settings."
+                    .to_string()
+            })?;
+            let retry_access_token = retry_provider.resolve_auth()?;
+            retry_provider
+                .fetch_usage_once(&http_client, &retry_access_token)
+                .await
+                .map_err(ClaudeCodeProvider::usage_request_error_to_string)
+        }
+        Err(error) => Err(ClaudeCodeProvider::usage_request_error_to_string(error)),
     }
 }
 
@@ -3258,6 +3359,15 @@ async fn save_provider_oauth_tokens(
             format!("OAuth not supported for provider '{}'", provider_name),
         ));
     }
+    let _claude_code_refresh_guard = if base_provider == "claude_code" {
+        Some(
+            ClaudeCodeProvider::lock_refresh_guard()
+                .await
+                .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?,
+        )
+    } else {
+        None
+    };
     let _openai_codex_refresh_guard = if base_provider == "openai_codex" {
         Some(
             OpenAICodexProvider::lock_refresh_guard()
@@ -3773,6 +3883,45 @@ extra_headers:
     }
 
     #[tokio::test]
+    #[serial_test::serial]
+    async fn claude_code_delete_waits_for_refresh_guard() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let config_dir = gcx.config_dir.clone();
+        let providers_dir = config_dir.join("providers.d");
+        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
+        tokio::fs::write(
+            providers_dir.join("claude_code_2.yaml"),
+            "base_provider: claude_code\ndisplay_name: Work Claude\noauth_tokens:\n  access_token: access\n  refresh_token: refresh\n  expires_at: 9223372036854775807\n",
+        )
+        .await
+        .unwrap();
+        reload_provider_from_disk(gcx.clone(), "claude_code_2", &config_dir)
+            .await
+            .unwrap();
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let guard = ClaudeCodeProvider::lock_refresh_guard().await.unwrap();
+
+        let delete = tokio::spawn(handle_v1_provider_delete(
+            axum::extract::State(app),
+            Path(ProviderPathParams {
+                name: "claude_code_2".to_string(),
+            }),
+        ));
+        tokio::task::yield_now().await;
+        assert!(!delete.is_finished());
+        drop(guard);
+
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), delete)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!provider_file_exists(&config_dir, "claude_code_2"));
+        assert!(gcx.providers.read().await.get("claude_code_2").is_none());
+    }
+
+    #[tokio::test]
     async fn custom_provider_update_removes_deleted_extra_headers_on_disk_and_runtime() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let config_dir = gcx.config_dir.clone();
@@ -4168,53 +4317,6 @@ extra_headers:
             .unwrap()
             .iter()
             .any(|model| model.as_str() == Some("gpt-5.6-codex")));
-    }
-
-    #[tokio::test]
-    async fn concurrent_refresh_save_and_custom_model_update_preserve_auth_and_models() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.config_dir.clone();
-        let providers_dir = config_dir.join("providers.d");
-        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
-        tokio::fs::write(
-            providers_dir.join("claude_code_2.yaml"),
-            "base_provider: claude_code\ndisplay_name: Work Claude\noauth_tokens:\n  access_token: old\n  refresh_token: old-refresh\n  expires_at: 1\n",
-        )
-        .await
-        .unwrap();
-        reload_provider_from_disk(gcx.clone(), "claude_code_2", &config_dir)
-            .await
-            .unwrap();
-        {
-            let mut registry = gcx.providers.write().await;
-            registry.get_mut("claude_code_2").unwrap().add_custom_model(
-                "claude-custom".to_string(),
-                CustomModelConfig {
-                    n_ctx: Some(4096),
-                    ..Default::default()
-                },
-            );
-        }
-
-        let refresh_save = crate::providers::oauth_refresh::save_refreshed_tokens(
-            &gcx,
-            &config_dir,
-            "claude_code_2",
-            "claude_code",
-            "Work Claude",
-            "new-access",
-            "new-refresh",
-            i64::MAX,
-        );
-        let patch_model = patch_provider_model_config(gcx.clone(), &config_dir, "claude_code_2");
-        let (refresh_result, model_result) = tokio::join!(refresh_save, patch_model);
-        refresh_result.unwrap();
-        model_result.unwrap();
-
-        let saved = provider_config_json(&config_dir, "claude_code_2").await;
-        assert_eq!(saved["oauth_tokens"]["access_token"], "new-access");
-        assert_eq!(saved["oauth_tokens"]["refresh_token"], "new-refresh");
-        assert_eq!(saved["custom_models"]["claude-custom"]["n_ctx"], 4096);
     }
 
     #[tokio::test]

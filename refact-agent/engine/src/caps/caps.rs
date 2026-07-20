@@ -17,6 +17,7 @@ use crate::caps::model_caps::{
 use refact_core::provider_types::AvailableModel;
 
 const PROVIDER_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+pub(crate) const MODEL_BASE_PROVIDER_HEADER: &str = "x-refact-internal-base-provider";
 
 pub use refact_core::llm_types::{
     BaseModelRecord, EmbeddingModelRecord, HasBaseModelRecord, WireFormat, default_embedding_batch,
@@ -267,6 +268,14 @@ fn build_chat_model_record(
         )
     };
 
+    let mut extra_headers = runtime_extra_headers.clone();
+    if let Some(base_provider) = base_provider_names.first() {
+        extra_headers.insert(
+            MODEL_BASE_PROVIDER_HEADER.to_string(),
+            base_provider.clone(),
+        );
+    }
+
     ChatModelRecord {
         base: BaseModelRecord {
             n_ctx,
@@ -280,7 +289,7 @@ fn build_chat_model_record(
             api_key: runtime_api_key.to_string(),
             auth_token: runtime_auth_token.to_string(),
             tokenizer_api_key: runtime_tokenizer_api_key.to_string(),
-            extra_headers: runtime_extra_headers.clone(),
+            extra_headers,
             similar_models: Vec::new(),
             tokenizer,
             enabled: model.enabled,
@@ -1301,6 +1310,14 @@ mod tests {
 
         assert_eq!(record.base.id, "openai_2/gpt-4.1");
         assert_eq!(record.base.n_ctx, 128_000);
+        assert_eq!(
+            record
+                .base
+                .extra_headers
+                .get(MODEL_BASE_PROVIDER_HEADER)
+                .map(String::as_str),
+            Some("openai")
+        );
         assert_eq!(record.base.tokenizer, "openai-tokenizer");
         assert!(record.supports_tools);
         assert!(record.supports_strict_tools);

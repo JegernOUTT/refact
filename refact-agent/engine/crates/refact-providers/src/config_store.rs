@@ -112,6 +112,18 @@ pub async fn write_provider_config(
     write_provider_config_value(&path, &settings).await
 }
 
+pub async fn delete_provider_config(config_dir: &Path, instance_id: &str) -> Result<(), String> {
+    validate_provider_instance_id(instance_id)?;
+    let path = provider_config_path(config_dir, instance_id);
+    let lock = provider_config_lock(&path);
+    let _guard = lock.lock().await;
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Failed to delete config: {}", error)),
+    }
+}
+
 pub async fn update_provider_config_with<E, F, M>(
     config_dir: &Path,
     instance_id: &str,
@@ -156,4 +168,24 @@ where
     F: FnOnce(Option<serde_yaml::Value>) -> Result<serde_yaml::Value, String>,
 {
     update_provider_config_with(config_dir, instance_id, |error| error, update).await
+}
+
+pub async fn update_provider_config_if<F>(
+    config_dir: &Path,
+    instance_id: &str,
+    update: F,
+) -> Result<Option<serde_yaml::Value>, String>
+where
+    F: FnOnce(Option<serde_yaml::Value>) -> Result<Option<serde_yaml::Value>, String>,
+{
+    validate_provider_instance_id(instance_id)?;
+    let path = provider_config_path(config_dir, instance_id);
+    let lock = provider_config_lock(&path);
+    let _guard = lock.lock().await;
+    let existing = read_provider_config_value(&path).await?;
+    let Some(updated) = update(existing)? else {
+        return Ok(None);
+    };
+    write_provider_config_value(&path, &updated).await?;
+    Ok(Some(updated))
 }

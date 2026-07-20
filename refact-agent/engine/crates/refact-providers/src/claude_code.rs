@@ -1,8 +1,10 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use tokio::sync::{Mutex as AMutex, MutexGuard};
 
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
@@ -14,6 +16,12 @@ use crate::traits::{
 };
 
 const SUPPORTS_CACHE_CONTROL: bool = true;
+pub const CLAUDE_CODE_OAUTH_EXPIRES_AT_HEADER: &str =
+    "x-refact-internal-claude-code-oauth-expires-at";
+
+lazy_static::lazy_static! {
+    static ref CLAUDE_CODE_REFRESH_GUARD: AMutex<()> = AMutex::new(());
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClaudeCodeProvider {
@@ -27,6 +35,12 @@ pub struct ClaudeCodeProvider {
 }
 
 impl ClaudeCodeProvider {
+    pub async fn lock_refresh_guard() -> Result<MutexGuard<'static, ()>, String> {
+        tokio::time::timeout(Duration::from_secs(30), CLAUDE_CODE_REFRESH_GUARD.lock())
+            .await
+            .map_err(|_| "Claude Code OAuth refresh guard timed out".to_string())
+    }
+
     fn needs_refresh_on_start(expires_at: i64) -> bool {
         const REFRESH_BEFORE_EXPIRY_MS: i64 = 5 * 60 * 1000;
         if expires_at == 0 {
@@ -92,7 +106,7 @@ impl ClaudeCodeProvider {
 
     /// Subscription-only auth: returns the in-app OAuth access token for this
     /// provider instance, or an actionable error if not logged in / expired.
-    fn resolve_auth(&self) -> Result<String, String> {
+    pub fn resolve_auth(&self) -> Result<String, String> {
         if self.oauth_tokens.access_token.is_empty() {
             return Err("Claude Code: not logged in for this provider instance. \
                 Click 'Login with Anthropic' in provider settings."
@@ -102,6 +116,86 @@ impl ClaudeCodeProvider {
             return Err("Claude Code: OAuth token expired — refresh needed.".to_string());
         }
         Ok(self.oauth_tokens.access_token.clone())
+    }
+
+    pub fn should_force_refresh_for_status(
+        status: reqwest::StatusCode,
+        refresh_token: &str,
+        already_attempted: bool,
+    ) -> bool {
+        !already_attempted
+            && !refresh_token.is_empty()
+            && matches!(
+                status,
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            )
+    }
+
+    pub fn access_token_changed_since_rejection(
+        &self,
+        rejected_access_token: &str,
+    ) -> Option<String> {
+        (!self.oauth_tokens.access_token.is_empty()
+            && self.oauth_tokens.access_token != rejected_access_token)
+            .then(|| self.oauth_tokens.access_token.clone())
+    }
+
+    pub fn auth_state_matches(&self, tokens: &OAuthTokens) -> bool {
+        &self.oauth_tokens == tokens
+    }
+
+    pub fn update_auth_state_from_if_current(
+        &mut self,
+        source: &ClaudeCodeProvider,
+        previous_tokens: &OAuthTokens,
+    ) -> bool {
+        if source.auth_state_matches(previous_tokens) || !self.auth_state_matches(previous_tokens) {
+            return false;
+        }
+        self.oauth_tokens = source.oauth_tokens.clone();
+        true
+    }
+
+    pub async fn refresh_access_token_and_persist(
+        &mut self,
+        http_client: &reqwest::Client,
+        config_dir: &std::path::Path,
+        instance_id: &str,
+    ) -> Result<Option<String>, String> {
+        if self.oauth_tokens.refresh_token.is_empty() {
+            return Ok(None);
+        }
+
+        let refreshed = match crate::claude_code_oauth::refresh_access_token(
+            http_client,
+            &self.oauth_tokens.refresh_token,
+        )
+        .await
+        {
+            Ok(refreshed) => refreshed,
+            Err(error) if crate::oauth_refresh::is_permanent_refresh_error(&error) => {
+                crate::oauth_refresh::mark_invalid_refresh_token(
+                    instance_id,
+                    &self.oauth_tokens.refresh_token,
+                );
+                self.oauth_tokens = OAuthTokens::default();
+                self.save_oauth_tokens_config(config_dir, instance_id)
+                    .await?;
+                return Err(format!(
+                    "Claude Code OAuth refresh token is invalid. Please log in again in Claude Code provider settings: {}",
+                    error
+                ));
+            }
+            Err(error) => {
+                return Err(format!("Claude Code OAuth refresh failed: {}", error));
+            }
+        };
+
+        let access_token = refreshed.access_token.clone();
+        self.oauth_tokens = refreshed;
+        self.save_oauth_tokens_config(config_dir, instance_id)
+            .await?;
+        Ok((!access_token.is_empty()).then_some(access_token))
     }
 }
 
@@ -146,34 +240,58 @@ pub struct ClaudeCodeUsage {
     pub raw_extra: Map<String, Value>,
 }
 
+pub enum ClaudeCodeUsageRequestError {
+    Status(reqwest::StatusCode, String),
+    Other(String),
+}
+
 impl ClaudeCodeProvider {
     pub async fn fetch_usage(
         &self,
         http_client: &reqwest::Client,
     ) -> Result<ClaudeCodeUsage, String> {
         let token = self.resolve_auth()?;
+        self.fetch_usage_once(http_client, &token)
+            .await
+            .map_err(Self::usage_request_error_to_string)
+    }
 
+    pub async fn fetch_usage_once(
+        &self,
+        http_client: &reqwest::Client,
+        access_token: &str,
+    ) -> Result<ClaudeCodeUsage, ClaudeCodeUsageRequestError> {
         let resp = http_client
             .get("https://api.anthropic.com/api/oauth/usage")
-            .header("Authorization", format!("Bearer {}", token))
+            .header("Authorization", format!("Bearer {}", access_token))
             .header("anthropic-beta", "oauth-2025-04-20")
             .send()
             .await
-            .map_err(|e| format!("Request failed: {}", e))?;
+            .map_err(|error| {
+                ClaudeCodeUsageRequestError::Other(format!("Request failed: {}", error))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             let truncated: String = body.chars().take(512).collect();
-            return Err(format!("Usage API returned {}: {}", status, truncated));
+            return Err(ClaudeCodeUsageRequestError::Status(status, truncated));
         }
 
-        let root: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse usage response: {}", e))?;
+        let root: serde_json::Value = resp.json().await.map_err(|error| {
+            ClaudeCodeUsageRequestError::Other(format!("Failed to parse usage response: {}", error))
+        })?;
 
         Ok(Self::parse_usage_payload(&root))
+    }
+
+    pub fn usage_request_error_to_string(error: ClaudeCodeUsageRequestError) -> String {
+        match error {
+            ClaudeCodeUsageRequestError::Status(status, body) => {
+                format!("Usage API returned {}: {}", status, body)
+            }
+            ClaudeCodeUsageRequestError::Other(message) => message,
+        }
     }
 
     fn parse_usage_payload(root: &Value) -> ClaudeCodeUsage {
@@ -428,8 +546,14 @@ fn parse_claude_extra_usage(e: &Value) -> Option<ClaudeCodeExtraUsage> {
             .get("is_enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        used_credits: obj.get("used_credits").and_then(as_f64_loose),
-        monthly_limit: obj.get("monthly_limit").and_then(as_f64_loose),
+        used_credits: obj
+            .get("used_credits")
+            .and_then(as_f64_loose)
+            .map(|value| value / 100.0),
+        monthly_limit: obj
+            .get("monthly_limit")
+            .and_then(as_f64_loose)
+            .map(|value| value / 100.0),
         utilization: obj.get("utilization").and_then(as_f64_loose),
         currency: parse_optional_string_field(obj, "currency"),
         disabled_reason: parse_optional_string_field(obj, "disabled_reason"),
@@ -523,6 +647,12 @@ available:
 
         let has_auth = !auth_token.is_empty();
 
+        let mut extra_headers = HashMap::new();
+        extra_headers.insert(
+            CLAUDE_CODE_OAUTH_EXPIRES_AT_HEADER.to_string(),
+            self.oauth_tokens.expires_at.to_string(),
+        );
+
         Ok(ProviderRuntime {
             name: self.name().to_string(),
             display_name: self.display_name().to_string(),
@@ -535,7 +665,7 @@ available:
             api_key: String::new(),
             auth_token,
             tokenizer_api_key: String::new(),
-            extra_headers: HashMap::new(),
+            extra_headers,
             supports_cache_control: SUPPORTS_CACHE_CONTROL,
             chat_models: Vec::new(),
             completion_models: Vec::new(),
@@ -688,6 +818,7 @@ available:
             return Ok(());
         }
 
+        let _guard = Self::lock_refresh_guard().await?;
         tracing::info!("Claude Code: refreshing OAuth token on startup");
         let refreshed = match crate::claude_code_oauth::refresh_access_token(
             http_client,
@@ -944,7 +1075,7 @@ mod tests {
             "extra_usage": {
                 "is_enabled": false,
                 "used_credits": null,
-                "monthly_limit": "25.5",
+                "monthly_limit": "2550",
                 "utilization": "4.5",
                 "currency": "USD",
                 "disabled_reason": "admin_disabled"
@@ -1007,6 +1138,84 @@ mod tests {
         assert_eq!(usage.scoped_windows[0].label, "Fable");
         assert_eq!(usage.scoped_windows[0].window.percent_used, 42.0);
         assert!(!usage.raw_extra.contains_key("fable_weekly"));
+    }
+
+    #[test]
+    fn claude_code_extra_usage_converts_minor_currency_units() {
+        let usage = ClaudeCodeProvider::parse_usage_payload(&json!({
+            "extra_usage": {
+                "is_enabled": true,
+                "used_credits": 1300,
+                "monthly_limit": 30000,
+                "utilization": 4.333,
+                "currency": "USD"
+            }
+        }));
+
+        let extra = usage.extra_usage.unwrap();
+        assert_eq!(extra.used_credits, Some(13.0));
+        assert_eq!(extra.monthly_limit, Some(300.0));
+        assert_eq!(extra.utilization, Some(4.333));
+    }
+
+    #[test]
+    fn claude_code_auth_state_update_is_compare_and_swap() {
+        let previous_tokens = OAuthTokens {
+            access_token: "old-access".to_string(),
+            refresh_token: "old-refresh".to_string(),
+            expires_at: 1,
+        };
+        let mut current = ClaudeCodeProvider {
+            oauth_tokens: previous_tokens.clone(),
+            enabled_models: vec!["keep-model".to_string()],
+            ..Default::default()
+        };
+        let refreshed = ClaudeCodeProvider {
+            oauth_tokens: OAuthTokens {
+                access_token: "new-access".to_string(),
+                refresh_token: "new-refresh".to_string(),
+                expires_at: 2,
+            },
+            enabled_models: vec!["clobber-model".to_string()],
+            ..Default::default()
+        };
+
+        assert!(current.update_auth_state_from_if_current(&refreshed, &previous_tokens));
+        assert_eq!(current.oauth_tokens, refreshed.oauth_tokens);
+        assert_eq!(current.enabled_models, vec!["keep-model".to_string()]);
+
+        current.oauth_tokens.access_token = "newer-login".to_string();
+        assert!(!current.update_auth_state_from_if_current(&refreshed, &previous_tokens));
+        assert_eq!(current.oauth_tokens.access_token, "newer-login");
+    }
+
+    #[test]
+    fn claude_code_auth_rejection_refresh_is_bounded() {
+        assert!(ClaudeCodeProvider::should_force_refresh_for_status(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "refresh",
+            false,
+        ));
+        assert!(ClaudeCodeProvider::should_force_refresh_for_status(
+            reqwest::StatusCode::FORBIDDEN,
+            "refresh",
+            false,
+        ));
+        assert!(!ClaudeCodeProvider::should_force_refresh_for_status(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "refresh",
+            true,
+        ));
+        assert!(!ClaudeCodeProvider::should_force_refresh_for_status(
+            reqwest::StatusCode::BAD_REQUEST,
+            "refresh",
+            false,
+        ));
+        assert!(!ClaudeCodeProvider::should_force_refresh_for_status(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "",
+            false,
+        ));
     }
 
     #[test]
