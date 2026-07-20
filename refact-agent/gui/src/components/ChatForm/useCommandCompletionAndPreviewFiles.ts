@@ -23,6 +23,8 @@ import {
 } from "../../features/Chat/Thread";
 import { formatMessagesForLsp } from "../../features/Chat/Thread/utils";
 
+const EMPTY_MESSAGES: ReturnType<typeof selectMessagesById> = [];
+
 function useGetCommandCompletionQuery(
   query: string,
   cursor: number,
@@ -81,12 +83,15 @@ function useGetCommandPreviewQuery(
   query: string,
 ): (ChatContextFile | string)[] {
   const hasCaps = useHasCaps();
+  const hasPreviewQuery = query.trim().length > 0;
   const chatId = useThreadId();
   const attachedImages = useAppSelector((state) =>
     selectThreadImagesById(state, chatId),
   );
 
-  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
+  const messages = useAppSelector((state) =>
+    hasPreviewQuery ? selectMessagesById(state, chatId) : EMPTY_MESSAGES,
+  );
   const currentThreadMode = useAppSelector((state) =>
     selectThreadModeById(state, chatId),
   );
@@ -117,10 +122,10 @@ function useGetCommandPreviewQuery(
     };
   }, [query, attachedImages]);
 
-  const messagesToSend: LspChatMessage[] = formatMessagesForLsp([
-    ...messages,
-    userMessage,
-  ]);
+  const messagesToSend: LspChatMessage[] = useMemo(
+    () => formatMessagesForLsp([...messages, userMessage]),
+    [messages, userMessage],
+  );
 
   const metaToSend: ChatMeta = {
     chat_id: chatId,
@@ -130,11 +135,11 @@ function useGetCommandPreviewQuery(
   const { data } = commandsApi.useGetCommandPreviewQuery(
     { messages: messagesToSend, meta: metaToSend, model: currentModel },
     {
-      skip: !hasCaps,
+      skip: !hasCaps || !hasPreviewQuery,
     },
   );
 
-  if (!data) return [];
+  if (!hasPreviewQuery || !data) return [];
   return data.files;
 }
 

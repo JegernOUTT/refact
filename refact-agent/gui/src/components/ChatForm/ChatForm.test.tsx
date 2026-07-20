@@ -8,6 +8,7 @@ import { fireEvent, screen } from "@testing-library/react";
 import { render, waitFor } from "../../utils/test-utils";
 import { ChatForm, ChatFormProps } from "./ChatForm";
 import { createDefaultChatState } from "../../utils/test-utils";
+import { applyChatEvent } from "../../features/Chat/Thread";
 
 import {
   server,
@@ -335,6 +336,47 @@ describe("ChatForm", () => {
         document.querySelectorAll('[aria-label^="File: codegen.ts"]').length,
       ).toBe(1);
     });
+  });
+
+  test("does not request command preview for an empty composer", async () => {
+    const previewSpy = vi.fn();
+    server.use(
+      http.post("*/v1/at-command-preview", () => {
+        previewSpy();
+        return HttpResponse.json({
+          messages: [],
+          current_context: 0,
+          number_context: 10,
+        });
+      }),
+    );
+
+    const chat = chatStateWithThread({
+      messages: [{ role: "user", content: "Existing transcript" }],
+    });
+    const { store } = render(<App />, {
+      preloadedState: {
+        chat,
+        ...engineConfigState,
+      },
+    });
+
+    await new Promise((resolve) => window.setTimeout(resolve, 600));
+    expect(previewSpy).not.toHaveBeenCalled();
+
+    const threadId = chat.current_thread_id;
+    store.dispatch(
+      applyChatEvent({
+        chat_id: threadId,
+        seq: "2",
+        type: "message_added",
+        message: { role: "assistant", content: "Streaming update" },
+        index: 1,
+      }),
+    );
+
+    await new Promise((resolve) => window.setTimeout(resolve, 600));
+    expect(previewSpy).not.toHaveBeenCalled();
   });
 
   test.skip("does not submit while IME composition is active", async () => {
