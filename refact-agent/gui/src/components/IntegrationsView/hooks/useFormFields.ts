@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   IntegrationField,
   IntegrationPrimitive,
@@ -6,8 +6,13 @@ import type {
 
 export const useFormFields = (
   fields?: Record<string, IntegrationField<NonNullable<IntegrationPrimitive>>>,
+  resetKey?: string,
 ) => {
   const [areExtraFieldsRevealed, setAreExtraFieldsRevealed] = useState(false);
+
+  useEffect(() => {
+    setAreExtraFieldsRevealed(false);
+  }, [resetKey]);
 
   const { importantFields, extraFields } = useMemo(() => {
     if (!fields) {

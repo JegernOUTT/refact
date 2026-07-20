@@ -4,15 +4,17 @@ fields:
     f_desc: "The URL of the MCP server endpoint, e.g., 'https://api.example.com/mcp'."
   headers:
     f_type: string_to_string_map
-    f_desc: "HTTP headers to include in requests to the MCP server."
+    f_desc: "Advanced HTTP header overrides. After you apply the URL, Refact probes the server for advertised OAuth."
     f_default:
       User-Agent: "Refact.ai (+https://github.com/JegernOUTT/refact)"
       Accept: "application/json, text/event-stream"
       Content-Type: application/json
+    f_extra: true
   auth_type:
     f_type: string_short
-    f_desc: "Authentication type: none, bearer, oauth2_client_credentials, or oauth2_pkce."
+    f_desc: "Advanced authentication override: none, bearer, oauth2_client_credentials, or oauth2_pkce. Leave as none to discover server OAuth automatically."
     f_default: "none"
+    f_extra: true
   bearer_token:
     f_type: string_long
     f_desc: "Bearer token for auth_type=bearer."
@@ -20,21 +22,24 @@ fields:
     f_extra: {"password": true}
   oauth2_client_id:
     f_type: string_short
-    f_desc: "OAuth2 client ID for auth_type=oauth2_client_credentials."
+    f_desc: "Advanced OAuth2 client ID override for auth_type=oauth2_client_credentials."
     f_default: ""
+    f_extra: true
   oauth2_client_secret:
     f_type: string_long
-    f_desc: "OAuth2 client secret for auth_type=oauth2_client_credentials."
+    f_desc: "Advanced OAuth2 client secret override for auth_type=oauth2_client_credentials."
     f_default: ""
     f_extra: {"password": true}
   oauth2_token_url:
     f_type: string_long
-    f_desc: "OAuth2 token endpoint URL for auth_type=oauth2_client_credentials."
+    f_desc: "Advanced OAuth2 token endpoint override for auth_type=oauth2_client_credentials."
     f_default: ""
+    f_extra: true
   oauth2_scopes:
     f_type: string_long
-    f_desc: "OAuth2 scopes (comma-separated) for auth_type=oauth2_client_credentials."
+    f_desc: "Advanced OAuth2 scope override for auth_type=oauth2_client_credentials."
     f_default: ""
+    f_extra: true
   init_timeout:
     f_type: string_short
     f_desc: "Timeout in seconds for MCP server initialization."
@@ -63,6 +68,7 @@ fields:
 description: |
   You can add here an MCP (Model Context Protocol) server, connecting via Streamable HTTP transport.
   This is the modern MCP transport protocol that supersedes the legacy SSE transport.
+  Enter the server URL and apply the configuration. Refact will probe for advertised OAuth and offer a browser login automatically when available.
   Read more about MCP here: https://www.anthropic.com/news/model-context-protocol
 available:
   on_your_laptop_possible: true

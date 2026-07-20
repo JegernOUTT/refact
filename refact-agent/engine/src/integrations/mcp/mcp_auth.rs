@@ -2006,4 +2006,28 @@ mod tests {
             Some("oauth2_pkce")
         );
     }
+
+    #[test]
+    fn test_remote_mcp_schemas_keep_manual_auth_in_advanced_configuration() {
+        for schema in [
+            include_str!("mcp_http_schema.yaml"),
+            include_str!("mcp_sse_schema.yaml"),
+        ] {
+            let value: serde_yaml::Value = serde_yaml::from_str(schema).unwrap();
+            let fields = value.get("fields").and_then(|v| v.as_mapping()).unwrap();
+
+            for (field_name, field) in fields {
+                let field_name = field_name.as_str().unwrap();
+                let field = field.as_mapping().unwrap();
+                let is_advanced = field
+                    .get(serde_yaml::Value::String("f_extra".to_string()))
+                    .is_some();
+                assert_eq!(
+                    is_advanced,
+                    field_name != "url",
+                    "only url should be visible before advanced configuration is opened"
+                );
+            }
+        }
+    }
 }

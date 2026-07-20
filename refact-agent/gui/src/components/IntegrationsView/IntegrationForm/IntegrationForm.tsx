@@ -52,7 +52,7 @@ export const IntegrationForm: FC<IntegrationFormProps> = ({
     extraFields,
     areExtraFieldsRevealed,
     toggleExtraFields,
-  } = useFormFields(integration.data?.integr_schema.fields);
+  } = useFormFields(integration.data?.integr_schema.fields, integrationPath);
 
   const schema = integration.data?.integr_schema;
   const values = integration.data?.integr_values;
