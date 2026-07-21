@@ -1,6 +1,10 @@
 import * as RadioGroupPrimitive from "@radix-ui/react-radio-group";
 import { FC, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useGetAutoNameMutation } from "../../../services/refact/mcpMarketplace";
+import {
+  useGetAutoNameMutation,
+  useWizardProbeMutation,
+} from "../../../services/refact/mcpMarketplace";
+import type { WizardProbeResponse } from "../../../services/refact/mcpMarketplace";
 import { NotConfiguredIntegrationWithIconRecord } from "../../../services/refact";
 import { validateSnakeCase } from "../../../utils/validateSnakeCase";
 import { createProjectLabelsWithConflictMarkers } from "../../../utils/createProjectLabelsWithConflictMarkers";
@@ -17,20 +21,6 @@ type MCPSetupWizardProps = {
   ) => void;
 };
 
-function detectTransport(input: string): "stdio" | "http" | "sse" {
-  const trimmed = input.trim();
-  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-    return "http";
-  }
-  return "stdio";
-}
-
-function getConfigPrefix(transport: "stdio" | "http" | "sse"): string {
-  if (transport === "http") return "mcp_http_";
-  if (transport === "sse") return "mcp_sse_";
-  return "mcp_stdio_";
-}
-
 export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
   integration,
   onSubmit,
@@ -39,6 +29,8 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
   const [suggestedName, setSuggestedName] = useState("");
   const [nameError, setNameError] = useState("");
   const [transport, setTransport] = useState<"stdio" | "http" | "sse">("stdio");
+  const [apiPrefix, setApiPrefix] = useState("mcp_stdio_");
+  const [detecting, setDetecting] = useState(false);
   const [useSSE, setUseSSE] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [selectedConfigPath, setSelectedConfigPath] = useState(
@@ -46,7 +38,39 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
   );
 
   const [getAutoName] = useGetAutoNameMutation();
+  const [wizardProbe, { isLoading: isProbing }] = useWizardProbeMutation();
+  const [probeResult, setProbeResult] = useState<WizardProbeResponse | null>(
+    null,
+  );
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleTestConnection = async () => {
+    setProbeResult(null);
+    try {
+      const result = await wizardProbe({ input: input.trim() }).unwrap();
+      setProbeResult(result);
+    } catch {
+      setProbeResult({ transport: "stdio", error: "Probe request failed" });
+    }
+  };
+
+  const probeSummary = (() => {
+    if (!probeResult) return null;
+    if (probeResult.error) return `✗ ${probeResult.error}`;
+    if (probeResult.transport === "http") {
+      if (!probeResult.reachable) return "✗ Server is not reachable";
+      if (probeResult.needs_auth && probeResult.oauth_available) {
+        return "✓ Reachable — OAuth login will be offered after setup";
+      }
+      if (probeResult.needs_auth) {
+        return "⚠ Reachable, but requires manual authentication";
+      }
+      return "✓ Server is reachable";
+    }
+    return probeResult.command_found
+      ? `✓ Command found: ${probeResult.resolved_path ?? ""}`
+      : "✗ Command not found in PATH";
+  })();
 
   const pathOptions = useMemo(() => {
     return integration.integr_config_path.map((configPath, index) => ({
@@ -63,7 +87,9 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
   }, [pathOptions]);
 
   const effectiveTransport = useSSE ? "sse" : transport;
-  const configPrefix = getConfigPrefix(effectiveTransport);
+  // Transport detection lives in the engine (/v1/mcp/auto-name); the only
+  // local decision is the explicit legacy-SSE override toggle.
+  const configPrefix = useSSE ? "mcp_sse_" : apiPrefix;
 
   const transportLabel =
     effectiveTransport === "stdio"
@@ -75,11 +101,7 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
   const handleInputChange = useCallback(
     (value: string) => {
       setInput(value);
-      const detected = detectTransport(value);
-      setTransport(detected);
-      if (detected !== "stdio") {
-        setUseSSE(false);
-      }
+      setProbeResult(null);
 
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
@@ -87,8 +109,12 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
 
       if (!value.trim()) {
         setSuggestedName("");
+        setTransport("stdio");
+        setApiPrefix("mcp_stdio_");
+        setDetecting(false);
         return;
       }
+      setDetecting(true);
 
       debounceRef.current = setTimeout(() => {
         void getAutoName({ input: value.trim() })
@@ -96,14 +122,28 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
           .then((result) => {
             setSuggestedName(result.suggested_name);
             setTransport(result.transport);
+            setApiPrefix(result.config_prefix);
+            if (result.transport !== "stdio") {
+              setUseSSE(false);
+            }
             if (!validateSnakeCase(result.suggested_name)) {
               setNameError("The name must be in snake_case!");
             } else {
               setNameError("");
             }
+            setDetecting(false);
           })
           .catch(() => {
+            // Offline fallback only: the engine endpoint is the source of
+            // truth for detection, this mirrors its trivial URL check.
             const trimmed = value.trim();
+            const isUrl =
+              trimmed.startsWith("http://") || trimmed.startsWith("https://");
+            setTransport(isUrl ? "http" : "stdio");
+            setApiPrefix(isUrl ? "mcp_http_" : "mcp_stdio_");
+            if (isUrl) {
+              setUseSSE(false);
+            }
             const fallback = trimmed
               .split(/[^a-z0-9]+/i)
               .filter(Boolean)
@@ -112,6 +152,7 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
               .replace(/^_+|_+$/g, "")
               .slice(0, 40);
             setSuggestedName(fallback || "mcp_server");
+            setDetecting(false);
           });
       }, 300);
     },
@@ -151,7 +192,8 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
     });
   };
 
-  const canSubmit = !!input.trim() && !!suggestedName && !nameError;
+  const canSubmit =
+    !!input.trim() && !!suggestedName && !nameError && !detecting;
 
   return (
     <Surface
@@ -242,6 +284,22 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
           </div>
         </div>
       )}
+
+      <div className={styles.detectedStack}>
+        {input.trim() && (
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={isProbing}
+            loading={isProbing}
+            onClick={() => void handleTestConnection()}
+            data-testid="mcp-wizard-test"
+          >
+            Test connection
+          </Button>
+        )}
+        {probeSummary && <p className={styles.text}>{probeSummary}</p>}
+      </div>
 
       <Button
         type="button"

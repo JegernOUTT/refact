@@ -80,6 +80,12 @@ pub struct MCPOAuthTokens {
     pub client_secret: Option<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// The MCP server URL these tokens were minted for. Tokens are refused
+    /// when the config's URL changes so credentials for one server can never
+    /// be replayed against another. Legacy configs without this field keep
+    /// working and get bound on the next token refresh/login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_url: Option<String>,
 }
 
 pub async fn save_tokens_to_config(
@@ -254,6 +260,10 @@ pub struct MCPAuthProbeResult {
     pub suggested_scopes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub www_authenticate: Option<WwwAuthenticateInfo>,
+    /// HTTP status of the probe request, for callers that need to distinguish
+    /// a healthy server from a reachable-but-broken endpoint (404/500/...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
 }
 
 pub async fn probe_mcp_auth(
@@ -343,6 +353,7 @@ pub async fn probe_mcp_auth(
             oauth_available: false,
             suggested_scopes: vec![],
             www_authenticate,
+            http_status: Some(status.as_u16()),
         });
     }
 
@@ -379,6 +390,7 @@ pub async fn probe_mcp_auth(
         oauth_available,
         suggested_scopes,
         www_authenticate,
+        http_status: Some(status.as_u16()),
     })
 }
 
@@ -599,6 +611,14 @@ pub async fn create_auth_manager_from_tokens(
     mcp_url: &str,
     tokens: &MCPOAuthTokens,
 ) -> Result<AuthorizationManager, String> {
+    if let Some(bound) = tokens.bound_url.as_deref() {
+        if bound != mcp_url {
+            return Err(format!(
+                "stored OAuth tokens are bound to '{}' but the config now points at '{}'; re-authentication required",
+                bound, mcp_url
+            ));
+        }
+    }
     let mut state = OAuthState::new(mcp_url, None)
         .await
         .map_err(|e| format!("create OAuth state: {}", e))?;
@@ -630,6 +650,7 @@ fn tokens_from_response(
     old_refresh_token: &str,
     response: &StandardTokenResponse<VendorExtraTokenFields, BasicTokenType>,
     old_scopes: &[String],
+    bound_url: Option<String>,
 ) -> MCPOAuthTokens {
     let access_token = response.access_token().secret().to_string();
     let refresh_token = response
@@ -663,6 +684,7 @@ fn tokens_from_response(
         client_id,
         client_secret: None,
         scopes,
+        bound_url,
     }
 }
 
@@ -728,6 +750,7 @@ pub async fn mcp_oauth_refresh_task(
                     &tokens.refresh_token,
                     &token_response,
                     &tokens.scopes,
+                    tokens.bound_url.clone(),
                 );
                 if let Err(e) = save_tokens_to_config(&config_path, &new_tokens).await {
                     warn!(
@@ -759,6 +782,7 @@ pub async fn mcp_oauth_refresh_task(
 struct PendingOAuthSession {
     oauth_state: Arc<AMutex<OAuthState>>,
     config_path: String,
+    mcp_url: String,
     created_at: SystemTime,
     state_param: String,
     scopes: Vec<String>,
@@ -818,6 +842,7 @@ impl MCPOAuthSessionManager {
             PendingOAuthSession {
                 oauth_state: Arc::new(AMutex::new(state)),
                 config_path: config_path.to_string(),
+                mcp_url: mcp_url.to_string(),
                 created_at: SystemTime::now(),
                 state_param: state_param.clone(),
                 scopes: scopes.iter().map(|s| s.to_string()).collect(),
@@ -834,7 +859,7 @@ impl MCPOAuthSessionManager {
         session_id: &str,
         code: &str,
     ) -> Result<(MCPOAuthTokens, String), String> {
-        let (oauth_state_arc, config_path, state_param, old_scopes) = {
+        let (oauth_state_arc, config_path, mcp_url, state_param, old_scopes) = {
             let sessions = pending_sessions().lock().await;
             let session = sessions
                 .get(session_id)
@@ -842,6 +867,7 @@ impl MCPOAuthSessionManager {
             (
                 session.oauth_state.clone(),
                 session.config_path.clone(),
+                session.mcp_url.clone(),
                 session.state_param.clone(),
                 session.scopes.clone(),
             )
@@ -913,6 +939,7 @@ impl MCPOAuthSessionManager {
                 client_id,
                 client_secret: None,
                 scopes,
+                bound_url: Some(mcp_url),
             },
             config_path,
         ))
@@ -1043,6 +1070,7 @@ mod tests {
             client_id: "client_123".to_string(),
             client_secret: Some("secret_456".to_string()),
             scopes: vec!["read".to_string(), "write".to_string()],
+            bound_url: Some("https://mcp.example.com/mcp".to_string()),
         };
         let json = serde_json::to_value(&tokens).unwrap();
         let roundtrip: MCPOAuthTokens = serde_json::from_value(json).unwrap();
@@ -1058,6 +1086,7 @@ mod tests {
             client_id: "client_123".to_string(),
             client_secret: None,
             scopes: vec!["openid".to_string()],
+            bound_url: None,
         };
         let yaml = serde_yaml::to_string(&tokens).unwrap();
         let roundtrip: MCPOAuthTokens = serde_yaml::from_str(&yaml).unwrap();
@@ -1078,6 +1107,7 @@ mod tests {
             client_id: "my_client".to_string(),
             client_secret: None,
             scopes: vec!["mcp".to_string()],
+            bound_url: None,
         };
 
         save_tokens_to_config(&path, &tokens).await.unwrap();
@@ -1115,6 +1145,7 @@ mod tests {
             client_id: "new_client".to_string(),
             client_secret: None,
             scopes: vec![],
+            bound_url: None,
         };
 
         save_tokens_to_config(&path, &new_tokens).await.unwrap();
@@ -1137,6 +1168,7 @@ mod tests {
                 PendingOAuthSession {
                     oauth_state: Arc::new(AMutex::new(old_state)),
                     config_path: "/tmp/test.yaml".to_string(),
+                    mcp_url: "http://127.0.0.1:1/mcp".to_string(),
                     created_at: SystemTime::now() - Duration::from_secs(700),
                     state_param: String::new(),
                     scopes: vec![],
@@ -1152,6 +1184,7 @@ mod tests {
                 PendingOAuthSession {
                     oauth_state: Arc::new(AMutex::new(fresh_state)),
                     config_path: "/tmp/test.yaml".to_string(),
+                    mcp_url: "http://127.0.0.1:1/mcp".to_string(),
                     created_at: SystemTime::now(),
                     state_param: String::new(),
                     scopes: vec![],
@@ -1263,6 +1296,7 @@ mod tests {
             client_id: "client_id_1".to_string(),
             client_secret: None,
             scopes: vec![],
+            bound_url: None,
         };
         let response = reconstruct_token_response(&tokens).unwrap();
         assert_eq!(response.access_token().secret(), "access_abc123");
@@ -1278,6 +1312,7 @@ mod tests {
             client_id: "client_id_1".to_string(),
             client_secret: None,
             scopes: vec![],
+            bound_url: None,
         };
         let response = reconstruct_token_response(&tokens).unwrap();
         assert_eq!(response.access_token().secret(), "access_expired");
@@ -1297,6 +1332,7 @@ mod tests {
             client_id: "client".to_string(),
             client_secret: None,
             scopes: vec![],
+            bound_url: None,
         };
         let response = reconstruct_token_response(&tokens).unwrap();
         assert_eq!(response.access_token().secret(), "access_only");
@@ -1334,6 +1370,7 @@ mod tests {
             client_id: "client_123".to_string(),
             client_secret: None,
             scopes: vec!["mcp".to_string()],
+            bound_url: None,
         };
         save_tokens_to_config(&path, &tokens).await.unwrap();
 
@@ -1353,6 +1390,7 @@ mod tests {
             client_id: "client".to_string(),
             client_secret: None,
             scopes: vec![],
+            bound_url: None,
         };
         assert!(
             !needs_refresh(&tokens),
@@ -1373,6 +1411,7 @@ mod tests {
             client_id: "client".to_string(),
             client_secret: None,
             scopes: vec![],
+            bound_url: None,
         };
         assert!(
             needs_refresh(&tokens),
@@ -1393,6 +1432,7 @@ mod tests {
             client_id: "client".to_string(),
             client_secret: None,
             scopes: vec![],
+            bound_url: None,
         };
         assert!(
             !needs_refresh(&tokens),
@@ -1413,6 +1453,7 @@ mod tests {
             client_id: "client".to_string(),
             client_secret: None,
             scopes: vec![],
+            bound_url: None,
         };
         assert!(
             needs_refresh(&tokens),
@@ -1430,9 +1471,21 @@ mod tests {
             client_id: "client".to_string(),
             client_secret: None,
             scopes: vec![],
+            bound_url: None,
         };
         let response = reconstruct_token_response(&tokens).unwrap();
-        let new_tokens = tokens_from_response("client".to_string(), "old_refresh", &response, &[]);
+        let new_tokens = tokens_from_response(
+            "client".to_string(),
+            "old_refresh",
+            &response,
+            &[],
+            Some("https://mcp.example.com/mcp".to_string()),
+        );
+        assert_eq!(
+            new_tokens.bound_url.as_deref(),
+            Some("https://mcp.example.com/mcp"),
+            "refresh must preserve the URL binding"
+        );
         assert_eq!(new_tokens.access_token, "old_access");
         assert_eq!(
             new_tokens.refresh_token, "old_refresh",
@@ -1505,6 +1558,7 @@ mod tests {
                 PendingOAuthSession {
                     oauth_state: Arc::new(AMutex::new(old_state)),
                     config_path: "/tmp/test.yaml".to_string(),
+                    mcp_url: "http://127.0.0.1:1/mcp".to_string(),
                     created_at: SystemTime::now() - Duration::from_secs(700),
                     state_param: stale_state.clone(),
                     scopes: vec![],
@@ -1591,6 +1645,7 @@ mod tests {
             client_id: "client".to_string(),
             client_secret: None,
             scopes: vec![],
+            bound_url: None,
         };
         let response = reconstruct_token_response(&tokens).unwrap();
         let expires_in = response
@@ -1617,6 +1672,7 @@ mod tests {
             client_id: "client".to_string(),
             client_secret: None,
             scopes: vec![],
+            bound_url: None,
         };
         let response = reconstruct_token_response(&tokens).unwrap();
         let expires_in = response
@@ -1639,6 +1695,7 @@ mod tests {
             client_id: "client".to_string(),
             client_secret: None,
             scopes: vec![],
+            bound_url: None,
         };
         let response = reconstruct_token_response(&tokens).unwrap();
         assert!(
@@ -1658,6 +1715,7 @@ mod tests {
             PendingOAuthSession {
                 oauth_state: Arc::new(AMutex::new(oauth_state)),
                 config_path: "/tmp/test.yaml".to_string(),
+                mcp_url: "http://127.0.0.1:1/mcp".to_string(),
                 created_at: SystemTime::now(),
                 state_param: state_val.clone(),
                 scopes: vec![],
@@ -1698,6 +1756,7 @@ mod tests {
             PendingOAuthSession {
                 oauth_state: Arc::new(AMutex::new(oauth_state)),
                 config_path: "/tmp/test.yaml".to_string(),
+                mcp_url: "http://127.0.0.1:1/mcp".to_string(),
                 created_at: SystemTime::now(),
                 state_param: state_val.clone(),
                 scopes: vec![],

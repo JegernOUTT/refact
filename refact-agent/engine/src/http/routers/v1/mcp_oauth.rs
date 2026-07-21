@@ -628,6 +628,7 @@ mod tests {
             client_id: "cid".to_string(),
             client_secret: None,
             scopes: vec!["read".to_string()],
+            bound_url: None,
         };
         save_tokens_to_config(&path, &tokens).await.unwrap();
         assert!(load_tokens_from_config(&path).await.is_some());

@@ -1028,8 +1028,13 @@ async fn install_marketplace_action(
 ) -> Result<Value, String> {
     match market_kind {
         MarketKind::Mcp => {
-            let body = serde_json::to_vec(&serde_json::json!({ "server_id": item_id }))
-                .map_err(|e| e.to_string())?;
+            // Buddy installs are agent-initiated with no env-var form; allow the
+            // config to be written with empty required env vars so the user can
+            // fill credentials in the integration form afterwards.
+            let body = serde_json::to_vec(
+                &serde_json::json!({ "server_id": item_id, "allow_incomplete": true }),
+            )
+            .map_err(|e| e.to_string())?;
             crate::http::routers::v1::mcp_marketplace::install_mcp_marketplace_server(
                 app.gcx.clone(),
                 hyper::body::Bytes::from(body),

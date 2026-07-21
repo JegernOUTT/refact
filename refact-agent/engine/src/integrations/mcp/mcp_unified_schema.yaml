@@ -17,7 +17,7 @@ fields:
     f_extra: true
   auth_type:
     f_type: string_short
-    f_desc: "Authentication: none, bearer, or oauth2 (for URL-based servers)."
+    f_desc: "Authentication for URL-based servers: none, bearer, oauth2_client_credentials, or oauth2_pkce. Leave as none to discover server OAuth automatically."
     f_default: "none"
     f_extra: true
   bearer_token:

@@ -117,6 +117,130 @@ pub trait MCPTransportInitializer: Send + Sync {
     }
 }
 
+/// Server prefix used for model-facing tool names, derived from the config
+/// filename. stdio configs keep the historical short form
+/// (`mcp_stdio_github.yaml` -> `mcp_github`); remote configs keep their full
+/// stem (`mcp_http_github.yaml` -> `mcp_http_github`) so a stdio and a remote
+/// config for the same server never publish colliding tool names.
+pub fn tool_name_server_prefix(config_path: &str) -> String {
+    let yaml_name = std::path::Path::new(config_path)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    if let Some(stripped) = yaml_name.strip_prefix("mcp_stdio_") {
+        return format!("mcp_{}", stripped);
+    }
+    yaml_name.to_string()
+}
+
+/// Process-scoped cache of the last successfully listed tool catalog per
+/// config path. Lets `mcp_integr_tools` expose tools while a slow server is
+/// still starting or reconnecting; execution against a not-yet-connected
+/// client fails gracefully in `ToolMCP::tool_execute`.
+static MCP_TOOL_CATALOG_CACHE: std::sync::Mutex<
+    Option<HashMap<String, (std::time::Instant, Vec<rmcp::model::Tool>)>>,
+> = std::sync::Mutex::new(None);
+const TOOL_CATALOG_CACHE_TTL_SECS: u64 = 1800;
+const TOOL_CATALOG_CACHE_MAX_ENTRIES: usize = 64;
+
+pub fn tool_catalog_cache_store(config_path: &str, tools: &[rmcp::model::Tool]) {
+    let mut guard = match MCP_TOOL_CATALOG_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let cache = guard.get_or_insert_with(HashMap::new);
+    if cache.len() >= TOOL_CATALOG_CACHE_MAX_ENTRIES && !cache.contains_key(config_path) {
+        if let Some(oldest_key) = cache
+            .iter()
+            .min_by_key(|(_, (at, _))| *at)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest_key);
+        }
+    }
+    cache.insert(
+        config_path.to_string(),
+        (std::time::Instant::now(), tools.to_vec()),
+    );
+}
+
+pub fn tool_catalog_cache_get(config_path: &str) -> Option<Vec<rmcp::model::Tool>> {
+    let mut guard = match MCP_TOOL_CATALOG_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let cache = guard.as_mut()?;
+    match cache.get(config_path) {
+        Some((at, tools)) if at.elapsed() < Duration::from_secs(TOOL_CATALOG_CACHE_TTL_SECS) => {
+            Some(tools.clone())
+        }
+        Some(_) => {
+            cache.remove(config_path);
+            None
+        }
+        None => None,
+    }
+}
+
+pub fn tool_catalog_cache_remove(config_path: &str) {
+    let mut guard = match MCP_TOOL_CATALOG_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(cache) = guard.as_mut() {
+        cache.remove(config_path);
+    }
+}
+
+fn build_mcp_tool_boxes(
+    tools: &[rmcp::model::Tool],
+    config_path: &str,
+    common: &IntegrationCommon,
+    mcp_common: &CommonMCPSettings,
+    mcp_client: Arc<AMutex<Option<McpRunningService>>>,
+    request_timeout: u64,
+) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+    let server_prefix = tool_name_server_prefix(config_path);
+    let kept: Vec<&rmcp::model::Tool> = tools
+        .iter()
+        .filter(|tool| {
+            !mcp_common
+                .disabled_tools
+                .iter()
+                .any(|d| d == tool.name.as_ref())
+        })
+        .collect();
+    let candidates: Vec<(String, String)> = kept
+        .iter()
+        .map(|tool| {
+            (
+                super::mcp_naming::model_tool_name(&server_prefix, tool.name.as_ref()),
+                tool.name.to_string(),
+            )
+        })
+        .collect();
+    let resolved_names = super::mcp_naming::disambiguate_model_tool_names(candidates);
+
+    kept.into_iter()
+        .zip(resolved_names)
+        .map(|(tool, model_name)| {
+            let auto_approve = mcp_common
+                .auto_approve_tools
+                .iter()
+                .any(|a| a == tool.name.as_ref());
+            Box::new(ToolMCP {
+                model_name,
+                common: common.clone(),
+                config_path: config_path.to_string(),
+                mcp_client: mcp_client.clone(),
+                mcp_tool: tool.clone(),
+                request_timeout,
+                auto_approve,
+            }) as Box<dyn crate::tools::tools_description::Tool + Send>
+        })
+        .collect()
+}
+
 pub async fn mcp_integr_tools(
     gcx_option: Option<Weak<GlobalContext>>,
     config_path: &str,
@@ -153,8 +277,7 @@ pub async fn mcp_integr_tools(
         }
     };
 
-    let mut result: Vec<Box<dyn crate::tools::tools_description::Tool + Send>> = vec![];
-    {
+    let result: Vec<Box<dyn crate::tools::tools_description::Tool + Send>> = {
         let mut session_locked = session.lock().await;
         let session_downcasted: &mut SessionMCP =
             match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
@@ -167,32 +290,61 @@ pub async fn mcp_integr_tools(
                     return vec![];
                 }
             };
-        if session_downcasted.mcp_client.is_none() {
-            tracing::error!("No mcp_client for {:?}, strange (2)", session_key);
-            return vec![];
-        }
-        for tool in session_downcasted.mcp_tools.iter() {
-            if mcp_common
-                .disabled_tools
-                .iter()
-                .any(|d| d == tool.name.as_ref())
-            {
-                continue;
+        let startup_in_progress = matches!(
+            session_downcasted.connection_status,
+            MCPConnectionStatus::Connecting | MCPConnectionStatus::Reconnecting { .. }
+        );
+        match &session_downcasted.mcp_client {
+            Some(mcp_client) if !startup_in_progress => {
+                // Connected (or terminally failed) sessions are authoritative,
+                // including a legitimately empty tool list.
+                build_mcp_tool_boxes(
+                    &session_downcasted.mcp_tools,
+                    config_path,
+                    common,
+                    mcp_common,
+                    mcp_client.clone(),
+                    request_timeout,
+                )
             }
-            let auto_approve = mcp_common
-                .auto_approve_tools
-                .iter()
-                .any(|a| a == tool.name.as_ref());
-            result.push(Box::new(ToolMCP {
-                common: common.clone(),
-                config_path: config_path.to_string(),
-                mcp_client: session_downcasted.mcp_client.clone().unwrap(),
-                mcp_tool: tool.clone(),
-                request_timeout,
-                auto_approve,
-            }));
+            _ if !startup_in_progress => {
+                tracing::error!("No mcp_client for {:?}, strange (2)", session_key);
+                vec![]
+            }
+            _ => {
+                // Startup or reconnect in progress: serve the last known tool
+                // catalog so the model does not lose the server's tools while
+                // it is coming up. Execution before the client is ready fails
+                // gracefully inside ToolMCP::tool_execute.
+                match tool_catalog_cache_get(config_path) {
+                    Some(cached_tools) => {
+                        tracing::info!(
+                            "serving {} cached MCP tools for {} while the server is starting",
+                            cached_tools.len(),
+                            session_key
+                        );
+                        let placeholder_client: Arc<AMutex<Option<McpRunningService>>> =
+                            session_downcasted
+                                .mcp_client
+                                .clone()
+                                .unwrap_or_else(|| Arc::new(AMutex::new(None)));
+                        build_mcp_tool_boxes(
+                            &cached_tools,
+                            config_path,
+                            common,
+                            mcp_common,
+                            placeholder_client,
+                            request_timeout,
+                        )
+                    }
+                    None => {
+                        tracing::error!("No mcp_client for {:?}, strange (2)", session_key);
+                        vec![]
+                    }
+                }
+            }
         }
-    }
+    };
 
     result
 }
@@ -381,6 +533,144 @@ where
     }
 }
 
+/// Connects to a remote MCP server over the modern Streamable HTTP transport.
+/// Shared by the `mcp_http_*` (primary) and `mcp_sse_*` (fallback) integrations.
+pub(crate) async fn serve_streamable_http_transport(
+    url: String,
+    headers: HashMap<String, String>,
+    auth: MCPAuthSettings,
+    config_path: String,
+    transport_name: &'static str,
+    init_timeout: u64,
+    logs: Arc<AMutex<Vec<String>>>,
+    debug_name: String,
+    session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
+    handler: McpClientHandler,
+) -> Option<McpRunningService> {
+    use rmcp::transport::common::client_side_sse::ExponentialBackoff;
+    use rmcp::transport::streamable_http_client::{
+        StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+    };
+
+    let mut retry_config = ExponentialBackoff::default();
+    retry_config.max_times = Some(3);
+    retry_config.base_duration = Duration::from_millis(500);
+    let mut config = StreamableHttpClientTransportConfig::with_uri(url.trim());
+    config.retry_config = Arc::new(retry_config);
+
+    if auth.auth_type == AuthType::Oauth2Pkce {
+        let auth_client = build_auth_client_for_mcp(
+            url.trim(),
+            &headers,
+            &config_path,
+            transport_name,
+            logs.clone(),
+            &debug_name,
+            session,
+        )
+        .await?;
+        let transport = StreamableHttpClientTransport::with_client(auth_client, config);
+        serve_client_with_timeout(
+            rmcp::serve_client(handler, transport),
+            init_timeout,
+            transport_name,
+            logs,
+            &debug_name,
+        )
+        .await
+    } else {
+        let client = build_reqwest_client_for_mcp(
+            url.trim(),
+            &headers,
+            &auth,
+            transport_name,
+            logs.clone(),
+            &debug_name,
+        )
+        .await?;
+        let transport = StreamableHttpClientTransport::with_client(client, config);
+        serve_client_with_timeout(
+            rmcp::serve_client(handler, transport),
+            init_timeout,
+            transport_name,
+            logs,
+            &debug_name,
+        )
+        .await
+    }
+}
+
+/// Connects to a remote MCP server over the legacy HTTP+SSE transport.
+/// Shared by the `mcp_sse_*` (primary) and `mcp_http_*` (fallback) integrations.
+pub(crate) async fn serve_legacy_sse_transport(
+    url: String,
+    headers: HashMap<String, String>,
+    auth: MCPAuthSettings,
+    config_path: String,
+    init_timeout: u64,
+    logs: Arc<AMutex<Vec<String>>>,
+    debug_name: String,
+    session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
+    handler: McpClientHandler,
+) -> Option<McpRunningService> {
+    let client = super::mcp_sse_transport::build_legacy_sse_client(
+        url.trim(),
+        &headers,
+        &auth,
+        &config_path,
+        logs.clone(),
+        &debug_name,
+        session,
+    )
+    .await?;
+    let transport = match super::mcp_sse_transport::connect_legacy_sse(
+        client,
+        url.trim(),
+        logs.clone(),
+        &debug_name,
+    )
+    .await
+    {
+        Ok(transport) => transport,
+        Err(e) => {
+            let msg = format!("Failed to open legacy SSE connection: {}", e);
+            tracing::error!("{msg} for {debug_name}");
+            add_log_entry(logs, msg).await;
+            return None;
+        }
+    };
+    // rustc's auto-trait solver rejects awaiting rmcp's serve future directly
+    // inside this (already async-trait-boxed) fn with a spurious
+    // "implementation of `Send` is not general enough" error. Spawning the
+    // serve future checks Send at a monomorphic boundary and sidesteps that;
+    // the task is awaited (or aborted on timeout) right here, so it never
+    // outlives this call.
+    let serve_handle = tokio::spawn(rmcp::serve_client(handler, transport));
+    let abort_handle = serve_handle.abort_handle();
+    match timeout(Duration::from_secs(init_timeout), serve_handle).await {
+        Ok(Ok(Ok(client))) => Some(client),
+        Ok(Ok(Err(e))) => {
+            let msg = format!("Failed to init legacy SSE server: {}", e);
+            tracing::error!("{msg} for {debug_name}");
+            add_log_entry(logs, msg).await;
+            None
+        }
+        Ok(Err(join_error)) => {
+            let msg = format!("Legacy SSE init task failed: {}", join_error);
+            tracing::error!("{msg} for {debug_name}");
+            add_log_entry(logs, msg).await;
+            None
+        }
+        Err(_) => {
+            abort_handle.abort();
+            let msg = format!("Request timed out after {} seconds", init_timeout);
+            tracing::error!("{msg} for {debug_name}");
+            add_log_entry(logs, msg).await;
+            None
+        }
+    }
+}
+
 macro_rules! impl_mcp_integration_trait {
     ($struct_name:ty, $schema_yaml:expr) => {
         #[async_trait::async_trait]
@@ -505,6 +795,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 auth_manager: None,
                 auth_status: MCPAuthStatus::NotApplicable,
                 oauth_refresh_task_handle: None,
+                resource_index_task: None,
                 oauth_probe: None,
                 sampling_session_approved: false,
                 active_progress: Vec::new(),
@@ -574,6 +865,9 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
 
             if let Some(mcp_client) = mcp_client {
                 cancel_mcp_client(&debug_name, mcp_client, logs.clone()).await;
+                // The config changed: the old tool catalog must not be served
+                // for the new configuration.
+                tool_catalog_cache_remove(&config_path);
                 tokio::spawn(super::mcp_resources::remove_indexed_resources(
                     gcx_weak.clone(),
                     config_path.clone(),
@@ -792,6 +1086,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
 
                 let arc = Arc::new(AMutex::new(Some(client)));
                 session_downcasted.mcp_client = Some(arc.clone());
+                tool_catalog_cache_store(&config_path, &tools);
                 session_downcasted.mcp_tools = tools;
                 session_downcasted.mcp_resources = resources.clone();
                 session_downcasted.mcp_prompts = prompts;
@@ -805,13 +1100,23 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             };
 
             if !resources.is_empty() {
-                tokio::spawn(super::mcp_resources::index_mcp_resources(
+                let index_task = tokio::spawn(super::mcp_resources::index_mcp_resources(
                     gcx_weak.clone(),
                     config_path.clone(),
                     peer,
                     resources,
                     logs.clone(),
                 ));
+                let mut session_locked = session_arc_clone.lock().await;
+                if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>()
+                {
+                    if let Some(previous) = mcp_session
+                        .resource_index_task
+                        .replace(index_task.abort_handle())
+                    {
+                        previous.abort();
+                    }
+                }
             }
 
             log(
@@ -1100,6 +1405,7 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
                 Some(s) => s,
                 None => return false,
             };
+            tool_catalog_cache_store(&mcp_session.config_path, &tools);
             mcp_session.mcp_tools = tools;
             mcp_session.connection_status = MCPConnectionStatus::Connected;
             mcp_session.last_successful_connection = Some(Instant::now());
@@ -1151,6 +1457,7 @@ mod tests {
                 auth_manager: None,
                 auth_status: super::super::session_mcp::MCPAuthStatus::NotApplicable,
                 oauth_refresh_task_handle: None,
+                resource_index_task: None,
                 oauth_probe: None,
                 sampling_session_approved: false,
                 active_progress: Vec::new(),
@@ -1197,6 +1504,7 @@ mod tests {
             .unwrap();
         session.launched_cfg = config.clone();
         session.oauth_probe = Some(super::super::mcp_auth::MCPAuthProbeResult {
+            http_status: Some(401),
             needs_auth: true,
             oauth_available: true,
             suggested_scopes: vec!["mcp.read".to_string()],
@@ -1240,6 +1548,7 @@ mod tests {
             client_id: "client".to_string(),
             client_secret: None,
             scopes: vec!["mcp.read".to_string()],
+            bound_url: None,
         });
         let with_tokens = serde_json::to_value(&settings).unwrap();
         assert!(!should_skip_mcp_session_setup(session, &with_tokens));
@@ -1436,6 +1745,7 @@ mod tests {
                 auth_manager: None,
                 auth_status: MCPAuthStatus::NotApplicable,
                 oauth_refresh_task_handle: None,
+                resource_index_task: None,
                 oauth_probe: None,
                 sampling_session_approved: false,
                 active_progress: Vec::new(),

@@ -49,6 +49,9 @@ fn truncate_to_byte_limit(text: String, limit: usize, total_bytes: &mut usize) -
 }
 
 pub struct ToolMCP {
+    /// Model-facing tool name, precomputed with collision disambiguation in
+    /// `mcp_integr_tools` (see `mcp_naming::disambiguate_model_tool_names`).
+    pub model_name: String,
     pub common: IntegrationCommon,
     pub config_path: String,
     pub mcp_client: Arc<AMutex<Option<McpRunningService>>>,
@@ -392,17 +395,7 @@ impl Tool for ToolMCP {
             serde_json::Value::Object(map)
         };
 
-        let tool_name = {
-            let yaml_name = std::path::Path::new(&self.config_path)
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .unwrap_or("unknown");
-            let shortened_yaml_name = super::mcp_naming::shorten_config_name(yaml_name);
-            format!("{}_{}", shortened_yaml_name, self.mcp_tool.name)
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                .collect::<String>()
-        };
+        let tool_name = self.model_name.clone();
 
         let annotations = self
             .mcp_tool
@@ -473,6 +466,7 @@ mod tests {
         }))
         .expect("failed to deserialize McpTool");
         ToolMCP {
+            model_name: "mcp_server_test_tool".to_string(),
             common: crate::integrations::integr_abstract::IntegrationCommon::default(),
             config_path: "mcp_stdio_server.yaml".to_string(),
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -494,6 +488,7 @@ mod tests {
         }))
         .expect("failed to deserialize McpTool");
         ToolMCP {
+            model_name: "mcp_server_test_tool".to_string(),
             common: crate::integrations::integr_abstract::IntegrationCommon::default(),
             config_path: "mcp_stdio_server.yaml".to_string(),
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),

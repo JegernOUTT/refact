@@ -15,7 +15,13 @@ mod tests {
             "inputSchema": schema
         }))
         .expect("failed to deserialize McpTool");
+        let server_prefix =
+            crate::integrations::mcp::integr_mcp_common::tool_name_server_prefix(config_path);
         ToolMCP {
+            model_name: crate::integrations::mcp::mcp_naming::model_tool_name(
+                &server_prefix,
+                tool_name,
+            ),
             common: IntegrationCommon::default(),
             config_path: config_path.to_string(),
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -37,14 +43,16 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_naming_sse_prefix_stripped() {
+    fn test_mcp_naming_sse_keeps_full_stem() {
+        // Remote configs keep their full stem so a stdio and an sse config for
+        // the same server never publish colliding tool names.
         let tool = make_tool_mcp(
             "mcp_sse_myserver.yaml",
             json!({"type": "object", "properties": {}}),
             "fetch_data",
         );
         let desc = tool.tool_description();
-        assert_eq!(desc.name, "mcp_myserver_fetch_data");
+        assert_eq!(desc.name, "mcp_sse_myserver_fetch_data");
     }
 
     #[test]
@@ -183,6 +191,7 @@ mod tests {
         }))
         .expect("failed to deserialize");
         let tool = ToolMCP {
+            model_name: "mcp_server_test_tool".to_string(),
             common: IntegrationCommon::default(),
             config_path: "mcp_stdio_srv.yaml".to_string(),
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -202,6 +211,7 @@ mod tests {
         }))
         .expect("failed to deserialize");
         let tool = ToolMCP {
+            model_name: "mcp_server_test_tool".to_string(),
             common: IntegrationCommon::default(),
             config_path: "mcp_stdio_srv.yaml".to_string(),
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -214,13 +224,15 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_http_prefix_stripped() {
+    fn test_mcp_http_keeps_full_stem() {
+        // Remote configs keep their full stem so a stdio and an http config
+        // for the same server never publish colliding tool names.
         let tool = make_tool_mcp(
             "mcp_http_myserver.yaml",
             json!({"type": "object", "properties": {}}),
             "do_something",
         );
         let desc = tool.tool_description();
-        assert_eq!(desc.name, "mcp_myserver_do_something");
+        assert_eq!(desc.name, "mcp_http_myserver_do_something");
     }
 }

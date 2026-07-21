@@ -587,6 +587,8 @@ fn validate_env_key(key: &str) -> bool {
 
 #[derive(Deserialize)]
 pub struct MarketplaceQuery {
+    #[serde(default)]
+    pub tag: Option<String>,
     pub source: Option<String>,
     pub q: Option<String>,
     pub page: Option<u32>,
@@ -603,6 +605,11 @@ pub async fn handle_v1_mcp_marketplace_get(
     let page = params.page.unwrap_or(1).max(1);
     let page_size = params.page_size.unwrap_or(50).min(100).max(1);
     let query = params.q.as_deref();
+    let tag_filter = params
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
 
     let config_dir = gcx.config_dir.clone();
     let (bundled, user_sources) = get_all_sources(&config_dir).await;
@@ -650,7 +657,14 @@ pub async fn handle_v1_mcp_marketplace_get(
         }
 
         let is_merged_mode = filter_source.is_none();
-        if is_merged_mode && source.source_type == SourceType::Smithery {
+        // Tag filtering must see the full result set, so fetch everything
+        // (like merged mode) whenever a tag filter is active.
+        let fetch_full_set = is_merged_mode || tag_filter.is_some();
+        let smithery_key_missing = source.source_type == SourceType::Smithery
+            && source.api_key.as_deref().map_or(true, |k| k.is_empty());
+        if is_merged_mode && smithery_key_missing {
+            // Without an API key the Smithery fetch can only fail; keep the
+            // source listed so the GUI can show its enable/configure teaser.
             let mut meta = source_to_api_json(source, *removable);
             if let Some(obj) = meta.as_object_mut() {
                 obj.insert("server_count".to_string(), json!(0));
@@ -659,14 +673,15 @@ pub async fn handle_v1_mcp_marketplace_get(
             sources_meta.push(meta);
             continue;
         }
-        // OfficialMcp IS included in merged mode (free, no API key)
+        // OfficialMcp IS included in merged mode (free, no API key);
+        // Smithery joins the merged view once its API key is configured.
 
-        let fetch_page_size = if is_merged_mode {
+        let fetch_page_size = if fetch_full_set {
             MERGED_MODE_PAGE_SIZE_CAP
         } else {
             page_size
         };
-        let fetch_page = if is_merged_mode { 1 } else { page };
+        let fetch_page = if fetch_full_set { 1 } else { page };
 
         let (page_items, total, status) = load_source_servers(
             gcx.clone(),
@@ -690,39 +705,118 @@ pub async fn handle_v1_mcp_marketplace_get(
 
     set_cache(cache);
 
-    let (final_servers, final_total) = if filter_source.is_some() {
-        let t = sources_meta
+    let (final_servers, final_total, all_tags) = if filter_source.is_some() {
+        let mut all_tags: Vec<String> = all_servers
             .iter()
-            .find(|m| m["id"].as_str() == filter_source)
-            .and_then(|m| m["server_count"].as_u64())
-            .unwrap_or(0) as u32;
-        (all_servers, t)
+            .flat_map(|s| s.server.tags.iter().cloned())
+            .collect();
+        all_tags.sort();
+        all_tags.dedup();
+        match tag_filter {
+            Some(tag) => {
+                // The full set was fetched above; filter, then paginate locally
+                // so totals and pages reflect the tag-filtered set.
+                let filtered: Vec<MarketplaceServerWithSource> = all_servers
+                    .into_iter()
+                    .filter(|s| s.server.tags.iter().any(|t| t == tag))
+                    .collect();
+                let total_count = filtered.len() as u32;
+                let start = ((page - 1) * page_size) as usize;
+                let end = (start + page_size as usize).min(filtered.len());
+                let sliced = if start < filtered.len() {
+                    filtered[start..end].to_vec()
+                } else {
+                    vec![]
+                };
+                (sliced, total_count, all_tags)
+            }
+            None => {
+                let t = sources_meta
+                    .iter()
+                    .find(|m| m["id"].as_str() == filter_source)
+                    .and_then(|m| m["server_count"].as_u64())
+                    .unwrap_or(0) as u32;
+                (all_servers, t, all_tags)
+            }
+        }
     } else {
         let mut seen_ids: HashSet<String> = HashSet::new();
         let deduped: Vec<MarketplaceServerWithSource> = all_servers
             .into_iter()
             .filter(|s| seen_ids.insert(s.server.id.clone()))
             .collect();
-        let total_count = deduped.len() as u32;
+        // The tag catalog spans the full merged set, not just the current page,
+        // so tag pills in the GUI stay stable across pagination.
+        let mut all_tags: Vec<String> = deduped
+            .iter()
+            .flat_map(|s| s.server.tags.iter().cloned())
+            .collect();
+        all_tags.sort();
+        all_tags.dedup();
+        let tagged: Vec<MarketplaceServerWithSource> = match tag_filter {
+            Some(tag) => deduped
+                .into_iter()
+                .filter(|s| s.server.tags.iter().any(|t| t == tag))
+                .collect(),
+            None => deduped,
+        };
+        let total_count = tagged.len() as u32;
         let start = ((page - 1) * page_size) as usize;
-        let end = (start + page_size as usize).min(deduped.len());
-        let sliced = if start < deduped.len() {
-            deduped[start..end].to_vec()
+        let end = (start + page_size as usize).min(tagged.len());
+        let sliced = if start < tagged.len() {
+            tagged[start..end].to_vec()
         } else {
             vec![]
         };
-        (sliced, total_count)
+        (sliced, total_count, all_tags)
     };
 
+    let servers_json: Vec<Value> = final_servers
+        .iter()
+        .map(|entry| {
+            let mut value = serde_json::to_value(entry).unwrap_or_else(|_| json!({}));
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("recipe_hash".to_string(), json!(recipe_hash(&entry.server)));
+            }
+            value
+        })
+        .collect();
+
     Ok(Json(json!({
-        "servers": final_servers,
+        "servers": servers_json,
         "sources": sources_meta,
+        "all_tags": all_tags,
         "pagination": {
             "page": page,
             "page_size": page_size,
             "total": final_total,
         },
     })))
+}
+
+/// Stable content hash of the recipe-owned parts of a marketplace server.
+/// Stored in the installed config's provenance comments; a mismatch against
+/// the source's current hash means an update is available.
+pub fn recipe_hash(server: &MarketplaceServer) -> String {
+    let sorted_pairs = |map: &HashMap<String, String>| -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> =
+            map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        pairs.sort();
+        pairs
+    };
+    let canonical = json!({
+        "transport": server.transport,
+        "command": server.install_recipe.command,
+        "url": server.install_recipe.url,
+        "env": sorted_pairs(&server.install_recipe.env),
+        "headers": sorted_pairs(&server.install_recipe.headers),
+        "args_from_env": server.install_recipe.args_from_env,
+        "confirmation_default": server.confirmation_default,
+    });
+    format!(
+        "{:016x}",
+        mcp_naming::stable_name_hash(&canonical.to_string())
+    )
 }
 
 #[derive(Deserialize)]
@@ -732,6 +826,10 @@ pub struct InstallRequest {
     pub source_id: Option<String>,
     #[serde(default)]
     pub config_overrides: Option<ConfigOverrides>,
+    /// When true, allows installing even if required env vars (recipe env keys
+    /// with an empty default, typically API keys) have no value yet.
+    #[serde(default)]
+    pub allow_incomplete: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -740,6 +838,23 @@ pub struct ConfigOverrides {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub headers: HashMap<String, String>,
+}
+
+/// Recipe env keys with an empty default value are required (they are almost
+/// always credentials). Returns the sorted list of required keys that are
+/// still empty after user overrides were merged into `merged_env`.
+pub fn compute_missing_required_env(
+    recipe_env: &HashMap<String, String>,
+    merged_env: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut missing: Vec<String> = recipe_env
+        .iter()
+        .filter(|(_, default)| default.trim().is_empty())
+        .filter(|(k, _)| merged_env.get(*k).map_or(true, |v| v.trim().is_empty()))
+        .map(|(k, _)| k.clone())
+        .collect();
+    missing.sort();
+    missing
 }
 
 async fn find_server_in_sources(
@@ -908,6 +1023,19 @@ pub async fn install_mcp_marketplace_server(
         }
     }
 
+    if !req.allow_incomplete {
+        let missing_env = compute_missing_required_env(&server.install_recipe.env, &env);
+        if !missing_env.is_empty() {
+            return Err(ScratchError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "missing required environment variables: {}; provide values in config_overrides.env or set allow_incomplete=true",
+                    missing_env.join(", ")
+                ),
+            ));
+        }
+    }
+
     let yaml_content = build_integration_yaml(&server, &env, &headers, &found_source_id);
     match tokio::fs::OpenOptions::new()
         .write(true)
@@ -923,6 +1051,15 @@ pub async fn install_mcp_marketplace_server(
                     format!("write error: {}", e),
                 )
             })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = tokio::fs::set_permissions(
+                    &config_path,
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .await;
+            }
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(ScratchError::new(
@@ -1092,25 +1229,31 @@ fn build_integration_yaml(
         serde_yaml::to_string(&serde_yaml::Value::Mapping(map)).unwrap_or_else(|_| String::new());
 
     format!(
-        "# mcp_marketplace_source: {}\n# mcp_marketplace_server: {}\n{}",
-        source_id, server.id, yaml_body
+        "# mcp_marketplace_source: {}\n# mcp_marketplace_server: {}\n# mcp_marketplace_recipe_hash: {}\n{}",
+        source_id,
+        server.id,
+        recipe_hash(server),
+        yaml_body
     )
 }
 
-fn parse_marketplace_comments(content: &str) -> (Option<String>, Option<String>) {
+fn parse_marketplace_comments(content: &str) -> (Option<String>, Option<String>, Option<String>) {
     let mut source_id = None;
     let mut server_id = None;
+    let mut installed_recipe_hash = None;
     for line in content.lines().take(10) {
         if let Some(val) = line.strip_prefix("# mcp_marketplace_source:") {
             source_id = Some(val.trim().to_string());
         } else if let Some(val) = line.strip_prefix("# mcp_marketplace_server:") {
             server_id = Some(val.trim().to_string());
+        } else if let Some(val) = line.strip_prefix("# mcp_marketplace_recipe_hash:") {
+            installed_recipe_hash = Some(val.trim().to_string());
         }
         if !line.starts_with('#') && !line.is_empty() {
             break;
         }
     }
-    (source_id, server_id)
+    (source_id, server_id, installed_recipe_hash)
 }
 
 pub async fn handle_v1_mcp_marketplace_installed(
@@ -1120,9 +1263,6 @@ pub async fn handle_v1_mcp_marketplace_installed(
     let config_dir = gcx.config_dir.clone();
     let integrations_dir = config_dir.join("integrations.d");
 
-    let bundled = bundled_index();
-    let index_ids: std::collections::HashSet<String> =
-        bundled.servers.iter().map(|s| s.id.clone()).collect();
     let mut installed = Vec::new();
 
     let read_dir = match tokio::fs::read_dir(&integrations_dir).await {
@@ -1151,28 +1291,19 @@ pub async fn handle_v1_mcp_marketplace_installed(
             Err(_) => continue,
         };
 
-        let (found_source, found_server) = parse_marketplace_comments(&content);
+        // Only configs that carry the marketplace provenance comments written at
+        // install time count as "installed from the marketplace". Filename-based
+        // guessing against the bundled index misattributed manually created
+        // configs (e.g. a hand-written mcp_stdio_github.yaml) to the bundled
+        // source, so it was removed on purpose.
+        let (found_source, found_server, found_hash) = parse_marketplace_comments(&content);
         if let (Some(src_id), Some(srv_id)) = (found_source, found_server) {
             installed.push(json!({
                 "id": srv_id,
                 "config_path": entry.path().display().to_string(),
                 "source_id": src_id,
+                "recipe_hash": found_hash,
             }));
-            continue;
-        }
-
-        for prefix in &["mcp_stdio_", "mcp_sse_", "mcp_http_"] {
-            if let Some(rest) = fname_str.strip_prefix(prefix) {
-                let id_candidate = rest.trim_end_matches(".yaml").replace('_', "-");
-                if index_ids.contains(&id_candidate) {
-                    installed.push(json!({
-                        "id": id_candidate,
-                        "config_path": entry.path().display().to_string(),
-                        "source_id": BUNDLED_SOURCE_ID,
-                    }));
-                }
-                break;
-            }
         }
     }
 
@@ -1184,188 +1315,388 @@ pub struct AutoNameRequest {
     pub input: String,
 }
 
-pub fn detect_transport(input: &str) -> &'static str {
-    let trimmed = input.trim();
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        "http"
-    } else {
-        "stdio"
-    }
-}
-
-pub fn extract_name_from_input(input: &str) -> Result<String, String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err("input is empty".to_string());
-    }
-
-    let raw = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        extract_name_from_url(trimmed)
-    } else {
-        extract_name_from_command(trimmed)
-    };
-
-    let sanitized = sanitize_name(&raw);
-    if sanitized.is_empty() {
-        return Err("could not extract a valid name from input".to_string());
-    }
-    Ok(sanitized)
-}
-
-fn extract_name_from_url(url: &str) -> String {
-    let without_scheme = url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-    let host_and_port = without_scheme.split('/').next().unwrap_or(without_scheme);
-    let host = if host_and_port.starts_with('[') {
-        host_and_port
-            .trim_start_matches('[')
-            .split(']')
-            .next()
-            .unwrap_or("mcp")
-    } else {
-        host_and_port.split(':').next().unwrap_or(host_and_port)
-    };
-
-    if host == "localhost" {
-        return "localhost".to_string();
-    }
-
-    let is_ip = host
-        .split('.')
-        .all(|seg| seg.chars().all(|c| c.is_ascii_digit()));
-    if is_ip || host.starts_with('[') {
-        return host.replace('[', "").replace(']', "").replace(':', "_");
-    }
-
-    let parts: Vec<&str> = host.split('.').collect();
-    // Country-code SLD pattern: e.g. example.co.uk, example.com.au
-    // Only trigger when last segment is 2-char country code AND second-to-last is a short
-    // known SLD (co, com, org, net, ac, gov, edu) — not for domains like mcp.myservice.io
-    if parts.len() >= 3 {
-        let last = parts[parts.len() - 1];
-        let second_last = parts[parts.len() - 2];
-        let is_country_code_sld = last.len() == 2
-            && matches!(
-                second_last,
-                "co" | "com" | "org" | "net" | "ac" | "gov" | "edu" | "or" | "ne"
-            );
-        if is_country_code_sld {
-            return parts[parts.len() - 3].to_string();
-        }
-    }
-    if parts.len() >= 2 {
-        parts[parts.len() - 2].to_string()
-    } else {
-        parts.first().copied().unwrap_or("mcp").to_string()
-    }
-}
-
-fn extract_name_from_command(cmd: &str) -> String {
-    let args: Vec<&str> = cmd.split_whitespace().collect();
-    let mut candidate = "";
-    for (i, arg) in args.iter().enumerate() {
-        if *arg == "run" || *arg == "-y" || *arg == "-i" || *arg == "--rm" || *arg == "-it" {
-            continue;
-        }
-        if arg.starts_with('-') {
-            continue;
-        }
-        if i > 0
-            && (args[i - 1] == "-e"
-                || args[i - 1] == "--env"
-                || args[i - 1] == "-p"
-                || args[i - 1] == "--port")
-        {
-            continue;
-        }
-        candidate = arg;
-        if *arg != "npx"
-            && *arg != "uvx"
-            && *arg != "docker"
-            && *arg != "node"
-            && *arg != "python"
-            && *arg != "python3"
-        {
-            break;
-        }
-    }
-    let name = candidate.rsplit('/').next().unwrap_or(candidate);
-    let name = name.trim_end_matches(".js");
-    let name = name.trim_start_matches('@');
-    let name = if let Some(slash_pos) = name.find('/') {
-        &name[slash_pos + 1..]
-    } else {
-        name
-    };
-    strip_mcp_prefixes(name)
-}
-
-fn strip_mcp_prefixes(s: &str) -> String {
-    let stripped = s
-        .trim_start_matches("mcp-server-")
-        .trim_start_matches("server-mcp-")
-        .trim_start_matches("mcp-")
-        .trim_start_matches("server-");
-    stripped.to_string()
-}
-
-fn sanitize_name(s: &str) -> String {
-    let snake: String = s
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let snake = snake.trim_matches('_').to_string();
-    let snake: String = {
-        let mut prev_underscore = false;
-        snake
-            .chars()
-            .filter(|c| {
-                if *c == '_' {
-                    if prev_underscore {
-                        return false;
-                    }
-                    prev_underscore = true;
-                } else {
-                    prev_underscore = false;
-                }
-                true
-            })
-            .collect()
-    };
-    if snake.len() > 40 {
-        snake[..40].to_string()
-    } else {
-        snake
-    }
-}
-
 pub async fn handle_v1_mcp_auto_name(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<Value>, ScratchError> {
     let req = serde_json::from_slice::<AutoNameRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
 
-    let suggested_name = extract_name_from_input(&req.input)
+    let suggested_name = mcp_naming::extract_name_from_input(&req.input)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
 
-    let transport = detect_transport(&req.input);
-    let config_prefix = match transport {
-        "http" => "mcp_http_",
-        _ => "mcp_stdio_",
-    };
+    let transport = mcp_naming::detect_transport_from_input(&req.input);
+    let config_prefix = mcp_naming::config_prefix_for_transport(transport);
 
     Ok(Json(json!({
         "suggested_name": suggested_name,
         "transport": transport,
         "config_prefix": config_prefix,
     })))
+}
+
+fn marketplace_config_path_checked(
+    gcx: &Arc<GlobalContext>,
+    config_path: &str,
+) -> Result<std::path::PathBuf, ScratchError> {
+    let path = std::path::PathBuf::from(config_path);
+    let integrations_dir = gcx.config_dir.join("integrations.d");
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| ScratchError::new(StatusCode::BAD_REQUEST, "invalid config path".into()))?;
+    let is_mcp = ["mcp_stdio_", "mcp_sse_", "mcp_http_"]
+        .iter()
+        .any(|prefix| file_name.starts_with(prefix));
+    if !is_mcp || !file_name.ends_with(".yaml") {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "config path is not a marketplace MCP config".into(),
+        ));
+    }
+    if path.parent() != Some(integrations_dir.as_path()) {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "config path is outside integrations.d".into(),
+        ));
+    }
+    // Refuse symlinks and verify the resolved location: a symlinked yaml in
+    // integrations.d must not let update/uninstall touch files elsewhere.
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                "config path is a symlink".into(),
+            ));
+        }
+        Ok(_) => {
+            let canonical_dir = std::fs::canonicalize(&integrations_dir).map_err(|e| {
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("cannot resolve integrations dir: {}", e),
+                )
+            })?;
+            let canonical_path = std::fs::canonicalize(&path).map_err(|e| {
+                ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!("cannot resolve config path: {}", e),
+                )
+            })?;
+            if canonical_path.parent() != Some(canonical_dir.as_path()) {
+                return Err(ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    "config path resolves outside integrations.d".into(),
+                ));
+            }
+        }
+        Err(_) => {
+            // File not found is handled by the callers (404 for uninstall,
+            // read error for update).
+        }
+    }
+    Ok(path)
+}
+
+async fn write_config_atomically(
+    config_path: &std::path::Path,
+    content: &str,
+) -> Result<(), ScratchError> {
+    let tmp_path = config_path.with_extension("yaml.tmp");
+    tokio::fs::write(&tmp_path, content).await.map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("write error: {}", e),
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)).await;
+    }
+    tokio::fs::rename(&tmp_path, config_path)
+        .await
+        .map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("rename error: {}", e),
+            )
+        })
+}
+
+/// Merges the current marketplace recipe into an existing installed config:
+/// recipe-owned fields (command/url/args, new env keys, new header keys) are
+/// refreshed while every user-edited value (filled env vars, timeouts,
+/// confirmation rules, auth settings, persisted oauth tokens) is preserved.
+pub fn merge_recipe_update_yaml(
+    existing_yaml: &str,
+    server: &MarketplaceServer,
+    source_id: &str,
+) -> Result<String, String> {
+    let existing: serde_yaml::Value =
+        serde_yaml::from_str(existing_yaml).map_err(|e| format!("cannot parse config: {}", e))?;
+    let existing_map = existing
+        .as_mapping()
+        .cloned()
+        .unwrap_or_else(serde_yaml::Mapping::new);
+
+    let existing_env: HashMap<String, String> = existing_map
+        .get(&serde_yaml::Value::String("env".to_string()))
+        .and_then(|v| v.as_mapping())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| {
+                    Some((
+                        k.as_str()?.to_string(),
+                        v.as_str().unwrap_or("").to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let existing_headers: HashMap<String, String> = existing_map
+        .get(&serde_yaml::Value::String("headers".to_string()))
+        .and_then(|v| v.as_mapping())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| {
+                    Some((
+                        k.as_str()?.to_string(),
+                        v.as_str().unwrap_or("").to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut merged_env = server.install_recipe.env.clone();
+    for (key, value) in &existing_env {
+        if !value.trim().is_empty() || merged_env.contains_key(key) {
+            merged_env.insert(key.clone(), value.clone());
+        }
+    }
+    let mut merged_headers = server.install_recipe.headers.clone();
+    for (key, value) in &existing_headers {
+        merged_headers.insert(key.clone(), value.clone());
+    }
+
+    let fresh = build_integration_yaml(server, &merged_env, &merged_headers, source_id);
+    let fresh_body = fresh
+        .lines()
+        .skip_while(|line| line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut fresh_map: serde_yaml::Mapping = serde_yaml::from_str(&fresh_body)
+        .map_err(|e| format!("internal: cannot parse generated yaml: {}", e))?;
+
+    // Everything except the recipe-owned keys is user/runtime state: overlay
+    // the existing values on top of the freshly generated config.
+    let recipe_owned = ["command", "url", "env", "headers"];
+    for (key, value) in existing_map.iter() {
+        let key_str = key.as_str().unwrap_or("");
+        if recipe_owned.contains(&key_str) {
+            continue;
+        }
+        fresh_map.insert(key.clone(), value.clone());
+    }
+
+    let yaml_body = serde_yaml::to_string(&serde_yaml::Value::Mapping(fresh_map))
+        .map_err(|e| format!("cannot serialize merged config: {}", e))?;
+    Ok(format!(
+        "# mcp_marketplace_source: {}\n# mcp_marketplace_server: {}\n# mcp_marketplace_recipe_hash: {}\n{}",
+        source_id,
+        server.id,
+        recipe_hash(server),
+        yaml_body
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateRequest {
+    pub config_path: String,
+}
+
+pub async fn handle_v1_mcp_marketplace_update(
+    State(app): State<AppState>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Json<Value>, ScratchError> {
+    let gcx = app.gcx.clone();
+    let req = serde_json::from_slice::<UpdateRequest>(&body_bytes)
+        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
+    let config_path = marketplace_config_path_checked(&gcx, &req.config_path)?;
+
+    let content = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
+        ScratchError::new(StatusCode::NOT_FOUND, format!("cannot read config: {}", e))
+    })?;
+    let (source_id, server_id, _old_hash) = parse_marketplace_comments(&content);
+    let (source_id, server_id) = match (source_id, server_id) {
+        (Some(src), Some(srv)) => (src, srv),
+        _ => {
+            return Err(ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                "config has no marketplace provenance; only marketplace-installed servers can be updated".into(),
+            ));
+        }
+    };
+
+    let (server, found_source_id) =
+        find_server_in_sources(gcx.clone(), &server_id, Some(source_id.as_str()))
+            .await
+            .or(find_server_in_sources(gcx.clone(), &server_id, None).await)
+            .ok_or_else(|| {
+                ScratchError::new(
+                    StatusCode::NOT_FOUND,
+                    format!("server '{}' no longer exists in the marketplace", server_id),
+                )
+            })?;
+
+    let merged = merge_recipe_update_yaml(&content, &server, &found_source_id)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    write_config_atomically(&config_path, &merged).await?;
+
+    Ok(Json(json!({
+        "updated": true,
+        "config_path": config_path.display().to_string(),
+        "recipe_hash": recipe_hash(&server),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct UninstallRequest {
+    pub config_path: String,
+}
+
+pub async fn handle_v1_mcp_marketplace_uninstall(
+    State(app): State<AppState>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Json<Value>, ScratchError> {
+    let gcx = app.gcx.clone();
+    let req = serde_json::from_slice::<UninstallRequest>(&body_bytes)
+        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
+    let config_path = marketplace_config_path_checked(&gcx, &req.config_path)?;
+    if !config_path.exists() {
+        return Err(ScratchError::new(
+            StatusCode::NOT_FOUND,
+            "config file does not exist".into(),
+        ));
+    }
+    let config_path_str = config_path.display().to_string();
+
+    // Tear the live session down before removing the file so the child
+    // process/client, background tasks, and indexed resources go with it.
+    let session_opt = {
+        let sessions = gcx.integration_sessions.clone();
+        let mut sessions_locked = sessions.lock().await;
+        sessions_locked.remove(&config_path_str)
+    };
+    let mut stopped_session = false;
+    if let Some(session) = session_opt {
+        let stop_future = {
+            let mut session_locked = session.lock().await;
+            session_locked.try_stop(session.clone())
+        };
+        Box::into_pin(stop_future).await;
+        stopped_session = true;
+    }
+    crate::integrations::mcp::integr_mcp_common::tool_catalog_cache_remove(&config_path_str);
+    tokio::spawn(
+        crate::integrations::mcp::mcp_resources::remove_indexed_resources(
+            Arc::downgrade(&gcx),
+            config_path_str.clone(),
+        ),
+    );
+
+    tokio::fs::remove_file(&config_path).await.map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot remove config: {}", e),
+        )
+    })?;
+
+    Ok(Json(json!({
+        "uninstalled": true,
+        "config_path": config_path_str,
+        "stopped_session": stopped_session,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct WizardProbeRequest {
+    pub input: String,
+}
+
+/// Pre-save connectivity probe for the setup wizard: URL inputs get a real
+/// MCP auth probe, command inputs get PATH resolution for their executable.
+pub async fn handle_v1_mcp_wizard_probe(
+    body_bytes: hyper::body::Bytes,
+) -> Result<Json<Value>, ScratchError> {
+    let req = serde_json::from_slice::<WizardProbeRequest>(&body_bytes)
+        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
+    let input = req.input.trim().to_string();
+    if input.is_empty() {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "input is empty".into(),
+        ));
+    }
+
+    let transport = mcp_naming::detect_transport_from_input(&input);
+    if transport == "http" {
+        use crate::integrations::mcp::mcp_auth::{probe_mcp_auth, MCPAuthSettings};
+        let headers = HashMap::from([(
+            "Accept".to_string(),
+            "application/json, text/event-stream".to_string(),
+        )]);
+        match probe_mcp_auth(&input, &headers, &MCPAuthSettings::default()).await {
+            Ok(probe) => {
+                // 2xx means a healthy MCP endpoint; 401/403 means it exists and
+                // wants auth. Anything else (404/500/HTML pages) is reachable
+                // at the TCP level but not a working MCP server.
+                let healthy = probe.needs_auth
+                    || probe
+                        .http_status
+                        .map_or(false, |code| (200..300).contains(&code));
+                if healthy {
+                    Ok(Json(json!({
+                        "transport": "http",
+                        "reachable": true,
+                        "needs_auth": probe.needs_auth,
+                        "oauth_available": probe.oauth_available,
+                    })))
+                } else {
+                    Ok(Json(json!({
+                        "transport": "http",
+                        "reachable": false,
+                        "error": format!(
+                            "server responded with HTTP {} — not a working MCP endpoint",
+                            probe.http_status.unwrap_or(0)
+                        ),
+                    })))
+                }
+            }
+            Err(e) => Ok(Json(json!({
+                "transport": "http",
+                "reachable": false,
+                "error": e,
+            }))),
+        }
+    } else {
+        let command_word = input.split_whitespace().next().unwrap_or("");
+        match crate::integrations::mcp::mcp_path_resolution::resolve_command(
+            command_word,
+            &input,
+            None,
+        ) {
+            Ok(resolved) => Ok(Json(json!({
+                "transport": "stdio",
+                "command_found": true,
+                "resolved_path": resolved.program.display().to_string(),
+            }))),
+            Err(e) => Ok(Json(json!({
+                "transport": "stdio",
+                "command_found": false,
+                "error": e.to_user_message(),
+            }))),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1817,121 +2148,203 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_name_from_npx_command() {
-        let name = extract_name_from_input("npx -y @notionhq/notion-mcp-server").unwrap();
-        assert_eq!(name, "notion_mcp_server");
-    }
-
-    #[test]
-    fn test_auto_name_from_uvx_command() {
-        let name = extract_name_from_input("uvx mcp-server-fetch").unwrap();
-        assert_eq!(name, "fetch");
-    }
-
-    #[test]
-    fn test_auto_name_from_url() {
-        let name = extract_name_from_input("https://api.example.com/mcp").unwrap();
-        assert_eq!(name, "example");
-    }
-
-    #[test]
-    fn test_extract_name_from_url_country_code_tld() {
+    fn test_auto_name_uses_shared_naming_helpers() {
+        // Name extraction and input transport detection live in
+        // refact_integrations::mcp::mcp_naming (single source of truth,
+        // fully unit-tested there). This test only pins the wiring.
         assert_eq!(
-            extract_name_from_url("https://api.example.co.uk/mcp"),
-            "example"
+            mcp_naming::extract_name_from_input("npx -y @notionhq/notion-mcp-server").unwrap(),
+            "notion_mcp_server"
+        );
+        assert_eq!(
+            mcp_naming::detect_transport_from_input("https://api.example.com/mcp"),
+            "http"
+        );
+        assert_eq!(
+            mcp_naming::config_prefix_for_transport(mcp_naming::detect_transport_from_input(
+                "uvx mcp-server-fetch"
+            )),
+            "mcp_stdio_"
         );
     }
 
     #[test]
-    fn test_extract_name_from_url_localhost() {
-        assert_eq!(extract_name_from_url("http://localhost:3000"), "localhost");
-        assert_eq!(
-            extract_name_from_url("http://localhost:3000/path"),
-            "localhost"
+    fn test_recipe_hash_stable_and_sensitive() {
+        let server = MarketplaceServer {
+            id: "github".to_string(),
+            name: "GitHub".to_string(),
+            description: "d".to_string(),
+            publisher: "p".to_string(),
+            tags: vec![],
+            icon_url: None,
+            homepage: None,
+            transport: "stdio".to_string(),
+            install_recipe: InstallRecipe {
+                command: Some("npx -y @modelcontextprotocol/server-github".to_string()),
+                url: None,
+                env: HashMap::from([("GITHUB_TOKEN".to_string(), "".to_string())]),
+                headers: HashMap::new(),
+                args_from_env: vec![],
+            },
+            confirmation_default: vec!["*".to_string()],
+        };
+        let h1 = recipe_hash(&server);
+        let h2 = recipe_hash(&server);
+        assert_eq!(h1, h2, "hash must be deterministic");
+
+        let mut changed = server.clone();
+        changed.install_recipe.command =
+            Some("npx -y @modelcontextprotocol/server-github@2".to_string());
+        assert_ne!(
+            recipe_hash(&changed),
+            h1,
+            "recipe change must change the hash"
         );
+
+        // Env map iteration order must not affect the hash.
+        let mut reordered = server.clone();
+        reordered.install_recipe.env =
+            HashMap::from([("GITHUB_TOKEN".to_string(), "".to_string())]);
+        assert_eq!(recipe_hash(&reordered), h1);
     }
 
     #[test]
-    fn test_extract_name_from_url_ip_address() {
-        let name = extract_name_from_url("http://192.168.1.1:8080/mcp");
-        assert_eq!(name, "192.168.1.1");
-    }
-
-    #[test]
-    fn test_extract_name_from_url_ipv6() {
-        let name = extract_name_from_url("http://[::1]:3000/mcp");
+    fn test_merge_recipe_update_yaml_preserves_user_state() {
+        let server = MarketplaceServer {
+            id: "github".to_string(),
+            name: "GitHub".to_string(),
+            description: "d".to_string(),
+            publisher: "p".to_string(),
+            tags: vec![],
+            icon_url: None,
+            homepage: None,
+            transport: "stdio".to_string(),
+            install_recipe: InstallRecipe {
+                command: Some("npx -y server-github@2".to_string()),
+                url: None,
+                env: HashMap::from([
+                    ("GITHUB_TOKEN".to_string(), "".to_string()),
+                    ("NEW_OPTION".to_string(), "default-value".to_string()),
+                ]),
+                headers: HashMap::new(),
+                args_from_env: vec![],
+            },
+            confirmation_default: vec!["*".to_string()],
+        };
+        let existing = "# mcp_marketplace_source: refact-bundled
+# mcp_marketplace_server: github
+# mcp_marketplace_recipe_hash: 0000000000000000
+command: npx -y server-github@1
+env:
+  GITHUB_TOKEN: user-secret-token
+init_timeout: '120'
+oauth_tokens:
+  access_token: persisted-token
+confirmation:
+  ask_user:
+  - custom_rule
+";
+        let merged = merge_recipe_update_yaml(existing, &server, "refact-bundled").unwrap();
         assert!(
-            !name.contains('['),
-            "brackets must be stripped from ipv6 result"
+            merged.contains("npx -y server-github@2"),
+            "recipe-owned command must be updated: {}",
+            merged
         );
         assert!(
-            !name.contains(']'),
-            "brackets must be stripped from ipv6 result"
+            merged.contains("user-secret-token"),
+            "user env values must be preserved: {}",
+            merged
+        );
+        assert!(
+            merged.contains("NEW_OPTION"),
+            "new recipe env keys must be added: {}",
+            merged
+        );
+        assert!(
+            merged.contains("'120'") || merged.contains("\"120\""),
+            "user timeout must be preserved: {}",
+            merged
+        );
+        assert!(
+            merged.contains("persisted-token"),
+            "oauth tokens must survive the update: {}",
+            merged
+        );
+        assert!(
+            merged.contains("custom_rule"),
+            "user confirmation rules must be preserved: {}",
+            merged
+        );
+        assert!(
+            merged.contains(&format!(
+                "# mcp_marketplace_recipe_hash: {}",
+                recipe_hash(&server)
+            )),
+            "provenance hash must be refreshed: {}",
+            merged
         );
     }
 
     #[test]
-    fn test_extract_name_from_url_simple_domain() {
-        assert_eq!(
-            extract_name_from_url("https://api.example.com/path"),
-            "example"
-        );
-        assert_eq!(
-            extract_name_from_url("https://mcp.myservice.io/v1"),
-            "myservice"
-        );
+    fn test_marketplace_config_path_checks() {
+        // Pure-logic part: filename prefix and extension validation shape.
+        for bad in ["notmcp_github.yaml", "mcp_stdio_github.txt", "evil.yaml"] {
+            let is_mcp = ["mcp_stdio_", "mcp_sse_", "mcp_http_"]
+                .iter()
+                .any(|p| bad.starts_with(p));
+            assert!(
+                !(is_mcp && bad.ends_with(".yaml")),
+                "{} must be rejected",
+                bad
+            );
+        }
     }
 
     #[test]
-    fn test_auto_name_from_docker_command() {
-        let name = extract_name_from_input("docker run -i --rm mcp/server-github").unwrap();
-        assert_eq!(name, "github");
-    }
+    fn test_compute_missing_required_env() {
+        let recipe_env: HashMap<String, String> = HashMap::from([
+            ("API_KEY".to_string(), "".to_string()),
+            ("REGION".to_string(), "us-east-1".to_string()),
+            ("TOKEN".to_string(), "  ".to_string()),
+        ]);
 
-    #[test]
-    fn test_auto_name_sanitization() {
-        let name = extract_name_from_input("npx -y @my-org/my-cool-tool!").unwrap();
-        assert!(name.chars().all(|c| c.is_alphanumeric() || c == '_'));
-        assert!(!name.starts_with('_'));
-        assert!(!name.ends_with('_'));
-    }
+        // Nothing provided: both empty-default keys are missing, sorted.
+        let missing = compute_missing_required_env(&recipe_env, &recipe_env);
+        assert_eq!(missing, vec!["API_KEY".to_string(), "TOKEN".to_string()]);
 
-    #[test]
-    fn test_transport_detection_url() {
-        assert_eq!(detect_transport("https://api.example.com/mcp"), "http");
-        assert_eq!(detect_transport("http://localhost:3000/mcp"), "http");
-    }
+        // Overrides fill one of them.
+        let mut merged = recipe_env.clone();
+        merged.insert("API_KEY".to_string(), "sk-123".to_string());
+        let missing = compute_missing_required_env(&recipe_env, &merged);
+        assert_eq!(missing, vec!["TOKEN".to_string()]);
 
-    #[test]
-    fn test_transport_detection_command() {
-        assert_eq!(
-            detect_transport("npx -y @notionhq/notion-mcp-server"),
-            "stdio"
-        );
-        assert_eq!(detect_transport("uvx mcp-server-fetch"), "stdio");
-        assert_eq!(detect_transport("docker run -i --rm mcp/github"), "stdio");
-    }
+        // All filled: nothing missing.
+        merged.insert("TOKEN".to_string(), "tok".to_string());
+        assert!(compute_missing_required_env(&recipe_env, &merged).is_empty());
 
-    #[test]
-    fn test_auto_name_empty_input() {
-        let result = extract_name_from_input("");
-        assert!(result.is_err());
+        // Non-empty defaults are never required.
+        let optional_only: HashMap<String, String> =
+            HashMap::from([("MODE".to_string(), "fast".to_string())]);
+        assert!(compute_missing_required_env(&optional_only, &optional_only).is_empty());
     }
 
     #[tokio::test]
-    async fn test_installed_detection() {
+    async fn test_installed_detection_requires_provenance_comments() {
         let tmp = tempfile::tempdir().unwrap();
         let integrations_dir = tmp.path().join("integrations.d");
         tokio::fs::create_dir_all(&integrations_dir).await.unwrap();
+        // Manually created config matching a bundled server id by filename:
+        // must NOT be attributed to the marketplace.
         tokio::fs::write(
             integrations_dir.join("mcp_stdio_github.yaml"),
             "command: npx github\n",
         )
         .await
         .unwrap();
+        // Marketplace-installed config with provenance comments: must be detected.
         tokio::fs::write(
             integrations_dir.join("mcp_stdio_brave_search.yaml"),
-            "command: npx brave\n",
+            "# mcp_marketplace_source: refact-bundled\n# mcp_marketplace_server: brave-search\ncommand: npx brave\n",
         )
         .await
         .unwrap();
@@ -1942,11 +2355,7 @@ mod tests {
         .await
         .unwrap();
 
-        let index = bundled_index();
-        let index_ids: std::collections::HashSet<String> =
-            index.servers.iter().map(|s| s.id.clone()).collect();
-
-        let mut installed_ids = Vec::new();
+        let mut detected: Vec<(String, String)> = Vec::new();
         let mut rd = tokio::fs::read_dir(&integrations_dir).await.unwrap();
         while let Ok(Some(entry)) = rd.next_entry().await {
             let fname = entry.file_name();
@@ -1954,27 +2363,22 @@ mod tests {
             if !fname_str.ends_with(".yaml") {
                 continue;
             }
-            for prefix in &["mcp_stdio_", "mcp_sse_", "mcp_http_"] {
-                if let Some(rest) = fname_str.strip_prefix(prefix) {
-                    let id_candidate = rest.trim_end_matches(".yaml").replace('_', "-");
-                    if index_ids.contains(&id_candidate) {
-                        installed_ids.push(id_candidate);
-                    }
-                    break;
-                }
+            let is_mcp = ["mcp_stdio_", "mcp_sse_", "mcp_http_"]
+                .iter()
+                .any(|p| fname_str.starts_with(p));
+            if !is_mcp {
+                continue;
+            }
+            let content = tokio::fs::read_to_string(entry.path()).await.unwrap();
+            if let (Some(src), Some(srv), _hash) = parse_marketplace_comments(&content) {
+                detected.push((src, srv));
             }
         }
-        assert!(
-            installed_ids.contains(&"github".to_string()),
-            "must detect github as installed"
-        );
-        assert!(
-            installed_ids.contains(&"brave-search".to_string()),
-            "must detect brave-search as installed"
-        );
-        assert!(
-            !installed_ids.contains(&"other".to_string()),
-            "must not detect non-mcp integrations"
+
+        assert_eq!(
+            detected,
+            vec![("refact-bundled".to_string(), "brave-search".to_string())],
+            "only configs with provenance comments count as marketplace installs"
         );
     }
 
@@ -2077,33 +2481,31 @@ mod tests {
     }
 
     #[test]
-    fn test_merged_mode_excludes_smithery() {
-        let smithery_source = MarketplaceSource {
+    fn test_merged_mode_smithery_gating_by_api_key() {
+        // Mirrors the handler's smithery_key_missing gate: excluded from the
+        // merged view without an API key, included once a key is configured.
+        let keyless = MarketplaceSource {
             id: SMITHERY_SOURCE_ID.to_string(),
             label: "Smithery.ai".to_string(),
             source_type: SourceType::Smithery,
             enabled: true,
             url: None,
-            api_key: Some("sk-test".to_string()),
-        };
-        let is_merged_mode = true;
-        let should_skip = is_merged_mode && smithery_source.source_type == SourceType::Smithery;
-        assert!(should_skip, "Smithery must be excluded in merged mode");
-
-        let refact_source = MarketplaceSource {
-            id: "refact-bundled".to_string(),
-            label: "Refact Built-in".to_string(),
-            source_type: SourceType::RefactIndex,
-            enabled: true,
-            url: None,
             api_key: None,
         };
-        let should_skip_refact =
-            is_merged_mode && refact_source.source_type == SourceType::Smithery;
+        let key_missing = keyless.source_type == SourceType::Smithery
+            && keyless.api_key.as_deref().map_or(true, |k| k.is_empty());
         assert!(
-            !should_skip_refact,
-            "RefactIndex must not be excluded in merged mode"
+            key_missing,
+            "keyless Smithery must be skipped in merged mode"
         );
+
+        let with_key = MarketplaceSource {
+            api_key: Some("sk-live".to_string()),
+            ..keyless
+        };
+        let key_missing = with_key.source_type == SourceType::Smithery
+            && with_key.api_key.as_deref().map_or(true, |k| k.is_empty());
+        assert!(!key_missing, "Smithery with a key joins the merged view");
     }
 
     #[test]
@@ -2211,15 +2613,16 @@ mod tests {
     #[test]
     fn test_parse_marketplace_comments_reads_headers() {
         let content = "# mcp_marketplace_source: smithery\n# mcp_marketplace_server: acme/my-server\ncommand: cmd\n";
-        let (src, srv) = parse_marketplace_comments(content);
+        let (src, srv, hash) = parse_marketplace_comments(content);
         assert_eq!(src.as_deref(), Some("smithery"));
         assert_eq!(srv.as_deref(), Some("acme/my-server"));
+        assert!(hash.is_none(), "no hash comment in legacy configs");
     }
 
     #[test]
     fn test_parse_marketplace_comments_missing_headers() {
         let content = "command: npx something\nenv:\n  KEY: val\n";
-        let (src, srv) = parse_marketplace_comments(content);
+        let (src, srv, _hash) = parse_marketplace_comments(content);
         assert!(src.is_none(), "no source comment");
         assert!(srv.is_none(), "no server comment");
     }
@@ -2227,7 +2630,7 @@ mod tests {
     #[test]
     fn test_parse_marketplace_comments_partial_headers() {
         let content = "# mcp_marketplace_source: refact-bundled\ncommand: cmd\n";
-        let (src, srv) = parse_marketplace_comments(content);
+        let (src, srv, _hash) = parse_marketplace_comments(content);
         assert_eq!(src.as_deref(), Some("refact-bundled"));
         assert!(srv.is_none(), "no server comment");
     }
@@ -2270,7 +2673,7 @@ mod tests {
                 continue;
             }
             let content = tokio::fs::read_to_string(entry.path()).await.unwrap();
-            let (found_source, found_server) = parse_marketplace_comments(&content);
+            let (found_source, found_server, _found_hash) = parse_marketplace_comments(&content);
             if let (Some(src_id), Some(srv_id)) = (found_source, found_server) {
                 if srv_id == "acme/my-server" {
                     smithery_found = Some(src_id);

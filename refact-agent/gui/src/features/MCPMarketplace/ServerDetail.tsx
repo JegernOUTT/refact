@@ -7,16 +7,20 @@ import {
   useGetInstalledServersQuery,
 } from "../../services/refact/mcpMarketplace";
 import { Badge, Button, FieldText, Icon } from "../../components/ui";
+import { requiredEnvKeys } from "./requiredEnv";
+import { installErrorMessage, installedKey } from "./installError";
 import styles from "./MCPMarketplace.module.css";
 
 type ServerDetailProps = {
   server: MCPServer;
   onBack: () => void;
+  onInstalled?: (configPath: string) => void;
 };
 
 export const ServerDetail: React.FC<ServerDetailProps> = ({
   server,
   onBack,
+  onInstalled,
 }) => {
   const defaultEnv = server.install_recipe.env ?? {};
   const [envValues, setEnvValues] = useState<
@@ -28,7 +32,16 @@ export const ServerDetail: React.FC<ServerDetailProps> = ({
   const { data: installedData } = useGetInstalledServersQuery(undefined);
 
   const isInstalled =
-    installedData?.installed.some((s) => s.id === server.id) ?? false;
+    installedData?.installed.some(
+      (s) =>
+        installedKey(s.source_id, s.id) ===
+        installedKey(server.source_id, server.id),
+    ) ?? false;
+
+  const requiredKeys = requiredEnvKeys(server);
+  const missingRequiredKeys = requiredKeys.filter(
+    (key) => !(envValues[key] ?? "").trim(),
+  );
 
   const handleInstall = async () => {
     const definedEnv = Object.fromEntries(
@@ -38,19 +51,19 @@ export const ServerDetail: React.FC<ServerDetailProps> = ({
     );
     const configOverrides =
       Object.keys(definedEnv).length > 0 ? { env: definedEnv } : undefined;
-    await installServer({
-      server_id: server.id,
-      source_id: server.source_id,
-      config_overrides: configOverrides,
-    });
+    try {
+      const result = await installServer({
+        server_id: server.id,
+        source_id: server.source_id,
+        config_overrides: configOverrides,
+      }).unwrap();
+      onInstalled?.(result.config_path);
+    } catch {
+      // The mutation error state renders the failure notice below.
+    }
   };
 
-  const errorMessage =
-    error && "data" in error
-      ? String(error.data)
-      : error
-        ? "Installation failed"
-        : null;
+  const errorMessage = error ? installErrorMessage(error) : null;
 
   return (
     <div className={styles.detailRoot}>
@@ -104,7 +117,10 @@ export const ServerDetail: React.FC<ServerDetailProps> = ({
           <p className={styles.text}>Configuration</p>
           {Object.keys(defaultEnv).map((key) => (
             <label key={key} className={styles.configField}>
-              <span className={styles.smallText}>{key}</span>
+              <span className={styles.smallText}>
+                {key}
+                {requiredKeys.includes(key) ? " (required)" : ""}
+              </span>
               <FieldText
                 value={envValues[key] ?? ""}
                 onChange={(nextValue) =>
@@ -114,6 +130,11 @@ export const ServerDetail: React.FC<ServerDetailProps> = ({
               />
             </label>
           ))}
+          {missingRequiredKeys.length > 0 && (
+            <p className={styles.mutedText}>
+              Fill in {missingRequiredKeys.join(", ")} to install this server.
+            </p>
+          )}
         </div>
       )}
 
@@ -142,7 +163,7 @@ export const ServerDetail: React.FC<ServerDetailProps> = ({
         <Button
           variant="primary"
           onClick={() => void handleInstall()}
-          disabled={isLoading}
+          disabled={isLoading || missingRequiredKeys.length > 0}
           loading={isLoading}
           className={styles.alignStart}
         >

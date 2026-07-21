@@ -230,7 +230,8 @@ use crate::http::routers::v1::setup_status::handle_v1_setup_status;
 
 use crate::http::routers::v1::mcp_marketplace::{
     handle_v1_mcp_marketplace_get, handle_v1_mcp_marketplace_install,
-    handle_v1_mcp_marketplace_installed, handle_v1_mcp_auto_name,
+    handle_v1_mcp_marketplace_installed, handle_v1_mcp_marketplace_update,
+    handle_v1_mcp_marketplace_uninstall, handle_v1_mcp_auto_name, handle_v1_mcp_wizard_probe,
 };
 use crate::http::routers::v1::mcp_marketplace_sources::{
     handle_v1_mcp_marketplace_sources_get, handle_v1_mcp_marketplace_sources_post,
@@ -887,7 +888,16 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/mcp/marketplace/installed",
             get(handle_v1_mcp_marketplace_installed),
         )
+        .route(
+            "/mcp/marketplace/update",
+            post(handle_v1_mcp_marketplace_update),
+        )
+        .route(
+            "/mcp/marketplace/uninstall",
+            post(handle_v1_mcp_marketplace_uninstall),
+        )
         .route("/mcp/auto-name", post(handle_v1_mcp_auto_name))
+        .route("/mcp/wizard-probe", post(handle_v1_mcp_wizard_probe))
         .route(
             "/mcp/marketplace/sources",
             get(handle_v1_mcp_marketplace_sources_get),

@@ -43,7 +43,17 @@ describe("MCPSetupWizard", () => {
     expect(screen.getByText(/Local server \(stdio\)/)).toBeDefined();
   });
 
-  it("typing a URL shows Remote server (HTTP) detection", () => {
+  it("typing a URL shows Remote server (HTTP) detection", async () => {
+    server.use(
+      http.post("*/v1/mcp/auto-name", () => {
+        return HttpResponse.json({
+          suggested_name: "example_mcp",
+          transport: "http",
+          config_prefix: "mcp_http_",
+        });
+      }),
+    );
+
     render(
       <MCPSetupWizard
         integration={MOCK_INTEGRATION}
@@ -57,7 +67,9 @@ describe("MCPSetupWizard", () => {
       target: { value: "https://api.example.com/mcp" },
     });
 
-    expect(screen.getByText(/Remote server \(HTTP\)/)).toBeDefined();
+    // Detection is engine-driven via /v1/mcp/auto-name, so the label updates
+    // once the response arrives.
+    expect(await screen.findByText(/Remote server \(HTTP\)/)).toBeDefined();
   });
 
   it("name auto-populated from auto-name API response", async () => {
@@ -152,6 +164,10 @@ describe("MCPSetupWizard", () => {
     fireEvent.change(input, { target: { value: "npx notion" } });
 
     const nameField = await screen.findByTestId("mcp-wizard-name");
+    // Submit unlocks once the engine-driven detection resolves.
+    await waitFor(() =>
+      expect((nameField as HTMLInputElement).value).toBe("notion_server"),
+    );
     fireEvent.change(nameField, { target: { value: "notion_server" } });
 
     const submitBtn = screen.getByTestId("mcp-wizard-submit");
@@ -196,6 +212,8 @@ describe("MCPSetupWizard", () => {
       target: { value: "https://api.example.com/mcp" },
     });
 
+    // Submit stays disabled until the engine-driven detection resolves.
+    await screen.findByText(/Remote server \(HTTP\)/);
     const nameField = await screen.findByTestId("mcp-wizard-name");
     fireEvent.change(nameField, { target: { value: "example_mcp" } });
 
@@ -251,7 +269,17 @@ describe("MCPSetupWizard - SSE advanced toggle", () => {
     expect(screen.getByTestId("mcp-wizard-sse-checkbox")).toBeDefined();
   });
 
-  it("does not show SSE checkbox for URL inputs", () => {
+  it("does not show SSE checkbox for URL inputs", async () => {
+    server.use(
+      http.post("*/v1/mcp/auto-name", () => {
+        return HttpResponse.json({
+          suggested_name: "example_mcp",
+          transport: "http",
+          config_prefix: "mcp_http_",
+        });
+      }),
+    );
+
     render(
       <MCPSetupWizard integration={MOCK_INTEGRATION} onSubmit={vi.fn()} />,
       { preloadedState: PRELOADED_STATE },
@@ -262,6 +290,8 @@ describe("MCPSetupWizard - SSE advanced toggle", () => {
       target: { value: "https://api.example.com/mcp" },
     });
 
+    // Once engine-driven detection reports http, the SSE toggle disappears.
+    await screen.findByText(/Remote server \(HTTP\)/);
     expect(screen.queryByText(/Advanced: Use SSE transport/i)).toBeNull();
   });
 });

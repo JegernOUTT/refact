@@ -4443,6 +4443,7 @@ dependencies = [
  "shell-words",
  "similar",
  "sqlite-vec",
+ "sse-stream",
  "strip-ansi-escapes",
  "strsim 0.11.1",
  "structopt",

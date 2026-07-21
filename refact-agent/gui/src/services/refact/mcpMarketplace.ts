@@ -19,8 +19,9 @@ export type MCPServer = {
     headers?: Record<string, string>;
   };
   confirmation_default: string[];
-  verified?: boolean;
-  use_count?: number;
+  /** Content hash of the recipe-owned fields; compare against an installed
+   *  server's stored hash to detect available updates. */
+  recipe_hash?: string;
 };
 
 export type MarketplaceSource = {
@@ -47,11 +48,14 @@ export type MarketplaceResponse = {
   sources: MarketplaceSource[];
   pagination?: MarketplacePagination;
   source?: "remote" | "local" | "merged";
+  /** Tag catalog across the full (pre-pagination) result set. */
+  all_tags?: string[];
 };
 
 export type MarketplaceQueryParams = {
   source?: string;
   q?: string;
+  tag?: string;
   page?: number;
   page_size?: number;
 };
@@ -63,6 +67,12 @@ export type InstallRequest = {
     env?: Record<string, string>;
     headers?: Record<string, string>;
   };
+  /**
+   * The engine refuses to install a server whose required env vars (recipe env
+   * keys with an empty default, typically API keys) are still empty, unless
+   * this flag is set.
+   */
+  allow_incomplete?: boolean;
 };
 
 export type InstallResponse = {
@@ -72,8 +82,43 @@ export type InstallResponse = {
 
 export type InstalledServer = {
   id: string;
-  name: string;
   config_path: string;
+  source_id: string;
+  recipe_hash?: string | null;
+};
+
+export type UpdateServerResponse = {
+  updated: boolean;
+  config_path: string;
+  recipe_hash: string;
+};
+
+export type UninstallServerResponse = {
+  uninstalled: boolean;
+  config_path: string;
+  stopped_session: boolean;
+};
+
+export type ProjectConfigEntry = {
+  project_dir: string;
+  config_path?: string;
+  server_count?: number;
+  missing_servers?: string[];
+  error?: string;
+};
+
+export type ProjectConfigResponse = {
+  project_configs: ProjectConfigEntry[];
+};
+
+export type WizardProbeResponse = {
+  transport: "stdio" | "http";
+  reachable?: boolean;
+  needs_auth?: boolean;
+  oauth_available?: boolean;
+  command_found?: boolean;
+  resolved_path?: string;
+  error?: string;
 };
 
 export type InstalledResponse = {
@@ -154,6 +199,64 @@ export const mcpMarketplaceApi = createApi({
         return { data: result.data as InstallResponse };
       },
       invalidatesTags: ["InstalledServers"],
+    }),
+
+    updateServer: builder.mutation<
+      UpdateServerResponse,
+      { config_path: string }
+    >({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildApiUrlFromState(state, "/v1/mcp/marketplace/update"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as UpdateServerResponse };
+      },
+      invalidatesTags: ["InstalledServers"],
+    }),
+
+    uninstallServer: builder.mutation<
+      UninstallServerResponse,
+      { config_path: string }
+    >({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildApiUrlFromState(state, "/v1/mcp/marketplace/uninstall"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as UninstallServerResponse };
+      },
+      invalidatesTags: ["InstalledServers"],
+    }),
+
+    wizardProbe: builder.mutation<WizardProbeResponse, { input: string }>({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildApiUrlFromState(state, "/v1/mcp/wizard-probe"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as WizardProbeResponse };
+      },
+    }),
+
+    getProjectMcpConfig: builder.query<ProjectConfigResponse, undefined>({
+      queryFn: async (_arg, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildApiUrlFromState(state, "/v1/mcp/project-config"),
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as ProjectConfigResponse };
+      },
     }),
 
     getInstalledServers: builder.query<InstalledResponse, undefined>({
@@ -280,6 +383,10 @@ export const {
   useImportMcpConfigMutation,
   useGetMarketplaceQuery,
   useInstallServerMutation,
+  useUpdateServerMutation,
+  useUninstallServerMutation,
+  useWizardProbeMutation,
+  useGetProjectMcpConfigQuery,
   useGetInstalledServersQuery,
   useGetAutoNameMutation,
   useGetMarketplaceSourcesQuery,

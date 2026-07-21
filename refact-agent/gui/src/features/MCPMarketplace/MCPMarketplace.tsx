@@ -16,6 +16,8 @@ import {
   useGetMarketplaceQuery,
   useGetInstalledServersQuery,
   useInstallServerMutation,
+  useUpdateServerMutation,
+  useUninstallServerMutation,
 } from "../../services/refact/mcpMarketplace";
 import type {
   MCPServer,
@@ -25,6 +27,8 @@ import { ServerCard } from "./ServerCard";
 import { ServerDetail } from "./ServerDetail";
 import { SourceSelector } from "./SourceSelector";
 import { SourceSettings } from "./SourceSettings";
+import { requiredEnvKeys } from "./requiredEnv";
+import { installErrorMessage, installedKey } from "./installError";
 import styles from "./MCPMarketplace.module.css";
 import type { Config } from "../Config/configSlice";
 import { useAppDispatch } from "../../hooks";
@@ -34,28 +38,6 @@ import { change } from "../Pages/pagesSlice";
 const PAGE_SIZE = 20;
 
 const SERVER_CARD_HEIGHT = 240;
-
-const fallbackInstallError = "Failed to install MCP server";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function stringifyErrorData(value: unknown): string | null {
-  if (typeof value === "string") return value;
-  if (isRecord(value) && typeof value.detail === "string") return value.detail;
-  return null;
-}
-
-function installErrorMessage(error: unknown): string {
-  if (!isRecord(error)) return fallbackInstallError;
-  if ("data" in error) {
-    return stringifyErrorData(error.data) ?? fallbackInstallError;
-  }
-  if (typeof error.error === "string") return error.error;
-  if (typeof error.message === "string") return error.message;
-  return fallbackInstallError;
-}
 
 type MCPMarketplaceProps = {
   host: Config["host"];
@@ -71,13 +53,22 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
 }) => {
   const dispatch = useAppDispatch();
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [selectedServer, setSelectedServer] = useState<MCPServer | null>(null);
-  const [installingId, setInstallingId] = useState<string | null>(null);
+  const [installingKey, setInstallingKey] = useState<string | null>(null);
   const [installError, setInstallError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [page, setPage] = useState(1);
+
+  React.useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search.trim());
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
 
   const {
     data: marketplaceData,
@@ -85,11 +76,15 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
     error,
   } = useGetMarketplaceQuery({
     source: selectedSource ?? undefined,
+    q: debouncedSearch || undefined,
+    tag: selectedTag ?? undefined,
     page,
     page_size: PAGE_SIZE,
   });
   const { data: installedData } = useGetInstalledServersQuery(undefined);
   const [installServer] = useInstallServerMutation();
+  const [updateServer] = useUpdateServerMutation();
+  const [uninstallServer] = useUninstallServerMutation();
 
   const sources = useMemo<MarketplaceSource[]>(
     () => marketplaceData?.sources ?? [],
@@ -102,15 +97,23 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
     return map;
   }, [sources]);
 
-  const installedIds = useMemo(
-    () => new Set((installedData?.installed ?? []).map((s) => s.id)),
+  const installedKeys = useMemo(
+    () =>
+      new Set(
+        (installedData?.installed ?? []).map((s) =>
+          installedKey(s.source_id, s.id),
+        ),
+      ),
     [installedData],
   );
 
   const installedConfigPaths = useMemo(
     () =>
       new Map(
-        (installedData?.installed ?? []).map((s) => [s.id, s.config_path]),
+        (installedData?.installed ?? []).map((s) => [
+          installedKey(s.source_id, s.id),
+          s.config_path,
+        ]),
       ),
     [installedData],
   );
@@ -123,6 +126,9 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
   };
 
   const allTags = useMemo(() => {
+    // Server-provided catalog spans the full result set; fall back to the
+    // current page's tags for older engines.
+    if (marketplaceData?.all_tags?.length) return marketplaceData.all_tags;
     const tagSet = new Set<string>();
     (marketplaceData?.servers ?? []).forEach((s) =>
       s.tags.forEach((t) => tagSet.add(t)),
@@ -130,19 +136,48 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
     return Array.from(tagSet).sort();
   }, [marketplaceData]);
 
-  const filteredServers = useMemo(() => {
-    const servers = marketplaceData?.servers ?? [];
-    const q = search.toLowerCase();
-    return servers.filter((s) => {
-      const matchesSearch =
-        !q ||
-        s.name.toLowerCase().includes(q) ||
-        s.description.toLowerCase().includes(q) ||
-        s.tags.some((t) => t.toLowerCase().includes(q));
-      const matchesTag = !selectedTag || s.tags.includes(selectedTag);
-      return matchesSearch && matchesTag;
-    });
-  }, [marketplaceData, search, selectedTag]);
+  // Search and tag filtering are applied engine-side across all sources.
+  const filteredServers = useMemo(
+    () => marketplaceData?.servers ?? [],
+    [marketplaceData],
+  );
+
+  const updateAvailableByKey = useMemo(() => {
+    const currentHashes = new Map(
+      (marketplaceData?.servers ?? [])
+        .filter((s) => s.recipe_hash)
+        .map((s) => [installedKey(s.source_id, s.id), s.recipe_hash]),
+    );
+    const result = new Set<string>();
+    for (const entry of installedData?.installed ?? []) {
+      const key = installedKey(entry.source_id, entry.id);
+      const current = currentHashes.get(key);
+      if (entry.recipe_hash && current && entry.recipe_hash !== current) {
+        result.add(key);
+      }
+    }
+    return result;
+  }, [marketplaceData, installedData]);
+
+  const handleUpdate = async (configPath: string) => {
+    setInstallError(null);
+    try {
+      await updateServer({ config_path: configPath }).unwrap();
+      dispatch(integrationsApi.util.invalidateTags(["INTEGRATIONS"]));
+    } catch (err) {
+      setInstallError(installErrorMessage(err));
+    }
+  };
+
+  const handleUninstall = async (configPath: string) => {
+    setInstallError(null);
+    try {
+      await uninstallServer({ config_path: configPath }).unwrap();
+      dispatch(integrationsApi.util.invalidateTags(["INTEGRATIONS"]));
+    } catch (err) {
+      setInstallError(installErrorMessage(err));
+    }
+  };
 
   const pagination = marketplaceData?.pagination;
   const totalPages = pagination
@@ -150,7 +185,14 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
     : 1;
 
   const handleInstall = async (server: MCPServer) => {
-    setInstallingId(server.id);
+    if (requiredEnvKeys(server).length > 0) {
+      // Never write a config with silently empty credentials: route to the
+      // detail view where the required env vars can be filled in first.
+      setInstallError(null);
+      setSelectedServer(server);
+      return;
+    }
+    setInstallingKey(installedKey(server.source_id, server.id));
     setInstallError(null);
     try {
       const result = await installServer({
@@ -167,7 +209,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
     } catch (err) {
       setInstallError(installErrorMessage(err));
     } finally {
-      setInstallingId(null);
+      setInstallingKey(null);
     }
   };
 
@@ -193,6 +235,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
       <ServerDetail
         server={selectedServer}
         onBack={() => setSelectedServer(null)}
+        onInstalled={handleConfigure}
       />
     );
 
@@ -321,9 +364,20 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
           renderItem={(server) => (
             <ServerCard
               server={server}
-              isInstalled={installedIds.has(server.id)}
-              installedConfigPath={installedConfigPaths.get(server.id)}
-              isInstalling={installingId === server.id}
+              isInstalled={installedKeys.has(
+                installedKey(server.source_id, server.id),
+              )}
+              installedConfigPath={installedConfigPaths.get(
+                installedKey(server.source_id, server.id),
+              )}
+              updateAvailable={updateAvailableByKey.has(
+                installedKey(server.source_id, server.id),
+              )}
+              onUpdate={(configPath) => void handleUpdate(configPath)}
+              onUninstall={(configPath) => void handleUninstall(configPath)}
+              isInstalling={
+                installingKey === installedKey(server.source_id, server.id)
+              }
               onInstall={(s) => void handleInstall(s)}
               onViewDetail={(s) => setSelectedServer(s)}
               onConfigure={handleConfigure}

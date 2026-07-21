@@ -28,6 +28,16 @@ const MOCK_SERVER: MCPServer = {
   confirmation_default: [],
 };
 
+// Same server but with every recipe env var pre-filled, so card-level install
+// does not get routed to the detail view by the required-env gate.
+const MOCK_SERVER_NO_REQUIRED_ENV: MCPServer = {
+  ...MOCK_SERVER,
+  install_recipe: {
+    command: "npx test-server",
+    env: { API_KEY: "prefilled-key" },
+  },
+};
+
 const MOCK_SOURCES: MarketplaceSource[] = [
   {
     id: "refact-bundled",
@@ -245,32 +255,50 @@ describe("ServerCard", () => {
     expect(screen.getByText("Refact Built-in")).toBeDefined();
   });
 
-  it("renders verified badge when server is verified", () => {
-    const verifiedServer = { ...MOCK_SERVER, verified: true };
+  it("shows Update and Uninstall for installed servers with a newer recipe", () => {
+    const updates: string[] = [];
+    const uninstalls: string[] = [];
     render(
       <ServerCard
-        server={verifiedServer}
-        isInstalled={false}
+        server={MOCK_SERVER}
+        isInstalled={true}
+        installedConfigPath="/tmp/mcp_stdio_test_server.yaml"
+        updateAvailable={true}
         isInstalling={false}
         onInstall={() => undefined}
         onViewDetail={() => undefined}
+        onConfigure={() => undefined}
+        onUpdate={(p) => updates.push(p)}
+        onUninstall={(p) => uninstalls.push(p)}
       />,
     );
-    expect(screen.getByText("Verified")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: /update/i }));
+    expect(updates).toEqual(["/tmp/mcp_stdio_test_server.yaml"]);
+
+    // Uninstall is a two-step confirm.
+    const uninstallBtn = screen.getByRole("button", { name: /uninstall/i });
+    fireEvent.click(uninstallBtn);
+    expect(uninstalls).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: /confirm/i }));
+    expect(uninstalls).toEqual(["/tmp/mcp_stdio_test_server.yaml"]);
   });
 
-  it("renders use count when provided", () => {
-    const countedServer = { ...MOCK_SERVER, use_count: 42 };
+  it("hides Update when no newer recipe is available", () => {
     render(
       <ServerCard
-        server={countedServer}
-        isInstalled={false}
+        server={MOCK_SERVER}
+        isInstalled={true}
+        installedConfigPath="/tmp/mcp_stdio_test_server.yaml"
+        updateAvailable={false}
         isInstalling={false}
         onInstall={() => undefined}
         onViewDetail={() => undefined}
+        onUpdate={() => undefined}
+        onUninstall={() => undefined}
       />,
     );
-    expect(screen.getByText("42 installs")).toBeDefined();
+    expect(screen.queryByRole("button", { name: /update/i })).toBeNull();
   });
 });
 
@@ -370,7 +398,7 @@ describe("MCPMarketplace", () => {
     expect(screen.getByTitle("Manage marketplace sources")).toBeDefined();
   });
 
-  it("filters servers by search query", async () => {
+  it("filters servers via the engine-side q parameter", async () => {
     const secondServer: MCPServer = {
       ...MOCK_SERVER,
       id: "other-server",
@@ -379,11 +407,13 @@ describe("MCPMarketplace", () => {
       tags: ["database"],
     };
     server.use(
-      http.get("*/v1/mcp/marketplace", () => {
-        return HttpResponse.json({
-          servers: [MOCK_SERVER, secondServer],
-          sources: MOCK_SOURCES,
-        });
+      http.get("*/v1/mcp/marketplace", ({ request }) => {
+        const url = new URL(request.url);
+        const q = (url.searchParams.get("q") ?? "").toLowerCase();
+        const servers = [MOCK_SERVER, secondServer].filter(
+          (entry) => !q || entry.name.toLowerCase().includes(q),
+        );
+        return HttpResponse.json({ servers, sources: MOCK_SOURCES });
       }),
       http.get("*/v1/mcp/marketplace/installed", () => {
         return HttpResponse.json({ installed: [] });
@@ -405,7 +435,8 @@ describe("MCPMarketplace", () => {
     const searchInput = screen.getByPlaceholderText("Search servers…");
     fireEvent.change(searchInput, { target: { value: "Other" } });
 
-    expect(screen.queryByText("Test Server")).toBeNull();
+    // Search is debounced and applied engine-side via the q parameter.
+    await waitFor(() => expect(screen.queryByText("Test Server")).toBeNull());
     expect(screen.getByText("Other Service")).toBeDefined();
   });
 
@@ -419,7 +450,7 @@ describe("MCPMarketplace", () => {
           installed: [
             {
               id: "test-server",
-              name: "Test Server",
+              source_id: "refact-bundled",
               config_path: "/tmp/test.yaml",
             },
           ],
@@ -481,7 +512,10 @@ describe("MCPMarketplace", () => {
 
     server.use(
       http.get("*/v1/mcp/marketplace", () => {
-        return HttpResponse.json(MOCK_RESPONSE);
+        return HttpResponse.json({
+          ...MOCK_RESPONSE,
+          servers: [MOCK_SERVER_NO_REQUIRED_ENV],
+        });
       }),
       http.get("*/v1/mcp/marketplace/installed", () => {
         return HttpResponse.json({ installed: [] });
@@ -528,6 +562,243 @@ describe("MCPMarketplace", () => {
     } finally {
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
     }
+  });
+
+  it("routes card-level install to the detail view when required env vars are empty", async () => {
+    let installAttempts = 0;
+    server.use(
+      http.get("*/v1/mcp/marketplace", () => {
+        return HttpResponse.json(MOCK_RESPONSE);
+      }),
+      http.get("*/v1/mcp/marketplace/installed", () => {
+        return HttpResponse.json({ installed: [] });
+      }),
+      http.post("*/v1/mcp/marketplace/install", () => {
+        installAttempts += 1;
+        return HttpResponse.json({
+          installed: true,
+          config_path: "/tmp/test.yaml",
+        });
+      }),
+    );
+
+    render(
+      <MCPMarketplace
+        host="vscode"
+        tabbed={false}
+        backFromMarketplace={() => undefined}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await screen.findByText("Test Server");
+    fireEvent.click(screen.getByRole("button", { name: /^install$/i }));
+
+    // Detail view with the env form opens instead of firing the install.
+    expect(await screen.findByText("Configuration")).toBeDefined();
+    expect(screen.getAllByText(/API_KEY/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/\(required\)/).length).toBeGreaterThan(0);
+    expect(installAttempts).toBe(0);
+
+    // Install stays disabled until the required env var is filled.
+    const detailInstall = screen.getByRole("button", { name: /^install$/i });
+    expect(detailInstall).toBeDisabled();
+  });
+
+  it("enables detail install once required env is filled and sends the override", async () => {
+    const installBodies: Record<string, unknown>[] = [];
+    server.use(
+      http.get("*/v1/mcp/marketplace", () => {
+        return HttpResponse.json(MOCK_RESPONSE);
+      }),
+      http.get("*/v1/mcp/marketplace/installed", () => {
+        return HttpResponse.json({ installed: [] });
+      }),
+      http.post("*/v1/mcp/marketplace/install", async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        installBodies.push(body);
+        return HttpResponse.json({
+          installed: true,
+          config_path: "/tmp/test.yaml",
+        });
+      }),
+    );
+
+    render(
+      <MCPMarketplace
+        host="vscode"
+        tabbed={false}
+        backFromMarketplace={() => undefined}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await screen.findByText("Test Server");
+    fireEvent.click(screen.getByRole("button", { name: /^install$/i }));
+    await screen.findByText("Configuration");
+
+    const envInput = screen.getByRole("textbox");
+    fireEvent.change(envInput, { target: { value: "sk-test-123" } });
+
+    const detailInstall = screen.getByRole("button", { name: /^install$/i });
+    expect(detailInstall).not.toBeDisabled();
+    fireEvent.click(detailInstall);
+
+    await waitFor(() => expect(installBodies).toHaveLength(1));
+    expect(installBodies[0].server_id).toBe("test-server");
+    const overrides = installBodies[0].config_overrides as {
+      env: Record<string, string>;
+    };
+    expect(overrides.env.API_KEY).toBe("sk-test-123");
+  });
+
+  it("marks servers with changed recipes as updatable and fires the update call", async () => {
+    const updateCalls: Record<string, unknown>[] = [];
+    server.use(
+      http.get("*/v1/mcp/marketplace", () => {
+        return HttpResponse.json({
+          ...MOCK_RESPONSE,
+          servers: [{ ...MOCK_SERVER, recipe_hash: "hash-v2" }],
+        });
+      }),
+      http.get("*/v1/mcp/marketplace/installed", () => {
+        return HttpResponse.json({
+          installed: [
+            {
+              id: "test-server",
+              source_id: "refact-bundled",
+              config_path: "/tmp/mcp_stdio_test_server.yaml",
+              recipe_hash: "hash-v1",
+            },
+          ],
+        });
+      }),
+      http.post("*/v1/mcp/marketplace/update", async ({ request }) => {
+        updateCalls.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({
+          updated: true,
+          config_path: "/tmp/mcp_stdio_test_server.yaml",
+          recipe_hash: "hash-v2",
+        });
+      }),
+    );
+
+    render(
+      <MCPMarketplace
+        host="vscode"
+        tabbed={false}
+        backFromMarketplace={() => undefined}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await screen.findByText("Test Server");
+    const updateBtn = await screen.findByRole("button", { name: /update/i });
+    fireEvent.click(updateBtn);
+
+    await waitFor(() => expect(updateCalls).toHaveLength(1));
+    expect(updateCalls[0].config_path).toBe("/tmp/mcp_stdio_test_server.yaml");
+  });
+
+  it("uses the engine-provided all_tags catalog for tag pills", async () => {
+    server.use(
+      http.get("*/v1/mcp/marketplace", () => {
+        return HttpResponse.json({
+          ...MOCK_RESPONSE,
+          all_tags: ["search", "code", "tag-from-another-page"],
+        });
+      }),
+      http.get("*/v1/mcp/marketplace/installed", () => {
+        return HttpResponse.json({ installed: [] });
+      }),
+    );
+
+    render(
+      <MCPMarketplace
+        host="vscode"
+        tabbed={false}
+        backFromMarketplace={() => undefined}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await screen.findByText("Test Server");
+    expect(screen.getByText("tag-from-another-page")).toBeDefined();
+  });
+
+  it("offers Update when the installed recipe hash differs and calls the endpoint", async () => {
+    const updateCalls: Record<string, unknown>[] = [];
+    server.use(
+      http.get("*/v1/mcp/marketplace", () => {
+        return HttpResponse.json({
+          ...MOCK_RESPONSE,
+          servers: [{ ...MOCK_SERVER, recipe_hash: "hash-v2" }],
+        });
+      }),
+      http.get("*/v1/mcp/marketplace/installed", () => {
+        return HttpResponse.json({
+          installed: [
+            {
+              id: "test-server",
+              source_id: "refact-bundled",
+              config_path: "/tmp/mcp_stdio_test_server.yaml",
+              recipe_hash: "hash-v1",
+            },
+          ],
+        });
+      }),
+      http.post("*/v1/mcp/marketplace/update", async ({ request }) => {
+        updateCalls.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({
+          updated: true,
+          config_path: "/tmp/mcp_stdio_test_server.yaml",
+          recipe_hash: "hash-v2",
+        });
+      }),
+    );
+
+    render(
+      <MCPMarketplace
+        host="vscode"
+        tabbed={false}
+        backFromMarketplace={() => undefined}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await screen.findByText("Test Server");
+    const updateBtn = await screen.findByRole("button", { name: /update/i });
+    fireEvent.click(updateBtn);
+
+    await waitFor(() => expect(updateCalls).toHaveLength(1));
+    expect(updateCalls[0].config_path).toBe("/tmp/mcp_stdio_test_server.yaml");
+  });
+
+  it("uses the server-provided all_tags catalog for tag pills", async () => {
+    server.use(
+      http.get("*/v1/mcp/marketplace", () => {
+        return HttpResponse.json({
+          ...MOCK_RESPONSE,
+          all_tags: ["code", "database", "search"],
+        });
+      }),
+      http.get("*/v1/mcp/marketplace/installed", () => {
+        return HttpResponse.json({ installed: [] });
+      }),
+    );
+
+    render(
+      <MCPMarketplace
+        host="vscode"
+        tabbed={false}
+        backFromMarketplace={() => undefined}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await screen.findByText("Test Server");
+    // "database" is not on any current-page server, but comes from all_tags.
+    expect(screen.getByText("database")).toBeDefined();
   });
 
   it("source settings dialog opens and closes", async () => {

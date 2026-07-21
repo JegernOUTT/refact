@@ -180,6 +180,10 @@ test = false
 bench = false
 
 [[bin]]
+name = "mcp_echo_server"
+path = "src/bin/mcp_echo_server.rs"
+
+[[bin]]
 name = "refact"
 path = "src/bin/refact.rs"
 test = false
@@ -335,6 +339,8 @@ tree-sitter-rust = "0.23"
 tree-sitter-typescript = "0.23"
 typetag = "0.2"
 unicode-width = "0.2"
+# SSE event decoding for the legacy MCP HTTP+SSE client transport (same crate rmcp uses internally).
+sse-stream = "0.2"
 url = "2.4.1"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3"
@@ -352,6 +358,10 @@ thiserror = "2.0.12"
 dirs = "5.0"
 
 [dev-dependencies]
+# Same pinned rev as the main dependency; integration tests drive the MCP
+# client stack directly (tests/mcp_stdio_e2e.rs).
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "63583b164f54ec6ed2f17c98450487c747d34aeb", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
+serde_json = "1"
 tempfile = "3.8"
 proptest = "1.4"
 insta = "1.34"

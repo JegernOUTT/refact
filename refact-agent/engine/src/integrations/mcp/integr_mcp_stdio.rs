@@ -193,9 +193,48 @@ fn read_last_child_pid() -> Option<u32> {
 
 impl_mcp_integration_trait!(IntegrationMCPStdio, "mcp_stdio_schema.yaml");
 
+#[derive(Clone)]
+pub enum UnifiedMCPInner {
+    Stdio(IntegrationMCPStdio),
+    Http(super::integr_mcp_http::IntegrationMCPHttp),
+}
+
+impl Default for UnifiedMCPInner {
+    fn default() -> Self {
+        UnifiedMCPInner::Stdio(IntegrationMCPStdio::default())
+    }
+}
+
+/// Decides which transport a unified-schema config should use.
+/// `url` selects the remote (Streamable HTTP with legacy SSE fallback)
+/// transport, `command` selects stdio; setting both is an error.
+pub fn unified_transport_choice(value: &serde_json::Value) -> Result<&'static str, String> {
+    let url = value
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    let command = value
+        .get("command")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    if !url.is_empty() && !command.is_empty() {
+        return Err(
+            "provide either `command` (local stdio server) or `url` (remote server), not both"
+                .to_string(),
+        );
+    }
+    if !url.is_empty() {
+        Ok("http")
+    } else {
+        Ok("stdio")
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct IntegrationMCPUnified {
-    pub inner: IntegrationMCPStdio,
+    pub inner: UnifiedMCPInner,
 }
 
 #[async_trait]
@@ -206,27 +245,79 @@ impl IntegrationTrait for IntegrationMCPUnified {
         config_path: String,
         value: &serde_json::Value,
     ) -> Result<(), serde_json::Error> {
-        self.inner
-            .integr_settings_apply(gcx, config_path, value)
-            .await
+        use serde::de::Error as _;
+        let choice = unified_transport_choice(value).map_err(serde_json::Error::custom)?;
+        if choice == "http" {
+            let mut http = super::integr_mcp_http::IntegrationMCPHttp::default();
+            http.integr_settings_apply(gcx, config_path, value).await?;
+            self.inner = UnifiedMCPInner::Http(http);
+        } else {
+            let mut stdio = IntegrationMCPStdio::default();
+            stdio.integr_settings_apply(gcx, config_path, value).await?;
+            self.inner = UnifiedMCPInner::Stdio(stdio);
+        }
+        Ok(())
     }
 
     fn integr_settings_as_json(&self) -> serde_json::Value {
-        self.inner.integr_settings_as_json()
+        match &self.inner {
+            UnifiedMCPInner::Stdio(integration) => integration.integr_settings_as_json(),
+            UnifiedMCPInner::Http(integration) => integration.integr_settings_as_json(),
+        }
     }
 
     fn integr_common(&self) -> crate::integrations::integr_abstract::IntegrationCommon {
-        self.inner.integr_common()
+        match &self.inner {
+            UnifiedMCPInner::Stdio(integration) => integration.integr_common(),
+            UnifiedMCPInner::Http(integration) => integration.integr_common(),
+        }
     }
 
     async fn integr_tools(
         &self,
         integr_name: &str,
     ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
-        self.inner.integr_tools(integr_name).await
+        match &self.inner {
+            UnifiedMCPInner::Stdio(integration) => integration.integr_tools(integr_name).await,
+            UnifiedMCPInner::Http(integration) => integration.integr_tools(integr_name).await,
+        }
     }
 
     fn integr_schema(&self) -> &str {
         include_str!("mcp_unified_schema.yaml")
+    }
+}
+
+#[cfg(test)]
+mod unified_tests {
+    use super::*;
+
+    #[test]
+    fn test_unified_transport_choice_url_selects_http() {
+        let value = serde_json::json!({"url": "https://mcp.example.com/mcp", "command": ""});
+        assert_eq!(unified_transport_choice(&value).unwrap(), "http");
+        let value = serde_json::json!({"url": "  https://mcp.example.com/mcp  "});
+        assert_eq!(unified_transport_choice(&value).unwrap(), "http");
+    }
+
+    #[test]
+    fn test_unified_transport_choice_command_selects_stdio() {
+        let value = serde_json::json!({"command": "npx -y @org/mcp-server", "url": ""});
+        assert_eq!(unified_transport_choice(&value).unwrap(), "stdio");
+    }
+
+    #[test]
+    fn test_unified_transport_choice_empty_defaults_to_stdio() {
+        let value = serde_json::json!({});
+        assert_eq!(unified_transport_choice(&value).unwrap(), "stdio");
+    }
+
+    #[test]
+    fn test_unified_transport_choice_rejects_both() {
+        let value = serde_json::json!({
+            "command": "npx -y @org/mcp-server",
+            "url": "https://mcp.example.com/mcp"
+        });
+        assert!(unified_transport_choice(&value).is_err());
     }
 }

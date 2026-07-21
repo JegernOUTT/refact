@@ -82,6 +82,7 @@ pub fn upsert_progress(list: &mut Vec<MCPProgressInfo>, incoming: MCPProgressInf
     }
 }
 
+#[derive(Clone)]
 pub struct McpClientHandler {
     pub peer_arc: Arc<AMutex<Option<Peer<RoleClient>>>>,
     pub session_arc: Arc<AMutex<Box<dyn IntegrationSession>>>,
@@ -580,13 +581,33 @@ impl ClientHandler for McpClientHandler {
                 add_log_entry(logs.clone(), msg).await;
 
                 if !new_resources.is_empty() {
-                    tokio::spawn(super::mcp_resources::index_mcp_resources(
+                    let index_task = tokio::spawn(super::mcp_resources::index_mcp_resources(
                         gcx,
                         config_path,
                         peer,
                         new_resources,
                         logs,
                     ));
+                    let mut session_locked = session_arc.lock().await;
+                    if let Some(mcp_session) =
+                        session_locked.as_any_mut().downcast_mut::<SessionMCP>()
+                    {
+                        if let Some(previous) = mcp_session
+                            .resource_index_task
+                            .replace(index_task.abort_handle())
+                        {
+                            previous.abort();
+                        }
+                    }
+                } else {
+                    let mut session_locked = session_arc.lock().await;
+                    if let Some(mcp_session) =
+                        session_locked.as_any_mut().downcast_mut::<SessionMCP>()
+                    {
+                        if let Some(previous) = mcp_session.resource_index_task.take() {
+                            previous.abort();
+                        }
+                    }
                 }
             });
             let mut handle = handle_arc.lock().await;
@@ -694,6 +715,9 @@ pub struct SessionMCP {
     pub auth_manager: Option<Arc<AMutex<AuthorizationManager>>>,
     pub auth_status: MCPAuthStatus,
     pub oauth_refresh_task_handle: Option<AbortHandle>,
+    /// Vectorization of the server's MCP resources runs in this owned task;
+    /// aborted on stop/reconfigure so it never outlives the session.
+    pub resource_index_task: Option<AbortHandle>,
     pub oauth_probe: Option<super::mcp_auth::MCPAuthProbeResult>,
     pub sampling_session_approved: bool,
     pub active_progress: Vec<MCPProgressInfo>,
@@ -721,6 +745,7 @@ impl IntegrationSession for SessionMCP {
                 startup_task_handles,
                 health_task_handle,
                 oauth_refresh_task_handle,
+                resource_index_task,
                 stderr_file,
             ) = {
                 let mut session_locked = self_arc.lock().await;
@@ -736,6 +761,7 @@ impl IntegrationSession for SessionMCP {
                     session_downcasted.startup_task_handles.clone(),
                     session_downcasted.health_task_handle.clone(),
                     session_downcasted.oauth_refresh_task_handle.clone(),
+                    session_downcasted.resource_index_task.clone(),
                     session_downcasted.stderr_file_path.clone(),
                 )
             };
@@ -752,6 +778,10 @@ impl IntegrationSession for SessionMCP {
             }
 
             if let Some(abort_handle) = oauth_refresh_task_handle {
+                abort_handle.abort();
+            }
+
+            if let Some(abort_handle) = resource_index_task {
                 abort_handle.abort();
             }
 
@@ -855,6 +885,7 @@ mod tests {
             auth_manager: None,
             auth_status: MCPAuthStatus::NotApplicable,
             oauth_refresh_task_handle: None,
+            resource_index_task: None,
             oauth_probe: None,
             sampling_session_approved: false,
             active_progress: Vec::new(),

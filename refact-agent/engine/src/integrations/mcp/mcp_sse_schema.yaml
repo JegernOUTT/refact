@@ -66,8 +66,10 @@ fields:
     f_default: ""
     f_extra: true
 description: |
-  You can add here an MCP (Model Context Protocol) server, connecting to an SSE endpoint.
-  Enter the server URL and apply the configuration. Refact will probe for advertised OAuth and offer a browser login automatically when available.
+  You can add here an MCP (Model Context Protocol) server, connecting via the legacy HTTP+SSE transport
+  (2024-11-05 protocol revision). Refact speaks real SSE first and falls back to Streamable HTTP if the
+  server turns out to be modern. Enter the server URL and apply the configuration. Refact will probe for
+  advertised OAuth and offer a browser login automatically when available.
   Read more about MCP here: https://www.anthropic.com/news/model-context-protocol
 available:
   on_your_laptop_possible: true

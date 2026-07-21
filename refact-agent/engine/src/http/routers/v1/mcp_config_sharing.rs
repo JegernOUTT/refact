@@ -227,14 +227,44 @@ fn build_yaml_from_config(
     serde_yaml::to_string(&val).unwrap_or_default()
 }
 
+/// Restores redacted secret values into a config using dotted field paths
+/// (e.g. `env.API_KEY`, `oauth_tokens.client_secret`). Intermediate objects
+/// are created as needed so nested redactions round-trip through export/import.
 fn apply_secrets_to_config(config: &mut HashMap<String, Value>, secrets: &HashMap<String, String>) {
     for (field_path, secret_val) in secrets {
-        if let Some(rest) = field_path.strip_prefix("env.") {
-            if let Some(Value::Object(env_map)) = config.get_mut("env") {
-                env_map.insert(rest.to_string(), Value::String(secret_val.clone()));
+        let mut segments = field_path.split('.');
+        let first = match segments.next() {
+            Some(first) if !first.is_empty() => first.to_string(),
+            _ => continue,
+        };
+        let rest: Vec<&str> = segments.collect();
+        if rest.is_empty() {
+            config.insert(first, Value::String(secret_val.clone()));
+            continue;
+        }
+        let entry = config
+            .entry(first)
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let mut cursor = entry;
+        for (index, segment) in rest.iter().enumerate() {
+            let is_last = index == rest.len() - 1;
+            let map = match cursor {
+                Value::Object(map) => map,
+                other => {
+                    *other = Value::Object(serde_json::Map::new());
+                    match other {
+                        Value::Object(map) => map,
+                        _ => unreachable!(),
+                    }
+                }
+            };
+            if is_last {
+                map.insert((*segment).to_string(), Value::String(secret_val.clone()));
+                break;
             }
-        } else {
-            config.insert(field_path.clone(), Value::String(secret_val.clone()));
+            cursor = map
+                .entry((*segment).to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
         }
     }
 }
@@ -333,8 +363,52 @@ pub async fn handle_v1_mcp_import(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<Value>, ScratchError> {
     let gcx = app.gcx.clone();
-    let raw: Value = serde_json::from_slice(&body_bytes)
+    let mut raw: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
+
+    // `from_project: true` imports the workspace's `.refact/mcp-servers.json`
+    // (the file behind GET /v1/mcp/project-config) without the client having
+    // to read and re-upload it.
+    if raw.get("from_project").and_then(|v| v.as_bool()) == Some(true) {
+        let workspace_folders = {
+            let folders = gcx
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap()
+                .clone();
+            folders
+        };
+        let mut project_json: Option<Value> = None;
+        for folder in &workspace_folders {
+            let config_path = folder.join(".refact").join("mcp-servers.json");
+            if let Ok(content) = tokio::fs::read_to_string(&config_path).await {
+                match serde_json::from_str::<Value>(&content) {
+                    Ok(parsed) => {
+                        project_json = Some(parsed);
+                        break;
+                    }
+                    Err(e) => {
+                        return Err(ScratchError::new(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!("failed to parse {}: {}", config_path.display(), e),
+                        ));
+                    }
+                }
+            }
+        }
+        let project_json = project_json.ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                "no .refact/mcp-servers.json found in any workspace folder".to_string(),
+            )
+        })?;
+        if let (Some(target), Some(source)) = (raw.as_object_mut(), project_json.as_object()) {
+            for (key, value) in source {
+                target.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+    }
 
     let mut conversion_errors: Vec<Value> = Vec::new();
     let raw = if raw.get("bundle").is_none()
@@ -478,14 +552,40 @@ pub async fn handle_v1_mcp_project_config(
                 continue;
             }
         };
-        let bundle: ExportBundle = match serde_json::from_str(&content) {
+        // Accept both shapes the import endpoint accepts: a Refact export
+        // bundle and a Claude/VS Code style `mcpServers` map.
+        let bundle: ExportBundle = match serde_json::from_str::<ExportBundle>(&content) {
             Ok(b) => b,
-            Err(e) => {
-                project_configs.push(json!({
-                    "project_dir": folder.display().to_string(),
-                    "error": format!("failed to parse mcp-servers.json: {}", e),
-                }));
-                continue;
+            Err(bundle_err) => {
+                let as_value: Option<Value> = serde_json::from_str(&content).ok();
+                let converted = as_value
+                    .as_ref()
+                    .and_then(|v| v.get("mcpServers").or(Some(v)))
+                    .and_then(|v| v.as_object())
+                    .filter(|map| {
+                        !map.is_empty()
+                            && map.values().all(|entry| {
+                                entry.get("command").is_some() || entry.get("url").is_some()
+                            })
+                    })
+                    .map(|map| {
+                        let (servers, _errors) = convert_mcp_servers_json_to_bundle(map);
+                        ExportBundle {
+                            version: 1,
+                            exported_at: String::new(),
+                            servers,
+                        }
+                    });
+                match converted {
+                    Some(b) => b,
+                    None => {
+                        project_configs.push(json!({
+                            "project_dir": folder.display().to_string(),
+                            "error": format!("failed to parse mcp-servers.json: {}", bundle_err),
+                        }));
+                        continue;
+                    }
+                }
             }
         };
 
@@ -534,6 +634,60 @@ mod tests {
 
     #[test]
     fn test_validate_config_name_rejects_traversal() {
+        assert!(mcp_naming::validate_config_filename("../evil").is_err());
+        assert!(mcp_naming::validate_config_filename("foo/../../bar").is_err());
+    }
+
+    #[test]
+    fn test_apply_secrets_to_config_nested_paths() {
+        let mut config: HashMap<String, Value> = HashMap::from([
+            (
+                "env".to_string(),
+                serde_json::json!({ "API_KEY": "<REDACTED>" }),
+            ),
+            (
+                "oauth_tokens".to_string(),
+                serde_json::json!({ "access_token": "a", "client_secret": "<REDACTED>" }),
+            ),
+            (
+                "bearer_token".to_string(),
+                Value::String("<REDACTED>".to_string()),
+            ),
+        ]);
+        let secrets: HashMap<String, String> = HashMap::from([
+            ("env.API_KEY".to_string(), "sk-env".to_string()),
+            (
+                "oauth_tokens.client_secret".to_string(),
+                "oauth-secret".to_string(),
+            ),
+            ("bearer_token".to_string(), "bearer-secret".to_string()),
+        ]);
+
+        apply_secrets_to_config(&mut config, &secrets);
+
+        assert_eq!(config["env"]["API_KEY"], "sk-env");
+        assert_eq!(
+            config["oauth_tokens"]["client_secret"], "oauth-secret",
+            "nested non-env secrets must be restored in place"
+        );
+        assert_eq!(
+            config["oauth_tokens"]["access_token"], "a",
+            "sibling values must be untouched"
+        );
+        assert_eq!(config["bearer_token"], "bearer-secret");
+    }
+
+    #[test]
+    fn test_apply_secrets_creates_missing_intermediate_objects() {
+        let mut config: HashMap<String, Value> = HashMap::new();
+        let secrets: HashMap<String, String> =
+            HashMap::from([("env.TOKEN".to_string(), "v".to_string())]);
+        apply_secrets_to_config(&mut config, &secrets);
+        assert_eq!(config["env"]["TOKEN"], "v");
+    }
+
+    #[test]
+    fn test_validate_config_name_rejects_traversal_legacy_shape() {
         assert!(mcp_naming::validate_config_filename("../evil").is_err());
         assert!(mcp_naming::validate_config_filename("foo/../../bar").is_err());
         assert!(mcp_naming::validate_config_filename("mcp_stdio_ok").is_ok());

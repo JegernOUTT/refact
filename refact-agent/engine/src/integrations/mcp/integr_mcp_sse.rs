@@ -3,22 +3,16 @@ use std::sync::Arc;
 use std::sync::Weak;
 use async_trait::async_trait;
 use tokio::sync::Mutex as AMutex;
-use tokio::time::Duration;
-use rmcp::transport::streamable_http_client::{
-    StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
-};
-use rmcp::transport::common::client_side_sse::ExponentialBackoff;
-use rmcp::serve_client;
 use serde::{Deserialize, Serialize};
 
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationCommon;
-use super::session_mcp::{McpClientHandler, McpRunningService};
+use super::session_mcp::{McpClientHandler, McpRunningService, add_log_entry};
 use super::integr_mcp_common::{
-    CommonMCPSettings, MCPTransportInitializer, build_reqwest_client_for_mcp,
-    build_auth_client_for_mcp, serve_client_with_timeout, impl_mcp_integration_trait,
+    CommonMCPSettings, MCPTransportInitializer, impl_mcp_integration_trait,
+    serve_legacy_sse_transport, serve_streamable_http_transport,
 };
-use super::mcp_auth::{MCPAuthSettings, AuthType};
+use super::mcp_auth::MCPAuthSettings;
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Default, Debug)]
 pub struct SettingsMCPSse {
@@ -62,52 +56,54 @@ impl MCPTransportInitializer for IntegrationMCPSse {
         session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
         handler: McpClientHandler,
     ) -> Option<McpRunningService> {
-        let mut retry_config = ExponentialBackoff::default();
-        retry_config.max_times = Some(3);
-        retry_config.base_duration = Duration::from_millis(500);
-        let mut config = StreamableHttpClientTransportConfig::with_uri(self.cfg.mcp_url.trim());
-        config.retry_config = Arc::new(retry_config);
-
-        if self.cfg.auth.auth_type == AuthType::Oauth2Pkce {
-            let auth_client = build_auth_client_for_mcp(
-                self.cfg.mcp_url.trim(),
-                &self.cfg.mcp_headers,
-                &self.config_path,
-                "SSE",
-                logs.clone(),
-                &debug_name,
-                session,
-            )
-            .await?;
-            let transport = StreamableHttpClientTransport::with_client(auth_client, config);
-            serve_client_with_timeout(
-                serve_client(handler, transport),
-                init_timeout,
-                "SSE",
-                logs,
-                &debug_name,
-            )
-            .await
-        } else {
-            let client = build_reqwest_client_for_mcp(
-                self.cfg.mcp_url.trim(),
-                &self.cfg.mcp_headers,
-                &self.cfg.auth,
-                "SSE",
-                logs.clone(),
-                &debug_name,
-            )
-            .await?;
-            let transport = StreamableHttpClientTransport::with_client(client, config);
-            serve_client_with_timeout(
-                serve_client(handler, transport),
-                init_timeout,
-                "SSE",
-                logs,
-                &debug_name,
-            )
-            .await
+        // The mcp_sse_* config type is the legacy HTTP+SSE transport
+        // (2024-11-05 protocol revision), so speak real SSE first. Both
+        // attempts share one init_timeout budget.
+        let started = tokio::time::Instant::now();
+        if let Some(client) = serve_legacy_sse_transport(
+            self.cfg.mcp_url.clone(),
+            self.cfg.mcp_headers.clone(),
+            self.cfg.auth.clone(),
+            self.config_path.clone(),
+            init_timeout,
+            logs.clone(),
+            debug_name.clone(),
+            session.clone(),
+            handler.clone(),
+        )
+        .await
+        {
+            return Some(client);
         }
+
+        let remaining = init_timeout.saturating_sub(started.elapsed().as_secs());
+        if remaining < 5 {
+            let msg =
+                "Legacy SSE connection failed; no time budget left for the Streamable HTTP fallback"
+                    .to_string();
+            tracing::warn!("{msg} for {debug_name}");
+            add_log_entry(logs, msg).await;
+            return None;
+        }
+
+        // The server may in fact be a modern Streamable HTTP server that was
+        // configured as SSE; fall back before giving up.
+        let msg = "Legacy SSE connection failed; trying Streamable HTTP fallback".to_string();
+        tracing::warn!("{msg} for {debug_name}");
+        add_log_entry(logs.clone(), msg).await;
+        serve_streamable_http_transport(
+            self.cfg.mcp_url.clone(),
+            self.cfg.mcp_headers.clone(),
+            self.cfg.auth.clone(),
+            self.config_path.clone(),
+            "Streamable HTTP",
+            remaining,
+            logs,
+            debug_name,
+            session,
+            handler,
+        )
+        .await
     }
 
     fn remote_probe_info(&self) -> Option<(String, HashMap<String, String>, MCPAuthSettings)> {

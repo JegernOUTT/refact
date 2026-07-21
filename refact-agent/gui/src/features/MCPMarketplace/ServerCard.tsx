@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import classNames from "classnames";
-import { Check, ExternalLink, Settings, Star } from "lucide-react";
+import { Check, ExternalLink, RefreshCw, Settings, Trash2 } from "lucide-react";
 import { Badge, Button, Card as KitCard, Icon } from "../../components/ui";
 import type { MCPServer } from "../../services/refact/mcpMarketplace";
 import styles from "./MCPMarketplace.module.css";
@@ -9,9 +9,12 @@ type ServerCardProps = {
   server: MCPServer;
   isInstalled: boolean;
   installedConfigPath?: string;
+  updateAvailable?: boolean;
   onInstall: (server: MCPServer) => void;
   onViewDetail: (server: MCPServer) => void;
   onConfigure?: (configPath: string) => void;
+  onUpdate?: (configPath: string) => void;
+  onUninstall?: (configPath: string) => void;
   isInstalling: boolean;
   sourceLabel?: string;
 };
@@ -20,13 +23,17 @@ export const ServerCard: React.FC<ServerCardProps> = ({
   server,
   isInstalled,
   installedConfigPath,
+  updateAvailable = false,
   onInstall,
   onViewDetail,
   onConfigure,
+  onUpdate,
+  onUninstall,
   isInstalling,
   sourceLabel,
 }) => {
   const [imgError, setImgError] = useState(false);
+  const [confirmUninstall, setConfirmUninstall] = useState(false);
 
   return (
     <KitCard
@@ -80,19 +87,6 @@ export const ServerCard: React.FC<ServerCardProps> = ({
 
         <div className={styles.cardFooterGroup}>
           <div className={styles.cardFooter}>
-            {server.verified && (
-              <span
-                className={classNames(styles.statusRow, styles.verifiedBadge)}
-              >
-                <Icon icon={Star} size="sm" tone="success" />
-                <span className={styles.smallText}>Verified</span>
-              </span>
-            )}
-            {server.use_count !== undefined && server.use_count > 0 && (
-              <span className={styles.smallText}>
-                {server.use_count} installs
-              </span>
-            )}
             {sourceLabel && (
               <Badge tone="muted" className={styles.sourceBadgeInCard}>
                 {sourceLabel}
@@ -112,6 +106,16 @@ export const ServerCard: React.FC<ServerCardProps> = ({
                   <Icon icon={Check} size="sm" tone="success" />
                   <span className={styles.smallText}>Installed</span>
                 </span>
+                {installedConfigPath && updateAvailable && onUpdate && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    leftIcon={RefreshCw}
+                    onClick={() => onUpdate(installedConfigPath)}
+                  >
+                    Update
+                  </Button>
+                )}
                 {installedConfigPath && onConfigure && (
                   <Button
                     size="sm"
@@ -120,6 +124,24 @@ export const ServerCard: React.FC<ServerCardProps> = ({
                     onClick={() => onConfigure(installedConfigPath)}
                   >
                     Configure
+                  </Button>
+                )}
+                {installedConfigPath && onUninstall && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    leftIcon={Trash2}
+                    onClick={() => {
+                      if (confirmUninstall) {
+                        setConfirmUninstall(false);
+                        onUninstall(installedConfigPath);
+                      } else {
+                        setConfirmUninstall(true);
+                      }
+                    }}
+                    onBlur={() => setConfirmUninstall(false)}
+                  >
+                    {confirmUninstall ? "Confirm?" : "Uninstall"}
                   </Button>
                 )}
               </>
