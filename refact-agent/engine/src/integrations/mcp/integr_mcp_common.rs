@@ -439,6 +439,32 @@ macro_rules! impl_mcp_integration_trait {
 }
 pub(crate) use impl_mcp_integration_trait;
 
+fn should_skip_mcp_session_setup(session: &SessionMCP, new_cfg_value: &Value) -> bool {
+    if new_cfg_value != &session.launched_cfg {
+        return false;
+    }
+
+    session.mcp_client.is_some()
+        || session
+            .startup_task_handles
+            .as_ref()
+            .map_or(false, |handles| !handles.1.is_finished())
+        || matches!(session.connection_status, MCPConnectionStatus::NeedsAuth)
+}
+
+fn prepare_mcp_session_for_start(
+    session: &mut SessionMCP,
+    new_cfg_value: Value,
+    config_changed: bool,
+) {
+    session.launched_cfg = new_cfg_value;
+    session.connection_status = MCPConnectionStatus::Connecting;
+    if config_changed {
+        session.oauth_probe = None;
+    }
+    session.sampling_session_approved = false;
+}
+
 pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync + 'static>(
     gcx: Arc<GlobalContext>,
     config_path: String,
@@ -507,16 +533,9 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             }
         };
 
-        // If it's same config, and there is an mcp client, or startup task is running, skip
-        if new_cfg_value == session_downcasted.launched_cfg {
-            if session_downcasted.mcp_client.is_some()
-                || session_downcasted
-                    .startup_task_handles
-                    .as_ref()
-                    .map_or(false, |h| !h.1.is_finished())
-            {
-                return;
-            }
+        let config_changed = new_cfg_value != session_downcasted.launched_cfg;
+        if should_skip_mcp_session_setup(session_downcasted, &new_cfg_value) {
+            return;
         }
 
         let peer_arc: Arc<AMutex<Option<Peer<RoleClient>>>> = Arc::new(AMutex::new(None));
@@ -533,10 +552,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                     }
                 };
                 mcp_session.stderr_cursor = Arc::new(AMutex::new(0));
-                mcp_session.launched_cfg = new_cfg_value.clone();
-                mcp_session.connection_status = MCPConnectionStatus::Connecting;
-                mcp_session.oauth_probe = None;
-                mcp_session.sampling_session_approved = false;
+                prepare_mcp_session_for_start(mcp_session, new_cfg_value.clone(), config_changed);
                 (
                     std::mem::take(&mut mcp_session.mcp_client),
                     mcp_session.logs.clone(),
@@ -1148,6 +1164,91 @@ mod tests {
         assert_eq!(cfg.health_check_interval, 30);
         assert_eq!(cfg.reconnect_max_attempts, 7);
         assert!(cfg.reconnect_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_unchanged_needs_auth_session_skips_relaunch() {
+        let session_arc = make_session_arc(MCPConnectionStatus::NeedsAuth);
+        let config = serde_json::json!({"url": "https://mcp.example.com"});
+        let mut session_locked = session_arc.lock().await;
+        let session = session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap();
+        session.launched_cfg = config.clone();
+
+        assert!(should_skip_mcp_session_setup(session, &config));
+        assert!(!should_skip_mcp_session_setup(
+            session,
+            &serde_json::json!({"url": "https://other.example.com"})
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_same_config_retry_preserves_oauth_probe() {
+        let session_arc = make_session_arc(MCPConnectionStatus::Failed {
+            message: "temporary failure".to_string(),
+        });
+        let config = serde_json::json!({"url": "https://mcp.example.com"});
+        let mut session_locked = session_arc.lock().await;
+        let session = session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap();
+        session.launched_cfg = config.clone();
+        session.oauth_probe = Some(super::super::mcp_auth::MCPAuthProbeResult {
+            needs_auth: true,
+            oauth_available: true,
+            suggested_scopes: vec!["mcp.read".to_string()],
+            www_authenticate: None,
+        });
+
+        prepare_mcp_session_for_start(session, config.clone(), false);
+        assert!(session.oauth_probe.is_some());
+
+        prepare_mcp_session_for_start(
+            session,
+            serde_json::json!({"url": "https://other.example.com"}),
+            true,
+        );
+        assert!(session.oauth_probe.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_oauth_token_changes_and_explicit_reconnect_force_relaunch() {
+        use super::super::integr_mcp_http::SettingsMCPHttp;
+        use super::super::mcp_auth::MCPOAuthTokens;
+
+        let session_arc = make_session_arc(MCPConnectionStatus::NeedsAuth);
+        let mut settings = SettingsMCPHttp::default();
+        settings.mcp_url = "https://mcp.example.com".to_string();
+        settings.auth.auth_type = AuthType::Oauth2Pkce;
+        let without_tokens = serde_json::to_value(&settings).unwrap();
+
+        let mut session_locked = session_arc.lock().await;
+        let session = session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap();
+        session.launched_cfg = without_tokens.clone();
+        assert!(should_skip_mcp_session_setup(session, &without_tokens));
+
+        settings.auth.oauth_tokens = Some(MCPOAuthTokens {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: 9999999999000,
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec!["mcp.read".to_string()],
+        });
+        let with_tokens = serde_json::to_value(&settings).unwrap();
+        assert!(!should_skip_mcp_session_setup(session, &with_tokens));
+
+        session.launched_cfg = with_tokens.clone();
+        assert!(!should_skip_mcp_session_setup(session, &without_tokens));
+
+        session.launched_cfg = serde_json::Value::Null;
+        assert!(!should_skip_mcp_session_setup(session, &with_tokens));
     }
 
     #[tokio::test]
