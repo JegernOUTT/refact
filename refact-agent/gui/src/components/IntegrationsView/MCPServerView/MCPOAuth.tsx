@@ -1,5 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { integrationsApi } from "../../../services/refact/integrations";
+import type {
+  MCPAuthStatus,
+  MCPServerInfo,
+} from "../../../services/refact/mcpServerInfo";
 import { useOpenUrl } from "../../../hooks/useOpenUrl";
 import {
   Badge,
@@ -14,12 +18,33 @@ import styles from "./MCPOAuth.module.css";
 
 type MCPOAuthProps = {
   configPath: string;
+  connectionStatus?: MCPServerInfo["status"];
+  authStatus?: MCPAuthStatus;
+  pollingIntervalMs?: number;
 };
 
-export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
+function getStatusName(status: unknown): string | null {
+  if (typeof status === "string") return status;
+  if (
+    typeof status === "object" &&
+    status !== null &&
+    "status" in status &&
+    typeof status.status === "string"
+  ) {
+    return status.status;
+  }
+  return null;
+}
+
+export const MCPOAuth: React.FC<MCPOAuthProps> = ({
+  configPath,
+  connectionStatus,
+  authStatus,
+  pollingIntervalMs = 3000,
+}) => {
   const openUrl = useOpenUrl();
 
-  const [pollingInterval, setPollingInterval] = useState(3000);
+  const [pollingInterval, setPollingInterval] = useState(pollingIntervalMs);
 
   const { data: status, isLoading } = integrationsApi.useMcpOauthStatusQuery(
     configPath,
@@ -46,14 +71,31 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
   }, [waitingForCallback, status?.authenticated]);
 
   useEffect(() => {
+    const connectionStatusName = getStatusName(connectionStatus);
+    const authStatusName = getStatusName(authStatus);
+    const authDiscoveryPending =
+      connectionStatusName === "needs_auth" &&
+      (authStatusName === "needs_login" || authStatusName === "needs_reauth") &&
+      (status === undefined || !status.needs_login);
+    const serverAuthCheckActive =
+      connectionStatusName === "connecting" ||
+      connectionStatusName === "reconnecting" ||
+      authDiscoveryPending;
     const shouldPoll =
-      waitingForCallback ||
-      (status !== undefined &&
-        !status.authenticated &&
-        (status.auth_type === "oauth2_pkce" ||
-          (status.needs_login && status.oauth_available)));
-    setPollingInterval(shouldPoll ? 3000 : 0);
-  }, [waitingForCallback, status]);
+      !status?.authenticated &&
+      (waitingForCallback ||
+        serverAuthCheckActive ||
+        (status !== undefined &&
+          (status.auth_type === "oauth2_pkce" ||
+            (status.needs_login && status.oauth_available))));
+    setPollingInterval(shouldPoll ? pollingIntervalMs : 0);
+  }, [
+    authStatus,
+    connectionStatus,
+    pollingIntervalMs,
+    waitingForCallback,
+    status,
+  ]);
 
   const handleStartOAuth = async () => {
     setError(null);

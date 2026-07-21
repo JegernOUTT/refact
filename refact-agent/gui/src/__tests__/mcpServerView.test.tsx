@@ -265,6 +265,7 @@ describe("mcpServerInfo API types", () => {
     const serverInfo = {
       config_path: "/path/to/config.yaml",
       status: { status: "connected" },
+      auth_status: "authenticated" as const,
       server_name: "GitHub MCP",
       server_version: "1.0.0",
       protocol_version: "2024-11-05",

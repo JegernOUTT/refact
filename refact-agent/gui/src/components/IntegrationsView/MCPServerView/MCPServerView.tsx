@@ -208,7 +208,11 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
 
       <div className={styles.divider} role="separator" />
 
-      <MCPOAuth configPath={configPath} />
+      <MCPOAuth
+        configPath={configPath}
+        connectionStatus={data.status}
+        authStatus={data.auth_status}
+      />
 
       <div className="rf-stagger">
         <CollapsibleSection

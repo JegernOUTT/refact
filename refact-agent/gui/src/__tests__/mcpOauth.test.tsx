@@ -3,6 +3,7 @@ import { render, screen, waitFor, fireEvent } from "../utils/test-utils";
 import { http, HttpResponse } from "msw";
 import { server } from "../utils/mockServer";
 import { MCPOAuth } from "../components/IntegrationsView/MCPServerView/MCPOAuth";
+import { MCPServerView } from "../components/IntegrationsView/MCPServerView";
 
 const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
 
@@ -76,6 +77,211 @@ describe("MCPOAuth", () => {
         screen.getByRole("button", { name: /Login with OAuth/i }),
       ).toBeInTheDocument();
     });
+  });
+
+  test("keeps polling while the server discovers OAuth", async () => {
+    let statusRequests = 0;
+    server.use(
+      http.get("*/v1/mcp/oauth/status", () => {
+        statusRequests += 1;
+        if (statusRequests === 1) {
+          return HttpResponse.json({
+            auth_type: "none",
+            authenticated: false,
+            needs_login: false,
+            oauth_available: false,
+            suggested_scopes: [],
+            expires_at: 0,
+            scopes: [],
+          });
+        }
+        return HttpResponse.json({
+          auth_type: "none",
+          authenticated: false,
+          needs_login: true,
+          oauth_available: true,
+          suggested_scopes: ["mcp.read"],
+          expires_at: 0,
+          scopes: [],
+        });
+      }),
+    );
+
+    render(
+      <MCPOAuth
+        configPath={CONFIG_PATH}
+        connectionStatus={{ status: "connecting" }}
+        authStatus="not_applicable"
+        pollingIntervalMs={10}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await waitFor(
+      () => {
+        expect(statusRequests).toBeGreaterThanOrEqual(2);
+        expect(
+          screen.getByRole("button", { name: /Login with OAuth/i }),
+        ).toBeInTheDocument();
+      },
+      { timeout: 1000 },
+    );
+  });
+
+  test("stops polling after authentication while the server reconnects", async () => {
+    let statusRequests = 0;
+    server.use(
+      http.get("*/v1/mcp/oauth/status", () => {
+        statusRequests += 1;
+        return HttpResponse.json({
+          auth_type: "oauth2_pkce",
+          authenticated: true,
+          needs_login: false,
+          oauth_available: true,
+          suggested_scopes: [],
+          expires_at: Date.now() + 3600000,
+          scopes: [],
+        });
+      }),
+    );
+
+    render(
+      <MCPOAuth
+        configPath={CONFIG_PATH}
+        connectionStatus={{ status: "reconnecting" }}
+        authStatus="needs_login"
+        pollingIntervalMs={10}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Authenticated")).toBeInTheDocument();
+    });
+    const requestsAfterAuthentication = statusRequests;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(statusRequests).toBe(requestsAfterAuthentication);
+  });
+
+  test("stops polling after a terminal non-OAuth failure", async () => {
+    let statusRequests = 0;
+    server.use(
+      http.get("*/v1/mcp/oauth/status", () => {
+        statusRequests += 1;
+        return HttpResponse.json({
+          auth_type: "none",
+          authenticated: false,
+          needs_login: true,
+          oauth_available: false,
+          suggested_scopes: [],
+          expires_at: 0,
+          scopes: [],
+        });
+      }),
+    );
+
+    render(
+      <MCPOAuth
+        configPath={CONFIG_PATH}
+        connectionStatus={{ status: "needs_auth" }}
+        authStatus="needs_login"
+        pollingIntervalMs={10}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await waitFor(() => expect(statusRequests).toBeGreaterThanOrEqual(1));
+    const requestsAfterFailure = statusRequests;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(statusRequests).toBe(requestsAfterFailure);
+  });
+
+  test("MCPServerView forwards live auth state until OAuth login appears", async () => {
+    let oauthStatusRequests = 0;
+    server.use(
+      http.get("*/v1/mcp-server-info", () => {
+        return HttpResponse.json({
+          config_path: CONFIG_PATH,
+          status: { status: "connecting" },
+          auth_status: "not_applicable",
+          tools: [],
+          resources: [],
+          prompts: [],
+          capabilities: {
+            tools: false,
+            resources: false,
+            prompts: false,
+            sampling: true,
+          },
+          logs_tail: [],
+          metrics: {},
+          active_progress: [],
+        });
+      }),
+      http.get("*/v1/mcp/oauth/status", () => {
+        oauthStatusRequests += 1;
+        if (oauthStatusRequests === 1) {
+          return HttpResponse.json({
+            auth_type: "none",
+            authenticated: false,
+            needs_login: false,
+            oauth_available: false,
+            suggested_scopes: [],
+            expires_at: 0,
+            scopes: [],
+          });
+        }
+        return HttpResponse.json({
+          auth_type: "none",
+          authenticated: false,
+          needs_login: true,
+          oauth_available: true,
+          suggested_scopes: ["mcp.read"],
+          expires_at: 0,
+          scopes: [],
+        });
+      }),
+      http.post("*/v1/integration-get", () => {
+        return HttpResponse.json({
+          project_path: "",
+          integr_name: "mcp_http_test",
+          integr_config_path: CONFIG_PATH,
+          integr_schema: {
+            fields: {},
+            available: {
+              on_your_laptop: true,
+              when_isolated: true,
+            },
+            confirmation: {
+              ask_user_default: [],
+              deny_default: [],
+            },
+          },
+          integr_values: { url: "https://mcp.example.com" },
+          error_log: [],
+        });
+      }),
+      http.post("*/v1/integrations-mcp-logs", () => {
+        return HttpResponse.json({ logs: [] });
+      }),
+    );
+
+    render(
+      <MCPServerView configPath={CONFIG_PATH} integrName="mcp_http_test" />,
+      {
+        preloadedState: PRELOADED_STATE,
+      },
+    );
+
+    await waitFor(
+      () => {
+        expect(oauthStatusRequests).toBeGreaterThanOrEqual(2);
+        expect(
+          screen.getByRole("button", { name: /Login with OAuth/i }),
+        ).toBeInTheDocument();
+      },
+      { timeout: 5000 },
+    );
   });
 
   test("renders nothing when server needs login but oauth is not available", async () => {

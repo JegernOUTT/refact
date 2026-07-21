@@ -45,9 +45,18 @@ export type MCPProgressInfo = {
   updated_at_ms: number;
 };
 
+export type MCPAuthStatus =
+  | "not_applicable"
+  | "authenticated"
+  | "needs_login"
+  | "needs_reauth"
+  | "refreshing"
+  | { error: string };
+
 export type MCPServerInfo = {
   config_path: string;
   status: Record<string, unknown>;
+  auth_status: MCPAuthStatus;
   server_name?: string;
   server_version?: string;
   protocol_version?: string;
