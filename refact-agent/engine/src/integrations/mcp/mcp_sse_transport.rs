@@ -29,6 +29,7 @@ const POSTER_CHANNEL_CAPACITY: usize = 64;
 const ENDPOINT_WAIT_SECS: u64 = 30;
 const POST_TIMEOUT_SECS: u64 = 30;
 const PKCE_CONNECT_TIMEOUT_SECS: u64 = 15;
+const SSE_HEADER_TIMEOUT_SECS: u64 = 30;
 
 pub type LegacySseMessageStream = futures::stream::BoxStream<'static, ServerJsonRpcMessage>;
 pub type LegacySseTransport = SinkStreamTransport<LegacySseSink, LegacySseMessageStream>;
@@ -103,12 +104,21 @@ pub async fn connect_legacy_sse(
     logs: Arc<AMutex<Vec<String>>>,
     debug_name: &str,
 ) -> Result<LegacySseTransport, String> {
-    let response = client
-        .get(url)
-        .header(reqwest::header::ACCEPT, "text/event-stream")
-        .send()
-        .await
-        .map_err(|e| format!("SSE GET {} failed: {}", url, e))?;
+    let response = timeout(
+        Duration::from_secs(SSE_HEADER_TIMEOUT_SECS),
+        client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .send(),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "SSE GET {} timed out after {}s waiting for response headers",
+            url, SSE_HEADER_TIMEOUT_SECS
+        )
+    })?
+    .map_err(|e| format!("SSE GET {} failed: {}", url, e))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -122,17 +132,19 @@ pub async fn connect_legacy_sse(
             match event {
                 Ok(sse) => {
                     if sse.event.as_deref() == Some("endpoint") {
-                        return sse.data;
+                        return match sse.data {
+                            Some(data) => Ok(data),
+                            None => Err("SSE endpoint event carried no data".to_string()),
+                        };
                     }
                     // Ignore keepalive comments and any pre-endpoint frames.
                 }
                 Err(e) => {
-                    tracing::warn!("SSE stream error before endpoint event: {}", e);
-                    return None;
+                    return Err(format!("SSE stream error before endpoint event: {}", e));
                 }
             }
         }
-        None
+        Err("SSE stream ended before the endpoint event".to_string())
     })
     .await
     .map_err(|_| {
@@ -140,8 +152,7 @@ pub async fn connect_legacy_sse(
             "server did not send the SSE endpoint event within {}s",
             ENDPOINT_WAIT_SECS
         )
-    })?
-    .ok_or_else(|| "SSE stream ended before the endpoint event".to_string())?;
+    })??;
 
     let endpoint = resolve_message_endpoint(url, &endpoint_data)?;
     tracing::info!("legacy SSE endpoint for {}: {}", debug_name, endpoint);
@@ -313,6 +324,7 @@ pub async fn build_legacy_sse_client(
 
     match reqwest::Client::builder()
         .default_headers(header_map)
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(PKCE_CONNECT_TIMEOUT_SECS))
         .build()
     {
@@ -536,6 +548,49 @@ mod tests {
         assert!(
             result.is_err(),
             "connect must fail when stream ends without endpoint event"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_legacy_sse_connect_does_not_follow_redirects() {
+        use axum::routing::get;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sse_route = get(|| async {
+            (
+                axum::http::StatusCode::TEMPORARY_REDIRECT,
+                [(
+                    axum::http::header::LOCATION,
+                    "http://attacker.example/collect",
+                )],
+            )
+        });
+        let app = axum::Router::new().route("/sse", sse_route);
+        listener.set_nonblocking(true).unwrap();
+        let handle = tokio::spawn(async move {
+            axum::Server::from_tcp(listener)
+                .unwrap()
+                .serve(app.into_make_service())
+                .await
+                .unwrap();
+        });
+
+        // Client hardened exactly like the production MCP clients: redirects
+        // disabled so a hostile server cannot bounce authenticated traffic to
+        // another origin.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let logs = Arc::new(AMutex::new(Vec::new()));
+        let result =
+            connect_legacy_sse(client, &format!("http://{}/sse", addr), logs, "redirect_test")
+                .await;
+        assert!(
+            result.is_err(),
+            "connect must refuse to follow a cross-origin redirect"
         );
         handle.abort();
     }

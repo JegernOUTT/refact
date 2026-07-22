@@ -192,8 +192,15 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
     });
   };
 
+  const looksLikeUrl = /^https?:\/\//i.test(input.trim());
+  const sseNeedsUrl = useSSE && !looksLikeUrl;
+
   const canSubmit =
-    !!input.trim() && !!suggestedName && !nameError && !detecting;
+    !!input.trim() &&
+    !!suggestedName &&
+    !nameError &&
+    !detecting &&
+    !sseNeedsUrl;
 
   return (
     <Surface
@@ -279,6 +286,11 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
                     Use SSE transport
                   </label>
                 </div>
+                {sseNeedsUrl && (
+                  <p className={styles.error}>
+                    SSE transport requires an http(s):// URL, not a command.
+                  </p>
+                )}
               </div>
             </div>
           </div>
@@ -290,7 +302,7 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
           <Button
             type="button"
             variant="ghost"
-            disabled={isProbing}
+            disabled={isProbing || sseNeedsUrl}
             loading={isProbing}
             onClick={() => void handleTestConnection()}
             data-testid="mcp-wizard-test"

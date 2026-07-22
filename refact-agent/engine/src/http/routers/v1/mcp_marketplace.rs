@@ -1,25 +1,27 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
+
 use axum::extract::Query;
-use axum::response::Json;
 use axum::extract::State;
+use axum::response::Json;
 use hyper::StatusCode;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::time::{Duration, Instant};
-use std::sync::Mutex;
 
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::global_context::{GlobalContext, SharedGlobalContext};
-use crate::integrations::mcp::mcp_naming;
 use crate::http::routers::v1::mcp_marketplace_sources::{
-    load_sources, get_all_sources, smithery_api_key, source_to_api_json, BUNDLED_SOURCE_ID,
-    SourceType, MarketplaceSource,
+    get_all_sources, load_sources, smithery_api_key, source_to_api_json, MarketplaceSource,
+    SourceType, BUNDLED_SOURCE_ID,
 };
+use crate::integrations::mcp::mcp_naming;
 #[cfg(test)]
-use crate::http::routers::v1::mcp_marketplace_sources::{SMITHERY_SOURCE_ID, OFFICIAL_MCP_SOURCE_ID};
+use crate::http::routers::v1::mcp_marketplace_sources::{
+    OFFICIAL_MCP_SOURCE_ID, SMITHERY_SOURCE_ID,
+};
 
 const BUNDLED_CACHE_TTL_SECS: u64 = 3600;
 const SMITHERY_CACHE_TTL_SECS: u64 = 900;
@@ -29,6 +31,53 @@ const OFFICIAL_MCP_REGISTRY_URL: &str = "https://registry.modelcontextprotocol.i
 
 static SOURCE_CACHES: Mutex<Option<HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)>>> =
     Mutex::new(None);
+static MARKETPLACE_MUTATION_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn marketplace_mutation_lock(config_path: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = MARKETPLACE_MUTATION_LOCKS.lock().unwrap();
+    locks
+        .entry(config_path.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+fn source_cache_key(
+    source_id: &str,
+    query: &str,
+    tag: Option<&str>,
+    page: u32,
+    page_size: u32,
+) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        source_id,
+        query,
+        tag.unwrap_or(""),
+        page,
+        page_size
+    )
+}
+
+fn require_marketplace_provenance(content: &str, action: &str) -> Result<(), ScratchError> {
+    if matches!(parse_marketplace_comments(content), (Some(_), Some(_), _)) {
+        return Ok(());
+    }
+    Err(ScratchError::new(
+        StatusCode::BAD_REQUEST,
+        format!(
+            "config has no marketplace provenance; only marketplace-installed servers can be {}",
+            action
+        ),
+    ))
+}
+
+fn is_sensitive_header(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    ["authorization", "token", "api-key", "apikey", "secret"]
+        .iter()
+        .any(|part| key.contains(part))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallRecipe {
@@ -436,6 +485,7 @@ async fn load_source_servers(
     gcx: Arc<GlobalContext>,
     source: &MarketplaceSource,
     query: Option<&str>,
+    tag: Option<&str>,
     page: u32,
     page_size: u32,
     cache: &mut HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)>,
@@ -447,7 +497,7 @@ async fn load_source_servers(
     };
 
     let query_str = query.unwrap_or("");
-    let cache_key = format!("{}:{}", source.id, query_str);
+    let cache_key = source_cache_key(&source.id, query_str, tag, page, page_size);
 
     if let Some((ts, cached)) = cache.get(&cache_key) {
         if ts.elapsed().as_secs() < ttl {
@@ -657,9 +707,8 @@ pub async fn handle_v1_mcp_marketplace_get(
         }
 
         let is_merged_mode = filter_source.is_none();
-        // Tag filtering must see the full result set, so fetch everything
-        // (like merged mode) whenever a tag filter is active.
-        let fetch_full_set = is_merged_mode || tag_filter.is_some();
+        // Tag catalogs and filtering must see the full source result set.
+        let fetch_full_set = true;
         let smithery_key_missing = source.source_type == SourceType::Smithery
             && source.api_key.as_deref().map_or(true, |k| k.is_empty());
         if is_merged_mode && smithery_key_missing {
@@ -687,6 +736,7 @@ pub async fn handle_v1_mcp_marketplace_get(
             gcx.clone(),
             source,
             query,
+            tag_filter,
             fetch_page,
             fetch_page_size,
             &mut cache,
@@ -731,12 +781,15 @@ pub async fn handle_v1_mcp_marketplace_get(
                 (sliced, total_count, all_tags)
             }
             None => {
-                let t = sources_meta
-                    .iter()
-                    .find(|m| m["id"].as_str() == filter_source)
-                    .and_then(|m| m["server_count"].as_u64())
-                    .unwrap_or(0) as u32;
-                (all_servers, t, all_tags)
+                let total_count = all_servers.len() as u32;
+                let start = ((page - 1) * page_size) as usize;
+                let end = (start + page_size as usize).min(all_servers.len());
+                let sliced = if start < all_servers.len() {
+                    all_servers[start..end].to_vec()
+                } else {
+                    vec![]
+                };
+                (sliced, total_count, all_tags)
             }
         }
     } else {
@@ -1412,6 +1465,15 @@ async fn write_config_atomically(
         use std::os::unix::fs::PermissionsExt;
         let _ = tokio::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)).await;
     }
+    #[cfg(target_os = "windows")]
+    if config_path.exists() {
+        tokio::fs::remove_file(config_path).await.map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("remove old config error: {}", e),
+            )
+        })?;
+    }
     tokio::fs::rename(&tmp_path, config_path)
         .await
         .map_err(|e| {
@@ -1423,7 +1485,7 @@ async fn write_config_atomically(
 }
 
 /// Merges the current marketplace recipe into an existing installed config:
-/// recipe-owned fields (command/url/args, new env keys, new header keys) are
+/// recipe-owned fields (command/url/args, new env keys, current header keys) are
 /// refreshed while every user-edited value (filled env vars, timeouts,
 /// confirmation rules, auth settings, persisted oauth tokens) is preserved.
 pub fn merge_recipe_update_yaml(
@@ -1475,7 +1537,9 @@ pub fn merge_recipe_update_yaml(
     }
     let mut merged_headers = server.install_recipe.headers.clone();
     for (key, value) in &existing_headers {
-        merged_headers.insert(key.clone(), value.clone());
+        if merged_headers.contains_key(key) || is_sensitive_header(key) {
+            merged_headers.insert(key.clone(), value.clone());
+        }
     }
 
     let fresh = build_integration_yaml(server, &merged_env, &merged_headers, source_id);
@@ -1522,6 +1586,9 @@ pub async fn handle_v1_mcp_marketplace_update(
     let req = serde_json::from_slice::<UpdateRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
     let config_path = marketplace_config_path_checked(&gcx, &req.config_path)?;
+    let config_path_str = config_path.display().to_string();
+    let mutation_lock = marketplace_mutation_lock(&config_path_str);
+    let _mutation_guard = mutation_lock.lock().await;
 
     let content = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
         ScratchError::new(StatusCode::NOT_FOUND, format!("cannot read config: {}", e))
@@ -1548,9 +1615,61 @@ pub async fn handle_v1_mcp_marketplace_update(
                 )
             })?;
 
+    let file_name = config_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let expected_prefix = mcp_naming::config_prefix_for_transport(&server.transport);
+    if !file_name.starts_with(expected_prefix) {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "marketplace update changes transport to '{}'; uninstall and reinstall the server",
+                server.transport
+            ),
+        ));
+    }
+
     let merged = merge_recipe_update_yaml(&content, &server, &found_source_id)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let current = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
+        ScratchError::new(StatusCode::NOT_FOUND, format!("cannot re-read config: {}", e))
+    })?;
+    let (current_source, current_server, _) = parse_marketplace_comments(&current);
+    if current != content
+        || current_source.as_deref() != Some(source_id.as_str())
+        || current_server.as_deref() != Some(server_id.as_str())
+    {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            "config changed while marketplace update was in progress".into(),
+        ));
+    }
     write_config_atomically(&config_path, &merged).await?;
+
+    let session_opt = {
+        let sessions = gcx.integration_sessions.clone();
+        let mut sessions_locked = sessions.lock().await;
+        sessions_locked.remove(&config_path_str)
+    };
+    if let Some(session) = session_opt {
+        let stop_future = {
+            let mut session_locked = session.lock().await;
+            session_locked.try_stop(session.clone())
+        };
+        Box::into_pin(stop_future).await;
+    }
+    crate::integrations::mcp::integr_mcp_common::tool_catalog_cache_remove(&config_path_str);
+    crate::integrations::mcp::mcp_resources::remove_indexed_resources(
+        Arc::downgrade(&gcx),
+        config_path_str.clone(),
+    )
+    .await;
+    let _ = crate::integrations::running_integrations::load_integrations(
+        gcx,
+        &[format!("**/integrations.d/{}", file_name)],
+    )
+    .await;
 
     Ok(Json(json!({
         "updated": true,
@@ -1572,13 +1691,19 @@ pub async fn handle_v1_mcp_marketplace_uninstall(
     let req = serde_json::from_slice::<UninstallRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
     let config_path = marketplace_config_path_checked(&gcx, &req.config_path)?;
+    let config_path_str = config_path.display().to_string();
+    let mutation_lock = marketplace_mutation_lock(&config_path_str);
+    let _mutation_guard = mutation_lock.lock().await;
     if !config_path.exists() {
         return Err(ScratchError::new(
             StatusCode::NOT_FOUND,
             "config file does not exist".into(),
         ));
     }
-    let config_path_str = config_path.display().to_string();
+    let initial_content = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
+        ScratchError::new(StatusCode::NOT_FOUND, format!("cannot read config: {}", e))
+    })?;
+    require_marketplace_provenance(&initial_content, "uninstalled")?;
 
     // Tear the live session down before removing the file so the child
     // process/client, background tasks, and indexed resources go with it.
@@ -1597,12 +1722,22 @@ pub async fn handle_v1_mcp_marketplace_uninstall(
         stopped_session = true;
     }
     crate::integrations::mcp::integr_mcp_common::tool_catalog_cache_remove(&config_path_str);
-    tokio::spawn(
-        crate::integrations::mcp::mcp_resources::remove_indexed_resources(
-            Arc::downgrade(&gcx),
-            config_path_str.clone(),
-        ),
-    );
+    crate::integrations::mcp::mcp_resources::remove_indexed_resources(
+        Arc::downgrade(&gcx),
+        config_path_str.clone(),
+    )
+    .await;
+
+    let content = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
+        ScratchError::new(StatusCode::NOT_FOUND, format!("cannot re-read config: {}", e))
+    })?;
+    require_marketplace_provenance(&content, "uninstalled")?;
+    if content != initial_content {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            "config changed while marketplace uninstall was in progress".into(),
+        ));
+    }
 
     tokio::fs::remove_file(&config_path).await.map_err(|e| {
         ScratchError::new(
@@ -1702,6 +1837,34 @@ pub async fn handle_v1_mcp_wizard_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_uninstall_provenance_rejection() {
+        let err = require_marketplace_provenance("command: npx server\n", "uninstalled")
+            .expect_err("config without both provenance fields must be rejected");
+        assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.message,
+            "config has no marketplace provenance; only marketplace-installed servers can be uninstalled"
+        );
+        assert!(require_marketplace_provenance(
+            "# mcp_marketplace_source: official-mcp\n# mcp_marketplace_server: org/server\n",
+            "uninstalled"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_official_registry_cache_key_isolates_fetch_dimensions() {
+        let small_page = source_cache_key("official-mcp", "git", None, 1, 10);
+        let larger_fetch = source_cache_key("official-mcp", "git", None, 1, 500);
+        let tagged_fetch =
+            source_cache_key("official-mcp", "git", Some("official-mcp"), 1, 10);
+        let next_page = source_cache_key("official-mcp", "git", None, 2, 10);
+        assert_ne!(small_page, larger_fetch);
+        assert_ne!(small_page, tagged_fetch);
+        assert_ne!(small_page, next_page);
+    }
 
     #[test]
     fn test_bundled_index_parses() {

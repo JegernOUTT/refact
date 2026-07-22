@@ -80,14 +80,37 @@ fn sources_path(config_dir: &PathBuf) -> PathBuf {
 }
 
 pub async fn load_sources(config_dir: &PathBuf) -> SourcesConfig {
+    load_sources_checked(config_dir)
+        .await
+        .unwrap_or_else(|_| default_sources_config())
+}
+
+async fn load_sources_checked(config_dir: &PathBuf) -> Result<SourcesConfig, String> {
     let path = sources_path(config_dir);
     let content = match tokio::fs::read_to_string(&path).await {
         Ok(c) => c,
-        Err(_) => return default_sources_config(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(default_sources_config())
+        }
+        Err(err) => {
+            tracing::warn!("failed to read marketplace sources {}: {}", path.display(), err);
+            return Err(format!("read marketplace sources {}: {}", path.display(), err));
+        }
     };
     match serde_yaml::from_str::<SourcesConfig>(&content) {
-        Ok(cfg) => cfg,
-        Err(_) => default_sources_config(),
+        Ok(cfg) => Ok(cfg),
+        Err(err) => {
+            tracing::warn!(
+                "failed to parse marketplace sources {}: {}",
+                path.display(),
+                err
+            );
+            Err(format!(
+                "parse marketplace sources {}: {}",
+                path.display(),
+                err
+            ))
+        }
     }
 }
 
@@ -113,12 +136,24 @@ fn default_sources_config() -> SourcesConfig {
 }
 
 async fn save_sources(config_dir: &PathBuf, config: &SourcesConfig) -> Result<(), String> {
+    tokio::fs::create_dir_all(config_dir)
+        .await
+        .map_err(|e| format!("create sources config directory: {}", e))?;
     let path = sources_path(config_dir);
     let yaml = serde_yaml::to_string(config).map_err(|e| format!("serialize sources: {}", e))?;
     let tmp_path = path.with_extension("yaml.tmp");
     tokio::fs::write(&tmp_path, yaml.as_bytes())
         .await
         .map_err(|e| format!("write sources tmp: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(
+            &tmp_path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .await;
+    }
     #[cfg(target_os = "windows")]
     {
         let _ = tokio::fs::remove_file(&path).await;
@@ -163,7 +198,9 @@ pub async fn handle_v1_mcp_marketplace_sources_get(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let gcx = app.gcx.clone();
     let config_dir = gcx.config_dir.clone();
-    let cfg = load_sources(&config_dir).await;
+    let cfg = load_sources_checked(&config_dir)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let mut sources_json = vec![source_to_api_json(&bundled_source(), false)];
     for source in &cfg.sources {
@@ -220,7 +257,9 @@ pub async fn handle_v1_mcp_marketplace_sources_post(
     }
 
     let config_dir = gcx.config_dir.clone();
-    let mut cfg = load_sources(&config_dir).await;
+    let mut cfg = load_sources_checked(&config_dir)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let new_source = MarketplaceSource {
         id: req.id.clone(),
@@ -257,7 +296,9 @@ pub async fn handle_v1_mcp_marketplace_sources_delete(
     }
 
     let config_dir = gcx.config_dir.clone();
-    let mut cfg = load_sources(&config_dir).await;
+    let mut cfg = load_sources_checked(&config_dir)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let before = cfg.sources.len();
     cfg.sources.retain(|s| s.id != source_id);
@@ -300,7 +341,9 @@ pub async fn handle_v1_mcp_marketplace_sources_configure(
     }
 
     let config_dir = gcx.config_dir.clone();
-    let mut cfg = load_sources(&config_dir).await;
+    let mut cfg = load_sources_checked(&config_dir)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let source = cfg
         .sources
@@ -422,6 +465,25 @@ mod tests {
             reloaded.sources.iter().any(|s| s.id == "custom"),
             "custom source should persist"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_saved_sources_file_has_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+
+        save_sources(&config_dir, &default_sources_config())
+            .await
+            .unwrap();
+
+        let permissions = tokio::fs::metadata(sources_path(&config_dir))
+            .await
+            .unwrap()
+            .permissions();
+        assert_eq!(permissions.mode() & 0o777, 0o600);
     }
 
     #[test]

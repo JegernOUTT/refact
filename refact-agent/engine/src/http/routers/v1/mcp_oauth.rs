@@ -465,6 +465,10 @@ pub async fn handle_v1_mcp_oauth_status(
         .and_then(|v| v.as_str())
         .unwrap_or("none")
         .to_string();
+    let config_url = config_yaml
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let tokens = load_tokens_from_config(&query.config_path).await;
     let (authenticated, expires_at, scopes) = match &tokens {
@@ -473,8 +477,13 @@ pub async fn handle_v1_mcp_oauth_status(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as i64;
-            let authenticated =
-                !t.access_token.is_empty() && (t.expires_at == 0 || t.expires_at > now_ms);
+            let url_bound_ok = match (t.bound_url.as_deref(), config_url.as_deref()) {
+                (Some(bound), Some(cfg)) => bound == cfg,
+                _ => true,
+            };
+            let authenticated = !t.access_token.is_empty()
+                && (t.expires_at == 0 || t.expires_at > now_ms)
+                && url_bound_ok;
             (authenticated, t.expires_at, t.scopes.clone())
         }
         None => (false, 0, vec![]),

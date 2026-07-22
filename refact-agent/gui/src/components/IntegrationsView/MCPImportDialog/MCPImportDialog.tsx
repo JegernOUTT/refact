@@ -50,7 +50,7 @@ function getImportBody(
 
 const REDACTED = "<REDACTED>";
 
-type SecretField = { configName: string; fieldPath: string };
+type SecretField = { configName: string; path: string[] };
 
 /** Finds `<REDACTED>` values in a Refact export bundle so the user can fill
  *  them in before importing (the engine re-injects them via `secrets`). */
@@ -62,24 +62,32 @@ function collectRedactedFields(parsed: unknown): SecretField[] {
   const fields: SecretField[] = [];
   for (const server of servers) {
     if (!isRecord(server) || typeof server.config_name !== "string") continue;
-    const config = server.config;
-    if (!isRecord(config)) continue;
-    const walk = (value: unknown, path: string) => {
+    const walk = (value: unknown, path: string[]) => {
       if (value === REDACTED) {
         fields.push({
           configName: server.config_name as string,
-          fieldPath: path,
+          path,
         });
         return;
       }
       if (isRecord(value)) {
         for (const [key, child] of Object.entries(value)) {
-          walk(child, path ? `${path}.${key}` : key);
+          walk(child, [...path, key]);
+        }
+      } else if (Array.isArray(value)) {
+        for (const [index, child] of value.entries()) {
+          walk(child, [...path, String(index)]);
         }
       }
     };
-    for (const [key, value] of Object.entries(config)) {
-      walk(value, key);
+    for (const rootKey of ["config", "tools_config", "confirmation"] as const) {
+      const root = server[rootKey];
+      if (!isRecord(root)) continue;
+      const pathPrefix =
+        rootKey === "config" ? [] : [rootKey.replace("_config", "")];
+      for (const [key, value] of Object.entries(root)) {
+        walk(value, [...pathPrefix, key]);
+      }
     }
   }
   return fields;
@@ -234,12 +242,13 @@ export function MCPImportDialog() {
       return;
     }
 
-    const secretsMap = new Map<string, Record<string, string>>();
+    const secretsMap = new Map<string, { path: string[]; value: string }[]>();
     for (const field of redactedFields) {
-      const value = secretValues[`${field.configName}\u0000${field.fieldPath}`];
+      const fieldKey = JSON.stringify([field.configName, field.path]);
+      const value = secretValues[fieldKey];
       if (!value?.trim()) continue;
-      const bucket = secretsMap.get(field.configName) ?? {};
-      bucket[field.fieldPath] = value;
+      const bucket = secretsMap.get(field.configName) ?? [];
+      bucket.push({ path: field.path, value });
       secretsMap.set(field.configName, bucket);
     }
     if (secretsMap.size > 0) {
@@ -342,15 +351,16 @@ export function MCPImportDialog() {
                     Fill in redacted secrets
                   </Text>
                   {redactedFields.map((field) => {
-                    const key = `${field.configName}\u0000${field.fieldPath}`;
+                    const key = JSON.stringify([field.configName, field.path]);
+                    const fieldLabel = field.path.join(" · ");
                     return (
                       <Flex key={key} align="center" gap="2">
                         <Text size="1" className={styles.mutedText}>
-                          {field.configName} · {field.fieldPath}
+                          {field.configName} · {fieldLabel}
                         </Text>
                         <FieldText
                           type="password"
-                          aria-label={`Secret for ${field.configName} ${field.fieldPath}`}
+                          aria-label={`Secret for ${field.configName} ${fieldLabel}`}
                           value={secretValues[key] ?? ""}
                           onChange={(nextValue) =>
                             setSecretValues((prev) => ({

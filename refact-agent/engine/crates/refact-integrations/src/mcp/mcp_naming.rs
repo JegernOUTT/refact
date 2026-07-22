@@ -132,7 +132,9 @@ pub fn with_hash_suffix(candidate: &str, original: &str) -> String {
     let suffix = format!("_{:08x}", stable_name_hash(original) as u32);
     let keep = MAX_MODEL_TOOL_NAME_BYTES.saturating_sub(suffix.len());
     let mut trimmed = candidate.to_string();
-    trimmed.truncate(keep);
+    while trimmed.len() > keep {
+        trimmed.pop();
+    }
     let trimmed = trimmed.trim_end_matches('_');
     format!("{}{}", trimmed, suffix)
 }
@@ -287,7 +289,7 @@ fn sanitize_suggested_name(s: &str) -> String {
     let snake: String = s
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() {
+            if c.is_ascii_alphanumeric() {
                 c.to_ascii_lowercase()
             } else {
                 '_'
@@ -313,7 +315,7 @@ fn sanitize_suggested_name(s: &str) -> String {
             .collect()
     };
     if snake.len() > 40 {
-        snake[..40].to_string()
+        snake.chars().take(40).collect()
     } else {
         snake
     }
@@ -511,5 +513,22 @@ mod tests {
             assert!(name.len() <= MAX_MODEL_TOOL_NAME_BYTES);
             assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
         }
+    }
+
+    #[test]
+    fn test_sanitize_suggested_name_handles_unicode_and_long_input() {
+        let unicode = "\u{4f60}\u{597d}".repeat(30);
+        let _ = extract_name_from_input(&format!("npx {}", unicode));
+        let long_ascii = "a".repeat(200);
+        let name = extract_name_from_input(&format!("npx {}", long_ascii)).unwrap();
+        assert!(name.len() <= 40, "suggested name too long: {}", name.len());
+        assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    }
+
+    #[test]
+    fn test_with_hash_suffix_handles_multibyte_candidate() {
+        let candidate = "\u{4f60}\u{597d}".repeat(20);
+        let out = with_hash_suffix(&candidate, "orig");
+        assert!(out.len() <= MAX_MODEL_TOOL_NAME_BYTES);
     }
 }

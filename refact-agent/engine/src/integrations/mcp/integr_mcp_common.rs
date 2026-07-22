@@ -20,7 +20,7 @@ use super::session_mcp::{
 };
 use super::mcp_auth::{
     MCPAuthSettings, MCPTokenManager, AuthType, create_auth_manager_from_tokens,
-    load_tokens_from_config, mcp_oauth_refresh_task, probe_mcp_auth,
+    load_tokens_from_config, mcp_oauth_refresh_task, probe_mcp_auth, save_tokens_to_config,
 };
 use super::mcp_metrics::new_shared_metrics;
 use super::tool_mcp::ToolMCP;
@@ -142,6 +142,7 @@ static MCP_TOOL_CATALOG_CACHE: std::sync::Mutex<
 > = std::sync::Mutex::new(None);
 const TOOL_CATALOG_CACHE_TTL_SECS: u64 = 1800;
 const TOOL_CATALOG_CACHE_MAX_ENTRIES: usize = 64;
+const MCP_CONNECT_TIMEOUT_SECS: u64 = 15;
 
 pub fn tool_catalog_cache_store(config_path: &str, tools: &[rmcp::model::Tool]) {
     let mut guard = match MCP_TOOL_CATALOG_CACHE.lock() {
@@ -394,6 +395,8 @@ pub(crate) async fn build_reqwest_client_for_mcp(
 
     match reqwest::Client::builder()
         .default_headers(header_map)
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(MCP_CONNECT_TIMEOUT_SECS))
         .build()
     {
         Ok(client) => Some(client),
@@ -416,7 +419,7 @@ pub(crate) async fn build_auth_client_for_mcp(
     session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
 ) -> Option<AuthClient<reqwest::Client>> {
     let tokens = load_tokens_from_config(config_path).await;
-    let tokens = match tokens {
+    let mut tokens = match tokens {
         Some(t) if !t.access_token.is_empty() => t,
         _ => {
             let msg = format!(
@@ -442,6 +445,16 @@ pub(crate) async fn build_auth_client_for_mcp(
             return None;
         }
     };
+
+    if tokens.bound_url.is_none() {
+        tokens.bound_url = Some(url.to_string());
+        if let Err(e) = save_tokens_to_config(config_path, &tokens).await {
+            tracing::warn!(
+                "Failed to bind legacy OAuth tokens to '{}' for {}: {}",
+                url, debug_name, e
+            );
+        }
+    }
 
     let auth_manager = match create_auth_manager_from_tokens(url, &tokens).await {
         Ok(m) => m,
@@ -475,6 +488,8 @@ pub(crate) async fn build_auth_client_for_mcp(
 
     let base_client = match reqwest::Client::builder()
         .default_headers(header_map)
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(MCP_CONNECT_TIMEOUT_SECS))
         .build()
     {
         Ok(c) => c,

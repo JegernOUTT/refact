@@ -159,15 +159,25 @@ pub async fn handle_v1_mcp_server_info(
             )
         };
 
-    let yaml_name = std::path::Path::new(&config_path_clone)
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown");
-    let shortened_yaml_name = mcp_naming::shorten_config_name(yaml_name);
+    let server_prefix =
+        crate::integrations::mcp::integr_mcp_common::tool_name_server_prefix(&config_path_clone);
 
+    let internal_names = {
+        let candidates: Vec<(String, String)> = tools_raw
+            .iter()
+            .map(|tool| {
+                (
+                    mcp_naming::model_tool_name(&server_prefix, tool.name.as_ref()),
+                    tool.name.to_string(),
+                )
+            })
+            .collect();
+        mcp_naming::disambiguate_model_tool_names(candidates)
+    };
     let tools: Vec<McpToolInfo> = tools_raw
         .iter()
-        .map(|tool| {
+        .zip(internal_names)
+        .map(|(tool, internal_name)| {
             let input_schema = {
                 let mut map = tool.input_schema.as_ref().clone();
                 if !map.contains_key("type") {
@@ -175,11 +185,6 @@ pub async fn handle_v1_mcp_server_info(
                 }
                 serde_json::Value::Object(map)
             };
-
-            let internal_name = format!("{}_{}", shortened_yaml_name, tool.name)
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                .collect::<String>();
 
             let annotations = tool
                 .annotations

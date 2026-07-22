@@ -95,6 +95,55 @@ pub struct McpClientHandler {
     pub prompt_refresh_handle: Arc<AMutex<Option<tokio::task::AbortHandle>>>,
 }
 
+#[derive(Clone, Copy)]
+enum RefreshKind {
+    Tool,
+    Resource,
+    Prompt,
+}
+
+async fn refresh_is_current(
+    session_arc: &Arc<AMutex<Box<dyn IntegrationSession>>>,
+    handle_arc: &Arc<AMutex<Option<AbortHandle>>>,
+    kind: RefreshKind,
+) -> bool {
+    let client_arc = {
+        let mut session_locked = session_arc.lock().await;
+        let Some(session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>() else {
+            return false;
+        };
+        if session.connection_status != MCPConnectionStatus::Connected {
+            return false;
+        }
+        session.mcp_client.clone()
+    };
+    let Some(client_arc) = client_arc else {
+        return false;
+    };
+    let client_locked = client_arc.lock().await;
+    let Some(client) = client_locked.as_ref() else {
+        return false;
+    };
+    let current_handle = match kind {
+        RefreshKind::Tool => &client.service().tool_refresh_handle,
+        RefreshKind::Resource => &client.service().resource_refresh_handle,
+        RefreshKind::Prompt => &client.service().prompt_refresh_handle,
+    };
+    Arc::ptr_eq(handle_arc, current_handle)
+}
+
+async fn abort_refresh_handles(handler: &McpClientHandler) {
+    for handle_arc in [
+        &handler.tool_refresh_handle,
+        &handler.resource_refresh_handle,
+        &handler.prompt_refresh_handle,
+    ] {
+        if let Some(handle) = handle_arc.lock().await.take() {
+            handle.abort();
+        }
+    }
+}
+
 pub fn redact_sensitive_value(key: &str, value: &str) -> String {
     let key_lower = key.to_lowercase();
     if key_lower.contains("token")
@@ -423,14 +472,26 @@ impl ClientHandler for McpClientHandler {
         let request_timeout = self.request_timeout;
         let handle_arc = self.tool_refresh_handle.clone();
         async move {
-            {
-                let mut handle = handle_arc.lock().await;
-                if let Some(h) = handle.take() {
-                    h.abort();
-                }
+            let mut handle = handle_arc.lock().await;
+            if let Some(h) = handle.take() {
+                h.abort();
             }
+            if !refresh_is_current(&session_arc, &handle_arc, RefreshKind::Tool).await {
+                return;
+            }
+            let refresh_handle_arc = handle_arc.clone();
+            let refresh_session_arc = session_arc.clone();
             let task = tokio::spawn(async move {
                 sleep(Duration::from_millis(200)).await;
+                if !refresh_is_current(
+                    &refresh_session_arc,
+                    &refresh_handle_arc,
+                    RefreshKind::Tool,
+                )
+                .await
+                {
+                    return;
+                }
                 let peer = {
                     let locked = peer_arc.lock().await;
                     locked.clone()
@@ -467,12 +528,24 @@ impl ClientHandler for McpClientHandler {
                 };
                 let old_count;
                 let new_count = new_tools.len();
-                {
+                let msg = {
+                    if !refresh_is_current(
+                        &refresh_session_arc,
+                        &refresh_handle_arc,
+                        RefreshKind::Tool,
+                    )
+                    .await
+                    {
+                        return;
+                    }
                     let mut session_locked = session_arc.lock().await;
                     let session_downcasted = session_locked
                         .as_any_mut()
                         .downcast_mut::<SessionMCP>()
                         .unwrap();
+                    if session_downcasted.connection_status != MCPConnectionStatus::Connected {
+                        return;
+                    }
                     old_count = session_downcasted.mcp_tools.len();
                     let old_names: std::collections::HashSet<_> = session_downcasted
                         .mcp_tools
@@ -484,15 +557,14 @@ impl ClientHandler for McpClientHandler {
                     let added: Vec<_> = new_names.difference(&old_names).collect();
                     let removed: Vec<_> = old_names.difference(&new_names).collect();
                     session_downcasted.mcp_tools = new_tools;
-                    let msg = format!(
+                    format!(
                         "tools/list_changed: {} → {} tools, added: {:?}, removed: {:?}",
                         old_count, new_count, added, removed
-                    );
-                    tracing::info!("{} for {}", msg, debug_name);
-                    add_log_entry(logs, msg).await;
-                }
+                    )
+                };
+                tracing::info!("{} for {}", msg, debug_name);
+                add_log_entry(logs, msg).await;
             });
-            let mut handle = handle_arc.lock().await;
             *handle = Some(task.abort_handle());
         }
     }
@@ -509,14 +581,26 @@ impl ClientHandler for McpClientHandler {
         let gcx = self.gcx.clone();
         let handle_arc = self.resource_refresh_handle.clone();
         async move {
-            {
-                let mut handle = handle_arc.lock().await;
-                if let Some(h) = handle.take() {
-                    h.abort();
-                }
+            let mut handle = handle_arc.lock().await;
+            if let Some(h) = handle.take() {
+                h.abort();
             }
+            if !refresh_is_current(&session_arc, &handle_arc, RefreshKind::Resource).await {
+                return;
+            }
+            let refresh_handle_arc = handle_arc.clone();
+            let refresh_session_arc = session_arc.clone();
             let task = tokio::spawn(async move {
                 sleep(Duration::from_millis(200)).await;
+                if !refresh_is_current(
+                    &refresh_session_arc,
+                    &refresh_handle_arc,
+                    RefreshKind::Resource,
+                )
+                .await
+                {
+                    return;
+                }
                 let msg = "resources/list_changed: re-fetching resource list".to_string();
                 tracing::info!("{} for {}", msg, debug_name);
                 add_log_entry(logs.clone(), msg).await;
@@ -562,11 +646,23 @@ impl ClientHandler for McpClientHandler {
                 };
 
                 let (old_count, config_path) = {
+                    if !refresh_is_current(
+                        &refresh_session_arc,
+                        &refresh_handle_arc,
+                        RefreshKind::Resource,
+                    )
+                    .await
+                    {
+                        return;
+                    }
                     let mut session_locked = session_arc.lock().await;
                     let session_downcasted = session_locked
                         .as_any_mut()
                         .downcast_mut::<SessionMCP>()
                         .unwrap();
+                    if session_downcasted.connection_status != MCPConnectionStatus::Connected {
+                        return;
+                    }
                     let old_count = session_downcasted.mcp_resources.len();
                     session_downcasted.mcp_resources = new_resources.clone();
                     (old_count, session_downcasted.config_path.clone())
@@ -580,18 +676,30 @@ impl ClientHandler for McpClientHandler {
                 tracing::info!("{} for {}", msg, debug_name);
                 add_log_entry(logs.clone(), msg).await;
 
+                if !refresh_is_current(
+                    &refresh_session_arc,
+                    &refresh_handle_arc,
+                    RefreshKind::Resource,
+                )
+                .await
+                {
+                    return;
+                }
                 if !new_resources.is_empty() {
-                    let index_task = tokio::spawn(super::mcp_resources::index_mcp_resources(
-                        gcx,
-                        config_path,
-                        peer,
-                        new_resources,
-                        logs,
-                    ));
                     let mut session_locked = session_arc.lock().await;
                     if let Some(mcp_session) =
                         session_locked.as_any_mut().downcast_mut::<SessionMCP>()
                     {
+                        if mcp_session.connection_status != MCPConnectionStatus::Connected {
+                            return;
+                        }
+                        let index_task = tokio::spawn(super::mcp_resources::index_mcp_resources(
+                            gcx,
+                            config_path,
+                            peer,
+                            new_resources,
+                            logs,
+                        ));
                         if let Some(previous) = mcp_session
                             .resource_index_task
                             .replace(index_task.abort_handle())
@@ -604,13 +712,15 @@ impl ClientHandler for McpClientHandler {
                     if let Some(mcp_session) =
                         session_locked.as_any_mut().downcast_mut::<SessionMCP>()
                     {
+                        if mcp_session.connection_status != MCPConnectionStatus::Connected {
+                            return;
+                        }
                         if let Some(previous) = mcp_session.resource_index_task.take() {
                             previous.abort();
                         }
                     }
                 }
             });
-            let mut handle = handle_arc.lock().await;
             *handle = Some(task.abort_handle());
         }
     }
@@ -626,14 +736,26 @@ impl ClientHandler for McpClientHandler {
         let request_timeout = self.request_timeout;
         let handle_arc = self.prompt_refresh_handle.clone();
         async move {
-            {
-                let mut handle = handle_arc.lock().await;
-                if let Some(h) = handle.take() {
-                    h.abort();
-                }
+            let mut handle = handle_arc.lock().await;
+            if let Some(h) = handle.take() {
+                h.abort();
             }
+            if !refresh_is_current(&session_arc, &handle_arc, RefreshKind::Prompt).await {
+                return;
+            }
+            let refresh_handle_arc = handle_arc.clone();
+            let refresh_session_arc = session_arc.clone();
             let task = tokio::spawn(async move {
                 sleep(Duration::from_millis(200)).await;
+                if !refresh_is_current(
+                    &refresh_session_arc,
+                    &refresh_handle_arc,
+                    RefreshKind::Prompt,
+                )
+                .await
+                {
+                    return;
+                }
                 let peer = {
                     let locked = peer_arc.lock().await;
                     locked.clone()
@@ -672,24 +794,35 @@ impl ClientHandler for McpClientHandler {
                     }
                 };
                 let new_count = new_prompts.len();
-                {
+                let msg = {
+                    if !refresh_is_current(
+                        &refresh_session_arc,
+                        &refresh_handle_arc,
+                        RefreshKind::Prompt,
+                    )
+                    .await
+                    {
+                        return;
+                    }
                     let mut session_locked = session_arc.lock().await;
                     let session_downcasted = session_locked
                         .as_any_mut()
                         .downcast_mut::<SessionMCP>()
                         .unwrap();
+                    if session_downcasted.connection_status != MCPConnectionStatus::Connected {
+                        return;
+                    }
                     let old_count = session_downcasted.mcp_prompts.len();
                     session_downcasted.mcp_prompts = new_prompts;
-                    let msg = format!(
+                    format!(
                         "prompts/list_changed: {} → {} prompts",
                         old_count, new_count
-                    );
-                    tracing::info!("{} for {}", msg, debug_name);
-                    add_log_entry(logs, msg).await;
-                }
+                    )
+                };
+                tracing::info!("{} for {}", msg, debug_name);
+                add_log_entry(logs, msg).await;
                 crate::http::routers::v1::at_commands::invalidate_slash_cache().await;
             });
-            let mut handle = handle_arc.lock().await;
             *handle = Some(task.abort_handle());
         }
     }
@@ -753,6 +886,7 @@ impl IntegrationSession for SessionMCP {
                     .as_any_mut()
                     .downcast_mut::<SessionMCP>()
                     .unwrap();
+                session_downcasted.connection_status = MCPConnectionStatus::Disconnected;
                 (
                     session_downcasted.debug_name.clone(),
                     session_downcasted.config_path.clone(),
@@ -761,7 +895,7 @@ impl IntegrationSession for SessionMCP {
                     session_downcasted.startup_task_handles.clone(),
                     session_downcasted.health_task_handle.clone(),
                     session_downcasted.oauth_refresh_task_handle.clone(),
-                    session_downcasted.resource_index_task.clone(),
+                    session_downcasted.resource_index_task.take(),
                     session_downcasted.stderr_file_path.clone(),
                 )
             };
@@ -840,6 +974,7 @@ pub async fn cancel_mcp_client(
     };
 
     if let Some(client) = client_to_cancel {
+        abort_refresh_handles(client.service()).await;
         match timeout(Duration::from_secs(3), client.cancel()).await {
             Ok(Ok(reason)) => {
                 let success_msg = format!("MCP server stopped: {:?}", reason);
