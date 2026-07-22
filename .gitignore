@@ -323,3 +323,6 @@ plugins/intellij/src/main/resources/webview/dist/
 /build-jb-plugin-local.sh
 /refact-*.zip
 
+.playwright-mcp/
+issue-18.png
+ui-audit-*.html
