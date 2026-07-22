@@ -451,11 +451,29 @@ describe("TaskProgressWidget goal projection", () => {
 
   test("collapsed goal controls reflect goal status availability", () => {
     renderWidget(
+      makeRuntime({ goal: makeGoal({ active: false, status: "paused" }) }),
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Pause goal" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resume goal" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Stop goal" })).toBeEnabled();
+  });
+
+  test("terminal goal statuses hide the collapsed controls", () => {
+    renderWidget(
       makeRuntime({ goal: makeGoal({ active: false, status: "stopped" }) }),
     );
 
-    expect(screen.getByRole("button", { name: "Pause goal" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Stop goal" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Resume goal" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Pause goal" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Resume goal" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Stop goal" }),
+    ).not.toBeInTheDocument();
   });
 });

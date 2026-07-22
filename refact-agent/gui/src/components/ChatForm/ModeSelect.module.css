@@ -58,11 +58,13 @@
 }
 
 .triggerTitle {
+  flex: 0 0 auto;
+  max-width: 14ch;
   color: currentColor;
 }
 
 .triggerMeta {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   color: var(--rf-color-muted);
   font-weight: 450;
 }

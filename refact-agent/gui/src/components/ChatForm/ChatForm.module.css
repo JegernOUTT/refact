@@ -305,6 +305,7 @@
 
 .chatFormCollapsed .bottomControlsRow {
   padding-top: var(--rf-space-1);
+  padding-bottom: var(--rf-space-1);
 }
 
 .bottomModelControl,
@@ -374,20 +375,20 @@
 }
 
 @container (max-width: 500px) {
-  .chatFormCollapsed .bottomWorkspaceControl {
+  .chatFormCollapsed .bottomModelControl {
     display: none;
   }
 }
 
 @container (max-width: 440px) {
-  .chatFormCollapsed .bottomModeControl,
+  .chatFormCollapsed .bottomWorkspaceControl,
   .hideCollapsedStatusFirst {
     display: none;
   }
 }
 
 @container (max-width: 380px) {
-  .chatFormCollapsed .bottomModelControl,
+  .chatFormCollapsed .bottomModeControl,
   .hideCollapsedStatusSecond {
     display: none;
   }

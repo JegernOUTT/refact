@@ -187,10 +187,11 @@ function goalControlAvailability(goal: GoalSnapshot): {
   canResume: boolean;
   canStop: boolean;
 } {
+  const isTerminal = goal.status === "completed" || goal.status === "stopped";
   return {
-    canPause: goal.active && goal.status !== "paused",
-    canResume: goal.status === "paused" || !goal.active,
-    canStop: goal.status !== "stopped" && goal.status !== "completed",
+    canPause: goal.active && !isTerminal && goal.status !== "paused",
+    canResume: !isTerminal && (goal.status === "paused" || !goal.active),
+    canStop: !isTerminal,
   };
 }
 
@@ -283,28 +284,32 @@ const GoalControlIcons: React.FC<GoalControlIconsProps> = ({
 }) => {
   const { canPause, canResume, canStop } = goalControlAvailability(goal);
 
+  if (!canPause && !canResume && !canStop) return null;
+
   return (
     <Flex
       align="center"
       gap="1"
       className={classNames(styles.goalControlIcons, className)}
     >
-      <IconButton
-        aria-label="Pause goal"
-        icon={Pause}
-        size="sm"
-        variant="soft"
-        disabled={!canPause}
-        onClick={() => onControl("pause")}
-      />
-      <IconButton
-        aria-label="Resume goal"
-        icon={Play}
-        size="sm"
-        variant="soft"
-        disabled={!canResume}
-        onClick={() => onControl("resume")}
-      />
+      {canResume ? (
+        <IconButton
+          aria-label="Resume goal"
+          icon={Play}
+          size="sm"
+          variant="soft"
+          onClick={() => onControl("resume")}
+        />
+      ) : (
+        <IconButton
+          aria-label="Pause goal"
+          icon={Pause}
+          size="sm"
+          variant="soft"
+          disabled={!canPause}
+          onClick={() => onControl("pause")}
+        />
+      )}
       <IconButton
         aria-label="Stop goal"
         icon={Square}
@@ -445,7 +450,7 @@ const GoalSection: React.FC<GoalSectionProps> = ({
                 onApply={handleApplyBudget}
                 onChange={handleBudgetChange}
               />
-              <Flex align="center" justify="between" gap="2" wrap="wrap">
+              <Flex align="center" justify="end" gap="3" wrap="wrap">
                 <Text size="1" color="gray" className={styles.goalProgress}>
                   {goal
                     ? formatGoalBudgetLine(goal)
@@ -551,26 +556,30 @@ type GoalControlsProps = {
 const GoalControls: React.FC<GoalControlsProps> = ({ goal, onControl }) => {
   const { canPause, canResume, canStop } = goalControlAvailability(goal);
 
+  if (!canPause && !canResume && !canStop) return null;
+
   return (
     <Flex align="center" gap="2" wrap="wrap" className={styles.goalControls}>
-      <Button
-        size="sm"
-        variant="soft"
-        leftIcon={Pause}
-        disabled={!canPause}
-        onClick={() => onControl("pause")}
-      >
-        Pause
-      </Button>
-      <Button
-        size="sm"
-        variant="soft"
-        leftIcon={Play}
-        disabled={!canResume}
-        onClick={() => onControl("resume")}
-      >
-        Resume
-      </Button>
+      {canResume ? (
+        <Button
+          size="sm"
+          variant="soft"
+          leftIcon={Play}
+          onClick={() => onControl("resume")}
+        >
+          Resume
+        </Button>
+      ) : (
+        <Button
+          size="sm"
+          variant="soft"
+          leftIcon={Pause}
+          disabled={!canPause}
+          onClick={() => onControl("pause")}
+        >
+          Pause
+        </Button>
+      )}
       <Button
         size="sm"
         variant="danger"

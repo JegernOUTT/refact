@@ -7,6 +7,7 @@
   box-sizing: border-box;
   padding: 0 var(--rf-space-2);
   color: var(--rf-color-fg);
+  font: inherit;
   background: transparent;
   border: 0;
   border-radius: var(--rf-radius-ctl);
@@ -37,9 +38,8 @@
 }
 
 .trigger.disabled {
-  color: var(--rf-color-faint);
+  color: var(--rf-color-muted);
   cursor: default;
-  opacity: 0.58;
 }
 
 .triggerContent {

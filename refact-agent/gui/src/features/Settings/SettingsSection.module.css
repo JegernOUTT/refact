@@ -48,7 +48,7 @@
 
 .title {
   color: var(--rf-color-fg);
-  font: 750 var(--rf-text-5) / var(--rf-line) var(--rf-font-ui);
+  font: 700 var(--rf-text-5) / var(--rf-line) var(--rf-font-ui);
 }
 
 .description {

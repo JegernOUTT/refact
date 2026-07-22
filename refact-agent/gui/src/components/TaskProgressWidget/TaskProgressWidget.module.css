@@ -9,6 +9,7 @@
   border: 0;
   background: transparent;
   color: inherit;
+  font: inherit;
   cursor: pointer;
   opacity: var(--rf-motion-opacity-soft);
   padding: var(--rf-space-2) var(--rf-space-3);
@@ -40,6 +41,9 @@
 
 .goalControlIcons {
   flex-shrink: 0;
+  margin-left: var(--rf-space-1);
+  padding-left: var(--rf-space-2);
+  border-left: var(--rf-hairline) solid var(--rf-border);
 }
 
 .headerRowControls {
@@ -102,7 +106,7 @@
 }
 
 .goalBody {
-  padding: 0 var(--rf-space-2) var(--rf-space-2);
+  padding: var(--rf-space-2);
 }
 
 .goalLabel {
@@ -112,13 +116,14 @@
 }
 
 .goalInput {
+  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   min-height: calc(var(--rf-control-h-lg) * 2);
   resize: vertical;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-2);
+  background: var(--rf-surface-3);
   color: var(--rf-color-fg);
   font: inherit;
   line-height: var(--rf-line);
@@ -174,7 +179,7 @@
   min-height: var(--rf-control-h);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-2);
+  background: var(--rf-surface-3);
   color: var(--rf-color-fg);
   font: inherit;
   padding: 0 var(--rf-space-2);

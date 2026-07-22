@@ -3,11 +3,13 @@
   align-items: center;
   max-width: var(--rf-nav-w);
   min-width: 0;
-  padding: var(--rf-space-1) var(--rf-space-2);
+  min-height: var(--rf-control-h-sm);
+  padding: 0 var(--rf-space-2);
   border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-ctl);
   background: transparent;
   color: var(--rf-color-fg);
+  font: inherit;
   cursor: pointer;
   transition:
     background-color var(--rf-dur-fast) var(--rf-ease-standard),
@@ -62,6 +64,10 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.triggerText {
+  min-width: 4ch;
 }
 
 .triggerText,

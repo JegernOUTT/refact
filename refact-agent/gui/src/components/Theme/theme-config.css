@@ -11,6 +11,10 @@
   font-family: var(--code-font-family);
 }
 
+.radix-themes .rt-BaseButton {
+  border-radius: var(--rf-radius-ctl);
+}
+
 :where(.radix-themes):where(
     .rt-BaseMenuContent,
     .rt-DropdownMenuContent,

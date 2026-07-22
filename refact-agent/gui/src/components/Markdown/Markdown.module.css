@@ -9,7 +9,7 @@
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
   font-size: var(--rf-text-3);
-  line-height: 1.6;
+  line-height: var(--rf-line);
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -87,7 +87,7 @@
 
 .variant_chat {
   font-size: var(--rf-text-3);
-  line-height: 1.6;
+  line-height: var(--rf-line);
 }
 
 .variant_tool {
@@ -141,7 +141,7 @@
   padding: calc(var(--rf-space-1) / 2) var(--rf-space-1);
   border: 1px solid var(--rf-border);
   border-radius: var(--rf-radius-chip);
-  font-size: 0.875em;
+  font-size: var(--rf-text-2);
 }
 
 .code_block {
