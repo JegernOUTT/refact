@@ -2,6 +2,7 @@ import React, { useState, useCallback, useMemo } from "react";
 import { SlidersHorizontal, Wrench, Brain, Settings } from "lucide-react";
 import { StringListEditor } from "./StringListEditor";
 import { RulesTableEditor } from "./RulesTableEditor";
+import { ToolToggleList } from "./ToolToggleList";
 import {
   ConfigPatch,
   safeArray,
@@ -40,7 +41,6 @@ import styles from "./editors.module.css";
 type ModeFormProps = {
   config: Record<string, unknown>;
   onPatch: (patch: ConfigPatch) => void;
-  availableTools?: string[];
 };
 
 type EnrichedModelGroup = ReturnType<typeof enrichAndGroupModels>;
@@ -200,11 +200,7 @@ const MODE_SECTIONS = [
   { id: "advanced", label: "Advanced", icon: Settings },
 ];
 
-export const ModeForm: React.FC<ModeFormProps> = ({
-  config,
-  onPatch,
-  availableTools = [],
-}) => {
+export const ModeForm: React.FC<ModeFormProps> = ({ config, onPatch }) => {
   const [activeTab, setActiveTab] = useState("basic");
 
   const title = safeString(config.title);
@@ -324,12 +320,9 @@ export const ModeForm: React.FC<ModeFormProps> = ({
             </Field>
           </div>
 
-          <StringListEditor
-            value={tools}
+          <ToolToggleList
+            enabledTools={tools}
             onChange={(t) => patch(["tools"], t)}
-            label="Available Tools"
-            placeholder="Add tool..."
-            suggestions={availableTools}
           />
 
           <RulesTableEditor

@@ -2,6 +2,7 @@ export { MessageListEditor } from "./MessageListEditor";
 export type { MessageTemplate } from "./MessageListEditor";
 
 export { StringListEditor } from "./StringListEditor";
+export { ToolToggleList } from "./ToolToggleList";
 
 export { RulesTableEditor } from "./RulesTableEditor";
 export type { ToolConfirmRule } from "./RulesTableEditor";

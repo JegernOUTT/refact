@@ -270,6 +270,91 @@
   font-size: var(--rf-text-1);
 }
 
+.toolToggleList {
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.toolToggleSearch {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.toolToggleGroup {
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.toolToggleGroupTitle {
+  margin: 0;
+  padding: var(--rf-space-1) 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.toolToggleRow {
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-radius: var(--rf-radius-sm);
+}
+
+.toolToggleRow:hover {
+  background: var(--rf-surface-1);
+}
+
+.toolToggleInfo {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 0;
+}
+
+.toolToggleName {
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-2);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.toolToggleDesc {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.toolToggleCustom {
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+}
+
 @media (width <= 18.75rem) {
   .addRow {
     align-items: stretch;
@@ -282,6 +367,10 @@
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  .toolToggleRow {
+    transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+
   .messageItem,
   .modelDefaultsSection,
   .addRow,
@@ -342,6 +431,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .toolToggleRow {
+    transition: none;
+  }
+
   .messageItem,
   .modelDefaultsSection,
   .addRow,
