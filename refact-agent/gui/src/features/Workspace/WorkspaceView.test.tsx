@@ -19,6 +19,7 @@ import {
   splitTab,
 } from "./workspaceSlice";
 import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
+import { updateConfig } from "../Config/configSlice";
 import { WorkspaceView } from "./WorkspaceView";
 
 const groupSplitViewCss = readFileSync(
@@ -95,6 +96,18 @@ function expectSurface(key: SurfaceKey) {
 }
 
 describe("WorkspaceView", () => {
+  it("renders the terminal drawer for capable web hosts and omits it otherwise", () => {
+    const webStore = createWorkspaceStore();
+    const webView = renderWorkspaceView(webStore);
+    expect(screen.getByLabelText("Terminal drawer")).toBeInTheDocument();
+    webView.unmount();
+
+    const ideStore = createWorkspaceStore();
+    ideStore.dispatch(updateConfig({ host: "vscode" }));
+    renderWorkspaceView(ideStore);
+    expect(screen.queryByLabelText("Terminal drawer")).not.toBeInTheDocument();
+  });
+
   it("renders an unsplit surface without pane chrome", () => {
     renderWorkspaceView(createWorkspaceStore());
 

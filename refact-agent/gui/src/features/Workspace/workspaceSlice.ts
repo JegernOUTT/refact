@@ -14,6 +14,7 @@ import {
   isChatSurface,
   isPanelSurface,
   isPanelSurfaceEnabled,
+  isTerminalSurface,
   isWorkspaceSurface,
   type PanelCapabilities,
   type SurfaceKey,
@@ -30,16 +31,99 @@ export type WorkspaceState = {
   tabs: SurfaceKey[];
   activeTabId: SurfaceKey | null;
   groups: WorkspaceGroups;
+  dock?: WorkspaceDockState;
+  drawer?: WorkspaceDrawerState;
 };
+
+export type WorkspaceDockSection = "files" | "git" | "tasks";
+
+export type WorkspaceDockState = {
+  open: boolean;
+  width: number;
+  section: WorkspaceDockSection;
+};
+
+export type WorkspaceDrawerState = {
+  open: boolean;
+  height: number;
+};
+
+export type WorkspaceHydrationState = Pick<
+  WorkspaceState,
+  "tabs" | "activeTabId" | "groups"
+> &
+  Partial<Pick<WorkspaceState, "dock" | "drawer">>;
 
 export const INITIAL_WORKSPACE_LEAF_ID = "root";
 export const MAX_WORKSPACE_TABS = 30;
 export const MAX_GROUP_LEAVES = 6;
+export const DOCK_MIN_WIDTH = 240;
+export const DOCK_MAX_WIDTH = 400;
+export const DOCK_DEFAULT_WIDTH = 280;
+export const DRAWER_MIN_HEIGHT = 160;
+export const DRAWER_DEFAULT_HEIGHT = 280;
+
+export const DEFAULT_WORKSPACE_DOCK: WorkspaceDockState = {
+  open: true,
+  width: DOCK_DEFAULT_WIDTH,
+  section: "files",
+};
+
+export const DEFAULT_WORKSPACE_DRAWER: WorkspaceDrawerState = {
+  open: false,
+  height: DRAWER_DEFAULT_HEIGHT,
+};
+
+export const normalizeDockWidth = (value: number): number =>
+  Number.isFinite(value)
+    ? Math.min(DOCK_MAX_WIDTH, Math.max(DOCK_MIN_WIDTH, value))
+    : DOCK_DEFAULT_WIDTH;
+
+export const normalizeDrawerHeight = (value: number): number =>
+  Number.isFinite(value)
+    ? Math.max(DRAWER_MIN_HEIGHT, value)
+    : DRAWER_DEFAULT_HEIGHT;
+
+export const clampDrawerHeight = (
+  value: number,
+  viewportHeight: number,
+): number => {
+  const maxHeight = Number.isFinite(viewportHeight)
+    ? Math.max(DRAWER_MIN_HEIGHT, viewportHeight * 0.6)
+    : DRAWER_DEFAULT_HEIGHT;
+  return Math.min(maxHeight, normalizeDrawerHeight(value));
+};
+
+export const normalizeWorkspaceDock = (
+  dock?: Partial<WorkspaceDockState> | null,
+): WorkspaceDockState => ({
+  open:
+    typeof dock?.open === "boolean" ? dock.open : DEFAULT_WORKSPACE_DOCK.open,
+  width: normalizeDockWidth(dock?.width ?? DOCK_DEFAULT_WIDTH),
+  section:
+    dock?.section === "files" ||
+    dock?.section === "git" ||
+    dock?.section === "tasks"
+      ? dock.section
+      : DEFAULT_WORKSPACE_DOCK.section,
+});
+
+export const normalizeWorkspaceDrawer = (
+  drawer?: Partial<WorkspaceDrawerState> | null,
+): WorkspaceDrawerState => ({
+  open:
+    typeof drawer?.open === "boolean"
+      ? drawer.open
+      : DEFAULT_WORKSPACE_DRAWER.open,
+  height: normalizeDrawerHeight(drawer?.height ?? DRAWER_DEFAULT_HEIGHT),
+});
 
 const initialState: WorkspaceState = {
   tabs: [],
   activeTabId: null,
   groups: {},
+  dock: { ...DEFAULT_WORKSPACE_DOCK },
+  drawer: { ...DEFAULT_WORKSPACE_DRAWER },
 };
 
 const DEFAULT_PANEL_CAPABILITIES: PanelCapabilities = {
@@ -684,11 +768,23 @@ const groupsEqual = (
 const workspaceStatesEqual = (
   left: WorkspaceState,
   right: WorkspaceState,
-): boolean =>
-  left.activeTabId === right.activeTabId &&
-  left.tabs.length === right.tabs.length &&
-  left.tabs.every((tabId, index) => tabId === right.tabs[index]) &&
-  groupsEqual(left.groups, right.groups);
+): boolean => {
+  const leftDock = normalizeWorkspaceDock(left.dock);
+  const rightDock = normalizeWorkspaceDock(right.dock);
+  const leftDrawer = normalizeWorkspaceDrawer(left.drawer);
+  const rightDrawer = normalizeWorkspaceDrawer(right.drawer);
+  return (
+    left.activeTabId === right.activeTabId &&
+    leftDock.open === rightDock.open &&
+    leftDock.width === rightDock.width &&
+    leftDock.section === rightDock.section &&
+    leftDrawer.open === rightDrawer.open &&
+    leftDrawer.height === rightDrawer.height &&
+    left.tabs.length === right.tabs.length &&
+    left.tabs.every((tabId, index) => tabId === right.tabs[index]) &&
+    groupsEqual(left.groups, right.groups)
+  );
+};
 
 export const sanitizeWorkspaceSurfaceUniqueness = (
   state: WorkspaceState,
@@ -741,7 +837,13 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
     tabs.includes(state.activeTabId)
       ? state.activeTabId
       : tabs[0] ?? null;
-  const nextState: WorkspaceState = { tabs, activeTabId, groups };
+  const nextState: WorkspaceState = {
+    tabs,
+    activeTabId,
+    groups,
+    dock: normalizeWorkspaceDock(state.dock),
+    drawer: normalizeWorkspaceDrawer(state.drawer),
+  };
 
   return workspaceStatesEqual(state, nextState) ? state : nextState;
 };
@@ -762,6 +864,8 @@ export const reconcileWorkspaceState = (
       .slice(0, MAX_WORKSPACE_TABS),
     activeTabId: state.activeTabId,
     groups: {},
+    dock: normalizeWorkspaceDock(state.dock),
+    drawer: normalizeWorkspaceDrawer(state.drawer),
   };
 
   for (const [tabId, group] of Object.entries(state.groups)) {
@@ -798,6 +902,44 @@ export const workspaceSlice = createSlice({
   reducerPath: "workspace",
   initialState,
   reducers: {
+    setDockOpen: (state, action: PayloadAction<boolean>) => {
+      state.dock = {
+        ...normalizeWorkspaceDock(state.dock),
+        open: action.payload,
+      };
+    },
+    toggleDock: (state) => {
+      const dock = normalizeWorkspaceDock(state.dock);
+      state.dock = { ...dock, open: !dock.open };
+    },
+    setDockWidth: (state, action: PayloadAction<number>) => {
+      state.dock = {
+        ...normalizeWorkspaceDock(state.dock),
+        width: normalizeDockWidth(action.payload),
+      };
+    },
+    setDockSection: (state, action: PayloadAction<WorkspaceDockSection>) => {
+      state.dock = {
+        ...normalizeWorkspaceDock(state.dock),
+        section: action.payload,
+      };
+    },
+    setDrawerOpen: (state, action: PayloadAction<boolean>) => {
+      state.drawer = {
+        ...normalizeWorkspaceDrawer(state.drawer),
+        open: action.payload,
+      };
+    },
+    toggleDrawer: (state) => {
+      const drawer = normalizeWorkspaceDrawer(state.drawer);
+      state.drawer = { ...drawer, open: !drawer.open };
+    },
+    setDrawerHeight: (state, action: PayloadAction<number>) => {
+      state.drawer = {
+        ...normalizeWorkspaceDrawer(state.drawer),
+        height: normalizeDrawerHeight(action.payload),
+      };
+    },
     openTab: (state, action: PayloadAction<SurfaceKey>) => {
       if (!isWorkspaceSurface(action.payload)) return;
       if (!state.tabs.includes(action.payload)) {
@@ -1091,11 +1233,12 @@ export const workspaceSlice = createSlice({
     hydrateWorkspace: (
       _state,
       action: PayloadAction<
-        WorkspaceState & { panelCapabilities?: PanelCapabilities }
+        WorkspaceHydrationState & { panelCapabilities?: PanelCapabilities }
       >,
     ) => {
       const panelCapabilities =
         action.payload.panelCapabilities ?? DEFAULT_PANEL_CAPABILITIES;
+      const legacyTerminalTab = action.payload.tabs.some(isTerminalSurface);
       const tabs = unique(action.payload.tabs)
         .filter(
           (key) =>
@@ -1124,6 +1267,13 @@ export const workspaceSlice = createSlice({
               ? activeTabId
               : tabs[0] ?? null,
           groups,
+          dock: normalizeWorkspaceDock(action.payload.dock),
+          drawer: {
+            ...normalizeWorkspaceDrawer(action.payload.drawer),
+            open:
+              legacyTerminalTab ||
+              normalizeWorkspaceDrawer(action.payload.drawer).open,
+          },
         },
         panelCapabilities,
       );
@@ -1132,6 +1282,13 @@ export const workspaceSlice = createSlice({
 });
 
 export const {
+  setDockOpen,
+  toggleDock,
+  setDockWidth,
+  setDockSection,
+  setDrawerOpen,
+  toggleDrawer,
+  setDrawerHeight,
   openTab,
   closeTab,
   setActiveTab,
@@ -1152,6 +1309,12 @@ type WorkspaceRootState = {
 };
 
 export const selectTabs = (state: WorkspaceRootState) => state.workspace.tabs;
+
+export const selectWorkspaceDock = (state: WorkspaceRootState) =>
+  state.workspace.dock ?? DEFAULT_WORKSPACE_DOCK;
+
+export const selectWorkspaceDrawer = (state: WorkspaceRootState) =>
+  state.workspace.drawer ?? DEFAULT_WORKSPACE_DRAWER;
 
 export const selectActiveTabId = (state: WorkspaceRootState) =>
   state.workspace.activeTabId;

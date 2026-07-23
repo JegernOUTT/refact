@@ -170,7 +170,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
   const pages = useAppSelector(selectPages);
   const capabilities = useAppSelector(selectCapabilities);
-  const hasPanelLauncher =
+  const hasWorkspaceChrome =
     capabilities.filesPanel ||
     capabilities.gitPanel ||
     capabilities.terminalPanel;
@@ -185,7 +185,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     workspaceTabs.length > 0 ||
     openTasks.length > 0 ||
     pages.some((page) => page.name === "buddy") ||
-    hasPanelLauncher;
+    hasWorkspaceChrome;
   const [createTask] = useCreateTaskMutation();
 
   const goHome = useCallback(() => {

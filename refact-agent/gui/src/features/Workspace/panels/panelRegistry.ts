@@ -1,8 +1,7 @@
 import { lazy, type ComponentType } from "react";
 
-import type { PanelKind } from "../surfaceKey";
+import type { CenterPanelKind } from "../surfaceKey";
 import { FilesPanel } from "../FilesPanel";
-import { TerminalPanel } from "../TerminalPanel";
 
 const GitPanel = lazy(() =>
   import("../GitPanel/GitPanel").then((module) => ({
@@ -10,8 +9,7 @@ const GitPanel = lazy(() =>
   })),
 );
 
-export const PANEL_COMPONENTS: Record<PanelKind, ComponentType> = {
+export const PANEL_COMPONENTS: Record<CenterPanelKind, ComponentType> = {
   files: FilesPanel,
   git: GitPanel,
-  terminal: TerminalPanel,
 };

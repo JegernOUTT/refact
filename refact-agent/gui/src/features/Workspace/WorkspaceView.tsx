@@ -10,6 +10,7 @@ import {
   switchToThread,
 } from "../Chat/Thread";
 import { collectTabIds } from "../ChatPanes/panesTree";
+import { selectCapabilities } from "../Config/configSlice";
 import {
   hasTabDragType,
   readTabDragSurfaceKey,
@@ -20,10 +21,12 @@ import {
   usePointerDropZone,
 } from "../ChatPanes/usePointerDrag";
 import { GroupSplitView } from "./GroupSplitView";
+import { Drawer } from "./Drawer";
 import { SurfacePane } from "./SurfacePane";
+import { TerminalPanel } from "./TerminalPanel";
 import {
   isChatSurface,
-  isPanelSurface,
+  isCenterPanelSurface,
   makeSurfaceKey,
   type PanelSurfaceKey,
 } from "./surfaceKey";
@@ -46,8 +49,10 @@ export function WorkspaceView() {
   const openThreadIds = useAppSelector(selectOpenThreadIds);
   const tabs = useAppSelector(selectTabs);
   const groups = useAppSelector(selectWorkspaceGroups);
+  const capabilities = useAppSelector(selectCapabilities);
   const [mountedPanelKeys, setMountedPanelKeys] = useState<PanelSurfaceKey[]>(
-    () => (activeTabId && isPanelSurface(activeTabId) ? [activeTabId] : []),
+    () =>
+      activeTabId && isCenterPanelSurface(activeTabId) ? [activeTabId] : [],
   );
   const currentSurfaceKey = currentThreadId
     ? makeSurfaceKey("chat", currentThreadId)
@@ -73,7 +78,7 @@ export function WorkspaceView() {
   useEffect(() => {
     setMountedPanelKeys((current) => {
       const openPanels = current.filter((key) => tabs.includes(key));
-      if (!activeTabId || !isPanelSurface(activeTabId)) return openPanels;
+      if (!activeTabId || !isCenterPanelSurface(activeTabId)) return openPanels;
       return openPanels.includes(activeTabId)
         ? openPanels
         : [...openPanels, activeTabId];
@@ -210,74 +215,83 @@ export function WorkspaceView() {
 
   return (
     <div className={styles.workspaceView}>
-      <div
-        className={classNames(
-          styles.body,
-          !isSplit && styles.unsplitBody,
-          isSplit && styles.splitBody,
-          isSplit ? "rf-enter-scale" : "rf-enter",
-        )}
-      >
-        {activeTabId && activeTabCanSplit && isSplit ? (
-          <GroupSplitView tabId={activeTabId} />
-        ) : (
-          <div
-            ref={unsplitPointerDrop.ref}
-            className={classNames(
-              styles.unsplitSurfaceWrap,
-              unsplitDropActive && styles.unsplitSurfaceDragActive,
-            )}
-            onDragEnter={handleUnsplitDragEnter}
-            onDragOver={handleUnsplitDragOver}
-            onDragLeave={handleUnsplitDragLeave}
-            onDragEnd={handleUnsplitDragEnd}
-            onDrop={handleUnsplitDrop}
-            data-workspace-unsplit-drop-target={
-              activeTabCanSplit ? "true" : undefined
-            }
-          >
-            {activeTabId && isPanelSurface(activeTabId) ? null : (
-              <SurfacePane surfaceKey={activeTabId} />
-            )}
-            {mountedPanelKeys.map((panelKey) => {
-              const active = panelKey === activeTabId;
-              return (
+      <div className={styles.mainColumn}>
+        <div
+          className={classNames(
+            styles.body,
+            !isSplit && styles.unsplitBody,
+            isSplit && styles.splitBody,
+            isSplit ? "rf-enter-scale" : "rf-enter",
+          )}
+        >
+          {activeTabId && activeTabCanSplit && isSplit ? (
+            <GroupSplitView tabId={activeTabId} />
+          ) : (
+            <div
+              ref={unsplitPointerDrop.ref}
+              className={classNames(
+                styles.unsplitSurfaceWrap,
+                unsplitDropActive && styles.unsplitSurfaceDragActive,
+              )}
+              onDragEnter={handleUnsplitDragEnter}
+              onDragOver={handleUnsplitDragOver}
+              onDragLeave={handleUnsplitDragLeave}
+              onDragEnd={handleUnsplitDragEnd}
+              onDrop={handleUnsplitDrop}
+              data-workspace-unsplit-drop-target={
+                activeTabCanSplit ? "true" : undefined
+              }
+            >
+              {activeTabId && isCenterPanelSurface(activeTabId) ? null : (
+                <SurfacePane surfaceKey={activeTabId} />
+              )}
+              {mountedPanelKeys.map((panelKey) => {
+                const active = panelKey === activeTabId;
+                return (
+                  <div
+                    key={panelKey}
+                    className={classNames(
+                      styles.panelMount,
+                      active
+                        ? styles.panelMountActive
+                        : styles.panelMountHidden,
+                    )}
+                    aria-hidden={!active}
+                  >
+                    <SurfacePane surfaceKey={panelKey} />
+                  </div>
+                );
+              })}
+              {unsplitDropActive ? (
                 <div
-                  key={panelKey}
-                  className={classNames(
-                    styles.panelMount,
-                    active ? styles.panelMountActive : styles.panelMountHidden,
-                  )}
-                  aria-hidden={!active}
+                  className={classNames(styles.unsplitDropOverlay, "rf-enter")}
+                  aria-hidden="true"
                 >
-                  <SurfacePane surfaceKey={panelKey} />
+                  <div className={styles.unsplitDropHint}>Drop to split</div>
                 </div>
-              );
-            })}
-            {unsplitDropActive ? (
-              <div
-                className={classNames(styles.unsplitDropOverlay, "rf-enter")}
-                aria-hidden="true"
-              >
-                <div className={styles.unsplitDropHint}>Drop to split</div>
-              </div>
-            ) : null}
-            {activeTabCanSplit ? (
-              <div className={styles.unsplitSplitAffordance}>
-                <Tooltip content="Split this tab">
-                  <IconButton
-                    aria-label="Split active tab"
-                    className={styles.unsplitSplitButton}
-                    icon={Columns3}
-                    onClick={handleSplitActiveSurface}
-                    size="sm"
-                    variant="plain"
-                  />
-                </Tooltip>
-              </div>
-            ) : null}
-          </div>
-        )}
+              ) : null}
+              {activeTabCanSplit ? (
+                <div className={styles.unsplitSplitAffordance}>
+                  <Tooltip content="Split this tab">
+                    <IconButton
+                      aria-label="Split active tab"
+                      className={styles.unsplitSplitButton}
+                      icon={Columns3}
+                      onClick={handleSplitActiveSurface}
+                      size="sm"
+                      variant="plain"
+                    />
+                  </Tooltip>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+        {capabilities.terminalPanel ? (
+          <Drawer>
+            <TerminalPanel />
+          </Drawer>
+        ) : null}
       </div>
     </div>
   );

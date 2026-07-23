@@ -1,0 +1,108 @@
+.drawer {
+  position: relative;
+  display: flex;
+  flex: 0 0 var(--workspace-drawer-h);
+  flex-direction: column;
+  width: 100%;
+  height: var(--workspace-drawer-h);
+  max-height: 60dvh;
+  min-width: 0;
+  min-height: min(calc(var(--rf-control-h-lg) * 4 + var(--rf-space-4)), 60dvh);
+  overflow: hidden;
+  background: var(--rf-bg);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+
+.collapsed {
+  flex-basis: var(--rf-control-h);
+  height: var(--rf-control-h);
+  min-height: var(--rf-control-h);
+}
+
+.splitter {
+  position: absolute;
+  top: calc(-1 * var(--rf-space-xs));
+  right: 0;
+  left: 0;
+  z-index: var(--rf-z-base);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: calc(var(--rf-space-xs) * 2);
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.splitter::before {
+  position: absolute;
+  inset: 0;
+  background: var(--rf-color-accent-soft);
+  content: "";
+  opacity: var(--rf-motion-opacity-hidden);
+}
+
+.splitter:hover::before,
+.splitter[data-dragging]::before {
+  opacity: var(--rf-motion-opacity-visible);
+}
+
+.splitterHandle {
+  position: relative;
+  width: var(--rf-space-6);
+  height: var(--rf-hairline);
+  background: var(--rf-border-strong);
+}
+
+.openHeader,
+.collapsedStrip {
+  display: flex;
+  flex: 0 0 var(--rf-control-h);
+  align-items: center;
+  gap: var(--rf-space-2);
+  width: 100%;
+  min-width: 0;
+  min-height: var(--rf-control-h);
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border: 0;
+}
+
+.collapsedStrip {
+  cursor: pointer;
+}
+
+.collapsedStrip:hover {
+  background: var(--rf-surface-2);
+}
+
+.label {
+  color: var(--rf-color-muted);
+  font: 600 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  text-transform: uppercase;
+}
+
+.count {
+  color: var(--rf-color-muted);
+  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
+.statuses {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.content {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.collapsed .content {
+  visibility: hidden;
+  pointer-events: none;
+}

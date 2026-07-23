@@ -3,6 +3,7 @@ import {
   Files,
   GitBranch,
   Layers,
+  Menu as MenuIcon,
   Plus,
   SquareTerminal,
   X,
@@ -66,12 +67,14 @@ import {
   selectTabs,
   selectWorkspaceGroups,
   setActiveTab,
+  selectWorkspaceDock,
+  toggleDock,
   type PaneGroup,
 } from "./workspaceSlice";
 import {
   isPanelKind,
   makeSurfaceKey,
-  PANEL_KINDS,
+  CENTER_PANEL_KINDS,
   panelCapabilityKey,
   parseSurfaceKey,
   type PanelKind,
@@ -257,6 +260,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
   const currentPage = useAppSelector(selectCurrentPage);
   const pages = useAppSelector(selectPages);
   const capabilities = useAppSelector(selectCapabilities);
+  const dock = useAppSelector(selectWorkspaceDock);
   const [draggingTabId, setDraggingTabId] = useState<SurfaceKey | null>(null);
   const [dragTargetTabId, setDragTargetTabId] = useState<SurfaceKey | null>(
     null,
@@ -288,9 +292,13 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
       ? makeSurfaceKey("task", currentPage.taskId)
       : null;
   const buddySurfaceOpen = pages.some((page) => page.name === "buddy");
-  const openablePanelKinds = PANEL_KINDS.filter(
+  const openablePanelKinds = CENTER_PANEL_KINDS.filter(
     (kind) => capabilities[panelCapabilityKey(kind)],
   );
+  const showDockToggle =
+    capabilities.filesPanel ||
+    capabilities.gitPanel ||
+    capabilities.terminalPanel;
 
   const visibleTabKeys = useMemo(
     () =>
@@ -641,6 +649,17 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
       )}
       aria-label="Workspace tabs"
     >
+      {showDockToggle ? (
+        <IconButton
+          aria-label="Toggle workspace dock"
+          aria-pressed={dock.open}
+          className={styles.dockToggle}
+          icon={MenuIcon}
+          onClick={() => dispatch(toggleDock())}
+          size="sm"
+          variant="plain"
+        />
+      ) : null}
       <div
         className={classNames(styles.scrollArea, "scrollX")}
         onWheel={handleWheel}

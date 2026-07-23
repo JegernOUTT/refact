@@ -128,9 +128,12 @@ function getTabWrap(name: RegExp): HTMLElement {
 }
 
 describe("TabBar", () => {
-  it("shows all enabled workspace panels in the web launcher", async () => {
+  it("shows center panels and the dock toggle without a Terminal center tab", async () => {
     const store = createStoreWithChatTabs();
     const view = renderTabBar(store);
+    expect(
+      screen.getByRole("button", { name: "Toggle workspace dock" }),
+    ).toBeInTheDocument();
 
     await view.user.click(
       screen.getByRole("button", { name: "Open workspace panel" }),
@@ -139,9 +142,8 @@ describe("TabBar", () => {
     expect(screen.getByRole("menuitem", { name: "Files" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Git" })).toBeInTheDocument();
     expect(
-      screen.getByRole("menuitem", { name: "Terminal" }),
-    ).toBeInTheDocument();
-
+      screen.queryByRole("menuitem", { name: "Terminal" }),
+    ).not.toBeInTheDocument();
     await view.user.click(screen.getByRole("menuitem", { name: "Files" }));
     expect(store.getState().workspace.tabs).toContain(
       makeSurfaceKey("files", "main"),
@@ -158,6 +160,9 @@ describe("TabBar", () => {
 
     expect(
       screen.queryByRole("button", { name: "Open workspace panel" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Toggle workspace dock" }),
     ).not.toBeInTheDocument();
     expect(screen.getAllByRole("tab")).toHaveLength(3);
     expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();

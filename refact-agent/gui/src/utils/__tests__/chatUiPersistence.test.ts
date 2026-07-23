@@ -62,6 +62,8 @@ function splitWorkspace(): WorkspaceState {
         focusedLeafId: "right",
       },
     },
+    dock: { open: false, width: 340, section: "git" },
+    drawer: { open: true, height: 320 },
   };
 }
 
@@ -266,7 +268,7 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedActiveTab()).toEqual({ type: "dashboard" });
   });
 
-  it("round-trips workspace v2 under the project namespace", () => {
+  it("round-trips workspace layout state under the project namespace", () => {
     savePersistedChatTabs({
       openThreadIds: ["chat-a", "chat-b"],
       currentThreadId: "chat-b",
@@ -279,7 +281,7 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedWorkspace()).toEqual(workspace);
   });
 
-  it("round-trips singleton panel tabs under the project namespace", () => {
+  it("migrates a legacy Terminal panel tab into the drawer", () => {
     savePersistedChatTabs({
       openThreadIds: ["chat-a"],
       currentThreadId: "chat-a",
@@ -295,7 +297,13 @@ describe("chatUiPersistence", () => {
 
     savePersistedWorkspace(workspace);
 
-    expect(loadPersistedWorkspace()).toEqual(workspace);
+    expect(loadPersistedWorkspace()).toEqual({
+      tabs: [chatSurface("chat-a"), files],
+      activeTabId: chatSurface("chat-a"),
+      groups: {},
+      dock: { open: true, width: 280, section: "files" },
+      drawer: { open: true, height: 280 },
+    });
   });
 
   it("derives task and buddy navigation tabs outside persisted workspace panes", () => {
@@ -322,6 +330,8 @@ describe("chatUiPersistence", () => {
       tabs: [chatSurface("chat-a")],
       activeTabId: chatSurface("chat-a"),
       groups: {},
+      dock: { open: true, width: 280, section: "files" },
+      drawer: { open: false, height: 280 },
     });
   });
 
@@ -363,6 +373,8 @@ describe("chatUiPersistence", () => {
       tabs: [chatSurface("chat-b")],
       activeTabId: chatSurface("chat-b"),
       groups: {},
+      dock: { open: true, width: 280, section: "files" },
+      drawer: { open: false, height: 280 },
     });
   });
 
@@ -388,6 +400,8 @@ describe("chatUiPersistence", () => {
       tabs: [chatSurface("chat-b")],
       activeTabId: chatSurface("chat-b"),
       groups: {},
+      dock: { open: true, width: 280, section: "files" },
+      drawer: { open: false, height: 280 },
     });
 
     localStorage.setItem(workspaceStorageKey(), "not json");
@@ -395,6 +409,8 @@ describe("chatUiPersistence", () => {
       tabs: [chatSurface("chat-b")],
       activeTabId: chatSurface("chat-b"),
       groups: {},
+      dock: { open: true, width: 280, section: "files" },
+      drawer: { open: false, height: 280 },
     });
   });
 
@@ -418,6 +434,8 @@ describe("chatUiPersistence", () => {
       tabs: [chatSurface("chat-a"), chatSurface("chat-b")],
       activeTabId: chatSurface("chat-a"),
       groups: {},
+      dock: { open: true, width: 280, section: "files" },
+      drawer: { open: false, height: 280 },
     });
   });
 
@@ -465,6 +483,8 @@ describe("chatUiPersistence", () => {
       tabs: [chatSurface("chat-a")],
       activeTabId: chatSurface("chat-a"),
       groups: {},
+      dock: { open: true, width: 280, section: "files" },
+      drawer: { open: false, height: 280 },
     });
   });
 

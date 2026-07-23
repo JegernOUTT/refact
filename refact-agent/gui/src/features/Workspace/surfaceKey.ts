@@ -1,6 +1,8 @@
 export const PANEL_KINDS = ["files", "git", "terminal"] as const;
+export const CENTER_PANEL_KINDS = ["files", "git"] as const;
 
 export type PanelKind = (typeof PANEL_KINDS)[number];
+export type CenterPanelKind = (typeof CENTER_PANEL_KINDS)[number];
 export type PanelCapabilityKey = `${PanelKind}Panel`;
 export type PanelCapabilities = Record<PanelCapabilityKey, boolean>;
 export type SurfaceKind = "chat" | "task" | "buddy" | "dashboard" | PanelKind;
@@ -20,6 +22,9 @@ const isPrefixedSurfaceKind = (
 
 export const isPanelKind = (kind: string): kind is PanelKind =>
   (PANEL_KINDS as readonly string[]).includes(kind);
+
+export const isCenterPanelKind = (kind: string): kind is CenterPanelKind =>
+  (CENTER_PANEL_KINDS as readonly string[]).includes(kind);
 
 export function makeSurfaceKey(kind: "dashboard", id?: null): SurfaceKey;
 export function makeSurfaceKey(kind: PanelKind, id: "main"): PanelSurfaceKey;
@@ -75,6 +80,11 @@ export const isChatSurface = (key: SurfaceKey): key is ChatSurfaceKey =>
 export const isPanelSurface = (key: SurfaceKey): key is PanelSurfaceKey =>
   PANEL_KINDS.some((kind) => key === `${kind}:main`);
 
+export const isCenterPanelSurface = (
+  key: SurfaceKey,
+): key is `${CenterPanelKind}:main` =>
+  CENTER_PANEL_KINDS.some((kind) => key === `${kind}:main`);
+
 export const isFilesSurface = (
   key: SurfaceKey,
 ): key is Extract<PanelSurfaceKey, "files:main"> => key === "files:main";
@@ -90,7 +100,7 @@ export const isTerminalSurface = (
 export const isWorkspaceSurface = (
   key: SurfaceKey,
 ): key is ChatSurfaceKey | PanelSurfaceKey =>
-  isChatSurface(key) || isPanelSurface(key);
+  isChatSurface(key) || isCenterPanelSurface(key);
 
 export const panelCapabilityKey = (kind: PanelKind): PanelCapabilityKey =>
   `${kind}Panel`;
@@ -99,7 +109,7 @@ export const isPanelSurfaceEnabled = (
   key: SurfaceKey,
   capabilities: PanelCapabilities,
 ): key is PanelSurfaceKey => {
-  if (!isPanelSurface(key)) return false;
+  if (!isCenterPanelSurface(key)) return false;
   const { kind } = parseSurfaceKey(key);
-  return isPanelKind(kind) && capabilities[panelCapabilityKey(kind)];
+  return isCenterPanelKind(kind) && capabilities[panelCapabilityKey(kind)];
 };

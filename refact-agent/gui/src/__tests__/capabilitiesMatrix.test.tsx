@@ -127,9 +127,12 @@ describe("resolveCapabilities matrix", () => {
 });
 
 describe("TabBar panel launcher reflects capabilities", () => {
-  it("offers every panel on the web host defaults", async () => {
+  it("offers every center panel on the web host defaults", async () => {
     const store = createStoreWithChat(makeConfig("web"));
     const view = render(<TabBar />, { store });
+    expect(
+      screen.getByRole("button", { name: "Toggle workspace dock" }),
+    ).toBeInTheDocument();
 
     await view.user.click(
       screen.getByRole("button", { name: "Open workspace panel" }),
@@ -137,9 +140,7 @@ describe("TabBar panel launcher reflects capabilities", () => {
 
     expect(screen.getByRole("menuitem", { name: "Files" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Git" })).toBeInTheDocument();
-    expect(
-      screen.getByRole("menuitem", { name: "Terminal" }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Terminal" })).toBeNull();
   });
 
   it("drops revoked panels from the launcher on the web host", async () => {
@@ -152,9 +153,7 @@ describe("TabBar panel launcher reflects capabilities", () => {
 
     expect(screen.getByRole("menuitem", { name: "Files" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Git" })).toBeNull();
-    expect(
-      screen.getByRole("menuitem", { name: "Terminal" }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Terminal" })).toBeNull();
   });
 
   it("renders no launcher for IDE host defaults", () => {
@@ -304,7 +303,7 @@ describe("persisted panel tabs respect capability revocation", () => {
     expect(store.getState().workspace.activeTabId).toBe(chat("chat-a"));
   });
 
-  it("keeps every persisted panel tab when capabilities allow them", () => {
+  it("keeps center panel tabs and migrates Terminal into the drawer", () => {
     const store = createStoreWithOpenThread();
 
     store.dispatch(
@@ -319,9 +318,9 @@ describe("persisted panel tabs respect capability revocation", () => {
     expect(store.getState().workspace.tabs).toEqual([
       chat("chat-a"),
       "git:main",
-      "terminal:main",
     ]);
     expect(store.getState().workspace.activeTabId).toBe("git:main");
+    expect(store.getState().workspace.drawer?.open).toBe(true);
   });
 
   it("drops every panel tab when hydrating with IDE capabilities", () => {

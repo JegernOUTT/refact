@@ -1,16 +1,24 @@
 import { collectTabIds, type PaneNode } from "../features/ChatPanes/panesTree";
 import {
+  DEFAULT_WORKSPACE_DOCK,
+  DEFAULT_WORKSPACE_DRAWER,
   MAX_GROUP_LEAVES,
   MAX_WORKSPACE_TABS,
+  normalizeWorkspaceDock,
+  normalizeWorkspaceDrawer,
   reconcileWorkspaceState,
   sanitizeWorkspaceSurfaceUniqueness,
   type PaneGroup,
+  type WorkspaceDockState,
+  type WorkspaceDrawerState,
   type WorkspaceGroups,
+  type WorkspaceHydrationState,
   type WorkspaceState,
 } from "../features/Workspace/workspaceSlice";
 import {
   isChatSurface,
   isPanelSurface,
+  isTerminalSurface,
   parseSurfaceKey,
   type SurfaceKey,
 } from "../features/Workspace/surfaceKey";
@@ -376,6 +384,8 @@ function createFallbackWorkspace(): WorkspaceState {
     tabs: fallbackTabId ? [fallbackTabId] : [],
     activeTabId: fallbackTabId,
     groups: {},
+    dock: { ...DEFAULT_WORKSPACE_DOCK },
+    drawer: { ...DEFAULT_WORKSPACE_DRAWER },
   };
 }
 
@@ -395,10 +405,32 @@ function isOpenWorkspaceSurface(
   surfaceKey: SurfaceKey,
   openThreadIds: ReadonlySet<string>,
 ): boolean {
-  return isPanelSurface(surfaceKey)
+  return isPanelSurface(surfaceKey) && !isTerminalSurface(surfaceKey)
     ? true
     : isChatSurface(surfaceKey) &&
         openThreadIds.has(surfaceKey.slice("chat:".length));
+}
+
+function normalizePersistedDock(value: unknown): WorkspaceDockState {
+  if (!isRecord(value)) return { ...DEFAULT_WORKSPACE_DOCK };
+  return normalizeWorkspaceDock({
+    open: typeof value.open === "boolean" ? value.open : undefined,
+    width: typeof value.width === "number" ? value.width : undefined,
+    section:
+      value.section === "files" ||
+      value.section === "git" ||
+      value.section === "tasks"
+        ? value.section
+        : undefined,
+  });
+}
+
+function normalizePersistedDrawer(value: unknown): WorkspaceDrawerState {
+  if (!isRecord(value)) return { ...DEFAULT_WORKSPACE_DRAWER };
+  return normalizeWorkspaceDrawer({
+    open: typeof value.open === "boolean" ? value.open : undefined,
+    height: typeof value.height === "number" ? value.height : undefined,
+  });
 }
 
 type WorkspaceNodeValidationContext = {
@@ -535,7 +567,9 @@ export function loadPersistedWorkspace(): WorkspaceState {
   const fallback = createFallbackWorkspace();
   const trustedKey = trustedProjectScopedStorageKey(WORKSPACE_STORAGE_KEY);
   const record = trustedKey ? readRecord(trustedKey) : null;
-  if (!record || record.version !== 2) return fallback;
+  if (!record || (record.version !== 2 && record.version !== 3)) {
+    return fallback;
+  }
 
   const persistedTabs = loadPersistedChatTabs();
   const openThreadIds = new Set(persistedTabs.openThreadIds);
@@ -544,9 +578,14 @@ export function loadPersistedWorkspace(): WorkspaceState {
   }
 
   const tabs: SurfaceKey[] = [];
+  let legacyTerminalTab = false;
   for (const rawSurfaceKey of record.tabs) {
     const surfaceKey = normalizeSurfaceKey(rawSurfaceKey);
     if (!surfaceKey) return fallback;
+    if (isTerminalSurface(surfaceKey)) {
+      legacyTerminalTab = true;
+      continue;
+    }
     if (!isOpenWorkspaceSurface(surfaceKey, openThreadIds)) continue;
     if (tabs.includes(surfaceKey)) continue;
     tabs.push(surfaceKey);
@@ -596,20 +635,29 @@ export function loadPersistedWorkspace(): WorkspaceState {
           ? rawActiveTabId
           : tabs[0] ?? null,
       groups,
+      dock: normalizePersistedDock(record.dock),
+      drawer: {
+        ...normalizePersistedDrawer(record.drawer),
+        open: legacyTerminalTab || normalizePersistedDrawer(record.drawer).open,
+      },
     }),
     persistedTabs.openThreadIds,
   );
 }
 
-export function savePersistedWorkspace(workspace: WorkspaceState): void {
+export function savePersistedWorkspace(
+  workspace: WorkspaceHydrationState,
+): void {
   const storageKey = trustedProjectScopedStorageKey(WORKSPACE_STORAGE_KEY);
   if (!storageKey) return;
 
   writeRecord(storageKey, {
-    version: 2,
+    version: 3,
     tabs: workspace.tabs.slice(0, MAX_WORKSPACE_TABS),
     activeTabId: workspace.activeTabId,
     groups: workspace.groups,
+    dock: normalizeWorkspaceDock(workspace.dock),
+    drawer: normalizeWorkspaceDrawer(workspace.drawer),
     updatedAt: Date.now(),
   });
 }

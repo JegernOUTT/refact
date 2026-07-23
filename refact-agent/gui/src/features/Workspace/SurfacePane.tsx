@@ -9,7 +9,7 @@ import { ChatThreadProvider } from "../Chat/Thread";
 import { selectCapabilities } from "../Config/configSlice";
 import { PANEL_COMPONENTS } from "./panels/panelRegistry";
 import {
-  isPanelKind,
+  isCenterPanelKind,
   panelCapabilityKey,
   parseSurfaceKey,
   type SurfaceKey,
@@ -56,7 +56,7 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
       );
     }
 
-    if (isPanelKind(parsed.kind)) {
+    if (isCenterPanelKind(parsed.kind)) {
       if (!capabilities[panelCapabilityKey(parsed.kind)]) return null;
       const PanelComponent = PANEL_COMPONENTS[parsed.kind];
       return (

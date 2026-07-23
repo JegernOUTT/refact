@@ -200,6 +200,10 @@ function expectNoPanelChrome() {
   expect(screen.queryByRole("tab", { name: "Files" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Git" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Terminal" })).toBeNull();
+  expect(
+    screen.queryByRole("button", { name: "Toggle workspace dock" }),
+  ).toBeNull();
+  expect(screen.queryByLabelText("Terminal drawer")).toBeNull();
 }
 
 afterEach(() => {

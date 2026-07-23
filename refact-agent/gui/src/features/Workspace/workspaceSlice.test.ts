@@ -22,9 +22,16 @@ import {
   selectGroupForTab,
   selectIsTabSplit,
   selectTabs,
+  selectWorkspaceDock,
+  selectWorkspaceDrawer,
   selectVisibleSurfaceKeys,
   selectVisibleThreadIds,
   setActiveTab,
+  setDockOpen,
+  setDockSection,
+  setDockWidth,
+  setDrawerHeight,
+  setDrawerOpen,
   setPaneActive,
   splitPaneWithSurface,
   splitTab,
@@ -124,19 +131,53 @@ describe("surfaceKey helpers", () => {
 });
 
 describe("workspaceSlice", () => {
-  test("opens, focuses, and closes singleton panel tabs", () => {
+  test("updates normalized dock and drawer layout state", () => {
+    let state = reducer(undefined, setDockOpen(false));
+    state = reducer(state, setDockWidth(1000));
+    state = reducer(state, setDockSection("tasks"));
+    state = reducer(state, setDrawerOpen(true));
+    state = reducer(state, setDrawerHeight(40));
+
+    expect(selectWorkspaceDock(rootState(state))).toEqual({
+      open: false,
+      width: 400,
+      section: "tasks",
+    });
+    expect(selectWorkspaceDrawer(rootState(state))).toEqual({
+      open: true,
+      height: 160,
+    });
+  });
+
+  test("migrates a legacy Terminal center tab into the drawer", () => {
+    const chatA = chat("a");
+    const state = reducer(
+      undefined,
+      hydrateWorkspace({
+        tabs: [chatA, terminal],
+        activeTabId: terminal,
+        groups: {},
+      }),
+    );
+
+    expect(state.tabs).toEqual([chatA]);
+    expect(state.activeTabId).toBe(chatA);
+    expect(state.drawer).toEqual({ open: true, height: 280 });
+  });
+
+  test("opens and closes center panels while rejecting the legacy Terminal surface", () => {
     const chatA = chat("a");
     let state = reducer(undefined, openTab(chatA));
     state = reducer(state, openTab(files));
     state = reducer(state, openTab(terminal));
     state = reducer(state, openTab(files));
 
-    expect(state.tabs).toEqual([chatA, files, terminal]);
+    expect(state.tabs).toEqual([chatA, files]);
     expect(state.activeTabId).toBe(files);
 
     state = reducer(state, closeTab(files));
-    expect(state.tabs).toEqual([chatA, terminal]);
-    expect(state.activeTabId).toBe(terminal);
+    expect(state.tabs).toEqual([chatA]);
+    expect(state.activeTabId).toBe(chatA);
 
     const beforeSplit = state;
     state = reducer(state, splitTab({ tabId: terminal, dir: "row" }));
@@ -269,7 +310,7 @@ describe("workspaceSlice", () => {
       reconcileWorkspace({ openThreadIds: ["a"] }),
     );
 
-    expect(reconciled).toEqual({
+    expect(reconciled).toMatchObject({
       tabs: [chatA],
       activeTabId: chatA,
       groups: {},
