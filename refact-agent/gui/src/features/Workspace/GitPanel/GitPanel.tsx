@@ -8,6 +8,7 @@ import {
   useStageGitPathsMutation,
   useUnstageGitPathsMutation,
   type GitFileChange,
+  type GitStatusRoot,
 } from "../../../services/refact/gitRead";
 import { worktreeErrorText } from "../../Worktrees/worktreeError";
 import { BranchesLog } from "./BranchesLog";
@@ -20,6 +21,12 @@ import styles from "./GitPanel.module.css";
 function rootLabel(root: string): string {
   const normalized = root.replace(/[/\\]+$/, "");
   return normalized.split(/[/\\]/).pop() ?? root;
+}
+
+function branchLabel(status?: GitStatusRoot): string {
+  if (!status) return "";
+  if (status.head_detached) return "Detached HEAD";
+  return status.branch ?? "No branch";
 }
 
 function first<T>(values: T[]): T | undefined {
@@ -42,7 +49,7 @@ export function GitPanel() {
     [statusQuery.data?.roots],
   );
   const rootPaths = useMemo(() => roots.map((root) => root.root), [roots]);
-  const [activeRoot, setActiveRoot] = useState(configuredRoots[0] ?? "");
+  const [activeRoot, setActiveRoot] = useState("");
   const [selected, setSelected] = useState<
     (SelectedGitFile & { root: string }) | null
   >(null);
@@ -60,7 +67,8 @@ export function GitPanel() {
 
   const activeStatus =
     roots.find((root) => root.root === activeRoot) ?? first(roots);
-  const resolvedRoot = activeStatus?.root ?? activeRoot;
+  const resolvedRoot = activeStatus?.root ?? "";
+  const noRepositories = statusQuery.data !== undefined && roots.length === 0;
   const selectedForRoot = selected?.root === resolvedRoot ? selected : null;
   const statusError = statusQuery.error
     ? worktreeErrorText(statusQuery.error)
@@ -140,69 +148,73 @@ export function GitPanel() {
         </p>
       ) : null}
 
-      <div className={styles.contentGrid}>
-        <aside className={styles.sidebar}>
-          <section
-            className={styles.section}
-            aria-labelledby="git-changes-heading"
-          >
-            <header className={styles.sectionHeader}>
-              <div>
-                <h2 id="git-changes-heading">Changes</h2>
-                <p>{activeStatus?.branch ?? "Detached HEAD"}</p>
-              </div>
-              <Badge tone="muted">
-                {(activeStatus?.staged.length ?? 0) +
-                  (activeStatus?.unstaged.length ?? 0)}
-              </Badge>
-            </header>
-            <StatusList
-              status={activeStatus}
-              selected={selectedForRoot}
-              pendingPath={pendingPath}
-              isLoading={statusQuery.isLoading}
-              error={statusError ?? null}
-              onSelect={(file) => setSelected({ ...file, root: resolvedRoot })}
-              onStage={(change) => void mutatePath(change, false)}
-              onUnstage={(change) => void mutatePath(change, true)}
-              onRefresh={() => void statusQuery.refetch()}
-            />
-          </section>
-          {resolvedRoot ? (
-            <CommitBox
-              key={resolvedRoot}
-              root={resolvedRoot}
-              stagedChanges={activeStatus?.staged ?? []}
-              onCommitted={(shortOid) => {
-                setFeedback(`Committed ${shortOid}`);
-                setSelected(null);
-                void statusQuery.refetch();
-              }}
-            />
-          ) : null}
-        </aside>
-        <main className={styles.mainColumn}>
-          {resolvedRoot ? (
-            <>
-              <DiffView root={resolvedRoot} selected={selectedForRoot} />
-              <BranchesLog
-                key={`history-${resolvedRoot}`}
-                root={resolvedRoot}
+      {noRepositories ? (
+        <section className={styles.section}>
+          <p className={styles.emptyText} role="status">
+            No git repository found in this workspace.
+          </p>
+        </section>
+      ) : (
+        <div className={styles.contentGrid}>
+          <aside className={styles.sidebar}>
+            <section
+              className={styles.section}
+              aria-labelledby="git-changes-heading"
+            >
+              <header className={styles.sectionHeader}>
+                <div>
+                  <h2 id="git-changes-heading">Changes</h2>
+                  <p>{branchLabel(activeStatus)}</p>
+                </div>
+                <Badge tone="muted">
+                  {(activeStatus?.staged.length ?? 0) +
+                    (activeStatus?.unstaged.length ?? 0)}
+                </Badge>
+              </header>
+              <StatusList
+                status={activeStatus}
+                selected={selectedForRoot}
+                pendingPath={pendingPath}
+                isLoading={statusQuery.isLoading}
+                error={statusError ?? null}
+                onSelect={(file) =>
+                  setSelected({ ...file, root: resolvedRoot })
+                }
+                onStage={(change) => void mutatePath(change, false)}
+                onUnstage={(change) => void mutatePath(change, true)}
+                onRefresh={() => void statusQuery.refetch()}
               />
-              <WorktreesSection
-                key={`worktrees-${resolvedRoot}`}
-                root={resolvedRoot}
-              />
-            </>
-          ) : (
-            <section className={styles.section}>
-              <p className={styles.emptyText}>
-                No Git workspace root is available.
-              </p>
             </section>
-          )}
-        </main>
-      </div>
+            {resolvedRoot ? (
+              <CommitBox
+                key={resolvedRoot}
+                root={resolvedRoot}
+                stagedChanges={activeStatus?.staged ?? []}
+                onCommitted={(shortOid) => {
+                  setFeedback(`Committed ${shortOid}`);
+                  setSelected(null);
+                  void statusQuery.refetch();
+                }}
+              />
+            ) : null}
+          </aside>
+          <main className={styles.mainColumn}>
+            {resolvedRoot ? (
+              <>
+                <DiffView root={resolvedRoot} selected={selectedForRoot} />
+                <BranchesLog
+                  key={`history-${resolvedRoot}`}
+                  root={resolvedRoot}
+                />
+                <WorktreesSection
+                  key={`worktrees-${resolvedRoot}`}
+                  root={resolvedRoot}
+                />
+              </>
+            ) : null}
+          </main>
+        </div>
+      )}
     </div>
   );
 }

@@ -145,6 +145,14 @@ fn internal_error(message: impl Into<String>) -> (StatusCode, Json<Value>) {
     api_error(StatusCode::INTERNAL_SERVER_ERROR, message)
 }
 
+fn resolve_enclosing_root(roots: &[PathBuf], requested: &Path) -> Option<PathBuf> {
+    roots
+        .iter()
+        .filter(|root| requested.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .cloned()
+}
+
 async fn selected_roots(
     gcx: Arc<GlobalContext>,
     requested: Option<String>,
@@ -170,9 +178,7 @@ async fn selected_roots(
         .await
         .map(|path| dunce::simplified(&path).to_path_buf())
         .map_err(|_| api_error(StatusCode::NOT_FOUND, "Git root not found"))?;
-    roots
-        .into_iter()
-        .find(|root| root == &requested)
+    resolve_enclosing_root(&roots, &requested)
         .map(|root| vec![root])
         .ok_or_else(|| {
             api_error(
@@ -624,6 +630,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_enclosing_root_matches_exact_subdir_and_rejects_outside() {
+        let roots = vec![PathBuf::from("/repo"), PathBuf::from("/repo/nested")];
+        assert_eq!(
+            resolve_enclosing_root(&roots, Path::new("/repo")),
+            Some(PathBuf::from("/repo"))
+        );
+        assert_eq!(
+            resolve_enclosing_root(&roots, Path::new("/repo/refact-agent/engine")),
+            Some(PathBuf::from("/repo"))
+        );
+        assert_eq!(
+            resolve_enclosing_root(&roots, Path::new("/repo/nested/src")),
+            Some(PathBuf::from("/repo/nested"))
+        );
+        assert_eq!(resolve_enclosing_root(&roots, Path::new("/outside")), None);
+        assert_eq!(
+            resolve_enclosing_root(&roots, Path::new("/repo-sibling")),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn selected_roots_filters_by_canonical_active_root() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -642,6 +670,39 @@ mod tests {
         assert_eq!(selected[0], dunce::canonicalize(active.path()).unwrap());
 
         let error = selected_roots(gcx, Some(other.path().to_string_lossy().to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn selected_roots_maps_subdir_and_symlink_to_enclosing_root() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let active = tempfile::tempdir().unwrap();
+        let subdir = active.path().join("refact-agent").join("engine");
+        fs::create_dir_all(&subdir).unwrap();
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() =
+            vec![active.path().to_path_buf()];
+        let canonical_root = dunce::canonicalize(active.path()).unwrap();
+
+        let selected = selected_roots(gcx.clone(), Some(subdir.to_string_lossy().to_string()))
+            .await
+            .unwrap();
+        assert_eq!(selected, vec![canonical_root.clone()]);
+
+        #[cfg(unix)]
+        {
+            let link_holder = tempfile::tempdir().unwrap();
+            let link = link_holder.path().join("engine-link");
+            std::os::unix::fs::symlink(&subdir, &link).unwrap();
+            let selected = selected_roots(gcx.clone(), Some(link.to_string_lossy().to_string()))
+                .await
+                .unwrap();
+            assert_eq!(selected, vec![canonical_root.clone()]);
+        }
+
+        let outside = tempfile::tempdir().unwrap();
+        let error = selected_roots(gcx, Some(outside.path().to_string_lossy().to_string()))
             .await
             .unwrap_err();
         assert_eq!(error.0, StatusCode::NOT_FOUND);

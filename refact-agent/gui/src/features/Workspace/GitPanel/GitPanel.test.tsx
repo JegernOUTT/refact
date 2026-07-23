@@ -341,4 +341,75 @@ describe("GitPanel", () => {
     );
     await waitFor(() => expect(deleteCalls).toEqual(["wt-1"]));
   });
+
+  test("drives git requests with status-provided roots for subdirectory workspaces", async () => {
+    const branchRoots: (string | null)[] = [];
+    const logRoots: (string | null)[] = [];
+    const stageBodies: unknown[] = [];
+    installHandlers({
+      status: () => [statusRoot("/repo", [], [APP_CHANGE])],
+    });
+    server.use(
+      http.get("*/v1/git/branches", ({ request }) => {
+        branchRoots.push(new URL(request.url).searchParams.get("root"));
+        return HttpResponse.json({
+          roots: [
+            {
+              root: "/repo",
+              current: "main",
+              branches: [{ name: "main", is_head: true, upstream: null }],
+            },
+          ],
+        });
+      }),
+      http.get("*/v1/git/log", ({ request }) => {
+        logRoots.push(new URL(request.url).searchParams.get("root"));
+        return HttpResponse.json({ roots: [{ root: "/repo", commits: [] }] });
+      }),
+      http.post("*/v1/git/stage", async ({ request }) => {
+        stageBodies.push(await request.json());
+        return HttpResponse.json({ staged: 1, skipped: 0 });
+      }),
+    );
+    const { user } = renderPanel(["/repo/refact-agent/engine"]);
+
+    await user.click(
+      await screen.findByRole("checkbox", { name: "Stage src/app.ts" }),
+    );
+
+    await waitFor(() => expect(stageBodies).toHaveLength(1));
+    expect(stageBodies[0]).toEqual({ root: "/repo", paths: ["src/app.ts"] });
+    await waitFor(() => expect(branchRoots.length).toBeGreaterThan(0));
+    await waitFor(() => expect(logRoots.length).toBeGreaterThan(0));
+    expect(branchRoots.every((root) => root === "/repo")).toBe(true);
+    expect(logRoots.every((root) => root === "/repo")).toBe(true);
+  });
+
+  test("shows a no-repository empty state when status returns zero roots", async () => {
+    installHandlers({ status: () => [] });
+    renderPanel(["/repo/refact-agent/engine"]);
+
+    expect(
+      await screen.findByText("No git repository found in this workspace."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Detached HEAD")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("No Git repository status is available."),
+    ).not.toBeInTheDocument();
+  });
+
+  test("labels detached HEAD only from the status flag", async () => {
+    installHandlers({
+      status: () => [
+        {
+          ...statusRoot("/repo", [], [APP_CHANGE]),
+          branch: null,
+          head_detached: true,
+        },
+      ],
+    });
+    renderPanel();
+
+    expect(await screen.findByText("Detached HEAD")).toBeInTheDocument();
+  });
 });
