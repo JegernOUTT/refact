@@ -13,8 +13,10 @@ import { WorktreeStatusBadge } from "../../Worktrees/WorktreeStatusBadge";
 import { worktreeErrorText } from "../../Worktrees/worktreeError";
 import styles from "./GitPanel.module.css";
 
-export function WorktreesSection({ root }: { root: string }) {
-  const worktrees = useListWorktreesQuery({ source_workspace_root: root });
+export function WorktreesSection({ workspaceRoot }: { workspaceRoot: string }) {
+  const worktrees = useListWorktreesQuery({
+    source_workspace_root: workspaceRoot,
+  });
   const [openWorktree, openState] = useOpenWorktreeMutation();
   const [deleteWorktree, deleteState] = useDeleteWorktreeMutation();
   const copyToClipboard = useCopyToClipboard();
@@ -30,7 +32,7 @@ export function WorktreesSection({ root }: { root: string }) {
     try {
       const response = await openWorktree({
         id: record.meta.id,
-        source_workspace_root: root,
+        source_workspace_root: workspaceRoot,
       }).unwrap();
       copyToClipboard(response.path);
       setFeedback(`Copied ${response.path}`);
@@ -48,7 +50,7 @@ export function WorktreesSection({ root }: { root: string }) {
     try {
       await deleteWorktree({
         id: record.meta.id,
-        source_workspace_root: root,
+        source_workspace_root: workspaceRoot,
         delete_branch: false,
       }).unwrap();
       setFeedback(`Cleaned up ${record.meta.branch ?? record.meta.id}`);
@@ -143,7 +145,7 @@ export function WorktreesSection({ root }: { root: string }) {
       <WorktreeDiffPanel
         open={selected !== null}
         record={selected}
-        sourceWorkspaceRoot={root}
+        sourceWorkspaceRoot={workspaceRoot}
         onOpenChange={(open) => {
           if (!open) setSelected(null);
         }}

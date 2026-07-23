@@ -92,6 +92,7 @@ function installHandlers(options?: {
   statusCalls?: string[];
   diffCalls?: URLSearchParams[];
   commitBodies?: unknown[];
+  worktreeCalls?: URLSearchParams[];
   openCalls?: string[];
   deleteCalls?: string[];
 }) {
@@ -166,15 +167,16 @@ function installHandlers(options?: {
         error_log: [],
       });
     }),
-    http.get("*/v1/worktrees", () =>
-      HttpResponse.json({
+    http.get("*/v1/worktrees", ({ request }) => {
+      options?.worktreeCalls?.push(new URL(request.url).searchParams);
+      return HttpResponse.json({
         project_hash: "project",
         source_workspace_root: "/repo",
         source_current_branch: "main",
         source_branches: ["main"],
         worktrees: [record],
-      }),
-    ),
+      });
+    }),
     http.get("*/v1/worktrees/:id/diff", () =>
       HttpResponse.json({
         id: "wt-1",
@@ -383,8 +385,10 @@ describe("GitPanel", () => {
     const branchRoots: (string | null)[] = [];
     const logRoots: (string | null)[] = [];
     const stageBodies: unknown[] = [];
+    const worktreeCalls: URLSearchParams[] = [];
     installHandlers({
       status: () => [statusRoot("/repo", [], [APP_CHANGE])],
+      worktreeCalls,
     });
     server.use(
       http.get("*/v1/git/branches", ({ request }) => {
@@ -418,8 +422,13 @@ describe("GitPanel", () => {
     expect(stageBodies[0]).toEqual({ root: "/repo", paths: ["src/app.ts"] });
     await waitFor(() => expect(branchRoots.length).toBeGreaterThan(0));
     await waitFor(() => expect(logRoots.length).toBeGreaterThan(0));
+    await waitFor(() => expect(worktreeCalls).toHaveLength(1));
     expect(branchRoots.every((root) => root === "/repo")).toBe(true);
     expect(logRoots.every((root) => root === "/repo")).toBe(true);
+    expect(worktreeCalls[0]?.get("source_workspace_root")).toBe(
+      "/repo/refact-agent/engine",
+    );
+    expect(await screen.findByText("refact/wt-1")).toBeInTheDocument();
   });
 
   test("shows a no-repository empty state when status returns zero roots", async () => {

@@ -37,6 +37,28 @@ function firstRoot(values: string[]): string | undefined {
   return values.length > 0 ? values[0] : undefined;
 }
 
+function comparableRoot(root: string): string {
+  const normalized = root.replace(/\\/g, "/");
+  return normalized.length > 1 ? normalized.replace(/\/+$/, "") : normalized;
+}
+
+function workspaceRootForGitRoot(
+  configuredRoots: string[],
+  gitRoot: string,
+): string {
+  const comparableGitRoot = comparableRoot(gitRoot);
+  return (
+    configuredRoots.find((root) => {
+      const comparableWorkspaceRoot = comparableRoot(root);
+      return (
+        comparableWorkspaceRoot === comparableGitRoot ||
+        comparableWorkspaceRoot.startsWith(`${comparableGitRoot}/`) ||
+        comparableGitRoot.startsWith(`${comparableWorkspaceRoot}/`)
+      );
+    }) ?? gitRoot
+  );
+}
+
 export function GitPanel() {
   const configuredRoots = useAppSelector(
     (state) => state.current_project.workspaceRoots ?? [],
@@ -68,6 +90,7 @@ export function GitPanel() {
   const activeStatus =
     roots.find((root) => root.root === activeRoot) ?? first(roots);
   const resolvedRoot = activeStatus?.root ?? "";
+  const worktreesRoot = workspaceRootForGitRoot(configuredRoots, resolvedRoot);
   const noRepositories = statusQuery.data !== undefined && roots.length === 0;
   const selectedForRoot = selected?.root === resolvedRoot ? selected : null;
   const statusError = statusQuery.error
@@ -207,8 +230,8 @@ export function GitPanel() {
                   root={resolvedRoot}
                 />
                 <WorktreesSection
-                  key={`worktrees-${resolvedRoot}`}
-                  root={resolvedRoot}
+                  key={`worktrees-${worktreesRoot}`}
+                  workspaceRoot={worktreesRoot}
                 />
               </>
             ) : null}
