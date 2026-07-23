@@ -153,9 +153,35 @@ fn resolve_enclosing_root(roots: &[PathBuf], requested: &Path) -> Option<PathBuf
         .cloned()
 }
 
-async fn selected_roots(
+fn effective_git_roots_from(
+    mut roots: Vec<PathBuf>,
+    workspace_folders: &[PathBuf],
+) -> Vec<PathBuf> {
+    for folder in workspace_folders {
+        let Ok(folder) = dunce::canonicalize(folder) else {
+            continue;
+        };
+        if roots.iter().any(|root| folder.starts_with(root)) {
+            continue;
+        }
+        let Some(workdir) = Repository::discover(&folder)
+            .ok()
+            .and_then(|repository| repository.workdir().map(Path::to_path_buf))
+        else {
+            continue;
+        };
+        let Ok(workdir) = dunce::canonicalize(&workdir) else {
+            continue;
+        };
+        if !roots.contains(&workdir) {
+            roots.push(workdir);
+        }
+    }
+    roots
+}
+
+async fn effective_git_roots(
     gcx: Arc<GlobalContext>,
-    requested: Option<String>,
 ) -> Result<Vec<PathBuf>, (StatusCode, Json<Value>)> {
     let configured = gcx
         .documents_state
@@ -170,6 +196,17 @@ async fn selected_roots(
             .map_err(|error| internal_error(format!("Failed to resolve git root: {}", error)))?;
         roots.push(dunce::simplified(&canonical).to_path_buf());
     }
+    let folders = crate::files_correction::get_unscoped_project_dirs(gcx).await;
+    tokio::task::spawn_blocking(move || effective_git_roots_from(roots, &folders))
+        .await
+        .map_err(|error| internal_error(format!("Git root discovery task failed: {}", error)))
+}
+
+async fn selected_roots(
+    gcx: Arc<GlobalContext>,
+    requested: Option<String>,
+) -> Result<Vec<PathBuf>, (StatusCode, Json<Value>)> {
+    let roots = effective_git_roots(gcx).await?;
 
     let Some(requested) = requested else {
         return Ok(roots);
@@ -650,6 +687,97 @@ mod tests {
             resolve_enclosing_root(&roots, Path::new("/repo-sibling")),
             None
         );
+    }
+
+    #[test]
+    fn effective_git_roots_from_discovers_enclosing_repo_for_subdir_workspace() {
+        let (dir, repo) = init_repo();
+        commit_file(&repo, dir.path(), "Initial commit");
+        let subdir = dir.path().join("refact-agent").join("engine");
+        fs::create_dir_all(&subdir).unwrap();
+        let canonical_repo = dunce::canonicalize(dir.path()).unwrap();
+
+        let roots = effective_git_roots_from(Vec::new(), &[subdir]);
+
+        assert_eq!(roots, vec![canonical_repo]);
+    }
+
+    #[test]
+    fn effective_git_roots_from_keeps_single_root_when_workspace_is_repo_root() {
+        let (dir, repo) = init_repo();
+        commit_file(&repo, dir.path(), "Initial commit");
+        let canonical_repo = dunce::canonicalize(dir.path()).unwrap();
+
+        let roots =
+            effective_git_roots_from(vec![canonical_repo.clone()], &[dir.path().to_path_buf()]);
+
+        assert_eq!(roots, vec![canonical_repo]);
+    }
+
+    #[test]
+    fn effective_git_roots_from_skips_non_repo_and_bare_repo_folders() {
+        let plain = tempfile::tempdir().unwrap();
+        let bare = tempfile::tempdir().unwrap();
+        Repository::init_bare(bare.path()).unwrap();
+
+        let roots = effective_git_roots_from(
+            Vec::new(),
+            &[plain.path().to_path_buf(), bare.path().to_path_buf()],
+        );
+
+        assert_eq!(roots, Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn effective_git_roots_from_dedupes_covered_and_repeated_folders() {
+        let (dir, repo) = init_repo();
+        commit_file(&repo, dir.path(), "Initial commit");
+        let sub_a = dir.path().join("crates").join("a");
+        let sub_b = dir.path().join("crates").join("b");
+        fs::create_dir_all(&sub_a).unwrap();
+        fs::create_dir_all(&sub_b).unwrap();
+        let canonical_repo = dunce::canonicalize(dir.path()).unwrap();
+
+        let discovered = effective_git_roots_from(Vec::new(), &[sub_a.clone(), sub_b.clone()]);
+        assert_eq!(discovered, vec![canonical_repo.clone()]);
+
+        let with_known_root = effective_git_roots_from(
+            vec![canonical_repo.clone()],
+            &[dir.path().to_path_buf(), sub_a, sub_b],
+        );
+        assert_eq!(with_known_root, vec![canonical_repo]);
+    }
+
+    #[tokio::test]
+    async fn selected_roots_discovers_enclosing_repo_for_subdir_workspace_folder() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (dir, repo) = init_repo();
+        commit_file(&repo, dir.path(), "Initial commit");
+        let subdir = dir.path().join("refact-agent").join("engine");
+        fs::create_dir_all(&subdir).unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![subdir.clone()];
+        let canonical_repo = dunce::canonicalize(dir.path()).unwrap();
+
+        let all_roots = selected_roots(gcx.clone(), None).await.unwrap();
+        assert_eq!(all_roots, vec![canonical_repo.clone()]);
+
+        let status = status_for_repo(&all_roots[0]).unwrap();
+        assert!(status.branch.is_some());
+        let log = log_for_repo(&all_roots[0], 10, 0).unwrap();
+        assert_eq!(log.commits.len(), 1);
+        let branches = branches_for_repo(&all_roots[0]).unwrap();
+        assert!(branches.current.is_some());
+
+        let mapped = selected_roots(gcx.clone(), Some(subdir.to_string_lossy().to_string()))
+            .await
+            .unwrap();
+        assert_eq!(mapped, vec![canonical_repo]);
+
+        let outside = tempfile::tempdir().unwrap();
+        let error = selected_roots(gcx, Some(outside.path().to_string_lossy().to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
