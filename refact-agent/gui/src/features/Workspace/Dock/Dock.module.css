@@ -24,6 +24,10 @@
   width: 100%;
 }
 
+.sectionBadge {
+  flex: 0 0 auto;
+}
+
 .content {
   display: flex;
   flex: 1 1 auto;

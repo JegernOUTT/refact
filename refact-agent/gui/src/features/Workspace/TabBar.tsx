@@ -5,7 +5,6 @@ import {
   GitBranch,
   Layers,
   Menu as MenuIcon,
-  Plus,
   SquareTerminal,
   X,
 } from "lucide-react";
@@ -22,7 +21,7 @@ import {
   useState,
 } from "react";
 
-import { Badge, Icon, IconButton, Menu, StatusDot } from "../../components/ui";
+import { Badge, Icon, IconButton, StatusDot } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectCapabilities, selectHost } from "../Config/configSlice";
 import {
@@ -62,7 +61,6 @@ import {
 } from "../Tasks/tasksSlice";
 import {
   closeTab,
-  openTab,
   reorderTabs,
   selectActiveTabId,
   selectTabs,
@@ -75,8 +73,6 @@ import {
 import {
   isPanelKind,
   makeSurfaceKey,
-  CENTER_PANEL_KINDS,
-  panelCapabilityKey,
   parseSurfaceKey,
   type PanelKind,
   type SurfaceKey,
@@ -317,9 +313,6 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
       ? makeSurfaceKey("task", currentPage.taskId)
       : null;
   const buddySurfaceOpen = pages.some((page) => page.name === "buddy");
-  const openablePanelKinds = CENTER_PANEL_KINDS.filter(
-    (kind) => capabilities[panelCapabilityKey(kind)],
-  );
   const showDockToggle =
     host === "web" && (capabilities.filesPanel || capabilities.gitPanel);
 
@@ -454,17 +447,6 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
       event.stopPropagation();
     },
     [],
-  );
-
-  const handleOpenPanel = useCallback(
-    (kind: PanelKind) => {
-      const surfaceKey = makeSurfaceKey(kind, "main");
-      dispatch(openTab(surfaceKey));
-      if (currentPage?.name !== "chat") {
-        dispatch(push({ name: "chat" }));
-      }
-    },
-    [currentPage?.name, dispatch],
   );
 
   const stopCloseDragEvent = useCallback(
@@ -812,31 +794,6 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
           })}
         </div>
       </div>
-      {openablePanelKinds.length > 0 ? (
-        <Menu>
-          <Menu.Trigger asChild>
-            <IconButton
-              aria-label="Open workspace panel"
-              className={styles.panelLauncher}
-              icon={Plus}
-              size="sm"
-              variant="plain"
-            />
-          </Menu.Trigger>
-          <Menu.Content align="end" maxWidth="240px">
-            <Menu.Label>Workspace panels</Menu.Label>
-            {openablePanelKinds.map((kind) => {
-              const panel = PANEL_INFO[kind];
-              return (
-                <Menu.Item key={kind} onSelect={() => handleOpenPanel(kind)}>
-                  <Icon icon={panel.icon} size="sm" tone="muted" />
-                  {panel.title}
-                </Menu.Item>
-              );
-            })}
-          </Menu.Content>
-        </Menu>
-      ) : null}
     </nav>
   );
 }

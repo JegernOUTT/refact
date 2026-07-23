@@ -265,8 +265,8 @@ describe("Toolbar single workspace tab row", () => {
 
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Open workspace panel" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "Open workspace panel" }),
+    ).not.toBeInTheDocument();
   });
 
   it("opens the Refact Daemon page from the connection area", async () => {

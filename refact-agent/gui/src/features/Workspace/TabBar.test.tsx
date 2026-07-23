@@ -128,22 +128,16 @@ function getTabWrap(name: RegExp): HTMLElement {
 }
 
 describe("TabBar", () => {
-  it("shows the dock toggle and only remaining center panels", async () => {
+  it("shows the dock toggle without a center-panel launcher", () => {
     const store = createStoreWithChatTabs();
-    const view = renderTabBar(store);
+    renderTabBar(store);
     expect(
       screen.getByRole("button", { name: "Toggle workspace dock" }),
     ).toBeInTheDocument();
 
-    await view.user.click(
-      screen.getByRole("button", { name: "Open workspace panel" }),
-    );
-
-    expect(screen.getByRole("menuitem", { name: "Git" })).toBeInTheDocument();
     expect(
-      screen.queryByRole("menuitem", { name: "Terminal" }),
+      screen.queryByRole("button", { name: "Open workspace panel" }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: "Files" })).toBeNull();
   });
 
   it("renders the existing tab UI without panel chrome for IDE hosts", () => {

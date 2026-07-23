@@ -42,23 +42,6 @@
   overflow: hidden;
 }
 
-.panelMount {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-}
-
-.panelMountActive {
-  visibility: visible;
-}
-
-.panelMountHidden {
-  visibility: hidden;
-  pointer-events: none;
-}
-
 .unsplitSurfaceDragActive {
   background: var(--rf-color-accent-soft);
 }

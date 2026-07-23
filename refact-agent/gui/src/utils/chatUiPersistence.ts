@@ -411,8 +411,8 @@ function isOpenWorkspaceSurface(
     ? false
     : isFileSurface(surfaceKey) ||
         (isPanelSurface(surfaceKey) && !isTerminalSurface(surfaceKey))
-    ? true
-    : isChatSurface(surfaceKey) &&
+      ? true
+      : isChatSurface(surfaceKey) &&
         openThreadIds.has(surfaceKey.slice("chat:".length));
 }
 

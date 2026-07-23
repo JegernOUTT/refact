@@ -1,8 +1,6 @@
 export const PANEL_KINDS = ["files", "git", "terminal"] as const;
-export const CENTER_PANEL_KINDS = ["git"] as const;
 
 export type PanelKind = (typeof PANEL_KINDS)[number];
-export type CenterPanelKind = (typeof CENTER_PANEL_KINDS)[number];
 export type PanelCapabilityKey = `${PanelKind}Panel`;
 export type PanelCapabilities = Record<PanelCapabilityKey, boolean>;
 export type SurfaceKind =
@@ -29,9 +27,6 @@ const isPrefixedSurfaceKind = (
 
 export const isPanelKind = (kind: string): kind is PanelKind =>
   (PANEL_KINDS as readonly string[]).includes(kind);
-
-export const isCenterPanelKind = (kind: string): kind is CenterPanelKind =>
-  (CENTER_PANEL_KINDS as readonly string[]).includes(kind);
 
 export function makeSurfaceKey(kind: "dashboard", id?: null): SurfaceKey;
 export function makeSurfaceKey(kind: PanelKind, id: "main"): PanelSurfaceKey;
@@ -90,11 +85,6 @@ export const isFileSurface = (key: SurfaceKey): key is FileSurfaceKey =>
 export const isPanelSurface = (key: SurfaceKey): key is PanelSurfaceKey =>
   PANEL_KINDS.some((kind) => key === `${kind}:main`);
 
-export const isCenterPanelSurface = (
-  key: SurfaceKey,
-): key is `${CenterPanelKind}:main` =>
-  CENTER_PANEL_KINDS.some((kind) => key === `${kind}:main`);
-
 export const isFilesSurface = (
   key: SurfaceKey,
 ): key is Extract<PanelSurfaceKey, "files:main"> => key === "files:main";
@@ -110,7 +100,7 @@ export const isTerminalSurface = (
 export const isWorkspaceSurface = (
   key: SurfaceKey,
 ): key is ChatSurfaceKey | FileSurfaceKey | PanelSurfaceKey =>
-  isChatSurface(key) || isFileSurface(key) || isCenterPanelSurface(key);
+  isChatSurface(key) || isFileSurface(key) || isGitSurface(key);
 
 export const isWorkspaceSurfaceEnabled = (
   key: SurfaceKey,
@@ -120,14 +110,11 @@ export const isWorkspaceSurfaceEnabled = (
   (isFileSurface(key) && capabilities.filesPanel) ||
   isPanelSurfaceEnabled(key, capabilities);
 
-export const panelCapabilityKey = (kind: PanelKind): PanelCapabilityKey =>
-  `${kind}Panel`;
-
 export const isPanelSurfaceEnabled = (
   key: SurfaceKey,
   capabilities: PanelCapabilities,
 ): key is PanelSurfaceKey => {
-  if (!isCenterPanelSurface(key)) return false;
+  if (!isGitSurface(key)) return false;
   const { kind } = parseSurfaceKey(key);
-  return isCenterPanelKind(kind) && capabilities[panelCapabilityKey(kind)];
+  return kind === "git" && capabilities.gitPanel;
 };

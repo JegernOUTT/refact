@@ -127,19 +127,16 @@ describe("resolveCapabilities matrix", () => {
 });
 
 describe("TabBar panel launcher reflects capabilities", () => {
-  it("offers remaining center panels and the dock on web defaults", async () => {
+  it("offers the dock without a center-panel launcher on web defaults", () => {
     const store = createStoreWithChat(makeConfig("web"));
-    const view = render(<TabBar />, { store });
+    render(<TabBar />, { store });
     expect(
       screen.getByRole("button", { name: "Toggle workspace dock" }),
     ).toBeInTheDocument();
 
-    await view.user.click(
-      screen.getByRole("button", { name: "Open workspace panel" }),
-    );
-
-    expect(screen.getByRole("menuitem", { name: "Git" })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: "Terminal" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Open workspace panel" }),
+    ).toBeNull();
   });
 
   it("keeps the dock toggle when the only center panel is revoked", () => {

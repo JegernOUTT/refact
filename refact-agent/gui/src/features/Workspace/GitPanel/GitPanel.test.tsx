@@ -9,7 +9,9 @@ import type {
   GitStatusRoot,
 } from "../../../services/refact/gitRead";
 import type { WorktreeRecordView } from "../../../services/refact/worktrees";
+import { GitDock } from "./GitDock";
 import { GitPanel } from "./GitPanel";
+import { setActiveGitRoot } from "./gitPanelSlice";
 
 const APP_CHANGE: GitFileChange = {
   relative_path: "src/app.ts",
@@ -71,20 +73,26 @@ function worktreeRecord(): WorktreeRecordView {
 }
 
 function renderPanel(workspaceRoots = ["/repo"]) {
-  return render(<GitPanel />, {
-    preloadedState: {
-      config: {
-        host: "web",
-        lspPort: 8001,
-        engineServed: true,
-        themeProps: { appearance: "dark" },
-      },
-      current_project: {
-        name: "repo",
-        workspaceRoots,
+  return render(
+    <>
+      <GitDock />
+      <GitPanel />
+    </>,
+    {
+      preloadedState: {
+        config: {
+          host: "web",
+          lspPort: 8001,
+          engineServed: true,
+          themeProps: { appearance: "dark" },
+        },
+        current_project: {
+          name: "repo",
+          workspaceRoots,
+        },
       },
     },
-  });
+  );
 }
 
 function installHandlers(options?: {
@@ -278,6 +286,22 @@ describe("GitPanel", () => {
     ).not.toBeInTheDocument();
   });
 
+  test("opens the singleton main Git surface from a dock file selection", async () => {
+    const { store, user } = renderPanel();
+
+    await user.click(
+      await screen.findByRole("button", { name: /src\/app.ts/ }),
+    );
+
+    expect(store.getState().workspace.tabs).toContain("git:main");
+    expect(store.getState().workspace.activeTabId).toBe("git:main");
+    expect(store.getState().gitPanel.selectedFile).toEqual({
+      root: "/repo",
+      path: "src/app.ts",
+      staged: false,
+    });
+  });
+
   test("commits only the active root staged files and refreshes status", async () => {
     const commitBodies: unknown[] = [];
     const statusCalls: string[] = [];
@@ -289,12 +313,28 @@ describe("GitPanel", () => {
         statusRoot("/other", [OTHER_CHANGE], []),
       ],
     });
-    const { user } = renderPanel(["/repo", "/other"]);
+    const { store, user } = renderPanel(["/repo", "/other"]);
 
-    await user.click(await screen.findByRole("tab", { name: "other" }));
+    await screen.findByRole("combobox", { name: "Git root" });
+    store.dispatch(setActiveGitRoot("/other"));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", { name: "Git root" }),
+      ).toHaveTextContent("other"),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Commit staged changes" }),
+      ).toBeDisabled(),
+    );
     await user.type(
       screen.getByRole("textbox", { name: "Commit message" }),
       "Update docs",
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Commit staged changes" }),
+      ).toBeEnabled(),
     );
     expect(
       screen.queryByRole("button", { name: /generate message/i }),

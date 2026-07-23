@@ -46,17 +46,9 @@
   height: 100%;
 }
 
-.dockToggle,
-.panelLauncher {
-  flex: 0 0 auto;
-}
-
 .dockToggle {
+  flex: 0 0 auto;
   margin-inline-end: var(--rf-space-1);
-}
-
-.panelLauncher {
-  margin-inline-start: var(--rf-space-1);
 }
 
 .tabList {

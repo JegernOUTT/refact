@@ -8,13 +8,8 @@ import { Chat } from "../Chat/Chat";
 import { ChatThreadProvider } from "../Chat/Thread";
 import { selectCapabilities } from "../Config/configSlice";
 import { FileViewer } from "./FilesPanel";
-import { PANEL_COMPONENTS } from "./panels/panelRegistry";
-import {
-  isCenterPanelKind,
-  panelCapabilityKey,
-  parseSurfaceKey,
-  type SurfaceKey,
-} from "./surfaceKey";
+import { GitPanel } from "./GitPanel";
+import { isGitSurface, parseSurfaceKey, type SurfaceKey } from "./surfaceKey";
 import styles from "./SurfacePane.module.css";
 
 export type SurfacePaneProps = {
@@ -69,21 +64,15 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
       );
     }
 
-    if (isCenterPanelKind(parsed.kind)) {
-      if (!capabilities[panelCapabilityKey(parsed.kind)]) return null;
-      const PanelComponent = PANEL_COMPONENTS[parsed.kind];
+    if (isGitSurface(surfaceKey)) {
+      if (!capabilities.gitPanel) return null;
       return (
         <div
-          className={classNames(
-            styles.surfacePane,
-            styles.panelSurface,
-          )}
+          className={classNames(styles.surfacePane, styles.panelSurface)}
           data-surface-key={surfaceKey}
         >
-          <Suspense
-            fallback={<Spinner label={`Loading ${parsed.kind} panel`} />}
-          >
-            <PanelComponent />
+          <Suspense fallback={<Spinner label="Loading Git panel" />}>
+            <GitPanel />
           </Suspense>
         </div>
       );

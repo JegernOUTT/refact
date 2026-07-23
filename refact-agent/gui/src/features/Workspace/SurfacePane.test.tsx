@@ -35,6 +35,9 @@ describe("SurfacePane", () => {
         });
       }),
     );
+    server.use(
+      http.get("*/v1/git/status", () => HttpResponse.json({ roots: [] })),
+    );
   });
 
   it("renders an empty placeholder when no surface is selected", () => {
@@ -72,6 +75,17 @@ describe("SurfacePane", () => {
     expect(screen.getByLabelText("File viewer")).toBeInTheDocument();
     expect(
       document.querySelector(`[data-surface-key="${surfaceKey}"]`),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the main Git surface directly", async () => {
+    render(<SurfacePane surfaceKey={makeSurfaceKey("git", "main")} />);
+
+    expect(await screen.findByTestId("git-main-panel")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Select a changed file from the Git dock to inspect its diff.",
+      ),
     ).toBeInTheDocument();
   });
 

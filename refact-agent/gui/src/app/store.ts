@@ -88,6 +88,7 @@ import { terminalSlice } from "../features/Workspace/TerminalPanel";
 import { dashboardSlice } from "../features/DaemonDashboard/dashboardSlice";
 import { filesApi } from "../services/refact/files";
 import { filesPanelSlice } from "../features/Workspace/FilesPanel";
+import { gitPanelSlice } from "../features/Workspace/GitPanel";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -172,6 +173,7 @@ const rootReducer = combineSlices(
   terminalSlice,
   dashboardSlice,
   filesPanelSlice,
+  gitPanelSlice,
 );
 
 const rootPersistConfig = {

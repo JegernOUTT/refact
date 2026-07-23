@@ -1,12 +1,7 @@
 import { http, HttpResponse } from "msw";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "../../../utils/test-utils";
+import { fireEvent, render, screen, waitFor } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { setDockOpen } from "../workspaceSlice";
 import { Dock } from "./Dock";
@@ -16,20 +11,28 @@ const originalMatchMedia = window.matchMedia;
 function mockNarrow(narrow: boolean) {
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
-    value: vi.fn((query: string): MediaQueryList => ({
-      matches: narrow && query === "(max-width: 767px)",
-      media: query,
-      onchange: null,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
-      dispatchEvent: vi.fn(),
-    })),
+    value: vi.fn(
+      (query: string): MediaQueryList => ({
+        matches: narrow && query === "(max-width: 767px)",
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }),
+    ),
   });
 }
 
 describe("Dock", () => {
+  beforeEach(() => {
+    server.use(
+      http.get("*/v1/git/status", () => HttpResponse.json({ roots: [] })),
+    );
+  });
+
   afterEach(() => {
     Object.defineProperty(window, "matchMedia", {
       configurable: true,
@@ -100,15 +103,66 @@ describe("Dock", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
-  it("switches among enabled section placeholders", () => {
+  it("switches to the Git dock section", async () => {
     mockNarrow(false);
     server.use(
       http.get("*/v1/files/tree", () =>
         HttpResponse.json({ path: "", entries: [], truncated: false }),
       ),
+      http.get("*/v1/git/status", () => HttpResponse.json({ roots: [] })),
     );
     render(<Dock />);
     fireEvent.click(screen.getByRole("radio", { name: "Git" }));
-    expect(screen.getByText("Git coming soon")).toBeInTheDocument();
+    expect(
+      await screen.findByText("No git repository found in this workspace."),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the aggregate changed-file count on the Git switcher entry", async () => {
+    mockNarrow(false);
+    server.use(
+      http.get("*/v1/files/tree", () =>
+        HttpResponse.json({ path: "", entries: [], truncated: false }),
+      ),
+      http.get("*/v1/git/status", () =>
+        HttpResponse.json({
+          roots: [
+            {
+              root: "/repo",
+              branch: "main",
+              head_detached: false,
+              ahead: 0,
+              behind: 0,
+              staged: [
+                {
+                  relative_path: "a",
+                  absolute_path: "/repo/a",
+                  status: "MODIFIED",
+                },
+              ],
+              unstaged: [
+                {
+                  relative_path: "b",
+                  absolute_path: "/repo/b",
+                  status: "ADDED",
+                },
+                {
+                  relative_path: "c",
+                  absolute_path: "/repo/c",
+                  status: "DELETED",
+                },
+              ],
+              untracked_included: true,
+            },
+          ],
+        }),
+      ),
+    );
+
+    render(<Dock />);
+
+    expect(await screen.findByLabelText("3 changed files")).toHaveTextContent(
+      "3",
+    );
   });
 });

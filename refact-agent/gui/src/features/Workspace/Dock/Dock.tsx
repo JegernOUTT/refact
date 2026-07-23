@@ -10,14 +10,17 @@ import {
 } from "react";
 
 import {
+  Badge,
   Icon,
   SegmentedControl,
   Sheet,
   useMediaQuery,
 } from "../../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
+import { useGetGitStatusQuery } from "../../../services/refact/gitRead";
 import { selectCapabilities } from "../../Config/configSlice";
 import { FilesPanel } from "../FilesPanel";
+import { GitDock } from "../GitPanel";
 import {
   normalizeDockWidth,
   selectWorkspaceDock,
@@ -29,6 +32,7 @@ import {
 import styles from "./Dock.module.css";
 
 const narrowQuery = "(max-width: 767px)";
+const EMPTY_ROOTS: string[] = [];
 
 type DockStyle = CSSProperties & {
   "--workspace-dock-w": string;
@@ -37,7 +41,35 @@ type DockStyle = CSSProperties & {
 type DockOption = {
   value: WorkspaceDockSection;
   label: React.ReactNode;
+  ariaLabel?: string;
 };
+
+function GitDockLabel() {
+  const configuredRoots = useAppSelector(
+    (state) => state.current_project.workspaceRoots ?? EMPTY_ROOTS,
+  );
+  const { data } = useGetGitStatusQuery(configuredRoots);
+  const changedCount =
+    data?.roots.reduce(
+      (count, root) => count + root.staged.length + root.unstaged.length,
+      0,
+    ) ?? 0;
+
+  return (
+    <>
+      <Icon icon={GitBranch} size="sm" />
+      Git
+      <Badge
+        aria-label={`${changedCount} changed files`}
+        className={styles.sectionBadge}
+        size="xs"
+        tone={changedCount > 0 ? "warning" : "muted"}
+      >
+        {changedCount}
+      </Badge>
+    </>
+  );
+}
 
 export function Dock() {
   const dispatch = useAppDispatch();
@@ -64,12 +96,8 @@ export function Dock() {
     if (capabilities.gitPanel) {
       result.push({
         value: "git",
-        label: (
-          <>
-            <Icon icon={GitBranch} size="sm" />
-            Git
-          </>
-        ),
+        label: <GitDockLabel />,
+        ariaLabel: "Git",
       });
     }
     result.push({
@@ -156,8 +184,9 @@ export function Dock() {
       </div>
       <div className={styles.content}>
         {activeSection === "files" ? <FilesPanel /> : null}
-        {activeSection !== "files" ? (
-          <div className={styles.placeholder}>{`${activeSection === "git" ? "Git" : "Tasks"} coming soon`}</div>
+        {activeSection === "git" ? <GitDock /> : null}
+        {activeSection === "tasks" ? (
+          <div className={styles.placeholder}>Tasks coming soon</div>
         ) : null}
       </div>
     </>
