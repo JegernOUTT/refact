@@ -15,7 +15,7 @@ describe("terminalSlice", () => {
       state,
       sessionAdded({
         process_id: "one",
-        title: "bash · one",
+        title: "zsh · one",
         status: "running",
       }),
     );
@@ -23,7 +23,7 @@ describe("terminalSlice", () => {
       state,
       sessionAdded({
         process_id: "two",
-        title: "bash · two",
+        title: "zsh · two",
         status: "running",
       }),
     );
@@ -36,8 +36,8 @@ describe("terminalSlice", () => {
     expect(state).toEqual({
       activeProcessId: "one",
       sessions: [
-        { process_id: "one", title: "bash · one", status: "exited" },
-        { process_id: "two", title: "bash · two", status: "running" },
+        { process_id: "one", title: "zsh · one", status: "exited" },
+        { process_id: "two", title: "zsh · two", status: "running" },
       ],
     });
     expect(JSON.stringify(state)).not.toContain("output");
@@ -47,8 +47,8 @@ describe("terminalSlice", () => {
     let state = reducer(
       undefined,
       sessionsReattached([
-        { process_id: "one", title: "bash · one", status: "running" },
-        { process_id: "two", title: "bash · two", status: "running" },
+        { process_id: "one", title: "zsh · one", status: "running" },
+        { process_id: "two", title: "zsh · two", status: "running" },
       ]),
     );
     state = reducer(state, activeSessionChanged("one"));

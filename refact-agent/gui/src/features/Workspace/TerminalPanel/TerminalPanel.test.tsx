@@ -54,7 +54,7 @@ describe("TerminalPanel", () => {
             {
               process_id: "reattach-123456",
               status: "running",
-              command_preview: "bash -l",
+              command_preview: "/bin/zsh",
               created_at_ms: 1,
               tty: true,
               service_name: null,
@@ -85,7 +85,7 @@ describe("TerminalPanel", () => {
     render(<TerminalPanel />, { preloadedState: CONFIG_STATE });
 
     expect(
-      await screen.findByRole("tab", { name: /bash · reattach/i }),
+      await screen.findByRole("tab", { name: /\/bin\/zsh · reattach/i }),
     ).toBeVisible();
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     expect(screen.queryByText("background")).not.toBeInTheDocument();
@@ -98,7 +98,7 @@ describe("TerminalPanel", () => {
           processes: ["first-123456", "second-12345"].map((process_id) => ({
             process_id,
             status: "running",
-            command_preview: "bash -l",
+            command_preview: "/bin/zsh",
             created_at_ms: 1,
             tty: true,
             service_name: null,
@@ -114,7 +114,7 @@ describe("TerminalPanel", () => {
     const { container, user } = render(<TerminalPanel />, {
       preloadedState: CONFIG_STATE,
     });
-    await screen.findByRole("tab", { name: /bash · first/i });
+    await screen.findByRole("tab", { name: /\/bin\/zsh · first/i });
     const first = container.querySelector(
       '[data-terminal-process-id="first-123456"]',
     );
@@ -124,7 +124,7 @@ describe("TerminalPanel", () => {
     expect(first).toBeInTheDocument();
     expect(second).toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: /bash · first/i }));
+    await user.click(screen.getByRole("tab", { name: /\/bin\/zsh · first/i }));
     expect(
       container.querySelector('[data-terminal-process-id="first-123456"]'),
     ).toBe(first);
@@ -133,7 +133,7 @@ describe("TerminalPanel", () => {
     ).toBe(second);
   });
 
-  test("spawns a login shell and kills a running session when closed", async () => {
+  test("spawns the backend-selected shell and kills it when closed", async () => {
     const spawnBodies: unknown[] = [];
     let killed = false;
     server.use(
@@ -143,6 +143,7 @@ describe("TerminalPanel", () => {
         return HttpResponse.json({
           process_id: "spawned-1234",
           status: "running",
+          command_preview: "powershell.exe",
         });
       }),
       http.get("*/v1/exec/spawned-1234/read", () =>
@@ -166,22 +167,44 @@ describe("TerminalPanel", () => {
     );
 
     expect(
-      await screen.findByRole("tab", { name: /bash · spawned/i }),
+      await screen.findByRole("tab", { name: /powershell\.exe · spawned/i }),
     ).toBeVisible();
-    expect(spawnBodies).toEqual([
-      { command: "bash -l", pty: true, rows: 24, cols: 80 },
-    ]);
+    expect(spawnBodies).toEqual([{ pty: true, rows: 24, cols: 80 }]);
 
     await user.click(
-      screen.getByRole("button", { name: /Close bash · spawned/i }),
+      screen.getByRole("button", { name: /Close powershell\.exe · spawned/i }),
     );
     await waitFor(() => expect(killed).toBe(true));
     expect(window.confirm).toHaveBeenCalled();
     await waitFor(() =>
       expect(
-        screen.queryByRole("tab", { name: /bash · spawned/i }),
+        screen.queryByRole("tab", { name: /powershell\.exe · spawned/i }),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  test("uses the shell fallback when spawn preview is absent", async () => {
+    server.use(
+      http.get("*/v1/exec/list", () => HttpResponse.json({ processes: [] })),
+      http.post("*/v1/exec/spawn", () =>
+        HttpResponse.json({ process_id: "fallback-1234", status: "running" }),
+      ),
+      http.get("*/v1/exec/fallback-1234/read", () =>
+        HttpResponse.json({ chunks: [], next_seq: 0, status: "running" }),
+      ),
+      http.post("*/v1/exec/fallback-1234/resize", () => HttpResponse.json({})),
+    );
+
+    const { user } = render(<TerminalPanel />, {
+      preloadedState: CONFIG_STATE,
+    });
+    await user.click(
+      await screen.findByRole("button", { name: "New terminal" }),
+    );
+
+    expect(
+      await screen.findByRole("tab", { name: /shell · fallback/i }),
+    ).toBeVisible();
   });
 
   test("shows an honest disabled state for a 403 spawn response", async () => {

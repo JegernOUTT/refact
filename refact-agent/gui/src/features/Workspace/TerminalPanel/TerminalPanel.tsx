@@ -36,8 +36,14 @@ function shortProcessId(processId: string): string {
   return processId.slice(0, 8);
 }
 
-function terminalTitle(processId: string): string {
-  return `bash · ${shortProcessId(processId)}`;
+function terminalTitle(
+  processId: string,
+  commandPreview: string | undefined,
+): string {
+  const label = commandPreview?.trim();
+  return `${label && label.length > 0 ? label : "shell"} · ${shortProcessId(
+    processId,
+  )}`;
 }
 
 function statusDot(status: ExecStatus): "running" | "error" | "idle" {
@@ -87,7 +93,10 @@ export function TerminalPanel() {
               .filter((process) => process.tty && process.status === "running")
               .map((process) => ({
                 process_id: process.process_id,
-                title: terminalTitle(process.process_id),
+                title: terminalTitle(
+                  process.process_id,
+                  process.command_preview,
+                ),
                 status: process.status,
               })),
           ),
@@ -113,7 +122,6 @@ export function TerminalPanel() {
       const fitted = lastFittedRef.current;
       const result = await spawnExec(
         {
-          command: "bash -l",
           pty: true,
           rows: fitted?.rows ?? DEFAULT_PTY_ROWS,
           cols: fitted?.cols ?? DEFAULT_PTY_COLS,
@@ -124,7 +132,7 @@ export function TerminalPanel() {
       dispatch(
         sessionAdded({
           process_id: result.process_id,
-          title: terminalTitle(result.process_id),
+          title: terminalTitle(result.process_id, result.command_preview),
           status: result.status,
         }),
       );
@@ -261,7 +269,7 @@ export function TerminalPanel() {
           <EmptyState
             icon={SquareTerminal}
             title="No terminal sessions"
-            description="Start a bash login shell in the active workspace."
+            description="Start an interactive shell in the active workspace."
             variant="full"
             action={
               <Button

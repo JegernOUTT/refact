@@ -23,6 +23,7 @@ export type ExecSpawnRequest = {
 export type ExecSpawnResponse = {
   process_id: string;
   status: ExecStatus;
+  command_preview?: string;
 };
 
 export type ExecProcessSnapshot = {

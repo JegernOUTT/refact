@@ -56,7 +56,7 @@ describe("TerminalPanel spawn dimensions", () => {
             {
               process_id: "seed-1234567",
               status: "running",
-              command_preview: "bash -l",
+              command_preview: "/bin/zsh",
               created_at_ms: 1,
               tty: true,
               service_name: null,
@@ -69,6 +69,7 @@ describe("TerminalPanel spawn dimensions", () => {
         return HttpResponse.json({
           process_id: "spawned-9999",
           status: "running",
+          command_preview: "/bin/zsh",
         });
       }),
     );
@@ -76,13 +77,11 @@ describe("TerminalPanel spawn dimensions", () => {
     const { user } = render(<TerminalPanel />, {
       preloadedState: CONFIG_STATE,
     });
-    await screen.findByRole("tab", { name: /bash · seed-123/i });
+    await screen.findByRole("tab", { name: /\/bin\/zsh · seed-123/i });
 
     await user.click(screen.getByRole("button", { name: "New terminal" }));
 
     await waitFor(() => expect(spawnBodies).toHaveLength(1));
-    expect(spawnBodies).toEqual([
-      { command: "bash -l", pty: true, rows: 48, cols: 132 },
-    ]);
+    expect(spawnBodies).toEqual([{ pty: true, rows: 48, cols: 132 }]);
   });
 });

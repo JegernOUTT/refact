@@ -49,6 +49,7 @@ pub struct ExecSpawnHttpRequest {
 pub struct ExecSpawnHttpResponse {
     pub process_id: String,
     pub status: &'static str,
+    pub command_preview: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -186,6 +187,7 @@ fn command_from_request(request: &ExecSpawnHttpRequest) -> Result<String, Scratc
         (None, Some(argv)) if !argv.is_empty() && argv.iter().all(|part| !part.is_empty()) => {
             Ok(command_from_argv(argv))
         }
+        (None, None) if request.pty => Ok(default_interactive_shell()),
         (Some(_), Some(_)) => Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
             "provide exactly one of command or argv".to_string(),
@@ -194,6 +196,36 @@ fn command_from_request(request: &ExecSpawnHttpRequest) -> Result<String, Scratc
             StatusCode::BAD_REQUEST,
             "provide exactly one non-empty command or argv".to_string(),
         )),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn default_interactive_shell() -> String {
+    "powershell.exe".to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn default_interactive_shell() -> String {
+    let configured = std::env::var("SHELL").ok();
+    resolve_unix_default_shell(configured.as_deref(), |candidate| {
+        which::which(candidate).is_ok()
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_unix_default_shell(
+    configured: Option<&str>,
+    is_executable: impl Fn(&str) -> bool,
+) -> String {
+    if let Some(shell) = configured.filter(|shell| !shell.trim().is_empty()) {
+        if is_executable(shell) {
+            return shell_words::join([shell]);
+        }
+    }
+    if is_executable("bash") {
+        "bash -l".to_string()
+    } else {
+        "sh -l".to_string()
     }
 }
 
@@ -293,6 +325,7 @@ pub async fn handle_v1_exec_spawn(
     Ok(Json(ExecSpawnHttpResponse {
         process_id: result.snapshot.meta.process_id.as_str().to_string(),
         status: status_label(&result.snapshot.status),
+        command_preview: result.snapshot.meta.command,
     }))
 }
 
@@ -726,6 +759,22 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn default_shell_resolution_follows_unix_ladder() {
+        assert_eq!(
+            super::resolve_unix_default_shell(Some("/opt/fish"), |candidate| candidate
+                == "/opt/fish"),
+            "/opt/fish"
+        );
+        assert_eq!(
+            super::resolve_unix_default_shell(Some("/missing/fish"), |candidate| candidate
+                == "bash"),
+            "bash -l"
+        );
+        assert_eq!(super::resolve_unix_default_shell(None, |_| false), "sh -l");
+    }
+
     #[tokio::test]
     #[serial_test::parallel(exec_http_env)]
     async fn spawn_requires_exactly_one_command_shape() {
@@ -744,10 +793,66 @@ mod tests {
 
         let (status, _) = json_response(
             router,
-            post_json("/v1/exec/spawn", json!({ "command": null, "argv": null })),
+            post_json(
+                "/v1/exec/spawn",
+                json!({ "command": null, "argv": null, "pty": false }),
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
+    async fn spawn_default_pty_shell_returns_command_preview() {
+        let (_temp, app) = test_app().await;
+        let router = make_refact_http_server(app);
+
+        let (status, spawned) = json_response(
+            router.clone(),
+            post_json("/v1/exec/spawn", json!({ "pty": true })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            spawned["command_preview"],
+            super::default_interactive_shell()
+        );
+        let process_id = spawned["process_id"].as_str().unwrap();
+        let (status, _) = json_response(
+            router,
+            post_json(&format!("/v1/exec/{process_id}/kill"), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
+    async fn spawn_explicit_command_preserves_command_preview() {
+        let (_temp, app) = test_app().await;
+        let router = make_refact_http_server(app);
+
+        let (status, spawned) = json_response(
+            router.clone(),
+            post_json(
+                "/v1/exec/spawn",
+                json!({ "command": "sleep 30", "pty": true }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(spawned["command_preview"], "sleep 30");
+        let process_id = spawned["process_id"].as_str().unwrap();
+        let (status, _) = json_response(
+            router,
+            post_json(&format!("/v1/exec/{process_id}/kill"), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
