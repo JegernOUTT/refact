@@ -56,6 +56,8 @@ pub struct WorkerRow {
     pub project_id: String,
     pub slug: String,
     pub root: PathBuf,
+    #[serde(default = "worker_row_root_exists_default")]
+    pub root_exists: bool,
     pub pinned: bool,
     pub last_active_ms: u64,
     pub state: WorkerState,
@@ -74,6 +76,10 @@ pub struct WorkerRow {
     pub last_status_report_ms: Option<u64>,
     pub last_error: Option<String>,
     pub log_path: String,
+}
+
+fn worker_row_root_exists_default() -> bool {
+    true
 }
 
 pub struct DaemonState {
@@ -570,6 +576,7 @@ impl DaemonState {
                 project_id: entry.id.clone(),
                 slug: entry.slug.clone(),
                 root: entry.root.clone(),
+                root_exists: entry.root.exists(),
                 pinned: entry.pinned,
                 last_active_ms: last_activity_ms,
                 state: worker
@@ -1061,6 +1068,69 @@ mod tests {
         assert_eq!(rows[0].busy_chats, 0);
         assert_eq!(rows[0].last_status_report_ms, None);
         assert_eq!(rows[0].idle_deadline_ms, None);
+    }
+
+    #[tokio::test]
+    async fn worker_rows_report_whether_project_root_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = DaemonState::new_with_daemon_dir(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events.jsonl")),
+            None,
+            dir.path().join("daemon"),
+            0,
+        );
+        let present_root = dir.path().join("present-project");
+        let missing_root = dir.path().join("missing-project");
+        std::fs::create_dir_all(&present_root).unwrap();
+        std::fs::create_dir_all(&missing_root).unwrap();
+        let (present_id, missing_id) = {
+            let mut registry = state.projects.write().await;
+            let present = registry.open(present_root.clone()).await.unwrap();
+            let missing = registry.open(missing_root.clone()).await.unwrap();
+            (present.id, missing.id)
+        };
+        std::fs::remove_dir_all(&missing_root).unwrap();
+
+        let rows = state.worker_rows().await;
+
+        assert_eq!(rows.len(), 2);
+        let row_by_id = |id: &str| rows.iter().find(|row| row.project_id == id).unwrap();
+        assert!(row_by_id(&present_id).root_exists);
+        assert!(!row_by_id(&missing_id).root_exists);
+    }
+
+    #[test]
+    fn worker_row_deserializes_missing_root_exists_as_true() {
+        let row = worker_row_json_without_root_exists();
+        let parsed: WorkerRow = serde_json::from_value(row).unwrap();
+        assert!(parsed.root_exists);
+    }
+
+    fn worker_row_json_without_root_exists() -> Value {
+        serde_json::json!({
+            "project_id": "project",
+            "slug": "project",
+            "root": "/tmp/project",
+            "pinned": false,
+            "last_active_ms": 0,
+            "state": "stopped",
+            "pid": null,
+            "rss_bytes": null,
+            "cpu_percent": null,
+            "uptime_secs": null,
+            "http_port": null,
+            "lsp_port": null,
+            "lsp_clients": 0,
+            "busy_chats": 0,
+            "exec_running": 0,
+            "live_proxy_streams": 0,
+            "cron_next_fire_ms": null,
+            "idle_deadline_ms": null,
+            "last_status_report_ms": null,
+            "last_error": null,
+            "log_path": "/tmp/log"
+        })
     }
 
     #[tokio::test]

@@ -16,7 +16,9 @@ import {
   type DaemonWorker,
 } from "../../../services/refact/daemon";
 import { AddProjectDialog } from "./AddProjectDialog";
+import { MissingProjectsSection } from "./MissingProjectsSection";
 import { ProjectCard } from "./ProjectCard";
+import { splitProjectWorkers } from "./projectOrdering";
 import {
   fetchReadyProjectStatuses,
   isReadyWorker,
@@ -33,6 +35,7 @@ function pendingWorker(root: string): DaemonWorker {
     project_id: `pending:${root}`,
     slug,
     root,
+    root_exists: true,
     pinned: false,
     last_active_ms: null,
     state: "starting",
@@ -128,6 +131,11 @@ export function ProjectsPage() {
     return [optimisticWorker, ...workers];
   }, [optimisticWorker, workers]);
 
+  const { present, missing } = useMemo(
+    () => splitProjectWorkers(displayedWorkers),
+    [displayedWorkers],
+  );
+
   if (isLoading && displayedWorkers.length === 0) {
     return <LoadingState label="Loading projects" variant="full" />;
   }
@@ -200,17 +208,27 @@ export function ProjectsPage() {
           variant="full"
         />
       ) : (
-        <div className={styles.grid}>
-          {displayedWorkers.map((worker) => (
-            <ProjectCard
-              daemonBase={daemonBase}
-              key={worker.project_id}
+        <>
+          {present.length > 0 ? (
+            <div className={styles.grid}>
+              {present.map((worker) => (
+                <ProjectCard
+                  daemonBase={daemonBase}
+                  key={worker.project_id}
+                  onMutated={() => void refetch()}
+                  ragStatus={ragStatuses[worker.project_id]}
+                  worker={worker}
+                />
+              ))}
+            </div>
+          ) : null}
+          {missing.length > 0 ? (
+            <MissingProjectsSection
               onMutated={() => void refetch()}
-              ragStatus={ragStatuses[worker.project_id]}
-              worker={worker}
+              workers={missing}
             />
-          ))}
-        </div>
+          ) : null}
+        </>
       )}
 
       <AddProjectDialog

@@ -2009,6 +2009,7 @@ mod tests {
             project_id: project_id.to_string(),
             slug: slug.to_string(),
             root: PathBuf::from("/tmp/demo"),
+            root_exists: true,
             pinned: true,
             last_active_ms: 0,
             state: WorkerState::Ready,

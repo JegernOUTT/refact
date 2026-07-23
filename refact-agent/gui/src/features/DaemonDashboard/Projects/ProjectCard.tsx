@@ -14,6 +14,8 @@ import {
   Card,
   Dialog,
   FieldError,
+  IconButton,
+  Tooltip,
 } from "../../../components/ui";
 import {
   useForgetProjectMutation,
@@ -158,25 +160,26 @@ export function ProjectCard({
             {worker.root}
           </span>
         </div>
-        <Button
-          aria-label={
-            worker.pinned ? `Unpin ${worker.slug}` : `Pin ${worker.slug}`
-          }
-          disabled={pending}
-          leftIcon={worker.pinned ? PinOff : Pin}
-          onClick={() =>
-            void mutate(() =>
-              pin({
-                projectId: worker.project_id,
-                pinned: !worker.pinned,
-              }).unwrap(),
-            )
-          }
-          size="sm"
-          variant="ghost"
-        >
-          {worker.pinned ? "Unpin" : "Pin"}
-        </Button>
+        <Tooltip content={worker.pinned ? "Unpin project" : "Pin project"}>
+          <IconButton
+            aria-label={
+              worker.pinned ? `Unpin ${worker.slug}` : `Pin ${worker.slug}`
+            }
+            disabled={pending}
+            icon={worker.pinned ? PinOff : Pin}
+            loading={pinState.isLoading}
+            onClick={() =>
+              void mutate(() =>
+                pin({
+                  projectId: worker.project_id,
+                  pinned: !worker.pinned,
+                }).unwrap(),
+              )
+            }
+            size="sm"
+            variant="ghost"
+          />
+        </Tooltip>
       </div>
 
       <div className={styles.statusRow}>

@@ -57,7 +57,7 @@
   display: grid;
   grid-template-columns: repeat(
     auto-fit,
-    minmax(min(100%, calc(var(--rf-space-6) * 9)), 1fr)
+    minmax(min(100%, calc(var(--rf-space-6) * 12)), 1fr)
   );
   gap: var(--rf-space-4);
   align-items: start;
@@ -152,6 +152,78 @@
   flex-wrap: wrap;
   gap: var(--rf-space-2);
   margin-top: auto;
+}
+
+.missingSection {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+}
+
+.missingHeader {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+}
+
+.missingToggle {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: 0;
+  border: 0;
+  color: var(--rf-color-muted);
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.missingToggle:hover {
+  color: var(--rf-color-fg);
+}
+
+.missingList {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.missingRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-1) var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
+}
+
+.missingName {
+  font-size: var(--rf-text-2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.missingPath {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dialogBody,

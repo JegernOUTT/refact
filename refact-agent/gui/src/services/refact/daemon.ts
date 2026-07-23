@@ -20,6 +20,7 @@ export type DaemonWorker = {
   project_id: string;
   slug: string;
   root: string;
+  root_exists?: boolean;
   pinned: boolean;
   last_active_ms: number | null;
   state: string;
