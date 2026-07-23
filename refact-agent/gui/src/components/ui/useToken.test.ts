@@ -129,6 +129,23 @@ describe("useToken", () => {
     expect(bare.result.current).toBe("root-value");
   });
 
+  it("prefers the radix theme root scope over the document root", () => {
+    installTokenStyles();
+    const style = document.createElement("style");
+    style.textContent = `.radix-themes { --rf-test-direct: themed-value; }`;
+    document.head.append(style);
+    const themeRoot = document.createElement("div");
+    themeRoot.className = "radix-themes";
+    document.body.append(themeRoot);
+
+    const { result } = renderHook(() => useToken("--rf-test-direct"));
+
+    expect(result.current).toBe("themed-value");
+
+    style.remove();
+    themeRoot.remove();
+  });
+
   it("updates after appearance class changes", async () => {
     installTokenStyles();
     document.documentElement.classList.add("dark");

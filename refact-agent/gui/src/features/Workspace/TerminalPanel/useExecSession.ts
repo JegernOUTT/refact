@@ -31,6 +31,7 @@ type UseExecSessionOptions = {
   connection: EngineApiConnection;
   apiKey?: string;
   onStatusChange: (status: ExecStatus) => void;
+  onResize?: (rows: number, cols: number) => void;
 };
 
 function parseEvent<T>(event: Event): T | null {
@@ -54,6 +55,7 @@ export function useExecSession({
   connection,
   apiKey,
   onStatusChange,
+  onResize,
 }: UseExecSessionOptions) {
   const [error, setError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
@@ -72,6 +74,7 @@ export function useExecSession({
     let reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
     let inputBuffer = "";
     let exitNoticeWritten = false;
+    let syncedSize: { rows: number; cols: number } | null = null;
 
     const reportError = (cause: unknown) => {
       if (stopped) return;
@@ -116,32 +119,39 @@ export function useExecSession({
       }
     });
 
-    const flushResize = async () => {
-      resizeTimer = null;
-      if (stopped) return;
+    const syncSize = async () => {
+      if (stopped || isTerminalStatus(statusRef.current)) return;
       try {
         fitAddon.fit();
-        if (terminal.rows > 0 && terminal.cols > 0) {
-          await resizeExec(
-            processId,
-            terminal.rows,
-            terminal.cols,
-            connection,
-            apiKey,
-          );
-        }
+      } catch {
+        return;
+      }
+      const { rows, cols } = terminal;
+      if (rows <= 0 || cols <= 0) return;
+      onResize?.(rows, cols);
+      if (syncedSize && syncedSize.rows === rows && syncedSize.cols === cols) {
+        return;
+      }
+      try {
+        await resizeExec(processId, rows, cols, connection, apiKey);
+        syncedSize = { rows, cols };
       } catch (cause) {
         reportError(cause);
       }
     };
 
     const scheduleResize = () => {
+      if (stopped) return;
       if (resizeTimer !== null) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => void flushResize(), RESIZE_DEBOUNCE_MS);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = null;
+        void syncSize();
+      }, RESIZE_DEBOUNCE_MS);
     };
     const resizeObserver = new ResizeObserver(scheduleResize);
     resizeObserver.observe(container);
-    scheduleResize();
+    const fonts = (document as Partial<Document>).fonts;
+    void fonts?.ready.then(() => scheduleResize());
 
     const scheduleReconnect = () => {
       eventSource?.close();
@@ -199,6 +209,7 @@ export function useExecSession({
     };
 
     async function backfillAndConnect() {
+      await syncSize();
       try {
         const read = await readExec(
           processId,
@@ -237,7 +248,7 @@ export function useExecSession({
       if (resizeTimer !== null) clearTimeout(resizeTimer);
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
     };
-  }, [apiKey, connection, onStatusChange, processId, runtime]);
+  }, [apiKey, connection, onResize, onStatusChange, processId, runtime]);
 
   return { error, reconnecting };
 }

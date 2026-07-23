@@ -110,9 +110,11 @@ function makeRuntime(): RuntimeFixture {
 function Harness({
   runtime,
   onStatusChange,
+  onResize,
 }: {
   runtime: RuntimeFixture["runtime"];
   onStatusChange: (status: ExecStatus) => void;
+  onResize?: (rows: number, cols: number) => void;
 }) {
   const state = useExecSession({
     processId: "proc-1",
@@ -120,6 +122,7 @@ function Harness({
     connection: CONFIG,
     apiKey: undefined,
     onStatusChange,
+    onResize,
   });
   return <div data-reconnecting={state.reconnecting}>{state.error}</div>;
 }
@@ -208,6 +211,39 @@ describe("useExecSession", () => {
     expect(FakeResizeObserver.disconnect).toHaveBeenCalled();
   });
 
+  test("syncs the fitted PTY size before painting backfill on attach", async () => {
+    const calls: string[] = [];
+    server.use(
+      http.get("*/v1/exec/proc-1/read", () => {
+        calls.push("read");
+        return HttpResponse.json({
+          chunks: [{ seq: 0, stream: "combined", text: "backfill" }],
+          next_seq: 1,
+          status: "running",
+        });
+      }),
+      http.post("*/v1/exec/proc-1/resize", () => {
+        calls.push("resize");
+        return HttpResponse.json({});
+      }),
+    );
+    const fixture = makeRuntime();
+    const onResize = vi.fn();
+    render(
+      <Harness
+        runtime={fixture.runtime}
+        onStatusChange={vi.fn()}
+        onResize={onResize}
+      />,
+    );
+
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    expect(calls).toEqual(["resize", "read"]);
+    expect(fixture.fit).toHaveBeenCalled();
+    expect(onResize).toHaveBeenCalledWith(40, 120);
+    expect(fixture.write).toHaveBeenCalledWith("backfill");
+  });
+
   test("reconnects with sequence resume after an SSE error", async () => {
     let readCount = 0;
     server.use(
@@ -252,6 +288,7 @@ describe("useExecSession", () => {
       http.get("*/v1/exec/proc-1/read", () =>
         HttpResponse.json({ chunks: [], next_seq: 0, status: "running" }),
       ),
+      http.post("*/v1/exec/proc-1/resize", () => HttpResponse.json({})),
     );
     const fixture = makeRuntime();
     const view = render(

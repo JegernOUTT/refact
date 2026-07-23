@@ -16,10 +16,15 @@ function canUseDOM(): boolean {
   return typeof window !== "undefined" && typeof document !== "undefined";
 }
 
+function tokenScope(): Element {
+  const themed = document.querySelector("[data-radix-themes], .radix-themes");
+  return themed ?? document.documentElement;
+}
+
 function readToken(name: string): string {
   if (!canUseDOM()) return "";
   return window
-    .getComputedStyle(document.documentElement)
+    .getComputedStyle(tokenScope())
     .getPropertyValue(normalizeTokenName(name))
     .trim();
 }
@@ -78,6 +83,7 @@ function startTokenWatch(): void {
   observer.observe(document.body, {
     attributes: true,
     attributeFilter: OBSERVED_ATTRIBUTES,
+    subtree: true,
   });
 
   if (typeof window.matchMedia === "function") {

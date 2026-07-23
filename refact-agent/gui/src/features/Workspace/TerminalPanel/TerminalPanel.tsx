@@ -1,7 +1,7 @@
 import "@xterm/xterm/css/xterm.css";
 
 import { Plus, SquareTerminal, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   Button,
@@ -29,6 +29,9 @@ import {
 } from "./terminalSlice";
 import styles from "./TerminalPanel.module.css";
 
+const DEFAULT_PTY_ROWS = 24;
+const DEFAULT_PTY_COLS = 80;
+
 function shortProcessId(processId: string): string {
   return processId.slice(0, 8);
 }
@@ -52,6 +55,7 @@ export function TerminalPanel() {
   const [spawning, setSpawning] = useState(false);
   const [disabled, setDisabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const lastFittedRef = useRef<{ rows: number; cols: number } | null>(null);
   const apiKey = config.apiKey ?? undefined;
   const connection = useMemo(
     () => ({
@@ -106,8 +110,14 @@ export function TerminalPanel() {
     setSpawning(true);
     setError(null);
     try {
+      const fitted = lastFittedRef.current;
       const result = await spawnExec(
-        { command: "bash -l", pty: true, rows: 24, cols: 80 },
+        {
+          command: "bash -l",
+          pty: true,
+          rows: fitted?.rows ?? DEFAULT_PTY_ROWS,
+          cols: fitted?.cols ?? DEFAULT_PTY_COLS,
+        },
         connection,
         apiKey,
       );
@@ -154,6 +164,13 @@ export function TerminalPanel() {
       dispatch(sessionStatusChanged({ processId, status }));
     },
     [dispatch],
+  );
+
+  const handleSessionResize = useCallback(
+    (_processId: string, rows: number, cols: number) => {
+      lastFittedRef.current = { rows, cols };
+    },
+    [],
   );
 
   if (disabled) {
@@ -236,6 +253,7 @@ export function TerminalPanel() {
               processId={session.process_id}
               apiKey={apiKey}
               onStatusChange={handleStatusChange}
+              onResize={handleSessionResize}
             />
           </div>
         ))}
