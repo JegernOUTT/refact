@@ -191,10 +191,14 @@ async fn effective_git_roots(
         .clone();
     let mut roots = Vec::with_capacity(configured.len());
     for root in configured {
-        let canonical = tokio::fs::canonicalize(&root)
-            .await
-            .map_err(|error| internal_error(format!("Failed to resolve git root: {}", error)))?;
-        roots.push(dunce::simplified(&canonical).to_path_buf());
+        match tokio::fs::canonicalize(&root).await {
+            Ok(canonical) => roots.push(dunce::simplified(&canonical).to_path_buf()),
+            Err(error) => tracing::warn!(
+                "Skipping unavailable configured git root {}: {}",
+                root.display(),
+                error
+            ),
+        }
     }
     let folders = crate::files_correction::get_unscoped_project_dirs(gcx).await;
     tokio::task::spawn_blocking(move || effective_git_roots_from(roots, &folders))
@@ -575,6 +579,10 @@ mod tests {
     use super::*;
     use std::fs;
 
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
     fn init_repo() -> (tempfile::TempDir, Repository) {
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
@@ -591,6 +599,17 @@ mod tests {
         let signature = git2::Signature::now("Test User", "test@example.com").unwrap();
         repo.commit(Some("HEAD"), &signature, &signature, message, &tree, &[])
             .unwrap();
+    }
+
+    async fn get_json(router: &axum::Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
     }
 
     #[test]
@@ -837,11 +856,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_matrix_git_stage_rejects_non_relative_paths() {
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
+    async fn git_reads_skip_missing_roots_and_serve_valid_repo() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (dir, repo) = init_repo();
+        commit_file(&repo, dir.path(), "Initial commit");
+        let missing = dir.path().join("missing-root");
+        *gcx.documents_state.workspace_folders.lock().unwrap() = Vec::new();
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() =
+            vec![missing, dir.path().to_path_buf()];
+        let canonical_root = dunce::canonicalize(dir.path())
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let router = crate::http::routers::make_refact_http_server(app);
 
+        let (status, payload) = get_json(&router, "/v1/git/status").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["roots"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["roots"][0]["root"], canonical_root);
+        assert!(payload["roots"][0]["branch"].is_string());
+
+        let (status, payload) = get_json(&router, "/v1/git/branches").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["roots"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["roots"][0]["root"], canonical_root);
+        assert!(payload["roots"][0]["current"].is_string());
+
+        let (status, payload) = get_json(&router, "/v1/git/log").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["roots"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["roots"][0]["root"], canonical_root);
+        assert_eq!(payload["roots"][0]["commits"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn git_read_explicit_missing_root_returns_not_found() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let holder = tempfile::tempdir().unwrap();
+        let missing = holder.path().join("missing-root");
+        *gcx.documents_state.workspace_folders.lock().unwrap() = Vec::new();
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![missing.clone()];
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let router = crate::http::routers::make_refact_http_server(app);
+        let uri = format!("/v1/git/status?root={}", missing.to_string_lossy());
+
+        let (status, payload) = get_json(&router, &uri).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(payload["code"], "not_found");
+        assert_eq!(payload["error"], "Git root not found");
+    }
+
+    #[tokio::test]
+    async fn git_reads_return_empty_roots_when_all_configured_roots_are_missing() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let holder = tempfile::tempdir().unwrap();
+        let missing = holder.path().join("missing-root");
+        *gcx.documents_state.workspace_folders.lock().unwrap() = Vec::new();
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![missing];
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let router = crate::http::routers::make_refact_http_server(app);
+
+        for uri in ["/v1/git/status", "/v1/git/branches", "/v1/git/log"] {
+            let (status, payload) = get_json(&router, uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert_eq!(payload, json!({ "roots": [] }), "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_matrix_git_stage_rejects_non_relative_paths() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let active = tempfile::tempdir().unwrap();
         Repository::init(active.path()).unwrap();
