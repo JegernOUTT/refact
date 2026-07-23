@@ -3,9 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import { setUpStore } from "../../../app/store";
 import type { DaemonWorker } from "../../../services/refact/daemon";
+import type { ProviderListItem } from "../../../services/refact/providers";
 import { server } from "../../../utils/mockServer";
 import { render, screen, waitFor, within } from "../../../utils/test-utils";
 import type { StatsSummary } from "../../StatsDashboard/types";
+import { formatCostTick } from "./costTicks";
 import { UsagePage } from "./UsagePage";
 
 vi.mock("echarts-for-react/lib/core", () => ({
@@ -98,9 +100,9 @@ function modelRow(calls: number, tokens: number, cost: number) {
   };
 }
 
-function providerRow(calls: number) {
+function providerRow(calls: number, provider = "anthropic") {
   return {
-    provider: "anthropic",
+    provider,
     total_calls: calls,
     successful_calls: calls,
     failed_calls: 0,
@@ -111,6 +113,19 @@ function providerRow(calls: number) {
     total_cache_creation_tokens: 0,
     total_cost_usd: 0,
     total_duration_ms: 0,
+  };
+}
+
+function providerListItem(name: string, baseProvider = name): ProviderListItem {
+  return {
+    name,
+    base_provider: baseProvider,
+    display_name: name,
+    enabled: true,
+    readonly: false,
+    has_credentials: true,
+    status: "configured",
+    model_count: 1,
   };
 }
 
@@ -146,7 +161,7 @@ const alphaSummary = projectSummary({
     total_messages_sent: 5,
   },
   by_model: [modelRow(10, 1_000, 1.25)],
-  by_provider: [providerRow(10)],
+  by_provider: [providerRow(10, "openrouter")],
   by_day: [dayRow("2026-07-01", 1_000, 1.25)],
 });
 
@@ -167,7 +182,7 @@ const betaSummary = projectSummary({
     total_messages_sent: 3,
   },
   by_model: [modelRow(5, 500, 0.75)],
-  by_provider: [providerRow(5)],
+  by_provider: [providerRow(5, "openrouter")],
   by_day: [dayRow("2026-07-02", 500, 0.75)],
 });
 
@@ -189,7 +204,10 @@ describe("UsagePage", () => {
       http.get(`${BASE}/p/beta/v1/stats/llm/summary`, () =>
         HttpResponse.json(betaSummary),
       ),
-      http.get(`${BASE}/p/alpha/v1/providers/anthropic/account-info`, () =>
+      http.get(`${BASE}/p/alpha/v1/providers`, () =>
+        HttpResponse.json({ providers: [providerListItem("openrouter")] }),
+      ),
+      http.get(`${BASE}/p/alpha/v1/providers/openrouter/account-info`, () =>
         HttpResponse.json({ data: { limit: 100, usage: 95, remaining: 5 } }),
       ),
     );
@@ -211,9 +229,46 @@ describe("UsagePage", () => {
     expect(within(modelTable).getByText("15")).toBeInTheDocument();
 
     expect(
-      await screen.findByText("anthropic: $5.00 of $100.00 plan remaining"),
+      await screen.findByText("openrouter: $5.00 of $100.00 plan remaining"),
     ).toBeInTheDocument();
     expect(screen.getAllByTestId("echarts-mock").length).toBeGreaterThan(0);
+  });
+
+  it("skips account-info probes for providers without advertised support", async () => {
+    let providersListRequested = false;
+    let accountInfoProbed = false;
+    server.use(
+      http.get(`${BASE}/daemon/v1/workers`, () =>
+        HttpResponse.json([worker("alpha", "ready")]),
+      ),
+      http.get(`${BASE}/p/alpha/v1/stats/llm/summary`, () =>
+        HttpResponse.json(alphaSummary),
+      ),
+      http.get(`${BASE}/p/alpha/v1/providers`, () => {
+        providersListRequested = true;
+        return HttpResponse.json({
+          providers: [
+            providerListItem("anthropic"),
+            providerListItem("openrouter"),
+          ],
+        });
+      }),
+      http.get(`${BASE}/p/alpha/v1/providers/openrouter/account-info`, () =>
+        HttpResponse.json({ data: { remaining: 50, limit: 100 } }),
+      ),
+      http.get(`${BASE}/p/alpha/v1/providers/anthropic/account-info`, () => {
+        accountInfoProbed = true;
+        return new HttpResponse(null, { status: 400 });
+      }),
+    );
+
+    renderUsage();
+
+    expect((await screen.findAllByText("1.0K")).length).toBeGreaterThan(0);
+    await waitFor(() => expect(providersListRequested).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(accountInfoProbed).toBe(false);
+    expect(screen.queryByText(/token plan/)).toBeNull();
   });
 
   it("lists stopped workers as not counted and wakes them on demand", async () => {
@@ -275,5 +330,25 @@ describe("UsagePage", () => {
     expect(
       await screen.findByText("No LLM calls recorded yet"),
     ).toBeInTheDocument();
+  });
+});
+
+describe("formatCostTick", () => {
+  it("uses 2-3 decimals for sub-dollar ranges", () => {
+    expect(formatCostTick(0.05, 0.195)).toBe("$0.05");
+    expect(formatCostTick(0.1, 0.195)).toBe("$0.10");
+    expect(formatCostTick(0.15, 0.195)).toBe("$0.15");
+    expect(formatCostTick(0.125, 0.5)).toBe("$0.125");
+    expect(formatCostTick(0, 0.195)).toBe("$0.00");
+  });
+
+  it("uses 2 decimals below ten dollars", () => {
+    expect(formatCostTick(2.5, 9)).toBe("$2.50");
+    expect(formatCostTick(1, 9.99)).toBe("$1.00");
+  });
+
+  it("uses integers for ten dollars and above", () => {
+    expect(formatCostTick(4, 12)).toBe("$4");
+    expect(formatCostTick(150, 600)).toBe("$150");
   });
 });

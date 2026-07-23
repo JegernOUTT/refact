@@ -18,8 +18,7 @@
 .pageHeader h2,
 .pageHeader p,
 .group h3,
-.findingCopy p,
-.muted {
+.findingCopy p {
   margin: 0;
 }
 
@@ -29,8 +28,7 @@
 }
 
 .pageHeader p,
-.findingCopy p,
-.muted {
+.findingCopy p {
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
 }
@@ -96,6 +94,52 @@
 .findingAction {
   flex: 0 0 auto;
   min-width: 0;
+}
+
+.skeletonBadge {
+  --skeleton-width: calc(var(--rf-space-6) * 2);
+  --skeleton-height: var(--rf-space-5);
+}
+
+.skeletonTitle {
+  --skeleton-width: 44%;
+  --skeleton-height: var(--rf-space-4);
+}
+
+.skeletonDetail {
+  --skeleton-width: 68%;
+  --skeleton-height: var(--rf-space-3);
+}
+
+.breakdown {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.breakdownTable {
+  border-collapse: collapse;
+  align-self: flex-start;
+}
+
+.breakdownTable th,
+.breakdownTable td {
+  padding: var(--rf-space-1) 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  text-align: left;
+}
+
+.breakdownTable th {
+  padding-right: var(--rf-space-4);
+  font-weight: 500;
+}
+
+.breakdownNote {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
 }
 
 .fixRow {

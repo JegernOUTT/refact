@@ -5,6 +5,7 @@ import type {
   ProviderListItem,
   ProviderListResponse,
 } from "../../../services/refact/providers";
+import { providerSupportsAccountInfo } from "../../../services/refact/providers";
 import {
   projectApiUrl,
   type DaemonWorker,
@@ -16,6 +17,7 @@ const MAX_CONCURRENT_PROJECTS = 3;
 const REQUEST_TIMEOUT_MS = 5_000;
 const MAX_MODEL_PROVIDERS = 5;
 const MAX_HEALTH_CHECKS_PER_PROJECT = 3;
+const MAX_ACCOUNT_INFO_CHECKS_PER_PROJECT = 3;
 
 const HEALTH_CAPABLE_BASE_PROVIDERS = new Set(["openrouter", "google_gemini"]);
 
@@ -99,7 +101,7 @@ async function fetchJson(url: string, signal?: AbortSignal): Promise<unknown> {
   return (await response.json()) as unknown;
 }
 
-function providerItems(data: unknown): ProviderListItem[] {
+export function providerItems(data: unknown): ProviderListItem[] {
   if (
     data &&
     typeof data === "object" &&
@@ -352,20 +354,23 @@ async function checkProject(
     }
   }
 
-  if (configured.some((provider) => provider.base_provider === "openrouter")) {
+  const accountInfoProviders = configured
+    .filter((provider) => providerSupportsAccountInfo(provider.base_provider))
+    .slice(0, MAX_ACCOUNT_INFO_CHECKS_PER_PROJECT);
+  for (const provider of accountInfoProviders) {
     try {
       const info = (await fetchJson(
         projectApiUrl(
           daemonBase,
           project.projectId,
-          "/openrouter/account-info",
+          `/providers/${encodeURIComponent(provider.name)}/account-info`,
         ),
         signal,
       )) as OpenRouterAccountInfoResponse;
-      const finding = quotaFinding(project, "openrouter", info);
+      const finding = quotaFinding(project, provider.name, info);
       if (finding) findings.push(finding);
     } catch {
-      return;
+      continue;
     }
   }
 }

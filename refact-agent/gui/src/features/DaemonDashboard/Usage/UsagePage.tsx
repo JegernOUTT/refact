@@ -26,6 +26,7 @@ import {
   type DaemonWorker,
 } from "../../../services/refact/daemon";
 import { selectConfig } from "../../Config/configSlice";
+import { providerSupportsAccountInfo } from "../../../services/refact/providers";
 import { StatCard } from "../../StatsDashboard/components/StatCard";
 import type { StatsSummary } from "../../StatsDashboard/types";
 import {
@@ -39,6 +40,7 @@ import {
   formatTokenCount,
 } from "../../StatsDashboard/utils/formatters";
 import { isReadyWorker } from "../Projects/projectRagStatus";
+import { providerItems } from "../Doctor/clientChecks";
 import {
   aggregateUsage,
   type AggregatedUsage,
@@ -179,6 +181,51 @@ function tokenPlanWarning(
     };
   }
   return null;
+}
+
+async function fetchTokenPlanWarnings(
+  daemonBase: string,
+  probeProjectId: string,
+  usedProviders: string[],
+): Promise<TokenPlanWarning[]> {
+  let capableProviders: Set<string>;
+  try {
+    capableProviders = new Set(
+      providerItems(
+        await fetchJsonWithTimeout(
+          projectApiUrl(daemonBase, probeProjectId, "/providers"),
+        ),
+      )
+        .filter((item) => providerSupportsAccountInfo(item.base_provider))
+        .map((item) => item.name),
+    );
+  } catch {
+    capableProviders = new Set();
+  }
+  const providers = usedProviders
+    .filter((provider) => capableProviders.has(provider))
+    .slice(0, MAX_PROVIDER_PROBES);
+  const results = await Promise.all(
+    providers.map(async (provider) => {
+      try {
+        return tokenPlanWarning(
+          provider,
+          await fetchJsonWithTimeout(
+            projectApiUrl(
+              daemonBase,
+              probeProjectId,
+              `/providers/${encodeURIComponent(provider)}/account-info`,
+            ),
+          ),
+        );
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return results.filter(
+    (warning): warning is TokenPlanWarning => warning !== null,
+  );
 }
 
 type NotCountedRowProps = {
@@ -424,32 +471,12 @@ export function UsagePage() {
       return;
     }
     let active = true;
-    const providers = aggregated.used_providers.slice(0, MAX_PROVIDER_PROBES);
-    void Promise.all(
-      providers.map(async (provider) => {
-        try {
-          return tokenPlanWarning(
-            provider,
-            await fetchJsonWithTimeout(
-              projectApiUrl(
-                daemonBase,
-                probeProjectId,
-                `/providers/${encodeURIComponent(provider)}/account-info`,
-              ),
-            ),
-          );
-        } catch {
-          return null;
-        }
-      }),
+    void fetchTokenPlanWarnings(
+      daemonBase,
+      probeProjectId,
+      aggregated.used_providers,
     ).then((results) => {
-      if (active) {
-        setWarnings(
-          results.filter(
-            (warning): warning is TokenPlanWarning => warning !== null,
-          ),
-        );
-      }
+      if (active) setWarnings(results);
     });
     return () => {
       active = false;

@@ -62,6 +62,10 @@ export type ProviderListResponse = {
   providers: ProviderListItem[];
 };
 
+export function providerSupportsAccountInfo(baseProvider: string): boolean {
+  return baseProvider === "openrouter";
+}
+
 export type ProviderDetailResponse = {
   name: string;
   base_provider: string;

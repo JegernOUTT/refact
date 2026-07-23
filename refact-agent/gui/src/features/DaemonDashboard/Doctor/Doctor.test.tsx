@@ -1,4 +1,4 @@
-import { http, HttpResponse } from "msw";
+import { delay, http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 
 import { setUpStore } from "../../../app/store";
@@ -16,6 +16,11 @@ import {
   quotaFinding,
   staleDefaultModelFindings,
 } from "./clientChecks";
+import {
+  humanizeByteMessage,
+  humanizeBytes,
+  parseDiskCacheDetail,
+} from "./diskUsage";
 import { DoctorPage } from "./DoctorPage";
 import {
   buildDefaultsUpdate,
@@ -192,6 +197,43 @@ describe("Doctor client checks (pure)", () => {
       severity: "info",
       message: "Check failed: provider list on refact",
     });
+  });
+});
+
+describe("Doctor disk usage humanization (pure)", () => {
+  it("humanizes byte counts into binary units", () => {
+    expect(humanizeBytes(21474836480)).toBe("20.0 GiB");
+    expect(humanizeBytes(5 * 1024 * 1024)).toBe("5.0 MiB");
+    expect(humanizeBytes(2048)).toBe("2.0 KiB");
+    expect(humanizeBytes(512)).toBe("512 bytes");
+  });
+
+  it("humanizes byte counts embedded in finding messages", () => {
+    expect(humanizeByteMessage("Refact caches use 21474836480 bytes")).toBe(
+      "Refact caches use 20.0 GiB",
+    );
+    expect(humanizeByteMessage("Refact caches use 100 bytes")).toBe(
+      "Refact caches use 100 bytes",
+    );
+    expect(humanizeByteMessage("no numbers here")).toBe("no numbers here");
+  });
+
+  it("parses the disk cache detail fields", () => {
+    expect(
+      parseDiskCacheDetail(
+        "worktrees=10737418240 shadow_repos=5368709120 logs=1024 capped=true",
+      ),
+    ).toEqual({
+      worktrees: 10737418240,
+      shadowRepos: 5368709120,
+      logs: 1024,
+      capped: true,
+    });
+    expect(
+      parseDiskCacheDetail("worktrees=1 shadow_repos=2 logs=3 capped=false"),
+    ).toMatchObject({ capped: false });
+    expect(parseDiskCacheDetail("worktrees=1 shadow_repos=2")).toBeNull();
+    expect(parseDiskCacheDetail("free-form detail text")).toBeNull();
   });
 });
 
@@ -462,5 +504,136 @@ describe("Doctor page", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Informational (1)")).toBeInTheDocument();
     expect(screen.getByText("All checks passed 🩺")).toBeInTheDocument();
+  });
+
+  it("shows skeleton finding rows while checks are pending", async () => {
+    server.use(
+      workersHandler([worker("refact", "ready")]),
+      http.get("https://daemon.example.test/daemon/v1/doctor", async () => {
+        await delay(40);
+        return HttpResponse.json({ findings: [], generated_at_ms: 1 });
+      }),
+      http.get("https://daemon.example.test/p/refact/v1/providers", () =>
+        HttpResponse.json({ providers: [providerItem("openai")] }),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/defaults", () =>
+        HttpResponse.json(makeDefaults("openai/gpt-4o")),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/models", () =>
+        HttpResponse.json(modelsResponse(["gpt-4o"])),
+      ),
+    );
+
+    renderDoctor();
+
+    const skeleton = screen.getByTestId("doctor-skeleton");
+    expect(skeleton).toBeInTheDocument();
+    expect(skeleton).toHaveAttribute("aria-label", "Running checks");
+    expect(skeleton.querySelectorAll("li").length).toBeGreaterThanOrEqual(3);
+
+    expect(await screen.findByText("All checks passed 🩺")).toBeInTheDocument();
+    expect(screen.queryByTestId("doctor-skeleton")).toBeNull();
+  });
+
+  it("humanizes the disk cache finding into a byte breakdown table", async () => {
+    server.use(
+      workersHandler([worker("refact", "ready")]),
+      doctorHandler([
+        {
+          id: "disk_cache_usage",
+          severity: "warning",
+          message: "Refact caches use 21474836480 bytes",
+          detail:
+            "worktrees=10737418240 shadow_repos=5368709120 logs=5368709120 capped=false",
+          fix_action: "prune_caches",
+        },
+      ]),
+      http.get("https://daemon.example.test/p/refact/v1/providers", () =>
+        HttpResponse.json({ providers: [providerItem("openai")] }),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/defaults", () =>
+        HttpResponse.json(makeDefaults("openai/gpt-4o")),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/models", () =>
+        HttpResponse.json(modelsResponse(["gpt-4o"])),
+      ),
+    );
+
+    renderDoctor();
+
+    expect(
+      await screen.findByText("Refact caches use 20.0 GiB"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Worktrees")).toBeInTheDocument();
+    expect(screen.getByText("10.0 GiB")).toBeInTheDocument();
+    expect(screen.getByText("Shadow repos")).toBeInTheDocument();
+    expect(screen.getByText("Logs")).toBeInTheDocument();
+    expect(screen.getAllByText("5.0 GiB")).toHaveLength(2);
+    expect(screen.queryByText(/worktrees=/)).toBeNull();
+    expect(screen.queryByText(/21474836480/)).toBeNull();
+  });
+
+  it("reports token plan exhaustion through the aliased account-info route", async () => {
+    server.use(
+      workersHandler([worker("refact", "ready")]),
+      doctorHandler(),
+      http.get("https://daemon.example.test/p/refact/v1/providers", () =>
+        HttpResponse.json({
+          providers: [providerItem("openrouter_work", "openrouter")],
+        }),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/defaults", () =>
+        HttpResponse.json(makeDefaults("openrouter_work/gpt-4o")),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/models", () =>
+        HttpResponse.json(modelsResponse(["gpt-4o"])),
+      ),
+      http.get(
+        "https://daemon.example.test/p/refact/v1/providers/openrouter_work/health",
+        () => HttpResponse.json({ ok: true }),
+      ),
+      http.get(
+        "https://daemon.example.test/p/refact/v1/providers/openrouter_work/account-info",
+        () => HttpResponse.json({ data: { remaining: 0 } }),
+      ),
+    );
+
+    renderDoctor();
+
+    expect(
+      await screen.findByText(
+        "Token plan exhausted for openrouter_work on refact",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("treats an account-info failure as unsupported without surfacing errors", async () => {
+    server.use(
+      workersHandler([worker("refact", "ready")]),
+      doctorHandler(),
+      http.get("https://daemon.example.test/p/refact/v1/providers", () =>
+        HttpResponse.json({ providers: [providerItem("openrouter")] }),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/defaults", () =>
+        HttpResponse.json(makeDefaults("openrouter/gpt-4o")),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/models", () =>
+        HttpResponse.json(modelsResponse(["gpt-4o"])),
+      ),
+      http.get(
+        "https://daemon.example.test/p/refact/v1/providers/openrouter/health",
+        () => HttpResponse.json({ ok: true }),
+      ),
+      http.get(
+        "https://daemon.example.test/p/refact/v1/providers/openrouter/account-info",
+        () => new HttpResponse(null, { status: 400 }),
+      ),
+    );
+
+    renderDoctor();
+
+    expect(await screen.findByText("All checks passed 🩺")).toBeInTheDocument();
+    expect(screen.queryByText(/Token plan exhausted/)).toBeNull();
+    expect(screen.queryByText(/Check failed/)).toBeNull();
   });
 });

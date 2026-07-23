@@ -6,6 +6,7 @@ import {
   EmptyState,
   FieldSelect,
   Icon,
+  Skeleton,
   Surface,
 } from "../../../components/ui";
 import { selectConfig } from "../../Config/configSlice";
@@ -308,9 +309,28 @@ export function DoctorPage() {
       </header>
 
       {running && findings === null ? (
-        <p className={styles.muted} aria-live="polite">
-          Running checks…
-        </p>
+        <Surface
+          aria-label="Running checks"
+          className={styles.group}
+          data-testid="doctor-skeleton"
+          radius="card"
+          role="status"
+          variant="glass"
+        >
+          <ul className={styles.findingList}>
+            {[0, 1, 2, 3].map((row) => (
+              <li className={styles.finding} key={row}>
+                <div className={styles.findingCopy}>
+                  <div className={styles.findingHeader}>
+                    <Skeleton className={styles.skeletonBadge} radius="pill" />
+                    <Skeleton className={styles.skeletonTitle} radius="chip" />
+                  </div>
+                  <Skeleton className={styles.skeletonDetail} radius="chip" />
+                </div>
+              </li>
+            ))}
+          </ul>
+        </Surface>
       ) : null}
 
       {allGreen ? (

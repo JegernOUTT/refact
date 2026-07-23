@@ -19,6 +19,7 @@ import {
   useChartTheme,
   valueAxis,
 } from "../../StatsDashboard/utils/chartTheme";
+import { formatCostTick } from "./costTicks";
 import styles from "./Usage.module.css";
 
 echarts.use([
@@ -70,6 +71,7 @@ export function UsageCharts({ days }: UsageChartsProps) {
   };
 
   const hasCostData = days.some((day) => day.total_cost_usd > 0);
+  const maxCost = Math.max(...days.map((day) => day.total_cost_usd), 0);
   const costPerDayOption = {
     tooltip: chartTooltip(theme, "axis", {
       valueFormatter: (value: number) => `$${value.toFixed(2)}`,
@@ -80,7 +82,7 @@ export function UsageCharts({ days }: UsageChartsProps) {
       valueAxis(theme, {
         axisLabel: {
           color: theme.muted,
-          formatter: (value: number) => `$${value.toFixed(0)}`,
+          formatter: (value: number) => formatCostTick(value, maxCost),
         },
       }),
     ],
