@@ -5,9 +5,9 @@
   flex-direction: column;
   width: 100%;
   height: var(--workspace-drawer-h);
-  max-height: 60dvh;
+  max-height: 50dvh;
   min-width: 0;
-  min-height: min(calc(var(--rf-control-h-lg) * 4 + var(--rf-space-4)), 60dvh);
+  min-height: min(calc(var(--rf-control-h-lg) * 4 + var(--rf-space-4)), 50dvh);
   overflow: hidden;
   background: var(--rf-bg);
   border-top: var(--rf-hairline) solid var(--rf-border);

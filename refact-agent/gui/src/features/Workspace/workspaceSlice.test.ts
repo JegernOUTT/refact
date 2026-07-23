@@ -43,7 +43,7 @@ import {
   isChatSurface,
   isFilesSurface,
   isGitSurface,
-  isPanelSurface,
+  isMainSurface,
   isTerminalSurface,
   makeSurfaceKey,
   parseSurfaceKey,
@@ -54,9 +54,9 @@ const reducer = workspaceSlice.reducer;
 
 const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
 const task = (id: string): SurfaceKey => makeSurfaceKey("task", id);
-const files = makeSurfaceKey("files", "main");
+const files = "files:main";
 const git = makeSurfaceKey("git", "main");
-const terminal = makeSurfaceKey("terminal", "main");
+const terminal = "terminal:main";
 
 const leaf = (
   id: string,
@@ -115,14 +115,11 @@ describe("surfaceKey helpers", () => {
     });
     expect(isChatSurface("chat:thread-a")).toBe(true);
     expect(isChatSurface("task:task-a")).toBe(false);
-    expect(parseSurfaceKey(files)).toEqual({ kind: "files", id: "main" });
-    expect(isPanelSurface(files)).toBe(true);
+    expect(() => parseSurfaceKey(files)).toThrow("invalid surface key");
+    expect(isMainSurface(files)).toBe(false);
     expect(isFilesSurface(files)).toBe(true);
     expect(isGitSurface(git)).toBe(true);
     expect(isTerminalSurface(terminal)).toBe(true);
-    expect(() => makeSurfaceKey("files", "other" as "main")).toThrow(
-      "invalid files surface id",
-    );
     expect(() => parseSurfaceKey("terminal:other")).toThrow(
       "invalid surface key",
     );
@@ -193,7 +190,7 @@ describe("workspaceSlice", () => {
         tabs: [chatA, files, terminal],
         activeTabId: terminal,
         groups: {},
-        panelCapabilities: {
+        workspaceCapabilities: {
           filesPanel: true,
           gitPanel: true,
           terminalPanel: false,

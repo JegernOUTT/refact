@@ -35,10 +35,12 @@ import {
   selectWorkspaceGroups,
   splitTab,
 } from "./workspaceSlice";
+import { useWorkspaceShortcuts } from "./useWorkspaceShortcuts";
 import styles from "./WorkspaceView.module.css";
 
 export function WorkspaceView() {
   const dispatch = useAppDispatch();
+  useWorkspaceShortcuts();
   const [unsplitDragActive, setUnsplitDragActive] = useState(false);
   const activeTabId = useAppSelector(selectActiveTabId);
   const currentThreadId = useAppSelector(selectCurrentThreadId);

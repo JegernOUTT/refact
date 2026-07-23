@@ -8,6 +8,7 @@ import type {
 } from "../../../services/refact/tasks";
 import { render, screen, waitFor, within } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
+import statusDotStyles from "../../../components/ui/StatusDot/StatusDot.module.css";
 import { TasksSection, TasksSectionView } from "./TasksSection";
 import { buildTaskDockEntries, type TaskDockEntry } from "./tasksSectionModel";
 
@@ -85,7 +86,10 @@ describe("TasksSection", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Tasks need attention")).toBeInTheDocument();
+    expect(screen.getByLabelText("Tasks need attention")).toHaveClass(
+      statusDotStyles.warning,
+      statusDotStyles.small,
+    );
     expect(
       screen
         .getAllByRole("button")

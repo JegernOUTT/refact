@@ -35,7 +35,8 @@ type DrawerProps = {
 
 function sessionStatus(status: ExecStatus): "running" | "error" | "idle" {
   if (status === "running" || status === "starting") return "running";
-  if (status === "failed" || status === "timed_out") return "error";
+  if (status === "failed" || status === "timed_out" || status === "killed")
+    return "error";
   return "idle";
 }
 
@@ -140,6 +141,8 @@ export function Drawer({ children }: DrawerProps) {
                 <StatusDot
                   key={session.process_id}
                   aria-label={sessionStatusLabel(session)}
+                  pulse={sessionStatus(session.status) === "running"}
+                  size="small"
                   status={sessionStatus(session.status)}
                 />
               ))}
@@ -170,6 +173,8 @@ export function Drawer({ children }: DrawerProps) {
               <StatusDot
                 key={session.process_id}
                 aria-label={sessionStatusLabel(session)}
+                pulse={sessionStatus(session.status) === "running"}
+                size="small"
                 status={sessionStatus(session.status)}
               />
             ))}

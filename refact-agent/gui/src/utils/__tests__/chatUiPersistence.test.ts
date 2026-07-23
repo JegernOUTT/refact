@@ -287,8 +287,8 @@ describe("chatUiPersistence", () => {
       currentThreadId: "chat-a",
       tabs: [{ id: "chat-a" }],
     });
-    const files = makeSurfaceKey("files", "main");
-    const terminal = makeSurfaceKey("terminal", "main");
+    const files = "files:main";
+    const terminal = "terminal:main";
     const workspace = {
       tabs: [chatSurface("chat-a"), files, terminal],
       activeTabId: terminal,

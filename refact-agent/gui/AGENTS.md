@@ -416,6 +416,20 @@ Threads continue processing even without open tabs. `closeThread` preserves busy
 
 **Two SSE systems**: Chat subscription (per-thread, real-time state) + Trajectories subscription (global, metadata sync only). Sidebar v2 also carries section snapshots/updates plus notification envelopes for cross-thread prompts.
 
+### Workspace dock / main / drawer contract
+
+The web Workspace is one shell with three authorities. Keep the grammar stable:
+
+- **Dock lists things.** It is a 240–400px project-persisted left rail with capability-filtered `Files | Git | Tasks` sections. Files owns the tree, Git owns changes/staging/commit, and Tasks projects in-flight cards. Below 768px the same dock renders through the kit `Sheet`; opening a file, Git change, or task closes the narrow Sheet instead of changing lifecycle.
+- **Main shows things.** The top tab bar owns chats plus `file:{path}` read-only viewers, the singleton `git:main` surface, and existing `task:{id}` workspaces. File tabs deduplicate by exact path. Tasks remain per-task surfaces; do not invent `tasks:main`. Files and Terminal are not live center-tab kinds.
+- **Drawer executes things.** Terminal is the bottom, height-persisted drawer under Main. It stays mounted when collapsed so PTY sessions survive; the open height is clamped to 50dvh and the collapsed strip keeps the session count and `StatusDot` indicators visible.
+
+Workspace layout state is project-scoped as `dock: { open, width, section }` and `drawer: { open, height }`. Persistence accepts `files:main` and `terminal:main` only as legacy migration inputs: Files is silently dropped, Terminal opens the drawer, and neither may be emitted as a new tab. `git:main` remains the only panel-like live Main surface. Remove obsolete registries, launchers, splitters, CSS, and persistence keys when moving a surface; compatibility parsing is not permission to keep a dead render path.
+
+Web-only keyboard shortcuts use stable section numbers: `Ctrl/Cmd+B` toggles the dock, `Ctrl/Cmd+J` toggles the terminal drawer, and `Ctrl/Cmd+1/2/3` opens and selects Files/Git/Tasks respectively when that section is available. The Workspace handler must not register for IDE hosts and must ignore composing/repeated/modified events plus targets inside inputs, textareas, selects, contenteditable regions, and `.xterm`.
+
+The shell renders dock chrome only for web hosts with Files or Git capability, and terminal chrome only with Terminal capability. VS Code, JetBrains, and generic IDE hosts retain zero new Workspace chrome even if stale persisted layout exists. Changes to this shell must keep the IDE characterization suite, capability matrix, project-scoped legacy fixture, Workspace unit suite, boundary lint, and the Playwright no-horizontal-scroll route with dock + drawer open green at 240/360/768/1280px. Use kit `Badge`/`StatusDot` for Git, Tasks, and terminal indicators; preserve `min-width: 0`, Sheet clamping, and explicit `.scrollX` islands.
+
 ### Scheduler feature
 
 The scheduler UI is opened by the `scheduler` page (`openScheduler({ taskId? })`) and by EventLog clicks on `cron_fire` events. Keep the GUI model aligned with backend cron tools:

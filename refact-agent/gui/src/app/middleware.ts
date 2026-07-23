@@ -242,14 +242,14 @@ function hydratePersistedChatUi(listenerApi: {
 
   listenerApi.dispatch(hydratePersistedChatTabs());
   if (trustedWorkspace) {
-    const panelCapabilities = selectCapabilities(listenerApi.getState());
+    const workspaceCapabilities = selectCapabilities(listenerApi.getState());
     listenerApi.dispatch(
-      hydrateWorkspace({ ...trustedWorkspace, panelCapabilities }),
+      hydrateWorkspace({ ...trustedWorkspace, workspaceCapabilities }),
     );
     listenerApi.dispatch(
       reconcileWorkspace({
         openThreadIds: listenerApi.getState().chat.open_thread_ids,
-        panelCapabilities,
+        workspaceCapabilities,
       }),
     );
     switchToFocusedWorkspaceChat(listenerApi);

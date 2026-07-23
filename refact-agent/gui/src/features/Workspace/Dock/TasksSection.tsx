@@ -71,7 +71,7 @@ export function TasksSectionView({
           <StatusDot
             aria-label="Tasks need attention"
             size="small"
-            status="error"
+            status="needs_attention"
           />
         ) : hasRunning ? (
           <StatusDot

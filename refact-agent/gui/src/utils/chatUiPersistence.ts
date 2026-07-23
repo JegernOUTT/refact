@@ -19,7 +19,7 @@ import {
   isChatSurface,
   isFileSurface,
   isFilesSurface,
-  isPanelSurface,
+  isMainSurface,
   isTerminalSurface,
   parseSurfaceKey,
   type SurfaceKey,
@@ -33,8 +33,6 @@ const WORKSPACE_STORAGE_KEY = "refact:chat-ui:workspace:v1";
 const TASKS_UI_STORAGE_KEY = "refact:chat-ui:tasks-ui:v1";
 const ASK_QUESTIONS_STORAGE_KEY = "refact:chat-ui:ask-questions:v1";
 const TASK_WORKSPACE_TABS_STORAGE_KEY = "refact:chat-ui:task-workspace-tabs:v1";
-const FILES_EXPLORER_WIDTH_STORAGE_KEY =
-  "refact:chat-ui:files-explorer-width:v1";
 const PROJECT_STORAGE_NAMESPACE_SESSION_KEY =
   "refact:chat-ui:project-storage-namespace:v1";
 
@@ -394,6 +392,7 @@ function createFallbackWorkspace(): WorkspaceState {
 function normalizeSurfaceKey(value: unknown): SurfaceKey | null {
   const key = stringOrUndefined(value)?.trim();
   if (!key) return null;
+  if (isFilesSurface(key) || isTerminalSurface(key)) return key;
 
   try {
     parseSurfaceKey(key);
@@ -410,7 +409,7 @@ function isOpenWorkspaceSurface(
   return isFilesSurface(surfaceKey)
     ? false
     : isFileSurface(surfaceKey) ||
-        (isPanelSurface(surfaceKey) && !isTerminalSurface(surfaceKey))
+        (isMainSurface(surfaceKey) && !isTerminalSurface(surfaceKey))
       ? true
       : isChatSurface(surfaceKey) &&
         openThreadIds.has(surfaceKey.slice("chat:".length));
@@ -934,28 +933,6 @@ export function saveTaskWorkspaceTab(
   writeRecord(storageKey, {
     version: 1,
     tabs,
-    updatedAt: Date.now(),
-  });
-}
-
-export function loadPersistedFilesExplorerWidth(): number | null {
-  const trustedKey = trustedProjectScopedStorageKey(
-    FILES_EXPLORER_WIDTH_STORAGE_KEY,
-  );
-  const record = trustedKey ? readRecord(trustedKey) : null;
-  return numberOrUndefined(record?.width) ?? null;
-}
-
-export function savePersistedFilesExplorerWidth(width: number): void {
-  if (!Number.isFinite(width)) return;
-  const storageKey = trustedProjectScopedStorageKey(
-    FILES_EXPLORER_WIDTH_STORAGE_KEY,
-  );
-  if (!storageKey) return;
-
-  writeRecord(storageKey, {
-    version: 1,
-    width,
     updatedAt: Date.now(),
   });
 }

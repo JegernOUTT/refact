@@ -286,7 +286,7 @@ describe("persisted panel tabs respect capability revocation", () => {
         tabs: [chat("chat-a"), "git:main", "files:main"],
         activeTabId: "git:main",
         groups: {},
-        panelCapabilities: resolveCapabilities("web", { gitPanel: false }),
+        workspaceCapabilities: resolveCapabilities("web", { gitPanel: false }),
       }),
     );
 
@@ -302,7 +302,7 @@ describe("persisted panel tabs respect capability revocation", () => {
         tabs: [chat("chat-a"), "git:main", "terminal:main"],
         activeTabId: "git:main",
         groups: {},
-        panelCapabilities: resolveCapabilities("web"),
+        workspaceCapabilities: resolveCapabilities("web"),
       }),
     );
 
@@ -322,7 +322,7 @@ describe("persisted panel tabs respect capability revocation", () => {
         tabs: [chat("chat-a"), "files:main", "git:main", "terminal:main"],
         activeTabId: "files:main",
         groups: {},
-        panelCapabilities: resolveCapabilities("vscode"),
+        workspaceCapabilities: resolveCapabilities("vscode"),
       }),
     );
 
@@ -338,13 +338,13 @@ describe("persisted panel tabs respect capability revocation", () => {
         tabs: [chat("chat-a"), "terminal:main"],
         activeTabId: "terminal:main",
         groups: {},
-        panelCapabilities: resolveCapabilities("web"),
+        workspaceCapabilities: resolveCapabilities("web"),
       }),
     );
     store.dispatch(
       reconcileWorkspace({
         openThreadIds: ["chat-a"],
-        panelCapabilities: resolveCapabilities("web", {
+        workspaceCapabilities: resolveCapabilities("web", {
           terminalPanel: false,
         }),
       }),

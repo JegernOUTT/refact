@@ -1,13 +1,5 @@
 import classNames from "classnames";
-import {
-  Files,
-  FileText,
-  GitBranch,
-  Layers,
-  Menu as MenuIcon,
-  SquareTerminal,
-  X,
-} from "lucide-react";
+import { FileText, Layers, Menu as MenuIcon, X } from "lucide-react";
 import {
   ComponentProps,
   DragEvent,
@@ -71,10 +63,10 @@ import {
   type PaneGroup,
 } from "./workspaceSlice";
 import {
-  isPanelKind,
+  isMainSurfaceKind,
   makeSurfaceKey,
   parseSurfaceKey,
-  type PanelKind,
+  type MainSurfaceKind,
   type SurfaceKey,
 } from "./surfaceKey";
 import { getStatusFromSessionState } from "../../utils/sessionStatus";
@@ -88,13 +80,9 @@ type TabSurfaceKind =
   | "buddy"
   | "dashboard"
   | "file"
-  | PanelKind;
+  | MainSurfaceKind;
 
-const PANEL_INFO = {
-  files: { title: "Files", icon: Files },
-  git: { title: "Git", icon: GitBranch },
-  terminal: { title: "Terminal", icon: SquareTerminal },
-} as const;
+const MAIN_SURFACE_INFO = { git: { title: "Git" } } as const;
 
 const pathBasename = (path: string): string => {
   const normalized = path.replace(/\\/g, "/");
@@ -179,7 +167,7 @@ function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
     if (
       parsed.kind === "dashboard" ||
       parsed.kind === "file" ||
-      isPanelKind(parsed.kind)
+      isMainSurfaceKind(parsed.kind)
     ) {
       return { type: "surface", id: surfaceKey };
     }
@@ -240,9 +228,9 @@ function displayInfoForSurface(
     };
   }
 
-  if (isPanelKind(parsed.kind)) {
+  if (isMainSurfaceKind(parsed.kind)) {
     return {
-      title: PANEL_INFO[parsed.kind].title,
+      title: MAIN_SURFACE_INFO[parsed.kind].title,
       kind: parsed.kind,
       unreadNotificationCount: 0,
     };
@@ -400,7 +388,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
         }
         return;
       }
-      if (parsed.kind === "file" || isPanelKind(parsed.kind)) {
+      if (parsed.kind === "file" || isMainSurfaceKind(parsed.kind)) {
         dispatch(setActiveTab(tabId));
         if (currentPage?.name !== "chat") {
           dispatch(push({ name: "chat" }));

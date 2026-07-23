@@ -14,12 +14,12 @@ import {
   isChatSurface,
   isFileSurface,
   isFilesSurface,
-  isPanelSurface,
-  isPanelSurfaceEnabled,
+  isMainSurface,
+  isMainSurfaceEnabled,
   isTerminalSurface,
   isWorkspaceSurface,
   isWorkspaceSurfaceEnabled,
-  type PanelCapabilities,
+  type WorkspaceCapabilities,
   type SurfaceKey,
 } from "./surfaceKey";
 
@@ -92,7 +92,7 @@ export const clampDrawerHeight = (
   viewportHeight: number,
 ): number => {
   const maxHeight = Number.isFinite(viewportHeight)
-    ? Math.max(DRAWER_MIN_HEIGHT, viewportHeight * 0.6)
+    ? Math.max(DRAWER_MIN_HEIGHT, viewportHeight * 0.5)
     : DRAWER_DEFAULT_HEIGHT;
   return Math.min(maxHeight, normalizeDrawerHeight(value));
 };
@@ -129,7 +129,7 @@ const initialState: WorkspaceState = {
   drawer: { ...DEFAULT_WORKSPACE_DRAWER },
 };
 
-const DEFAULT_PANEL_CAPABILITIES: PanelCapabilities = {
+const DEFAULT_WORKSPACE_CAPABILITIES: WorkspaceCapabilities = {
   filesPanel: true,
   gitPanel: true,
   terminalPanel: true,
@@ -791,13 +791,13 @@ const workspaceStatesEqual = (
 
 export const sanitizeWorkspaceSurfaceUniqueness = (
   state: WorkspaceState,
-  panelCapabilities: PanelCapabilities = DEFAULT_PANEL_CAPABILITIES,
+  workspaceCapabilities: WorkspaceCapabilities = DEFAULT_WORKSPACE_CAPABILITIES,
 ): WorkspaceState => {
   const tabs = unique(state.tabs)
     .filter(
       (key) =>
         !isFilesSurface(key) &&
-        isWorkspaceSurfaceEnabled(key, panelCapabilities),
+        isWorkspaceSurfaceEnabled(key, workspaceCapabilities),
     )
     .slice(0, MAX_WORKSPACE_TABS);
   const topLevelSurfaces = new Set(tabs);
@@ -836,7 +836,7 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
 
   const activeTabId =
     state.activeTabId &&
-    isWorkspaceSurfaceEnabled(state.activeTabId, panelCapabilities) &&
+    isWorkspaceSurfaceEnabled(state.activeTabId, workspaceCapabilities) &&
     tabs.includes(state.activeTabId)
       ? state.activeTabId
       : tabs[0] ?? null;
@@ -854,7 +854,7 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
 export const reconcileWorkspaceState = (
   state: WorkspaceState,
   openThreadIds: string[],
-  panelCapabilities: PanelCapabilities = DEFAULT_PANEL_CAPABILITIES,
+  workspaceCapabilities: WorkspaceCapabilities = DEFAULT_WORKSPACE_CAPABILITIES,
 ): WorkspaceState => {
   const openThreads = new Set(openThreadIds);
   const nextState: WorkspaceState = {
@@ -862,9 +862,9 @@ export const reconcileWorkspaceState = (
       .filter(
         (key) =>
           openChatSurface(key, openThreads) ||
-          (isFileSurface(key) && panelCapabilities.filesPanel) ||
+          (isFileSurface(key) && workspaceCapabilities.filesPanel) ||
           (!isFilesSurface(key) &&
-            isPanelSurfaceEnabled(key, panelCapabilities)),
+            isMainSurfaceEnabled(key, workspaceCapabilities)),
       )
       .slice(0, MAX_WORKSPACE_TABS),
     activeTabId: state.activeTabId,
@@ -896,7 +896,7 @@ export const reconcileWorkspaceState = (
 
   const sanitizedState = sanitizeWorkspaceSurfaceUniqueness(
     nextState,
-    panelCapabilities,
+    workspaceCapabilities,
   );
 
   return workspaceStatesEqual(state, sanitizedState) ? state : sanitizedState;
@@ -1227,28 +1227,30 @@ export const workspaceSlice = createSlice({
       state,
       action: PayloadAction<{
         openThreadIds: string[];
-        panelCapabilities?: PanelCapabilities;
+        workspaceCapabilities?: WorkspaceCapabilities;
       }>,
     ) =>
       reconcileWorkspaceState(
         state,
         action.payload.openThreadIds,
-        action.payload.panelCapabilities,
+        action.payload.workspaceCapabilities,
       ),
     hydrateWorkspace: (
       _state,
       action: PayloadAction<
-        WorkspaceHydrationState & { panelCapabilities?: PanelCapabilities }
+        WorkspaceHydrationState & {
+          workspaceCapabilities?: WorkspaceCapabilities;
+        }
       >,
     ) => {
-      const panelCapabilities =
-        action.payload.panelCapabilities ?? DEFAULT_PANEL_CAPABILITIES;
+      const workspaceCapabilities =
+        action.payload.workspaceCapabilities ?? DEFAULT_WORKSPACE_CAPABILITIES;
       const legacyTerminalTab = action.payload.tabs.some(isTerminalSurface);
       const tabs = unique(action.payload.tabs)
         .filter(
           (key) =>
             !isFilesSurface(key) &&
-            isWorkspaceSurfaceEnabled(key, panelCapabilities),
+            isWorkspaceSurfaceEnabled(key, workspaceCapabilities),
         )
         .slice(0, MAX_WORKSPACE_TABS);
       const groups: Record<SurfaceKey, PaneGroup> = {};
@@ -1270,7 +1272,7 @@ export const workspaceSlice = createSlice({
             activeTabId &&
             (isChatSurface(activeTabId) ||
               isFileSurface(activeTabId) ||
-              isPanelSurface(activeTabId)) &&
+              isMainSurface(activeTabId)) &&
             tabs.includes(activeTabId)
               ? activeTabId
               : tabs[0] ?? null,
@@ -1283,7 +1285,7 @@ export const workspaceSlice = createSlice({
               normalizeWorkspaceDrawer(action.payload.drawer).open,
           },
         },
-        panelCapabilities,
+        workspaceCapabilities,
       );
     },
   },

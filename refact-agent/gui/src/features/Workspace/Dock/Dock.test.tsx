@@ -5,6 +5,7 @@ import { fireEvent, render, screen, waitFor } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { setDockOpen } from "../workspaceSlice";
 import { Dock } from "./Dock";
+import badgeStyles from "../../../components/ui/Badge/Badge.module.css";
 
 const originalMatchMedia = window.matchMedia;
 
@@ -161,8 +162,8 @@ describe("Dock", () => {
 
     render(<Dock />);
 
-    expect(await screen.findByLabelText("3 changed files")).toHaveTextContent(
-      "3",
-    );
+    const badge = await screen.findByLabelText("3 changed files");
+    expect(badge).toHaveTextContent("3");
+    expect(badge).toHaveClass(badgeStyles.warning, badgeStyles["size-xs"]);
   });
 });

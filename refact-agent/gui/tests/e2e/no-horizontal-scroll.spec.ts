@@ -45,6 +45,10 @@ const routes = [
     path: "/tests/e2e/route-showcase.html?route=chat-split",
   },
   {
+    name: "workspace dock and drawer",
+    path: "/tests/e2e/route-showcase.html?route=workspace-chrome",
+  },
+  {
     name: "buddy",
     path: "/tests/e2e/route-showcase.html?route=buddy",
   },
@@ -140,6 +144,16 @@ test.describe("no page-level horizontal scroll", () => {
           await expect(
             page.locator("[data-surface-key='chat:showcase-chat-b']"),
           ).toBeVisible();
+        }
+        if (route.path.includes("route=workspace-chrome")) {
+          await expect(
+            page.locator('section[aria-label="Terminal drawer"]'),
+          ).toBeVisible();
+          if (width < 768) {
+            await expect(page.getByRole("dialog")).toBeVisible();
+          } else {
+            await expect(page.getByTestId("workspace-dock")).toBeVisible();
+          }
         }
 
         const overflow = await page.evaluate<OverflowReport, boolean>(

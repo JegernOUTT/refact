@@ -61,7 +61,9 @@ const splitChatId = "showcase-chat-b";
 const chatSurface = (id: string) => makeSurfaceKey("chat", id);
 const route =
   new URLSearchParams(window.location.search).get("route") ?? "dashboard";
-const chatRoute = route === "chat" || route === "chat-split";
+const workspaceChromeRoute = route === "workspace-chrome";
+const chatRoute =
+  route === "chat" || route === "chat-split" || workspaceChromeRoute;
 const chatDndRoute = route === "chat-dnd";
 const multiChatRoute = route === "chat-split" || chatDndRoute;
 
@@ -922,6 +924,55 @@ window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
     }
     return Promise.resolve(jsonResponse({ ok: true }));
   }
+  if (path === "/v1/files/tree") {
+    return Promise.resolve(
+      jsonResponse({
+        path: url.searchParams.get("path") ?? "",
+        entries: [
+          {
+            name: "src",
+            path: "/workspace/refact/src",
+            kind: "dir",
+            size: null,
+          },
+          {
+            name: "README.md",
+            path: "/workspace/refact/README.md",
+            kind: "file",
+            size: 1024,
+          },
+        ],
+        truncated: false,
+      }),
+    );
+  }
+  if (path === "/v1/git/status") {
+    return Promise.resolve(
+      jsonResponse({
+        roots: [
+          {
+            root: "/workspace/refact",
+            branch: "main",
+            head_detached: false,
+            ahead: 0,
+            behind: 0,
+            staged: [],
+            unstaged: [
+              {
+                relative_path: "README.md",
+                absolute_path: "/workspace/refact/README.md",
+                status: "MODIFIED",
+              },
+            ],
+            untracked_included: true,
+          },
+        ],
+      }),
+    );
+  }
+  if (path === "/v1/exec/list") {
+    return Promise.resolve(jsonResponse({ processes: [] }));
+  }
   if (path === "/v1/buddy") return Promise.resolve(jsonResponse(buddySnapshot));
   if (path === "/v1/buddy/settings") {
     if (init?.method === "POST" && init.body) {
@@ -1132,6 +1183,16 @@ const preloadedState: Partial<RootState> = {
                   : [chatSurface(chatId)],
                 activeTabId: chatSurface(chatId),
                 groups: {},
+                ...(workspaceChromeRoute
+                  ? {
+                      dock: {
+                        open: true,
+                        width: 280,
+                        section: "files" as const,
+                      },
+                      drawer: { open: true, height: 280 },
+                    }
+                  : {}),
               },
       }
     : {}),
