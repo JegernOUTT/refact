@@ -1,0 +1,112 @@
+.section {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.heading {
+  color: var(--rf-color-muted);
+  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  text-transform: uppercase;
+}
+
+.list {
+  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--rf-space-2);
+  overflow-y: auto;
+}
+
+.card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  width: 100%;
+  min-width: 0;
+  padding: var(--rf-space-2);
+  color: var(--rf-color-fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-ctl);
+}
+
+.card:hover {
+  background: var(--rf-surface-1);
+}
+
+.card:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.cardLead,
+.cardCopy {
+  display: flex;
+  min-width: 0;
+}
+
+.cardLead {
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.cardCopy {
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.cardTitle,
+.taskName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cardTitle {
+  color: var(--rf-color-fg);
+  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.taskName {
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
+.state,
+.empty {
+  margin: auto;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-4);
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  text-align: center;
+}

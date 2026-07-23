@@ -30,6 +30,7 @@ import {
   type WorkspaceDockSection,
 } from "../workspaceSlice";
 import styles from "./Dock.module.css";
+import { TasksSection } from "./TasksSection";
 
 const narrowQuery = "(max-width: 767px)";
 const EMPTY_ROOTS: string[] = [];
@@ -185,9 +186,7 @@ export function Dock() {
       <div className={styles.content}>
         {activeSection === "files" ? <FilesPanel /> : null}
         {activeSection === "git" ? <GitDock /> : null}
-        {activeSection === "tasks" ? (
-          <div className={styles.placeholder}>Tasks coming soon</div>
-        ) : null}
+        {activeSection === "tasks" ? <TasksSection /> : null}
       </div>
     </>
   );
