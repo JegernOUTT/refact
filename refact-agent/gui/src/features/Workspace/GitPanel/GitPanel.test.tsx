@@ -158,7 +158,7 @@ function installHandlers(options?: {
       return HttpResponse.json({
         commits_applied: [
           {
-            project_path: "file:///other",
+            project_path: "/other",
             project_name: "other",
             commit_oid: "0123456789abcdef",
           },
@@ -305,7 +305,7 @@ describe("GitPanel", () => {
     expect(commitBodies[0]).toEqual({
       commits: [
         {
-          project_path: "file:///other",
+          root: "/other",
           commit_message: "Update docs",
           staged_changes: [OTHER_CHANGE],
           unstaged_changes: [],
@@ -315,6 +315,43 @@ describe("GitPanel", () => {
     expect(await screen.findByText("Committed 01234567")).toBeInTheDocument();
     expect(statusCalls.length).toBeGreaterThanOrEqual(2);
   });
+
+  test.each(["C:\\repo", "/repo#reserved"])(
+    "submits the plain status root without URL mangling: %s",
+    async (root) => {
+      const change: GitFileChange = {
+        relative_path: "src/app.ts",
+        absolute_path: `${root}/src/app.ts`,
+        status: "MODIFIED",
+      };
+      const commitBodies: unknown[] = [];
+      installHandlers({
+        commitBodies,
+        status: () => [statusRoot(root, [change], [])],
+      });
+      const { user } = renderPanel([root]);
+
+      await user.type(
+        await screen.findByRole("textbox", { name: "Commit message" }),
+        "Keep root literal",
+      );
+      await user.click(
+        screen.getByRole("button", { name: "Commit staged changes" }),
+      );
+
+      await waitFor(() => expect(commitBodies).toHaveLength(1));
+      expect(commitBodies[0]).toEqual({
+        commits: [
+          {
+            root,
+            commit_message: "Keep root literal",
+            staged_changes: [change],
+            unstaged_changes: [],
+          },
+        ],
+      });
+    },
+  );
 
   test("lists worktrees and supports diff, open, and cleanup actions", async () => {
     const openCalls: string[] = [];

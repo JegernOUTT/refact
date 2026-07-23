@@ -93,7 +93,8 @@ export type GitCommitChange = {
 
 export type GitCommitRequest = {
   commits: {
-    project_path: string;
+    root?: string;
+    project_path?: string;
     commit_message: string;
     staged_changes: GitCommitChange[];
     unstaged_changes: GitCommitChange[];

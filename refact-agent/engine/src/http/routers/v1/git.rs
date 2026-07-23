@@ -14,7 +14,7 @@ use crate::files_correction::{deserialize_path, serialize_path};
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
 use crate::custom_error::ScratchError;
-use crate::git::{CommitInfo, FileChange};
+use crate::git::FileChange;
 use crate::git::operations::{get_configured_author_email_and_name, stage_changes};
 use crate::git::checkpoints::{
     preview_changes_for_workspace_checkpoint, preview_changes_for_workspace_checkpoint_for_root,
@@ -24,7 +24,18 @@ use crate::worktrees::types::WorktreeMeta;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GitCommitPost {
-    pub commits: Vec<CommitInfo>,
+    pub commits: Vec<GitCommitRequest>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GitCommitRequest {
+    #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub project_path: Option<Url>,
+    pub commit_message: String,
+    pub staged_changes: Vec<FileChange>,
+    pub unstaged_changes: Vec<FileChange>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -111,23 +122,62 @@ pub async fn handle_v1_git_commit(
 
     let abort_flag: Arc<AtomicBool> = gcx.git_operations_abort_flag.clone();
     for commit in post.commits {
-        let project_path_str = commit.project_path.to_string();
-        let project_name = commit
+        let repo_path = if let Some(root) = commit.root.as_ref() {
+            super::git_read::resolve_requested_root(gcx.clone(), root.clone()).await
+        } else {
+            commit
+                .project_path
+                .as_ref()
+                .ok_or_else(|| "A commit root or project_path is required".to_string())
+                .and_then(|project_path| {
+                    project_path
+                        .to_file_path()
+                        .map_err(|_| "Invalid project_path file URL".to_string())
+                })
+                .map(|path| crate::files_correction::canonical_path(&path.display().to_string()))
+        };
+        let repo_path = match repo_path {
+            Ok(repo_path) => repo_path,
+            Err(error_message) => {
+                let project_path = commit
+                    .project_path
+                    .clone()
+                    .or_else(|| {
+                        commit
+                            .root
+                            .as_ref()
+                            .and_then(|root| Url::from_file_path(root).ok())
+                    })
+                    .unwrap_or_else(|| Url::parse("file:///").unwrap());
+                let project_name = commit
+                    .root
+                    .as_ref()
+                    .and_then(|root| {
+                        PathBuf::from(root)
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_default();
+                error_log.push(GitError {
+                    error_message,
+                    project_name,
+                    project_path,
+                });
+                continue;
+            }
+        };
+        let project_path = commit
             .project_path
-            .to_file_path()
-            .ok()
-            .and_then(|path| path.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .clone()
+            .or_else(|| Url::from_file_path(&repo_path).ok())
+            .unwrap_or_else(|| Url::parse("file:///").unwrap());
+        let project_path_str = project_path.to_string();
+        let project_name = repo_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
 
         let git_result: Result<(String, String, String), String> = (|| {
-            let repo_path = crate::files_correction::canonical_path(
-                &commit
-                    .project_path
-                    .to_file_path()
-                    .unwrap_or_default()
-                    .display()
-                    .to_string(),
-            );
             let repository =
                 Repository::open(&repo_path).map_err(|e| format!("Failed to open repo: {}", e))?;
             stage_changes(&repository, &commit.unstaged_changes, &abort_flag)?;
@@ -152,7 +202,7 @@ pub async fn handle_v1_git_commit(
                 error_log.push(GitError {
                     error_message: e,
                     project_name,
-                    project_path: commit.project_path,
+                    project_path,
                 });
             }
             Ok((oid_str, pname, desc)) => {
@@ -322,4 +372,148 @@ pub async fn handle_v1_checkpoints_restore(
         .header("Content-Type", "application/json")
         .body(Body::from(serde_json::to_string(&response).unwrap()))
         .unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use serde_json::{Value, json};
+    use std::fs;
+    use std::path::Path;
+    use tower::ServiceExt;
+
+    fn init_repo() -> (tempfile::TempDir, Repository) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+        fs::write(dir.path().join("file.txt"), "base\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("Test User", "test@example.com").unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Initial commit",
+            &tree,
+            &[],
+        )
+        .unwrap();
+        drop(tree);
+        fs::write(dir.path().join("file.txt"), "changed\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        drop(index);
+        (dir, repo)
+    }
+
+    async fn post_commit(gcx: Arc<GlobalContext>, commit: Value) -> Value {
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let router = crate::http::routers::make_refact_http_server(app);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/git-commit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commits": [commit] }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn commit_body(project_field: Value, message: &str) -> Value {
+        let mut body = json!({
+            "commit_message": message,
+            "staged_changes": [],
+            "unstaged_changes": [],
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(project_field.as_object().unwrap().clone());
+        body
+    }
+
+    #[tokio::test]
+    async fn git_commit_accepts_plain_workspace_root() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (dir, repo) = init_repo();
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![dir.path().to_path_buf()];
+
+        let response = post_commit(
+            gcx,
+            commit_body(
+                json!({ "root": dir.path().to_string_lossy() }),
+                "Plain root commit",
+            ),
+        )
+        .await;
+
+        assert_eq!(response["commits_applied"].as_array().unwrap().len(), 1);
+        assert!(response["error_log"].as_array().unwrap().is_empty());
+        assert_eq!(
+            repo.head().unwrap().peel_to_commit().unwrap().message(),
+            Some("Plain root commit")
+        );
+    }
+
+    #[tokio::test]
+    async fn git_commit_maps_plain_workspace_subdir_to_enclosing_repo() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (dir, repo) = init_repo();
+        let subdir = dir.path().join("refact-agent").join("engine");
+        fs::create_dir_all(&subdir).unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![subdir.clone()];
+
+        let response = post_commit(
+            gcx,
+            commit_body(
+                json!({ "root": subdir.to_string_lossy() }),
+                "Subdir root commit",
+            ),
+        )
+        .await;
+
+        assert_eq!(response["commits_applied"].as_array().unwrap().len(), 1);
+        assert!(response["error_log"].as_array().unwrap().is_empty());
+        assert_eq!(
+            repo.head().unwrap().peel_to_commit().unwrap().message(),
+            Some("Subdir root commit")
+        );
+    }
+
+    #[tokio::test]
+    async fn git_commit_keeps_legacy_project_path_request_working() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (dir, repo) = init_repo();
+        let project_path = Url::from_file_path(dir.path()).unwrap();
+
+        let response = post_commit(
+            gcx,
+            commit_body(
+                json!({ "project_path": project_path }),
+                "Legacy path commit",
+            ),
+        )
+        .await;
+
+        assert_eq!(response["commits_applied"].as_array().unwrap().len(), 1);
+        assert!(response["error_log"].as_array().unwrap().is_empty());
+        assert_eq!(
+            repo.head().unwrap().peel_to_commit().unwrap().message(),
+            Some("Legacy path commit")
+        );
+    }
 }

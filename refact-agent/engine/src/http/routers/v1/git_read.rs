@@ -229,6 +229,24 @@ async fn selected_roots(
         })
 }
 
+pub(super) async fn resolve_requested_root(
+    gcx: Arc<GlobalContext>,
+    requested: String,
+) -> Result<PathBuf, String> {
+    selected_roots(gcx, Some(requested))
+        .await
+        .map_err(|(_, Json(error))| {
+            error
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Git root not found")
+                .to_string()
+        })?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Git root not found".to_string())
+}
+
 fn repo_relative_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
     let mut unique = BTreeSet::new();
     for raw_path in paths {

@@ -14,11 +14,6 @@ type CommitBoxProps = {
   onCommitted: (shortOid: string) => void;
 };
 
-function projectUrl(root: string): string {
-  const normalized = root.startsWith("/") ? root : `/${root}`;
-  return `file://${encodeURI(normalized)}`;
-}
-
 function first<T>(values: T[]): T | undefined {
   return values.length > 0 ? values[0] : undefined;
 }
@@ -42,7 +37,7 @@ export function CommitBox({
         body: {
           commits: [
             {
-              project_path: projectUrl(root),
+              root,
               commit_message: message.trim(),
               staged_changes: stagedChanges.map(
                 ({ relative_path, absolute_path, status }) => ({
