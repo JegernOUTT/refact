@@ -12,10 +12,13 @@ import {
 } from "../ChatPanes/panesTree";
 import {
   isChatSurface,
+  isFileSurface,
+  isFilesSurface,
   isPanelSurface,
   isPanelSurfaceEnabled,
   isTerminalSurface,
   isWorkspaceSurface,
+  isWorkspaceSurfaceEnabled,
   type PanelCapabilities,
   type SurfaceKey,
 } from "./surfaceKey";
@@ -793,7 +796,8 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
   const tabs = unique(state.tabs)
     .filter(
       (key) =>
-        isChatSurface(key) || isPanelSurfaceEnabled(key, panelCapabilities),
+        !isFilesSurface(key) &&
+        isWorkspaceSurfaceEnabled(key, panelCapabilities),
     )
     .slice(0, MAX_WORKSPACE_TABS);
   const topLevelSurfaces = new Set(tabs);
@@ -832,8 +836,7 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
 
   const activeTabId =
     state.activeTabId &&
-    (isChatSurface(state.activeTabId) ||
-      isPanelSurfaceEnabled(state.activeTabId, panelCapabilities)) &&
+    isWorkspaceSurfaceEnabled(state.activeTabId, panelCapabilities) &&
     tabs.includes(state.activeTabId)
       ? state.activeTabId
       : tabs[0] ?? null;
@@ -859,7 +862,9 @@ export const reconcileWorkspaceState = (
       .filter(
         (key) =>
           openChatSurface(key, openThreads) ||
-          isPanelSurfaceEnabled(key, panelCapabilities),
+          (isFileSurface(key) && panelCapabilities.filesPanel) ||
+          (!isFilesSurface(key) &&
+            isPanelSurfaceEnabled(key, panelCapabilities)),
       )
       .slice(0, MAX_WORKSPACE_TABS),
     activeTabId: state.activeTabId,
@@ -1242,7 +1247,8 @@ export const workspaceSlice = createSlice({
       const tabs = unique(action.payload.tabs)
         .filter(
           (key) =>
-            isChatSurface(key) || isPanelSurfaceEnabled(key, panelCapabilities),
+            !isFilesSurface(key) &&
+            isWorkspaceSurfaceEnabled(key, panelCapabilities),
         )
         .slice(0, MAX_WORKSPACE_TABS);
       const groups: Record<SurfaceKey, PaneGroup> = {};
@@ -1262,7 +1268,9 @@ export const workspaceSlice = createSlice({
           tabs,
           activeTabId:
             activeTabId &&
-            (isChatSurface(activeTabId) || isPanelSurface(activeTabId)) &&
+            (isChatSurface(activeTabId) ||
+              isFileSurface(activeTabId) ||
+              isPanelSurface(activeTabId)) &&
             tabs.includes(activeTabId)
               ? activeTabId
               : tabs[0] ?? null,

@@ -46,7 +46,7 @@ describe("ContextFiles file clicks", () => {
     const items = screen.getAllByText("foo.ts:3-10");
     await user.click(items[items.length - 1]);
 
-    expect(store.getState().workspace.tabs).toContain("files:main");
+    expect(store.getState().workspace.tabs).toContain(`file:${filePath}`);
     expect(store.getState().filesPanel.viewerTarget).toEqual({
       path: filePath,
       line: 3,

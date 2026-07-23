@@ -53,7 +53,7 @@ afterEach(() => {
 });
 
 describe("useOpenFileInApp", () => {
-  it("opens the Files panel viewer on the web host", async () => {
+  it("opens a file viewer tab on the web host", async () => {
     const { user, store } = render(
       <OpenFileHarness target={{ path: filePath, line: 7 }} />,
       { preloadedState: { config: makeConfig("web") } },
@@ -66,7 +66,7 @@ describe("useOpenFileInApp", () => {
 
     await user.click(screen.getByRole("button", { name: "open" }));
 
-    expect(store.getState().workspace.tabs).toContain("files:main");
+    expect(store.getState().workspace.tabs).toContain(`file:${filePath}`);
     expect(store.getState().filesPanel.viewerTarget).toEqual({
       path: filePath,
       line: 7,
@@ -113,7 +113,7 @@ describe("useOpenFileInApp", () => {
     );
   });
 
-  it("prefers the Files panel when both capabilities are enabled", async () => {
+  it("prefers the in-app file viewer when both capabilities are enabled", async () => {
     const postMessageSpy = vi.spyOn(window, "postMessage");
     const { user, store } = render(
       <OpenFileHarness target={{ path: filePath }} />,
@@ -166,14 +166,14 @@ describe("useOpenFileInApp", () => {
 });
 
 describe("useGoToLink editor links", () => {
-  it("routes editor: links into the Files panel on the web host", async () => {
+  it("routes editor: links into a file viewer tab on the web host", async () => {
     const { user, store } = render(<GoToLinkHarness />, {
       preloadedState: { config: makeConfig("web") },
     });
 
     await user.click(screen.getByRole("button", { name: "go" }));
 
-    expect(store.getState().workspace.tabs).toContain("files:main");
+    expect(store.getState().workspace.tabs).toContain(`file:${filePath}`);
     expect(store.getState().filesPanel.viewerTarget).toEqual({
       path: filePath,
       line: undefined,

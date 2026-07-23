@@ -7,6 +7,7 @@ import { useAppSelector, useConfig } from "../../hooks";
 import { Chat } from "../Chat/Chat";
 import { ChatThreadProvider } from "../Chat/Thread";
 import { selectCapabilities } from "../Config/configSlice";
+import { FileViewer } from "./FilesPanel";
 import { PANEL_COMPONENTS } from "./panels/panelRegistry";
 import {
   isCenterPanelKind,
@@ -56,6 +57,18 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
       );
     }
 
+    if (parsed.kind === "file") {
+      if (!capabilities.filesPanel) return null;
+      return (
+        <div
+          className={classNames(styles.surfacePane, styles.fileSurface)}
+          data-surface-key={surfaceKey}
+        >
+          <FileViewer path={parsed.id} />
+        </div>
+      );
+    }
+
     if (isCenterPanelKind(parsed.kind)) {
       if (!capabilities[panelCapabilityKey(parsed.kind)]) return null;
       const PanelComponent = PANEL_COMPONENTS[parsed.kind];
@@ -64,7 +77,6 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
           className={classNames(
             styles.surfacePane,
             styles.panelSurface,
-            parsed.kind === "files" && styles.fullPanelSurface,
           )}
           data-surface-key={surfaceKey}
         >

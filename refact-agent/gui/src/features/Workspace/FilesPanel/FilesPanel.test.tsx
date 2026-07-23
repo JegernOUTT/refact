@@ -9,12 +9,9 @@ import {
   within,
 } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
-import {
-  loadPersistedFilesExplorerWidth,
-  savePersistedFilesExplorerWidth,
-  setProjectStorageNamespace,
-} from "../../../utils/chatUiPersistence";
+import { setProjectStorageNamespace } from "../../../utils/chatUiPersistence";
 import { FilesPanel } from "./FilesPanel";
+import { FileViewer } from "./FileViewer";
 import { openFileInFilesPanel } from "./filesPanelSlice";
 
 const rootPath = "/workspace";
@@ -141,7 +138,7 @@ describe("FilesPanel", () => {
       rootHandler(),
       http.get("*/v1/files/read", () => HttpResponse.json(readResponse())),
     );
-    const view = render(<FilesPanel />);
+    const view = render(<FileViewer path={filePath} />);
     view.store.dispatch(openFileInFilesPanel({ path: filePath, line: 2 }));
 
     expect(await screen.findByText("const second = 2;")).toBeVisible();
@@ -162,7 +159,7 @@ describe("FilesPanel", () => {
         () => new HttpResponse(null, { status: 403 }),
       ),
     );
-    const view = render(<FilesPanel />);
+    const view = render(<FileViewer path={filePath} />);
     view.store.dispatch(openFileInFilesPanel({ path: filePath }));
 
     expect(await screen.findByText("File blocked")).toBeVisible();
@@ -179,7 +176,7 @@ describe("FilesPanel", () => {
         HttpResponse.json(readResponse({ truncated: true })),
       ),
     );
-    const view = render(<FilesPanel />);
+    const view = render(<FileViewer path={filePath} />);
     view.store.dispatch(openFileInFilesPanel({ path: filePath }));
 
     expect(await screen.findByText("File truncated at 1 MiB")).toBeVisible();
@@ -192,7 +189,7 @@ describe("FilesPanel", () => {
         HttpResponse.json(readResponse({ binary: true, content: "" })),
       ),
     );
-    const view = render(<FilesPanel />);
+    const view = render(<FileViewer path={filePath} />);
     view.store.dispatch(openFileInFilesPanel({ path: filePath }));
 
     expect(await screen.findByText("Binary file")).toBeVisible();
@@ -204,7 +201,7 @@ describe("FilesPanel", () => {
       rootHandler(),
       http.get("*/v1/files/read", () => HttpResponse.json(readResponse())),
     );
-    const { user } = render(<FilesPanel />);
+    const { user, store } = render(<FilesPanel />);
     const tree = await screen.findByRole("tree", { name: "Workspace files" });
     const workspace = await screen.findByRole("treeitem", {
       name: /workspace/i,
@@ -217,64 +214,14 @@ describe("FilesPanel", () => {
     fireEvent.keyDown(tree, { key: "ArrowDown" });
     fireEvent.keyDown(tree, { key: "Enter" });
 
-    await waitFor(() => {
-      expect(screen.getByText("const first = 1;")).toBeVisible();
-    });
+    await waitFor(() =>
+      expect(store.getState().workspace.activeTabId).toBe(
+        "file:/workspace/README.md",
+      ),
+    );
     expect(
       within(tree).getByRole("treeitem", { name: /README\.md/i }),
     ).toHaveAttribute("aria-selected", "true");
   });
 
-  it("restores the persisted explorer width on mount", () => {
-    savePersistedFilesExplorerWidth(333);
-    server.use(rootHandler());
-
-    render(<FilesPanel />);
-
-    expect(
-      screen
-        .getByTestId("files-panel")
-        .style.getPropertyValue("--files-explorer-w"),
-    ).toBe("333px");
-  });
-
-  it("updates the live width during drag and persists it on release", () => {
-    server.use(rootHandler());
-    render(<FilesPanel />);
-    const panel = screen.getByTestId("files-panel");
-    const splitter = screen.getByRole("separator", {
-      name: "Resize file explorer",
-    });
-
-    fireEvent.pointerDown(splitter, { button: 0, clientX: 260 });
-    fireEvent.pointerMove(window, { clientX: 321 });
-
-    expect(panel.style.getPropertyValue("--files-explorer-w")).toBe("321px");
-    expect(loadPersistedFilesExplorerWidth()).toBeNull();
-
-    fireEvent.pointerUp(window, { clientX: 321 });
-
-    expect(loadPersistedFilesExplorerWidth()).toBe(321);
-    expect(panel.style.getPropertyValue("--files-explorer-w")).toBe("321px");
-  });
-
-  it("clamps the committed explorer width to the allowed range", () => {
-    server.use(rootHandler());
-    render(<FilesPanel />);
-    const splitter = screen.getByRole("separator", {
-      name: "Resize file explorer",
-    });
-
-    fireEvent.pointerDown(splitter, { button: 0, clientX: 260 });
-    fireEvent.pointerMove(window, { clientX: 900 });
-    fireEvent.pointerUp(window, { clientX: 900 });
-
-    expect(loadPersistedFilesExplorerWidth()).toBe(480);
-
-    fireEvent.pointerDown(splitter, { button: 0, clientX: 480 });
-    fireEvent.pointerMove(window, { clientX: 12 });
-    fireEvent.pointerUp(window, { clientX: 12 });
-
-    expect(loadPersistedFilesExplorerWidth()).toBe(200);
-  });
 });

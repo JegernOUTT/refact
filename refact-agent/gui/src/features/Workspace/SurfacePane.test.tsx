@@ -20,6 +20,21 @@ describe("SurfacePane", () => {
         HttpResponse.json({ path: "", entries: [], truncated: false }),
       ),
     );
+    server.use(
+      http.get("*/v1/files/read", ({ request }) => {
+        const path = new URL(request.url).searchParams.get("path") ?? "";
+        return HttpResponse.json({
+          path,
+          content: "const value = 1;",
+          language: "typescript",
+          size: 16,
+          truncated: false,
+          line_start: null,
+          line_end: null,
+          mtime_ms: 1,
+        });
+      }),
+    );
   });
 
   it("renders an empty placeholder when no surface is selected", () => {
@@ -48,13 +63,13 @@ describe("SurfacePane", () => {
     expect(screen.queryByText("No surface selected")).not.toBeInTheDocument();
   });
 
-  it("renders the registered files panel surface", () => {
-    const surfaceKey = makeSurfaceKey("files", "main");
+  it("renders a file viewer surface", async () => {
+    const surfaceKey = makeSurfaceKey("file", "/workspace/main.ts");
 
     render(<SurfacePane surfaceKey={surfaceKey} />);
 
-    expect(screen.getByText("Explorer")).toBeInTheDocument();
-    expect(screen.getByText("Select a file")).toBeInTheDocument();
+    expect(await screen.findByText("const value = 1;")).toBeInTheDocument();
+    expect(screen.getByLabelText("File viewer")).toBeInTheDocument();
     expect(
       document.querySelector(`[data-surface-key="${surfaceKey}"]`),
     ).toBeInTheDocument();

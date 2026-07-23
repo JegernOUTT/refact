@@ -10,7 +10,7 @@ import {
   switchToThread,
 } from "../Chat/Thread";
 import { collectTabIds } from "../ChatPanes/panesTree";
-import { selectCapabilities } from "../Config/configSlice";
+import { selectCapabilities, selectHost } from "../Config/configSlice";
 import {
   hasTabDragType,
   readTabDragSurfaceKey,
@@ -21,6 +21,7 @@ import {
   usePointerDropZone,
 } from "../ChatPanes/usePointerDrag";
 import { GroupSplitView } from "./GroupSplitView";
+import { Dock } from "./Dock";
 import { Drawer } from "./Drawer";
 import { SurfacePane } from "./SurfacePane";
 import { TerminalPanel } from "./TerminalPanel";
@@ -50,6 +51,7 @@ export function WorkspaceView() {
   const tabs = useAppSelector(selectTabs);
   const groups = useAppSelector(selectWorkspaceGroups);
   const capabilities = useAppSelector(selectCapabilities);
+  const host = useAppSelector(selectHost);
   const [mountedPanelKeys, setMountedPanelKeys] = useState<PanelSurfaceKey[]>(
     () =>
       activeTabId && isCenterPanelSurface(activeTabId) ? [activeTabId] : [],
@@ -215,6 +217,10 @@ export function WorkspaceView() {
 
   return (
     <div className={styles.workspaceView}>
+      {host === "web" &&
+      (capabilities.filesPanel || capabilities.gitPanel) ? (
+        <Dock />
+      ) : null}
       <div className={styles.mainColumn}>
         <div
           className={classNames(

@@ -281,7 +281,7 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedWorkspace()).toEqual(workspace);
   });
 
-  it("migrates a legacy Terminal panel tab into the drawer", () => {
+  it("migrates legacy Files and Terminal panel tabs", () => {
     savePersistedChatTabs({
       openThreadIds: ["chat-a"],
       currentThreadId: "chat-a",
@@ -298,7 +298,7 @@ describe("chatUiPersistence", () => {
     savePersistedWorkspace(workspace);
 
     expect(loadPersistedWorkspace()).toEqual({
-      tabs: [chatSurface("chat-a"), files],
+      tabs: [chatSurface("chat-a")],
       activeTabId: chatSurface("chat-a"),
       groups: {},
       dock: { open: true, width: 280, section: "files" },

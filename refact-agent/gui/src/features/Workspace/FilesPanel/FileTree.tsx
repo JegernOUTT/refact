@@ -34,7 +34,7 @@ import {
   selectExpandedDirectories,
   selectFilesPanelSelectedPath,
   selectTreePath,
-  setViewerTarget,
+  openFileInFilesPanel,
   toggleDirectory,
 } from "./filesPanelSlice";
 import {
@@ -156,7 +156,7 @@ export function FileTree() {
     (entry: VisibleTreeEntry) => {
       dispatch(selectTreePath(entry.path));
       if (entry.kind === "dir") dispatch(toggleDirectory(entry.path));
-      else dispatch(setViewerTarget({ path: entry.path }));
+      else dispatch(openFileInFilesPanel({ path: entry.path }));
       treeRef.current?.focus();
     },
     [dispatch],

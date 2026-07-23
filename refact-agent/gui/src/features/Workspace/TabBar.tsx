@@ -1,6 +1,7 @@
 import classNames from "classnames";
 import {
   Files,
+  FileText,
   GitBranch,
   Layers,
   Menu as MenuIcon,
@@ -23,7 +24,7 @@ import {
 
 import { Badge, Icon, IconButton, Menu, StatusDot } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { selectCapabilities } from "../Config/configSlice";
+import { selectCapabilities, selectHost } from "../Config/configSlice";
 import {
   popBackTo,
   push,
@@ -85,13 +86,24 @@ import styles from "./TabBar.module.css";
 
 const BUDDY_SURFACE_KEY = makeSurfaceKey("buddy", "home");
 
-type TabSurfaceKind = "chat" | "task" | "buddy" | "dashboard" | PanelKind;
+type TabSurfaceKind =
+  | "chat"
+  | "task"
+  | "buddy"
+  | "dashboard"
+  | "file"
+  | PanelKind;
 
 const PANEL_INFO = {
   files: { title: "Files", icon: Files },
   git: { title: "Git", icon: GitBranch },
   terminal: { title: "Terminal", icon: SquareTerminal },
 } as const;
+
+const pathBasename = (path: string): string => {
+  const normalized = path.replace(/\\/g, "/");
+  return normalized.slice(normalized.lastIndexOf("/") + 1) || path;
+};
 
 type DisplayInfo = {
   title: string;
@@ -168,7 +180,11 @@ function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
 } {
   try {
     const parsed = parseSurfaceKey(surfaceKey);
-    if (parsed.kind === "dashboard" || isPanelKind(parsed.kind)) {
+    if (
+      parsed.kind === "dashboard" ||
+      parsed.kind === "file" ||
+      isPanelKind(parsed.kind)
+    ) {
       return { type: "surface", id: surfaceKey };
     }
     return { type: parsed.kind, id: parsed.id };
@@ -220,6 +236,14 @@ function displayInfoForSurface(
     };
   }
 
+  if (parsed.kind === "file") {
+    return {
+      title: pathBasename(parsed.id),
+      kind: "file",
+      unreadNotificationCount: 0,
+    };
+  }
+
   if (isPanelKind(parsed.kind)) {
     return {
       title: PANEL_INFO[parsed.kind].title,
@@ -260,6 +284,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
   const currentPage = useAppSelector(selectCurrentPage);
   const pages = useAppSelector(selectPages);
   const capabilities = useAppSelector(selectCapabilities);
+  const host = useAppSelector(selectHost);
   const dock = useAppSelector(selectWorkspaceDock);
   const [draggingTabId, setDraggingTabId] = useState<SurfaceKey | null>(null);
   const [dragTargetTabId, setDragTargetTabId] = useState<SurfaceKey | null>(
@@ -296,9 +321,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     (kind) => capabilities[panelCapabilityKey(kind)],
   );
   const showDockToggle =
-    capabilities.filesPanel ||
-    capabilities.gitPanel ||
-    capabilities.terminalPanel;
+    host === "web" && (capabilities.filesPanel || capabilities.gitPanel);
 
   const visibleTabKeys = useMemo(
     () =>
@@ -384,7 +407,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
         }
         return;
       }
-      if (isPanelKind(parsed.kind)) {
+      if (parsed.kind === "file" || isPanelKind(parsed.kind)) {
         dispatch(setActiveTab(tabId));
         if (currentPage?.name !== "chat") {
           dispatch(push({ name: "chat" }));
@@ -715,11 +738,15 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                   title={tabTitle}
                 >
                   <span className={styles.tabStatus}>
-                    <StatusDot
-                      aria-label={statusLabel(tab.status)}
-                      status={tab.status}
-                      size="small"
-                    />
+                    {tab.kind === "file" ? (
+                      <Icon icon={FileText} size="sm" tone="muted" />
+                    ) : (
+                      <StatusDot
+                        aria-label={statusLabel(tab.status)}
+                        status={tab.status}
+                        size="small"
+                      />
+                    )}
                   </span>
                   {tab.isGroup && (
                     <Badge

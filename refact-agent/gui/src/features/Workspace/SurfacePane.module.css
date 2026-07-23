@@ -13,10 +13,9 @@
   justify-content: stretch;
 }
 
-.fullPanelSurface {
+.fileSurface {
   align-items: stretch;
   justify-content: stretch;
-  padding: 0;
 }
 
 .placeholder {

@@ -1,6 +1,7 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
-import { openTab } from "../workspaceSlice";
+import { makeSurfaceKey } from "../surfaceKey";
+import { openTab, setDockOpen } from "../workspaceSlice";
 
 export type FileViewerTarget = {
   path: string;
@@ -11,12 +12,14 @@ export type FilesPanelState = {
   expandedDirectories: string[];
   selectedPath: string | null;
   viewerTarget: FileViewerTarget | null;
+  viewerTargets: Record<string, FileViewerTarget | undefined>;
 };
 
 const initialState: FilesPanelState = {
   expandedDirectories: [],
   selectedPath: null,
   viewerTarget: null,
+  viewerTargets: {},
 };
 
 export const filesPanelSlice = createSlice({
@@ -49,6 +52,9 @@ export const filesPanelSlice = createSlice({
     ) => {
       state.viewerTarget = action.payload;
       state.selectedPath = action.payload?.path ?? state.selectedPath;
+      if (action.payload) {
+        state.viewerTargets[action.payload.path] = action.payload;
+      }
     },
   },
 });
@@ -65,7 +71,8 @@ type FilesPanelDispatch = (
   action:
     | ReturnType<typeof openTab>
     | ReturnType<typeof expandDirectory>
-    | ReturnType<typeof setViewerTarget>,
+    | ReturnType<typeof setViewerTarget>
+    | ReturnType<typeof setDockOpen>,
 ) => void;
 
 const parentDirectories = (path: string): string[] => {
@@ -80,11 +87,17 @@ const parentDirectories = (path: string): string[] => {
 
 export const openFileInFilesPanel =
   (target: FileViewerTarget) => (dispatch: FilesPanelDispatch) => {
-    dispatch(openTab("files:main"));
+    dispatch(openTab(makeSurfaceKey("file", target.path)));
     for (const directory of parentDirectories(target.path)) {
       dispatch(expandDirectory(directory));
     }
     dispatch(setViewerTarget(target));
+    if (
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 767px)").matches
+    ) {
+      dispatch(setDockOpen(false));
+    }
   };
 
 type FilesPanelRootState = {
@@ -99,3 +112,8 @@ export const selectFilesPanelSelectedPath = (state: FilesPanelRootState) =>
 
 export const selectFileViewerTarget = (state: FilesPanelRootState) =>
   state.filesPanel.viewerTarget;
+
+export const selectFileViewerTargetByPath = (
+  state: FilesPanelRootState,
+  path: string,
+): FileViewerTarget | undefined => state.filesPanel.viewerTargets[path];

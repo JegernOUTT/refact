@@ -127,7 +127,7 @@ describe("resolveCapabilities matrix", () => {
 });
 
 describe("TabBar panel launcher reflects capabilities", () => {
-  it("offers every center panel on the web host defaults", async () => {
+  it("offers remaining center panels and the dock on web defaults", async () => {
     const store = createStoreWithChat(makeConfig("web"));
     const view = render(<TabBar />, { store });
     expect(
@@ -138,22 +138,20 @@ describe("TabBar panel launcher reflects capabilities", () => {
       screen.getByRole("button", { name: "Open workspace panel" }),
     );
 
-    expect(screen.getByRole("menuitem", { name: "Files" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Git" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Terminal" })).toBeNull();
   });
 
-  it("drops revoked panels from the launcher on the web host", async () => {
+  it("keeps the dock toggle when the only center panel is revoked", () => {
     const store = createStoreWithChat(makeConfig("web", { gitPanel: false }));
-    const view = render(<TabBar />, { store });
+    render(<TabBar />, { store });
 
-    await view.user.click(
-      screen.getByRole("button", { name: "Open workspace panel" }),
-    );
-
-    expect(screen.getByRole("menuitem", { name: "Files" })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: "Git" })).toBeNull();
-    expect(screen.queryByRole("menuitem", { name: "Terminal" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Toggle workspace dock" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Open workspace panel" }),
+    ).toBeNull();
   });
 
   it("renders no launcher for IDE host defaults", () => {
@@ -181,19 +179,18 @@ describe("TabBar panel launcher reflects capabilities", () => {
     ).toBeNull();
   });
 
-  it("offers only granted panels for an IDE host with overrides", async () => {
+  it("keeps panel chrome hidden for IDE hosts with overrides", () => {
     const store = createStoreWithChat(
       makeConfig("vscode", { filesPanel: true }),
     );
-    const view = render(<TabBar />, { store });
+    render(<TabBar />, { store });
 
-    await view.user.click(
-      screen.getByRole("button", { name: "Open workspace panel" }),
-    );
-
-    expect(screen.getByRole("menuitem", { name: "Files" })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: "Git" })).toBeNull();
-    expect(screen.queryByRole("menuitem", { name: "Terminal" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Toggle workspace dock" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Open workspace panel" }),
+    ).toBeNull();
   });
 });
 
@@ -216,7 +213,7 @@ describe("useOpenFileInApp precedence: app > ide > none", () => {
 
     await user.click(screen.getByRole("button", { name: "open" }));
 
-    expect(store.getState().workspace.tabs).toContain("files:main");
+    expect(store.getState().workspace.tabs).toContain(`file:${filePath}`);
     expect(store.getState().filesPanel.viewerTarget).toEqual({
       path: filePath,
       line: 4,
@@ -296,10 +293,7 @@ describe("persisted panel tabs respect capability revocation", () => {
       }),
     );
 
-    expect(store.getState().workspace.tabs).toEqual([
-      chat("chat-a"),
-      "files:main",
-    ]);
+    expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
     expect(store.getState().workspace.activeTabId).toBe(chat("chat-a"));
   });
 

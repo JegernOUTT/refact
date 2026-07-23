@@ -165,17 +165,18 @@ describe("workspaceSlice", () => {
     expect(state.drawer).toEqual({ open: true, height: 280 });
   });
 
-  test("opens and closes center panels while rejecting the legacy Terminal surface", () => {
+  test("drops legacy Files and Terminal surfaces while keeping file viewers", () => {
     const chatA = chat("a");
+    const file = makeSurfaceKey("file", "/workspace/src/main.ts");
     let state = reducer(undefined, openTab(chatA));
     state = reducer(state, openTab(files));
     state = reducer(state, openTab(terminal));
-    state = reducer(state, openTab(files));
+    state = reducer(state, openTab(file));
 
-    expect(state.tabs).toEqual([chatA, files]);
-    expect(state.activeTabId).toBe(files);
+    expect(state.tabs).toEqual([chatA, file]);
+    expect(state.activeTabId).toBe(file);
 
-    state = reducer(state, closeTab(files));
+    state = reducer(state, closeTab(file));
     expect(state.tabs).toEqual([chatA]);
     expect(state.activeTabId).toBe(chatA);
 
@@ -200,7 +201,7 @@ describe("workspaceSlice", () => {
       }),
     );
 
-    expect(hydrated.tabs).toEqual([chatA, files]);
+    expect(hydrated.tabs).toEqual([chatA]);
     expect(hydrated.activeTabId).toBe(chatA);
   });
 

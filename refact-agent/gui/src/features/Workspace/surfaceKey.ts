@@ -1,24 +1,31 @@
 export const PANEL_KINDS = ["files", "git", "terminal"] as const;
-export const CENTER_PANEL_KINDS = ["files", "git"] as const;
+export const CENTER_PANEL_KINDS = ["git"] as const;
 
 export type PanelKind = (typeof PANEL_KINDS)[number];
 export type CenterPanelKind = (typeof CENTER_PANEL_KINDS)[number];
 export type PanelCapabilityKey = `${PanelKind}Panel`;
 export type PanelCapabilities = Record<PanelCapabilityKey, boolean>;
-export type SurfaceKind = "chat" | "task" | "buddy" | "dashboard" | PanelKind;
+export type SurfaceKind =
+  | "chat"
+  | "task"
+  | "buddy"
+  | "dashboard"
+  | "file"
+  | PanelKind;
 export type SurfaceKey = string;
 export type ChatSurfaceKey = `chat:${string}`;
+export type FileSurfaceKey = `file:${string}`;
 export type PanelSurfaceKey = `${PanelKind}:main`;
 
 export type ParsedSurfaceKey =
-  | { kind: "chat" | "task" | "buddy"; id: string }
+  | { kind: "chat" | "task" | "buddy" | "file"; id: string }
   | { kind: PanelKind; id: "main" }
   | { kind: "dashboard"; id: null };
 
 const isPrefixedSurfaceKind = (
   kind: string,
-): kind is "chat" | "task" | "buddy" =>
-  kind === "chat" || kind === "task" || kind === "buddy";
+): kind is "chat" | "task" | "buddy" | "file" =>
+  kind === "chat" || kind === "task" || kind === "buddy" || kind === "file";
 
 export const isPanelKind = (kind: string): kind is PanelKind =>
   (PANEL_KINDS as readonly string[]).includes(kind);
@@ -77,6 +84,9 @@ export function parseSurfaceKey(key: SurfaceKey): ParsedSurfaceKey {
 export const isChatSurface = (key: SurfaceKey): key is ChatSurfaceKey =>
   key.startsWith("chat:") && key.length > "chat:".length;
 
+export const isFileSurface = (key: SurfaceKey): key is FileSurfaceKey =>
+  key.startsWith("file:") && key.length > "file:".length;
+
 export const isPanelSurface = (key: SurfaceKey): key is PanelSurfaceKey =>
   PANEL_KINDS.some((kind) => key === `${kind}:main`);
 
@@ -99,8 +109,16 @@ export const isTerminalSurface = (
 
 export const isWorkspaceSurface = (
   key: SurfaceKey,
-): key is ChatSurfaceKey | PanelSurfaceKey =>
-  isChatSurface(key) || isCenterPanelSurface(key);
+): key is ChatSurfaceKey | FileSurfaceKey | PanelSurfaceKey =>
+  isChatSurface(key) || isFileSurface(key) || isCenterPanelSurface(key);
+
+export const isWorkspaceSurfaceEnabled = (
+  key: SurfaceKey,
+  capabilities: PanelCapabilities,
+): boolean =>
+  isChatSurface(key) ||
+  (isFileSurface(key) && capabilities.filesPanel) ||
+  isPanelSurfaceEnabled(key, capabilities);
 
 export const panelCapabilityKey = (kind: PanelKind): PanelCapabilityKey =>
   `${kind}Panel`;

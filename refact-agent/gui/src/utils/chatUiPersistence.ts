@@ -17,6 +17,8 @@ import {
 } from "../features/Workspace/workspaceSlice";
 import {
   isChatSurface,
+  isFileSurface,
+  isFilesSurface,
   isPanelSurface,
   isTerminalSurface,
   parseSurfaceKey,
@@ -405,7 +407,10 @@ function isOpenWorkspaceSurface(
   surfaceKey: SurfaceKey,
   openThreadIds: ReadonlySet<string>,
 ): boolean {
-  return isPanelSurface(surfaceKey) && !isTerminalSurface(surfaceKey)
+  return isFilesSurface(surfaceKey)
+    ? false
+    : isFileSurface(surfaceKey) ||
+        (isPanelSurface(surfaceKey) && !isTerminalSurface(surfaceKey))
     ? true
     : isChatSurface(surfaceKey) &&
         openThreadIds.has(surfaceKey.slice("chat:".length));
@@ -586,6 +591,7 @@ export function loadPersistedWorkspace(): WorkspaceState {
       legacyTerminalTab = true;
       continue;
     }
+    if (isFilesSurface(surfaceKey)) continue;
     if (!isOpenWorkspaceSurface(surfaceKey, openThreadIds)) continue;
     if (tabs.includes(surfaceKey)) continue;
     tabs.push(surfaceKey);

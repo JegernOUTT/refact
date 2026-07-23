@@ -1,4 +1,4 @@
-import { skipToken, type FetchBaseQueryError } from "@reduxjs/toolkit/query";
+import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
 import { Copy, FileQuestion, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useMemo } from "react";
 
@@ -18,7 +18,7 @@ import {
 import { useReadFileQuery } from "../../../services/refact/files";
 import {
   expandDirectory,
-  selectFileViewerTarget,
+  selectFileViewerTargetByPath,
   selectTreePath,
 } from "./filesPanelSlice";
 import { pathBasename } from "./fileTreeModel";
@@ -45,26 +45,28 @@ const breadcrumbsForPath = (path: string): Breadcrumb[] => {
   }));
 };
 
-export function FileViewer() {
+export function FileViewer({ path }: { path: string }) {
   const dispatch = useAppDispatch();
   const copyToClipboard = useCopyToClipboard();
-  const target = useAppSelector(selectFileViewerTarget);
-  const request = target ? { path: target.path } : skipToken;
-  const { data, error, isFetching, refetch } = useReadFileQuery(request);
+  const storedTarget = useAppSelector((state) =>
+    selectFileViewerTargetByPath(state, path),
+  );
+  const target = storedTarget ?? { path };
+  const { data, error, isFetching, refetch } = useReadFileQuery({ path });
   const breadcrumbs = useMemo(
-    () => (target ? breadcrumbsForPath(target.path) : []),
-    [target],
+    () => breadcrumbsForPath(path),
+    [path],
   );
 
   useEffect(() => {
-    if (!target?.line || !data) return;
+    if (!target.line || !data) return;
     const timer = window.setTimeout(() => {
       document
         .getElementById("files-panel-target-line")
         ?.scrollIntoView({ block: "center" });
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [data, target?.line]);
+  }, [data, target.line]);
 
   const openBreadcrumb = useCallback(
     (crumb: Breadcrumb, index: number) => {
@@ -74,17 +76,6 @@ export function FileViewer() {
     },
     [breadcrumbs.length, dispatch],
   );
-
-  if (!target) {
-    return (
-      <EmptyState
-        icon={FileQuestion}
-        title="Select a file"
-        description="Choose a file from the explorer to view it here."
-        variant="full"
-      />
-    );
-  }
 
   const blocked = errorStatus(error) === 403;
   const lineStart = data?.line_start ?? 1;
@@ -146,7 +137,7 @@ export function FileViewer() {
         <EmptyState
           icon={FileQuestion}
           title="Binary file"
-          description={` is binary and cannot be previewed ( bytes).`}
+          description={`${pathBasename(target.path)} is binary and cannot be previewed (${data.size.toLocaleString()} bytes).`}
           variant="full"
         />
       ) : data ? (

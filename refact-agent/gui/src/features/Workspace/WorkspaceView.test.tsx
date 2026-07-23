@@ -138,25 +138,16 @@ describe("WorkspaceView", () => {
     ).toBeNull();
   });
 
-  it("lazy-mounts a panel and keeps it mounted while a chat is active", async () => {
+  it("keeps the Files tree mounted in the dock while a chat is active", async () => {
     const store = createWorkspaceStore();
-    const files = makeSurfaceKey("files", "main");
-
-    expect(screen.queryByLabelText("File explorer")).not.toBeInTheDocument();
-    store.dispatch(openTab(files));
     renderWorkspaceView(store);
 
     const mountedPanel = await screen.findByLabelText("File explorer");
-    const panelSurface = mountedPanel.closest(`[data-surface-key="${files}"]`);
-    expect(panelSurface).toBeInTheDocument();
+    expect(mountedPanel.closest('[aria-label="Workspace dock"]')).toBeVisible();
 
-    store.dispatch(setActiveTab(chat("chat-a")));
+    store.dispatch(setActiveTab(chat("chat-b")));
     await waitFor(() => {
       expect(screen.getByLabelText("File explorer")).toBe(mountedPanel);
-      expect(panelSurface?.parentElement).toHaveAttribute(
-        "aria-hidden",
-        "true",
-      );
     });
   });
 

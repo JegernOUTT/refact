@@ -110,6 +110,7 @@ export type {
   TooltipProps,
   TooltipTriggerProps,
 } from "./Tooltip";
+export { useMediaQuery } from "./useMediaQuery";
 export * from "./VirtualizedGrid";
 export * from "./VirtualList";
 export * from "./VirtualizedGrid";
