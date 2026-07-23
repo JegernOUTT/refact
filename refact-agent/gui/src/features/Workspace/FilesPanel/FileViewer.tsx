@@ -53,10 +53,7 @@ export function FileViewer({ path }: { path: string }) {
   );
   const target = storedTarget ?? { path };
   const { data, error, isFetching, refetch } = useReadFileQuery({ path });
-  const breadcrumbs = useMemo(
-    () => breadcrumbsForPath(path),
-    [path],
-  );
+  const breadcrumbs = useMemo(() => breadcrumbsForPath(path), [path]);
 
   useEffect(() => {
     if (!target.line || !data) return;
@@ -137,7 +134,9 @@ export function FileViewer({ path }: { path: string }) {
         <EmptyState
           icon={FileQuestion}
           title="Binary file"
-          description={`${pathBasename(target.path)} is binary and cannot be previewed (${data.size.toLocaleString()} bytes).`}
+          description={`${pathBasename(
+            target.path,
+          )} is binary and cannot be previewed (${data.size.toLocaleString()} bytes).`}
           variant="full"
         />
       ) : data ? (

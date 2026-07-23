@@ -223,5 +223,4 @@ describe("FilesPanel", () => {
       within(tree).getByRole("treeitem", { name: /README\.md/i }),
     ).toHaveAttribute("aria-selected", "true");
   });
-
 });
