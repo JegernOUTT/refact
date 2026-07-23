@@ -111,7 +111,7 @@ describe("Dashboard Home", () => {
     window.localStorage.clear();
   });
 
-  it("shows the first wizard step on a fresh daemon", async () => {
+  it("shows the first wizard step with widgets below on a fresh daemon", async () => {
     server.use(
       http.get("https://daemon.example.test/daemon/v1/workers", () =>
         HttpResponse.json([]),
@@ -132,6 +132,11 @@ describe("Dashboard Home", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Skip setup" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("No recent chats yet")).toBeInTheDocument();
+    expect(screen.getByText("All clear")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Quick actions" }),
     ).toBeInTheDocument();
   });
 
@@ -156,6 +161,12 @@ describe("Dashboard Home", () => {
           ],
         }),
       ),
+      http.get("https://daemon.example.test/p/refact/v1/trajectories", () =>
+        HttpResponse.json({ items: [] }),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/scheduler/cron", () =>
+        HttpResponse.json([]),
+      ),
       updateCheck(),
     );
 
@@ -168,6 +179,97 @@ describe("Dashboard Home", () => {
     expect(
       screen.getByRole("link", { name: "Open provider setup" }),
     ).toHaveAttribute("href", "/p/refact/?page=providers");
+  });
+
+  it("auto-completes setup for an established install with providers", async () => {
+    server.use(
+      http.get("https://daemon.example.test/daemon/v1/workers", () =>
+        HttpResponse.json([worker("refact", "ready")]),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/providers", () =>
+        HttpResponse.json({
+          providers: [
+            {
+              name: "openai",
+              base_provider: "openai",
+              display_name: "OpenAI",
+              enabled: true,
+              readonly: false,
+              has_credentials: true,
+              status: "active",
+              model_count: 1,
+            },
+          ],
+        }),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/trajectories", () =>
+        HttpResponse.json({ items: [] }),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/scheduler/cron", () =>
+        HttpResponse.json([]),
+      ),
+      updateCheck(),
+    );
+
+    renderHome();
+
+    await waitFor(() =>
+      expect(window.localStorage.getItem(WIZARD_DONE_KEY)).toBe("true"),
+    );
+    expect(screen.queryByText("First-run setup")).not.toBeInTheDocument();
+    expect(await screen.findByText("No recent chats yet")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Needs attention" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Quick actions" }),
+    ).toBeInTheDocument();
+  });
+
+  it("auto-completes setup when chats exist without configured providers", async () => {
+    server.use(
+      http.get("https://daemon.example.test/daemon/v1/workers", () =>
+        HttpResponse.json([worker("refact", "ready")]),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/providers", () =>
+        HttpResponse.json({
+          providers: [
+            {
+              name: "openai",
+              base_provider: "openai",
+              display_name: "OpenAI",
+              enabled: false,
+              readonly: false,
+              has_credentials: false,
+              status: "not_configured",
+              model_count: 0,
+            },
+          ],
+        }),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/trajectories", () =>
+        HttpResponse.json({
+          items: [
+            trajectory("chat-1", "Ship the release", new Date().toISOString()),
+          ],
+          next_cursor: null,
+          has_more: false,
+          total_count: 1,
+        }),
+      ),
+      http.get("https://daemon.example.test/p/refact/v1/scheduler/cron", () =>
+        HttpResponse.json([]),
+      ),
+      updateCheck(),
+    );
+
+    renderHome();
+
+    await waitFor(() =>
+      expect(window.localStorage.getItem(WIZARD_DONE_KEY)).toBe("true"),
+    );
+    expect(screen.queryByText("First-run setup")).not.toBeInTheDocument();
+    expect(await screen.findByText("Ship the release")).toBeInTheDocument();
   });
 
   it("renders populated steady-state widgets and navigation actions", async () => {

@@ -31,6 +31,8 @@ import styles from "./Home.module.css";
 type FirstRunWizardProps = {
   daemonBase: string;
   workers: DaemonWorker[];
+  hasChats: boolean;
+  userRequested: boolean;
   onDone: () => void;
   onProjectOpened: (response: DaemonProjectOpenResponse) => void;
 };
@@ -47,19 +49,29 @@ const stepNumber: Partial<Record<WizardStep, number>> = {
 export function FirstRunWizard({
   daemonBase,
   workers,
+  hasChats,
+  userRequested,
   onDone,
   onProjectOpened,
 }: FirstRunWizardProps) {
   const [state, dispatch] = useReducer(
     wizardReducer,
     workers,
-    (initialWorkers) => createWizardState(initialWorkers, false),
+    (initialWorkers) => createWizardState(initialWorkers, false, userRequested),
   );
   const [dialogOpen, setDialogOpen] = useState(false);
 
   useEffect(() => {
     dispatch({ type: "workers_updated", workers });
   }, [workers]);
+
+  useEffect(() => {
+    if (hasChats) dispatch({ type: "chats_detected" });
+  }, [hasChats]);
+
+  useEffect(() => {
+    if (state.step === "done") onDone();
+  }, [onDone, state.step]);
 
   useEffect(() => {
     if (state.step !== "provider_check" || !state.projectId) return;
@@ -98,6 +110,8 @@ export function FirstRunWizard({
     : "";
   const providersHref = projectHref ? `${projectHref}?page=providers` : "";
 
+  if (state.step === "done") return null;
+
   return (
     <Surface
       as="section"
@@ -124,8 +138,10 @@ export function FirstRunWizard({
 
       {state.step === "no_projects" || state.step === "adding_project" ? (
         <div className={styles.heroContent}>
-          <Icon icon={FolderPlus} size="lg" tone="accent" />
-          <h2 id="wizard-heading">Bring your first project into Refact</h2>
+          <div className={styles.heroTitle}>
+            <Icon icon={FolderPlus} size="lg" tone="accent" />
+            <h2 id="wizard-heading">Bring your first project into Refact</h2>
+          </div>
           <p>
             Pick a folder and the daemon will start its worker and prepare the
             workspace.
@@ -164,8 +180,10 @@ export function FirstRunWizard({
 
       {state.step === "provider_setup_pointer" ? (
         <div className={styles.heroContent}>
-          <Icon icon={KeyRound} size="lg" tone="warning" />
-          <h2 id="wizard-heading">Set up a provider</h2>
+          <div className={styles.heroTitle}>
+            <Icon icon={KeyRound} size="lg" tone="warning" />
+            <h2 id="wizard-heading">Set up a provider</h2>
+          </div>
           <p>
             {state.providerProbeFailed
               ? "We could not verify a configured provider. Open the workspace to check it, then try again."
@@ -188,8 +206,10 @@ export function FirstRunWizard({
 
       {state.step === "ready_for_chat" ? (
         <div className={styles.heroContent}>
-          <Icon icon={CheckCircle2} size="lg" tone="success" />
-          <h2 id="wizard-heading">Your workspace is ready</h2>
+          <div className={styles.heroTitle}>
+            <Icon icon={CheckCircle2} size="lg" tone="success" />
+            <h2 id="wizard-heading">Your workspace is ready</h2>
+          </div>
           <p>
             Start the first chat in {selectedWorker?.slug ?? "your project"}.
           </p>

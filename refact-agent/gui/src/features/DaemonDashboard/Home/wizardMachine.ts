@@ -14,6 +14,7 @@ export type WizardState = {
   step: WizardStep;
   projectId: string | null;
   providerProbeFailed: boolean;
+  established: boolean;
 };
 
 export type WizardEvent =
@@ -24,6 +25,7 @@ export type WizardEvent =
   | { type: "providers_checked"; configured: boolean }
   | { type: "providers_check_failed" }
   | { type: "recheck_providers" }
+  | { type: "chats_detected" }
   | { type: "skip" }
   | { type: "complete" }
   | { type: "restart"; workers: DaemonWorker[] };
@@ -38,24 +40,33 @@ function preferredReadyWorker(
   );
   if (preferred) return preferred;
   if (readyWorkers.length === 0) return null;
-  readyWorkers.sort(
-    (left, right) => (right.last_active_ms ?? 0) - (left.last_active_ms ?? 0),
-  );
-  return readyWorkers[0];
+  const ranked = [...readyWorkers].sort((left, right) => {
+    if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+    return (right.last_active_ms ?? 0) - (left.last_active_ms ?? 0);
+  });
+  return ranked[0];
 }
 
 export function createWizardState(
   workers: DaemonWorker[],
   dismissed: boolean,
+  userRequested = false,
 ): WizardState {
+  const established = !userRequested && workers.length > 0;
   if (dismissed) {
-    return { step: "done", projectId: null, providerProbeFailed: false };
+    return {
+      step: "done",
+      projectId: null,
+      providerProbeFailed: false,
+      established,
+    };
   }
   if (workers.length === 0) {
     return {
       step: "no_projects",
       projectId: null,
       providerProbeFailed: false,
+      established,
     };
   }
   const readyWorker = preferredReadyWorker(workers, null);
@@ -64,12 +75,14 @@ export function createWizardState(
       step: "provider_check",
       projectId: readyWorker.project_id,
       providerProbeFailed: false,
+      established,
     };
   }
   return {
     step: "project_starting",
     projectId: workers[0]?.project_id ?? null,
     providerProbeFailed: false,
+    established,
   };
 }
 
@@ -84,12 +97,13 @@ export function wizardReducer(
         : state;
     case "project_opening":
       return {
+        ...state,
         step: "project_starting",
-        projectId: state.projectId,
         providerProbeFailed: false,
       };
     case "project_opened":
       return {
+        ...state,
         step: "project_starting",
         projectId: event.projectId,
         providerProbeFailed: false,
@@ -100,6 +114,7 @@ export function wizardReducer(
         return state.step === "adding_project"
           ? state
           : {
+              ...state,
               step: "no_projects",
               projectId: null,
               providerProbeFailed: false,
@@ -108,6 +123,7 @@ export function wizardReducer(
       const readyWorker = preferredReadyWorker(event.workers, state.projectId);
       if (!readyWorker) {
         return {
+          ...state,
           step: "project_starting",
           projectId: state.projectId ?? event.workers[0].project_id,
           providerProbeFailed: false,
@@ -122,21 +138,23 @@ export function wizardReducer(
         return state;
       }
       return {
+        ...state,
         step: "provider_check",
         projectId: readyWorker.project_id,
         providerProbeFailed: false,
       };
     }
-    case "providers_checked":
-      return state.step === "provider_check"
-        ? {
-            ...state,
-            step: event.configured
-              ? "ready_for_chat"
-              : "provider_setup_pointer",
-            providerProbeFailed: false,
-          }
-        : state;
+    case "providers_checked": {
+      if (state.step !== "provider_check") return state;
+      if (event.configured && state.established) {
+        return { ...state, step: "done", providerProbeFailed: false };
+      }
+      return {
+        ...state,
+        step: event.configured ? "ready_for_chat" : "provider_setup_pointer",
+        providerProbeFailed: false,
+      };
+    }
     case "providers_check_failed":
       return state.step === "provider_check"
         ? {
@@ -153,14 +171,18 @@ export function wizardReducer(
             providerProbeFailed: false,
           }
         : state;
+    case "chats_detected":
+      return state.established && state.step !== "done"
+        ? { ...state, step: "done", providerProbeFailed: false }
+        : state;
     case "skip":
     case "complete":
       return {
+        ...state,
         step: "done",
-        projectId: state.projectId,
         providerProbeFailed: false,
       };
     case "restart":
-      return createWizardState(event.workers, false);
+      return createWizardState(event.workers, false, true);
   }
 }

@@ -7,7 +7,11 @@ import {
   type WizardState,
 } from "./wizardMachine";
 
-function worker(projectId: string, state: string): DaemonWorker {
+function worker(
+  projectId: string,
+  state: string,
+  extra: Partial<DaemonWorker> = {},
+): DaemonWorker {
   return {
     project_id: projectId,
     slug: projectId,
@@ -26,6 +30,7 @@ function worker(projectId: string, state: string): DaemonWorker {
     idle_deadline_ms: null,
     last_status_report_ms: null,
     last_error: null,
+    ...extra,
   };
 }
 
@@ -33,6 +38,7 @@ const empty: WizardState = {
   step: "no_projects",
   projectId: null,
   providerProbeFailed: false,
+  established: false,
 };
 
 describe("wizardMachine", () => {
@@ -86,11 +92,108 @@ describe("wizardMachine", () => {
     expect(createWizardState([], true).step).toBe("done");
   });
 
+  it("marks installs with pre-existing projects as established", () => {
+    expect(createWizardState([], false).established).toBe(false);
+    expect(createWizardState([worker("a", "ready")], false).established).toBe(
+      true,
+    );
+    expect(
+      createWizardState([worker("a", "ready")], false, true).established,
+    ).toBe(false);
+  });
+
+  it("short-circuits established installs to done when providers pass", () => {
+    const checking = createWizardState([worker("a", "ready")], false);
+    expect(
+      wizardReducer(checking, { type: "providers_checked", configured: true })
+        .step,
+    ).toBe("done");
+    expect(
+      wizardReducer(checking, { type: "providers_checked", configured: false })
+        .step,
+    ).toBe("provider_setup_pointer");
+  });
+
+  it("short-circuits established installs to done when chats exist", () => {
+    const checking = createWizardState([worker("a", "ready")], false);
+    expect(wizardReducer(checking, { type: "chats_detected" }).step).toBe(
+      "done",
+    );
+    const pointer = wizardReducer(checking, {
+      type: "providers_checked",
+      configured: false,
+    });
+    expect(wizardReducer(pointer, { type: "chats_detected" }).step).toBe(
+      "done",
+    );
+  });
+
+  it("keeps the fresh-install flow unchanged by the short-circuit", () => {
+    expect(wizardReducer(empty, { type: "chats_detected" })).toBe(empty);
+    const opened = wizardReducer(empty, {
+      type: "project_opened",
+      projectId: "refact",
+    });
+    const checking = wizardReducer(opened, {
+      type: "workers_updated",
+      workers: [worker("refact", "ready")],
+    });
+    expect(checking.established).toBe(false);
+    expect(
+      wizardReducer(checking, { type: "providers_checked", configured: true })
+        .step,
+    ).toBe("ready_for_chat");
+  });
+
+  it("never short-circuits a user-requested setup run", () => {
+    const requested = createWizardState([worker("a", "ready")], false, true);
+    expect(requested.step).toBe("provider_check");
+    expect(wizardReducer(requested, { type: "chats_detected" })).toBe(
+      requested,
+    );
+    expect(
+      wizardReducer(requested, { type: "providers_checked", configured: true })
+        .step,
+    ).toBe("ready_for_chat");
+  });
+
+  it("prefers pinned, then most recently active, then first ready project", () => {
+    expect(
+      createWizardState(
+        [
+          worker("recent", "ready", { last_active_ms: 100 }),
+          worker("pinned", "ready", { pinned: true, last_active_ms: 1 }),
+        ],
+        false,
+      ).projectId,
+    ).toBe("pinned");
+    expect(
+      createWizardState(
+        [
+          worker("old", "ready", { last_active_ms: 1 }),
+          worker("new", "ready", { last_active_ms: 50 }),
+        ],
+        false,
+      ).projectId,
+    ).toBe("new");
+    expect(
+      createWizardState(
+        [
+          worker("starting", "starting"),
+          worker("first", "ready", { last_active_ms: null }),
+          worker("second", "ready", { last_active_ms: null }),
+        ],
+        false,
+      ).projectId,
+    ).toBe("first");
+  });
+
   it("returns provider and ready states to waiting when their worker stops", () => {
     const providerState: WizardState = {
       step: "provider_setup_pointer",
       projectId: "a",
       providerProbeFailed: false,
+      established: false,
     };
     expect(
       wizardReducer(providerState, {
@@ -130,19 +233,27 @@ describe("wizardMachine", () => {
   ] as const)("allows setup to be skipped from %s", (step) => {
     expect(
       wizardReducer(
-        { step, projectId: "a", providerProbeFailed: false },
+        {
+          step,
+          projectId: "a",
+          providerProbeFailed: false,
+          established: false,
+        },
         { type: "skip" },
       ).step,
     ).toBe("done");
   });
 
-  it("restarts a skipped setup against current workers", () => {
+  it("restarts a skipped setup against current workers without short-circuiting", () => {
     const done = wizardReducer(empty, { type: "skip" });
-    expect(
-      wizardReducer(done, {
-        type: "restart",
-        workers: [worker("a", "ready")],
-      }),
-    ).toMatchObject({ step: "provider_check", projectId: "a" });
+    const restarted = wizardReducer(done, {
+      type: "restart",
+      workers: [worker("a", "ready")],
+    });
+    expect(restarted).toMatchObject({
+      step: "provider_check",
+      projectId: "a",
+      established: false,
+    });
   });
 });

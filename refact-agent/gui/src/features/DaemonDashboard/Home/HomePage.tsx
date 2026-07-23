@@ -63,6 +63,7 @@ export function HomePage() {
   const config = useAppSelector(selectConfig);
   const daemonBase = resolveDaemonBaseUrl(config);
   const [wizardDone, setWizardDone] = useState(readWizardDone);
+  const [setupRequested, setSetupRequested] = useState(false);
   const [addProjectOpen, setAddProjectOpen] = useState(false);
   const [optimisticWorker, setOptimisticWorker] = useState<DaemonWorker | null>(
     null,
@@ -108,7 +109,6 @@ export function HomePage() {
   }, [optimisticWorker, workersData]);
 
   useEffect(() => {
-    if (!wizardDone) return;
     const controller = new AbortController();
     setFanoutLoading(true);
     void fetchHomeFanout(daemonBase, workers, controller.signal)
@@ -119,16 +119,22 @@ export function HomePage() {
         if (!controller.signal.aborted) setFanoutLoading(false);
       });
     return () => controller.abort();
-  }, [daemonBase, fulfilledTimeStamp, wizardDone, workers]);
+  }, [daemonBase, fulfilledTimeStamp, workers]);
 
   function persistWizardDone(done: boolean) {
     setWizardDone(done);
+    if (done) setSetupRequested(false);
     try {
       if (done) window.localStorage.setItem(WIZARD_DONE_KEY, "true");
       else window.localStorage.removeItem(WIZARD_DONE_KEY);
     } catch {
       return;
     }
+  }
+
+  function openSetup() {
+    setSetupRequested(true);
+    persistWizardDone(false);
   }
 
   function navigate(page: DashboardPage) {
@@ -157,32 +163,34 @@ export function HomePage() {
       {!isLoading && !wizardDone ? (
         <FirstRunWizard
           daemonBase={daemonBase}
+          hasChats={fanout.chats.length > 0}
           onDone={() => persistWizardDone(true)}
           onProjectOpened={handleProjectOpened}
+          userRequested={setupRequested}
           workers={workers}
         />
-      ) : (
-        <div className={styles.widgets}>
-          <ContinueWidget
-            chats={fanout.chats}
-            hadErrors={fanout.hadErrors}
-            loading={fanoutLoading}
-          />
-          <NeedsAttentionWidget
-            crashedWorkers={crashedWorkers}
-            failedCrons={fanout.failedCrons}
-            loading={fanoutLoading || updateLoading}
-            onNavigate={navigate}
-            updateAvailable={updateCheck?.update_available === true}
-          />
-          <QuickActions
-            onAddProject={() => setAddProjectOpen(true)}
-            onNavigate={navigate}
-            onSetup={() => persistWizardDone(false)}
-            setupAvailable={wizardDone}
-          />
-        </div>
-      )}
+      ) : null}
+
+      <div className={styles.widgets}>
+        <ContinueWidget
+          chats={fanout.chats}
+          hadErrors={fanout.hadErrors}
+          loading={fanoutLoading}
+        />
+        <NeedsAttentionWidget
+          crashedWorkers={crashedWorkers}
+          failedCrons={fanout.failedCrons}
+          loading={fanoutLoading || updateLoading}
+          onNavigate={navigate}
+          updateAvailable={updateCheck?.update_available === true}
+        />
+        <QuickActions
+          onAddProject={() => setAddProjectOpen(true)}
+          onNavigate={navigate}
+          onSetup={openSetup}
+          setupAvailable={wizardDone}
+        />
+      </div>
 
       <AddProjectDialog
         onFailed={() => setOptimisticWorker(null)}
