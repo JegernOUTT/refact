@@ -53,7 +53,7 @@ export function createWizardState(
   userRequested = false,
 ): WizardState {
   const established = !userRequested && workers.length > 0;
-  if (dismissed) {
+  if (dismissed || established) {
     return {
       step: "done",
       projectId: null,

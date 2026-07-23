@@ -80,17 +80,20 @@ describe("wizardMachine", () => {
     ).toBe("ready_for_chat");
   });
 
-  it("derives initial states from dismissal and worker readiness", () => {
+  it("keeps fresh installs in the first step and honors dismissal", () => {
     expect(createWizardState([], false).step).toBe("no_projects");
-    expect(createWizardState([worker("a", "starting")], false).step).toBe(
-      "project_starting",
-    );
-    expect(createWizardState([worker("a", "ready")], false)).toMatchObject({
-      step: "provider_check",
-      projectId: "a",
-    });
     expect(createWizardState([], true).step).toBe("done");
   });
+
+  it.each(["stopped", "starting", "crashed"])(
+    "auto-completes established installs with only %s workers",
+    (state) => {
+      expect(createWizardState([worker("a", state)], false)).toMatchObject({
+        step: "done",
+        established: true,
+      });
+    },
+  );
 
   it("marks installs with pre-existing projects as established", () => {
     expect(createWizardState([], false).established).toBe(false);
@@ -100,32 +103,6 @@ describe("wizardMachine", () => {
     expect(
       createWizardState([worker("a", "ready")], false, true).established,
     ).toBe(false);
-  });
-
-  it("short-circuits established installs to done when providers pass", () => {
-    const checking = createWizardState([worker("a", "ready")], false);
-    expect(
-      wizardReducer(checking, { type: "providers_checked", configured: true })
-        .step,
-    ).toBe("done");
-    expect(
-      wizardReducer(checking, { type: "providers_checked", configured: false })
-        .step,
-    ).toBe("provider_setup_pointer");
-  });
-
-  it("short-circuits established installs to done when chats exist", () => {
-    const checking = createWizardState([worker("a", "ready")], false);
-    expect(wizardReducer(checking, { type: "chats_detected" }).step).toBe(
-      "done",
-    );
-    const pointer = wizardReducer(checking, {
-      type: "providers_checked",
-      configured: false,
-    });
-    expect(wizardReducer(pointer, { type: "chats_detected" }).step).toBe(
-      "done",
-    );
   });
 
   it("keeps the fresh-install flow unchanged by the short-circuit", () => {
@@ -146,15 +123,11 @@ describe("wizardMachine", () => {
   });
 
   it("never short-circuits a user-requested setup run", () => {
-    const requested = createWizardState([worker("a", "ready")], false, true);
-    expect(requested.step).toBe("provider_check");
-    expect(wizardReducer(requested, { type: "chats_detected" })).toBe(
-      requested,
-    );
-    expect(
-      wizardReducer(requested, { type: "providers_checked", configured: true })
-        .step,
-    ).toBe("ready_for_chat");
+    const requested = createWizardState([worker("a", "stopped")], false, true);
+    expect(requested).toMatchObject({
+      step: "project_starting",
+      established: false,
+    });
   });
 
   it("prefers pinned, then most recently active, then first ready project", () => {
@@ -165,6 +138,7 @@ describe("wizardMachine", () => {
           worker("pinned", "ready", { pinned: true, last_active_ms: 1 }),
         ],
         false,
+        true,
       ).projectId,
     ).toBe("pinned");
     expect(
@@ -174,6 +148,7 @@ describe("wizardMachine", () => {
           worker("new", "ready", { last_active_ms: 50 }),
         ],
         false,
+        true,
       ).projectId,
     ).toBe("new");
     expect(
@@ -184,6 +159,7 @@ describe("wizardMachine", () => {
           worker("second", "ready", { last_active_ms: null }),
         ],
         false,
+        true,
       ).projectId,
     ).toBe("first");
   });
@@ -214,7 +190,7 @@ describe("wizardMachine", () => {
   });
 
   it("falls back to the provider pointer when the probe fails", () => {
-    const checking = createWizardState([worker("a", "ready")], false);
+    const checking = createWizardState([worker("a", "ready")], false, true);
     expect(
       wizardReducer(checking, { type: "providers_check_failed" }),
     ).toMatchObject({

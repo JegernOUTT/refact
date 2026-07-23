@@ -141,6 +141,7 @@ describe("Dashboard Home", () => {
   });
 
   it("shows the provider pointer for a ready worker with no configured providers", async () => {
+    window.localStorage.setItem(WIZARD_DONE_KEY, "true");
     server.use(
       http.get("https://daemon.example.test/daemon/v1/workers", () =>
         HttpResponse.json([worker("refact", "ready")]),
@@ -170,7 +171,9 @@ describe("Dashboard Home", () => {
       updateCheck(),
     );
 
-    renderHome();
+    const view = renderHome();
+
+    await view.user.click(await screen.findByRole("button", { name: "Setup" }));
 
     expect(
       await screen.findByRole("heading", { name: "Set up a provider" }),
@@ -181,32 +184,14 @@ describe("Dashboard Home", () => {
     ).toHaveAttribute("href", "/p/refact/?page=providers");
   });
 
-  it("auto-completes setup for an established install with providers", async () => {
+  it("auto-completes setup for established installs without a ready worker", async () => {
     server.use(
       http.get("https://daemon.example.test/daemon/v1/workers", () =>
-        HttpResponse.json([worker("refact", "ready")]),
-      ),
-      http.get("https://daemon.example.test/p/refact/v1/providers", () =>
-        HttpResponse.json({
-          providers: [
-            {
-              name: "openai",
-              base_provider: "openai",
-              display_name: "OpenAI",
-              enabled: true,
-              readonly: false,
-              has_credentials: true,
-              status: "active",
-              model_count: 1,
-            },
-          ],
-        }),
-      ),
-      http.get("https://daemon.example.test/p/refact/v1/trajectories", () =>
-        HttpResponse.json({ items: [] }),
-      ),
-      http.get("https://daemon.example.test/p/refact/v1/scheduler/cron", () =>
-        HttpResponse.json([]),
+        HttpResponse.json([
+          worker("stopped", "stopped"),
+          worker("starting", "starting"),
+          worker("crashed", "crashed"),
+        ]),
       ),
       updateCheck(),
     );

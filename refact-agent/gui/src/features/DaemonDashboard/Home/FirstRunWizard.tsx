@@ -90,12 +90,10 @@ export function FirstRunWizard({
 
   function finish() {
     dispatch({ type: "complete" });
-    onDone();
   }
 
   function skip() {
     dispatch({ type: "skip" });
-    onDone();
   }
 
   function openAddProject() {
