@@ -90,7 +90,7 @@ export function useExecSession({
       for (const chunk of chunks) {
         if (chunk.seq < nextSequenceRef.current) continue;
         terminal.write(chunk.text);
-        nextSequenceRef.current = chunk.seq + 1;
+        nextSequenceRef.current = chunk.offset ?? chunk.seq + 1;
       }
     };
 
@@ -216,6 +216,7 @@ export function useExecSession({
           nextSequenceRef.current,
           connection,
           apiKey,
+          true,
         );
         if (stopped) return;
         writeChunks(read.chunks);

@@ -17,7 +17,7 @@ use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::exec::{
     ExecOutputChunk, ExecOutputStream, ExecOwnerMeta, ExecProcessFilter, ExecProcessId,
-    ExecProcessSnapshot, ExecSpawnRequest, ExecStatus,
+    ExecProcessSnapshot, ExecRawRead, ExecSpawnRequest, ExecStatus,
 };
 use crate::files_correction::{
     canonicalize_normalized_path, check_if_its_inside_a_workspace_or_config,
@@ -28,6 +28,7 @@ const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_READ_LIMIT: usize = 1000;
 const MAX_READ_LIMIT: usize = 10_000;
+const RAW_TAIL_MAX_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct ExecSpawnHttpRequest {
@@ -70,6 +71,14 @@ pub struct ExecReadQuery {
     #[serde(default)]
     pub since_seq: u64,
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub raw: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExecSubscribeQuery {
+    #[serde(default)]
+    pub since_seq: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,6 +86,8 @@ pub struct ExecOutputHttpChunk {
     pub seq: u64,
     pub stream: &'static str,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -309,6 +320,26 @@ pub async fn handle_v1_exec_read(
 ) -> Result<Json<ExecReadHttpResponse>, ScratchError> {
     let process_id = ExecProcessId(process_id);
     let (snapshot, _) = authorize_process(&app, &process_id).await?;
+    if query.raw && snapshot.meta.tty {
+        let raw = app
+            .runtime
+            .exec_registry
+            .read_raw_since(&process_id, query.since_seq, Some(RAW_TAIL_MAX_BYTES))
+            .await;
+        let (chunks, next_seq) = match raw {
+            Some(raw) if !raw.text.is_empty() => {
+                let next_seq = raw.new_offset;
+                (vec![raw_http_chunk(&raw)], next_seq)
+            }
+            Some(raw) => (Vec::new(), raw.new_offset.max(query.since_seq)),
+            None => (Vec::new(), query.since_seq),
+        };
+        return Ok(Json(ExecReadHttpResponse {
+            chunks,
+            next_seq,
+            status: status_label(&snapshot.status),
+        }));
+    }
     let limit = query
         .limit
         .unwrap_or(DEFAULT_READ_LIMIT)
@@ -390,9 +421,18 @@ pub async fn handle_v1_exec_stdin(
 pub async fn handle_v1_exec_subscribe(
     State(app): State<AppState>,
     Path(process_id): Path<String>,
+    Query(query): Query<ExecSubscribeQuery>,
 ) -> Result<Response<Body>, ScratchError> {
     let process_id = ExecProcessId(process_id);
     let (initial_snapshot, _) = authorize_process(&app, &process_id).await?;
+    if initial_snapshot.meta.tty {
+        return Ok(subscribe_raw_tty_stream(
+            app,
+            process_id,
+            initial_snapshot,
+            query.since_seq,
+        ));
+    }
     let registry = app.runtime.exec_registry.clone();
     let mut output_rx = registry.subscribe_output();
     let initial_read = registry
@@ -477,6 +517,115 @@ pub async fn handle_v1_exec_subscribe(
         .unwrap())
 }
 
+async fn next_raw_increment(
+    registry: &crate::exec::ExecRegistry,
+    process_id: &ExecProcessId,
+    offset: u64,
+) -> Option<ExecRawRead> {
+    registry
+        .read_raw_since(process_id, offset, None)
+        .await
+        .filter(|raw| !raw.text.is_empty())
+}
+
+fn subscribe_raw_tty_stream(
+    app: AppState,
+    process_id: ExecProcessId,
+    initial_snapshot: ExecProcessSnapshot,
+    since_offset: u64,
+) -> Response<Body> {
+    let registry = app.runtime.exec_registry.clone();
+    let mut output_rx = registry.subscribe_output();
+    let shutdown_flag = app.gcx.shutdown_flag.clone();
+
+    let stream = async_stream::stream! {
+        let initial = registry
+            .read_raw_since(&process_id, since_offset, Some(RAW_TAIL_MAX_BYTES))
+            .await;
+        let mut offset = initial
+            .as_ref()
+            .map(|raw| raw.new_offset)
+            .unwrap_or(since_offset)
+            .max(since_offset);
+        let chunks = match initial.as_ref() {
+            Some(raw) if !raw.text.is_empty() => vec![raw_http_chunk(raw)],
+            _ => Vec::new(),
+        };
+        let snapshot = json!({
+            "status": status_label(&initial_snapshot.status),
+            "chunks": chunks,
+            "next_seq": offset,
+        });
+        yield Ok::<_, Infallible>(sse_event("snapshot", &snapshot));
+        if initial_snapshot.status.is_terminal() {
+            yield Ok::<_, Infallible>(sse_exit(&initial_snapshot));
+            return;
+        }
+
+        let mut heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            Duration::from_secs(15),
+        );
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut status_poll = tokio::time::interval(Duration::from_millis(100));
+        status_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut shutdown_poll = tokio::time::interval(Duration::from_millis(200));
+        shutdown_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                result = output_rx.recv() => {
+                    match result {
+                        Ok(chunk) if chunk.process_id == process_id => {
+                            if let Some(raw) = next_raw_increment(&registry, &process_id, offset).await {
+                                offset = raw.new_offset;
+                                yield Ok::<_, Infallible>(sse_event("output", &raw_http_chunk(&raw)));
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            if let Some(raw) = next_raw_increment(&registry, &process_id, offset).await {
+                                offset = raw.new_offset;
+                                yield Ok::<_, Infallible>(sse_event("output", &raw_http_chunk(&raw)));
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = status_poll.tick() => {
+                    match registry.get(&process_id).await {
+                        Some(snapshot) if snapshot.status.is_terminal() => {
+                            if let Some(raw) = next_raw_increment(&registry, &process_id, offset).await {
+                                yield Ok::<_, Infallible>(sse_event("output", &raw_http_chunk(&raw)));
+                            }
+                            yield Ok::<_, Infallible>(sse_exit(&snapshot));
+                            break;
+                        }
+                        Some(_) => {}
+                        None => break,
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    yield Ok::<_, Infallible>(": hb\n\n".to_string());
+                }
+                _ = shutdown_poll.tick() => {
+                    if shutdown_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+            }
+        }
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/event-stream")
+        .header("Cache-Control", "no-cache")
+        .header("Connection", "keep-alive")
+        .body(Body::wrap_stream(stream))
+        .unwrap()
+}
+
 fn http_snapshot(snapshot: &ExecProcessSnapshot) -> ExecProcessHttpSnapshot {
     ExecProcessHttpSnapshot {
         process_id: snapshot.meta.process_id.as_str().to_string(),
@@ -493,6 +642,16 @@ fn http_chunk(chunk: &ExecOutputChunk) -> ExecOutputHttpChunk {
         seq: chunk.seq,
         stream: stream_label(&chunk.stream),
         text: chunk.text.clone(),
+        offset: None,
+    }
+}
+
+fn raw_http_chunk(raw: &ExecRawRead) -> ExecOutputHttpChunk {
+    ExecOutputHttpChunk {
+        seq: raw.start_offset,
+        stream: "combined",
+        text: raw.text.clone(),
+        offset: Some(raw.new_offset),
     }
 }
 
@@ -823,5 +982,151 @@ mod tests {
         assert!(collected.contains("event: snapshot"));
         assert!(collected.contains("terminal-sse"));
         assert!(collected.contains("event: exit"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
+    async fn subscribe_streams_raw_pty_bytes_with_crlf() {
+        let (_temp, app) = test_app().await;
+        let router = make_refact_http_server(app);
+        let (status, spawned) = json_response(
+            router.clone(),
+            post_json(
+                "/v1/exec/spawn",
+                json!({ "command": "printf 'a\\r\\nb\\r\\n'", "pty": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let process_id = spawned["process_id"].as_str().unwrap();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/exec/{process_id}/subscribe?since_seq=0"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let collected = tokio::time::timeout(Duration::from_secs(5), async move {
+            let mut text = String::new();
+            while let Some(chunk) = body.data().await {
+                text.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+                if text.contains("event: exit") {
+                    break;
+                }
+            }
+            text
+        })
+        .await
+        .expect("SSE stream should terminate after exit");
+
+        assert!(collected.contains("event: snapshot"));
+        assert!(
+            collected.contains("\\r\\n"),
+            "SSE payload must keep CRLF byte-faithful for tty: {collected:?}"
+        );
+        assert!(collected.contains("\"offset\""));
+        assert!(collected.contains("event: exit"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
+    async fn read_raw_uses_byte_cursor_for_tty_process() {
+        let (_temp, app) = test_app().await;
+        let router = make_refact_http_server(app.clone());
+        let (status, spawned) = json_response(
+            router.clone(),
+            post_json(
+                "/v1/exec/spawn",
+                json!({ "command": "printf 'x\\r\\ny\\r\\n'", "pty": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let process_id = spawned["process_id"].as_str().unwrap().to_string();
+        let exec_process_id = crate::exec::ExecProcessId(process_id.clone());
+        app.runtime
+            .exec_registry
+            .wait(&exec_process_id)
+            .await
+            .unwrap();
+
+        let (status, read) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri(format!("/v1/exec/{process_id}/read?raw=true&since_seq=0"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let chunks = read["chunks"].as_array().unwrap();
+        assert_eq!(chunks.len(), 1);
+        let text = chunks[0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("\r\n"),
+            "raw read must keep CRLF byte-faithful: {text:?}"
+        );
+        let next_seq = read["next_seq"].as_u64().unwrap();
+        assert!(next_seq > 0);
+        assert_eq!(chunks[0]["offset"].as_u64().unwrap(), next_seq);
+        assert_eq!(chunks[0]["seq"].as_u64().unwrap(), 0);
+
+        let (status, drained) = json_response(
+            router,
+            Request::builder()
+                .uri(format!(
+                    "/v1/exec/{process_id}/read?raw=true&since_seq={next_seq}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(drained["chunks"].as_array().unwrap().is_empty());
+        assert_eq!(drained["next_seq"].as_u64().unwrap(), next_seq);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
+    async fn read_raw_flag_is_ignored_for_non_tty_process() {
+        let (_temp, app) = test_app().await;
+        let router = make_refact_http_server(app.clone());
+        let (status, spawned) = json_response(
+            router.clone(),
+            post_json(
+                "/v1/exec/spawn",
+                json!({ "command": "printf plain-hello", "pty": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let process_id = spawned["process_id"].as_str().unwrap().to_string();
+        app.runtime
+            .exec_registry
+            .wait(&crate::exec::ExecProcessId(process_id.clone()))
+            .await
+            .unwrap();
+
+        let (status, read) = json_response(
+            router,
+            Request::builder()
+                .uri(format!("/v1/exec/{process_id}/read?raw=true&since_seq=0"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let chunks = read["chunks"].as_array().unwrap();
+        assert!(chunks
+            .iter()
+            .any(|chunk| chunk["text"].as_str().unwrap().contains("plain-hello")));
+        assert!(chunks.iter().all(|chunk| chunk.get("offset").is_none()));
     }
 }

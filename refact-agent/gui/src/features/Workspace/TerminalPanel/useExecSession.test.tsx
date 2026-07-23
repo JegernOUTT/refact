@@ -244,6 +244,65 @@ describe("useExecSession", () => {
     expect(fixture.write).toHaveBeenCalledWith("backfill");
   });
 
+  test("raw tty backfill preserves CRLF and advances the byte-offset cursor", async () => {
+    const readUrls: string[] = [];
+    server.use(
+      http.get("*/v1/exec/proc-1/read", ({ request }) => {
+        readUrls.push(request.url);
+        return HttpResponse.json({
+          chunks:
+            readUrls.length === 1
+              ? [{ seq: 0, stream: "combined", text: "tail\r\n", offset: 6 }]
+              : [],
+          next_seq: readUrls.length === 1 ? 6 : 11,
+          status: "running",
+        });
+      }),
+      http.post("*/v1/exec/proc-1/resize", () => HttpResponse.json({})),
+    );
+    const fixture = makeRuntime();
+    const view = render(
+      <Harness runtime={fixture.runtime} onStatusChange={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    expect(readUrls[0]).toContain("raw=true");
+    expect(readUrls[0]).toContain("since_seq=0");
+    expect(fixture.write).toHaveBeenCalledWith("tail\r\n");
+    const source = FakeEventSource.instances[0];
+    expect(source.url).toContain("since_seq=6");
+
+    act(() => {
+      source.emit("output", {
+        seq: 6,
+        stream: "combined",
+        text: "α\r\n",
+        offset: 11,
+      });
+      source.emit("output", {
+        seq: 6,
+        stream: "combined",
+        text: "stale-replay",
+        offset: 9,
+      });
+    });
+    expect(fixture.write).toHaveBeenCalledWith("α\r\n");
+    expect(fixture.write).not.toHaveBeenCalledWith("stale-replay");
+
+    act(() => {
+      source.fail();
+    });
+    await waitFor(() => expect(readUrls.length).toBeGreaterThan(1), {
+      timeout: 2_000,
+    });
+    expect(readUrls[1]).toContain("raw=true");
+    expect(readUrls[1]).toContain("since_seq=11");
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(2));
+    expect(FakeEventSource.instances[1].url).toContain("since_seq=11");
+
+    view.unmount();
+  });
+
   test("reconnects with sequence resume after an SSE error", async () => {
     let readCount = 0;
     server.use(

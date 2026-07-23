@@ -3,7 +3,7 @@ pub use refact_exec::{
     ExecRegistry, ExecShutdownCleanupSummary, ExecSpawnResult, ProcessCompletionEvent,
     ProcessCompletionTx,
 };
-pub use refact_exec::{ExecRawOutput, ExecTranscript};
+pub use refact_exec::{ExecRawOutput, ExecRawRead, ExecTranscript};
 pub use refact_exec::{
     generate_short_description, sanitize_short_description, ExecMode, ExecOutputChunk,
     ExecOutputLimits, ExecOutputStream, ExecOwnerMeta, ExecProcessFilter, ExecProcessId,

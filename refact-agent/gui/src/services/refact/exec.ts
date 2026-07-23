@@ -42,6 +42,7 @@ export type ExecOutputChunk = {
   seq: number;
   stream: "stdout" | "stderr" | "combined";
   text: string;
+  offset?: number;
 };
 
 export type ExecReadResponse = {
@@ -148,13 +149,14 @@ export function readExec(
   sinceSeq: number,
   connection: PortOrConnection,
   apiKey?: string,
+  raw = false,
 ): Promise<ExecReadResponse> {
   return execRequest(
     connection,
     `/v1/exec/${encodeURIComponent(processId)}/read`,
     apiKey,
     undefined,
-    { since_seq: sinceSeq, limit: 10_000 },
+    { since_seq: sinceSeq, limit: 10_000, raw: raw ? true : undefined },
   );
 }
 

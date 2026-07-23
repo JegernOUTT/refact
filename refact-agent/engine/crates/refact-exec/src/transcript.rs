@@ -3,6 +3,9 @@
 //! before transcript eviction so final shell/cmdline output filters can see lines outside the
 //! transcript window. Raw foreground capture is explicitly capped at 16 MiB stdout and 4 MiB
 //! stderr; when a cap is hit the captured stream ends with an `[X bytes elided]` marker.
+//! TTY processes additionally keep a combined raw buffer of unnormalized PTY bytes (escape
+//! sequences and carriage returns intact, arrival order preserved) that byte-offset cursors can
+//! stream from; it shares the 16 MiB cap and freezes at the cap instead of evicting.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -120,6 +123,7 @@ pub struct ExecRawCapture {
     process_id: ExecProcessId,
     stdout: ExecRawStreamCapture,
     stderr: ExecRawStreamCapture,
+    combined: Option<ExecRawStreamCapture>,
 }
 
 impl ExecRawCapture {
@@ -128,7 +132,15 @@ impl ExecRawCapture {
             process_id,
             stdout: ExecRawStreamCapture::new(FOREGROUND_STDOUT_CAPTURE_MAX_BYTES),
             stderr: ExecRawStreamCapture::new(FOREGROUND_STDERR_CAPTURE_MAX_BYTES),
+            combined: None,
         }
+    }
+
+    pub fn with_combined_capture(mut self) -> Self {
+        self.combined = Some(ExecRawStreamCapture::new(
+            FOREGROUND_STDOUT_CAPTURE_MAX_BYTES,
+        ));
+        self
     }
 
     pub fn append(&mut self, stream: &ExecOutputStream, text: &str) {
@@ -136,6 +148,41 @@ impl ExecRawCapture {
             ExecOutputStream::Stdout | ExecOutputStream::Combined => self.stdout.append(text),
             ExecOutputStream::Stderr => self.stderr.append(text),
         }
+    }
+
+    pub fn append_combined_raw(&mut self, text: &str) {
+        if let Some(combined) = self.combined.as_mut() {
+            combined.append(text);
+        }
+    }
+
+    pub fn read_combined_since(
+        &self,
+        offset: u64,
+        max_bytes: Option<usize>,
+    ) -> Option<ExecRawRead> {
+        let combined = self.combined.as_ref()?;
+        let text = &combined.text;
+        let len = text.len();
+        let mut start = offset.min(len as u64) as usize;
+        while start > 0 && !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        if let Some(max_bytes) = max_bytes {
+            let cap_start = len.saturating_sub(max_bytes);
+            if cap_start > start {
+                start = cap_start;
+                while start < len && !text.is_char_boundary(start) {
+                    start += 1;
+                }
+            }
+        }
+        Some(ExecRawRead {
+            process_id: self.process_id.clone(),
+            start_offset: start as u64,
+            new_offset: len as u64,
+            text: text[start..].to_string(),
+        })
     }
 
     pub fn read(&self) -> ExecRawOutput {
@@ -170,6 +217,14 @@ impl ExecRawOutput {
     pub fn is_truncated(&self) -> bool {
         self.stdout_elided_bytes > 0 || self.stderr_elided_bytes > 0
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecRawRead {
+    pub process_id: ExecProcessId,
+    pub start_offset: u64,
+    pub new_offset: u64,
+    pub text: String,
 }
 
 impl ExecTranscript {
@@ -843,5 +898,93 @@ mod tests {
         assert_eq!(t.dropped_chunks(), 0);
         assert_eq!(t.dropped_bytes(), 0);
         assert_eq!(t.truncated_chunks(), 0);
+    }
+
+    fn make_combined_capture() -> ExecRawCapture {
+        ExecRawCapture::foreground(ExecProcessId("exec_raw".to_string())).with_combined_capture()
+    }
+
+    #[test]
+    fn combined_raw_preserves_crlf_and_escape_bytes() {
+        let mut capture = make_combined_capture();
+        capture.append_combined_raw("a\r\n\x1b[31mred\x1b[0m\r\n");
+
+        let read = capture.read_combined_since(0, None).unwrap();
+        assert_eq!(read.text, "a\r\n\x1b[31mred\x1b[0m\r\n");
+        assert_eq!(read.start_offset, 0);
+        assert_eq!(read.new_offset, read.text.len() as u64);
+    }
+
+    #[test]
+    fn combined_raw_cursor_increments_and_drains() {
+        let mut capture = make_combined_capture();
+        capture.append_combined_raw("first\r\n");
+        let first = capture.read_combined_since(0, None).unwrap();
+        assert_eq!(first.text, "first\r\n");
+
+        capture.append_combined_raw("second\r\n");
+        let second = capture.read_combined_since(first.new_offset, None).unwrap();
+        assert_eq!(second.text, "second\r\n");
+        assert_eq!(second.start_offset, first.new_offset);
+
+        let empty = capture
+            .read_combined_since(second.new_offset, None)
+            .unwrap();
+        assert_eq!(empty.text, "");
+        assert_eq!(empty.new_offset, second.new_offset);
+    }
+
+    #[test]
+    fn combined_raw_offset_clamps_to_char_boundary() {
+        let mut capture = make_combined_capture();
+        capture.append_combined_raw("α\r\n");
+
+        let mid_char = capture.read_combined_since(1, None).unwrap();
+        assert_eq!(mid_char.start_offset, 0);
+        assert_eq!(mid_char.text, "α\r\n");
+
+        let beyond = capture.read_combined_since(100, None).unwrap();
+        assert_eq!(beyond.text, "");
+        assert_eq!(beyond.new_offset, "α\r\n".len() as u64);
+    }
+
+    #[test]
+    fn combined_raw_tail_cap_skips_forward_on_char_boundary() {
+        let mut capture = make_combined_capture();
+        capture.append_combined_raw("xβtail");
+
+        let read = capture.read_combined_since(0, Some(5)).unwrap();
+        assert_eq!(read.text, "tail");
+        assert_eq!(read.start_offset, "xβ".len() as u64);
+        assert_eq!(read.new_offset, "xβtail".len() as u64);
+    }
+
+    #[test]
+    fn combined_raw_tail_cap_never_starts_before_cursor() {
+        let mut capture = make_combined_capture();
+        capture.append_combined_raw("0123456789");
+
+        let read = capture.read_combined_since(8, Some(4)).unwrap();
+        assert_eq!(read.start_offset, 8);
+        assert_eq!(read.text, "89");
+    }
+
+    #[test]
+    fn combined_raw_absent_without_combined_capture() {
+        let capture = ExecRawCapture::foreground(ExecProcessId("exec_plain".to_string()));
+        assert!(capture.read_combined_since(0, None).is_none());
+    }
+
+    #[test]
+    fn combined_raw_does_not_leak_into_stream_captures() {
+        let mut capture = make_combined_capture();
+        capture.append(&ExecOutputStream::Combined, "clean");
+        capture.append_combined_raw("raw\r\n");
+
+        let output = capture.read();
+        assert_eq!(output.stdout, "clean");
+        assert_eq!(output.stderr, "");
+        let raw = capture.read_combined_since(0, None).unwrap();
+        assert_eq!(raw.text, "raw\r\n");
     }
 }

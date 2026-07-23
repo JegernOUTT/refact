@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 
-use crate::transcript::{ExecRawCapture, ExecRawOutput, ExecTranscript, DEFAULT_SPILL_THRESHOLD_BYTES};
+use crate::transcript::{
+    ExecRawCapture, ExecRawOutput, ExecRawRead, ExecTranscript, DEFAULT_SPILL_THRESHOLD_BYTES,
+};
 use crate::spill::SpillTarget;
 use crate::types::{
     current_timestamp_ms, ExecMode, ExecOutputChunk, ExecOutputStream, ExecProcessFilter,
@@ -82,7 +84,14 @@ impl ExecProcessRecord {
     fn new(meta: ExecProcessMeta, transcript_limit_bytes: usize, capture_raw: bool) -> Self {
         let process_id = meta.process_id.clone();
         let chat_id = meta.owner.chat_id.clone();
-        let raw_capture = capture_raw.then(|| ExecRawCapture::foreground(process_id.clone()));
+        let raw_capture = (capture_raw || meta.tty).then(|| {
+            let capture = ExecRawCapture::foreground(process_id.clone());
+            if meta.tty {
+                capture.with_combined_capture()
+            } else {
+                capture
+            }
+        });
         Self {
             snapshot: ExecProcessSnapshot::new(meta),
             transcript: ExecTranscript::new_with_spill(
@@ -637,6 +646,28 @@ impl ExecRegistry {
         stream: ExecOutputStream,
         text: String,
     ) -> Result<ExecOutputChunk, String> {
+        self.append_output_inner(process_id, stream, text, None)
+            .await
+    }
+
+    pub async fn append_output_with_raw(
+        &self,
+        process_id: &ExecProcessId,
+        stream: ExecOutputStream,
+        text: String,
+        raw_text: &str,
+    ) -> Result<ExecOutputChunk, String> {
+        self.append_output_inner(process_id, stream, text, Some(raw_text))
+            .await
+    }
+
+    async fn append_output_inner(
+        &self,
+        process_id: &ExecProcessId,
+        stream: ExecOutputStream,
+        text: String,
+        raw_text: Option<&str>,
+    ) -> Result<ExecOutputChunk, String> {
         let (chunk, spill_append) = {
             let mut records = self.records.lock().await;
             let record = records
@@ -644,6 +675,7 @@ impl ExecRegistry {
                 .ok_or_else(|| format!("process not found: {process_id}"))?;
             if let Some(raw_capture) = record.raw_capture.as_mut() {
                 raw_capture.append(&stream, &text);
+                raw_capture.append_combined_raw(raw_text.unwrap_or(text.as_str()));
             }
             record.transcript.append_chunk(stream, text)
         };
@@ -671,6 +703,19 @@ impl ExecRegistry {
             .get(process_id)
             .and_then(|record| record.raw_capture.as_ref())
             .map(ExecRawCapture::read)
+    }
+
+    pub async fn read_raw_since(
+        &self,
+        process_id: &ExecProcessId,
+        offset: u64,
+        max_bytes: Option<usize>,
+    ) -> Option<ExecRawRead> {
+        let records = self.records.lock().await;
+        records
+            .get(process_id)
+            .and_then(|record| record.raw_capture.as_ref())
+            .and_then(|capture| capture.read_combined_since(offset, max_bytes))
     }
 
     pub async fn read(
@@ -1835,6 +1880,106 @@ mod tests {
         let partial = registry.read(&process_id, 1, Some(1)).await;
         assert_eq!(partial.chunks, vec![second]);
         assert_eq!(partial.next_seq, 2);
+    }
+
+    #[tokio::test]
+    async fn append_with_raw_keeps_exact_bytes_for_tty_and_cursor_advances() {
+        let registry = ExecRegistry::new();
+        let snapshot = registry
+            .register(
+                meta("exec_tty_raw", ExecMode::Interactive, "bash -l").with_tty(true),
+                4096,
+            )
+            .await;
+        let process_id = snapshot.meta.process_id;
+
+        registry
+            .append_output_with_raw(
+                &process_id,
+                ExecOutputStream::Combined,
+                "a\nred\n".to_string(),
+                "a\r\n\x1b[31mred\x1b[0m\r\n",
+            )
+            .await
+            .unwrap();
+
+        let first = registry.read_raw_since(&process_id, 0, None).await.unwrap();
+        assert_eq!(first.text, "a\r\n\x1b[31mred\x1b[0m\r\n");
+        assert_eq!(first.start_offset, 0);
+        assert_eq!(first.new_offset, first.text.len() as u64);
+
+        registry
+            .append_output_with_raw(
+                &process_id,
+                ExecOutputStream::Combined,
+                "b\n".to_string(),
+                "b\r\n",
+            )
+            .await
+            .unwrap();
+        let second = registry
+            .read_raw_since(&process_id, first.new_offset, None)
+            .await
+            .unwrap();
+        assert_eq!(second.text, "b\r\n");
+        assert_eq!(second.start_offset, first.new_offset);
+
+        let transcript = registry.read(&process_id, 0, None).await;
+        let transcript_text = transcript
+            .chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<String>();
+        assert_eq!(transcript_text, "a\nred\nb\n");
+    }
+
+    #[tokio::test]
+    async fn append_with_empty_normalized_text_still_captures_raw_and_broadcasts() {
+        let registry = ExecRegistry::new();
+        let mut output_rx = registry.subscribe_output();
+        let snapshot = registry
+            .register(
+                meta("exec_tty_wake", ExecMode::Interactive, "bash -l").with_tty(true),
+                4096,
+            )
+            .await;
+        let process_id = snapshot.meta.process_id;
+
+        registry
+            .append_output_with_raw(
+                &process_id,
+                ExecOutputStream::Combined,
+                String::new(),
+                "\x1b[2J",
+            )
+            .await
+            .unwrap();
+
+        let wake = output_rx.try_recv().unwrap();
+        assert_eq!(wake.process_id, process_id);
+        assert_eq!(wake.text, "");
+        let raw = registry.read_raw_since(&process_id, 0, None).await.unwrap();
+        assert_eq!(raw.text, "\x1b[2J");
+        assert_eq!(registry.read(&process_id, 0, None).await.chunks.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn read_raw_since_is_none_for_non_tty_process() {
+        let registry = ExecRegistry::new();
+        let snapshot = registry
+            .register(meta("exec_no_raw", ExecMode::Foreground, "echo hi"), 4096)
+            .await;
+        let process_id = snapshot.meta.process_id;
+
+        registry
+            .append_output(&process_id, ExecOutputStream::Stdout, "hi".to_string())
+            .await
+            .unwrap();
+
+        assert!(registry
+            .read_raw_since(&process_id, 0, None)
+            .await
+            .is_none());
     }
 
     #[tokio::test]

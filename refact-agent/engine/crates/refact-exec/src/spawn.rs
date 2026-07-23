@@ -199,6 +199,54 @@ fn output_to_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&strip_ansi_escapes::strip(bytes)).to_string()
 }
 
+fn incomplete_utf8_suffix_len(bytes: &[u8]) -> usize {
+    let len = bytes.len();
+    let start = len.saturating_sub(3);
+    for index in (start..len).rev() {
+        let byte = bytes[index];
+        let seq_len = if byte >= 0xF0 {
+            4
+        } else if byte >= 0xE0 {
+            3
+        } else if byte >= 0xC0 {
+            2
+        } else if byte < 0x80 {
+            1
+        } else {
+            continue;
+        };
+        return if index + seq_len > len {
+            len - index
+        } else {
+            0
+        };
+    }
+    0
+}
+
+#[derive(Default)]
+struct Utf8ChunkDecoder {
+    pending: Vec<u8>,
+}
+
+impl Utf8ChunkDecoder {
+    fn decode(&mut self, bytes: &[u8]) -> String {
+        let mut data = std::mem::take(&mut self.pending);
+        data.extend_from_slice(bytes);
+        let split = data.len() - incomplete_utf8_suffix_len(&data);
+        self.pending = data.split_off(split);
+        String::from_utf8_lossy(&data).into_owned()
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let pending = std::mem::take(&mut self.pending);
+        Some(String::from_utf8_lossy(&pending).into_owned())
+    }
+}
+
 fn pump_output(
     registry: ExecRegistry,
     process_id: crate::types::ExecProcessId,
@@ -242,22 +290,35 @@ fn pump_blocking_output(
 ) -> JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
         let mut buffer = [0; PIPE_READ_BYTES];
+        let mut decoder = Utf8ChunkDecoder::default();
+        let append_raw = |raw_text: String| {
+            if raw_text.is_empty() {
+                return;
+            }
+            let text = output_to_text(raw_text.as_bytes());
+            if let Ok(chunk) = futures::executor::block_on(registry.append_output_with_raw(
+                &process_id,
+                stream.clone(),
+                text,
+                &raw_text,
+            )) {
+                if !chunk.text.is_empty() {
+                    if let Some(progress_tx) = progress_tx.as_ref() {
+                        let _ = progress_tx.send(chunk);
+                    }
+                }
+            }
+        };
         loop {
             match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(bytes_read) => {
-                    let text = output_to_text(&buffer[..bytes_read]);
-                    if !text.is_empty() {
-                        if let Ok(chunk) = futures::executor::block_on(registry.append_output(
-                            &process_id,
-                            stream.clone(),
-                            text,
-                        )) {
-                            if let Some(progress_tx) = progress_tx.as_ref() {
-                                let _ = progress_tx.send(chunk);
-                            }
-                        }
+                Ok(0) => {
+                    if let Some(raw_text) = decoder.finish() {
+                        append_raw(raw_text);
                     }
+                    break;
+                }
+                Ok(bytes_read) => {
+                    append_raw(decoder.decode(&buffer[..bytes_read]));
                 }
                 Err(error) => {
                     tracing::warn!("exec output pump failed for {process_id}: {error}");
@@ -840,6 +901,69 @@ mod tests {
             .filter(|chunk| chunk.stream == ExecOutputStream::Stdout)
             .map(|chunk| chunk.text.as_str())
             .collect::<String>()
+    }
+
+    #[test]
+    fn utf8_chunk_decoder_buffers_partial_trailing_codepoint() {
+        let mut decoder = Utf8ChunkDecoder::default();
+        let bytes = "aβc".as_bytes();
+        let first = decoder.decode(&bytes[..2]);
+        let second = decoder.decode(&bytes[2..]);
+        assert_eq!(first, "a");
+        assert_eq!(second, "βc");
+        assert!(decoder.finish().is_none());
+    }
+
+    #[test]
+    fn utf8_chunk_decoder_flushes_incomplete_tail_lossy_on_finish() {
+        let mut decoder = Utf8ChunkDecoder::default();
+        let text = decoder.decode(&[b'a', 0xE2]);
+        assert_eq!(text, "a");
+        assert_eq!(decoder.finish(), Some("\u{FFFD}".to_string()));
+    }
+
+    #[test]
+    fn utf8_chunk_decoder_replaces_invalid_bytes_in_the_middle() {
+        let mut decoder = Utf8ChunkDecoder::default();
+        let text = decoder.decode(&[b'a', 0xFF, b'b']);
+        assert_eq!(text, "a\u{FFFD}b");
+        assert!(decoder.finish().is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tty_raw_capture_preserves_crlf_while_transcript_is_normalized() {
+        let registry = ExecRegistry::new();
+        let result = registry
+            .spawn(ExecSpawnRequest::foreground("printf 'a\\r\\nb\\r\\n'").with_tty(true))
+            .await
+            .unwrap();
+        let process_id = result.snapshot.meta.process_id;
+
+        let raw = registry.read_raw_since(&process_id, 0, None).await.unwrap();
+        assert!(
+            raw.text.contains("\r\n"),
+            "raw capture must keep CRLF byte-faithful: {:?}",
+            raw.text
+        );
+        assert!(
+            raw.text.contains('a') && raw.text.contains('b'),
+            "raw capture must contain the printed lines: {:?}",
+            raw.text
+        );
+        assert_eq!(raw.new_offset, raw.text.len() as u64);
+
+        let read = registry.read(&process_id, 0, None).await;
+        let transcript_text = read
+            .chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<String>();
+        assert!(
+            !transcript_text.contains('\r'),
+            "transcript stays normalized: {transcript_text:?}"
+        );
+        assert!(transcript_text.contains('a') && transcript_text.contains('b'));
     }
 
     #[cfg(unix)]
