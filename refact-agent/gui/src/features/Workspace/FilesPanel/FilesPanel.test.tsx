@@ -9,6 +9,11 @@ import {
   within,
 } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
+import {
+  loadPersistedFilesExplorerWidth,
+  savePersistedFilesExplorerWidth,
+  setProjectStorageNamespace,
+} from "../../../utils/chatUiPersistence";
 import { FilesPanel } from "./FilesPanel";
 import { openFileInFilesPanel } from "./filesPanelSlice";
 
@@ -69,12 +74,15 @@ const readResponse = (overrides: Record<string, unknown> = {}) => ({
 
 describe("FilesPanel", () => {
   beforeEach(() => {
+    setProjectStorageNamespace("files-panel-test");
     vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(
       () => undefined,
     );
   });
 
   afterEach(() => {
+    localStorage.clear();
+    setProjectStorageNamespace(undefined);
     vi.restoreAllMocks();
   });
 
@@ -215,5 +223,58 @@ describe("FilesPanel", () => {
     expect(
       within(tree).getByRole("treeitem", { name: /README\.md/i }),
     ).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("restores the persisted explorer width on mount", () => {
+    savePersistedFilesExplorerWidth(333);
+    server.use(rootHandler());
+
+    render(<FilesPanel />);
+
+    expect(
+      screen
+        .getByTestId("files-panel")
+        .style.getPropertyValue("--files-explorer-w"),
+    ).toBe("333px");
+  });
+
+  it("updates the live width during drag and persists it on release", () => {
+    server.use(rootHandler());
+    render(<FilesPanel />);
+    const panel = screen.getByTestId("files-panel");
+    const splitter = screen.getByRole("separator", {
+      name: "Resize file explorer",
+    });
+
+    fireEvent.pointerDown(splitter, { button: 0, clientX: 260 });
+    fireEvent.pointerMove(window, { clientX: 321 });
+
+    expect(panel.style.getPropertyValue("--files-explorer-w")).toBe("321px");
+    expect(loadPersistedFilesExplorerWidth()).toBeNull();
+
+    fireEvent.pointerUp(window, { clientX: 321 });
+
+    expect(loadPersistedFilesExplorerWidth()).toBe(321);
+    expect(panel.style.getPropertyValue("--files-explorer-w")).toBe("321px");
+  });
+
+  it("clamps the committed explorer width to the allowed range", () => {
+    server.use(rootHandler());
+    render(<FilesPanel />);
+    const splitter = screen.getByRole("separator", {
+      name: "Resize file explorer",
+    });
+
+    fireEvent.pointerDown(splitter, { button: 0, clientX: 260 });
+    fireEvent.pointerMove(window, { clientX: 900 });
+    fireEvent.pointerUp(window, { clientX: 900 });
+
+    expect(loadPersistedFilesExplorerWidth()).toBe(480);
+
+    fireEvent.pointerDown(splitter, { button: 0, clientX: 480 });
+    fireEvent.pointerMove(window, { clientX: 12 });
+    fireEvent.pointerUp(window, { clientX: 12 });
+
+    expect(loadPersistedFilesExplorerWidth()).toBe(200);
   });
 });

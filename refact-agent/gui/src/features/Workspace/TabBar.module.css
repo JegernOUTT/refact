@@ -1,4 +1,6 @@
 .tabBar {
+  --tab-min-w: 96px;
+
   display: flex;
   box-sizing: border-box;
   align-items: center;
@@ -68,7 +70,7 @@
   display: flex;
   align-items: center;
   flex: 0 1 calc(var(--rf-nav-w-min) + var(--rf-space-3));
-  min-width: 0;
+  min-width: var(--tab-min-w);
   max-width: calc(var(--rf-nav-w) + var(--rf-space-6) + var(--rf-space-2));
   min-height: var(--rf-control-h);
   opacity: var(--rf-motion-opacity-visible);

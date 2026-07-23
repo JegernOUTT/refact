@@ -28,6 +28,7 @@ import {
 } from "./workspaceSlice";
 import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
 import { TabBar } from "./TabBar";
+import styles from "./TabBar.module.css";
 
 const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
 const task = (id: string): SurfaceKey => makeSurfaceKey("task", id);
@@ -472,5 +473,26 @@ describe("TabBar", () => {
       "task-b",
       "task-a",
     ]);
+  });
+
+  it("keeps tab labels readable with a min-width wrap and a full-title tooltip", () => {
+    const store = setUpStore();
+    store.dispatch(
+      createChatWithId({
+        id: "chat-long",
+        title: "Terminal Adjacent Extremely Long Chat Title",
+        mode: "agent",
+      }),
+    );
+    store.dispatch(openTab(chat("chat-long")));
+    store.dispatch(setActiveTab(chat("chat-long")));
+    renderTabBar(store);
+
+    const tab = screen.getByRole("tab", { name: /Terminal Adjacent/ });
+    expect(tab).toHaveAttribute(
+      "title",
+      "Terminal Adjacent Extremely Long Chat Title",
+    );
+    expect(getTabWrap(/Terminal Adjacent/)).toHaveClass(styles.tabWrap);
   });
 });
