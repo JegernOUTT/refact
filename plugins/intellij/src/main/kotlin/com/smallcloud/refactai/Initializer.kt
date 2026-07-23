@@ -25,8 +25,10 @@ class Initializer : ProjectActivity, Disposable {
     private val logger = Logger.getInstance("SMCInitializer")
 
     override suspend fun execute(project: Project) {
-        val isUnitTest = ApplicationManager.getApplication().isUnitTestMode
-        val shouldInitialize = !isUnitTest && !initialized.getAndSet(true)
+        if (ApplicationManager.getApplication().isUnitTestMode) {
+            return
+        }
+        val shouldInitialize = !initialized.getAndSet(true)
         if (shouldInitialize) {
             JcefConfigurer.applyEarlyRemoteModeWorkaround()
             logger.info("Bin prefix = ${Resources.binPrefix}")

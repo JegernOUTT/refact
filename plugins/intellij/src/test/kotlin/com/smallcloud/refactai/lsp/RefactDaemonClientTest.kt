@@ -686,13 +686,13 @@ class RefactDaemonClientTest {
     fun daemonStatusDiscoversTokenFromDaemonJson() {
         val root = Files.createTempDirectory("refact-daemon-info")
         val originalHome = System.getProperty("user.home")
+        val originalDaemonDir = System.getProperty(REFACT_DAEMON_DIR_PROPERTY)
         val server = MockWebServer()
         try {
             server.start()
             System.setProperty("user.home", root.toString())
-            val daemonDir = root.resolve(".cache").resolve("refact").resolve("daemon")
-            Files.createDirectories(daemonDir)
-            Files.writeString(daemonDir.resolve("daemon.json"), "{\"port\":${server.port},\"auth_token\":\"secret-token\"}")
+            System.setProperty(REFACT_DAEMON_DIR_PROPERTY, daemonHomeFor(root).toString())
+            writeDaemonJson(root, server.port, "secret-token")
             server.enqueue(
                 MockResponse.Builder()
                     .code(200)
@@ -724,6 +724,7 @@ class RefactDaemonClientTest {
         } finally {
             server.shutdown()
             System.setProperty("user.home", originalHome)
+            restoreDaemonDirProperty(originalDaemonDir)
             root.deleteRecursively()
         }
     }
@@ -732,10 +733,12 @@ class RefactDaemonClientTest {
     fun daemonStatusFallsBackToEndpointPortWhenReportedPortIsZero() {
         val root = Files.createTempDirectory("refact-daemon-zero-port")
         val originalHome = System.getProperty("user.home")
+        val originalDaemonDir = System.getProperty(REFACT_DAEMON_DIR_PROPERTY)
         val server = MockWebServer()
         try {
             server.start()
             System.setProperty("user.home", root.toString())
+            System.setProperty(REFACT_DAEMON_DIR_PROPERTY, daemonHomeFor(root).toString())
             writeDaemonJson(root, server.port, "zero-token")
             server.enqueue(
                 MockResponse.Builder()
@@ -771,6 +774,7 @@ class RefactDaemonClientTest {
         } finally {
             server.shutdown()
             System.setProperty("user.home", originalHome)
+            restoreDaemonDirProperty(originalDaemonDir)
             root.deleteRecursively()
         }
     }
@@ -779,12 +783,14 @@ class RefactDaemonClientTest {
     fun daemonStatusPrefersCompatibleDiskDaemonOverOldPreferredDaemon() {
         val root = Files.createTempDirectory("refact-daemon-compatible-disk")
         val originalHome = System.getProperty("user.home")
+        val originalDaemonDir = System.getProperty(REFACT_DAEMON_DIR_PROPERTY)
         val preferredServer = MockWebServer()
         val diskServer = MockWebServer()
         try {
             preferredServer.start()
             diskServer.start()
             System.setProperty("user.home", root.toString())
+            System.setProperty(REFACT_DAEMON_DIR_PROPERTY, daemonHomeFor(root).toString())
             writeDaemonJson(root, diskServer.port, "disk-token")
             preferredServer.enqueue(
                 MockResponse.Builder()
@@ -818,6 +824,7 @@ class RefactDaemonClientTest {
             preferredServer.shutdown()
             diskServer.shutdown()
             System.setProperty("user.home", originalHome)
+            restoreDaemonDirProperty(originalDaemonDir)
             root.deleteRecursively()
         }
     }
@@ -826,12 +833,14 @@ class RefactDaemonClientTest {
     fun openProjectUsesSuppliedDaemonEndpointWithoutRediscovery() {
         val root = Files.createTempDirectory("refact-daemon-open-validated")
         val originalHome = System.getProperty("user.home")
+        val originalDaemonDir = System.getProperty(REFACT_DAEMON_DIR_PROPERTY)
         val selectedServer = MockWebServer()
         val staleServer = MockWebServer()
         try {
             selectedServer.start()
             staleServer.start()
             System.setProperty("user.home", root.toString())
+            System.setProperty(REFACT_DAEMON_DIR_PROPERTY, daemonHomeFor(root).toString())
             writeDaemonJson(root, staleServer.port, "stale-token")
             staleServer.enqueue(
                 MockResponse.Builder()
@@ -876,6 +885,7 @@ class RefactDaemonClientTest {
             selectedServer.shutdown()
             staleServer.shutdown()
             System.setProperty("user.home", originalHome)
+            restoreDaemonDirProperty(originalDaemonDir)
             root.deleteRecursively()
         }
     }
@@ -884,10 +894,12 @@ class RefactDaemonClientTest {
     fun slowOpenProjectSucceedsWithinLongTimeoutAndEncodesProjectId() {
         val root = Files.createTempDirectory("refact-daemon-slow-open")
         val originalHome = System.getProperty("user.home")
+        val originalDaemonDir = System.getProperty(REFACT_DAEMON_DIR_PROPERTY)
         val server = MockWebServer()
         try {
             server.start()
             System.setProperty("user.home", root.toString())
+            System.setProperty(REFACT_DAEMON_DIR_PROPERTY, daemonHomeFor(root).toString())
             writeDaemonJson(root, server.port, "slow-token")
             server.enqueue(
                 MockResponse.Builder()
@@ -910,6 +922,7 @@ class RefactDaemonClientTest {
         } finally {
             server.shutdown()
             System.setProperty("user.home", originalHome)
+            restoreDaemonDirProperty(originalDaemonDir)
             root.deleteRecursively()
         }
     }
@@ -918,11 +931,13 @@ class RefactDaemonClientTest {
     fun staleTokenAfterPublicStatusRereadsDaemonJsonAndRetriesOnce() {
         val root = Files.createTempDirectory("refact-daemon-stale-token")
         val originalHome = System.getProperty("user.home")
+        val originalDaemonDir = System.getProperty(REFACT_DAEMON_DIR_PROPERTY)
         val server = MockWebServer()
         val authHeaders = mutableListOf<String?>()
         try {
             server.start()
             System.setProperty("user.home", root.toString())
+            System.setProperty(REFACT_DAEMON_DIR_PROPERTY, daemonHomeFor(root).toString())
             writeDaemonJson(root, server.port, "stale-token")
             var openCalls = 0
             server.dispatcher = object : Dispatcher() {
@@ -970,6 +985,7 @@ class RefactDaemonClientTest {
         } finally {
             server.shutdown()
             System.setProperty("user.home", originalHome)
+            restoreDaemonDirProperty(originalDaemonDir)
             root.deleteRecursively()
         }
     }
@@ -1076,10 +1092,103 @@ class RefactDaemonClientTest {
             )
         )
     }
+
+    @Test
+    fun isolatedDaemonDirSkipsDefaultPortProbe() {
+        assertEquals(
+            emptyList<DaemonEndpoint>(),
+            daemonEndpointCandidatesFor(DEFAULT_REFACT_DAEMON_PORT, null, null, isolatedDaemonDir = true),
+        )
+        assertEquals(
+            listOf(DaemonEndpoint(DEFAULT_REFACT_DAEMON_PORT, null)),
+            daemonEndpointCandidatesFor(DEFAULT_REFACT_DAEMON_PORT, null, null, isolatedDaemonDir = false),
+        )
+        assertEquals(
+            listOf(DaemonEndpoint(DEFAULT_REFACT_DAEMON_PORT, "tok")),
+            daemonEndpointCandidatesFor(DEFAULT_REFACT_DAEMON_PORT, DEFAULT_REFACT_DAEMON_PORT, "tok", isolatedDaemonDir = true),
+        )
+        assertEquals(
+            listOf(DaemonEndpoint(9000, null), DaemonEndpoint(9001, "tok")),
+            daemonEndpointCandidatesFor(9000, 9001, "tok", isolatedDaemonDir = true),
+        )
+        assertEquals(
+            listOf(DaemonEndpoint(9000, null), DaemonEndpoint(9001, "tok")),
+            daemonEndpointCandidatesFor(9000, 9001, "tok", isolatedDaemonDir = false),
+        )
+    }
+
+    @Test
+    fun daemonDirOverridePropertyTakesPrecedenceOverUserHome() {
+        val root = Files.createTempDirectory("refact-daemon-dir-override")
+        val originalDaemonDir = System.getProperty(REFACT_DAEMON_DIR_PROPERTY)
+        try {
+            System.setProperty(REFACT_DAEMON_DIR_PROPERTY, root.toString())
+            assertEquals(root.toFile(), daemonDir())
+            assertEquals(root.resolve("daemon.json").toFile(), daemonJsonFile())
+        } finally {
+            restoreDaemonDirProperty(originalDaemonDir)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun isolatedDaemonHomeDrivesDiscoveryWithDefaultPortResolution() {
+        val root = Files.createTempDirectory("refact-daemon-isolated-home")
+        val originalDaemonDir = System.getProperty(REFACT_DAEMON_DIR_PROPERTY)
+        val server = MockWebServer()
+        try {
+            server.start()
+            System.setProperty(REFACT_DAEMON_DIR_PROPERTY, daemonHomeFor(root).toString())
+            writeDaemonJson(root, server.port, "isolated-token")
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"pid\":31,\"version\":\"8.1.0\",\"port\":${server.port},\"workers\":1}")
+                    .build()
+            )
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"project_id\":\"isolated-project\"}")
+                    .build()
+            )
+
+            assertEquals(daemonHomeFor(root).resolve("daemon.json").toFile(), daemonJsonFile())
+            val client = HttpRefactDaemonClient(portProvider = { DEFAULT_REFACT_DAEMON_PORT }, pluginVersionProvider = { "8.1.0" })
+            val status = client.status()
+            val project = client.openProject(root.toString(), LSPConfig(), status)
+
+            assertEquals(server.port, status.port)
+            assertEquals("isolated-token", status.authToken)
+            assertEquals("isolated-project", project.projectId)
+            val statusRequest = server.takeRequest()
+            assertEquals("/daemon/v1/status", statusRequest.path)
+            assertEquals("Bearer isolated-token", statusRequest.headers["Authorization"])
+            val openRequest = server.takeRequest()
+            assertEquals("/daemon/v1/projects/open", openRequest.path)
+            assertEquals("Bearer isolated-token", openRequest.headers["Authorization"])
+        } finally {
+            server.shutdown()
+            restoreDaemonDirProperty(originalDaemonDir)
+            root.deleteRecursively()
+        }
+    }
+}
+
+private fun daemonHomeFor(root: Path): Path = root.resolve(".cache").resolve("refact").resolve("daemon")
+
+private fun restoreDaemonDirProperty(original: String?) {
+    if (original == null) {
+        System.clearProperty(REFACT_DAEMON_DIR_PROPERTY)
+    } else {
+        System.setProperty(REFACT_DAEMON_DIR_PROPERTY, original)
+    }
 }
 
 private fun writeDaemonJson(root: Path, port: Int, authToken: String) {
-    val daemonDir = root.resolve(".cache").resolve("refact").resolve("daemon")
+    val daemonDir = daemonHomeFor(root)
     Files.createDirectories(daemonDir)
     Files.writeString(daemonDir.resolve("daemon.json"), "{\"port\":$port,\"auth_token\":\"$authToken\"}")
 }

@@ -141,6 +141,15 @@ tasks {
         compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(javaCompilerVersion))
     }
 
+    // Isolate tests from the developer's real daemon home so they never register
+    // /tmp/unitTest_* projects in ~/.cache/refact/daemon/projects.json.
+    withType<Test> {
+        val isolatedDaemonHome = layout.buildDirectory.dir("test-daemon-home").get().asFile
+        systemProperty("refact.daemon.dir", isolatedDaemonHome.absolutePath)
+        environment("REFACT_DAEMON_DIR", isolatedDaemonHome.absolutePath)
+        doFirst { isolatedDaemonHome.mkdirs() }
+    }
+
     // Bundled engine binaries must be loose files in the plugin directory (refact/bin/...),
     // not resources inside the jar, so RefactBinaryResolver can execute them directly.
     processResources {

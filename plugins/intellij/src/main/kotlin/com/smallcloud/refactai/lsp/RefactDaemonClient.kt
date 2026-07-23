@@ -17,6 +17,8 @@ import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 const val DEFAULT_REFACT_DAEMON_PORT = 8488
+const val REFACT_DAEMON_DIR_ENV = "REFACT_DAEMON_DIR"
+const val REFACT_DAEMON_DIR_PROPERTY = "refact.daemon.dir"
 private const val DAEMON_STARTUP_HEALTH_TIMEOUT_SECONDS = 30L
 private const val DAEMON_SHUTDOWN_TIMEOUT_SECONDS = 15L
 private const val DAEMON_CONNECT_TIMEOUT_MS = 2_000
@@ -198,10 +200,39 @@ internal fun daemonUpgradeWaitFinished(
     return oldEndpointStatus == null || oldEndpointStatus.pid != oldDaemon.pid
 }
 
-private data class DaemonEndpoint(
+internal data class DaemonEndpoint(
     val port: Int,
     val authToken: String? = null,
 )
+
+internal fun daemonDirOverridePath(): File? {
+    val fromProperty = System.getProperty(REFACT_DAEMON_DIR_PROPERTY)?.trim()?.takeIf { it.isNotEmpty() }
+    val fromEnv = System.getenv(REFACT_DAEMON_DIR_ENV)?.trim()?.takeIf { it.isNotEmpty() }
+    return (fromProperty ?: fromEnv)?.let { File(it) }
+}
+
+internal fun daemonDir(): File {
+    return daemonDirOverridePath() ?: File(System.getProperty("user.home"), ".cache/refact/daemon")
+}
+
+internal fun daemonJsonFile(): File = File(daemonDir(), "daemon.json")
+
+internal fun daemonEndpointCandidatesFor(
+    preferredPort: Int,
+    diskPort: Int?,
+    diskToken: String?,
+    isolatedDaemonDir: Boolean,
+): List<DaemonEndpoint> {
+    val endpoints = mutableListOf<DaemonEndpoint>()
+    val includePreferred = !isolatedDaemonDir || preferredPort != DEFAULT_REFACT_DAEMON_PORT
+    if (includePreferred) {
+        endpoints.add(DaemonEndpoint(preferredPort, if (diskPort == preferredPort) diskToken else null))
+    }
+    if (diskPort != null && (diskPort != preferredPort || !includePreferred)) {
+        endpoints.add(DaemonEndpoint(diskPort, diskToken))
+    }
+    return endpoints
+}
 
 private data class DaemonRequestTimeouts(
     val connectTimeoutMs: Int = DAEMON_CONNECT_TIMEOUT_MS,
@@ -375,13 +406,12 @@ class HttpRefactDaemonClient(
         val diskInfo = readDaemonInfoFromDisk()
         val diskPort = diskInfo?.port?.takeIf { it > 0 }
         val diskToken = diskInfo?.authToken?.trim()?.takeIf { it.isNotEmpty() }
-        val endpoints = mutableListOf(
-            DaemonEndpoint(preferredPort, if (diskPort == preferredPort) diskToken else null)
+        return daemonEndpointCandidatesFor(
+            preferredPort = preferredPort,
+            diskPort = diskPort,
+            diskToken = diskToken,
+            isolatedDaemonDir = daemonDirOverridePath() != null,
         )
-        if (diskPort != null && diskPort != preferredPort) {
-            endpoints.add(DaemonEndpoint(diskPort, diskToken))
-        }
-        return endpoints
     }
 
     private fun statusForEndpoint(endpoint: DaemonEndpoint, timeouts: DaemonRequestTimeouts): DaemonStatus {
@@ -468,7 +498,7 @@ class HttpRefactDaemonClient(
     }
 
     private fun readDaemonInfoFromDisk(): DaemonInfoWire? {
-        val path = File(System.getProperty("user.home"), ".cache/refact/daemon/daemon.json")
+        val path = daemonJsonFile()
         if (!path.isFile) return null
         return runCatching {
             gson.fromJson(path.readText(), DaemonInfoWire::class.java)
