@@ -482,7 +482,25 @@ fn daemon_gui_bootstrap_script(project_id: &str, candidates: &GuiPublicOriginCan
             try {
               const url = new URL(value.url);
               if (url.origin === origin && isApiPath(url.pathname)) {
-                return new Request(prefixedApiUrl(url), value);
+                if (value.method === "GET" || value.method === "HEAD" || value.body === null) {
+                  return new Request(prefixedApiUrl(url), value);
+                }
+                return value.clone().arrayBuffer().then(function (buf) {
+                  return new Request(prefixedApiUrl(url), {
+                    method: value.method,
+                    headers: value.headers,
+                    body: buf,
+                    mode: value.mode,
+                    credentials: value.credentials,
+                    cache: value.cache,
+                    redirect: value.redirect,
+                    referrer: value.referrer,
+                    referrerPolicy: value.referrerPolicy,
+                    integrity: value.integrity,
+                    keepalive: value.keepalive,
+                    signal: value.signal,
+                  });
+                });
               }
             } catch (_error) {}
           }
@@ -491,7 +509,13 @@ fn daemon_gui_bootstrap_script(project_id: &str, candidates: &GuiPublicOriginCan
         if (typeof window.fetch === "function") {
           const originalFetch = window.fetch.bind(window);
           window.fetch = function (input, init) {
-            return originalFetch(prefixDaemonProjectApi(input), init);
+            const p = prefixDaemonProjectApi(input);
+            if (p && typeof p.then === "function") {
+              return p.then(function (value) {
+                return originalFetch(value, init);
+              });
+            }
+            return originalFetch(p, init);
           };
         }
         if (typeof window.EventSource === "function") {
@@ -693,6 +717,11 @@ mod tests {
         assert!(injected.contains("const daemonProjectApiPrefix = \"/p/abc%22%3C%2Fscript%3E\";"));
         assert!(injected.contains("window.__REFACT_DAEMON_PROJECT_API_PREFIX__"));
         assert!(injected.contains("window.fetch = function"));
+        assert!(injected.contains("value.clone().arrayBuffer().then"));
+        assert!(injected.contains("body: buf"));
+        assert!(injected.contains("typeof p.then === \"function\""));
+        assert!(injected.contains("originalFetch(value, init)"));
+        assert!(injected.contains("originalFetch(p, init)"));
         assert!(injected.contains("window.EventSource = function"));
         assert!(injected.contains("http://127.0.0.1:8488/p/abc123"));
         assert!(!injected.contains("abc\"</script>"));
