@@ -116,6 +116,82 @@ describe("FilesPanel", () => {
     expect(
       within(file).getByTestId("tree-chevron-slot").querySelector("svg"),
     ).toBeNull();
+    expect(file.querySelector(".lucide-file-text")).not.toBeNull();
+  });
+
+  it("hides ignored entries by default and reveals them muted", async () => {
+    server.use(
+      http.get("*/v1/files/tree", ({ request }) => {
+        const path = new URL(request.url).searchParams.get("path") ?? "";
+        if (path === "") {
+          return HttpResponse.json(
+            treeResponse("", [
+              { name: "workspace", path: rootPath, kind: "dir", size: null },
+            ]),
+          );
+        }
+        return HttpResponse.json(
+          treeResponse(rootPath, [
+            {
+              name: "main.ts",
+              path: `${rootPath}/main.ts`,
+              kind: "file",
+              size: 10,
+              ignored: false,
+            },
+            {
+              name: "debug.log",
+              path: `${rootPath}/debug.log`,
+              kind: "file",
+              size: 20,
+              ignored: true,
+            },
+          ]),
+        );
+      }),
+    );
+    const { user } = render(<FilesPanel />);
+    await user.click(
+      await screen.findByRole("treeitem", { name: /workspace/i }),
+    );
+
+    expect(
+      await screen.findByRole("treeitem", { name: /main\.ts/i }),
+    ).toBeVisible();
+    expect(screen.queryByRole("treeitem", { name: /debug\.log/i })).toBeNull();
+
+    await user.click(screen.getByRole("switch", { name: "Show ignored" }));
+
+    expect(
+      await screen.findByRole("treeitem", { name: /debug\.log/i }),
+    ).toHaveAttribute("data-ignored", "true");
+  });
+
+  it("persists the ignored toggle per project", async () => {
+    server.use(rootHandler());
+    setProjectStorageNamespace("project-a");
+    const first = render(<FilesPanel />);
+    const firstToggle = screen.getByRole("switch", { name: "Show ignored" });
+    await first.user.click(firstToggle);
+    expect(firstToggle).toBeChecked();
+    first.unmount();
+
+    setProjectStorageNamespace("project-b");
+    const second = render(<FilesPanel />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("switch", { name: "Show ignored" }),
+      ).not.toBeChecked(),
+    );
+    second.unmount();
+
+    setProjectStorageNamespace("project-a");
+    render(<FilesPanel />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("switch", { name: "Show ignored" }),
+      ).toBeChecked(),
+    );
   });
 
   it("fetches an expanded directory once and reuses its cached children", async () => {

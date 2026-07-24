@@ -8,6 +8,7 @@ export type FilesTreeEntry = {
   path: string;
   kind: "dir" | "file";
   size: number | null;
+  ignored?: boolean;
 };
 
 export type FilesTreeResponse = {

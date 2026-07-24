@@ -2,7 +2,6 @@ import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
 import {
   ChevronDown,
   ChevronRight,
-  File,
   Folder,
   FolderOpen,
   RotateCw,
@@ -35,6 +34,7 @@ import {
   resetFileTree,
   selectExpandedDirectories,
   selectFilesPanelSelectedPath,
+  selectShowIgnored,
   selectTreePath,
   openFileInFilesPanel,
   toggleDirectory,
@@ -46,6 +46,7 @@ import {
   type TreeChildrenByPath,
   type VisibleTreeEntry,
 } from "./fileTreeModel";
+import { fileTypeIcon } from "./fileTypeIcon";
 import styles from "./FilesPanel.module.css";
 
 const VIRTUALIZE_THRESHOLD = 200;
@@ -96,13 +97,18 @@ const TreeRow = ({
   onActivate: (entry: VisibleTreeEntry) => void;
 }) => {
   const isDirectory = entry.kind === "dir";
-  const EntryIcon = isDirectory ? (expanded ? FolderOpen : Folder) : File;
+  const EntryIcon = isDirectory
+    ? expanded
+      ? FolderOpen
+      : Folder
+    : fileTypeIcon(entry.name);
 
   return (
     <button
       aria-expanded={isDirectory ? expanded : undefined}
       aria-selected={selected}
       className={styles.treeRow}
+      data-ignored={entry.ignored ? "true" : undefined}
       data-selected={selected ? "true" : undefined}
       onClick={() => onActivate(entry)}
       onMouseDown={(event) => event.preventDefault()}
@@ -143,11 +149,16 @@ export function FileTree() {
   const treeRef = useRef<HTMLDivElement>(null);
   const expandedDirectories = useAppSelector(selectExpandedDirectories);
   const selectedPath = useAppSelector(selectFilesPanelSelectedPath);
+  const showIgnored = useAppSelector(selectShowIgnored);
   const contextRoot = useAppSelector(selectFocusedChatWorkspaceRoot);
   const [loadedContextRoot, setLoadedContextRoot] = useState(contextRoot);
   const [childrenByPath, setChildrenByPath] = useState<TreeChildrenByPath>({});
-  const { data: root, error, isFetching, refetch } =
-    useGetFilesTreeQuery(contextRoot);
+  const {
+    data: root,
+    error,
+    isFetching,
+    refetch,
+  } = useGetFilesTreeQuery(contextRoot);
   const contextExpandedDirectories = useMemo(
     () =>
       contextRoot
@@ -164,7 +175,12 @@ export function FileTree() {
   const visibleEntries = useMemo(
     () =>
       loadedContextRoot === contextRoot
-        ? flattenVisibleTree(root?.entries ?? [], expandedSet, childrenByPath)
+        ? flattenVisibleTree(
+            root?.entries ?? [],
+            expandedSet,
+            childrenByPath,
+            showIgnored,
+          )
         : [],
     [
       childrenByPath,
@@ -172,6 +188,7 @@ export function FileTree() {
       expandedSet,
       loadedContextRoot,
       root?.entries,
+      showIgnored,
     ],
   );
 

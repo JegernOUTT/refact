@@ -1,6 +1,10 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
 import type { DiffChunk } from "../../../services/refact";
+import {
+  getProjectStorageNamespace,
+  isProjectStorageNamespaceTrusted,
+} from "../../../utils/chatUiPersistence";
 
 import { makeSurfaceKey } from "../surfaceKey";
 import type { WorkspaceState } from "../workspaceSlice";
@@ -24,6 +28,7 @@ export type LiveFileUpdate = {
 export type FilesPanelState = {
   expandedDirectories: string[];
   selectedPath: string | null;
+  showIgnored: boolean;
   viewerTarget: FileViewerTarget | null;
   viewerTargets: Record<string, FileViewerTarget | undefined>;
   liveUpdatesByPath: Record<string, LiveFileUpdate[] | undefined>;
@@ -32,6 +37,7 @@ export type FilesPanelState = {
 const initialState: FilesPanelState = {
   expandedDirectories: [],
   selectedPath: null,
+  showIgnored: false,
   viewerTarget: null,
   viewerTargets: {},
   liveUpdatesByPath: {},
@@ -44,6 +50,35 @@ const compareRevision = (left: string, right: string): number => {
     return leftValue === rightValue ? 0 : leftValue > rightValue ? 1 : -1;
   }
   return left.localeCompare(right);
+};
+
+const SHOW_IGNORED_STORAGE_KEY = "refact:files-panel:show-ignored:v1";
+
+const showIgnoredStorageKey = (): string | null => {
+  const namespace = getProjectStorageNamespace();
+  return isProjectStorageNamespaceTrusted() && namespace
+    ? `refact:project:${namespace}:${SHOW_IGNORED_STORAGE_KEY}`
+    : null;
+};
+
+export const loadPersistedShowIgnored = (): boolean => {
+  const key = showIgnoredStorageKey();
+  if (!key || typeof localStorage === "undefined") return false;
+  try {
+    return localStorage.getItem(key) === "true";
+  } catch {
+    return false;
+  }
+};
+
+const persistShowIgnored = (showIgnored: boolean): void => {
+  const key = showIgnoredStorageKey();
+  if (!key || typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(key, String(showIgnored));
+  } catch {
+    return;
+  }
 };
 
 export const filesPanelSlice = createSlice({
@@ -73,6 +108,12 @@ export const filesPanelSlice = createSlice({
     resetFileTree: (state) => {
       state.expandedDirectories = [];
       state.selectedPath = null;
+    },
+    hydrateShowIgnored: (state, action: PayloadAction<boolean>) => {
+      state.showIgnored = action.payload;
+    },
+    setShowIgnored: (state, action: PayloadAction<boolean>) => {
+      state.showIgnored = action.payload;
     },
     setViewerTarget: (
       state,
@@ -124,11 +165,20 @@ export const {
   enrichLiveFileUpdate,
   applyLiveFileUpdate,
   expandDirectory,
+  hydrateShowIgnored,
   resetFileTree,
   selectTreePath,
+  setShowIgnored,
   setViewerTarget,
   toggleDirectory,
 } = filesPanelSlice.actions;
+
+export const updateShowIgnored =
+  (showIgnored: boolean) =>
+  (dispatch: (action: ReturnType<typeof setShowIgnored>) => void) => {
+    dispatch(setShowIgnored(showIgnored));
+    persistShowIgnored(showIgnored);
+  };
 
 type FilesPanelDispatch = (
   action:
@@ -238,6 +288,9 @@ export const selectExpandedDirectories = (state: FilesPanelRootState) =>
 
 export const selectFilesPanelSelectedPath = (state: FilesPanelRootState) =>
   state.filesPanel.selectedPath;
+
+export const selectShowIgnored = (state: FilesPanelRootState) =>
+  state.filesPanel.showIgnored;
 
 export const selectFileViewerTarget = (state: FilesPanelRootState) =>
   state.filesPanel.viewerTarget;

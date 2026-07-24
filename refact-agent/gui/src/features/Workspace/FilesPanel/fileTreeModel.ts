@@ -10,11 +10,13 @@ export const flattenVisibleTree = (
   rootEntries: FilesTreeEntry[],
   expandedDirectories: ReadonlySet<string>,
   childrenByPath: TreeChildrenByPath,
+  showIgnored = false,
 ): VisibleTreeEntry[] => {
   const visible: VisibleTreeEntry[] = [];
 
   const visit = (entries: FilesTreeEntry[], depth: number) => {
     for (const entry of entries) {
+      if (entry.ignored && !showIgnored) continue;
       visible.push({ ...entry, depth });
       if (entry.kind === "dir" && expandedDirectories.has(entry.path)) {
         const children = childrenByPath[entry.path];

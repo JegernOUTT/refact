@@ -4,6 +4,7 @@ use std::time::UNIX_EPOCH;
 
 use axum::extract::{Query, State};
 use axum::Json;
+use git2::Repository;
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +34,8 @@ pub struct TreeEntry {
     path: String,
     kind: &'static str,
     size: Option<u64>,
+    #[serde(default)]
+    ignored: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -161,6 +164,7 @@ async fn workspace_root_entries(gcx: Arc<GlobalContext>) -> Result<Vec<TreeEntry
             path: canonical.to_string_lossy().to_string(),
             kind: "dir",
             size: None,
+            ignored: false,
         });
     }
     sort_entries(&mut entries);
@@ -171,6 +175,7 @@ async fn list_dir_core(
     directory: &Path,
     indexing: &IndexingEverywhere,
 ) -> Result<Vec<TreeEntry>, ScratchError> {
+    let repository = Repository::discover(directory).ok();
     let mut read_dir = tokio::fs::read_dir(directory).await.map_err(|error| {
         io_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -208,6 +213,16 @@ async fn list_dir_core(
         if blocklisted_entry(indexing, directory, &path, is_dir) {
             continue;
         }
+        let ignored = repository
+            .as_ref()
+            .and_then(|repository| repository.workdir().map(|workdir| (repository, workdir)))
+            .and_then(|(repository, workdir)| {
+                path.strip_prefix(workdir)
+                    .ok()
+                    .map(|path| (repository, path))
+            })
+            .and_then(|(repository, path)| repository.status_should_ignore(path).ok())
+            .unwrap_or(false);
         let size = if is_dir {
             None
         } else {
@@ -231,6 +246,7 @@ async fn list_dir_core(
             path: path.to_string_lossy().to_string(),
             kind: if is_dir { "dir" } else { "file" },
             size,
+            ignored,
         });
     }
     sort_entries(&mut entries);
@@ -525,6 +541,7 @@ mod tests {
         assert_eq!(response["entries"][0]["name"], "alpha");
         assert_eq!(response["entries"][0]["kind"], "dir");
         assert_eq!(response["entries"][0]["size"], Value::Null);
+        assert_eq!(response["entries"][0]["ignored"], false);
         assert_eq!(response["entries"][1]["name"], "Beta");
     }
 
@@ -566,6 +583,62 @@ mod tests {
         assert_eq!(response["entries"][2]["name"], "A.txt");
         assert!(response.to_string().contains("nested.txt") == false);
         assert_eq!(clamped_tree_limit(Some(MAX_ENTRIES + 1)), MAX_ENTRIES);
+    }
+
+    #[tokio::test]
+    async fn tree_marks_gitignored_entries() {
+        let workspace = tempfile::tempdir().unwrap();
+        tokio::fs::write(workspace.path().join(".gitignore"), "*.log\n")
+            .await
+            .unwrap();
+        tokio::fs::write(workspace.path().join("debug.log"), "noise")
+            .await
+            .unwrap();
+        tokio::fs::write(workspace.path().join("main.rs"), "fn main() {}")
+            .await
+            .unwrap();
+        git2::Repository::init(workspace.path()).unwrap();
+        let (_gcx, router) = test_router(&[workspace.path()]).await;
+
+        let (status, response) = get_json(
+            router,
+            query_uri(
+                "/v1/files/tree",
+                &[("path", workspace.path().to_string_lossy().to_string())],
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let entries = response["entries"].as_array().unwrap();
+        let ignored = entries
+            .iter()
+            .find(|entry| entry["name"] == "debug.log")
+            .unwrap();
+        let visible = entries
+            .iter()
+            .find(|entry| entry["name"] == "main.rs")
+            .unwrap();
+        assert_eq!(ignored["ignored"], true);
+        assert_eq!(visible["ignored"], false);
+    }
+
+    #[tokio::test]
+    async fn tree_rejects_path_outside_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let (_gcx, router) = test_router(&[workspace.path()]).await;
+
+        let (status, _) = get_json(
+            router,
+            query_uri(
+                "/v1/files/tree",
+                &[("path", outside.path().to_string_lossy().to_string())],
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
