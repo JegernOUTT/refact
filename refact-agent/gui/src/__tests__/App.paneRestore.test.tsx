@@ -340,8 +340,10 @@ describe("App workspace restore", () => {
         tabs: [chatA],
         activeTabId: chatA,
         groups: {},
+        panelsForced: undefined,
+        liveEditsByChat: undefined,
         dock: { open: true, width: 280, section: "files" },
-        drawer: { open: false, height: 280 },
+        drawer: { open: false, height: 220 },
       });
       expect(store.getState().chat.current_thread_id).toBe("chat-a");
     });
@@ -392,8 +394,10 @@ describe("App workspace restore", () => {
         tabs: [chatA],
         activeTabId: chatA,
         groups: {},
+        panelsForced: undefined,
+        liveEditsByChat: undefined,
         dock: { open: true, width: 280, section: "files" },
-        drawer: { open: false, height: 280 },
+        drawer: { open: false, height: 220 },
       });
       expect(store.getState().tasksUI.openTasks).toEqual([
         {
@@ -476,8 +480,10 @@ describe("App workspace restore", () => {
         tabs: [chatA],
         activeTabId: chatA,
         groups: {},
+        panelsForced: undefined,
+        liveEditsByChat: undefined,
         dock: { open: true, width: 280, section: "files" },
-        drawer: { open: false, height: 280 },
+        drawer: { open: false, height: 220 },
       });
     });
   });

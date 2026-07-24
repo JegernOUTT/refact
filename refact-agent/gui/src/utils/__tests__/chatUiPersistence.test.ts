@@ -319,8 +319,10 @@ describe("chatUiPersistence", () => {
       tabs: [chatSurface("chat-a")],
       activeTabId: chatSurface("chat-a"),
       groups: {},
+      panelsForced: undefined,
+      liveEditsByChat: undefined,
       dock: { open: true, width: 280, section: "files" },
-      drawer: { open: true, height: 280 },
+      drawer: { open: true, height: 220 },
     });
   });
 
@@ -348,8 +350,10 @@ describe("chatUiPersistence", () => {
       tabs: [chatSurface("chat-a")],
       activeTabId: chatSurface("chat-a"),
       groups: {},
+      panelsForced: undefined,
+      liveEditsByChat: undefined,
       dock: { open: true, width: 280, section: "files" },
-      drawer: { open: false, height: 280 },
+      drawer: { open: false, height: 220 },
     });
   });
 
@@ -392,7 +396,7 @@ describe("chatUiPersistence", () => {
       activeTabId: chatSurface("chat-b"),
       groups: {},
       dock: { open: true, width: 280, section: "files" },
-      drawer: { open: false, height: 280 },
+      drawer: { open: false, height: 220 },
     });
   });
 
@@ -419,7 +423,7 @@ describe("chatUiPersistence", () => {
       activeTabId: chatSurface("chat-b"),
       groups: {},
       dock: { open: true, width: 280, section: "files" },
-      drawer: { open: false, height: 280 },
+      drawer: { open: false, height: 220 },
     });
 
     localStorage.setItem(workspaceStorageKey(), "not json");
@@ -428,7 +432,7 @@ describe("chatUiPersistence", () => {
       activeTabId: chatSurface("chat-b"),
       groups: {},
       dock: { open: true, width: 280, section: "files" },
-      drawer: { open: false, height: 280 },
+      drawer: { open: false, height: 220 },
     });
   });
 
@@ -452,8 +456,10 @@ describe("chatUiPersistence", () => {
       tabs: [chatSurface("chat-a"), chatSurface("chat-b")],
       activeTabId: chatSurface("chat-a"),
       groups: {},
+      panelsForced: undefined,
+      liveEditsByChat: undefined,
       dock: { open: true, width: 280, section: "files" },
-      drawer: { open: false, height: 280 },
+      drawer: { open: false, height: 220 },
     });
   });
 
@@ -501,8 +507,10 @@ describe("chatUiPersistence", () => {
       tabs: [chatSurface("chat-a")],
       activeTabId: chatSurface("chat-a"),
       groups: {},
+      panelsForced: undefined,
+      liveEditsByChat: undefined,
       dock: { open: true, width: 280, section: "files" },
-      drawer: { open: false, height: 280 },
+      drawer: { open: false, height: 220 },
     });
   });
 
