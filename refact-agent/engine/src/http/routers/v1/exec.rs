@@ -36,6 +36,7 @@ pub struct ExecSpawnHttpRequest {
     pub argv: Option<Vec<String>>,
     pub cwd: Option<String>,
     pub env: Option<HashMap<String, String>>,
+    pub chat_id: Option<String>,
     #[serde(default = "default_true")]
     pub pty: bool,
     #[serde(default = "default_rows")]
@@ -67,6 +68,11 @@ pub struct ExecListHttpResponse {
     pub processes: Vec<ExecProcessHttpSnapshot>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct ExecAccessQuery {
+    pub chat_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ExecReadQuery {
     #[serde(default)]
@@ -74,12 +80,14 @@ pub struct ExecReadQuery {
     pub limit: Option<usize>,
     #[serde(default)]
     pub raw: bool,
+    pub chat_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ExecSubscribeQuery {
     #[serde(default)]
     pub since_seq: u64,
+    pub chat_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,11 +116,13 @@ pub struct ExecKillHttpResponse {
 pub struct ExecResizeRequest {
     pub rows: u16,
     pub cols: u16,
+    pub chat_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ExecStdinRequest {
     pub chars: String,
+    pub chat_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,6 +169,7 @@ async fn active_workspace(app: &AppState) -> Result<PathBuf, ScratchError> {
 async fn authorize_process(
     app: &AppState,
     process_id: &ExecProcessId,
+    chat_id: Option<&str>,
 ) -> Result<(ExecProcessSnapshot, PathBuf), ScratchError> {
     let workspace = active_workspace(app).await?;
     let snapshot = app
@@ -167,6 +178,15 @@ async fn authorize_process(
         .authorize_process_access(process_id, "", Some(&workspace))
         .await
         .map_err(process_access_error)?;
+    if snapshot.meta.owner.chat_id.is_some() {
+        if let Some(chat_id) = chat_id {
+            app.runtime
+                .exec_registry
+                .authorize_process_access(process_id, chat_id, None)
+                .await
+                .map_err(process_access_error)?;
+        }
+    }
     Ok((snapshot, workspace))
 }
 
@@ -301,7 +321,7 @@ pub async fn handle_v1_exec_spawn(
     let workspace = active_workspace(&app).await?;
     let cwd = resolve_cwd(&app, &workspace, request.cwd.as_deref()).await?;
     let owner = ExecOwnerMeta {
-        chat_id: None,
+        chat_id: request.chat_id,
         tool_call_id: None,
         service_name: request.service_name.clone(),
         workspace: Some(workspace),
@@ -331,12 +351,14 @@ pub async fn handle_v1_exec_spawn(
 
 pub async fn handle_v1_exec_list(
     State(app): State<AppState>,
+    Query(query): Query<ExecAccessQuery>,
 ) -> Result<Json<ExecListHttpResponse>, ScratchError> {
     let workspace = active_workspace(&app).await?;
     let snapshots = app
         .runtime
         .exec_registry
         .list(ExecProcessFilter {
+            chat_id: query.chat_id,
             workspace: Some(workspace),
             ..ExecProcessFilter::default()
         })
@@ -352,7 +374,7 @@ pub async fn handle_v1_exec_read(
     Query(query): Query<ExecReadQuery>,
 ) -> Result<Json<ExecReadHttpResponse>, ScratchError> {
     let process_id = ExecProcessId(process_id);
-    let (snapshot, _) = authorize_process(&app, &process_id).await?;
+    let (snapshot, _) = authorize_process(&app, &process_id, query.chat_id.as_deref()).await?;
     if query.raw && snapshot.meta.tty {
         let raw = app
             .runtime
@@ -392,9 +414,10 @@ pub async fn handle_v1_exec_read(
 pub async fn handle_v1_exec_kill(
     State(app): State<AppState>,
     Path(process_id): Path<String>,
+    Query(query): Query<ExecAccessQuery>,
 ) -> Result<Json<ExecKillHttpResponse>, ScratchError> {
     let process_id = ExecProcessId(process_id);
-    authorize_process(&app, &process_id).await?;
+    authorize_process(&app, &process_id, query.chat_id.as_deref()).await?;
     let snapshot = app
         .runtime
         .exec_registry
@@ -413,7 +436,7 @@ pub async fn handle_v1_exec_resize(
     Json(request): Json<ExecResizeRequest>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
     let process_id = ExecProcessId(process_id);
-    authorize_process(&app, &process_id).await?;
+    authorize_process(&app, &process_id, request.chat_id.as_deref()).await?;
     app.runtime
         .exec_registry
         .resize(&process_id, request.rows, request.cols)
@@ -428,7 +451,7 @@ pub async fn handle_v1_exec_stdin(
     Json(request): Json<ExecStdinRequest>,
 ) -> Result<Json<ExecStdinResponse>, ScratchError> {
     let process_id = ExecProcessId(process_id);
-    authorize_process(&app, &process_id).await?;
+    authorize_process(&app, &process_id, request.chat_id.as_deref()).await?;
     let result = app
         .runtime
         .exec_registry
@@ -457,7 +480,8 @@ pub async fn handle_v1_exec_subscribe(
     Query(query): Query<ExecSubscribeQuery>,
 ) -> Result<Response<Body>, ScratchError> {
     let process_id = ExecProcessId(process_id);
-    let (initial_snapshot, _) = authorize_process(&app, &process_id).await?;
+    let (initial_snapshot, _) =
+        authorize_process(&app, &process_id, query.chat_id.as_deref()).await?;
     if initial_snapshot.meta.tty {
         return Ok(subscribe_raw_tty_stream(
             app,
@@ -960,6 +984,107 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[serial_test::parallel(exec_http_env)]
+    async fn exec_http_spawn_and_list_are_optionally_chat_scoped() {
+        let (_temp, app) = test_app().await;
+        let router = make_refact_http_server(app.clone());
+        let (status, chat_spawned) = json_response(
+            router.clone(),
+            post_json(
+                "/v1/exec/spawn",
+                json!({ "command": "sleep 30", "pty": false, "chat_id": "chat-a" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let chat_process_id = chat_spawned["process_id"].as_str().unwrap();
+        let chat_snapshot = app
+            .runtime
+            .exec_registry
+            .get(&crate::exec::ExecProcessId(chat_process_id.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(chat_snapshot.meta.owner.chat_id.as_deref(), Some("chat-a"));
+
+        let (status, legacy_spawned) = json_response(
+            router.clone(),
+            post_json(
+                "/v1/exec/spawn",
+                json!({ "command": "sleep 30", "pty": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let legacy_process_id = legacy_spawned["process_id"].as_str().unwrap();
+        let legacy_snapshot = app
+            .runtime
+            .exec_registry
+            .get(&crate::exec::ExecProcessId(legacy_process_id.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(legacy_snapshot.meta.owner.chat_id, None);
+
+        let (status, chat_list) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri("/v1/exec/list?chat_id=chat-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let chat_processes = chat_list["processes"].as_array().unwrap();
+        assert!(chat_processes
+            .iter()
+            .any(|process| process["process_id"] == chat_process_id));
+        assert!(!chat_processes
+            .iter()
+            .any(|process| process["process_id"] == legacy_process_id));
+
+        let (status, other_list) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri("/v1/exec/list?chat_id=chat-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!other_list["processes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|process| process["process_id"] == chat_process_id));
+
+        let (status, workspace_list) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri("/v1/exec/list")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let workspace_processes = workspace_list["processes"].as_array().unwrap();
+        assert!(workspace_processes
+            .iter()
+            .any(|process| process["process_id"] == chat_process_id));
+        assert!(workspace_processes
+            .iter()
+            .any(|process| process["process_id"] == legacy_process_id));
+
+        for process_id in [chat_process_id, legacy_process_id] {
+            let (status, _) = json_response(
+                router.clone(),
+                post_json(&format!("/v1/exec/{process_id}/kill"), json!({})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
     async fn write_stdin_to_running_tty_process_succeeds() {
         let (_temp, app_state) = test_app().await;
         let router = make_refact_http_server(app_state.clone());
@@ -1042,6 +1167,189 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn process_access_honors_chat_without_weakening_workspace_scope() {
+        let (temp, app) = test_app().await;
+        let owned = app
+            .runtime
+            .exec_registry
+            .register(
+                crate::exec::ExecProcessMeta::new(
+                    crate::exec::ExecMode::Background,
+                    "owned".to_string(),
+                )
+                .with_chat_id("chat-a")
+                .with_workspace(temp.path().to_path_buf()),
+                1024,
+            )
+            .await;
+        let legacy = app
+            .runtime
+            .exec_registry
+            .register(
+                crate::exec::ExecProcessMeta::new(
+                    crate::exec::ExecMode::Background,
+                    "legacy".to_string(),
+                )
+                .with_workspace(temp.path().to_path_buf()),
+                1024,
+            )
+            .await;
+        let foreign = tempfile::tempdir().unwrap();
+        let foreign_owned = app
+            .runtime
+            .exec_registry
+            .register(
+                crate::exec::ExecProcessMeta::new(
+                    crate::exec::ExecMode::Background,
+                    "foreign".to_string(),
+                )
+                .with_chat_id("chat-a")
+                .with_workspace(foreign.path().to_path_buf()),
+                1024,
+            )
+            .await;
+        let router = make_refact_http_server(app);
+
+        for uri in [
+            format!(
+                "/v1/exec/{}/read?chat_id=chat-a",
+                owned.meta.process_id.as_str()
+            ),
+            format!("/v1/exec/{}/read", owned.meta.process_id.as_str()),
+            format!(
+                "/v1/exec/{}/read?chat_id=chat-b",
+                legacy.meta.process_id.as_str()
+            ),
+        ] {
+            let (status, _) = json_response(
+                router.clone(),
+                Request::builder().uri(uri).body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+
+        for uri in [
+            format!(
+                "/v1/exec/{}/read?chat_id=chat-b",
+                owned.meta.process_id.as_str()
+            ),
+            format!(
+                "/v1/exec/{}/read?chat_id=chat-a",
+                foreign_owned.meta.process_id.as_str()
+            ),
+        ] {
+            let (status, _) = json_response(
+                router.clone(),
+                Request::builder().uri(uri).body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
+    async fn chat_scoped_process_routes_honor_query_and_body_chat_ids() {
+        let (_temp, app) = test_app().await;
+        let router = make_refact_http_server(app);
+        let (status, spawned) = json_response(
+            router.clone(),
+            post_json(
+                "/v1/exec/spawn",
+                json!({
+                    "command": "read line",
+                    "pty": true,
+                    "chat_id": "chat-a"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let process_id = spawned["process_id"].as_str().unwrap();
+
+        let (status, _) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/v1/exec/{process_id}/read?chat_id=chat-a&since_seq=0"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) = json_response(
+            router.clone(),
+            post_json(
+                &format!("/v1/exec/{process_id}/resize"),
+                json!({ "rows": 40, "cols": 120, "chat_id": "chat-a" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) = json_response(
+            router.clone(),
+            post_json(
+                &format!("/v1/exec/{process_id}/stdin"),
+                json!({ "chars": "hello", "chat_id": "chat-a" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        for request in [
+            Request::builder()
+                .uri(format!(
+                    "/v1/exec/{process_id}/read?chat_id=chat-b&since_seq=0"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            post_json(
+                &format!("/v1/exec/{process_id}/resize"),
+                json!({ "rows": 40, "cols": 120, "chat_id": "chat-b" }),
+            ),
+            post_json(
+                &format!("/v1/exec/{process_id}/stdin"),
+                json!({ "chars": "nope", "chat_id": "chat-b" }),
+            ),
+            post_json(
+                &format!("/v1/exec/{process_id}/kill?chat_id=chat-b"),
+                json!({}),
+            ),
+        ] {
+            let (status, _) = json_response(router.clone(), request).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/exec/{process_id}/subscribe?chat_id=chat-b"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let (status, killed) = json_response(
+            router,
+            post_json(
+                &format!("/v1/exec/{process_id}/kill?chat_id=chat-a"),
+                json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(killed["status"], "killed");
     }
 
     #[cfg(unix)]
