@@ -28,6 +28,12 @@ import {
   registerVisibleChatMount,
   unregisterVisibleChatMount,
 } from "../../features/Connection";
+import { selectCapabilities } from "../../features/Config/configSlice";
+import { TerminalPanel } from "../../features/Workspace/TerminalPanel";
+import {
+  selectPanelsForced,
+  selectWorkspaceDock,
+} from "../../features/Workspace/workspaceSlice";
 
 export type ChatProps = {
   host: Config["host"];
@@ -59,6 +65,11 @@ export const Chat: React.FC<ChatProps> = ({
   const browserOversizeInfo = useAppSelector((state) =>
     selectBrowserContextOversize(state, chatId),
   );
+  const capabilities = useAppSelector(selectCapabilities);
+  const panelsForced = useAppSelector(selectPanelsForced);
+  const workspaceDock = useAppSelector(selectWorkspaceDock);
+  const showTerminalWorkbench =
+    (capabilities.terminalPanel || panelsForced) && workspaceDock.open;
 
   const { submit, abort, retryFromIndex } = useChatActions(chatId);
 
@@ -184,6 +195,11 @@ export const Chat: React.FC<ChatProps> = ({
           <Container>
             <div className={styles.dockColumn}>
               {!isBuddyChat && <BuddyChatCompanion chatId={chatId} />}
+              {showTerminalWorkbench ? (
+                <div className={styles.terminalWorkbench}>
+                  <TerminalPanel chatId={chatId} />
+                </div>
+              ) : null}
               <div className={styles.dockGroup}>
                 <TaskProgressWidget />
                 <ChatForm

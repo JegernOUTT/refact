@@ -1,11 +1,12 @@
 import "@xterm/xterm/css/xterm.css";
 
-import { Plus, SquareTerminal, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Plus, SquareTerminal, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   Button,
   EmptyState,
+  Icon,
   IconButton,
   StatusDot,
 } from "../../../components/ui";
@@ -18,18 +19,17 @@ import {
   type ExecStatus,
 } from "../../../services/refact/exec";
 import { TerminalSession } from "./TerminalSession";
-import {
-  selectFocusedChatWorkspaceRoot,
-  selectFocusedWorkspaceChatId,
-} from "../workspaceSlice";
+import { selectChatWorkspaceRoot } from "../workspaceSlice";
 import {
   activeSessionChanged,
   selectActiveTerminalProcessId,
   selectTerminalSessions,
+  selectTerminalWorkbenchOpen,
   sessionAdded,
   sessionRemoved,
   sessionsReattached,
   sessionStatusChanged,
+  setTerminalWorkbenchOpen,
 } from "./terminalSlice";
 import styles from "./TerminalPanel.module.css";
 
@@ -56,16 +56,20 @@ function statusDot(status: ExecStatus): "running" | "error" | "idle" {
   return "idle";
 }
 
-export function TerminalPanel() {
+export function TerminalPanel({ chatId }: { chatId: string }) {
   const dispatch = useAppDispatch();
   const config = useConfig();
-  const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
-  const workspaceRoot = useAppSelector(selectFocusedChatWorkspaceRoot);
+  const workspaceRoot = useAppSelector((state) =>
+    selectChatWorkspaceRoot(state, chatId),
+  );
   const sessions = useAppSelector((state) =>
-    selectTerminalSessions(state, focusedChatId),
+    selectTerminalSessions(state, chatId),
   );
   const activeProcessId = useAppSelector((state) =>
-    selectActiveTerminalProcessId(state, focusedChatId),
+    selectActiveTerminalProcessId(state, chatId),
+  );
+  const workbenchOpen = useAppSelector((state) =>
+    selectTerminalWorkbenchOpen(state, chatId),
   );
   const [loading, setLoading] = useState(true);
   const [spawning, setSpawning] = useState(false);
@@ -95,17 +99,13 @@ export function TerminalPanel() {
   useEffect(() => {
     setLoading(true);
     setError(null);
-    if (!focusedChatId) {
-      setLoading(false);
-      return;
-    }
     let cancelled = false;
-    void listExec(connection, apiKey, focusedChatId)
+    void listExec(connection, apiKey, chatId)
       .then((response) => {
         if (cancelled) return;
         dispatch(
           sessionsReattached({
-            chatId: focusedChatId,
+            chatId,
             sessions: response.processes
               .filter((process) => process.tty && process.status === "running")
               .map((process) => ({
@@ -130,17 +130,17 @@ export function TerminalPanel() {
     return () => {
       cancelled = true;
     };
-  }, [apiKey, connection, dispatch, focusedChatId]);
+  }, [apiKey, chatId, connection, dispatch]);
 
   const handleNewSession = useCallback(async () => {
-    if (!focusedChatId) return;
+    dispatch(setTerminalWorkbenchOpen({ chatId, open: true }));
     setSpawning(true);
     setError(null);
     try {
       const fitted = lastFittedRef.current;
       const result = await spawnExec(
         {
-          chat_id: focusedChatId,
+          chat_id: chatId,
           ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
           pty: true,
           rows: fitted?.rows ?? DEFAULT_PTY_ROWS,
@@ -151,7 +151,7 @@ export function TerminalPanel() {
       );
       dispatch(
         sessionAdded({
-          chatId: focusedChatId,
+          chatId,
           session: {
             process_id: result.process_id,
             title: terminalTitle(result.process_id, result.command_preview),
@@ -168,7 +168,7 @@ export function TerminalPanel() {
     } finally {
       setSpawning(false);
     }
-  }, [apiKey, connection, dispatch, focusedChatId, workspaceRoot]);
+  }, [apiKey, chatId, connection, dispatch, workspaceRoot]);
 
   const handleCloseSession = useCallback(
     async (processId: string, status: ExecStatus) => {
@@ -182,25 +182,19 @@ export function TerminalPanel() {
       setError(null);
       try {
         if (running) await killExec(processId, connection, apiKey);
-        if (focusedChatId) {
-          dispatch(sessionRemoved({ chatId: focusedChatId, processId }));
-        }
+        dispatch(sessionRemoved({ chatId, processId }));
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     },
-    [apiKey, connection, dispatch, focusedChatId],
+    [apiKey, chatId, connection, dispatch],
   );
 
   const handleStatusChange = useCallback(
     (processId: string, status: ExecStatus) => {
-      if (focusedChatId) {
-        dispatch(
-          sessionStatusChanged({ chatId: focusedChatId, processId, status }),
-        );
-      }
+      dispatch(sessionStatusChanged({ chatId, processId, status }));
     },
-    [dispatch, focusedChatId],
+    [chatId, dispatch],
   );
 
   const handleSessionResize = useCallback(
@@ -210,23 +204,17 @@ export function TerminalPanel() {
     [],
   );
 
-  if (disabled) {
-    return (
-      <div className={styles.fullState}>
-        <EmptyState
-          icon={SquareTerminal}
-          title="Browser terminal disabled"
-          description="Terminal access is disabled by the daemon or REFACT_DISABLE_EXEC_HTTP policy. Enable exec HTTP access and try again."
-          variant="full"
-          action={<Button onClick={() => setDisabled(false)}>Try again</Button>}
-        />
-      </div>
-    );
-  }
-
   return (
-    <section className={styles.panel} aria-label="Terminal panel">
+    <section
+      className={styles.panel}
+      aria-label={`Terminal workbench for ${chatId}`}
+      data-open={workbenchOpen}
+    >
       <header className={styles.header}>
+        <div className={styles.title}>
+          <Icon icon={SquareTerminal} size="sm" tone="muted" />
+          <span>Terminal</span>
+        </div>
         <div
           className={styles.tabs}
           role="tablist"
@@ -245,10 +233,9 @@ export function TerminalPanel() {
                   aria-selected={active}
                   className={styles.tabSelect}
                   onClick={() =>
-                    focusedChatId &&
                     dispatch(
                       activeSessionChanged({
-                        chatId: focusedChatId,
+                        chatId,
                         processId: session.process_id,
                       }),
                     )
@@ -277,63 +264,90 @@ export function TerminalPanel() {
           size="sm"
           variant="plain"
           loading={spawning}
-          disabled={!focusedChatId}
           onClick={() => void handleNewSession()}
+        />
+        <IconButton
+          icon={workbenchOpen ? ChevronDown : ChevronUp}
+          aria-label={
+            workbenchOpen
+              ? "Collapse terminal workbench"
+              : "Expand terminal workbench"
+          }
+          size="sm"
+          variant="plain"
+          onClick={() =>
+            dispatch(setTerminalWorkbenchOpen({ chatId, open: !workbenchOpen }))
+          }
         />
       </header>
 
-      <div className={styles.body}>
-        {sessions.map((session) => (
-          <div
-            key={session.process_id}
-            className={
-              session.process_id === activeProcessId
-                ? styles.sessionActive
-                : styles.sessionHidden
-            }
-            aria-hidden={session.process_id !== activeProcessId}
-          >
-            <TerminalSession
-              processId={session.process_id}
-              apiKey={apiKey}
-              onStatusChange={handleStatusChange}
-              onResize={handleSessionResize}
-            />
-          </div>
-        ))}
-        {!loading && sessions.length === 0 ? (
-          <EmptyState
-            icon={SquareTerminal}
-            title={focusedChatId ? "No terminal sessions" : "No focused chat"}
-            description={
-              focusedChatId
-                ? "Start an interactive shell in the active workspace."
-                : "Focus a chat to view its terminal sessions."
-            }
-            variant="full"
-            action={
-              focusedChatId ? (
-                <Button
-                  leftIcon={Plus}
-                  loading={spawning}
-                  onClick={() => void handleNewSession()}
+      <div className="rf-expand-grid" data-open={workbenchOpen}>
+        <div
+          className={styles.body}
+          hidden={!workbenchOpen}
+          aria-hidden={!workbenchOpen}
+        >
+          {disabled ? (
+            <div className={styles.fullState}>
+              <EmptyState
+                icon={SquareTerminal}
+                title="Browser terminal disabled"
+                description="Terminal access is disabled by the daemon or REFACT_DISABLE_EXEC_HTTP policy. Enable exec HTTP access and try again."
+                variant="full"
+                action={
+                  <Button onClick={() => setDisabled(false)}>Try again</Button>
+                }
+              />
+            </div>
+          ) : (
+            <>
+              {sessions.map((session) => (
+                <div
+                  key={session.process_id}
+                  className={
+                    session.process_id === activeProcessId
+                      ? styles.sessionActive
+                      : styles.sessionHidden
+                  }
+                  aria-hidden={session.process_id !== activeProcessId}
                 >
-                  New terminal
-                </Button>
-              ) : undefined
-            }
-          />
-        ) : null}
-        {loading ? (
-          <div className={styles.loading}>Finding terminal sessions…</div>
-        ) : null}
-      </div>
-
-      {error ? (
-        <div className={styles.panelError} role="alert">
-          {error}
+                  <TerminalSession
+                    processId={session.process_id}
+                    apiKey={apiKey}
+                    onStatusChange={handleStatusChange}
+                    onResize={handleSessionResize}
+                  />
+                </div>
+              ))}
+              {!loading && sessions.length === 0 ? (
+                <EmptyState
+                  icon={SquareTerminal}
+                  title="No terminal sessions"
+                  description="Start an interactive shell in this chat's workspace."
+                  variant="full"
+                  action={
+                    <Button
+                      leftIcon={Plus}
+                      loading={spawning}
+                      onClick={() => void handleNewSession()}
+                    >
+                      New terminal
+                    </Button>
+                  }
+                />
+              ) : null}
+              {loading ? (
+                <div className={styles.loading}>Finding terminal sessions…</div>
+              ) : null}
+              {error ? (
+                <div className={styles.panelError} role="alert">
+                  {error}
+                </div>
+              ) : null}
+            </>
+          )}
         </div>
-      ) : null}
+      </div>
     </section>
   );
 }

@@ -74,7 +74,7 @@ describe("TerminalPanel spawn dimensions", () => {
       }),
     );
 
-    const { user, store } = render(<TerminalPanel />, {
+    const { user, store } = render(<TerminalPanel chatId="chat-a" />, {
       preloadedState: {
         ...CONFIG_STATE,
         current_project: { name: "workspace", workspaceRoots: ["/project"] },

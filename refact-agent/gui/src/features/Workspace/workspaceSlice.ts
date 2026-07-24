@@ -1652,6 +1652,16 @@ export const selectFocusedChatWorkspaceRoot = createSelector(
   },
 );
 
+export const selectChatWorkspaceRoot = (
+  state: FocusedChatWorkspaceRootState,
+  chatId: string,
+): string => {
+  const worktreeRoot = state.chat.threads[chatId]?.thread.worktree?.root;
+  if (worktreeRoot) return worktreeRoot;
+  const workspaceRoots = selectConfiguredWorkspaceRoots(state);
+  return workspaceRoots.length > 0 ? workspaceRoots[0] : "";
+};
+
 export const selectFocusedChatWorkspaceRoots = createSelector(
   [selectFocusedChatWorktreeRoot, selectConfiguredWorkspaceRoots],
   (worktreeRoot, workspaceRoots): string[] =>

@@ -4,11 +4,16 @@ import { fireEvent, renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { setUpStore } from "../../app/store";
+import { createChatWithId } from "../Chat/Thread";
 import { updateConfig } from "../Config/configSlice";
+import { openTab } from "./workspaceSlice";
+import { makeSurfaceKey } from "./surfaceKey";
 import { useWorkspaceShortcuts } from "./useWorkspaceShortcuts";
 
 function renderShortcuts() {
   const store = setUpStore();
+  store.dispatch(createChatWithId({ id: "chat-a" }));
+  store.dispatch(openTab(makeSurfaceKey("chat", "chat-a")));
   const wrapper = ({ children }: { children: ReactNode }) => (
     <Provider store={store}>{children}</Provider>
   );
@@ -27,7 +32,7 @@ describe("useWorkspaceShortcuts", () => {
     expect(store.getState().workspace.dock?.open).toBe(true);
 
     fireEvent.keyDown(window, { key: "j", ctrlKey: true });
-    expect(store.getState().workspace.drawer?.open).toBe(true);
+    expect(store.getState().terminal.workbenchOpenByChat["chat-a"]).toBe(true);
 
     fireEvent.keyDown(window, { key: "2", ctrlKey: true });
     expect(store.getState().workspace.dock).toMatchObject({
@@ -75,7 +80,9 @@ describe("useWorkspaceShortcuts", () => {
       open: true,
       section: "files",
     });
-    expect(store.getState().workspace.drawer?.open).toBe(false);
+    expect(
+      store.getState().terminal.workbenchOpenByChat["chat-a"],
+    ).toBeUndefined();
 
     input.remove();
     editable.remove();
@@ -95,6 +102,8 @@ describe("useWorkspaceShortcuts", () => {
       open: true,
       section: "files",
     });
-    expect(store.getState().workspace.drawer?.open).toBe(false);
+    expect(
+      store.getState().terminal.workbenchOpenByChat["chat-a"],
+    ).toBeUndefined();
   });
 });

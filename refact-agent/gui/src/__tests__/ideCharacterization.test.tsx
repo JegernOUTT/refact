@@ -267,7 +267,10 @@ describe("IDE characterization: zero new chrome", () => {
       expect(
         await screen.findByLabelText("Workspace dock"),
       ).toBeInTheDocument();
-      expect(screen.getByLabelText("Terminal drawer")).toBeInTheDocument();
+      expect(screen.queryByLabelText("Terminal drawer")).toBeNull();
+      expect(
+        screen.getByLabelText("Terminal workbench for chat-a"),
+      ).toBeInTheDocument();
       expect(screen.getByRole("radio", { name: "Files" })).toBeInTheDocument();
       expect(screen.getByRole("radio", { name: "Git" })).toBeInTheDocument();
       expect(screen.getByText("Terminal")).toBeInTheDocument();

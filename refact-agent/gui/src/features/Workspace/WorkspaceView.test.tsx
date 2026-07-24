@@ -17,7 +17,6 @@ import {
   openTab,
   setPanelsForced,
   setActiveTab,
-  setDockOpen,
   splitTab,
 } from "./workspaceSlice";
 import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
@@ -98,19 +97,28 @@ function expectSurface(key: SurfaceKey) {
 }
 
 describe("WorkspaceView", () => {
-  it("renders the terminal drawer for capable web hosts and omits it otherwise", () => {
+  it("never renders the legacy global terminal drawer", () => {
     const webStore = createWorkspaceStore();
     const webView = renderWorkspaceView(webStore);
-    expect(screen.getByLabelText("Terminal drawer")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Terminal drawer")).not.toBeInTheDocument();
+    const workbench = screen.getByLabelText("Terminal workbench for chat-a");
+    const composer = screen.getByTestId("chat-form-textarea");
+    expect(
+      workbench.compareDocumentPosition(composer) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     webView.unmount();
 
     const ideStore = createWorkspaceStore();
     ideStore.dispatch(updateConfig({ host: "vscode" }));
     renderWorkspaceView(ideStore);
     expect(screen.queryByLabelText("Terminal drawer")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Terminal workbench for chat-a"),
+    ).not.toBeInTheDocument();
   });
 
-  it("renders the dock and terminal drawer for an opted-in IDE host", async () => {
+  it("renders only the dock for an opted-in IDE host", async () => {
     const store = createWorkspaceStore();
     store.dispatch(updateConfig({ host: "vscode" }));
     renderWorkspaceView(store);
@@ -121,35 +129,19 @@ describe("WorkspaceView", () => {
     store.dispatch(setPanelsForced(true));
 
     expect(await screen.findByLabelText("Workspace dock")).toBeInTheDocument();
-    expect(screen.getByLabelText("Terminal drawer")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Terminal drawer")).not.toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Terminal workbench for chat-a"),
+    ).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Files" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Git" })).toBeInTheDocument();
-  });
-
-  it("hides the drawer strip when workspace panels are fully collapsed", async () => {
-    const store = createWorkspaceStore();
-    renderWorkspaceView(store);
-
-    expect(screen.getByLabelText("Terminal drawer")).toBeInTheDocument();
-
-    store.dispatch(setDockOpen(false));
-
-    await waitFor(() => {
-      expect(
-        screen.queryByLabelText("Terminal drawer"),
-      ).not.toBeInTheDocument();
-    });
-
-    store.dispatch(setDockOpen(true));
-
-    expect(await screen.findByLabelText("Terminal drawer")).toBeInTheDocument();
   });
 
   it("renders an unsplit surface without pane chrome", () => {
     renderWorkspaceView(createWorkspaceStore());
 
     expectSurface(chat("chat-a"));
-    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Terminal sessions")).toBeInTheDocument();
     expect(screen.queryByLabelText("Workspace pane controls")).toBeNull();
     expect(screen.queryByRole("button", { name: "Close Pane" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Split Right" })).toBeNull();

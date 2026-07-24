@@ -6,8 +6,9 @@ import { render } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { createChatWithId } from "../../Chat/Thread";
 import { makeSurfaceKey } from "../surfaceKey";
-import { openTab, setActiveTab } from "../workspaceSlice";
+import { openTab } from "../workspaceSlice";
 import { TerminalPanel } from "./TerminalPanel";
+import { setTerminalWorkbenchOpen } from "./terminalSlice";
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -42,8 +43,8 @@ const CONFIG_STATE = {
   },
 };
 
-function renderTerminalPanel() {
-  const view = render(<TerminalPanel />, {
+function renderTerminalPanel(chatId = "chat-a") {
+  const view = render(<TerminalPanel chatId={chatId} />, {
     preloadedState: {
       ...CONFIG_STATE,
       current_project: {
@@ -84,6 +85,13 @@ function addChat(view: ReturnType<typeof renderTerminalPanel>, id: string) {
     }),
   );
   view.store.dispatch(openTab(makeSurfaceKey("chat", id)));
+}
+
+function openWorkbench(
+  view: ReturnType<typeof renderTerminalPanel>,
+  chatId = "chat-a",
+) {
+  view.store.dispatch(setTerminalWorkbenchOpen({ chatId, open: true }));
 }
 
 describe("TerminalPanel", () => {
@@ -131,7 +139,8 @@ describe("TerminalPanel", () => {
       ),
     );
 
-    renderTerminalPanel();
+    const view = renderTerminalPanel();
+    openWorkbench(view);
 
     expect(
       await screen.findByRole("tab", { name: /\/bin\/zsh · reattach/i }),
@@ -161,7 +170,9 @@ describe("TerminalPanel", () => {
       http.post("*/v1/exec/:processId/resize", () => HttpResponse.json({})),
     );
 
-    const { container, user } = renderTerminalPanel();
+    const view = renderTerminalPanel();
+    openWorkbench(view);
+    const { container, user } = view;
     await screen.findByRole("tab", { name: /\/bin\/zsh · first/i });
     const first = container.querySelector(
       '[data-terminal-process-id="first-123456"]',
@@ -181,7 +192,7 @@ describe("TerminalPanel", () => {
     ).toBe(second);
   });
 
-  test("switching focused chats swaps terminal tabs and reattaches by chat", async () => {
+  test("keeps two explicit chat workbenches isolated", async () => {
     const listChatIds: (string | null)[] = [];
     server.use(
       http.get("*/v1/exec/list", ({ request }) => {
@@ -208,25 +219,57 @@ describe("TerminalPanel", () => {
       http.post("*/v1/exec/:processId/resize", () => HttpResponse.json({})),
     );
 
-    const view = renderTerminalPanel();
+    const view = renderTerminalPanel("chat-a");
     addChat(view, "chat-b");
+    view.rerender(
+      <>
+        <TerminalPanel chatId="chat-a" />
+        <TerminalPanel chatId="chat-b" />
+      </>,
+    );
+    openWorkbench(view, "chat-a");
+    openWorkbench(view, "chat-b");
 
     expect(
       await screen.findByRole("tab", { name: /chat-b · chat-b-p/i }),
     ).toBeVisible();
     expect(
-      screen.queryByRole("tab", { name: /chat-a · chat-a-p/i }),
-    ).toBeNull();
-
-    view.store.dispatch(setActiveTab(makeSurfaceKey("chat", "chat-a")));
-
-    expect(
       await screen.findByRole("tab", { name: /chat-a · chat-a-p/i }),
     ).toBeVisible();
-    expect(
-      screen.queryByRole("tab", { name: /chat-b · chat-b-p/i }),
-    ).toBeNull();
+    expect(screen.getAllByLabelText("Terminal sessions")).toHaveLength(2);
     expect(listChatIds).toEqual(expect.arrayContaining(["chat-a", "chat-b"]));
+  });
+
+  test("keeps the collapsed body out of the accessibility tree", async () => {
+    server.use(
+      http.get("*/v1/exec/list", () => HttpResponse.json({ processes: [] })),
+    );
+
+    const { user } = renderTerminalPanel();
+
+    expect(
+      screen.getByRole("button", { name: "Expand terminal workbench" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "No terminal sessions" }),
+    ).toBeNull();
+
+    await user.click(
+      screen.getByRole("button", { name: "Expand terminal workbench" }),
+    );
+
+    expect(await screen.findByText("No terminal sessions")).toBeVisible();
+
+    await user.click(
+      screen.getByRole("button", { name: "Collapse terminal workbench" }),
+    );
+
+    expect(
+      screen.queryByRole("heading", { name: "No terminal sessions" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Expand terminal workbench" }),
+    ).toBeVisible();
   });
 
   test("spawns the backend-selected shell and kills it when closed", async () => {

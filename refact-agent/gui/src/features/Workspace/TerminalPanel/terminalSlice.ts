@@ -11,11 +11,13 @@ export type TerminalSessionMetadata = {
 export type TerminalState = {
   sessionsByChat: Record<string, TerminalSessionMetadata[] | undefined>;
   activeProcessIdByChat: Record<string, string | null | undefined>;
+  workbenchOpenByChat: Record<string, boolean | undefined>;
 };
 
 const initialState: TerminalState = {
   sessionsByChat: {},
   activeProcessIdByChat: {},
+  workbenchOpenByChat: {},
 };
 
 type ChatSessionPayload = {
@@ -106,6 +108,21 @@ export const terminalSlice = createSlice({
           null;
       }
     },
+    setTerminalWorkbenchOpen: (
+      state,
+      action: PayloadAction<{ chatId: string; open: boolean }>,
+    ) => {
+      state.workbenchOpenByChat[action.payload.chatId] = action.payload.open;
+    },
+    toggleTerminalWorkbench: (
+      state,
+      action: PayloadAction<{ chatId: string }>,
+    ) => {
+      const { chatId } = action.payload;
+      state.workbenchOpenByChat[chatId] = !(
+        state.workbenchOpenByChat[chatId] ?? false
+      );
+    },
   },
 });
 
@@ -115,6 +132,8 @@ export const {
   sessionRemoved,
   sessionsReattached,
   sessionStatusChanged,
+  setTerminalWorkbenchOpen,
+  toggleTerminalWorkbench,
 } = terminalSlice.actions;
 
 type TerminalRootState = {
@@ -135,5 +154,10 @@ export const selectActiveTerminalProcessId = (
   state: TerminalRootState,
   chatId: string | null,
 ) => (chatId ? state.terminal.activeProcessIdByChat[chatId] ?? null : null);
+
+export const selectTerminalWorkbenchOpen = (
+  state: TerminalRootState,
+  chatId: string | null,
+) => (chatId ? state.terminal.workbenchOpenByChat[chatId] ?? false : false);
 
 export default terminalSlice.reducer;

@@ -40,6 +40,16 @@
   position: relative;
 }
 
+.terminalWorkbench {
+  margin-bottom: var(--rf-space-2);
+  overflow: hidden;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
 /* Single glass block shared by the task progress widget and the composer. */
 .dockGroup {
   overflow: hidden;
@@ -57,6 +67,7 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .dockPanel,
+  .terminalWorkbench,
   .dockGroup {
     backdrop-filter: none;
   }

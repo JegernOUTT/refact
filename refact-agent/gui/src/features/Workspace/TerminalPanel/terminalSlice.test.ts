@@ -4,10 +4,13 @@ import reducer, {
   activeSessionChanged,
   selectActiveTerminalProcessId,
   selectTerminalSessions,
+  selectTerminalWorkbenchOpen,
+  setTerminalWorkbenchOpen,
   sessionAdded,
   sessionRemoved,
   sessionsReattached,
   sessionStatusChanged,
+  toggleTerminalWorkbench,
 } from "./terminalSlice";
 
 const session = (processId: string) => ({
@@ -53,6 +56,7 @@ describe("terminalSlice", () => {
         "chat-a": [{ ...session("a-one"), status: "exited" }, session("a-two")],
         "chat-b": [session("b-one")],
       },
+      workbenchOpenByChat: {},
     });
     expect(selectTerminalSessions({ terminal: state }, "chat-a")).toEqual([
       { ...session("a-one"), status: "exited" },
@@ -68,6 +72,34 @@ describe("terminalSlice", () => {
       "b-one",
     );
     expect(JSON.stringify(state)).not.toContain("output");
+  });
+
+  test("keeps workbench visibility collapsed by default and isolated by chat", () => {
+    let state = reducer(undefined, { type: "init" });
+    expect(selectTerminalWorkbenchOpen({ terminal: state }, "chat-a")).toBe(
+      false,
+    );
+
+    state = reducer(state, toggleTerminalWorkbench({ chatId: "chat-a" }));
+    state = reducer(
+      state,
+      setTerminalWorkbenchOpen({ chatId: "chat-b", open: true }),
+    );
+
+    expect(selectTerminalWorkbenchOpen({ terminal: state }, "chat-a")).toBe(
+      true,
+    );
+    expect(selectTerminalWorkbenchOpen({ terminal: state }, "chat-b")).toBe(
+      true,
+    );
+
+    state = reducer(state, toggleTerminalWorkbench({ chatId: "chat-a" }));
+    expect(selectTerminalWorkbenchOpen({ terminal: state }, "chat-a")).toBe(
+      false,
+    );
+    expect(selectTerminalWorkbenchOpen({ terminal: state }, "chat-b")).toBe(
+      true,
+    );
   });
 
   test("merges reattached sessions and selects the nearest tab per chat on close", () => {
