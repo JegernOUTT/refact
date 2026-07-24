@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { setUpStore } from "../../../app/store";
-import { openFileInFilesPanel } from "./filesPanelSlice";
+import { applyLiveFileUpdate, openFileInFilesPanel } from "./filesPanelSlice";
 
 describe("openFileInFilesPanel", () => {
   it("opens and focuses a deduplicated file viewer tab", () => {
@@ -84,5 +84,39 @@ describe("openFileInFilesPanel", () => {
     store.dispatch(openFileInFilesPanel({ path: "/outside/src/x.rs" }));
 
     expect(store.getState().filesPanel.expandedDirectories).toEqual([]);
+  });
+});
+
+describe("live file updates", () => {
+  const chunk = {
+    file_name: "/workspace/src/main.ts",
+    file_action: "edit",
+    line1: 1,
+    line2: 2,
+    lines_remove: "old\n",
+    lines_add: "new\n",
+  };
+
+  it("keeps the newest revision and rejects stale edits", () => {
+    const store = setUpStore();
+    store.dispatch(
+      applyLiveFileUpdate({
+        path: chunk.file_name,
+        update: { revision: "10", chunks: [chunk] },
+      }),
+    );
+    store.dispatch(
+      applyLiveFileUpdate({
+        path: chunk.file_name,
+        update: {
+          revision: "9",
+          chunks: [{ ...chunk, lines_add: "stale\n" }],
+        },
+      }),
+    );
+
+    expect(
+      store.getState().filesPanel.liveUpdatesByPath[chunk.file_name],
+    ).toEqual([{ revision: "10", chunks: [chunk] }]);
   });
 });

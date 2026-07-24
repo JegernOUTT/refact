@@ -338,7 +338,7 @@ export function loadPersistedChatTabs(): PersistedChatTabsState {
   const rawCurrentThreadId = stringOrUndefined(record?.currentThreadId) ?? "";
   const currentThreadId = openThreadIds.includes(rawCurrentThreadId)
     ? rawCurrentThreadId
-    : openThreadIds[openThreadIds.length - 1] ?? "";
+    : (openThreadIds[openThreadIds.length - 1] ?? "");
 
   return { openThreadIds, currentThreadId, tabs };
 }
@@ -363,7 +363,7 @@ export function savePersistedChatTabs(input: PersistedChatTabsState): void {
     ? input.currentThreadId
     : openThreadIds.includes(existing.currentThreadId)
       ? existing.currentThreadId
-      : openThreadIds[openThreadIds.length - 1] ?? "";
+      : (openThreadIds[openThreadIds.length - 1] ?? "");
 
   writeRecord(storageKey, {
     version: 1,
@@ -383,7 +383,7 @@ function createFallbackWorkspace(): WorkspaceState {
   const persistedTabs = loadPersistedChatTabs();
   const fallbackThreadId = persistedTabs.currentThreadId
     ? persistedTabs.currentThreadId
-    : persistedTabs.openThreadIds.at(-1) ?? null;
+    : (persistedTabs.openThreadIds.at(-1) ?? null);
   const fallbackTabId = fallbackThreadId ? `chat:${fallbackThreadId}` : null;
 
   return {
@@ -477,7 +477,7 @@ function normalizePersistedWorkspaceNode(
     for (const rawSurfaceKey of value.tabIds) {
       const surfaceKey = normalizeSurfaceKey(rawSurfaceKey);
       if (!surfaceKey) return null;
-      if (!isChatSurface(surfaceKey)) return null;
+      if (!isChatSurface(surfaceKey) && !isFileSurface(surfaceKey)) return null;
       context.surfacePlacementCount.value += 1;
       if (context.surfacePlacementCount.value > MAX_WORKSPACE_TABS) return null;
       if (tabIds.includes(surfaceKey)) continue;
@@ -492,7 +492,7 @@ function normalizePersistedWorkspaceNode(
     const activeTabId =
       rawActiveTabId && tabIds.includes(rawActiveTabId)
         ? rawActiveTabId
-        : tabIds[0] ?? null;
+        : (tabIds[0] ?? null);
 
     return {
       kind: "leaf",
@@ -650,9 +650,17 @@ export function loadPersistedWorkspace(
       activeTabId:
         rawActiveTabId && tabs.includes(rawActiveTabId)
           ? rawActiveTabId
-          : tabs[0] ?? null,
+          : (tabs[0] ?? null),
       groups,
       panelsForced: panelsRecord?.panelsForced === true ? true : undefined,
+      liveEditsByChat: isRecord(record.liveEditsByChat)
+        ? Object.fromEntries(
+            Object.entries(record.liveEditsByChat).filter(
+              (entry): entry is [string, boolean] =>
+                entry[0].trim().length > 0 && typeof entry[1] === "boolean",
+            ),
+          )
+        : undefined,
       dock: normalizePersistedDock(record.dock),
       drawer: {
         ...normalizePersistedDrawer(record.drawer),
@@ -678,6 +686,7 @@ export function savePersistedWorkspace(
     tabs: workspace.tabs.slice(0, MAX_WORKSPACE_TABS),
     activeTabId: workspace.activeTabId,
     groups: workspace.groups,
+    liveEditsByChat: workspace.liveEditsByChat,
     dock: normalizeWorkspaceDock(workspace.dock),
     drawer: normalizeWorkspaceDrawer(workspace.drawer),
     updatedAt: Date.now(),

@@ -246,11 +246,32 @@ export function isToolConfirmationResponse(
   return true;
 }
 
-export type ToolEditResult = {
+export type ToolEditFileResult = {
+  path: string;
   file_before: string;
   file_after: string;
   chunks: DiffChunk[];
 };
+
+export type ToolEditResult = {
+  file_before: string;
+  file_after: string;
+  chunks: DiffChunk[];
+  files?: ToolEditFileResult[];
+};
+
+function isToolEditFileResult(data: unknown): data is ToolEditFileResult {
+  if (typeof data !== "object" || data === null) return false;
+  if (!("path" in data) || typeof data.path !== "string") return false;
+  if (!("file_before" in data) || typeof data.file_before !== "string") {
+    return false;
+  }
+  if (!("file_after" in data) || typeof data.file_after !== "string") {
+    return false;
+  }
+  if (!("chunks" in data) || !Array.isArray(data.chunks)) return false;
+  return data.chunks.every(isDiffChunk);
+}
 
 export function isToolEditResult(data: unknown): data is ToolEditResult {
   if (!data) return false;
@@ -261,6 +282,13 @@ export function isToolEditResult(data: unknown): data is ToolEditResult {
   if (typeof data.file_after !== "string") return false;
   if (!("chunks" in data)) return false;
   if (!Array.isArray(data.chunks)) return false;
+  if (
+    "files" in data &&
+    data.files !== undefined &&
+    (!Array.isArray(data.files) || !data.files.every(isToolEditFileResult))
+  ) {
+    return false;
+  }
 
   return data.chunks.every(isDiffChunk);
 }

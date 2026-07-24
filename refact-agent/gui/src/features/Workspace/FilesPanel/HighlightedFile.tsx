@@ -16,11 +16,15 @@ const escapeHtml = (value: string): string =>
 
 export function HighlightedFile({
   content,
+  changedLines = [],
+  changeRevision,
   language,
   lineStart,
   targetLine,
 }: {
   content: string;
+  changedLines?: number[];
+  changeRevision?: string;
   language: string | null;
   lineStart: number;
   targetLine?: number;
@@ -30,6 +34,7 @@ export function HighlightedFile({
   const [highlightedLines, setHighlightedLines] = useState<string[] | null>(
     null,
   );
+  const [visibleChangedLines, setVisibleChangedLines] = useState<number[]>([]);
   const sourceLines = useMemo(
     () => content.replace(/\n$/, "").split("\n"),
     [content],
@@ -51,6 +56,21 @@ export function HighlightedFile({
     };
   }, [appearance, content, highlight, language]);
 
+  useEffect(() => {
+    if (!changeRevision || changedLines.length === 0) {
+      setVisibleChangedLines([]);
+      return;
+    }
+    setVisibleChangedLines(changedLines);
+    const timer = window.setTimeout(() => setVisibleChangedLines([]), 1800);
+    return () => window.clearTimeout(timer);
+  }, [changeRevision, changedLines]);
+
+  const visibleChanges = useMemo(
+    () => new Set(visibleChangedLines),
+    [visibleChangedLines],
+  );
+
   return (
     <div className={styles.codeTable} role="table">
       {sourceLines.map((line, index) => {
@@ -60,6 +80,9 @@ export function HighlightedFile({
           <div
             className={styles.codeLine}
             data-line-number={lineNumber}
+            data-live-change={
+              visibleChanges.has(lineNumber) ? "true" : undefined
+            }
             data-target-line={target ? "true" : undefined}
             id={target ? "files-panel-target-line" : undefined}
             key={lineNumber}

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,7 +14,7 @@ import { server } from "../../../utils/mockServer";
 import { setProjectStorageNamespace } from "../../../utils/chatUiPersistence";
 import { FilesPanel } from "./FilesPanel";
 import { FileViewer } from "./FileViewer";
-import { openFileInFilesPanel } from "./filesPanelSlice";
+import { applyLiveFileUpdate, openFileInFilesPanel } from "./filesPanelSlice";
 import { createChatWithId } from "../../Chat/Thread/actions";
 import { openTab, setActiveTab } from "../workspaceSlice";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
@@ -302,9 +304,7 @@ describe("FilesPanel", () => {
     const breadcrumbs = await screen.findByRole("navigation", {
       name: "File path",
     });
-    await waitFor(() =>
-      expect(breadcrumbs).toHaveTextContent("a/src/main.ts"),
-    );
+    await waitFor(() => expect(breadcrumbs).toHaveTextContent("a/src/main.ts"));
     expect(breadcrumbs).not.toHaveTextContent("worktrees");
   });
 
@@ -337,6 +337,55 @@ describe("FilesPanel", () => {
     view.store.dispatch(openFileInFilesPanel({ path: filePath }));
 
     expect(await screen.findByText("File truncated at 1 MiB")).toBeVisible();
+  });
+
+  it("renders live content and changed-line highlights without rereading", async () => {
+    let readRequests = 0;
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () => {
+        readRequests += 1;
+        return HttpResponse.json(readResponse({ content: "old\nkeep\n" }));
+      }),
+    );
+    const view = render(<FileViewer path={filePath} />);
+    await screen.findByText("old");
+
+    view.store.dispatch(
+      applyLiveFileUpdate({
+        path: filePath,
+        update: {
+          revision: "7",
+          chunks: [
+            {
+              file_name: filePath,
+              file_action: "edit",
+              line1: 1,
+              line2: 2,
+              lines_remove: "old\n",
+              lines_add: "new\n",
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(await screen.findByText("new")).toBeVisible();
+    expect(screen.getByText("new").closest('[role="row"]')).toHaveAttribute(
+      "data-live-change",
+      "true",
+    );
+    expect(readRequests).toBe(1);
+  });
+
+  it("keeps the reduced-motion rule for live change highlights", () => {
+    const css = readFileSync(
+      "src/features/Workspace/FilesPanel/FilesPanel.module.css",
+      "utf8",
+    );
+    expect(css).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*data-live-change[\s\S]*animation: none/u,
+    );
   });
 
   it("identifies binary files without rendering an empty code view", async () => {

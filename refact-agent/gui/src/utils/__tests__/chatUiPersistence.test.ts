@@ -274,7 +274,10 @@ describe("chatUiPersistence", () => {
       currentThreadId: "chat-b",
       tabs: [{ id: "chat-a" }, { id: "chat-b" }],
     });
-    const workspace = splitWorkspace();
+    const workspace = {
+      ...splitWorkspace(),
+      liveEditsByChat: { "chat-a": false, "chat-b": true },
+    };
 
     savePersistedWorkspace(workspace);
 

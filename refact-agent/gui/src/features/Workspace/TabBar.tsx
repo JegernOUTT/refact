@@ -13,7 +13,13 @@ import {
   useState,
 } from "react";
 
-import { Badge, Icon, IconButton, StatusDot } from "../../components/ui";
+import {
+  Badge,
+  Icon,
+  IconButton,
+  StatusDot,
+  Switch,
+} from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectCapabilities, selectHost } from "../Config/configSlice";
 import {
@@ -55,9 +61,13 @@ import {
   closeTab,
   reorderTabs,
   selectActiveTabId,
+  selectFocusedWorkspaceChatId,
+  selectLiveEditsForChat,
+  selectPanelsForced,
   selectTabs,
   selectWorkspaceGroups,
   setActiveTab,
+  setLiveEditsForChat,
   selectWorkspaceDock,
   toggleDock,
   type PaneGroup,
@@ -270,6 +280,11 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
   const capabilities = useAppSelector(selectCapabilities);
   const host = useAppSelector(selectHost);
   const dock = useAppSelector(selectWorkspaceDock);
+  const panelsForced = useAppSelector(selectPanelsForced);
+  const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
+  const liveEdits = useAppSelector((state) =>
+    focusedChatId ? selectLiveEditsForChat(state, focusedChatId) : false,
+  );
   const [draggingTabId, setDraggingTabId] = useState<SurfaceKey | null>(null);
   const [dragTargetTabId, setDragTargetTabId] = useState<SurfaceKey | null>(
     null,
@@ -305,6 +320,10 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     !toolbarPlacement &&
     host === "web" &&
     (capabilities.filesPanel || capabilities.gitPanel);
+  const showLiveEdits =
+    !toolbarPlacement &&
+    Boolean(focusedChatId) &&
+    (capabilities.filesPanel || panelsForced);
 
   const visibleTabKeys = useMemo(
     () =>
@@ -784,6 +803,16 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
           })}
         </div>
       </div>
+      {showLiveEdits && focusedChatId ? (
+        <Switch
+          checked={liveEdits}
+          className={styles.liveEditsToggle}
+          label="Live edits"
+          onCheckedChange={(enabled) =>
+            dispatch(setLiveEditsForChat({ chatId: focusedChatId, enabled }))
+          }
+        />
+      ) : null}
     </nav>
   );
 }

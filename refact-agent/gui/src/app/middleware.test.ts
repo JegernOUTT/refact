@@ -28,10 +28,12 @@ import {
   closeTab as closeWorkspaceTab,
   focusPane as focusWorkspacePane,
   selectFocusedWorkspaceChatId,
+  setLiveEditsForChat,
   setPaneActive as setWorkspacePaneActive,
   workspaceSlice,
   type WorkspaceState,
 } from "../features/Workspace";
+import { collectTabIds } from "../features/ChatPanes/panesTree";
 import { makeSurfaceKey } from "../features/Workspace/surfaceKey";
 import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
 
@@ -397,6 +399,173 @@ describe("workspace routing middleware", () => {
         chatSurface("chat-b"),
       );
       expect(store.getState().chat.current_thread_id).toBe("chat-b");
+    });
+  });
+
+  it("refreshes open files without focus stealing when live edits are off", async () => {
+    const filePath = "/workspace/src/open.ts";
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a"]),
+      workspace: {
+        tabs: [chatSurface("chat-a"), makeSurfaceKey("file", filePath)],
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+        liveEditsByChat: { "chat-a": false },
+      },
+    });
+
+    store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "1",
+        type: "message_added",
+        index: 0,
+        message: {
+          role: "diff",
+          tool_call_id: "edit-1",
+          content: [
+            {
+              file_name: filePath,
+              file_action: "edit",
+              line1: 1,
+              line2: 2,
+              lines_remove: "old\n",
+              lines_add: "new\n",
+            },
+          ],
+        },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(store.getState().workspace.activeTabId).toBe(
+        chatSurface("chat-a"),
+      );
+      expect(store.getState().workspace.groups).toEqual({});
+      expect(
+        store.getState().filesPanel.liveUpdatesByPath[filePath],
+      ).toHaveLength(1);
+    });
+  });
+
+  it("auto-splits and follows focused-chat edits only while opted in", async () => {
+    const store = setUpStore({
+      config: { host: "vscode", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b"]),
+      workspace: {
+        tabs: [chatSurface("chat-a"), chatSurface("chat-b")],
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+        panelsForced: true,
+      },
+    });
+    const dispatchDiff = (chatId: string, seq: string, path: string) =>
+      store.dispatch(
+        applyChatEvent({
+          chat_id: chatId,
+          seq,
+          type: "message_added",
+          index: Number(seq),
+          message: {
+            role: "diff",
+            tool_call_id: `edit-${seq}`,
+            content: [
+              {
+                file_name: path,
+                file_action: "edit",
+                line1: 1,
+                line2: 1,
+                lines_remove: "",
+                lines_add: `${path}\n`,
+              },
+            ],
+          },
+        }),
+      );
+
+    dispatchDiff("chat-a", "1", "/workspace/off.ts");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.getState().workspace.groups).toEqual({});
+
+    store.dispatch(setLiveEditsForChat({ chatId: "chat-a", enabled: true }));
+    dispatchDiff("chat-a", "2", "/workspace/one.ts");
+    await waitFor(() => {
+      const group = store.getState().workspace.groups[chatSurface("chat-a")];
+      expect(group).toBeDefined();
+      expect(group ? collectTabIds(group.root) : []).toContain(
+        "file:/workspace/one.ts",
+      );
+    });
+
+    dispatchDiff("chat-a", "3", "/workspace/two.ts");
+    await waitFor(() => {
+      const group = store.getState().workspace.groups[chatSurface("chat-a")];
+      expect(group ? collectTabIds(group.root) : []).toEqual([
+        chatSurface("chat-a"),
+        "file:/workspace/two.ts",
+      ]);
+    });
+
+    dispatchDiff("chat-b", "4", "/workspace/background.ts");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const group = store.getState().workspace.groups[chatSurface("chat-a")];
+    expect(group ? collectTabIds(group.root) : []).not.toContain(
+      "file:/workspace/background.ts",
+    );
+  });
+
+  it("enriches a diff revision with paired file_after content", async () => {
+    const filePath = "/workspace/src/source.ts";
+    const chunk = {
+      file_name: filePath,
+      file_action: "edit",
+      line1: 1,
+      line2: 2,
+      lines_remove: "before\n",
+      lines_add: "after\n",
+    };
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a"]),
+      workspace: {
+        tabs: [chatSurface("chat-a"), makeSurfaceKey("file", filePath)],
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+        liveEditsByChat: { "chat-a": false },
+      },
+    });
+    store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "1",
+        type: "message_added",
+        index: 0,
+        message: { role: "diff", tool_call_id: "edit", content: [chunk] },
+      }),
+    );
+    store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "2",
+        type: "message_added",
+        index: 1,
+        message: {
+          role: "tool",
+          tool_call_id: "edit",
+          content: JSON.stringify({
+            file_before: "before\n",
+            file_after: "after\nrest\n",
+            chunks: [chunk],
+          }),
+        },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        store.getState().filesPanel.liveUpdatesByPath[filePath]?.[0].fileAfter,
+      ).toBe("after\nrest\n");
     });
   });
 

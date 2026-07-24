@@ -9,6 +9,7 @@ import {
   addSurfaceToPane,
   closePane,
   closeTab,
+  ensureLiveEditSplit,
   focusPane,
   MAX_GROUP_LEAVES,
   MAX_WORKSPACE_TABS,
@@ -22,6 +23,7 @@ import {
   selectFocusedWorkspaceChatId,
   selectGroupForTab,
   selectIsTabSplit,
+  selectLiveEditsForChat,
   selectTabs,
   selectWorkspaceDock,
   selectWorkspaceDrawer,
@@ -35,6 +37,7 @@ import {
   setDrawerHeight,
   setDrawerOpen,
   setPanelsForced,
+  setLiveEditsForChat,
   setPaneActive,
   splitPaneWithSurface,
   splitTab,
@@ -713,6 +716,62 @@ describe("workspaceSlice", () => {
     expect(groupFor(next, chatA).focusedLeafId).toBe(
       groupFor(state, chatA).focusedLeafId,
     );
+  });
+
+  test("live edits default by host and persist explicit per-chat choices", () => {
+    const state = reducer(undefined, openTab(chat("a")));
+    expect(
+      selectLiveEditsForChat(
+        { ...contextState(state, { a: null }), config: { host: "web" } },
+        "a",
+      ),
+    ).toBe(true);
+    expect(
+      selectLiveEditsForChat(
+        { ...contextState(state, { a: null }), config: { host: "vscode" } },
+        "a",
+      ),
+    ).toBe(false);
+
+    const disabled = reducer(
+      state,
+      setLiveEditsForChat({ chatId: "a", enabled: false }),
+    );
+    expect(
+      selectLiveEditsForChat(
+        { ...contextState(disabled, { a: null }), config: { host: "web" } },
+        "a",
+      ),
+    ).toBe(false);
+  });
+
+  test("live edit split reuses one horizontal file pane and follows paths", () => {
+    const chatA = chat("a");
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(
+      state,
+      ensureLiveEditSplit({ chatId: "a", filePath: "/workspace/one.ts" }),
+    );
+    const first = groupFor(state, chatA);
+    expect(first.root.kind).toBe("split");
+    if (first.root.kind !== "split") throw new Error("missing live split");
+    expect(first.root.dir).toBe("row");
+    expect(collectLeafIds(first.root)).toHaveLength(2);
+    expect(collectTabIds(first.root)).toEqual([
+      chatA,
+      "file:/workspace/one.ts",
+    ]);
+
+    state = reducer(
+      state,
+      ensureLiveEditSplit({ chatId: "a", filePath: "/workspace/two.ts" }),
+    );
+    const second = groupFor(state, chatA);
+    expect(collectLeafIds(second.root)).toHaveLength(2);
+    expect(collectTabIds(second.root)).toEqual([
+      chatA,
+      "file:/workspace/two.ts",
+    ]);
   });
 
   test("reconcileWorkspace prunes stale chat surfaces and drops or ungroups groups", () => {

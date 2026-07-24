@@ -21,10 +21,12 @@ import {
   expandDirectory,
   isPathWithinWorkspaceRoots,
   selectFileViewerTargetByPath,
+  selectLiveFileUpdatesByPath,
   selectTreePath,
 } from "./filesPanelSlice";
 import { pathBasename } from "./fileTreeModel";
 import { HighlightedFile } from "./HighlightedFile";
+import { applyLiveFileUpdates, changedLineNumbers } from "./liveFileModel";
 import styles from "./FilesPanel.module.css";
 
 const errorStatus = (error: unknown): number | string | null => {
@@ -90,6 +92,9 @@ export function FileViewer({ path }: { path: string }) {
   const storedTarget = useAppSelector((state) =>
     selectFileViewerTargetByPath(state, path),
   );
+  const liveUpdates = useAppSelector((state) =>
+    selectLiveFileUpdatesByPath(state, path),
+  );
   const configuredWorkspaceRoots = useAppSelector(
     (state) => state.current_project.workspaceRoots ?? EMPTY_ROOTS,
   );
@@ -103,6 +108,24 @@ export function FileViewer({ path }: { path: string }) {
   const breadcrumbs = useMemo(
     () => breadcrumbsForPath(path, workspaceRoots),
     [path, workspaceRoots],
+  );
+  const firstAuthoritativeUpdate = liveUpdates.findIndex(
+    (update) => update.fileAfter !== undefined,
+  );
+  const displayedContent = useMemo(() => {
+    if (firstAuthoritativeUpdate >= 0) {
+      const authoritativeUpdate = liveUpdates[firstAuthoritativeUpdate];
+      return applyLiveFileUpdates(
+        authoritativeUpdate.fileAfter ?? "",
+        liveUpdates.slice(firstAuthoritativeUpdate + 1),
+      );
+    }
+    return data ? applyLiveFileUpdates(data.content, liveUpdates) : null;
+  }, [data, firstAuthoritativeUpdate, liveUpdates]);
+  const latestLiveUpdate = liveUpdates.at(-1);
+  const changedLines = useMemo(
+    () => changedLineNumbers(latestLiveUpdate?.chunks ?? []),
+    [latestLiveUpdate],
   );
 
   useEffect(() => {
@@ -164,12 +187,12 @@ export function FileViewer({ path }: { path: string }) {
         </Tooltip>
       </header>
 
-      {isFetching && !data ? (
+      {isFetching && !data && displayedContent === null ? (
         <LoadingState
           label={`Loading ${pathBasename(target.path)}`}
           variant="full"
         />
-      ) : error ? (
+      ) : error && displayedContent === null ? (
         <ErrorState
           description={
             blocked
@@ -188,7 +211,7 @@ export function FileViewer({ path }: { path: string }) {
           title={blocked ? "File blocked" : "File unavailable"}
           variant="full"
         />
-      ) : data?.binary ? (
+      ) : data?.binary && firstAuthoritativeUpdate < 0 ? (
         <EmptyState
           icon={FileQuestion}
           title="Binary file"
@@ -197,22 +220,24 @@ export function FileViewer({ path }: { path: string }) {
           )} is binary and cannot be previewed (${data.size.toLocaleString()} bytes).`}
           variant="full"
         />
-      ) : data ? (
+      ) : displayedContent !== null ? (
         <>
           <div className={styles.fileMeta}>
-            <span>{data.language ?? "Plain text"}</span>
-            <span>{data.size.toLocaleString()} bytes</span>
+            <span>{data?.language ?? "Plain text"}</span>
+            <span>{displayedContent.length.toLocaleString()} bytes</span>
           </div>
-          {data.truncated ? (
+          {data?.truncated ? (
             <div className={styles.truncatedBanner} role="status">
               File truncated at 1 MiB
             </div>
           ) : null}
           <div className={`${styles.codeScroll} scrollX`}>
             <HighlightedFile
-              content={data.content}
-              language={data.language}
-              lineStart={lineStart}
+              content={displayedContent}
+              changedLines={changedLines}
+              changeRevision={latestLiveUpdate?.revision}
+              language={data?.language ?? null}
+              lineStart={data ? lineStart : 1}
               targetLine={target.line}
             />
           </div>

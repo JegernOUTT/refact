@@ -229,6 +229,43 @@
   box-shadow: inset var(--rf-focus-ring-w) 0 0 var(--rf-color-accent);
 }
 
+.codeLine[data-live-change="true"] {
+  background: var(--rf-color-accent-soft);
+  box-shadow: inset var(--rf-focus-ring-w) 0 0 var(--rf-color-success);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .codeLine[data-live-change="true"] {
+    animation: rf-live-edit-flash calc(var(--rf-dur-slow) * 5)
+      var(--rf-ease-standard) both;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .codeLine[data-live-change="true"] {
+    animation: none;
+  }
+}
+
+@keyframes rf-live-edit-flash {
+  from {
+    opacity: var(--rf-motion-opacity-soft);
+    transform: scaleY(var(--rf-motion-scale-enter));
+  }
+
+  20% {
+    opacity: var(--rf-motion-opacity-visible);
+    transform: scaleY(var(--rf-motion-scale-active));
+  }
+
+  to {
+    background: transparent;
+    box-shadow: inset 0 0 0 transparent;
+    opacity: var(--rf-motion-opacity-visible);
+    transform: scaleY(var(--rf-motion-scale-active));
+  }
+}
+
 .lineNumber {
   padding: 0 var(--rf-space-3);
   color: var(--rf-color-faint);

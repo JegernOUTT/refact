@@ -114,10 +114,13 @@ import { upsertToolCallIntoHistory } from "../features/History/historySlice";
 import {
   getEventMetadata,
   isEventMessage,
+  isDiffMessage,
+  isToolEditResult,
   isToolMessage,
   modelsApi,
   providersApi,
   type ChatMessage,
+  type ToolEditFileResult,
 } from "../services/refact";
 import { sendChatCommand } from "../services/refact/chatCommands";
 import { schedulerApi } from "../services/refact/schedulerApi";
@@ -135,6 +138,7 @@ import {
 import {
   addSurfaceToPane as addSurfaceToWorkspacePane,
   closePane as closeWorkspacePane,
+  ensureLiveEditSplit,
   closeTab as closeWorkspaceTab,
   focusPane as focusWorkspacePane,
   hydrateWorkspace,
@@ -153,12 +157,18 @@ import {
   toggleDock,
   toggleDrawer,
   selectFocusedWorkspaceChatId,
+  selectLiveEditsForChat,
+  setLiveEditsForChat,
   setActiveTab as setWorkspaceActiveTab,
   setPaneActive as setWorkspacePaneActive,
   splitPaneWithSurface,
   splitTab as splitWorkspaceTab,
   type WorkspaceState,
 } from "../features/Workspace";
+import {
+  applyLiveFileUpdate,
+  enrichLiveFileUpdate,
+} from "../features/Workspace/FilesPanel/filesPanelSlice";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
@@ -231,6 +241,32 @@ function persistOpenChatTabs(state: RootState): void {
 function persistWorkspaceLayout(state: RootState): void {
   syncProjectStorageNamespace(state);
   savePersistedWorkspace(state.workspace, state.config.host);
+}
+
+function toolEditFiles(message: ChatMessage): ToolEditFileResult[] {
+  if (!isToolMessage(message) || typeof message.content !== "string") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(message.content);
+  } catch {
+    return [];
+  }
+  if (!isToolEditResult(parsed)) return [];
+  if (parsed.files) return parsed.files;
+  if (
+    parsed.chunks.length > 0 &&
+    new Set(parsed.chunks.map((chunk) => chunk.file_name)).size === 1
+  ) {
+    return [
+      {
+        path: parsed.chunks[0].file_name,
+        file_before: parsed.file_before,
+        file_after: parsed.file_after,
+        chunks: parsed.chunks,
+      },
+    ];
+  }
+  return [];
 }
 
 function hydratePersistedChatUi(listenerApi: {
@@ -389,6 +425,7 @@ startListening({
     splitPaneWithSurface,
     resizeGroupSplit,
     setPanelsForced,
+    setLiveEditsForChat,
     setDockOpen,
     setDockSection,
     setDockWidth,
@@ -424,6 +461,87 @@ startListening({
     }
 
     persistWorkspaceLayout(listenerApi.getState());
+  },
+});
+
+startListening({
+  actionCreator: applyChatEvent,
+  effect: (action, listenerApi) => {
+    const event = action.payload;
+    if (event.type !== "message_added") return;
+    const state = listenerApi.getState();
+    if (selectFocusedWorkspaceChatId(state) !== event.chat_id) return;
+    if (state.chat.threads[event.chat_id]?.last_applied_seq !== event.seq)
+      return;
+
+    if (isToolMessage(event.message)) {
+      for (const file of toolEditFiles(event.message)) {
+        const updates = state.filesPanel.liveUpdatesByPath[file.path] ?? [];
+        const matchingUpdate = [...updates]
+          .reverse()
+          .find((update) =>
+            update.chunks.some((chunk) =>
+              file.chunks.some(
+                (resultChunk) =>
+                  resultChunk.file_name === chunk.file_name &&
+                  resultChunk.line1 === chunk.line1,
+              ),
+            ),
+          );
+        if (!matchingUpdate) continue;
+        listenerApi.dispatch(
+          enrichLiveFileUpdate({
+            path: file.path,
+            revision: matchingUpdate.revision,
+            fileAfter: file.file_after,
+          }),
+        );
+      }
+      return;
+    }
+    if (!isDiffMessage(event.message)) return;
+    const toolCallId = event.message.tool_call_id;
+    const pairedFiles = state.chat.threads[
+      event.chat_id
+    ]?.thread.messages.flatMap((message) =>
+      isToolMessage(message) && message.tool_call_id === toolCallId
+        ? toolEditFiles(message)
+        : [],
+    );
+
+    const chunksByPath = new Map<string, typeof event.message.content>();
+    for (const chunk of event.message.content) {
+      const chunks = chunksByPath.get(chunk.file_name) ?? [];
+      chunksByPath.set(chunk.file_name, [...chunks, chunk]);
+    }
+
+    const liveEdits = selectLiveEditsForChat(state, event.chat_id);
+    for (const [path, chunks] of chunksByPath) {
+      const fileKey = makeSurfaceKey("file", path);
+      const fileIsOpen =
+        state.workspace.tabs.includes(fileKey) ||
+        Object.values(state.workspace.groups).some((group) =>
+          group ? collectTabIds(group.root).includes(fileKey) : false,
+        );
+      if (!fileIsOpen && !liveEdits) continue;
+
+      listenerApi.dispatch(
+        applyLiveFileUpdate({
+          path,
+          update: {
+            revision: event.seq,
+            chunks,
+            fileAfter: pairedFiles?.find((file) => file.path === path)
+              ?.file_after,
+          },
+        }),
+      );
+      if (liveEdits) {
+        listenerApi.dispatch(
+          ensureLiveEditSplit({ chatId: event.chat_id, filePath: path }),
+        );
+      }
+    }
   },
 });
 

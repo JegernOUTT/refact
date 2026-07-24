@@ -1,5 +1,7 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
+import type { DiffChunk } from "../../../services/refact";
+
 import { makeSurfaceKey } from "../surfaceKey";
 import type { WorkspaceState } from "../workspaceSlice";
 import {
@@ -13,11 +15,18 @@ export type FileViewerTarget = {
   line?: number;
 };
 
+export type LiveFileUpdate = {
+  revision: string;
+  chunks: DiffChunk[];
+  fileAfter?: string;
+};
+
 export type FilesPanelState = {
   expandedDirectories: string[];
   selectedPath: string | null;
   viewerTarget: FileViewerTarget | null;
   viewerTargets: Record<string, FileViewerTarget | undefined>;
+  liveUpdatesByPath: Record<string, LiveFileUpdate[] | undefined>;
 };
 
 const initialState: FilesPanelState = {
@@ -25,6 +34,16 @@ const initialState: FilesPanelState = {
   selectedPath: null,
   viewerTarget: null,
   viewerTargets: {},
+  liveUpdatesByPath: {},
+};
+
+const compareRevision = (left: string, right: string): number => {
+  if (/^\d+$/u.test(left) && /^\d+$/u.test(right)) {
+    const leftValue = BigInt(left);
+    const rightValue = BigInt(right);
+    return leftValue === rightValue ? 0 : leftValue > rightValue ? 1 : -1;
+  }
+  return left.localeCompare(right);
 };
 
 export const filesPanelSlice = createSlice({
@@ -65,11 +84,45 @@ export const filesPanelSlice = createSlice({
         state.viewerTargets[action.payload.path] = action.payload;
       }
     },
+    applyLiveFileUpdate: (
+      state,
+      action: PayloadAction<{ path: string; update: LiveFileUpdate }>,
+    ) => {
+      const updates = state.liveUpdatesByPath[action.payload.path] ?? [];
+      const latest = updates.at(-1);
+      if (
+        latest &&
+        compareRevision(action.payload.update.revision, latest.revision) <= 0
+      ) {
+        return;
+      }
+      state.liveUpdatesByPath[action.payload.path] = [
+        ...updates,
+        action.payload.update,
+      ].slice(-20);
+    },
+    enrichLiveFileUpdate: (
+      state,
+      action: PayloadAction<{
+        path: string;
+        revision: string;
+        fileAfter: string;
+      }>,
+    ) => {
+      const updates = state.liveUpdatesByPath[action.payload.path];
+      if (!updates) return;
+      const update = updates.find(
+        (candidate) => candidate.revision === action.payload.revision,
+      );
+      if (update) update.fileAfter = action.payload.fileAfter;
+    },
   },
 });
 
 export const {
   collapseDirectory,
+  enrichLiveFileUpdate,
+  applyLiveFileUpdate,
   expandDirectory,
   resetFileTree,
   selectTreePath,
@@ -159,7 +212,7 @@ export const openFileInFilesPanel =
     const worktreeRoot = selectFocusedChatWorktreeRoot(state);
     const workspaceRoots = worktreeRoot
       ? [worktreeRoot]
-      : (state.current_project.workspaceRoots ?? []);
+      : state.current_project.workspaceRoots ?? [];
     for (const directory of parentDirectories(target.path)) {
       if (isPathWithinWorkspaceRoots(directory, workspaceRoots)) {
         dispatch(expandDirectory(directory));
@@ -178,6 +231,8 @@ type FilesPanelRootState = {
   filesPanel: FilesPanelState;
 };
 
+const EMPTY_LIVE_FILE_UPDATES: LiveFileUpdate[] = [];
+
 export const selectExpandedDirectories = (state: FilesPanelRootState) =>
   state.filesPanel.expandedDirectories;
 
@@ -191,3 +246,9 @@ export const selectFileViewerTargetByPath = (
   state: FilesPanelRootState,
   path: string,
 ): FileViewerTarget | undefined => state.filesPanel.viewerTargets[path];
+
+export const selectLiveFileUpdatesByPath = (
+  state: FilesPanelRootState,
+  path: string,
+): LiveFileUpdate[] =>
+  state.filesPanel.liveUpdatesByPath[path] ?? EMPTY_LIVE_FILE_UPDATES;
