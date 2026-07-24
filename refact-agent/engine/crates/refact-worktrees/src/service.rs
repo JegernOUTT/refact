@@ -128,6 +128,8 @@ impl WorktreeService {
         let registry = self.load_registry_pruning_missing_records().await?;
         let mut worktrees = Vec::with_capacity(registry.records.len());
         for record in &registry.records {
+            self.validate_registered_record_checkout_record(record)
+                .await?;
             worktrees.push(self.record_view(record).await?);
         }
         worktrees.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -156,6 +158,8 @@ impl WorktreeService {
             .iter()
             .find(|record| record.meta.id == id)
             .ok_or_else(|| format!("Worktree '{}' not found", id))?;
+        self.validate_registered_record_checkout_record(record)
+            .await?;
         self.record_view(record).await
     }
 
@@ -167,10 +171,8 @@ impl WorktreeService {
             .iter()
             .find(|record| record.meta.id == id)
             .ok_or_else(|| format!("Worktree '{}' not found", id))?;
-        let record = record.clone();
-        tokio::task::spawn_blocking(move || validate_registered_record_checkout(&record))
+        self.validate_registered_record_checkout_record(record)
             .await
-            .map_err(|e| format!("Worktree validation task failed: {}", e))?
     }
 
     pub async fn create_worktree(
@@ -417,6 +419,8 @@ impl WorktreeService {
                 record.meta.root.display()
             ));
         }
+        self.validate_registered_record_checkout_record(&record)
+            .await?;
         Ok(record.meta.clone())
     }
 
@@ -478,6 +482,10 @@ impl WorktreeService {
         .await
         .map_err(|e| format!("Legacy worktree validation task failed: {}", e))?;
         if discovered && status.path_exists && status.is_git_worktree {
+            let validation_meta = meta.clone();
+            tokio::task::spawn_blocking(move || validate_worktree_meta_checkout(&validation_meta))
+                .await
+                .map_err(|e| format!("Legacy worktree validation task failed: {}", e))??;
             return Ok(meta.clone());
         }
         Err(format!(
@@ -504,16 +512,8 @@ impl WorktreeService {
             .find(|record| record.meta.id == id)
             .cloned()
             .ok_or_else(|| format!("Worktree '{}' not found", id))?;
-        if !tokio::fs::try_exists(&record.meta.root)
-            .await
-            .unwrap_or(false)
-        {
-            return Err(format!(
-                "Worktree '{}' path '{}' does not exist",
-                id,
-                record.meta.root.display()
-            ));
-        }
+        self.validate_registered_record_checkout_record(&record)
+            .await?;
         let diff_root = record.meta.root.clone();
         let base_commit = record.meta.base_commit.clone();
         let base_branch = record.meta.base_branch.clone();
@@ -1504,6 +1504,16 @@ impl WorktreeService {
         self.record_view_with_status(record, status).await
     }
 
+    async fn validate_registered_record_checkout_record(
+        &self,
+        record: &WorktreeRegistryRecord,
+    ) -> Result<(), String> {
+        let record = record.clone();
+        tokio::task::spawn_blocking(move || validate_registered_record_checkout(&record))
+            .await
+            .map_err(|e| format!("Worktree validation task failed: {}", e))?
+    }
+
     async fn record_view_with_status(
         &self,
         record: &WorktreeRegistryRecord,
@@ -1887,15 +1897,18 @@ fn canonical_git_path(root: &Path, git_path: &str) -> Result<PathBuf, String> {
 }
 
 fn validate_registered_record_checkout(record: &WorktreeRegistryRecord) -> Result<(), String> {
-    if !record.meta.root.exists() {
+    validate_worktree_meta_checkout(&record.meta)
+}
+
+fn validate_worktree_meta_checkout(meta: &WorktreeMeta) -> Result<(), String> {
+    if !meta.root.exists() {
         return Err(format!(
             "Worktree '{}' path '{}' does not exist",
-            record.meta.id,
-            record.meta.root.display()
+            meta.id,
+            meta.root.display()
         ));
     }
-    let registered_root = record
-        .meta
+    let registered_root = meta
         .root
         .canonicalize()
         .map_err(|e| format!("Failed to canonicalize worktree root: {}", e))?;
@@ -1904,29 +1917,28 @@ fn validate_registered_record_checkout(record: &WorktreeRegistryRecord) -> Resul
     if top_level != registered_root {
         return Err(format!(
             "Worktree '{}' path '{}' is not the git worktree root",
-            record.meta.id,
-            record.meta.root.display()
+            meta.id,
+            meta.root.display()
         ));
     }
     let source_common_dir = git::run_git(
-        &record.meta.source_workspace_root,
+        &meta.source_workspace_root,
         &["rev-parse", "--git-common-dir"],
     )?;
     let registered_common_dir = git::run_git(&registered_root, &["rev-parse", "--git-common-dir"])?;
-    if canonical_git_path(&record.meta.source_workspace_root, &source_common_dir)?
+    if canonical_git_path(&meta.source_workspace_root, &source_common_dir)?
         != canonical_git_path(&registered_root, &registered_common_dir)?
     {
         return Err(format!(
             "Worktree '{}' path '{}' belongs to a different repository",
-            record.meta.id,
-            record.meta.root.display()
+            meta.id,
+            meta.root.display()
         ));
     }
-    let source_branch = record
-        .meta
+    let source_branch = meta
         .branch
         .clone()
-        .ok_or_else(|| format!("Worktree '{}' has no source branch", record.meta.id))?;
+        .ok_or_else(|| format!("Worktree '{}' has no source branch", meta.id))?;
     git::ensure_checkout_on_branch(&registered_root, "Source worktree", &source_branch)?;
     Ok(())
 }
@@ -3103,6 +3115,40 @@ mod worktree_registry_tests {
             .unwrap_err();
 
         assert!(error.contains("different repository"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn worktree_reads_refuse_registered_path_replaced_by_unrelated_repo() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/replaced-read-root".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let id = created.worktree.meta.id.clone();
+        let root = created.worktree.meta.root.clone();
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        init_repo(&root);
+        run_git(&root, &["checkout", "-b", &branch]);
+
+        for error in [
+            service.list_worktrees().await.unwrap_err(),
+            service.get_worktree(&id).await.unwrap_err(),
+            service.open_worktree(&id).await.unwrap_err(),
+            service.diff_worktree(&id).await.unwrap_err(),
+        ] {
+            assert!(error.contains("different repository"), "{error}");
+        }
     }
 
     #[tokio::test]
@@ -4675,5 +4721,62 @@ mod worktree_registry_tests {
             err.contains("outside the Refact worktree cache"),
             "expected outside-cache rejection, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn validate_legacy_task_agent_worktree_meta_rejects_wrong_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let source = source.canonicalize().unwrap();
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let id = "00000000-0000-0000-0000-000000000003";
+        let root = service.worktree_path_for_id(id).unwrap();
+        let expected_branch = "refact/task/task-1/card/T-1/legacy";
+        std::fs::create_dir_all(service.registry_dir()).unwrap();
+        run_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                expected_branch,
+                root.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let meta = WorktreeMeta {
+            id: id.to_string(),
+            kind: "task_agent".to_string(),
+            root: root.clone(),
+            source_workspace_root: source.clone(),
+            repo_root: source,
+            branch: Some(expected_branch.to_string()),
+            base_branch: Some("main".to_string()),
+            base_commit: None,
+            task_id: Some("task-1".to_string()),
+            card_id: Some("T-1".to_string()),
+            agent_id: Some("legacy".to_string()),
+            enforce: true,
+        };
+        assert_eq!(
+            service
+                .validate_legacy_task_agent_worktree_meta(&meta)
+                .await
+                .unwrap(),
+            meta
+        );
+        run_git(&root, &["checkout", "-b", "legacy-wrong-branch"]);
+
+        let err = service
+            .validate_legacy_task_agent_worktree_meta(&meta)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("different branch"), "{err}");
+        assert!(err.contains("legacy-wrong-branch"), "{err}");
+        assert!(err.contains(expected_branch), "{err}");
     }
 }
