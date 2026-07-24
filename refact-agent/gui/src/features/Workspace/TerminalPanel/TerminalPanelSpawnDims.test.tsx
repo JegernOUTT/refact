@@ -10,14 +10,17 @@ type RenderFn = typeof import("../../../utils/test-utils").render;
 
 function StubTerminalSession({
   processId,
+  chatId,
   onResize,
 }: {
   processId: string;
+  chatId: string;
   onResize?: (processId: string, rows: number, cols: number) => void;
 }) {
   useEffect(() => {
+    expect(chatId).toBe("chat-a");
     onResize?.(processId, 48, 132);
-  }, [onResize, processId]);
+  }, [chatId, onResize, processId]);
   return null;
 }
 

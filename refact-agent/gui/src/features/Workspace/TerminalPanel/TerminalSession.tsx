@@ -32,6 +32,7 @@ function usableToken(value: string | undefined): string | undefined {
 
 type TerminalSessionProps = {
   processId: string;
+  chatId: string;
   apiKey?: string;
   onStatusChange: (processId: string, status: ExecStatus) => void;
   onResize?: (processId: string, rows: number, cols: number) => void;
@@ -39,6 +40,7 @@ type TerminalSessionProps = {
 
 export function TerminalSession({
   processId,
+  chatId,
   apiKey,
   onStatusChange,
   onResize,
@@ -158,6 +160,7 @@ export function TerminalSession({
   );
   const { error, reconnecting } = useExecSession({
     processId,
+    chatId,
     runtime,
     connection,
     apiKey,

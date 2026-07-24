@@ -118,6 +118,7 @@ function Harness({
 }) {
   const state = useExecSession({
     processId: "proc-1",
+    chatId: "chat-a",
     runtime,
     connection: CONFIG,
     apiKey: undefined,
@@ -177,6 +178,7 @@ describe("useExecSession", () => {
     expect(fixture.write).toHaveBeenCalledWith("backfill");
     const source = FakeEventSource.instances[0];
     expect(source.url).toContain("since_seq=1");
+    expect(source.url).toContain("chat_id=chat-a");
 
     act(() => {
       source.emit("snapshot", {
@@ -189,9 +191,13 @@ describe("useExecSession", () => {
       fixture.emitData("b");
     });
 
-    await waitFor(() => expect(stdinBodies).toEqual([{ chars: "ab" }]));
     await waitFor(() =>
-      expect(resizeBodies).toEqual([{ rows: 40, cols: 120 }]),
+      expect(stdinBodies).toEqual([{ chars: "ab", chat_id: "chat-a" }]),
+    );
+    await waitFor(() =>
+      expect(resizeBodies).toEqual([
+        { rows: 40, cols: 120, chat_id: "chat-a" },
+      ]),
     );
     expect(fixture.write).not.toHaveBeenCalledWith("duplicate");
     expect(fixture.write).toHaveBeenCalledWith("live");
@@ -268,6 +274,7 @@ describe("useExecSession", () => {
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     expect(readUrls[0]).toContain("raw=true");
     expect(readUrls[0]).toContain("since_seq=0");
+    expect(readUrls[0]).toContain("chat_id=chat-a");
     expect(fixture.write).toHaveBeenCalledWith("tail\r\n");
     const source = FakeEventSource.instances[0];
     expect(source.url).toContain("since_seq=6");

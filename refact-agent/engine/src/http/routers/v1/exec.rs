@@ -179,13 +179,11 @@ async fn authorize_process(
         .await
         .map_err(process_access_error)?;
     if snapshot.meta.owner.chat_id.is_some() {
-        if let Some(chat_id) = chat_id {
-            app.runtime
-                .exec_registry
-                .authorize_process_access(process_id, chat_id, None)
-                .await
-                .map_err(process_access_error)?;
-        }
+        app.runtime
+            .exec_registry
+            .authorize_process_access(process_id, chat_id.unwrap_or_default(), None)
+            .await
+            .map_err(process_access_error)?;
     }
     Ok((snapshot, workspace))
 }
@@ -1072,10 +1070,16 @@ mod tests {
             .iter()
             .any(|process| process["process_id"] == legacy_process_id));
 
-        for process_id in [chat_process_id, legacy_process_id] {
+        for (process_id, chat_query) in [
+            (chat_process_id, "?chat_id=chat-a"),
+            (legacy_process_id, ""),
+        ] {
             let (status, _) = json_response(
                 router.clone(),
-                post_json(&format!("/v1/exec/{process_id}/kill"), json!({})),
+                post_json(
+                    &format!("/v1/exec/{process_id}/kill{chat_query}"),
+                    json!({}),
+                ),
             )
             .await;
             assert_eq!(status, StatusCode::OK);
@@ -1218,7 +1222,6 @@ mod tests {
                 "/v1/exec/{}/read?chat_id=chat-a",
                 owned.meta.process_id.as_str()
             ),
-            format!("/v1/exec/{}/read", owned.meta.process_id.as_str()),
             format!(
                 "/v1/exec/{}/read?chat_id=chat-b",
                 legacy.meta.process_id.as_str()
@@ -1233,6 +1236,7 @@ mod tests {
         }
 
         for uri in [
+            format!("/v1/exec/{}/read", owned.meta.process_id.as_str()),
             format!(
                 "/v1/exec/{}/read?chat_id=chat-b",
                 owned.meta.process_id.as_str()
@@ -1272,6 +1276,57 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let process_id = spawned["process_id"].as_str().unwrap();
 
+        for request in [
+            Request::builder()
+                .uri(format!("/v1/exec/{process_id}/read?since_seq=0"))
+                .body(Body::empty())
+                .unwrap(),
+            post_json(
+                &format!("/v1/exec/{process_id}/resize"),
+                json!({ "rows": 40, "cols": 120 }),
+            ),
+            post_json(
+                &format!("/v1/exec/{process_id}/stdin"),
+                json!({ "chars": "nope" }),
+            ),
+            post_json(&format!("/v1/exec/{process_id}/kill"), json!({})),
+            Request::builder()
+                .uri(format!(
+                    "/v1/exec/{process_id}/read?chat_id=chat-b&since_seq=0"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            post_json(
+                &format!("/v1/exec/{process_id}/resize"),
+                json!({ "rows": 40, "cols": 120, "chat_id": "chat-b" }),
+            ),
+            post_json(
+                &format!("/v1/exec/{process_id}/stdin"),
+                json!({ "chars": "nope", "chat_id": "chat-b" }),
+            ),
+            post_json(
+                &format!("/v1/exec/{process_id}/kill?chat_id=chat-b"),
+                json!({}),
+            ),
+        ] {
+            let (status, _) = json_response(router.clone(), request).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+
+        for chat_query in ["", "?chat_id=chat-b"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/exec/{process_id}/subscribe{chat_query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+
         let (status, _) = json_response(
             router.clone(),
             Request::builder()
@@ -1304,41 +1359,17 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        for request in [
-            Request::builder()
-                .uri(format!(
-                    "/v1/exec/{process_id}/read?chat_id=chat-b&since_seq=0"
-                ))
-                .body(Body::empty())
-                .unwrap(),
-            post_json(
-                &format!("/v1/exec/{process_id}/resize"),
-                json!({ "rows": 40, "cols": 120, "chat_id": "chat-b" }),
-            ),
-            post_json(
-                &format!("/v1/exec/{process_id}/stdin"),
-                json!({ "chars": "nope", "chat_id": "chat-b" }),
-            ),
-            post_json(
-                &format!("/v1/exec/{process_id}/kill?chat_id=chat-b"),
-                json!({}),
-            ),
-        ] {
-            let (status, _) = json_response(router.clone(), request).await;
-            assert_eq!(status, StatusCode::FORBIDDEN);
-        }
-
         let response = router
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/v1/exec/{process_id}/subscribe?chat_id=chat-b"))
+                    .uri(format!("/v1/exec/{process_id}/subscribe?chat_id=chat-a"))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), StatusCode::OK);
 
         let (status, killed) = json_response(
             router,

@@ -14,6 +14,7 @@ import { ExecToolCard } from "./ExecToolCard";
 import type { Config } from "../../../features/Config/configSlice";
 
 const receivedChars: string[] = [];
+let expectedChatId = "";
 
 function toolCall(): ToolCall {
   return {
@@ -46,6 +47,7 @@ function toolMessage(tty: boolean): ToolMessage {
 
 async function renderExpandedStdinCard(tty: boolean, config?: Partial<Config>) {
   const chat = createDefaultChatState();
+  expectedChatId = chat.current_thread_id;
   const currentThread = chat.threads[chat.current_thread_id];
   currentThread.thread.messages = [toolMessage(tty)];
   const result = render(
@@ -81,8 +83,12 @@ describe("ProcessStdinInput", () => {
     receivedChars.length = 0;
     server.use(
       http.post("*/v1/exec/:processId/stdin", async ({ request }) => {
-        const body = (await request.json()) as { chars: string };
+        const body = (await request.json()) as {
+          chars: string;
+          chat_id: string;
+        };
         receivedChars.push(body.chars);
+        expect(body.chat_id).toBe(expectedChatId);
         return HttpResponse.json({
           process_id: "exec_test",
           status: "running",
@@ -112,8 +118,12 @@ describe("ProcessStdinInput", () => {
         "https://engine.example.test/v1/exec/:processId/stdin",
         async ({ request }) => {
           receivedUrl = request.url;
-          const body = (await request.json()) as { chars: string };
+          const body = (await request.json()) as {
+            chars: string;
+            chat_id: string;
+          };
           receivedChars.push(body.chars);
+          expect(body.chat_id).toBe(expectedChatId);
           return HttpResponse.json({
             process_id: "exec_test",
             status: "running",

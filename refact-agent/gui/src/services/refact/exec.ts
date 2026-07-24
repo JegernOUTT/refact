@@ -2,12 +2,7 @@ import { buildApiUrl } from "./apiUrl";
 import { normalizeConnection, type PortOrConnection } from "./chatCommands";
 
 export type ExecStatus =
-  | "starting"
-  | "running"
-  | "exited"
-  | "failed"
-  | "killed"
-  | "timed_out";
+  "starting" | "running" | "exited" | "failed" | "killed" | "timed_out";
 
 export type ExecSpawnRequest = {
   command?: string;
@@ -153,6 +148,7 @@ export function readExec(
   processId: string,
   sinceSeq: number,
   connection: PortOrConnection,
+  chatId: string,
   apiKey?: string,
   raw = false,
 ): Promise<ExecReadResponse> {
@@ -161,13 +157,19 @@ export function readExec(
     `/v1/exec/${encodeURIComponent(processId)}/read`,
     apiKey,
     undefined,
-    { since_seq: sinceSeq, limit: 10_000, raw: raw ? true : undefined },
+    {
+      since_seq: sinceSeq,
+      limit: 10_000,
+      raw: raw ? true : undefined,
+      chat_id: chatId,
+    },
   );
 }
 
 export function killExec(
   processId: string,
   connection: PortOrConnection,
+  chatId: string,
   apiKey?: string,
 ): Promise<ExecKillResponse> {
   return execRequest(
@@ -175,6 +177,7 @@ export function killExec(
     `/v1/exec/${encodeURIComponent(processId)}/kill`,
     apiKey,
     { method: "POST", body: "{}" },
+    { chat_id: chatId },
   );
 }
 
@@ -183,6 +186,7 @@ export function resizeExec(
   rows: number,
   cols: number,
   connection: PortOrConnection,
+  chatId: string,
   apiKey?: string,
 ): Promise<Record<string, never>> {
   return execRequest(
@@ -191,7 +195,7 @@ export function resizeExec(
     apiKey,
     {
       method: "POST",
-      body: JSON.stringify({ rows, cols }),
+      body: JSON.stringify({ rows, cols, chat_id: chatId }),
     },
   );
 }
@@ -200,6 +204,7 @@ export function writeProcessStdin(
   processId: string,
   chars: string,
   connection: PortOrConnection,
+  chatId: string,
   apiKey?: string,
 ): Promise<ExecStdinResponse> {
   return execRequest(
@@ -208,7 +213,7 @@ export function writeProcessStdin(
     apiKey,
     {
       method: "POST",
-      body: JSON.stringify({ chars }),
+      body: JSON.stringify({ chars, chat_id: chatId }),
     },
   );
 }
@@ -216,11 +221,12 @@ export function writeProcessStdin(
 export function execSubscribeUrl(
   processId: string,
   connection: PortOrConnection,
+  chatId: string,
   sinceSeq = 0,
 ): string {
   return execUrl(
     connection,
     `/v1/exec/${encodeURIComponent(processId)}/subscribe`,
-    { since_seq: sinceSeq },
+    { since_seq: sinceSeq, chat_id: chatId },
   );
 }

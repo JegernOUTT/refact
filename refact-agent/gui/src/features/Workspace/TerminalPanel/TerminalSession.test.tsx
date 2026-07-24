@@ -51,6 +51,10 @@ const LIGHT_TOKENS: Record<string, string> = {
 };
 
 const tokenState = { current: DARK_TOKENS };
+const useExecSessionMock = vi.fn(() => ({
+  error: null,
+  reconnecting: false,
+}));
 
 const CONFIG_STATE = {
   config: {
@@ -68,6 +72,7 @@ beforeEach(async () => {
   vi.resetModules();
   FakeTerminal.instances = [];
   tokenState.current = DARK_TOKENS;
+  useExecSessionMock.mockClear();
   vi.doMock("@xterm/xterm", () => ({ Terminal: FakeTerminal }));
   vi.doMock("@xterm/addon-fit", () => ({
     FitAddon: class {
@@ -75,7 +80,7 @@ beforeEach(async () => {
     },
   }));
   vi.doMock("./useExecSession", () => ({
-    useExecSession: () => ({ error: null, reconnecting: false }),
+    useExecSession: useExecSessionMock,
   }));
   vi.doMock("../../../components/ui", async (importOriginal) => {
     const actual =
@@ -96,11 +101,18 @@ afterEach(() => {
 describe("TerminalSession", () => {
   test("constructs the terminal with a token-derived dark theme", async () => {
     render(
-      <TerminalSession processId="proc-theme" onStatusChange={vi.fn()} />,
+      <TerminalSession
+        processId="proc-theme"
+        chatId="chat-a"
+        onStatusChange={vi.fn()}
+      />,
       { preloadedState: CONFIG_STATE },
     );
 
     await waitFor(() => expect(FakeTerminal.instances).toHaveLength(1));
+    expect(useExecSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ processId: "proc-theme", chatId: "chat-a" }),
+    );
     const constructed = FakeTerminal.instances[0].constructorOptions;
     expect(constructed.theme?.background).not.toBe("#ffffff");
     expect(constructed.theme?.background).toBe("#0c0d0f");
@@ -117,7 +129,11 @@ describe("TerminalSession", () => {
 
   test("appearance switch updates options.theme without recreating the terminal", async () => {
     const view = render(
-      <TerminalSession processId="proc-theme" onStatusChange={vi.fn()} />,
+      <TerminalSession
+        processId="proc-theme"
+        chatId="chat-a"
+        onStatusChange={vi.fn()}
+      />,
       { preloadedState: CONFIG_STATE },
     );
 
@@ -129,7 +145,11 @@ describe("TerminalSession", () => {
 
     tokenState.current = LIGHT_TOKENS;
     view.rerender(
-      <TerminalSession processId="proc-theme" onStatusChange={vi.fn()} />,
+      <TerminalSession
+        processId="proc-theme"
+        chatId="chat-a"
+        onStatusChange={vi.fn()}
+      />,
     );
 
     await waitFor(() =>
@@ -145,7 +165,11 @@ describe("TerminalSession", () => {
       "--rf-color-fg": "",
     };
     render(
-      <TerminalSession processId="proc-theme" onStatusChange={vi.fn()} />,
+      <TerminalSession
+        processId="proc-theme"
+        chatId="chat-a"
+        onStatusChange={vi.fn()}
+      />,
       { preloadedState: CONFIG_STATE },
     );
 

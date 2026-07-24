@@ -181,7 +181,7 @@ export function TerminalPanel({ chatId }: { chatId: string }) {
       }
       setError(null);
       try {
-        if (running) await killExec(processId, connection, apiKey);
+        if (running) await killExec(processId, connection, chatId, apiKey);
         dispatch(sessionRemoved({ chatId, processId }));
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
@@ -313,6 +313,7 @@ export function TerminalPanel({ chatId }: { chatId: string }) {
                 >
                   <TerminalSession
                     processId={session.process_id}
+                    chatId={chatId}
                     apiKey={apiKey}
                     onStatusChange={handleStatusChange}
                     onResize={handleSessionResize}

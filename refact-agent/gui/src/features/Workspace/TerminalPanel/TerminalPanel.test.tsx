@@ -274,7 +274,7 @@ describe("TerminalPanel", () => {
 
   test("spawns the backend-selected shell and kills it when closed", async () => {
     const spawnBodies: unknown[] = [];
-    let killed = false;
+    const killChatIds: (string | null)[] = [];
     server.use(
       http.get("*/v1/exec/list", () => HttpResponse.json({ processes: [] })),
       http.post("*/v1/exec/spawn", async ({ request }) => {
@@ -289,8 +289,8 @@ describe("TerminalPanel", () => {
         HttpResponse.json({ chunks: [], next_seq: 0, status: "running" }),
       ),
       http.post("*/v1/exec/spawned-1234/resize", () => HttpResponse.json({})),
-      http.post("*/v1/exec/spawned-1234/kill", () => {
-        killed = true;
+      http.post("*/v1/exec/spawned-1234/kill", ({ request }) => {
+        killChatIds.push(new URL(request.url).searchParams.get("chat_id"));
         return HttpResponse.json({
           process_id: "spawned-1234",
           status: "killed",
@@ -319,7 +319,7 @@ describe("TerminalPanel", () => {
     await user.click(
       screen.getByRole("button", { name: /Close powershell\.exe · spawned/i }),
     );
-    await waitFor(() => expect(killed).toBe(true));
+    await waitFor(() => expect(killChatIds).toEqual(["chat-a"]));
     expect(window.confirm).toHaveBeenCalled();
     await waitFor(() =>
       expect(

@@ -7,6 +7,7 @@ import {
   selectApiKey,
   selectConfig,
 } from "../../../features/Config/configSlice";
+import { useThreadId } from "../../../features/Chat/Thread";
 import { hasUsableEngineEndpoint } from "../../../services/refact/apiUrl";
 import { writeProcessStdin } from "../../../services/refact/exec";
 import styles from "./ExecToolCard.module.css";
@@ -20,6 +21,7 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
 }) => {
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
+  const chatId = useThreadId();
   const [chars, setChars] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +33,13 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
       setIsSending(true);
       setError(null);
       try {
-        await writeProcessStdin(processId, value, config, apiKey ?? undefined);
+        await writeProcessStdin(
+          processId,
+          value,
+          config,
+          chatId,
+          apiKey ?? undefined,
+        );
         setChars("");
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
@@ -39,7 +47,7 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
         setIsSending(false);
       }
     },
-    [apiKey, config, hasEngineEndpoint, isSending, processId],
+    [apiKey, chatId, config, hasEngineEndpoint, isSending, processId],
   );
 
   const canSend = chars.length > 0 && !isSending && hasEngineEndpoint;

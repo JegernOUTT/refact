@@ -27,6 +27,7 @@ type TerminalRuntime = {
 
 type UseExecSessionOptions = {
   processId: string;
+  chatId: string;
   runtime: TerminalRuntime | null;
   connection: EngineApiConnection;
   apiKey?: string;
@@ -51,6 +52,7 @@ function isTerminalStatus(status: ExecStatus): boolean {
 
 export function useExecSession({
   processId,
+  chatId,
   runtime,
   connection,
   apiKey,
@@ -106,7 +108,7 @@ export function useExecSession({
       inputBuffer = "";
       if (!chars || stopped) return;
       try {
-        await writeProcessStdin(processId, chars, connection, apiKey);
+        await writeProcessStdin(processId, chars, connection, chatId, apiKey);
       } catch (cause) {
         reportError(cause);
       }
@@ -133,7 +135,7 @@ export function useExecSession({
         return;
       }
       try {
-        await resizeExec(processId, rows, cols, connection, apiKey);
+        await resizeExec(processId, rows, cols, connection, chatId, apiKey);
         syncedSize = { rows, cols };
       } catch (cause) {
         reportError(cause);
@@ -175,7 +177,12 @@ export function useExecSession({
     const connect = () => {
       if (stopped || isTerminalStatus(statusRef.current)) return;
       eventSource = new EventSource(
-        execSubscribeUrl(processId, connection, nextSequenceRef.current),
+        execSubscribeUrl(
+          processId,
+          connection,
+          chatId,
+          nextSequenceRef.current,
+        ),
       );
       eventSource.onopen = () => {
         reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
@@ -215,6 +222,7 @@ export function useExecSession({
           processId,
           nextSequenceRef.current,
           connection,
+          chatId,
           apiKey,
           true,
         );
@@ -249,7 +257,15 @@ export function useExecSession({
       if (resizeTimer !== null) clearTimeout(resizeTimer);
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
     };
-  }, [apiKey, connection, onResize, onStatusChange, processId, runtime]);
+  }, [
+    apiKey,
+    chatId,
+    connection,
+    onResize,
+    onStatusChange,
+    processId,
+    runtime,
+  ]);
 
   return { error, reconnecting };
 }
