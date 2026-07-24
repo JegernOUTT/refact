@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,6 +51,7 @@ pub async fn postprocess_tool_results(
     budget: ToolBudget,
     pp_settings: PostprocessSettings,
     existing_messages: &[ChatMessage],
+    truncation_exempt_tool_call_ids: &HashSet<String>,
 ) -> Vec<ChatMessage> {
     let mut result = Vec::new();
 
@@ -59,18 +60,38 @@ pub async fn postprocess_tool_results(
 
     result.extend(diff_messages);
 
+    let mut exempt_indexed: Vec<(usize, ChatMessage)> = Vec::new();
+    let mut budgeted_indexed: Vec<(usize, ChatMessage)> = Vec::new();
+    for (idx, msg) in other_messages.into_iter().enumerate() {
+        if !msg.tool_call_id.is_empty()
+            && truncation_exempt_tool_call_ids.contains(&msg.tool_call_id)
+        {
+            exempt_indexed.push((idx, msg));
+        } else {
+            budgeted_indexed.push((idx, msg));
+        }
+    }
+
     let total_budget = budget.tokens_for_code;
     let text_budget = if context_files.is_empty() {
         total_budget
-    } else if other_messages.is_empty() {
+    } else if budgeted_indexed.is_empty() {
         0
     } else {
         budget.tokens_for_text
     };
 
+    let budgeted_indices: Vec<usize> = budgeted_indexed.iter().map(|(idx, _)| *idx).collect();
+    let budgeted_messages: Vec<ChatMessage> =
+        budgeted_indexed.into_iter().map(|(_, msg)| msg).collect();
     let (text_messages, text_remaining) =
-        postprocess_plain_text(other_messages, tokenizer.clone(), text_budget, &None).await;
-    result.extend(text_messages);
+        postprocess_plain_text(budgeted_messages, tokenizer.clone(), text_budget, &None).await;
+
+    let mut ordered: Vec<(usize, ChatMessage)> =
+        budgeted_indices.into_iter().zip(text_messages).collect();
+    ordered.extend(exempt_indexed);
+    ordered.sort_by_key(|(idx, _)| *idx);
+    result.extend(ordered.into_iter().map(|(_, msg)| msg));
 
     deduplicate_web_search_tool_results(&mut result, existing_messages);
 
@@ -1320,5 +1341,128 @@ mod tests {
 
         let cf2 = make_context_file("test.rs", 10, 150);
         assert!(find_coverage_in_history(&cf2, &history).is_none());
+    }
+
+    struct NoopPPContext;
+
+    #[async_trait::async_trait]
+    impl PPContextTrait for NoopPPContext {
+        async fn read_file(&self, _path: &PathBuf) -> Result<String, String> {
+            Err("no files in tests".to_string())
+        }
+        async fn correct_to_nearest_filename(&self, _path: &str, _limit: usize) -> Vec<String> {
+            vec![]
+        }
+        async fn shortify_paths(&self, paths: &[String]) -> Vec<String> {
+            paths.to_vec()
+        }
+        async fn doc_defs_for_path(
+            &self,
+            _path: &str,
+        ) -> Vec<Arc<refact_core::ast_types::AstDefinition>> {
+            vec![]
+        }
+        fn canonical_path(&self, path: &str) -> PathBuf {
+            PathBuf::from(path)
+        }
+    }
+
+    fn small_budget() -> ToolBudget {
+        ToolBudget {
+            tokens_for_code: 200,
+            tokens_for_text: 60,
+        }
+    }
+
+    #[tokio::test]
+    async fn exempt_tool_results_bypass_shared_budget_truncation() {
+        let big = "content line\n".repeat(2000);
+        let exempt_content = format!("exempt-report: {}", big);
+        let messages = vec![
+            make_tool_message(&exempt_content, "call_exempt"),
+            make_tool_message(&format!("normal-output: {}", big), "call_normal"),
+        ];
+        let exempt_ids: HashSet<String> = HashSet::from(["call_exempt".to_string()]);
+
+        let result = postprocess_tool_results(
+            Arc::new(NoopPPContext),
+            None,
+            messages,
+            vec![],
+            small_budget(),
+            PostprocessSettings::default(),
+            &[],
+            &exempt_ids,
+        )
+        .await;
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].tool_call_id, "call_exempt");
+        assert_eq!(result[0].content.content_text_only(), exempt_content);
+        assert_eq!(result[1].tool_call_id, "call_normal");
+        assert!(result[1]
+            .content
+            .content_text_only()
+            .contains("Truncated: too many tokens"));
+    }
+
+    #[tokio::test]
+    async fn exempt_tool_results_keep_original_order() {
+        let big = "content line\n".repeat(2000);
+        let messages = vec![
+            make_tool_message(&format!("first: {}", big), "call_0"),
+            make_tool_message(&format!("second: {}", big), "call_exempt"),
+            make_tool_message(&format!("third: {}", big), "call_2"),
+        ];
+        let exempt_ids: HashSet<String> = HashSet::from(["call_exempt".to_string()]);
+
+        let result = postprocess_tool_results(
+            Arc::new(NoopPPContext),
+            None,
+            messages,
+            vec![],
+            small_budget(),
+            PostprocessSettings::default(),
+            &[],
+            &exempt_ids,
+        )
+        .await;
+
+        let ids: Vec<&str> = result.iter().map(|m| m.tool_call_id.as_str()).collect();
+        assert_eq!(ids, vec!["call_0", "call_exempt", "call_2"]);
+        assert!(result[1].content.content_text_only().starts_with("second: "));
+        assert!(!result[1]
+            .content
+            .content_text_only()
+            .contains("Truncated: too many tokens"));
+    }
+
+    #[tokio::test]
+    async fn empty_exempt_set_keeps_shared_budget_for_all() {
+        let big = "content line\n".repeat(2000);
+        let messages = vec![
+            make_tool_message(&format!("first: {}", big), "call_0"),
+            make_tool_message(&format!("second: {}", big), "call_1"),
+        ];
+
+        let result = postprocess_tool_results(
+            Arc::new(NoopPPContext),
+            None,
+            messages,
+            vec![],
+            small_budget(),
+            PostprocessSettings::default(),
+            &[],
+            &HashSet::new(),
+        )
+        .await;
+
+        assert_eq!(result.len(), 2);
+        for msg in &result {
+            assert!(msg
+                .content
+                .content_text_only()
+                .contains("Truncated: too many tokens"));
+        }
     }
 }

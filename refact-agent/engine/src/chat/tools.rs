@@ -276,6 +276,24 @@ fn is_editing_tool(tool_name: &str) -> bool {
     EDITING_TOOLS.contains(&tool_name)
 }
 
+// Tools whose results are expensive, non-reproducible reports (code reviews,
+// subagent/delegate outcomes). Their outputs bypass the shared per-round
+// ToolBudget so running many of them at once does not chop each report to a
+// fair-share fragment; overall context pressure is handled later by chat
+// compression instead.
+const TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS: &[&str] = &[
+    "code_review",
+    "subagent",
+    "delegate",
+    "agent_wait",
+    "agent_result",
+    "swarm_investigate",
+];
+
+fn is_tool_result_truncation_exempt(tool_name: &str) -> bool {
+    TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS.contains(&tool_name)
+}
+
 fn should_auto_approve_confirmation(thread: &ThreadParams, tool_name: &str) -> bool {
     if thread.autonomous_no_confirm {
         return true;
@@ -572,6 +590,20 @@ mod tests {
         assert!(is_editing_tool("update_textdoc_by_lines"));
         assert!(is_editing_tool("undo_textdoc"));
         assert!(is_editing_tool("mv"));
+    }
+
+    #[test]
+    fn test_tool_result_truncation_exempt_tools() {
+        assert!(is_tool_result_truncation_exempt("code_review"));
+        assert!(is_tool_result_truncation_exempt("subagent"));
+        assert!(is_tool_result_truncation_exempt("delegate"));
+        assert!(is_tool_result_truncation_exempt("agent_wait"));
+        assert!(is_tool_result_truncation_exempt("agent_result"));
+        assert!(is_tool_result_truncation_exempt("swarm_investigate"));
+        assert!(!is_tool_result_truncation_exempt("cat"));
+        assert!(!is_tool_result_truncation_exempt("shell"));
+        assert!(!is_tool_result_truncation_exempt("web_search"));
+        assert!(!is_tool_result_truncation_exempt(""));
     }
 
     #[test]
@@ -2111,6 +2143,18 @@ async fn execute_tools_inner(
 
     let pp_settings = options.postprocess_settings.unwrap_or_default();
 
+    let truncation_exempt_ids: std::collections::HashSet<String> = tool_calls
+        .iter()
+        .filter(|tc| {
+            let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
+                &tc.function.name,
+            );
+            is_tool_result_truncation_exempt(&tc.function.name)
+                || is_tool_result_truncation_exempt(resolved.as_str())
+        })
+        .map(|tc| tc.id.clone())
+        .collect();
+
     let results = postprocess_tool_results(
         app.gcx.clone(),
         None,
@@ -2119,6 +2163,7 @@ async fn execute_tools_inner(
         budget,
         pp_settings,
         messages,
+        &truncation_exempt_ids,
     )
     .await;
 

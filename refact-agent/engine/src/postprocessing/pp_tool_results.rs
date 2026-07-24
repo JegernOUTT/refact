@@ -15,6 +15,7 @@ pub async fn postprocess_tool_results(
     budget: ToolBudget,
     pp_settings: PostprocessSettings,
     existing_messages: &[ChatMessage],
+    truncation_exempt_tool_call_ids: &std::collections::HashSet<String>,
 ) -> Vec<ChatMessage> {
     refact_postprocessing::pp_tool_results::postprocess_tool_results(
         Arc::new(GcxPPContext(gcx)),
@@ -24,6 +25,7 @@ pub async fn postprocess_tool_results(
         budget,
         pp_settings,
         existing_messages,
+        truncation_exempt_tool_call_ids,
     )
     .await
 }
