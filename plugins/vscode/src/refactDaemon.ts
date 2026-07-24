@@ -82,7 +82,7 @@ type ShutdownDaemon = (
     options?: DaemonClientOptions,
 ) => Promise<void>;
 type IsProcessRunning = (pid: number) => boolean;
-type SpawnDaemon = (binPath: string, options?: DaemonClientOptions) => void | Promise<void>;
+type SpawnDaemon = (binPath: string, options?: DaemonClientOptions, port?: number) => void | Promise<void>;
 
 export type FindDaemonOptions = DaemonClientOptions & {
     pluginVersion?: string;
@@ -140,6 +140,9 @@ function daemonLogPath(options: DaemonClientOptions = {}): string {
 }
 
 export function daemonJsonPath(homeDir: string = os.homedir()): string {
+    if (process.env.REFACT_DAEMON_DIR) {
+        return path.join(process.env.REFACT_DAEMON_DIR, "daemon.json");
+    }
     return path.join(homeDir, ".cache", "refact", "daemon", "daemon.json");
 }
 
@@ -510,7 +513,7 @@ export async function findExistingDaemon(options: FindDaemonOptions = {}): Promi
     return undefined;
 }
 
-export async function ensureDaemon(binPath: string, options: EnsureDaemonOptions = {}): Promise<DaemonStatus> {
+export async function ensureDaemon(binPath: string, options: EnsureDaemonOptions = {}, spawnPort?: number): Promise<DaemonStatus> {
     const expectedExecutableSha256 = await sha256OfFile(binPath);
     const preferredEndpoint = daemonEndpoints(options)[0];
     const timeoutMs = options.timeoutMs ?? DAEMON_POLL_TIMEOUT_MS;
@@ -553,7 +556,7 @@ export async function ensureDaemon(binPath: string, options: EnsureDaemonOptions
     }
 
     try {
-        await spawnDaemon(binPath, options);
+        await spawnDaemon(binPath, options, spawnPort);
     } catch (error) {
         throw new Error(daemonStartupFailureMessage(`Failed to start Refact daemon from ${binPath}: ${errorMessage(error)}`, options));
     }
@@ -672,8 +675,8 @@ async function pollDaemon(
     throw new Error(`Refact daemon did not become ready on port ${lastPort}`);
 }
 
-function defaultSpawnDaemon(binPath: string, options: DaemonClientOptions = {}): Promise<void> {
-    const command = daemonSpawnCommand(binPath);
+function defaultSpawnDaemon(binPath: string, options: DaemonClientOptions = {}, port?: number): Promise<void> {
+    const command = daemonSpawnCommand(binPath, port);
     const spawnIo = daemonSpawnStdio(options);
     return new Promise((resolve, reject) => {
         let settled = false;
@@ -700,8 +703,20 @@ function defaultSpawnDaemon(binPath: string, options: DaemonClientOptions = {}):
     });
 }
 
-export function daemonSpawnCommand(binPath: string): { command: string; args: string[] } {
-    return { command: binPath, args: ["daemon"] };
+export function normalizeDaemonSpawnPort(port: number | undefined): number | undefined {
+    if (port === undefined || !Number.isFinite(port)) {
+        return undefined;
+    }
+    const normalized = Math.trunc(port);
+    return normalized >= 1 && normalized <= 65535 ? normalized : undefined;
+}
+
+export function daemonSpawnCommand(binPath: string, port?: number): { command: string; args: string[] } {
+    const normalizedPort = normalizeDaemonSpawnPort(port);
+    const args = normalizedPort !== undefined
+        ? ["daemon", "--port", String(normalizedPort)]
+        : ["daemon"];
+    return { command: binPath, args };
 }
 
 function defaultIsProcessRunning(pid: number): boolean {

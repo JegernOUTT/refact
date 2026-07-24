@@ -93,14 +93,28 @@ impl RuntimePaths {
     }
 }
 
-pub async fn run_daemon(foreground: bool) {
-    let config = match config::load().await {
+pub async fn run_daemon(foreground: bool, port: Option<u16>) {
+    let mut config = match config::load().await {
         Ok(config) => config,
         Err(error) => {
             eprintln!("failed to load daemon config: {error}");
             std::process::exit(1);
         }
     };
+    let env_port = std::env::var(config::DAEMON_PORT_ENV).ok();
+    match config::resolve_port_override(port, env_port.as_deref()) {
+        Ok(Some(value)) => config.port = value,
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    }
+    if let Some(value) = port {
+        // Export the CLI override so daemon self-relaunches (settings change,
+        // self-update, restart) inherit the same port.
+        std::env::set_var(config::DAEMON_PORT_ENV, value.to_string());
+    }
     let code = run_daemon_entry_with_paths(config, RuntimePaths::default(), foreground, true).await;
     if code != 0 {
         std::process::exit(code);

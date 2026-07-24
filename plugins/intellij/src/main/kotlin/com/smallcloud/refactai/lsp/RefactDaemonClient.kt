@@ -60,19 +60,24 @@ internal enum class DaemonSpawnOs {
 
 internal data class DaemonSpawnCommand(val argv: List<String>)
 
-internal fun daemonCommandCandidates(binPath: String, os: DaemonSpawnOs): List<DaemonSpawnCommand> {
+internal fun daemonCommandCandidates(binPath: String, os: DaemonSpawnOs, port: Int? = null): List<DaemonSpawnCommand> {
+    val daemonArgs = if (port != null && port in 1..65535) {
+        listOf("daemon", "--port", port.toString())
+    } else {
+        listOf("daemon")
+    }
     return when (os) {
         DaemonSpawnOs.Windows -> listOf(
-            DaemonSpawnCommand(listOf(binPath, "daemon")),
+            DaemonSpawnCommand(listOf(binPath) + daemonArgs),
         )
         DaemonSpawnOs.Linux -> listOf(
-            DaemonSpawnCommand(listOf("setsid", binPath, "daemon")),
-            DaemonSpawnCommand(listOf("nohup", binPath, "daemon")),
-            DaemonSpawnCommand(listOf(binPath, "daemon")),
+            DaemonSpawnCommand(listOf("setsid", binPath) + daemonArgs),
+            DaemonSpawnCommand(listOf("nohup", binPath) + daemonArgs),
+            DaemonSpawnCommand(listOf(binPath) + daemonArgs),
         )
         DaemonSpawnOs.Other -> listOf(
-            DaemonSpawnCommand(listOf("nohup", binPath, "daemon")),
-            DaemonSpawnCommand(listOf(binPath, "daemon")),
+            DaemonSpawnCommand(listOf("nohup", binPath) + daemonArgs),
+            DaemonSpawnCommand(listOf(binPath) + daemonArgs),
         )
     }
 }
@@ -254,6 +259,7 @@ internal class DaemonHttpStatusException(
 class HttpRefactDaemonClient(
     private val portProvider: () -> Int = { InferenceGlobalContext.xDebugLSPPort?.takeIf { it > 0 } ?: DEFAULT_REFACT_DAEMON_PORT },
     private val pluginVersionProvider: () -> String = { Resources.version },
+    private val spawnPortProvider: () -> Int? = { InferenceGlobalContext.xDebugLSPPort?.takeIf { it > 0 } },
 ) : RefactDaemonClient {
     private val gson = Gson()
     private val logger = Logger.getInstance(HttpRefactDaemonClient::class.java)
@@ -290,7 +296,7 @@ class HttpRefactDaemonClient(
             status = { status() },
             expectedVersion = expectedVersion,
             expectedExecutableSha256 = expectedExecutableSha256,
-            commands = daemonCommandCandidates(binPath, currentDaemonSpawnOs()),
+            commands = daemonCommandCandidates(binPath, currentDaemonSpawnOs(), spawnPortProvider()),
             spawnCandidate = { spawnDaemonProcess(it) },
             pollCandidate = { expectedVersion, rejectedPid, expectedHash ->
                 pollStatus(expectedVersion, rejectedPid, expectedHash)

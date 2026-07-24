@@ -9,7 +9,7 @@ use crate::global_context::CommandLine;
 #[derive(Debug, Clone)]
 pub enum RefactCliCommand {
     Worker(CommandLine),
-    Daemon { foreground: bool },
+    Daemon { foreground: bool, port: Option<u16> },
     Run(crate::daemon::run_cmd::RunOptions),
     Tui(TuiOptions),
     Control(crate::daemon::cli::CliOptions),
@@ -34,7 +34,7 @@ pub struct CliDispatchError {
 #[derive(Debug, Clone)]
 pub enum DispatchResult {
     Worker(CommandLine),
-    Daemon { foreground: bool },
+    Daemon { foreground: bool, port: Option<u16> },
     Run(crate::daemon::run_cmd::RunOptions),
     Tui(TuiOptions),
     Control(crate::daemon::cli::CliOptions),
@@ -98,7 +98,9 @@ where
 pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
     match command {
         RefactCliCommand::Worker(cmdline) => DispatchResult::Worker(cmdline),
-        RefactCliCommand::Daemon { foreground } => DispatchResult::Daemon { foreground },
+        RefactCliCommand::Daemon { foreground, port } => {
+            DispatchResult::Daemon { foreground, port }
+        }
         RefactCliCommand::Run(options) => DispatchResult::Run(options),
         RefactCliCommand::Tui(options) => DispatchResult::Tui(options),
         RefactCliCommand::Control(options) => DispatchResult::Control(options),
@@ -111,11 +113,11 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
 }
 
 pub fn help_text() -> &'static str {
-    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact                       Open the full-screen TUI\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ui [<path>] [--json] [--no-open]\n                                Open the dashboard or a project workspace\n    tui [--project <path>]      Open the full-screen TUI\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground]       Run the refact daemon\n    run [OPTIONS] <prompt>      Run one headless chat turn through the daemon\n    ps                          List daemon workers\n    projects                    Manage daemon project registry\n    cron                        Manage scheduler jobs\n    restart                     Restart a project worker or daemon\n    stop                        Stop a project worker or daemon\n    logs                        Print daemon or worker logs\n    events                      Print daemon events\n    status                      Print daemon health\n    doctor                      Diagnose daemon setup\n    version                     Print version and build information\n    self-update [OPTIONS]       Update this refact binary from GitHub Releases\n\nTUI OPTIONS:\n    --project <path>            Project root (default: cwd)\n\nRUN OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n\nAll management commands support --json. Run `refact worker --help` for engine flags."
+    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact                       Open the full-screen TUI\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ui [<path>] [--json] [--no-open]\n                                Open the dashboard or a project workspace\n    tui [--project <path>]      Open the full-screen TUI\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground] [--port <N>]\n                                Run the refact daemon\n    run [OPTIONS] <prompt>      Run one headless chat turn through the daemon\n    ps                          List daemon workers\n    projects                    Manage daemon project registry\n    cron                        Manage scheduler jobs\n    restart                     Restart a project worker or daemon\n    stop                        Stop a project worker or daemon\n    logs                        Print daemon or worker logs\n    events                      Print daemon events\n    status                      Print daemon health\n    doctor                      Diagnose daemon setup\n    version                     Print version and build information\n    self-update [OPTIONS]       Update this refact binary from GitHub Releases\n\nTUI OPTIONS:\n    --project <path>            Project root (default: cwd)\n\nRUN OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n\nAll management commands support --json. Run `refact worker --help` for engine flags."
 }
 
 pub fn daemon_help_text() -> &'static str {
-    "refact daemon [--foreground]\n\nRun the refact daemon control process.\n\nOPTIONS:\n    --foreground                Run in the foreground instead of detaching\n    -h, --help                  Print this help text"
+    "refact daemon [--foreground] [--port <N>]\n\nRun the refact daemon control process.\n\nOPTIONS:\n    --foreground                Run in the foreground instead of detaching\n    --port <N>                  Bind the control API to port N (0 picks a free port).\n                                Takes precedence over the REFACT_DAEMON_PORT environment\n                                variable and the `port` setting in daemon.yaml\n    -h, --help                  Print this help text"
 }
 
 pub fn tui_help_text() -> &'static str {
@@ -151,9 +153,28 @@ fn parse_worker(args: Vec<OsString>) -> Result<RefactCliCommand, CliDispatchErro
 
 fn parse_daemon(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
     let mut foreground = false;
-    for arg in args.iter().skip(2) {
-        match arg.to_string_lossy().as_ref() {
+    let mut port = None;
+    let mut i = 2usize;
+    while i < args.len() {
+        let value = args[i].to_string_lossy();
+        match value.as_ref() {
             "--foreground" => foreground = true,
+            "--port" => {
+                i += 1;
+                let Some(raw) = args.get(i) else {
+                    return Err(usage_error("--port requires a port number".to_string()));
+                };
+                let raw = raw.to_string_lossy();
+                match raw.parse::<u16>() {
+                    Ok(value) => port = Some(value),
+                    Err(_) => {
+                        return Err(usage_error(format!(
+                            "invalid daemon port `{}`: expected an integer between 0 and 65535",
+                            raw
+                        )))
+                    }
+                }
+            }
             "--help" | "-h" => return Ok(RefactCliCommand::Help(daemon_help_text())),
             other => {
                 return Err(usage_error(format!(
@@ -162,8 +183,9 @@ fn parse_daemon(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError>
                 )))
             }
         }
+        i += 1;
     }
-    Ok(RefactCliCommand::Daemon { foreground })
+    Ok(RefactCliCommand::Daemon { foreground, port })
 }
 
 fn parse_run(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
@@ -352,8 +374,44 @@ mod tests {
     fn parse_daemon_foreground() {
         assert!(matches!(
             parse_from(["refact", "daemon", "--foreground"]).unwrap(),
-            RefactCliCommand::Daemon { foreground: true }
+            RefactCliCommand::Daemon {
+                foreground: true,
+                port: None
+            }
         ));
+    }
+
+    #[test]
+    fn parse_daemon_port() {
+        assert!(matches!(
+            parse_from(["refact", "daemon", "--port", "9000"]).unwrap(),
+            RefactCliCommand::Daemon {
+                foreground: false,
+                port: Some(9000)
+            }
+        ));
+        assert!(matches!(
+            parse_from(["refact", "daemon", "--foreground", "--port", "0"]).unwrap(),
+            RefactCliCommand::Daemon {
+                foreground: true,
+                port: Some(0)
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_daemon_port_rejects_invalid_values() {
+        let missing = parse_from(["refact", "daemon", "--port"]).unwrap_err();
+        assert_eq!(missing.exit_code, 2);
+        assert!(missing.message.contains("--port requires a port number"));
+
+        let invalid = parse_from(["refact", "daemon", "--port", "banana"]).unwrap_err();
+        assert_eq!(invalid.exit_code, 2);
+        assert!(invalid.message.contains("invalid daemon port `banana`"));
+
+        let too_big = parse_from(["refact", "daemon", "--port", "70000"]).unwrap_err();
+        assert_eq!(too_big.exit_code, 2);
+        assert!(too_big.message.contains("invalid daemon port `70000`"));
     }
 
     #[test]
@@ -456,8 +514,14 @@ mod tests {
     #[test]
     fn dispatch_daemon_command() {
         assert!(matches!(
-            dispatch(RefactCliCommand::Daemon { foreground: false }),
-            DispatchResult::Daemon { foreground: false }
+            dispatch(RefactCliCommand::Daemon {
+                foreground: false,
+                port: Some(8490)
+            }),
+            DispatchResult::Daemon {
+                foreground: false,
+                port: Some(8490)
+            }
         ));
     }
 

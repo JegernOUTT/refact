@@ -300,6 +300,7 @@ export class RustBinaryBlob {
         }
 
         const daemonPort = this.daemon_port();
+        const explicitDaemonPort = this.explicit_daemon_port();
         const roots = this.workspace_roots();
         const rootSelection = refactDaemon.selectPrimaryWorkspaceRoot(roots);
         if (!rootSelection.primary) {
@@ -344,7 +345,7 @@ export class RustBinaryBlob {
             daemon = await refactDaemon.ensureDaemon(resolved.binPath, {
                 port: daemonPort,
                 pluginVersion: resolved.version ?? pluginVersion,
-            });
+            }, explicitDaemonPort);
         }
         if (!this.is_current_generation(generation)) {
             return;
@@ -826,6 +827,17 @@ export class RustBinaryBlob {
         return Number.isFinite(port) && port !== undefined && port > 0
             ? Math.trunc(port)
             : refactDaemon.DEFAULT_DAEMON_PORT;
+    }
+
+    private explicit_daemon_port(): number | undefined {
+        const configuration = vscode.workspace.getConfiguration();
+        const inspected = configuration.inspect<number>("refactai.daemonPort");
+        if (!inspected || (inspected.globalValue === undefined
+            && inspected.workspaceValue === undefined
+            && inspected.workspaceFolderValue === undefined)) {
+            return undefined;
+        }
+        return refactDaemon.normalizeDaemonSpawnPort(configuration.get<number>("refactai.daemonPort"));
     }
 
     private plugin_version(): string {

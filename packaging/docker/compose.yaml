@@ -6,10 +6,10 @@ services:
         REFACT_VERSION: __REFACT_VERSION__
     environment:
       REFACT_DAEMON_BIND: 0.0.0.0
-      REFACT_DAEMON_PORT: 8488
+      REFACT_DAEMON_PORT: ${REFACT_DAEMON_PORT:-8488}
       REFACT_DAEMON_TOKEN: ${REFACT_DAEMON_TOKEN:?set REFACT_DAEMON_TOKEN}
     ports:
-      - "8488:8488"
+      - "${REFACT_DAEMON_PORT:-8488}:${REFACT_DAEMON_PORT:-8488}"
     volumes:
       - ${REFACT_PROJECT_PATH:-../..}:/projects/workspace
       - refact-state:/var/lib/refact

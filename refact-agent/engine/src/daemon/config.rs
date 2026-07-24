@@ -130,6 +130,25 @@ fn default_port() -> u16 {
     8488
 }
 
+pub const DAEMON_PORT_ENV: &str = "REFACT_DAEMON_PORT";
+
+pub fn resolve_port_override(
+    cli_port: Option<u16>,
+    env_value: Option<&str>,
+) -> Result<Option<u16>, String> {
+    if cli_port.is_some() {
+        return Ok(cli_port);
+    }
+    let Some(raw) = env_value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    raw.parse::<u16>().map(Some).map_err(|_| {
+        format!(
+            "invalid {DAEMON_PORT_ENV} value `{raw}`: expected an integer between 0 and 65535"
+        )
+    })
+}
+
 fn default_bind() -> String {
     "127.0.0.1".to_string()
 }
@@ -304,5 +323,46 @@ mod tests {
         assert!(config.hooks.mappings.is_empty());
         assert!(config.hooks.default_project.is_none());
         assert!(config.hooks.allowed_projects.is_none());
+    }
+
+    #[test]
+    fn port_override_prefers_cli_over_env() {
+        assert_eq!(
+            resolve_port_override(Some(9000), Some("8490")).unwrap(),
+            Some(9000)
+        );
+        assert_eq!(
+            resolve_port_override(Some(9000), Some("banana")).unwrap(),
+            Some(9000)
+        );
+    }
+
+    #[test]
+    fn port_override_reads_env_when_no_cli_flag() {
+        assert_eq!(
+            resolve_port_override(None, Some("8490")).unwrap(),
+            Some(8490)
+        );
+        assert_eq!(
+            resolve_port_override(None, Some(" 0 ")).unwrap(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn port_override_ignores_absent_or_blank_env() {
+        assert_eq!(resolve_port_override(None, None).unwrap(), None);
+        assert_eq!(resolve_port_override(None, Some("")).unwrap(), None);
+        assert_eq!(resolve_port_override(None, Some("   ")).unwrap(), None);
+    }
+
+    #[test]
+    fn port_override_rejects_invalid_env() {
+        let error = resolve_port_override(None, Some("banana")).unwrap_err();
+        assert!(error.contains("REFACT_DAEMON_PORT"));
+        assert!(error.contains("banana"));
+
+        let error = resolve_port_override(None, Some("70000")).unwrap_err();
+        assert!(error.contains("70000"));
     }
 }

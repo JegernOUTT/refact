@@ -16,6 +16,7 @@ import {
     configuredBrowserHost,
     daemonRequestHeaders,
     daemonEndpoints,
+    daemonJsonPath as resolveDaemonJsonPath,
     daemonOpenProjectUrl,
     daemonSpawnCommand,
     daemonStatusUrl,
@@ -25,6 +26,7 @@ import {
     findExistingDaemon,
     isPluginNewerThanDaemon,
     missingBundledRefactError,
+    normalizeDaemonSpawnPort,
     openProject,
     projectProxyFetchWithRetry,
     projectProxyBaseUrl,
@@ -166,11 +168,54 @@ export async function runRefactDaemonTests() {
     await runDaemonReportedPortFallbackTest(0);
     await runDaemonReportedPortFallbackTest(-1);
     await runDaemonAuthHeaderTest();
+    runDaemonSpawnPortTests();
+    runDaemonJsonPathOverrideTest();
     await runOpenProjectStaleTokenRetryTest();
     await runShutdownTokenRotationTest();
     await runDiskPortTokenMismatchRecoveryTest();
     await runProjectProxyRetryTest();
     await runSpawnFailureSurfacesLogTest();
+}
+
+function runDaemonSpawnPortTests() {
+    assert.deepStrictEqual(daemonSpawnCommand("/bin/refact"), { command: "/bin/refact", args: ["daemon"] });
+    assert.deepStrictEqual(daemonSpawnCommand("/bin/refact", 9000), {
+        command: "/bin/refact",
+        args: ["daemon", "--port", "9000"],
+    });
+    assert.deepStrictEqual(daemonSpawnCommand("/bin/refact", 9000.7), {
+        command: "/bin/refact",
+        args: ["daemon", "--port", "9000"],
+    });
+    for (const invalid of [0, -1, 65536, 70000, Number.NaN, Number.POSITIVE_INFINITY]) {
+        assert.deepStrictEqual(daemonSpawnCommand("/bin/refact", invalid), {
+            command: "/bin/refact",
+            args: ["daemon"],
+        });
+    }
+    assert.strictEqual(normalizeDaemonSpawnPort(1), 1);
+    assert.strictEqual(normalizeDaemonSpawnPort(65535), 65535);
+    assert.strictEqual(normalizeDaemonSpawnPort(undefined), undefined);
+}
+
+function runDaemonJsonPathOverrideTest() {
+    const originalDaemonDir = process.env.REFACT_DAEMON_DIR;
+    try {
+        const override = path.join(os.tmpdir(), "refact-daemon-dir-override");
+        process.env.REFACT_DAEMON_DIR = override;
+        assert.strictEqual(resolveDaemonJsonPath(), path.join(override, "daemon.json"));
+        delete process.env.REFACT_DAEMON_DIR;
+        assert.strictEqual(
+            resolveDaemonJsonPath("/home/test"),
+            path.join("/home/test", ".cache", "refact", "daemon", "daemon.json"),
+        );
+    } finally {
+        if (originalDaemonDir === undefined) {
+            delete process.env.REFACT_DAEMON_DIR;
+        } else {
+            process.env.REFACT_DAEMON_DIR = originalDaemonDir;
+        }
+    }
 }
 
 function runBackendStatusTests() {

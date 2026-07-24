@@ -359,6 +359,30 @@ class RefactDaemonClientTest {
     }
 
     @Test
+    fun daemonCommandAppendsPortWhenConfigured() {
+        val linuxCommands = daemonCommandCandidates("/home/user/.refact/bin/refact", DaemonSpawnOs.Linux, 8490)
+        val windowsCommands = daemonCommandCandidates("C:\\Program Files\\Refact\\refact.exe", DaemonSpawnOs.Windows, 8490)
+
+        (linuxCommands + windowsCommands).forEach { command ->
+            assertEquals(listOf("daemon", "--port", "8490"), command.argv.takeLast(3))
+        }
+    }
+
+    @Test
+    fun daemonCommandOmitsPortWhenNullOrOutOfRange() {
+        val commands = listOf(
+            daemonCommandCandidates("/home/user/.refact/bin/refact", DaemonSpawnOs.Linux, null),
+            daemonCommandCandidates("/home/user/.refact/bin/refact", DaemonSpawnOs.Linux, 0),
+            daemonCommandCandidates("/home/user/.refact/bin/refact", DaemonSpawnOs.Linux, 65536),
+            daemonCommandCandidates("C:\\Program Files\\Refact\\refact.exe", DaemonSpawnOs.Windows, null),
+            daemonCommandCandidates("C:\\Program Files\\Refact\\refact.exe", DaemonSpawnOs.Windows, 0),
+            daemonCommandCandidates("C:\\Program Files\\Refact\\refact.exe", DaemonSpawnOs.Windows, 70000),
+        ).flatten()
+
+        assertFalse(commands.any { it.argv.contains("--port") })
+    }
+
+    @Test
     fun candidateSpawnsButNeverHealthyContinuesFallback() {
         val commands = listOf(
             DaemonSpawnCommand(listOf("first", "daemon")),
@@ -668,7 +692,11 @@ class RefactDaemonClientTest {
                     .build()
             )
 
-            val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "9.9.9" })
+            val client = HttpRefactDaemonClient(
+                portProvider = { server.port },
+                pluginVersionProvider = { "9.9.9" },
+                spawnPortProvider = { null },
+            )
             val status = client.ensureDaemon(binPath.toString(), "8.1.0")
 
             assertEquals(55, status.pid)

@@ -220,8 +220,10 @@
 				},
 				"refactai.daemonPort": {
 					"type": "number",
-					"description": "Port for the local Refact daemon control API.",
+					"description": "Port for the local daemon control API (1-65535). When set explicitly, the daemon is started with --port <value>. Useful when running several isolated environments (e.g. dev containers) that must not share one port.",
 					"default": 8488,
+					"minimum": 1,
+					"maximum": 65535,
 					"order": 16
 				},
 				"refactai.binaryPath": {
