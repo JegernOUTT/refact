@@ -34,6 +34,7 @@ export type WorkspaceState = {
   tabs: SurfaceKey[];
   activeTabId: SurfaceKey | null;
   groups: WorkspaceGroups;
+  panelsForced?: boolean;
   dock?: WorkspaceDockState;
   drawer?: WorkspaceDrawerState;
 };
@@ -55,7 +56,7 @@ export type WorkspaceHydrationState = Pick<
   WorkspaceState,
   "tabs" | "activeTabId" | "groups"
 > &
-  Partial<Pick<WorkspaceState, "dock" | "drawer">>;
+  Partial<Pick<WorkspaceState, "panelsForced" | "dock" | "drawer">>;
 
 export const INITIAL_WORKSPACE_LEAF_ID = "root";
 export const MAX_WORKSPACE_TABS = 30;
@@ -125,6 +126,7 @@ const initialState: WorkspaceState = {
   tabs: [],
   activeTabId: null,
   groups: {},
+  panelsForced: false,
   dock: { ...DEFAULT_WORKSPACE_DOCK },
   drawer: { ...DEFAULT_WORKSPACE_DRAWER },
 };
@@ -134,6 +136,12 @@ const DEFAULT_WORKSPACE_CAPABILITIES: WorkspaceCapabilities = {
   gitPanel: true,
   terminalPanel: true,
 };
+
+const effectiveWorkspaceCapabilities = (
+  state: WorkspaceState,
+  workspaceCapabilities: WorkspaceCapabilities,
+): WorkspaceCapabilities =>
+  state.panelsForced ? DEFAULT_WORKSPACE_CAPABILITIES : workspaceCapabilities;
 
 const createLeaf = (
   id: string,
@@ -778,6 +786,7 @@ const workspaceStatesEqual = (
   const rightDrawer = normalizeWorkspaceDrawer(right.drawer);
   return (
     left.activeTabId === right.activeTabId &&
+    Boolean(left.panelsForced) === Boolean(right.panelsForced) &&
     leftDock.open === rightDock.open &&
     leftDock.width === rightDock.width &&
     leftDock.section === rightDock.section &&
@@ -793,11 +802,15 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
   state: WorkspaceState,
   workspaceCapabilities: WorkspaceCapabilities = DEFAULT_WORKSPACE_CAPABILITIES,
 ): WorkspaceState => {
+  const effectiveCapabilities = effectiveWorkspaceCapabilities(
+    state,
+    workspaceCapabilities,
+  );
   const tabs = unique(state.tabs)
     .filter(
       (key) =>
         !isFilesSurface(key) &&
-        isWorkspaceSurfaceEnabled(key, workspaceCapabilities),
+        isWorkspaceSurfaceEnabled(key, effectiveCapabilities),
     )
     .slice(0, MAX_WORKSPACE_TABS);
   const topLevelSurfaces = new Set(tabs);
@@ -836,7 +849,7 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
 
   const activeTabId =
     state.activeTabId &&
-    isWorkspaceSurfaceEnabled(state.activeTabId, workspaceCapabilities) &&
+    isWorkspaceSurfaceEnabled(state.activeTabId, effectiveCapabilities) &&
     tabs.includes(state.activeTabId)
       ? state.activeTabId
       : tabs[0] ?? null;
@@ -844,6 +857,7 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
     tabs,
     activeTabId,
     groups,
+    panelsForced: state.panelsForced === true ? true : undefined,
     dock: normalizeWorkspaceDock(state.dock),
     drawer: normalizeWorkspaceDrawer(state.drawer),
   };
@@ -856,19 +870,24 @@ export const reconcileWorkspaceState = (
   openThreadIds: string[],
   workspaceCapabilities: WorkspaceCapabilities = DEFAULT_WORKSPACE_CAPABILITIES,
 ): WorkspaceState => {
+  const effectiveCapabilities = effectiveWorkspaceCapabilities(
+    state,
+    workspaceCapabilities,
+  );
   const openThreads = new Set(openThreadIds);
   const nextState: WorkspaceState = {
     tabs: unique(state.tabs)
       .filter(
         (key) =>
           openChatSurface(key, openThreads) ||
-          (isFileSurface(key) && workspaceCapabilities.filesPanel) ||
+          (isFileSurface(key) && effectiveCapabilities.filesPanel) ||
           (!isFilesSurface(key) &&
-            isMainSurfaceEnabled(key, workspaceCapabilities)),
+            isMainSurfaceEnabled(key, effectiveCapabilities)),
       )
       .slice(0, MAX_WORKSPACE_TABS),
     activeTabId: state.activeTabId,
     groups: {},
+    panelsForced: state.panelsForced === true ? true : undefined,
     dock: normalizeWorkspaceDock(state.dock),
     drawer: normalizeWorkspaceDrawer(state.drawer),
   };
@@ -896,7 +915,7 @@ export const reconcileWorkspaceState = (
 
   const sanitizedState = sanitizeWorkspaceSurfaceUniqueness(
     nextState,
-    workspaceCapabilities,
+    effectiveCapabilities,
   );
 
   return workspaceStatesEqual(state, sanitizedState) ? state : sanitizedState;
@@ -907,6 +926,9 @@ export const workspaceSlice = createSlice({
   reducerPath: "workspace",
   initialState,
   reducers: {
+    setPanelsForced: (state, action: PayloadAction<boolean>) => {
+      state.panelsForced = action.payload;
+    },
     setDockOpen: (state, action: PayloadAction<boolean>) => {
       state.dock = {
         ...normalizeWorkspaceDock(state.dock),
@@ -1243,8 +1265,12 @@ export const workspaceSlice = createSlice({
         }
       >,
     ) => {
-      const workspaceCapabilities =
+      const panelsForced = action.payload.panelsForced === true;
+      const baseWorkspaceCapabilities =
         action.payload.workspaceCapabilities ?? DEFAULT_WORKSPACE_CAPABILITIES;
+      const workspaceCapabilities = panelsForced
+        ? DEFAULT_WORKSPACE_CAPABILITIES
+        : baseWorkspaceCapabilities;
       const legacyTerminalTab = action.payload.tabs.some(isTerminalSurface);
       const tabs = unique(action.payload.tabs)
         .filter(
@@ -1277,6 +1303,7 @@ export const workspaceSlice = createSlice({
               ? activeTabId
               : tabs[0] ?? null,
           groups,
+          panelsForced: panelsForced || undefined,
           dock: normalizeWorkspaceDock(action.payload.dock),
           drawer: {
             ...normalizeWorkspaceDrawer(action.payload.drawer),
@@ -1292,6 +1319,7 @@ export const workspaceSlice = createSlice({
 });
 
 export const {
+  setPanelsForced,
   setDockOpen,
   toggleDock,
   setDockWidth,
@@ -1319,6 +1347,9 @@ type WorkspaceRootState = {
 };
 
 export const selectTabs = (state: WorkspaceRootState) => state.workspace.tabs;
+
+export const selectPanelsForced = (state: WorkspaceRootState) =>
+  state.workspace.panelsForced ?? false;
 
 export const selectWorkspaceDock = (state: WorkspaceRootState) =>
   state.workspace.dock ?? DEFAULT_WORKSPACE_DOCK;

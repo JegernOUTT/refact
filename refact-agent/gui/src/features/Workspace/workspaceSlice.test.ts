@@ -26,12 +26,14 @@ import {
   selectWorkspaceDrawer,
   selectVisibleSurfaceKeys,
   selectVisibleThreadIds,
+  selectPanelsForced,
   setActiveTab,
   setDockOpen,
   setDockSection,
   setDockWidth,
   setDrawerHeight,
   setDrawerOpen,
+  setPanelsForced,
   setPaneActive,
   splitPaneWithSurface,
   splitTab,
@@ -128,6 +130,14 @@ describe("surfaceKey helpers", () => {
 });
 
 describe("workspaceSlice", () => {
+  test("stores the explicit workspace panels opt-in", () => {
+    let state = reducer(undefined, setPanelsForced(true));
+    expect(selectPanelsForced(rootState(state))).toBe(true);
+
+    state = reducer(state, setPanelsForced(false));
+    expect(selectPanelsForced(rootState(state))).toBe(false);
+  });
+
   test("updates normalized dock and drawer layout state", () => {
     let state = reducer(undefined, setDockOpen(false));
     state = reducer(state, setDockWidth(1000));

@@ -195,8 +195,8 @@ function expectNoDashboardChrome() {
 
 function expectNoPanelChrome() {
   expect(
-    screen.queryByRole("button", { name: "Open workspace panel" }),
-  ).toBeNull();
+    screen.getByRole("button", { name: "Workspace panels" }),
+  ).toHaveAttribute("aria-pressed", "false");
   expect(screen.queryByRole("tab", { name: "Files" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Git" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Terminal" })).toBeNull();
@@ -218,7 +218,7 @@ describe("IDE characterization: zero new chrome", () => {
   const ideHosts = [["vscode"], ["jetbrains"]] as const;
 
   it.each(ideHosts)(
-    "renders the %s host with no dashboard or panel chrome",
+    "renders the %s host with only the opt-in panel button",
     async (host) => {
       const { store } = renderApp({ host }, (appStore) => {
         appStore.dispatch(
@@ -240,6 +240,37 @@ describe("IDE characterization: zero new chrome", () => {
       expect(store.getState().workspace.tabs).toEqual([
         makeSurfaceKey("chat", "chat-a"),
       ]);
+    },
+  );
+
+  it.each(ideHosts)(
+    "mounts workspace panels after opting in on %s",
+    async (host) => {
+      const { user } = renderApp({ host }, (appStore) => {
+        appStore.dispatch(
+          createChatWithId({
+            id: "chat-a",
+            title: "Chat Alpha",
+            mode: "agent",
+          }),
+        );
+      });
+
+      await screen.findByRole("tab", { name: /Chat Alpha/ });
+      expect(screen.queryByLabelText("Workspace dock")).toBeNull();
+      expect(screen.queryByLabelText("Terminal drawer")).toBeNull();
+
+      await user.click(
+        screen.getByRole("button", { name: "Workspace panels" }),
+      );
+
+      expect(
+        await screen.findByLabelText("Workspace dock"),
+      ).toBeInTheDocument();
+      expect(screen.getByLabelText("Terminal drawer")).toBeInTheDocument();
+      expect(screen.getByRole("radio", { name: "Files" })).toBeInTheDocument();
+      expect(screen.getByRole("radio", { name: "Git" })).toBeInTheDocument();
+      expect(screen.getByText("Terminal")).toBeInTheDocument();
     },
   );
 

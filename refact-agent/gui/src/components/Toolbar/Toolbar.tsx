@@ -1,5 +1,13 @@
 import { Dropdown, DropdownNavigationOptions } from "./Dropdown";
-import { CheckSquare, Home, Moon, Plus, Server, Sun } from "lucide-react";
+import {
+  CheckSquare,
+  Home,
+  Moon,
+  PanelLeft,
+  Plus,
+  Server,
+  Sun,
+} from "lucide-react";
 import classNames from "classnames";
 import { ComponentProps, useCallback, useMemo } from "react";
 
@@ -17,7 +25,12 @@ import { openTask, selectOpenTasksFromRoot } from "../../features/Tasks";
 import { selectCapabilities } from "../../features/Config/configSlice";
 import {
   selectFocusedWorkspaceChatId,
+  selectPanelsForced,
   selectTabs,
+  selectWorkspaceDock,
+  setDockOpen,
+  setPanelsForced,
+  toggleDock,
 } from "../../features/Workspace";
 import { TabBar } from "../../features/Workspace/TabBar";
 import {
@@ -71,6 +84,7 @@ type ToolbarIconButtonProps = {
   icon: ComponentProps<typeof IconButton>["icon"];
   className?: string;
   disabled?: boolean;
+  pressed?: boolean;
 };
 
 const ToolbarIconButton = ({
@@ -79,11 +93,13 @@ const ToolbarIconButton = ({
   icon,
   className,
   disabled,
+  pressed,
 }: ToolbarIconButtonProps) => (
   <Tooltip>
     <Tooltip.Trigger asChild>
       <IconButton
         aria-label={label}
+        aria-pressed={pressed}
         className={classNames(styles.iconButton, "rf-pressable", className)}
         disabled={disabled}
         icon={icon}
@@ -170,10 +186,15 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
   const pages = useAppSelector(selectPages);
   const capabilities = useAppSelector(selectCapabilities);
+  const panelsForced = useAppSelector(selectPanelsForced);
+  const workspaceDock = useAppSelector(selectWorkspaceDock);
   const hasWorkspaceChrome =
     capabilities.filesPanel ||
     capabilities.gitPanel ||
     capabilities.terminalPanel;
+  const workspacePanelsPressed = hasWorkspaceChrome
+    ? workspaceDock.open
+    : panelsForced;
   const { openSettings } = useEventsBusForIDE();
   const toolbarChatId =
     activeTab.type === "chat"
@@ -276,6 +297,16 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     openUrl(engineUrl);
   }, [engineUrl, openUrl]);
 
+  const onToggleWorkspacePanels = useCallback(() => {
+    if (hasWorkspaceChrome) {
+      dispatch(toggleDock());
+      return;
+    }
+    const next = !panelsForced;
+    dispatch(setPanelsForced(next));
+    if (next) dispatch(setDockOpen(true));
+  }, [dispatch, hasWorkspaceChrome, panelsForced]);
+
   return (
     <div className={styles.toolbar}>
       <div className={styles.toolbarSection}>
@@ -284,6 +315,13 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           className={styles.homeButton}
           icon={Home}
           onClick={goHome}
+        />
+        <ToolbarIconButton
+          label="Workspace panels"
+          className={styles.workspacePanelsButton}
+          icon={PanelLeft}
+          onClick={onToggleWorkspacePanels}
+          pressed={workspacePanelsPressed}
         />
       </div>
 

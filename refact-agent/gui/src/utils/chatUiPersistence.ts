@@ -1,4 +1,5 @@
 import { collectTabIds, type PaneNode } from "../features/ChatPanes/panesTree";
+import type { Config } from "../features/Config/configSlice";
 import {
   DEFAULT_WORKSPACE_DOCK,
   DEFAULT_WORKSPACE_DRAWER,
@@ -30,6 +31,7 @@ type JsonRecord = Record<string, unknown>;
 const CHAT_TABS_STORAGE_KEY = "refact:chat-ui:tabs:v1";
 const ACTIVE_TAB_STORAGE_KEY = "refact:chat-ui:active-tab:v1";
 const WORKSPACE_STORAGE_KEY = "refact:chat-ui:workspace:v1";
+const WORKSPACE_PANELS_STORAGE_KEY = "refact:chat-ui:workspace-panels:v1";
 const TASKS_UI_STORAGE_KEY = "refact:chat-ui:tasks-ui:v1";
 const ASK_QUESTIONS_STORAGE_KEY = "refact:chat-ui:ask-questions:v1";
 const TASK_WORKSPACE_TABS_STORAGE_KEY = "refact:chat-ui:task-workspace-tabs:v1";
@@ -45,6 +47,10 @@ const MAX_OPEN_TASKS = 25;
 const MAX_PLANNER_CHATS_PER_TASK = 50;
 const MAX_ASK_QUESTIONS_DRAFTS = 100;
 const ASK_QUESTIONS_DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function workspacePanelsStorageKey(host: Config["host"]): string {
+  return `${WORKSPACE_PANELS_STORAGE_KEY}:${host}`;
+}
 
 export type PersistedChatTab = {
   id: string;
@@ -567,10 +573,16 @@ function normalizePersistedWorkspaceGroup(
   return { root, focusedLeafId };
 }
 
-export function loadPersistedWorkspace(): WorkspaceState {
+export function loadPersistedWorkspace(
+  host: Config["host"] = "web",
+): WorkspaceState {
   const fallback = createFallbackWorkspace();
   const trustedKey = trustedProjectScopedStorageKey(WORKSPACE_STORAGE_KEY);
+  const panelsKey = trustedProjectScopedStorageKey(
+    workspacePanelsStorageKey(host),
+  );
   const record = trustedKey ? readRecord(trustedKey) : null;
+  const panelsRecord = panelsKey ? readRecord(panelsKey) : null;
   if (!record || (record.version !== 2 && record.version !== 3)) {
     return fallback;
   }
@@ -640,6 +652,7 @@ export function loadPersistedWorkspace(): WorkspaceState {
           ? rawActiveTabId
           : tabs[0] ?? null,
       groups,
+      panelsForced: panelsRecord?.panelsForced === true ? true : undefined,
       dock: normalizePersistedDock(record.dock),
       drawer: {
         ...normalizePersistedDrawer(record.drawer),
@@ -652,9 +665,13 @@ export function loadPersistedWorkspace(): WorkspaceState {
 
 export function savePersistedWorkspace(
   workspace: WorkspaceHydrationState,
+  host: Config["host"] = "web",
 ): void {
   const storageKey = trustedProjectScopedStorageKey(WORKSPACE_STORAGE_KEY);
-  if (!storageKey) return;
+  const panelsKey = trustedProjectScopedStorageKey(
+    workspacePanelsStorageKey(host),
+  );
+  if (!storageKey || !panelsKey) return;
 
   writeRecord(storageKey, {
     version: 3,
@@ -663,6 +680,11 @@ export function savePersistedWorkspace(
     groups: workspace.groups,
     dock: normalizeWorkspaceDock(workspace.dock),
     drawer: normalizeWorkspaceDrawer(workspace.drawer),
+    updatedAt: Date.now(),
+  });
+  writeRecord(panelsKey, {
+    version: 1,
+    panelsForced: workspace.panelsForced === true,
     updatedAt: Date.now(),
   });
 }

@@ -302,7 +302,9 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
       : null;
   const buddySurfaceOpen = pages.some((page) => page.name === "buddy");
   const showDockToggle =
-    host === "web" && (capabilities.filesPanel || capabilities.gitPanel);
+    !toolbarPlacement &&
+    host === "web" &&
+    (capabilities.filesPanel || capabilities.gitPanel);
 
   const visibleTabKeys = useMemo(
     () =>

@@ -10,6 +10,7 @@ import { selectCapabilities } from "../Config/configSlice";
 import { FileViewer } from "./FilesPanel";
 import { GitPanel } from "./GitPanel";
 import { isGitSurface, parseSurfaceKey, type SurfaceKey } from "./surfaceKey";
+import { selectPanelsForced } from "./workspaceSlice";
 import styles from "./SurfacePane.module.css";
 
 export type SurfacePaneProps = {
@@ -19,6 +20,7 @@ export type SurfacePaneProps = {
 export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
   const config = useConfig();
   const capabilities = useAppSelector(selectCapabilities);
+  const panelsForced = useAppSelector(selectPanelsForced);
   const backFromChat = useCallback(() => undefined, []);
 
   if (!surfaceKey) {
@@ -53,7 +55,7 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
     }
 
     if (parsed.kind === "file") {
-      if (!capabilities.filesPanel) return null;
+      if (!capabilities.filesPanel && !panelsForced) return null;
       return (
         <div
           className={classNames(styles.surfacePane, styles.fileSurface)}
@@ -65,7 +67,7 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
     }
 
     if (isGitSurface(surfaceKey)) {
-      if (!capabilities.gitPanel) return null;
+      if (!capabilities.gitPanel && !panelsForced) return null;
       return (
         <div
           className={classNames(styles.surfacePane, styles.panelSurface)}

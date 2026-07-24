@@ -10,7 +10,7 @@ import {
   switchToThread,
 } from "../Chat/Thread";
 import { collectTabIds } from "../ChatPanes/panesTree";
-import { selectCapabilities, selectHost } from "../Config/configSlice";
+import { selectCapabilities } from "../Config/configSlice";
 import {
   hasTabDragType,
   readTabDragSurfaceKey,
@@ -31,6 +31,7 @@ import {
   selectActiveTabId,
   selectFocusedWorkspaceChatId,
   selectIsTabSplit,
+  selectPanelsForced,
   selectTabs,
   selectWorkspaceGroups,
   splitTab,
@@ -48,7 +49,10 @@ export function WorkspaceView() {
   const tabs = useAppSelector(selectTabs);
   const groups = useAppSelector(selectWorkspaceGroups);
   const capabilities = useAppSelector(selectCapabilities);
-  const host = useAppSelector(selectHost);
+  const panelsForced = useAppSelector(selectPanelsForced);
+  const dockAvailable =
+    capabilities.filesPanel || capabilities.gitPanel || panelsForced;
+  const terminalAvailable = capabilities.terminalPanel || panelsForced;
   const currentSurfaceKey = currentThreadId
     ? makeSurfaceKey("chat", currentThreadId)
     : null;
@@ -200,9 +204,7 @@ export function WorkspaceView() {
 
   return (
     <div className={styles.workspaceView}>
-      {host === "web" && (capabilities.filesPanel || capabilities.gitPanel) ? (
-        <Dock />
-      ) : null}
+      {dockAvailable ? <Dock /> : null}
       <div className={styles.mainColumn}>
         <div
           className={classNames(
@@ -256,7 +258,7 @@ export function WorkspaceView() {
             </div>
           )}
         </div>
-        {capabilities.terminalPanel ? (
+        {terminalAvailable ? (
           <Drawer>
             <TerminalPanel />
           </Drawer>

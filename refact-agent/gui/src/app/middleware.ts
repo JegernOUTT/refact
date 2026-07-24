@@ -144,6 +144,7 @@ import {
   reconcileWorkspace,
   reorderTabs as reorderWorkspaceTabs,
   resizeGroupSplit,
+  setPanelsForced,
   setDockOpen,
   setDockSection,
   setDockWidth,
@@ -229,7 +230,7 @@ function persistOpenChatTabs(state: RootState): void {
 
 function persistWorkspaceLayout(state: RootState): void {
   syncProjectStorageNamespace(state);
-  savePersistedWorkspace(state.workspace);
+  savePersistedWorkspace(state.workspace, state.config.host);
 }
 
 function hydratePersistedChatUi(listenerApi: {
@@ -237,7 +238,7 @@ function hydratePersistedChatUi(listenerApi: {
   getState: () => RootState;
 }): void {
   const trustedWorkspace = isProjectStorageNamespaceTrusted()
-    ? loadPersistedWorkspace()
+    ? loadPersistedWorkspace(listenerApi.getState().config.host)
     : null;
 
   listenerApi.dispatch(hydratePersistedChatTabs());
@@ -387,6 +388,7 @@ startListening({
     addSurfaceToWorkspacePane,
     splitPaneWithSurface,
     resizeGroupSplit,
+    setPanelsForced,
     setDockOpen,
     setDockSection,
     setDockWidth,
@@ -850,6 +852,8 @@ startListening({
 startListening({
   actionCreator: updateConfig,
   effect: (_action, listenerApi) => {
+    const previousConfig = listenerApi.getOriginalState().config;
+    const nextConfig = listenerApi.getState().config;
     const namespaceChanged = syncProjectStorageNamespace(
       listenerApi.getState(),
     );
@@ -857,8 +861,6 @@ startListening({
       hydratePersistedChatUi(listenerApi);
     }
 
-    const previousConfig = listenerApi.getOriginalState().config;
-    const nextConfig = listenerApi.getState().config;
     if (endpointConfigChanged(previousConfig, nextConfig)) {
       listenerApi.dispatch(pingApi.util.resetApiState());
       listenerApi.dispatch(capsApi.util.resetApiState());

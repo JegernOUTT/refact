@@ -15,6 +15,7 @@ import { setTabDragData } from "../ChatPanes/tabDrag";
 import {
   addSurfaceToPane,
   openTab,
+  setPanelsForced,
   setActiveTab,
   splitTab,
 } from "./workspaceSlice";
@@ -106,6 +107,22 @@ describe("WorkspaceView", () => {
     ideStore.dispatch(updateConfig({ host: "vscode" }));
     renderWorkspaceView(ideStore);
     expect(screen.queryByLabelText("Terminal drawer")).not.toBeInTheDocument();
+  });
+
+  it("renders the dock and terminal drawer for an opted-in IDE host", async () => {
+    const store = createWorkspaceStore();
+    store.dispatch(updateConfig({ host: "vscode" }));
+    renderWorkspaceView(store);
+
+    expect(screen.queryByLabelText("Workspace dock")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Terminal drawer")).not.toBeInTheDocument();
+
+    store.dispatch(setPanelsForced(true));
+
+    expect(await screen.findByLabelText("Workspace dock")).toBeInTheDocument();
+    expect(screen.getByLabelText("Terminal drawer")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Files" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Git" })).toBeInTheDocument();
   });
 
   it("renders an unsplit surface without pane chrome", () => {

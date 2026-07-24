@@ -14,6 +14,7 @@ import { openTask } from "../../features/Tasks";
 import {
   makeSurfaceKey,
   openTab,
+  setDockOpen,
   setActiveTab,
 } from "../../features/Workspace";
 import type { TaskMeta } from "../../services/refact/tasks";
@@ -190,6 +191,48 @@ describe("Dropdown navigation", () => {
 });
 
 describe("Toolbar single workspace tab row", () => {
+  it.each(["web", "ide", "vscode", "jetbrains"] as const)(
+    "renders and toggles workspace panels on the %s host",
+    async (host) => {
+      useToolbarHandlers();
+      const view = render(<Toolbar activeTab={{ type: "dashboard" }} />, {
+        preloadedState: {
+          config: { ...baseConfig, host },
+          pages: pagesForActiveTab({ type: "dashboard" }),
+        },
+      });
+      const button = screen.getByRole("button", { name: "Workspace panels" });
+
+      expect(button).toHaveAttribute(
+        "aria-pressed",
+        host === "web" ? "true" : "false",
+      );
+      await view.user.click(button);
+
+      if (host === "web") {
+        expect(view.store.getState().workspace.dock?.open).toBe(false);
+        expect(button).toHaveAttribute("aria-pressed", "false");
+      } else {
+        expect(view.store.getState().workspace.panelsForced).toBe(true);
+        expect(button).toHaveAttribute("aria-pressed", "true");
+      }
+    },
+  );
+
+  it("reflects externally collapsed web dock state", async () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+    const button = screen.getByRole("button", { name: "Workspace panels" });
+
+    act(() => {
+      view.store.dispatch(setDockOpen(false));
+    });
+
+    await waitFor(() =>
+      expect(button).toHaveAttribute("aria-pressed", "false"),
+    );
+  });
+
   it("renders the unified workspace tab bar on chat and task pages without legacy KitTabs", () => {
     useToolbarHandlers();
     const activeTab = { type: "chat" as const, id: "chat-a" };

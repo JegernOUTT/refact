@@ -23,6 +23,7 @@ import { FilesPanel } from "../FilesPanel";
 import { GitDock } from "../GitPanel";
 import {
   normalizeDockWidth,
+  selectPanelsForced,
   selectWorkspaceDock,
   setDockOpen,
   setDockSection,
@@ -75,6 +76,7 @@ function GitDockLabel() {
 export function Dock() {
   const dispatch = useAppDispatch();
   const capabilities = useAppSelector(selectCapabilities);
+  const panelsForced = useAppSelector(selectPanelsForced);
   const dock = useAppSelector(selectWorkspaceDock);
   const isNarrow = useMediaQuery(narrowQuery);
   const dockRef = useRef<HTMLElement>(null);
@@ -83,7 +85,7 @@ export function Dock() {
   const [dragging, setDragging] = useState(false);
   const options = useMemo<DockOption[]>(() => {
     const result: DockOption[] = [];
-    if (capabilities.filesPanel) {
+    if (capabilities.filesPanel || panelsForced) {
       result.push({
         value: "files",
         label: (
@@ -94,7 +96,7 @@ export function Dock() {
         ),
       });
     }
-    if (capabilities.gitPanel) {
+    if (capabilities.gitPanel || panelsForced) {
       result.push({
         value: "git",
         label: <GitDockLabel />,
@@ -111,7 +113,7 @@ export function Dock() {
       ),
     });
     return result;
-  }, [capabilities.filesPanel, capabilities.gitPanel]);
+  }, [capabilities.filesPanel, capabilities.gitPanel, panelsForced]);
   const activeSection = options.some((option) => option.value === dock.section)
     ? dock.section
     : options[0].value;

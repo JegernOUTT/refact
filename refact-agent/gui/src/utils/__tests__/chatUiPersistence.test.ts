@@ -281,6 +281,21 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedWorkspace()).toEqual(workspace);
   });
 
+  it("persists workspace panel opt-in per project and host", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-b",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+    const workspace = { ...splitWorkspace(), panelsForced: true };
+
+    savePersistedWorkspace(workspace, "vscode");
+
+    expect(loadPersistedWorkspace("vscode")).toEqual(workspace);
+    expect(loadPersistedWorkspace("jetbrains").panelsForced).toBeUndefined();
+    expect(loadPersistedWorkspace().panelsForced).toBeUndefined();
+  });
+
   it("migrates legacy Files and Terminal panel tabs", () => {
     savePersistedChatTabs({
       openThreadIds: ["chat-a"],

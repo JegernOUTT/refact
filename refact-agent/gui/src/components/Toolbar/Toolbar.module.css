@@ -72,6 +72,11 @@
   color: var(--rf-color-accent);
 }
 
+.workspacePanelsButton[aria-pressed="true"] {
+  color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+}
+
 .toolbarDivider {
   width: var(--rf-hairline);
   height: 16px;
