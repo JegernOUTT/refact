@@ -69,6 +69,10 @@ describe("Dock", () => {
     expect(screen.getByRole("radio", { name: "Tasks" })).toBeInTheDocument();
 
     const dock = screen.getByTestId("workspace-dock");
+    expect(dock).toHaveClass("rf-grow-in");
+    expect(screen.getByTestId("workspace-dock-section")).toHaveClass(
+      "rf-enter",
+    );
     vi.spyOn(dock, "getBoundingClientRect").mockReturnValue({
       x: 0,
       y: 0,
@@ -113,7 +117,13 @@ describe("Dock", () => {
       http.get("*/v1/git/status", () => HttpResponse.json({ roots: [] })),
     );
     render(<Dock />);
+    const filesSection = screen.getByTestId("workspace-dock-section");
+    expect(filesSection).toHaveAttribute("data-section", "files");
     fireEvent.click(screen.getByRole("radio", { name: "Git" }));
+    const gitSection = screen.getByTestId("workspace-dock-section");
+    expect(gitSection).not.toBe(filesSection);
+    expect(gitSection).toHaveClass("rf-enter");
+    expect(gitSection).toHaveAttribute("data-section", "git");
     expect(
       await screen.findByText("No git repository found in this workspace."),
     ).toBeInTheDocument();

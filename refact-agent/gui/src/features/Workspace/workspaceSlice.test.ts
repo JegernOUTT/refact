@@ -192,7 +192,7 @@ describe("workspaceSlice", () => {
 
     expect(state.tabs).toEqual([chatA]);
     expect(state.activeTabId).toBe(chatA);
-    expect(state.drawer).toEqual({ open: true, height: 280 });
+    expect(state.drawer).toEqual({ open: true, height: 220 });
   });
 
   test("drops legacy Files and Terminal surfaces while keeping file viewers", () => {

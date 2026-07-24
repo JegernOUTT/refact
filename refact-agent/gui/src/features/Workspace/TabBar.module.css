@@ -122,6 +122,13 @@
     scale(var(--rf-motion-scale-active));
 }
 
+.tabWrapClosing {
+  opacity: var(--rf-motion-opacity-hidden);
+  pointer-events: none;
+  transform: translateX(calc(-1 * var(--rf-motion-distance-sm)))
+    scale(var(--rf-motion-scale-enter));
+}
+
 .tabButton {
   display: flex;
   box-sizing: border-box;
@@ -255,7 +262,9 @@
   }
 
   .tabWrapDragging,
-  .tabWrapDropTarget {
+  .tabWrapDropTarget,
+  .tabWrapClosing {
+    opacity: var(--rf-motion-opacity-visible);
     transform: translateX(var(--rf-motion-distance-none))
       scale(var(--rf-motion-scale-active));
   }

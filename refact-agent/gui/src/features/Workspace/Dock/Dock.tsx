@@ -1,3 +1,4 @@
+import classNames from "classnames";
 import { Files, GitBranch, ListTodo } from "lucide-react";
 import {
   type CSSProperties,
@@ -183,7 +184,12 @@ export function Dock() {
           value={activeSection}
         />
       </div>
-      <div className={styles.content}>
+      <div
+        key={activeSection}
+        className={classNames(styles.content, "rf-enter")}
+        data-testid="workspace-dock-section"
+        data-section={activeSection}
+      >
         {activeSection === "files" ? <FilesPanel /> : null}
         {activeSection === "git" ? <GitDock /> : null}
         {activeSection === "tasks" ? <TasksSection /> : null}
@@ -198,7 +204,7 @@ export function Dock() {
         onOpenChange={(open) => dispatch(setDockOpen(open))}
       >
         <Sheet.Content
-          className={styles.sheet}
+          className={classNames(styles.sheet, "rf-grow-in")}
           maxWidth="400px"
           scrollable={false}
           side="left"
@@ -218,7 +224,7 @@ export function Dock() {
   return (
     <aside
       aria-label="Workspace dock"
-      className={styles.dock}
+      className={classNames(styles.dock, "rf-grow-in")}
       data-testid="workspace-dock"
       ref={dockRef}
       style={{ "--workspace-dock-w": `${dock.width}px` } as DockStyle}

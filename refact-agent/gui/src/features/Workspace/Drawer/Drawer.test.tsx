@@ -57,6 +57,13 @@ describe("Drawer", () => {
         name: "Expand terminal drawer, 3 sessions",
       }),
     ).toBeInTheDocument();
+    const drawer = screen.getByLabelText("Terminal drawer");
+    const contentGrid = screen
+      .getByText("Terminal body")
+      .closest(".rf-expand-grid");
+    expect(drawer).toHaveAttribute("data-open", "false");
+    expect(contentGrid).toHaveClass("rf-expand-grid");
+    expect(contentGrid).toHaveAttribute("data-open", "false");
     expect(screen.getByLabelText("zsh · running: running")).toBeInTheDocument();
     expect(screen.getByLabelText("tests · failed: failed")).toBeInTheDocument();
     expect(screen.getByLabelText("build · killed: killed")).toHaveClass(
@@ -73,6 +80,8 @@ describe("Drawer", () => {
       }),
     );
     expect(view.store.getState().workspace.drawer?.open).toBe(true);
+    expect(drawer).toHaveAttribute("data-open", "true");
+    expect(contentGrid).toHaveAttribute("data-open", "true");
     expect(
       screen.getByRole("separator", { name: "Resize terminal drawer" }),
     ).toBeInTheDocument();
@@ -83,9 +92,9 @@ describe("Drawer", () => {
     expect(view.store.getState().workspace.drawer?.open).toBe(false);
   });
 
-  it("clamps drag height to the minimum and half of the viewport", () => {
+  it("clamps drag height to the minimum and 60 percent of the viewport", () => {
     expect(clampDrawerHeight(1, 1000)).toBe(DRAWER_MIN_HEIGHT);
-    expect(clampDrawerHeight(900, 1000)).toBe(500);
+    expect(clampDrawerHeight(900, 1000)).toBe(600);
 
     const view = render(<Drawer>Terminal body</Drawer>);
     act(() => {

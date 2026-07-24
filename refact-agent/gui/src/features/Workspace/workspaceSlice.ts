@@ -69,7 +69,7 @@ export const DOCK_MIN_WIDTH = 240;
 export const DOCK_MAX_WIDTH = 400;
 export const DOCK_DEFAULT_WIDTH = 280;
 export const DRAWER_MIN_HEIGHT = 160;
-export const DRAWER_DEFAULT_HEIGHT = 280;
+export const DRAWER_DEFAULT_HEIGHT = 220;
 
 export const DEFAULT_WORKSPACE_DOCK: WorkspaceDockState = {
   open: true,
@@ -97,7 +97,7 @@ export const clampDrawerHeight = (
   viewportHeight: number,
 ): number => {
   const maxHeight = Number.isFinite(viewportHeight)
-    ? Math.max(DRAWER_MIN_HEIGHT, viewportHeight * 0.5)
+    ? Math.max(DRAWER_MIN_HEIGHT, viewportHeight * 0.6)
     : DRAWER_DEFAULT_HEIGHT;
   return Math.min(maxHeight, normalizeDrawerHeight(value));
 };

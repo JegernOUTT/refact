@@ -120,6 +120,8 @@ export function Drawer({ children }: DrawerProps) {
       ref={drawerRef}
       className={classNames(styles.drawer, !drawer.open && styles.collapsed)}
       aria-label="Terminal drawer"
+      data-dragging={dragging}
+      data-open={drawer.open}
       style={{ "--workspace-drawer-h": `${renderedHeight}px` } as DrawerStyle}
     >
       {drawer.open ? (
@@ -134,7 +136,7 @@ export function Drawer({ children }: DrawerProps) {
           >
             <div className={styles.splitterHandle} />
           </div>
-          <div className={styles.openHeader}>
+          <div className={classNames(styles.openHeader, "rf-enter")}>
             <span className={styles.label}>Terminal</span>
             <span className={styles.count}>{sessions.length}</span>
             <div
@@ -163,7 +165,7 @@ export function Drawer({ children }: DrawerProps) {
       ) : (
         <button
           type="button"
-          className={styles.collapsedStrip}
+          className={classNames(styles.collapsedStrip, "rf-enter")}
           onClick={() => setOpen(true)}
           aria-label={`Expand terminal drawer, ${sessions.length} sessions`}
         >
@@ -185,8 +187,13 @@ export function Drawer({ children }: DrawerProps) {
           </span>
         </button>
       )}
-      <div className={styles.content} aria-hidden={!drawer.open}>
-        {children}
+      <div
+        className={classNames("rf-expand-grid", styles.contentGrid)}
+        data-open={drawer.open}
+      >
+        <div className={styles.content} aria-hidden={!drawer.open}>
+          {children}
+        </div>
       </div>
     </section>
   );

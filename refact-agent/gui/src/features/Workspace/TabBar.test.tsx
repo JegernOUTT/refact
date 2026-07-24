@@ -236,11 +236,49 @@ describe("TabBar", () => {
       within(getTabWrap(/Chat Beta/)).getByLabelText("Close Chat Beta"),
     );
 
+    const closingTab = getTabWrap(/Chat Beta/);
+    expect(closingTab).toHaveClass(styles.tabWrapClosing);
+    expect(store.getState().workspace.tabs).toContain(chat("chat-b"));
+    fireEvent.transitionEnd(closingTab);
+
     expect(dispatchSpy).toHaveBeenCalledWith(closeTab(chat("chat-b")));
     expect(store.getState().workspace.tabs).toEqual([
       chat("chat-a"),
       chat("chat-c"),
     ]);
+  });
+
+  it("closes tabs immediately when reduced motion is enabled", async () => {
+    const matchMediaSpy = vi.spyOn(window, "matchMedia").mockImplementation(
+      (query: string): MediaQueryList =>
+        ({
+          matches: query === "(prefers-reduced-motion: reduce)",
+          media: query,
+          onchange: null,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        }) satisfies MediaQueryList,
+    );
+
+    try {
+      const store = createStoreWithChatTabs();
+      const view = renderTabBar(store);
+
+      await view.user.click(
+        within(getTabWrap(/Chat Beta/)).getByLabelText("Close Chat Beta"),
+      );
+
+      expect(store.getState().workspace.tabs).toEqual([
+        chat("chat-a"),
+        chat("chat-c"),
+      ]);
+      expect(screen.queryByRole("tab", { name: /Chat Beta/ })).toBeNull();
+    } finally {
+      matchMediaSpy.mockRestore();
+    }
   });
 
   it("navigates home when the last workspace tab is closed from the chat page", async () => {
@@ -257,6 +295,7 @@ describe("TabBar", () => {
     await view.user.click(
       within(getTabWrap(/Chat Alpha/)).getByLabelText("Close Chat Alpha"),
     );
+    fireEvent.transitionEnd(getTabWrap(/Chat Alpha/));
 
     expect(store.getState().workspace.tabs).toEqual([]);
     expect(store.getState().workspace.activeTabId).toBeNull();
@@ -272,6 +311,7 @@ describe("TabBar", () => {
     await view.user.click(
       within(getTabWrap(/Chat Beta/)).getByLabelText("Close Chat Beta"),
     );
+    fireEvent.transitionEnd(getTabWrap(/Chat Beta/));
 
     expect(store.getState().workspace.tabs).toEqual([
       chat("chat-a"),
@@ -295,6 +335,7 @@ describe("TabBar", () => {
     await view.user.click(
       within(getTabWrap(/Chat Alpha/)).getByLabelText("Close Chat Alpha"),
     );
+    fireEvent.transitionEnd(getTabWrap(/Chat Alpha/));
 
     expect(store.getState().workspace.tabs).toEqual([]);
     expect(store.getState().pages.at(-1)).toEqual({
@@ -413,6 +454,7 @@ describe("TabBar", () => {
     await view.user.click(
       within(getTabWrap(/Task Alpha/)).getByLabelText("Close Task Alpha"),
     );
+    fireEvent.transitionEnd(getTabWrap(/Task Alpha/));
 
     expect(store.getState().tasksUI.openTasks).toEqual([]);
     expect(store.getState().pages.at(-1)).toEqual({ name: "history" });
@@ -430,6 +472,7 @@ describe("TabBar", () => {
     await view.user.click(
       within(getTabWrap(/Buddy/)).getByLabelText("Close Buddy"),
     );
+    fireEvent.transitionEnd(getTabWrap(/Buddy/));
 
     expect(store.getState().pages.at(-1)).toEqual({ name: "history" });
     expect(store.getState().workspace.tabs).toEqual([

@@ -5,6 +5,7 @@ import {
   DragEvent,
   MouseEvent,
   PointerEvent,
+  TransitionEvent,
   WheelEvent,
   useCallback,
   useEffect,
@@ -20,7 +21,7 @@ import {
   StatusDot,
   Switch,
 } from "../../components/ui";
-import { useAppDispatch, useAppSelector } from "../../hooks";
+import { useAppDispatch, useAppSelector, useReducedMotion } from "../../hooks";
 import { selectCapabilities, selectHost } from "../Config/configSlice";
 import {
   popBackTo,
@@ -285,6 +286,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
   const liveEdits = useAppSelector((state) =>
     focusedChatId ? selectLiveEditsForChat(state, focusedChatId) : false,
   );
+  const reducedMotion = useReducedMotion();
   const [draggingTabId, setDraggingTabId] = useState<SurfaceKey | null>(null);
   const [dragTargetTabId, setDragTargetTabId] = useState<SurfaceKey | null>(
     null,
@@ -293,6 +295,9 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
   const pointerDragEnabled = usePointerDragHost();
   const [pointerDropTargetId, setPointerDropTargetId] =
     useState<SurfaceKey | null>(null);
+  const [closingTabIds, setClosingTabIds] = useState<Set<SurfaceKey>>(
+    () => new Set(),
+  );
   const tabWrapEls = useRef(new Map<SurfaceKey, HTMLElement>());
   const gestureCleanupRef = useRef<(() => void) | null>(null);
 
@@ -419,10 +424,8 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     [currentPage, dispatch],
   );
 
-  const handleCloseTab = useCallback(
-    (event: MouseEvent<HTMLButtonElement>, tabId: SurfaceKey) => {
-      event.preventDefault();
-      event.stopPropagation();
+  const closeTabById = useCallback(
+    (tabId: SurfaceKey) => {
       const parsed = parseSurfaceKey(tabId);
       if (parsed.kind === "task") {
         dispatch(closeTask(parsed.id));
@@ -448,6 +451,44 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     },
     [currentPage, dispatch, tabs],
   );
+
+  const handleCloseTab = useCallback(
+    (event: MouseEvent<HTMLButtonElement>, tabId: SurfaceKey) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (reducedMotion) {
+        closeTabById(tabId);
+        return;
+      }
+      setClosingTabIds((current) => {
+        if (current.has(tabId)) return current;
+        const next = new Set(current);
+        next.add(tabId);
+        return next;
+      });
+    },
+    [closeTabById, reducedMotion],
+  );
+
+  const handleTabCloseTransitionEnd = useCallback(
+    (event: TransitionEvent<HTMLDivElement>, tabId: SurfaceKey) => {
+      if (event.target !== event.currentTarget) return;
+      if (!closingTabIds.has(tabId)) return;
+      closeTabById(tabId);
+      setClosingTabIds((current) => {
+        const next = new Set(current);
+        next.delete(tabId);
+        return next;
+      });
+    },
+    [closeTabById, closingTabIds],
+  );
+
+  useEffect(() => {
+    if (!reducedMotion || closingTabIds.size === 0) return;
+    for (const tabId of closingTabIds) closeTabById(tabId);
+    setClosingTabIds(new Set());
+  }, [closeTabById, closingTabIds, reducedMotion]);
 
   const stopClosePointerEvent = useCallback(
     (
@@ -687,6 +728,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
         >
           {tabItems.map((tab) => {
             const isActive = activeSurfaceKey === tab.id;
+            const isClosing = closingTabIds.has(tab.id);
             const unreadText =
               tab.unreadNotificationCount > 9
                 ? "9+"
@@ -704,9 +746,10 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                 }}
                 className={classNames(
                   styles.tabWrap,
-                  "rf-enter-scale",
+                  !isClosing && "rf-enter-scale",
                   isActive && styles.tabWrapActive,
                   tab.isGroup && styles.tabWrapGroup,
+                  isClosing && styles.tabWrapClosing,
                   draggingTabId === tab.id && styles.tabWrapDragging,
                   (dragTargetTabId === tab.id ||
                     pointerDropTargetId === tab.id) &&
@@ -715,6 +758,9 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                 onDragOver={(event) => handleTabDragOver(event, tab.id)}
                 onDragLeave={(event) => handleTabDragLeave(event, tab.id)}
                 onDrop={(event) => handleTabDrop(event, tab.id)}
+                onTransitionEnd={(event) =>
+                  handleTabCloseTransitionEnd(event, tab.id)
+                }
               >
                 <button
                   type="button"
