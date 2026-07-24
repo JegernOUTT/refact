@@ -6,7 +6,8 @@ import { describe, expect, it } from "vitest";
 import { setUpStore } from "../../app/store";
 import { createChatWithId } from "../Chat/Thread";
 import { updateConfig } from "../Config/configSlice";
-import { openTab } from "./workspaceSlice";
+import { setTerminalWorkbenchOpen } from "./TerminalPanel/terminalSlice";
+import { openTab, setDockOpen } from "./workspaceSlice";
 import { makeSurfaceKey } from "./surfaceKey";
 import { useWorkspaceShortcuts } from "./useWorkspaceShortcuts";
 
@@ -22,6 +23,31 @@ function renderShortcuts() {
 }
 
 describe("useWorkspaceShortcuts", () => {
+  it("opens the dock and current chat terminal when the dock is closed", () => {
+    const { store, rerender } = renderShortcuts();
+    store.dispatch(
+      setTerminalWorkbenchOpen({ chatId: "chat-a", open: true }),
+    );
+    store.dispatch(setDockOpen(false));
+    rerender();
+
+    fireEvent.keyDown(window, { key: "j", ctrlKey: true });
+
+    expect(store.getState().workspace.dock?.open).toBe(true);
+    expect(store.getState().terminal.workbenchOpenByChat["chat-a"]).toBe(true);
+  });
+
+  it("toggles the current chat terminal when the dock is already open", () => {
+    const { store } = renderShortcuts();
+
+    fireEvent.keyDown(window, { key: "j", ctrlKey: true });
+    expect(store.getState().terminal.workbenchOpenByChat["chat-a"]).toBe(true);
+
+    fireEvent.keyDown(window, { key: "j", metaKey: true });
+    expect(store.getState().terminal.workbenchOpenByChat["chat-a"]).toBe(false);
+    expect(store.getState().workspace.dock?.open).toBe(true);
+  });
+
   it("toggles web workspace chrome and selects visible dock sections", () => {
     const { store } = renderShortcuts();
 
@@ -31,9 +57,6 @@ describe("useWorkspaceShortcuts", () => {
     fireEvent.keyDown(window, { key: "B", metaKey: true });
     expect(store.getState().workspace.dock?.open).toBe(true);
 
-    fireEvent.keyDown(window, { key: "j", ctrlKey: true });
-    expect(store.getState().terminal.workbenchOpenByChat["chat-a"]).toBe(true);
-
     fireEvent.keyDown(window, { key: "2", ctrlKey: true });
     expect(store.getState().workspace.dock).toMatchObject({
       open: true,
@@ -42,6 +65,28 @@ describe("useWorkspaceShortcuts", () => {
 
     fireEvent.keyDown(window, { key: "3", metaKey: true });
     expect(store.getState().workspace.dock?.section).toBe("tasks");
+  });
+
+  it("ignores the terminal shortcut when terminal capability is unavailable", () => {
+    const { store, rerender } = renderShortcuts();
+    store.dispatch(
+      updateConfig({
+        capabilities: {
+          filesPanel: true,
+          gitPanel: true,
+          terminalPanel: false,
+        },
+      }),
+    );
+    store.dispatch(setDockOpen(false));
+    rerender();
+
+    fireEvent.keyDown(window, { key: "j", ctrlKey: true });
+
+    expect(
+      store.getState().terminal.workbenchOpenByChat["chat-a"],
+    ).toBeUndefined();
+    expect(store.getState().workspace.dock?.open).toBe(false);
   });
 
   it("ignores section shortcuts whose capability is unavailable", () => {
@@ -72,7 +117,7 @@ describe("useWorkspaceShortcuts", () => {
     const terminal = document.body.appendChild(document.createElement("div"));
     terminal.className = "xterm";
 
-    fireEvent.keyDown(input, { key: "b", ctrlKey: true });
+    fireEvent.keyDown(input, { key: "j", ctrlKey: true });
     fireEvent.keyDown(editable, { key: "2", ctrlKey: true });
     fireEvent.keyDown(terminal, { key: "j", metaKey: true });
 

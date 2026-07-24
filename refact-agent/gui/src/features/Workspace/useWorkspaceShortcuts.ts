@@ -2,10 +2,14 @@ import { useEffect } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectCapabilities, selectHost } from "../Config/configSlice";
-import { toggleTerminalWorkbench } from "./TerminalPanel/terminalSlice";
+import {
+  setTerminalWorkbenchOpen,
+  toggleTerminalWorkbench,
+} from "./TerminalPanel/terminalSlice";
 import {
   selectFocusedWorkspaceChatId,
   selectPanelsForced,
+  selectWorkspaceDock,
   setDockOpen,
   setDockSection,
   toggleDock,
@@ -27,6 +31,7 @@ export function useWorkspaceShortcuts() {
   const host = useAppSelector(selectHost);
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
+  const dock = useAppSelector(selectWorkspaceDock);
   const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
 
   useEffect(() => {
@@ -59,7 +64,14 @@ export function useWorkspaceShortcuts() {
         focusedChatId
       ) {
         event.preventDefault();
-        dispatch(toggleTerminalWorkbench({ chatId: focusedChatId }));
+        if (dock.open) {
+          dispatch(toggleTerminalWorkbench({ chatId: focusedChatId }));
+        } else {
+          dispatch(setDockOpen(true));
+          dispatch(
+            setTerminalWorkbenchOpen({ chatId: focusedChatId, open: true }),
+          );
+        }
         return;
       }
 
@@ -80,5 +92,5 @@ export function useWorkspaceShortcuts() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [capabilities, dispatch, focusedChatId, host, panelsForced]);
+  }, [capabilities, dispatch, dock.open, focusedChatId, host, panelsForced]);
 }
