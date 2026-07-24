@@ -75,21 +75,65 @@ type FilesPanelDispatch = (
     | ReturnType<typeof setDockOpen>,
 ) => void;
 
-const parentDirectories = (path: string): string[] => {
+const normalizePath = (path: string): string => {
   const normalized = path.replace(/\\/g, "/");
-  const parent = normalized.slice(0, normalized.lastIndexOf("/"));
-  const rootPrefix = parent.startsWith("/") ? "/" : "";
+  if (/^\/+$/u.test(normalized)) return "/";
+  if (/^[A-Za-z]:\/+$/u.test(normalized)) {
+    return `${normalized.slice(0, 2)}/`;
+  }
+  return normalized.replace(/\/+$/u, "");
+};
+
+export const isPathWithinWorkspaceRoots = (
+  path: string,
+  workspaceRoots: string[],
+): boolean => {
+  const normalizedPath = normalizePath(path);
+  return workspaceRoots.some((workspaceRoot) => {
+    const normalizedRoot = normalizePath(workspaceRoot);
+    if (!normalizedRoot) return false;
+    if (normalizedPath === normalizedRoot) return true;
+    if (normalizedRoot === "/") return normalizedPath.startsWith("/");
+    if (normalizedRoot.endsWith("/")) {
+      return normalizedPath.startsWith(normalizedRoot);
+    }
+    return normalizedPath.startsWith(`${normalizedRoot}/`);
+  });
+};
+
+const parentDirectories = (path: string): string[] => {
+  const normalized = normalizePath(path);
+  const lastSeparator = normalized.lastIndexOf("/");
+  const parent = lastSeparator === 0 ? "/" : normalized.slice(0, lastSeparator);
+  if (parent === "/") return [parent];
+  const rootPrefix = parent.startsWith("//")
+    ? "//"
+    : parent.startsWith("/")
+      ? "/"
+      : "";
   const segments = parent.split("/").filter(Boolean);
-  return segments.map(
-    (_, index) => rootPrefix + segments.slice(0, index + 1).join("/"),
-  );
+  return segments.map((_, index) => {
+    const directory = rootPrefix + segments.slice(0, index + 1).join("/");
+    if (index === 0 && /^[A-Za-z]:$/u.test(directory)) return `${directory}/`;
+    return directory;
+  });
+};
+
+type FilesPanelThunkState = {
+  current_project: {
+    workspaceRoots?: string[];
+  };
 };
 
 export const openFileInFilesPanel =
-  (target: FileViewerTarget) => (dispatch: FilesPanelDispatch) => {
+  (target: FileViewerTarget) =>
+  (dispatch: FilesPanelDispatch, getState: () => FilesPanelThunkState) => {
     dispatch(openTab(makeSurfaceKey("file", target.path)));
+    const workspaceRoots = getState().current_project.workspaceRoots ?? [];
     for (const directory of parentDirectories(target.path)) {
-      dispatch(expandDirectory(directory));
+      if (isPathWithinWorkspaceRoots(directory, workspaceRoots)) {
+        dispatch(expandDirectory(directory));
+      }
     }
     dispatch(setViewerTarget(target));
     if (

@@ -18,6 +18,7 @@ import {
 import { useReadFileQuery } from "../../../services/refact/files";
 import {
   expandDirectory,
+  isPathWithinWorkspaceRoots,
   selectFileViewerTargetByPath,
   selectTreePath,
 } from "./filesPanelSlice";
@@ -35,14 +36,26 @@ type Breadcrumb = {
   path: string;
 };
 
+const EMPTY_ROOTS: string[] = [];
+
 const breadcrumbsForPath = (path: string): Breadcrumb[] => {
   const normalized = path.replace(/\\/g, "/");
-  const rootPrefix = normalized.startsWith("/") ? "/" : "";
+  const rootPrefix = normalized.startsWith("//")
+    ? "//"
+    : normalized.startsWith("/")
+      ? "/"
+      : "";
   const segments = normalized.split("/").filter(Boolean);
-  return segments.map((label, index) => ({
-    label,
-    path: rootPrefix + segments.slice(0, index + 1).join("/"),
-  }));
+  return segments.map((label, index) => {
+    const crumbPath = rootPrefix + segments.slice(0, index + 1).join("/");
+    return {
+      label,
+      path:
+        index === 0 && /^[A-Za-z]:$/u.test(crumbPath)
+          ? `${crumbPath}/`
+          : crumbPath,
+    };
+  });
 };
 
 export function FileViewer({ path }: { path: string }) {
@@ -50,6 +63,9 @@ export function FileViewer({ path }: { path: string }) {
   const copyToClipboard = useCopyToClipboard();
   const storedTarget = useAppSelector((state) =>
     selectFileViewerTargetByPath(state, path),
+  );
+  const workspaceRoots = useAppSelector(
+    (state) => state.current_project.workspaceRoots ?? EMPTY_ROOTS,
   );
   const target = storedTarget ?? { path };
   const { data, error, isFetching, refetch } = useReadFileQuery({ path });
@@ -67,11 +83,16 @@ export function FileViewer({ path }: { path: string }) {
 
   const openBreadcrumb = useCallback(
     (crumb: Breadcrumb, index: number) => {
-      if (index === breadcrumbs.length - 1) return;
+      if (
+        index === breadcrumbs.length - 1 ||
+        !isPathWithinWorkspaceRoots(crumb.path, workspaceRoots)
+      ) {
+        return;
+      }
       dispatch(expandDirectory(crumb.path));
       dispatch(selectTreePath(crumb.path));
     },
-    [breadcrumbs.length, dispatch],
+    [breadcrumbs.length, dispatch, workspaceRoots],
   );
 
   const blocked = errorStatus(error) === 403;
@@ -86,7 +107,10 @@ export function FileViewer({ path }: { path: string }) {
               {index > 0 ? <span className={styles.separator}>/</span> : null}
               <button
                 className={styles.breadcrumb}
-                disabled={index === breadcrumbs.length - 1}
+                disabled={
+                  index === breadcrumbs.length - 1 ||
+                  !isPathWithinWorkspaceRoots(crumb.path, workspaceRoots)
+                }
                 onClick={() => openBreadcrumb(crumb, index)}
                 type="button"
               >

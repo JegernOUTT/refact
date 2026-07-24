@@ -151,6 +151,36 @@ describe("FilesPanel", () => {
     ).toHaveTextContent("workspace/src/main.ts");
   });
 
+  it("keeps breadcrumbs above the workspace root non-navigable", async () => {
+    const deepRoot = "/w/a/b/engine";
+    const deepFile = `${deepRoot}/src/x.rs`;
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(readResponse({ path: deepFile })),
+      ),
+    );
+    const view = render(<FileViewer path={deepFile} />, {
+      preloadedState: {
+        current_project: {
+          name: "engine",
+          workspaceRoots: [deepRoot],
+        },
+      },
+    });
+
+    expect(await screen.findByRole("button", { name: "w" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "a" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "b" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "engine" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "src" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "x.rs" })).toBeDisabled();
+
+    await view.user.click(screen.getByRole("button", { name: "engine" }));
+    expect(view.store.getState().filesPanel.expandedDirectories).toEqual([
+      deepRoot,
+    ]);
+  });
+
   it("shows an honest privacy-blocked state", async () => {
     server.use(
       rootHandler(),
