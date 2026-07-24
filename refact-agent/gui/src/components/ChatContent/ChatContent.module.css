@@ -29,7 +29,7 @@
 
 .floatingLinks {
   position: absolute;
-  bottom: var(--rf-composer-overlap, 0px);
+  bottom: var(--rf-composer-clearance, 0px);
   max-width: 100%;
 }
 
@@ -37,7 +37,7 @@
    rest above the floating glass composer while older text flows behind it.
    The extra space keeps the streaming tail clear of the panel edge. */
 .composerClearance {
-  height: calc(var(--rf-composer-overlap, 0px) + var(--rf-space-4));
+  height: calc(var(--rf-composer-clearance, 0px) + var(--rf-space-4));
   flex-shrink: 0;
   transition: height var(--rf-dur-med) var(--rf-ease-standard);
 }
@@ -416,7 +416,7 @@
 
 .queuedMessagesContainer {
   position: absolute;
-  bottom: calc(var(--rf-composer-overlap, 60px) + var(--rf-space-2));
+  bottom: calc(var(--rf-composer-clearance, 0px) + var(--rf-space-2));
   left: var(--rf-space-2);
   right: var(--rf-space-4);
   padding: var(--rf-space-2) 0;

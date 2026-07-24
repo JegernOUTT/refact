@@ -2,7 +2,7 @@
   position: absolute;
   right: var(--rf-space-4);
   /* Rest right above the floating glass composer, not behind it. */
-  bottom: calc(var(--rf-composer-overlap, 0px) + var(--rf-space-4));
+  bottom: calc(var(--rf-composer-clearance, 0px) + var(--rf-space-4));
   z-index: 1;
   pointer-events: none;
 }

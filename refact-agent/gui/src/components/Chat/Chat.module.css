@@ -1,6 +1,5 @@
 .chatRoot {
   position: relative;
-  --rf-composer-overlap: 0px;
 }
 
 .transcriptArea {

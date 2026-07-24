@@ -34,6 +34,7 @@ import {
   selectPanelsForced,
   selectWorkspaceDock,
 } from "../../features/Workspace/workspaceSlice";
+import { useBottomDockClearance } from "./useBottomDockClearance";
 
 export type ChatProps = {
   host: Config["host"];
@@ -88,27 +89,7 @@ export const Chat: React.FC<ChatProps> = ({
   const onEnableSend = () => dispatch(enableSend({ id: chatId }));
 
   const bottomDockRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const dock = bottomDockRef.current;
-    // The chat root renders through DropzoneProvider's asChild cloneElement,
-    // which overwrites any ref passed to it (react-dropzone's rootProps
-    // carry their own ref) — so resolve the root as the dock's parent.
-    const root = dock?.parentElement;
-    if (!dock || !root) return;
-
-    const updateClearance = () => {
-      root.style.setProperty(
-        "--rf-composer-clearance",
-        `${dock.offsetHeight}px`,
-      );
-    };
-
-    updateClearance();
-    const observer = new ResizeObserver(updateClearance);
-    observer.observe(dock);
-    return () => observer.disconnect();
-  }, []);
+  useBottomDockClearance(bottomDockRef);
 
   const handleSubmit = useCallback(
     (value: string, sendPolicy?: "immediate" | "after_flow") => {
