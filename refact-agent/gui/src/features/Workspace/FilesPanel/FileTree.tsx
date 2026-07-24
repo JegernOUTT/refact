@@ -112,11 +112,19 @@ const TreeRow = ({
           <span className={styles.indent} key={index} />
         ))}
       </span>
-      <Icon
-        icon={isDirectory ? (expanded ? ChevronDown : ChevronRight) : File}
-        size="sm"
-        tone="muted"
-      />
+      <span
+        aria-hidden="true"
+        className={styles.treeChevronSlot}
+        data-testid="tree-chevron-slot"
+      >
+        {isDirectory ? (
+          <Icon
+            icon={expanded ? ChevronDown : ChevronRight}
+            size="sm"
+            tone="muted"
+          />
+        ) : null}
+      </span>
       <Icon
         icon={EntryIcon}
         size="sm"

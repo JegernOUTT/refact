@@ -91,6 +91,13 @@
   border-inline-start: var(--rf-hairline) solid var(--rf-border);
 }
 
+.treeChevronSlot {
+  display: inline-flex;
+  flex: 0 0 var(--rf-icon-sm);
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+}
+
 .treeName {
   overflow: hidden;
   text-overflow: ellipsis;

@@ -83,6 +83,27 @@ describe("FilesPanel", () => {
     vi.restoreAllMocks();
   });
 
+  it("renders one file icon with an empty chevron slot", async () => {
+    server.use(rootHandler());
+    const { user } = render(<FilesPanel />);
+    const workspace = await screen.findByRole("treeitem", {
+      name: /workspace/i,
+    });
+
+    expect(workspace.querySelectorAll("svg")).toHaveLength(2);
+    expect(
+      within(workspace).getByTestId("tree-chevron-slot").querySelector("svg"),
+    ).not.toBeNull();
+
+    await user.click(workspace);
+    const file = await screen.findByRole("treeitem", { name: /README\.md/i });
+
+    expect(file.querySelectorAll("svg")).toHaveLength(1);
+    expect(
+      within(file).getByTestId("tree-chevron-slot").querySelector("svg"),
+    ).toBeNull();
+  });
+
   it("fetches an expanded directory once and reuses its cached children", async () => {
     let sourceRequests = 0;
     server.use(
@@ -138,7 +159,11 @@ describe("FilesPanel", () => {
       rootHandler(),
       http.get("*/v1/files/read", () => HttpResponse.json(readResponse())),
     );
-    const view = render(<FileViewer path={filePath} />);
+    const view = render(<FileViewer path={filePath} />, {
+      preloadedState: {
+        current_project: { name: "workspace", workspaceRoots: [rootPath] },
+      },
+    });
     view.store.dispatch(openFileInFilesPanel({ path: filePath, line: 2 }));
 
     expect(await screen.findByText("const second = 2;")).toBeVisible();
@@ -151,7 +176,7 @@ describe("FilesPanel", () => {
     ).toHaveTextContent("workspace/src/main.ts");
   });
 
-  it("keeps breadcrumbs above the workspace root non-navigable", async () => {
+  it("omits breadcrumbs above the enclosing workspace root", async () => {
     const deepRoot = "/w/a/b/engine";
     const deepFile = `${deepRoot}/src/x.rs`;
     server.use(
@@ -168,17 +193,43 @@ describe("FilesPanel", () => {
       },
     });
 
-    expect(await screen.findByRole("button", { name: "w" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "a" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "b" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "engine" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "engine" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "src" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "x.rs" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "w" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "a" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "b" })).toBeNull();
 
     await view.user.click(screen.getByRole("button", { name: "engine" }));
     expect(view.store.getState().filesPanel.expandedDirectories).toEqual([
       deepRoot,
     ]);
+  });
+
+  it("uses the enclosing root when multiple workspace roots are configured", async () => {
+    const engineRoot = "/home/user/project/engine";
+    const engineFile = `${engineRoot}/Cargo.toml`;
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(readResponse({ path: engineFile })),
+      ),
+    );
+    render(<FileViewer path={engineFile} />, {
+      preloadedState: {
+        current_project: {
+          name: "project",
+          workspaceRoots: ["/home/user/other", engineRoot],
+        },
+      },
+    });
+
+    const breadcrumbs = await screen.findByRole("navigation", {
+      name: "File path",
+    });
+    expect(breadcrumbs).toHaveTextContent("engine/Cargo.toml");
+    expect(breadcrumbs).not.toHaveTextContent("home");
+    expect(breadcrumbs).not.toHaveTextContent("user");
+    expect(within(breadcrumbs).getAllByRole("button")).toHaveLength(2);
   });
 
   it("shows an honest privacy-blocked state", async () => {

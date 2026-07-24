@@ -38,24 +38,49 @@ type Breadcrumb = {
 
 const EMPTY_ROOTS: string[] = [];
 
-const breadcrumbsForPath = (path: string): Breadcrumb[] => {
+const normalizeBreadcrumbPath = (path: string): string => {
   const normalized = path.replace(/\\/g, "/");
-  const rootPrefix = normalized.startsWith("//")
-    ? "//"
-    : normalized.startsWith("/")
-      ? "/"
-      : "";
-  const segments = normalized.split("/").filter(Boolean);
-  return segments.map((label, index) => {
-    const crumbPath = rootPrefix + segments.slice(0, index + 1).join("/");
-    return {
-      label,
-      path:
-        index === 0 && /^[A-Za-z]:$/u.test(crumbPath)
-          ? `${crumbPath}/`
-          : crumbPath,
-    };
-  });
+  if (/^\/+$/u.test(normalized)) return "/";
+  if (/^[A-Za-z]:\/+$/u.test(normalized)) {
+    return `${normalized.slice(0, 2)}/`;
+  }
+  return normalized.replace(/\/+$/u, "");
+};
+
+const breadcrumbsForPath = (
+  path: string,
+  workspaceRoots: string[],
+): Breadcrumb[] => {
+  const normalizedPath = normalizeBreadcrumbPath(path);
+  const workspaceRoot = workspaceRoots
+    .map(normalizeBreadcrumbPath)
+    .filter((root) =>
+      isPathWithinWorkspaceRoots(normalizedPath, root ? [root] : []),
+    )
+    .sort((left, right) => right.length - left.length)[0];
+
+  if (!workspaceRoot) {
+    return [{ label: pathBasename(normalizedPath), path: normalizedPath }];
+  }
+
+  const relativePath = normalizedPath
+    .slice(workspaceRoot.length)
+    .replace(/^\/+/, "");
+  const segments = relativePath.split("/").filter(Boolean);
+  const rootLabel = pathBasename(workspaceRoot) || workspaceRoot;
+  return [
+    { label: rootLabel, path: workspaceRoot },
+    ...segments.map((label, index) => {
+      const suffix = segments.slice(0, index + 1).join("/");
+      const crumbPath = workspaceRoot.endsWith("/")
+        ? `${workspaceRoot}${suffix}`
+        : `${workspaceRoot}/${suffix}`;
+      return {
+        label,
+        path: crumbPath,
+      };
+    }),
+  ];
 };
 
 export function FileViewer({ path }: { path: string }) {
@@ -69,7 +94,10 @@ export function FileViewer({ path }: { path: string }) {
   );
   const target = storedTarget ?? { path };
   const { data, error, isFetching, refetch } = useReadFileQuery({ path });
-  const breadcrumbs = useMemo(() => breadcrumbsForPath(path), [path]);
+  const breadcrumbs = useMemo(
+    () => breadcrumbsForPath(path, workspaceRoots),
+    [path, workspaceRoots],
+  );
 
   useEffect(() => {
     if (!target.line || !data) return;
