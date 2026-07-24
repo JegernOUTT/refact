@@ -72,7 +72,8 @@
   color: var(--rf-color-accent);
 }
 
-.workspacePanelsButton[aria-pressed="true"] {
+.workspacePanelsButton[aria-pressed="true"],
+.liveEditsButton[aria-pressed="true"] {
   color: var(--rf-color-accent);
   background: var(--rf-color-accent-soft);
 }

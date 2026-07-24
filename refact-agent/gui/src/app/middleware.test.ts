@@ -27,7 +27,9 @@ import {
   closePane as closeWorkspacePane,
   closeTab as closeWorkspaceTab,
   focusPane as focusWorkspacePane,
+  openTab as openWorkspaceTab,
   selectFocusedWorkspaceChatId,
+  setActiveTab as setWorkspaceActiveTab,
   setLiveEditsForChat,
   setPaneActive as setWorkspacePaneActive,
   workspaceSlice,
@@ -449,7 +451,7 @@ describe("workspace routing middleware", () => {
     });
   });
 
-  it("auto-splits and follows focused-chat edits only while opted in", async () => {
+  it("uses the focused chat Live edits preference for real diff auto-splits", async () => {
     const store = setUpStore({
       config: { host: "vscode", lspPort: 8001, themeProps: {} },
       chat: makeChatState("chat-a", ["chat-a", "chat-b"]),
@@ -484,18 +486,34 @@ describe("workspace routing middleware", () => {
         }),
       );
 
-    dispatchDiff("chat-a", "1", "/workspace/off.ts");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(store.getState().workspace.groups).toEqual({});
+    const openFilePath = "/workspace/open.ts";
+    store.dispatch(openWorkspaceTab(makeSurfaceKey("file", openFilePath)));
+    store.dispatch(setWorkspaceActiveTab(chatSurface("chat-a")));
+
+    dispatchDiff("chat-a", "1", openFilePath);
+    await waitFor(() => {
+      expect(store.getState().workspace.groups).toEqual({});
+      expect(store.getState().workspace.activeTabId).toBe(
+        chatSurface("chat-a"),
+      );
+      expect(
+        store.getState().filesPanel.liveUpdatesByPath[openFilePath],
+      ).toHaveLength(1);
+    });
 
     store.dispatch(setLiveEditsForChat({ chatId: "chat-a", enabled: true }));
     dispatchDiff("chat-a", "2", "/workspace/one.ts");
     await waitFor(() => {
       const group = store.getState().workspace.groups[chatSurface("chat-a")];
       expect(group).toBeDefined();
-      expect(group ? collectTabIds(group.root) : []).toContain(
+      expect(group?.root.kind).toBe("split");
+      if (group?.root.kind === "split") {
+        expect(group.root.dir).toBe("row");
+      }
+      expect(group ? collectTabIds(group.root) : []).toEqual([
+        chatSurface("chat-a"),
         "file:/workspace/one.ts",
-      );
+      ]);
     });
 
     dispatchDiff("chat-a", "3", "/workspace/two.ts");

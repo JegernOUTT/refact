@@ -14,6 +14,7 @@ import { openTask } from "../../features/Tasks";
 import {
   makeSurfaceKey,
   openTab,
+  setPanelsForced,
   setDockOpen,
   setActiveTab,
 } from "../../features/Workspace";
@@ -230,6 +231,129 @@ describe("Toolbar single workspace tab row", () => {
 
     await waitFor(() =>
       expect(button).toHaveAttribute("aria-pressed", "false"),
+    );
+  });
+
+  it("shows the icon-only Live edits control on the deployed web toolbar and toggles per chat", async () => {
+    useToolbarHandlers();
+    const activeTab = { type: "chat" as const, id: "chat-a" };
+    const view = renderToolbar(activeTab);
+    const chatA = makeSurfaceKey("chat", "chat-a");
+    const chatB = makeSurfaceKey("chat", "chat-b");
+
+    act(() => {
+      view.store.dispatch(
+        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
+      );
+      view.store.dispatch(
+        createChatWithId({ id: "chat-b", title: "Chat Beta" }),
+      );
+      view.store.dispatch(openTab(chatA));
+      view.store.dispatch(openTab(chatB));
+      view.store.dispatch(setActiveTab(chatA));
+    });
+    rerenderToolbar(view, activeTab);
+
+    const liveEdits = screen.getByRole("button", { name: "Live edits" });
+    expect(liveEdits).toHaveAttribute("aria-pressed", "true");
+    expect(liveEdits).not.toHaveTextContent("Live edits");
+
+    await view.user.click(liveEdits);
+    expect(view.store.getState().workspace.liveEditsByChat?.["chat-a"]).toBe(
+      false,
+    );
+    expect(liveEdits).toHaveAttribute("aria-pressed", "false");
+
+    act(() => {
+      view.store.dispatch(setActiveTab(chatB));
+    });
+
+    await waitFor(() =>
+      expect(liveEdits).toHaveAttribute("aria-pressed", "true"),
+    );
+    await view.user.click(liveEdits);
+    expect(view.store.getState().workspace.liveEditsByChat).toEqual({
+      "chat-a": false,
+      "chat-b": false,
+    });
+
+    act(() => {
+      view.store.dispatch(setActiveTab(chatA));
+    });
+    await waitFor(() =>
+      expect(liveEdits).toHaveAttribute("aria-pressed", "false"),
+    );
+  });
+
+  it("hides Live edits without a focused chat or available panels", () => {
+    useToolbarHandlers();
+    const activeTab = { type: "chat" as const, id: "chat-a" };
+    const view = render(<Toolbar activeTab={activeTab} />, {
+      preloadedState: {
+        config: {
+          ...baseConfig,
+          capabilities: {
+            filesPanel: false,
+            gitPanel: false,
+            terminalPanel: false,
+          },
+        },
+        pages: pagesForActiveTab(activeTab),
+      },
+    });
+
+    expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
+
+    act(() => {
+      view.store.dispatch(
+        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
+      );
+      view.store.dispatch(openTab(makeSurfaceKey("chat", "chat-a")));
+      view.store.dispatch(setActiveTab(makeSurfaceKey("chat", "chat-a")));
+    });
+    view.rerender(<Toolbar activeTab={activeTab} />);
+
+    expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
+  });
+
+  it("shows IDE Live edits after Workspace panels opt-in and defaults off", async () => {
+    useToolbarHandlers();
+    const activeTab = { type: "chat" as const, id: "chat-a" };
+    const view = render(<Toolbar activeTab={activeTab} />, {
+      preloadedState: {
+        config: { ...baseConfig, host: "vscode" as const },
+        pages: pagesForActiveTab(activeTab),
+      },
+    });
+    const chatA = makeSurfaceKey("chat", "chat-a");
+
+    act(() => {
+      view.store.dispatch(
+        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
+      );
+      view.store.dispatch(openTab(chatA));
+      view.store.dispatch(setActiveTab(chatA));
+    });
+    view.rerender(<Toolbar activeTab={activeTab} />);
+
+    expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
+
+    await view.user.click(
+      screen.getByRole("button", { name: "Workspace panels" }),
+    );
+    const liveEdits = screen.getByRole("button", { name: "Live edits" });
+    expect(liveEdits).toHaveAttribute("aria-pressed", "false");
+
+    await view.user.click(liveEdits);
+    expect(view.store.getState().workspace.liveEditsByChat?.["chat-a"]).toBe(
+      true,
+    );
+
+    act(() => {
+      view.store.dispatch(setPanelsForced(false));
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull(),
     );
   });
 

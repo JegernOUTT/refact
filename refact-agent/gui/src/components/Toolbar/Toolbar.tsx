@@ -1,6 +1,7 @@
 import { Dropdown, DropdownNavigationOptions } from "./Dropdown";
 import {
   CheckSquare,
+  FileDiff,
   Home,
   Moon,
   PanelLeft,
@@ -25,10 +26,12 @@ import { openTask, selectOpenTasksFromRoot } from "../../features/Tasks";
 import { selectCapabilities } from "../../features/Config/configSlice";
 import {
   selectFocusedWorkspaceChatId,
+  selectLiveEditsForChat,
   selectPanelsForced,
   selectTabs,
   selectWorkspaceDock,
   setDockOpen,
+  setLiveEditsForChat,
   setPanelsForced,
   toggleDock,
 } from "../../features/Workspace";
@@ -195,6 +198,14 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const workspacePanelsPressed = hasWorkspaceChrome
     ? workspaceDock.open
     : panelsForced;
+  const liveEdits = useAppSelector((state) =>
+    focusedWorkspaceChatId
+      ? selectLiveEditsForChat(state, focusedWorkspaceChatId)
+      : false,
+  );
+  const showLiveEdits =
+    focusedWorkspaceChatId !== null &&
+    (capabilities.filesPanel || panelsForced);
   const { openSettings } = useEventsBusForIDE();
   const toolbarChatId =
     activeTab.type === "chat"
@@ -307,6 +318,16 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     if (next) dispatch(setDockOpen(true));
   }, [dispatch, hasWorkspaceChrome, panelsForced]);
 
+  const onToggleLiveEdits = useCallback(() => {
+    if (!focusedWorkspaceChatId) return;
+    dispatch(
+      setLiveEditsForChat({
+        chatId: focusedWorkspaceChatId,
+        enabled: !liveEdits,
+      }),
+    );
+  }, [dispatch, focusedWorkspaceChatId, liveEdits]);
+
   return (
     <div className={styles.toolbar}>
       <div className={styles.toolbarSection}>
@@ -323,6 +344,15 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           onClick={onToggleWorkspacePanels}
           pressed={workspacePanelsPressed}
         />
+        {showLiveEdits ? (
+          <ToolbarIconButton
+            label="Live edits"
+            className={styles.liveEditsButton}
+            icon={FileDiff}
+            onClick={onToggleLiveEdits}
+            pressed={liveEdits}
+          />
+        ) : null}
       </div>
 
       {showTabBar ? (

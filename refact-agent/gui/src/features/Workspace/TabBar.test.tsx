@@ -208,23 +208,11 @@ describe("TabBar", () => {
     expect(store.getState().workspace.activeTabId).toBe(chat("chat-b"));
   });
 
-  it("shows and toggles the focused chat live-edits preference on web", async () => {
+  it("does not render the live-edits control outside the Toolbar", () => {
     const store = createStoreWithChatTabs();
-    const view = renderTabBar(store);
-    const toggle = screen.getByRole("switch", { name: "Live edits" });
-
-    expect(toggle).toHaveAttribute("aria-checked", "true");
-    await view.user.click(toggle);
-    expect(store.getState().workspace.liveEditsByChat?.["chat-a"]).toBe(false);
-  });
-
-  it("keeps IDE live edits off by default", () => {
-    const store = createStoreWithChatTabs();
-    store.dispatch(updateConfig({ host: "vscode" }));
     renderTabBar(store);
 
-    expect(screen.queryByRole("switch", { name: "Live edits" })).toBeNull();
-    expect(store.getState().workspace.liveEditsByChat).toBeUndefined();
+    expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
   });
 
   it("dispatches closeTab from the close button", async () => {

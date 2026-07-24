@@ -51,17 +51,6 @@
   margin-inline-end: var(--rf-space-1);
 }
 
-.liveEditsToggle {
-  flex: 0 0 auto;
-  margin-inline-start: var(--rf-space-2);
-}
-
-@media (max-width: 767px) {
-  .liveEditsToggle + span {
-    display: none;
-  }
-}
-
 .tabList {
   position: relative;
   display: flex;
