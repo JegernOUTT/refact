@@ -38,6 +38,15 @@ type FanoutTask =
   | { kind: "trajectories"; worker: DaemonWorker }
   | { kind: "cron"; worker: DaemonWorker };
 
+export function homeFanoutWorkerSignature(workers: DaemonWorker[]): string {
+  return workers
+    .map((worker) =>
+      JSON.stringify([worker.project_id, worker.root, worker.state]),
+    )
+    .sort()
+    .join("|");
+}
+
 async function fetchJson(url: string, signal?: AbortSignal): Promise<unknown> {
   const controller = new AbortController();
   const timeout = window.setTimeout(

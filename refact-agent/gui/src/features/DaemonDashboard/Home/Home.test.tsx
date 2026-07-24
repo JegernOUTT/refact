@@ -1,11 +1,11 @@
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { setUpStore } from "../../../app/store";
-import type { DaemonWorker } from "../../../services/refact/daemon";
+import { setUpStore, type AppStore } from "../../../app/store";
+import { daemonApi, type DaemonWorker } from "../../../services/refact/daemon";
 import { server } from "../../../utils/mockServer";
 import { render, screen, waitFor, within } from "../../../utils/test-utils";
-import { fetchHomeFanout } from "./homeFanout";
+import { fetchHomeFanout, homeFanoutWorkerSignature } from "./homeFanout";
 import { HomePage, WIZARD_DONE_KEY } from "./HomePage";
 
 const config = {
@@ -46,6 +46,17 @@ function worker(
 
 function renderHome() {
   return render(<HomePage />, { store: setUpStore({ config }) });
+}
+
+async function refetchWorkers(store: AppStore): Promise<void> {
+  await store
+    .dispatch(
+      daemonApi.endpoints.listProjects.initiate(undefined, {
+        forceRefetch: true,
+        subscribe: false,
+      }),
+    )
+    .unwrap();
 }
 
 function updateCheck(updateAvailable = false) {
@@ -331,6 +342,124 @@ describe("Dashboard Home", () => {
 
     expect(await screen.findByText("No recent chats yet")).toBeInTheDocument();
     expect(screen.getByText("All clear")).toBeInTheDocument();
+  });
+
+  it("shows loading until the first fan-out resolves", async () => {
+    window.localStorage.setItem(WIZARD_DONE_KEY, "true");
+    let releaseTrajectories: () => void = () => undefined;
+    const trajectoriesBlocked = new Promise<void>((resolve) => {
+      releaseTrajectories = resolve;
+    });
+    server.use(
+      http.get("https://daemon.example.test/daemon/v1/workers", () =>
+        HttpResponse.json([worker("ready", "ready")]),
+      ),
+      http.get(
+        "https://daemon.example.test/p/ready/v1/trajectories",
+        async () => {
+          await trajectoriesBlocked;
+          return HttpResponse.json({
+            items: [
+              trajectory("chat-1", "Loaded chat", new Date().toISOString()),
+            ],
+          });
+        },
+      ),
+      http.get("https://daemon.example.test/p/ready/v1/scheduler/cron", () =>
+        HttpResponse.json([]),
+      ),
+      updateCheck(),
+    );
+
+    renderHome();
+
+    expect(
+      await screen.findByText("Loading recent chats…"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Loaded chat")).not.toBeInTheDocument();
+
+    releaseTrajectories();
+
+    expect(await screen.findByText("Loaded chat")).toBeInTheDocument();
+    expect(screen.queryByText("Loading recent chats…")).not.toBeInTheDocument();
+  });
+
+  it("keeps identical worker polls stable and silently refreshes on state changes", async () => {
+    window.localStorage.setItem(WIZARD_DONE_KEY, "true");
+    let watchedState = "stopped";
+    let trajectoryRequests = 0;
+    let releaseRefresh: () => void = () => undefined;
+    const refreshBlocked = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    server.use(
+      http.get("https://daemon.example.test/daemon/v1/workers", () =>
+        HttpResponse.json([
+          worker("ready", "ready"),
+          worker("watched", watchedState),
+        ]),
+      ),
+      http.get(
+        "https://daemon.example.test/p/ready/v1/trajectories",
+        async () => {
+          trajectoryRequests += 1;
+          if (trajectoryRequests > 1) await refreshBlocked;
+          return HttpResponse.json({
+            items: [
+              trajectory(
+                `chat-${String(trajectoryRequests)}`,
+                trajectoryRequests === 1 ? "Initial chat" : "Refreshed chat",
+                new Date().toISOString(),
+              ),
+            ],
+          });
+        },
+      ),
+      http.get("https://daemon.example.test/p/ready/v1/scheduler/cron", () =>
+        HttpResponse.json([]),
+      ),
+      updateCheck(),
+    );
+
+    const view = renderHome();
+    expect(await screen.findByText("Initial chat")).toBeInTheDocument();
+    expect(trajectoryRequests).toBe(1);
+
+    await refetchWorkers(view.store);
+    await refetchWorkers(view.store);
+
+    expect(trajectoryRequests).toBe(1);
+    expect(screen.queryByText("Loading recent chats…")).not.toBeInTheDocument();
+
+    watchedState = "crashed";
+    await refetchWorkers(view.store);
+    await waitFor(() => expect(trajectoryRequests).toBe(2));
+
+    expect(screen.getByText("Initial chat")).toBeInTheDocument();
+    expect(screen.queryByText("Loading recent chats…")).not.toBeInTheDocument();
+
+    releaseRefresh();
+
+    expect(await screen.findByText("Refreshed chat")).toBeInTheDocument();
+    expect(trajectoryRequests).toBe(2);
+  });
+
+  it("uses worker identity and state for a deterministic fan-out signature", () => {
+    const workers = [worker("beta", "ready"), worker("alpha", "stopped")];
+    const reorderedCopies = [
+      worker("alpha", "stopped"),
+      worker("beta", "ready"),
+    ];
+
+    expect(homeFanoutWorkerSignature(workers)).toBe(
+      homeFanoutWorkerSignature(reorderedCopies),
+    );
+    expect(homeFanoutWorkerSignature(workers)).not.toBe(
+      homeFanoutWorkerSignature([
+        worker("beta", "ready"),
+        worker("alpha", "crashed"),
+      ]),
+    );
   });
 
   it("fans out only to ready workers", async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { selectConfig } from "../../Config/configSlice";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
@@ -14,7 +14,11 @@ import { AddProjectDialog } from "../Projects/AddProjectDialog";
 import { workerStateName } from "../Projects/projectRagStatus";
 import { ContinueWidget } from "./ContinueWidget";
 import { FirstRunWizard } from "./FirstRunWizard";
-import { fetchHomeFanout, type HomeFanoutResult } from "./homeFanout";
+import {
+  fetchHomeFanout,
+  homeFanoutWorkerSignature,
+  type HomeFanoutResult,
+} from "./homeFanout";
 import { NeedsAttentionWidget } from "./NeedsAttentionWidget";
 import { QuickActions } from "./QuickActions";
 import styles from "./Home.module.css";
@@ -69,10 +73,10 @@ export function HomePage() {
     null,
   );
   const [fanout, setFanout] = useState<HomeFanoutResult>(emptyFanout);
-  const [fanoutLoading, setFanoutLoading] = useState(false);
+  const [fanoutLoading, setFanoutLoading] = useState(true);
+  const hasFanoutResult = useRef(false);
   const {
     data: workersData = [],
-    fulfilledTimeStamp,
     isLoading,
     refetch,
   } = useListProjectsQuery(undefined, {
@@ -107,19 +111,31 @@ export function HomePage() {
     }
     return [optimisticWorker, ...workersData];
   }, [optimisticWorker, workersData]);
+  const workerSignature = useMemo(
+    () => homeFanoutWorkerSignature(workers),
+    [workers],
+  );
+  const currentWorkers = useRef(workers);
+  currentWorkers.current = workers;
 
   useEffect(() => {
+    if (isLoading) return;
     const controller = new AbortController();
-    setFanoutLoading(true);
-    void fetchHomeFanout(daemonBase, workers, controller.signal)
+    const isFirstFanout = !hasFanoutResult.current;
+    void fetchHomeFanout(daemonBase, currentWorkers.current, controller.signal)
       .then((result) => {
-        if (!controller.signal.aborted) setFanout(result);
+        if (!controller.signal.aborted) {
+          hasFanoutResult.current = true;
+          setFanout(result);
+        }
       })
       .finally(() => {
-        if (!controller.signal.aborted) setFanoutLoading(false);
+        if (!controller.signal.aborted && isFirstFanout) {
+          setFanoutLoading(false);
+        }
       });
     return () => controller.abort();
-  }, [daemonBase, fulfilledTimeStamp, workers]);
+  }, [daemonBase, isLoading, workerSignature]);
 
   function persistWizardDone(done: boolean) {
     setWizardDone(done);
