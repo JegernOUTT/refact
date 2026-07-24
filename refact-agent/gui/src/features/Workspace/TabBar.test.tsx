@@ -215,28 +215,95 @@ describe("TabBar", () => {
     expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
   });
 
-  it("dispatches closeTab from the close button", async () => {
-    const store = createStoreWithChatTabs();
-    const dispatchSpy = vi.spyOn(store, "dispatch");
-    const view = renderTabBar(store);
+  it("closes a tab exactly once when its transition ends", () => {
+    vi.useFakeTimers();
+    try {
+      const store = createStoreWithChatTabs();
+      const dispatchSpy = vi.spyOn(store, "dispatch");
+      renderTabBar(store);
 
-    await view.user.click(
-      within(getTabWrap(/Chat Beta/)).getByLabelText("Close Chat Beta"),
-    );
+      fireEvent.click(
+        within(getTabWrap(/Chat Beta/)).getByLabelText("Close Chat Beta"),
+      );
 
-    const closingTab = getTabWrap(/Chat Beta/);
-    expect(closingTab).toHaveClass(styles.tabWrapClosing);
-    expect(store.getState().workspace.tabs).toContain(chat("chat-b"));
-    fireEvent.transitionEnd(closingTab);
+      const closingTab = getTabWrap(/Chat Beta/);
+      expect(closingTab).toHaveClass(styles.tabWrapClosing);
+      expect(store.getState().workspace.tabs).toContain(chat("chat-b"));
+      expect(vi.getTimerCount()).toBe(1);
 
-    expect(dispatchSpy).toHaveBeenCalledWith(closeTab(chat("chat-b")));
-    expect(store.getState().workspace.tabs).toEqual([
-      chat("chat-a"),
-      chat("chat-c"),
-    ]);
+      fireEvent.transitionEnd(closingTab);
+      vi.advanceTimersByTime(1_000);
+
+      expect(dispatchSpy).toHaveBeenCalledWith(closeTab(chat("chat-b")));
+      expect(dispatchSpy).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(store.getState().workspace.tabs).toEqual([
+        chat("chat-a"),
+        chat("chat-c"),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("closes tabs immediately when reduced motion is enabled", async () => {
+  it("closes a tab exactly once when its transition is cancelled", () => {
+    vi.useFakeTimers();
+    try {
+      const store = createStoreWithChatTabs();
+      const dispatchSpy = vi.spyOn(store, "dispatch");
+      renderTabBar(store);
+
+      fireEvent.click(
+        within(getTabWrap(/Chat Beta/)).getByLabelText("Close Chat Beta"),
+      );
+      const closingTab = getTabWrap(/Chat Beta/);
+
+      fireEvent.transitionCancel(closingTab);
+      vi.advanceTimersByTime(1_000);
+
+      expect(dispatchSpy).toHaveBeenCalledWith(closeTab(chat("chat-b")));
+      expect(dispatchSpy).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(store.getState().workspace.tabs).toEqual([
+        chat("chat-a"),
+        chat("chat-c"),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a tab exactly once when no transition event fires", () => {
+    vi.useFakeTimers();
+    try {
+      const store = createStoreWithChatTabs();
+      const dispatchSpy = vi.spyOn(store, "dispatch");
+      renderTabBar(store);
+
+      fireEvent.click(
+        within(getTabWrap(/Chat Beta/)).getByLabelText("Close Chat Beta"),
+      );
+
+      vi.advanceTimersByTime(249);
+      expect(store.getState().workspace.tabs).toContain(chat("chat-b"));
+
+      vi.advanceTimersByTime(1);
+      vi.advanceTimersByTime(1_000);
+
+      expect(dispatchSpy).toHaveBeenCalledWith(closeTab(chat("chat-b")));
+      expect(dispatchSpy).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(store.getState().workspace.tabs).toEqual([
+        chat("chat-a"),
+        chat("chat-c"),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes tabs immediately without a timer when reduced motion is enabled", () => {
+    vi.useFakeTimers();
     const matchMediaSpy = vi.spyOn(window, "matchMedia").mockImplementation(
       (query: string): MediaQueryList =>
         ({
@@ -253,12 +320,13 @@ describe("TabBar", () => {
 
     try {
       const store = createStoreWithChatTabs();
-      const view = renderTabBar(store);
+      renderTabBar(store);
 
-      await view.user.click(
+      fireEvent.click(
         within(getTabWrap(/Chat Beta/)).getByLabelText("Close Chat Beta"),
       );
 
+      expect(vi.getTimerCount()).toBe(0);
       expect(store.getState().workspace.tabs).toEqual([
         chat("chat-a"),
         chat("chat-c"),
@@ -266,6 +334,53 @@ describe("TabBar", () => {
       expect(screen.queryByRole("tab", { name: /Chat Beta/ })).toBeNull();
     } finally {
       matchMediaSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears a pending close timer when the tab bar unmounts", () => {
+    vi.useFakeTimers();
+    try {
+      const store = createStoreWithChatTabs();
+      const view = renderTabBar(store);
+
+      fireEvent.click(
+        within(getTabWrap(/Chat Beta/)).getByLabelText("Close Chat Beta"),
+      );
+      expect(vi.getTimerCount()).toBe(1);
+
+      view.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(1_000);
+      expect(store.getState().workspace.tabs).toContain(chat("chat-b"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears a pending close timer when the tab disappears externally", () => {
+    vi.useFakeTimers();
+    try {
+      const store = createStoreWithChatTabs();
+      renderTabBar(store);
+
+      fireEvent.click(
+        within(getTabWrap(/Chat Beta/)).getByLabelText("Close Chat Beta"),
+      );
+      expect(vi.getTimerCount()).toBe(1);
+
+      act(() => {
+        store.dispatch(closeTab(chat("chat-b")));
+      });
+
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(1_000);
+      expect(store.getState().workspace.tabs).toEqual([
+        chat("chat-a"),
+        chat("chat-c"),
+      ]);
+    } finally {
+      vi.useRealTimers();
     }
   });
 

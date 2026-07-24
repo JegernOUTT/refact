@@ -5,7 +5,7 @@ import {
   DragEvent,
   MouseEvent,
   PointerEvent,
-  TransitionEvent,
+  TransitionEvent as ReactTransitionEvent,
   WheelEvent,
   useCallback,
   useEffect,
@@ -74,6 +74,7 @@ import { getStatusFromSessionState } from "../../utils/sessionStatus";
 import styles from "./TabBar.module.css";
 
 const BUDDY_SURFACE_KEY = makeSurfaceKey("buddy", "home");
+const TAB_CLOSE_FALLBACK_MS = 250;
 
 type TabSurfaceKind =
   | "chat"
@@ -283,7 +284,10 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
   const [closingTabIds, setClosingTabIds] = useState<Set<SurfaceKey>>(
     () => new Set(),
   );
+  const closingTabIdsRef = useRef(new Set<SurfaceKey>());
+  const closeTimersRef = useRef(new Map<SurfaceKey, number>());
   const tabWrapEls = useRef(new Map<SurfaceKey, HTMLElement>());
+  const tabListEl = useRef<HTMLDivElement | null>(null);
   const gestureCleanupRef = useRef<(() => void) | null>(null);
 
   const tabsById = useMemo(
@@ -433,6 +437,31 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     [currentPage, dispatch, tabs],
   );
 
+  const closeTabByIdRef = useRef(closeTabById);
+  closeTabByIdRef.current = closeTabById;
+
+  const clearCloseTimer = useCallback((tabId: SurfaceKey) => {
+    const timer = closeTimersRef.current.get(tabId);
+    if (timer === undefined) return;
+    window.clearTimeout(timer);
+    closeTimersRef.current.delete(tabId);
+  }, []);
+
+  const finalizeTabClose = useCallback(
+    (tabId: SurfaceKey) => {
+      if (!closingTabIdsRef.current.delete(tabId)) return;
+      clearCloseTimer(tabId);
+      setClosingTabIds((current) => {
+        if (!current.has(tabId)) return current;
+        const next = new Set(current);
+        next.delete(tabId);
+        return next;
+      });
+      closeTabByIdRef.current(tabId);
+    },
+    [clearCloseTimer],
+  );
+
   const handleCloseTab = useCallback(
     (event: MouseEvent<HTMLButtonElement>, tabId: SurfaceKey) => {
       event.preventDefault();
@@ -441,35 +470,80 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
         closeTabById(tabId);
         return;
       }
+      if (closingTabIdsRef.current.has(tabId)) return;
+      closingTabIdsRef.current.add(tabId);
       setClosingTabIds((current) => {
-        if (current.has(tabId)) return current;
         const next = new Set(current);
         next.add(tabId);
         return next;
       });
+      const timer = window.setTimeout(
+        () => finalizeTabClose(tabId),
+        TAB_CLOSE_FALLBACK_MS,
+      );
+      closeTimersRef.current.set(tabId, timer);
     },
-    [closeTabById, reducedMotion],
+    [closeTabById, finalizeTabClose, reducedMotion],
   );
 
   const handleTabCloseTransitionEnd = useCallback(
-    (event: TransitionEvent<HTMLDivElement>, tabId: SurfaceKey) => {
+    (event: ReactTransitionEvent<HTMLDivElement>, tabId: SurfaceKey) => {
       if (event.target !== event.currentTarget) return;
-      if (!closingTabIds.has(tabId)) return;
-      closeTabById(tabId);
-      setClosingTabIds((current) => {
-        const next = new Set(current);
-        next.delete(tabId);
-        return next;
-      });
+      finalizeTabClose(tabId);
     },
-    [closeTabById, closingTabIds],
+    [finalizeTabClose],
   );
 
   useEffect(() => {
-    if (!reducedMotion || closingTabIds.size === 0) return;
-    for (const tabId of closingTabIds) closeTabById(tabId);
-    setClosingTabIds(new Set());
-  }, [closeTabById, closingTabIds, reducedMotion]);
+    if (!reducedMotion) return;
+    for (const tabId of Array.from(closingTabIdsRef.current)) {
+      finalizeTabClose(tabId);
+    }
+  }, [finalizeTabClose, reducedMotion]);
+
+  useEffect(() => {
+    const tabList = tabListEl.current;
+    if (!tabList) return;
+    const handleTransitionCancel = (event: globalThis.TransitionEvent) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const tabId = target.dataset.surfaceKey;
+      if (!tabId) return;
+      finalizeTabClose(tabId);
+    };
+    tabList.addEventListener("transitioncancel", handleTransitionCancel);
+    return () => {
+      tabList.removeEventListener("transitioncancel", handleTransitionCancel);
+    };
+  }, [finalizeTabClose]);
+
+  useEffect(() => {
+    const visibleKeys = new Set(visibleTabKeys);
+    const removedIds = Array.from(closingTabIdsRef.current).filter(
+      (tabId) => !visibleKeys.has(tabId),
+    );
+    if (removedIds.length === 0) return;
+    for (const tabId of removedIds) {
+      closingTabIdsRef.current.delete(tabId);
+      clearCloseTimer(tabId);
+    }
+    setClosingTabIds((current) => {
+      const next = new Set(current);
+      for (const tabId of removedIds) next.delete(tabId);
+      return next;
+    });
+  }, [clearCloseTimer, visibleTabKeys]);
+
+  useEffect(
+    () => () => {
+      for (const timer of closeTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      closeTimersRef.current.clear();
+      closingTabIdsRef.current.clear();
+    },
+    [],
+  );
 
   const stopClosePointerEvent = useCallback(
     (
@@ -703,6 +777,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
         onDrop={handleBarDrop}
       >
         <div
+          ref={tabListEl}
           className={classNames(styles.tabList, "rf-stagger")}
           role="tablist"
           aria-label="Open workspace tabs"
@@ -721,6 +796,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
             return (
               <div
                 key={tab.id}
+                data-surface-key={tab.id}
                 ref={(node) => {
                   if (node) tabWrapEls.current.set(tab.id, node);
                   else tabWrapEls.current.delete(tab.id);
