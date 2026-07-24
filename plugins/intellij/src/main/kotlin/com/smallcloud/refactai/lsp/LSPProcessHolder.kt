@@ -144,6 +144,11 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         return browserUrl(base, host, attachedProject?.daemon?.authToken)
     }
 
+    open fun embeddedBrowserUrlOrNull(): URI? {
+        val base = baseUrlOrNull() ?: return null
+        return browserUrl(base, base.host ?: "127.0.0.1", attachedProject?.daemon?.authToken)
+    }
+
     private fun browserUrl(base: URI, host: String, authToken: String?): URI {
         val scheme = base.scheme?.takeIf { it.isNotBlank() } ?: "http"
         val path = base.rawPath?.takeIf { it.isNotEmpty() } ?: "/"

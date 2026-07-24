@@ -434,13 +434,21 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         val fake = FakeDaemonClient().apply {
             port = 9999
             projectId = "abc123"
+            authToken = "embedded token"
         }
         val holder = TestLspProcessHolder(mockProject(root), fake)
         LSPProcessHolder.BIN_PATH = "/tmp/refact"
         try {
             runOffEdt { holder.ensureStartedBlockingForTest("browser-url-override") }
 
-            assertEquals(URI("http://machine.local:9999/p/abc123/"), holder.browserUrlOrNull())
+            assertEquals(
+                URI("http://machine.local:9999/p/abc123/?daemon_token=embedded%20token"),
+                holder.browserUrlOrNull()
+            )
+            assertEquals(
+                URI("http://127.0.0.1:9999/p/abc123/?daemon_token=embedded%20token"),
+                holder.embeddedBrowserUrlOrNull()
+            )
         } finally {
             holder.dispose()
         }

@@ -70,6 +70,19 @@ import javax.swing.JPanel
 
 private val REFACT_DIFF_ID_KEY: Key<String> = Key.create("refact.diff.requestId")
 
+internal fun onChatReadySync(
+    config: Events.Config.Update,
+    sendConfig: (Events.Config.Update) -> Unit,
+    flushSelection: () -> Unit,
+    sendProjectInfo: () -> Unit,
+    flushQueue: () -> Unit,
+) {
+    sendConfig(config)
+    flushSelection()
+    sendProjectInfo()
+    flushQueue()
+}
+
 class SharedChatPane(val project: Project) : JPanel(), Disposable {
     private val paneScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val logger = Logger.getInstance(SharedChatPane::class.java)
@@ -208,10 +221,8 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
     private fun onPanelBecameVisible() {
         if (browserLazy.isInitialized()) {
             browser.refreshAfterVisibilityChange()
-            selectionDebouncer.flush()
-            configDebouncer.flush()
-            sendCurrentProjectInfo()
-            messageQueue.flushNow()
+            syncCurrentUserConfig()
+            maybeNavigateToDaemonGui()
 
             paneScope.launch {
                 delay(32)
@@ -254,9 +265,21 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
     }
 
     private fun doSendUserConfig() {
-        val config = this.editor.getUserConfig()
-        val message = Events.Config.Update(config)
-        this.postMessage(message)
+        this.postMessage(currentUserConfigMessage())
+    }
+
+    private fun currentUserConfigMessage(): Events.Config.Update {
+        return Events.Config.Update(this.editor.getUserConfig())
+    }
+
+    private fun syncCurrentUserConfig() {
+        onChatReadySync(
+            config = currentUserConfigMessage(),
+            sendConfig = { postMessage(it) },
+            flushSelection = { selectionDebouncer.flush() },
+            sendProjectInfo = { sendCurrentProjectInfo() },
+            flushQueue = { messageQueue.flushNow() },
+        )
     }
 
     private fun sendCurrentProjectInfo() {
@@ -304,6 +327,21 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
             return
         }
         BrowserUtil.browse(url)
+    }
+
+    private fun daemonGuiUrlOrNull(): String? {
+        return runCatching {
+            project.service<com.smallcloud.refactai.lsp.LSPProcessHolder>().embeddedBrowserUrlOrNull()?.toString()
+        }.getOrNull()
+    }
+
+    private fun maybeNavigateToDaemonGui() {
+        if (project.isDisposed) return
+        if (!browserLazy.isInitialized()) return
+        val url = daemonGuiUrlOrNull() ?: return
+        if (browser.loadDaemonGuiUrl(url)) {
+            logger.info("Requested chat webview navigation to daemon project GUI")
+        }
     }
 
     private fun handleOpenChatInBrowser() {
@@ -404,10 +442,16 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
                 override fun lspIsActive(isActive: Boolean) {
                     this@SharedChatPane.sendUserConfig()
                     this@SharedChatPane.sendCurrentProjectInfo()
+                    if (isActive) {
+                        this@SharedChatPane.maybeNavigateToDaemonGui()
+                    }
                 }
 
                 override fun backendConnectionStatusChanged(newStatus: LSPBackendConnectionStatus) {
                     this@SharedChatPane.sendUserConfig()
+                    if (newStatus == LSPBackendConnectionStatus.READY) {
+                        this@SharedChatPane.maybeNavigateToDaemonGui()
+                    }
                 }
             })
 
@@ -1106,10 +1150,7 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
             is Events.IsChatReady -> {
                 if (event.isReady && browserLazy.isInitialized()) {
                     browser.notifyReactReadyFromApp()
-                    configDebouncer.flush()
-                    selectionDebouncer.flush()
-                    sendCurrentProjectInfo()
-                    messageQueue.flushNow()
+                    syncCurrentUserConfig()
                 }
             }
 
@@ -1152,9 +1193,11 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
     }
 
     private val browserLazy = lazy {
-        ChatWebView(this.editor) { event ->
+        val webView = ChatWebView(this.editor) { event ->
             paneScope.launch { handleEvent(event) }
         }
+        daemonGuiUrlOrNull()?.let { webView.loadDaemonGuiUrl(it) }
+        webView
     }
     private val browser by browserLazy
 

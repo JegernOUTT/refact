@@ -36,6 +36,7 @@ import org.cef.CefSettings
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
 import org.cef.handler.*
+import org.cef.network.CefRequest
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
 import java.util.*
@@ -51,6 +52,57 @@ fun getActionKeybinding(actionId: String): String {
     val keymapManager = KeymapManager.getInstance()
     val shortcuts = keymapManager.activeKeymap.getShortcuts(actionId)
     return if (shortcuts.isNotEmpty()) KeymapUtil.getShortcutText(shortcuts[0]) else ""
+}
+
+internal const val REFACT_BOOTSTRAP_URL = "http://refactai/index.html"
+
+internal enum class ChatStartupMode {
+    BOOTSTRAP,
+    DAEMON_GUI,
+}
+
+internal fun canonicalizeDaemonGuiUrl(rawUrl: String?): String? {
+    if (rawUrl.isNullOrBlank()) return null
+    val uri = runCatching { java.net.URI(rawUrl.trim()) }.getOrNull() ?: return null
+    if (uri.rawUserInfo != null || uri.rawFragment != null) return null
+
+    val scheme = uri.scheme?.lowercase() ?: return null
+    if (scheme != "http" && scheme != "https") return null
+
+    val host = uri.host?.lowercase() ?: return null
+    val isLoopbackHost = host == "127.0.0.1" || host == "localhost" || host == "[::1]" || host == "::1"
+    if (!isLoopbackHost) return null
+
+    val port = uri.port
+    if (port <= 0) return null
+
+    val path = uri.rawPath ?: return null
+    val segments = path.split("/").filter { it.isNotEmpty() }
+    if (segments.size != 2 || segments[0] != "p" || segments[1].isEmpty()) return null
+
+    val normalizedPath = if (path.endsWith("/")) path else "$path/"
+    val query = uri.rawQuery?.takeIf { it.isNotEmpty() }
+    val canonicalHost = if (host == "::1" || host == "[::1]") "[::1]" else host
+
+    val base = "$scheme://$canonicalHost:$port$normalizedPath"
+    return if (query != null) "$base?$query" else base
+}
+
+internal fun isDaemonGuiUrl(rawUrl: String?): Boolean = canonicalizeDaemonGuiUrl(rawUrl) != null
+
+internal fun selectChatStartupMode(daemonGuiUrl: String?): ChatStartupMode {
+    return if (canonicalizeDaemonGuiUrl(daemonGuiUrl) != null) ChatStartupMode.DAEMON_GUI else ChatStartupMode.BOOTSTRAP
+}
+
+internal fun shouldNavigateToDaemonGui(currentUrl: String?, targetDaemonGuiUrl: String?): Boolean {
+    val canonicalTarget = canonicalizeDaemonGuiUrl(targetDaemonGuiUrl) ?: return false
+    val canonicalCurrent = canonicalizeDaemonGuiUrl(currentUrl)
+    return daemonGuiIdentity(canonicalCurrent) != daemonGuiIdentity(canonicalTarget)
+}
+
+private fun daemonGuiIdentity(canonicalUrl: String?): String? {
+    val uri = canonicalUrl?.let { runCatching { java.net.URI(it) }.getOrNull() } ?: return null
+    return java.net.URI(uri.scheme, null, uri.host, uri.port, uri.path, null, null).toString()
 }
 
 internal const val JCEF_UNRESPONSIVE_PONG_TIMEOUT_MS = 20_000L
@@ -217,6 +269,9 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
     private val useOffscreenRendering: Boolean = determineRenderingMode()
     private lateinit var postMessageTemplate: JavaScriptTemplate
     private val syntheticResizeInFlight = AtomicBoolean(false)
+    private val currentLoadedUrl = AtomicReference<String>(REFACT_BOOTSTRAP_URL)
+    private val pendingDaemonGuiUrl = AtomicReference<String?>(null)
+    private val daemonGuiMode = AtomicBoolean(false)
 
     private fun dispatchCefVisibilitySignals() {
         if (!::cefBrowser.isInitialized || !::component.isInitialized) return
@@ -351,7 +406,7 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
             setupLoadHandler()
             registerSchemeHandlerOnce()
             jbcefBrowser.createImmediately()
-            jbcefBrowser.loadURL("http://refactai/index.html")
+            jbcefBrowser.loadURL(REFACT_BOOTSTRAP_URL)
 
             logger.info("ChatWebView initialization completed successfully")
 
@@ -429,6 +484,16 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
         }
 
         jbcefBrowser.jbCefClient.addDisplayHandler(object : CefDisplayHandlerAdapter() {
+            override fun onAddressChange(browser: CefBrowser?, frame: CefFrame?, url: String?) {
+                if (frame != null && !frame.isMain) return
+                val loadedUrl = url ?: return
+                currentLoadedUrl.set(loadedUrl)
+                daemonGuiMode.set(isDaemonGuiUrl(loadedUrl))
+                if (daemonGuiMode.get()) {
+                    pendingDaemonGuiUrl.set(null)
+                }
+            }
+
             override fun onConsoleMessage(
                 browser: CefBrowser?,
                 level: CefSettings.LogSeverity?,
@@ -704,8 +769,101 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
         }
     }
 
+    private fun buildBridgeScript(): String {
+        return """
+            if (!window.__REFACT_MESSAGE_LISTENER__) {
+                window.__REFACT_MESSAGE_LISTENER__ = true;
+                const forwardToIntellij = function(message) {
+                    try {
+                        let messageData = typeof message === 'string'
+                            ? message
+                            : JSON.stringify(message);
+                        ${mainQuery.inject("messageData")};
+                    } catch (e) {
+                        console.error('Error posting message:', e);
+                    }
+                };
+                window.postIntellijMessage = forwardToIntellij;
+                window.ideMessageHandler = function(message) {
+                    ${mainQuery.inject("message")};
+                };
+                window.ideLinkHandler = function(href) {
+                    ${linkQuery.inject("href")};
+                };
+                window.addEventListener('message', function(event) {
+                    const message = event.data;
+                    if (event.source === window && message && typeof message === 'object' && typeof message.type === 'string') {
+                        forwardToIntellij(message);
+                    }
+                });
+            }
+        """.trimIndent()
+    }
+
+    private fun buildDaemonReadyProbeScript(): String {
+        return """
+            if (!window.__REFACT_DAEMON_READY_PROBE__) {
+                window.__REFACT_DAEMON_READY_PROBE__ = true;
+                const signalReady = function() {
+                    try { ${readyQuery.inject("'ready'")} } catch (e) { console.error('Ready signal failed', e); }
+                };
+                const waitForReactRoot = function() {
+                    const root = document.getElementById('refact-chat');
+                    if (root && root.childElementCount > 0) {
+                        window.setTimeout(signalReady, 100);
+                        return;
+                    }
+                    window.requestAnimationFrame(waitForReactRoot);
+                };
+                waitForReactRoot();
+            }
+        """.trimIndent()
+    }
+
+    private fun injectBridgeEarly(frame: CefFrame?) {
+        if (disposing.get()) return
+        if (frame != null && !frame.isMain) return
+        try {
+            val script = buildBridgeScript()
+            (frame ?: cefBrowser.mainFrame)?.executeJavaScript(script, "refact://bridge", 0)
+        } catch (e: Exception) {
+            logger.warn("Failed to inject IDE bridge early", e)
+        }
+    }
+
+    private fun setupDaemonGuiReady() {
+        if (disposing.get()) return
+        if (!initializationState.compareAndSet(1, 2)) return
+        try {
+            jsExecutor.executeBatch(
+                listOf(buildBridgeScript(), buildDaemonReadyProbeScript()),
+                "daemon-gui-setup"
+            )
+        } catch (e: Exception) {
+            logger.warn("Failed to set up IDE bridge for daemon GUI", e)
+        }
+        setupTimeoutTimer?.stop()
+        setupTimeoutTimer = Timer(15_000, null).apply {
+            isRepeats = false
+            addActionListener {
+                if (!disposing.get() && initializationState.get() == 2) {
+                    resetReactSetup("Daemon GUI did not signal ready; reloading with the IDE bridge")
+                }
+            }
+            start()
+        }
+    }
+
     private fun setupLoadHandler() {
         jbcefBrowser.jbCefClient.addLoadHandler(object : CefLoadHandlerAdapter() {
+            override fun onLoadStart(
+                browser: CefBrowser?,
+                frame: CefFrame?,
+                transitionType: CefRequest.TransitionType?
+            ) {
+                injectBridgeEarly(frame)
+            }
+
             override fun onLoadingStateChange(
                 browser: CefBrowser,
                 isLoading: Boolean,
@@ -727,14 +885,13 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
                 logger.info("Page loading completed, current state: ${initializationState.get()}")
 
                 if (initializationState.compareAndSet(0, 1)) {
-                    logger.info("Page loaded, scheduling React setup")
+                    logger.info("Page loaded, scheduling startup")
                     setupDelayTimer?.stop()
                     setupDelayTimer = Timer(100, null).apply {
                         isRepeats = false
                         addActionListener {
                             if (initializationState.get() == 1) {
-                                logger.info("Setting up React application")
-                                setupReactApplication()
+                                runStartupForCurrentMode()
                             }
                         }
                         start()
@@ -749,7 +906,7 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
             override fun onLoadEnd(browser: CefBrowser?, frame: CefFrame?, httpStatusCode: Int) {
                 logger.info("Load end event - HTTP status: $httpStatusCode, state: ${initializationState.get()}")
                 if (!disposing.get() && initializationState.get() == 1) {
-                    setupReactApplication()
+                    runStartupForCurrentMode()
                 }
             }
 
@@ -772,6 +929,12 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
 
                 logger.error("JCEF load error: code=$errorCode, text=$errorText, url=$failedUrl")
 
+                if (isDaemonGuiUrl(failedUrl)) {
+                    pendingDaemonGuiUrl.set(null)
+                    daemonGuiMode.set(false)
+                    currentLoadedUrl.set(REFACT_BOOTSTRAP_URL)
+                }
+
                 val errorMsg = "Browser load failed: $errorText (code: $errorCode, url: $failedUrl)"
                 lastInitError.set(errorMsg)
                 browserHealthy.set(false)
@@ -791,6 +954,17 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
                 }
             }
         }, cefBrowser)
+    }
+
+    private fun runStartupForCurrentMode() {
+        if (disposing.get()) return
+        if (daemonGuiMode.get()) {
+            logger.info("Setting up daemon project GUI (self-rendering)")
+            setupDaemonGuiReady()
+        } else {
+            logger.info("Setting up React application")
+            setupReactApplication()
+        }
     }
 
     private fun setupReactApplication() {
@@ -946,6 +1120,34 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
 
     fun isReady(): Boolean = initializationState.get() >= 3 && !jbcefBrowser.isDisposed
 
+    fun currentUrlForTest(): String = currentLoadedUrl.get()
+
+    fun isDaemonGuiMode(): Boolean = daemonGuiMode.get()
+
+    fun loadDaemonGuiUrl(rawUrl: String?): Boolean {
+        if (disposing.get()) return false
+        val canonical = canonicalizeDaemonGuiUrl(rawUrl) ?: return false
+        if (!shouldNavigateToDaemonGui(currentLoadedUrl.get(), canonical)) return false
+        if (!pendingDaemonGuiUrl.compareAndSet(null, canonical)) return false
+
+        initializationState.set(0)
+
+        ApplicationManager.getApplication().invokeLater {
+            if (disposing.get() || jbcefBrowser.isDisposed) {
+                pendingDaemonGuiUrl.compareAndSet(canonical, null)
+                return@invokeLater
+            }
+            logger.info("Navigating chat webview to daemon project GUI")
+            try {
+                jbcefBrowser.loadURL(canonical)
+            } catch (e: Exception) {
+                pendingDaemonGuiUrl.compareAndSet(canonical, null)
+                logger.warn("Failed to navigate chat webview to daemon project GUI", e)
+            }
+        }
+        return true
+    }
+
     val webView: JBCefBrowser
         get() = jbcefBrowser
 
@@ -984,13 +1186,24 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
         setupTimeoutTimer?.stop()
         setupTimeoutTimer = null
         browserHealthy.set(false)
+        if (daemonGuiMode.get()) {
+            initializationState.set(0)
+            setupDelayTimer?.stop()
+            setupDelayTimer = null
+            ApplicationManager.getApplication().invokeLater {
+                if (!disposing.get() && !jbcefBrowser.isDisposed) {
+                    jbcefBrowser.cefBrowser.reload()
+                }
+            }
+            return
+        }
         initializationState.set(1)
         setupDelayTimer?.stop()
         setupDelayTimer = Timer(1_000, null).apply {
             isRepeats = false
             addActionListener {
                 if (!disposing.get() && initializationState.get() == 1) {
-                    setupReactApplication()
+                    runStartupForCurrentMode()
                 }
             }
             start()
