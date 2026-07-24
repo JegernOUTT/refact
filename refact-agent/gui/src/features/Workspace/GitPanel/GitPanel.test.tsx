@@ -12,6 +12,9 @@ import type { WorktreeRecordView } from "../../../services/refact/worktrees";
 import { GitDock } from "./GitDock";
 import { GitPanel } from "./GitPanel";
 import { setActiveGitRoot } from "./gitPanelSlice";
+import { createChatWithId } from "../../Chat/Thread/actions";
+import { openTab, setActiveTab } from "../workspaceSlice";
+import type { WorktreeMeta } from "../../../services/refact/worktrees";
 
 const APP_CHANGE: GitFileChange = {
   relative_path: "src/app.ts",
@@ -72,6 +75,17 @@ function worktreeRecord(): WorktreeRecordView {
   };
 }
 
+function chatWorktree(id: string): WorktreeMeta {
+  return {
+    id,
+    kind: "chat",
+    root: `/worktrees/${id}`,
+    source_workspace_root: "/repo",
+    repo_root: "/repo",
+    enforce: false,
+  };
+}
+
 function renderPanel(workspaceRoots = ["/repo"]) {
   return render(
     <>
@@ -97,7 +111,7 @@ function renderPanel(workspaceRoots = ["/repo"]) {
 
 function installHandlers(options?: {
   status?: () => GitStatusRoot[];
-  statusCalls?: string[];
+  statusCalls?: (string | null)[];
   diffCalls?: URLSearchParams[];
   commitBodies?: unknown[];
   worktreeCalls?: URLSearchParams[];
@@ -106,8 +120,10 @@ function installHandlers(options?: {
 }) {
   const record = worktreeRecord();
   server.use(
-    http.get("*/v1/git/status", () => {
-      options?.statusCalls?.push("status");
+    http.get("*/v1/git/status", ({ request }) => {
+      options?.statusCalls?.push(
+        new URL(request.url).searchParams.get("root"),
+      );
       return HttpResponse.json({
         roots: options?.status?.() ?? [statusRoot("/repo", [], [APP_CHANGE])],
       });
@@ -230,7 +246,7 @@ beforeEach(() => {
 describe("GitPanel", () => {
   test("renders status and invalidates it after stage and unstage", async () => {
     let staged = false;
-    const statusCalls: string[] = [];
+    const statusCalls: (string | null)[] = [];
     installHandlers({
       statusCalls,
       status: () => [
@@ -302,9 +318,38 @@ describe("GitPanel", () => {
     });
   });
 
+  test("refetches status for the focused chat worktree", async () => {
+    const statusCalls: (string | null)[] = [];
+    installHandlers({
+      statusCalls,
+      status: () => [statusRoot("/repo", [], [APP_CHANGE])],
+    });
+    const { store } = renderPanel();
+    store.dispatch(
+      createChatWithId({ id: "chat-a", worktree: chatWorktree("a") }),
+    );
+    store.dispatch(
+      createChatWithId({ id: "chat-b", worktree: chatWorktree("b") }),
+    );
+
+    store.dispatch(openTab("chat:chat-a"));
+    await waitFor(() => expect(statusCalls).toContain("/worktrees/a"));
+
+    store.dispatch(openTab("chat:chat-b"));
+    store.dispatch(setActiveTab("chat:chat-b"));
+    await waitFor(() => expect(statusCalls).toContain("/worktrees/b"));
+
+    expect(statusCalls.filter((root) => root === "/worktrees/a")).toHaveLength(
+      1,
+    );
+    expect(statusCalls.filter((root) => root === "/worktrees/b")).toHaveLength(
+      1,
+    );
+  });
+
   test("commits only the active root staged files and refreshes status", async () => {
     const commitBodies: unknown[] = [];
-    const statusCalls: string[] = [];
+    const statusCalls: (string | null)[] = [];
     installHandlers({
       commitBodies,
       statusCalls,

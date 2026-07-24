@@ -147,15 +147,18 @@ export const gitReadApi = createApi({
   tagTypes: ["GitStatus", "GitDiff", "GitLog", "GitBranches"],
   endpoints: (builder) => ({
     getGitStatus: builder.query<GitRootsResponse<GitStatusRoot>, string[]>({
-      queryFn: async (_arg, api, _options, baseQuery) => {
+      queryFn: async (roots, api, _options, baseQuery) => {
         const state = api.getState() as RootState;
-        const result = await baseQuery({ url: gitUrl(state, "/git/status") });
+        const query =
+          roots.length === 1
+            ? new URLSearchParams({ root: roots[0] })
+            : undefined;
+        const result = await baseQuery({
+          url: gitUrl(state, "/git/status", query),
+        });
         if (result.error) return { error: result.error };
         return { data: result.data as GitRootsResponse<GitStatusRoot> };
       },
-      serializeQueryArgs: ({ endpointName }) => endpointName,
-      forceRefetch: ({ currentArg, previousArg }) =>
-        currentArg?.join("\n") !== previousArg?.join("\n"),
       providesTags: (result) => [
         { type: "GitStatus", id: "LIST" },
         ...(result?.roots.map((root) => rootTag(root.root)) ?? []),

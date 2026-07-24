@@ -31,12 +31,15 @@ import {
 import {
   collapseDirectory,
   expandDirectory,
+  isPathWithinWorkspaceRoots,
+  resetFileTree,
   selectExpandedDirectories,
   selectFilesPanelSelectedPath,
   selectTreePath,
   openFileInFilesPanel,
   toggleDirectory,
 } from "./filesPanelSlice";
+import { selectFocusedChatWorkspaceRoot } from "../workspaceSlice";
 import {
   flattenVisibleTree,
   parentDirectoryPath,
@@ -140,15 +143,36 @@ export function FileTree() {
   const treeRef = useRef<HTMLDivElement>(null);
   const expandedDirectories = useAppSelector(selectExpandedDirectories);
   const selectedPath = useAppSelector(selectFilesPanelSelectedPath);
+  const contextRoot = useAppSelector(selectFocusedChatWorkspaceRoot);
+  const [loadedContextRoot, setLoadedContextRoot] = useState(contextRoot);
   const [childrenByPath, setChildrenByPath] = useState<TreeChildrenByPath>({});
-  const { data: root, error, isFetching, refetch } = useGetFilesTreeQuery("");
+  const { data: root, error, isFetching, refetch } =
+    useGetFilesTreeQuery(contextRoot);
+  const contextExpandedDirectories = useMemo(
+    () =>
+      contextRoot
+        ? expandedDirectories.filter((path) =>
+            isPathWithinWorkspaceRoots(path, [contextRoot]),
+          )
+        : expandedDirectories,
+    [contextRoot, expandedDirectories],
+  );
   const expandedSet = useMemo(
-    () => new Set(expandedDirectories),
-    [expandedDirectories],
+    () => new Set(contextExpandedDirectories),
+    [contextExpandedDirectories],
   );
   const visibleEntries = useMemo(
-    () => flattenVisibleTree(root?.entries ?? [], expandedSet, childrenByPath),
-    [childrenByPath, expandedSet, root?.entries],
+    () =>
+      loadedContextRoot === contextRoot
+        ? flattenVisibleTree(root?.entries ?? [], expandedSet, childrenByPath)
+        : [],
+    [
+      childrenByPath,
+      contextRoot,
+      expandedSet,
+      loadedContextRoot,
+      root?.entries,
+    ],
   );
 
   const handleDirectoryLoaded = useCallback(
@@ -159,6 +183,13 @@ export function FileTree() {
     },
     [],
   );
+
+  useEffect(() => {
+    if (loadedContextRoot === contextRoot) return;
+    setChildrenByPath({});
+    dispatch(resetFileTree());
+    setLoadedContextRoot(contextRoot);
+  }, [contextRoot, dispatch, loadedContextRoot]);
 
   const activateEntry = useCallback(
     (entry: VisibleTreeEntry) => {
@@ -263,7 +294,7 @@ export function FileTree() {
       role="tree"
       tabIndex={0}
     >
-      {expandedDirectories.map((path) => (
+      {contextExpandedDirectories.map((path) => (
         <DirectoryLoader
           key={path}
           path={path}

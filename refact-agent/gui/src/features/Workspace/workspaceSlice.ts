@@ -1,4 +1,4 @@
-import { createSlice, PayloadAction } from "@reduxjs/toolkit";
+import { createSelector, createSlice, PayloadAction } from "@reduxjs/toolkit";
 import {
   closeLeaf,
   collectLeafIds,
@@ -1346,6 +1346,28 @@ type WorkspaceRootState = {
   workspace: WorkspaceState;
 };
 
+type FocusedChatWorkspaceRootState = WorkspaceRootState & {
+  chat: {
+    threads: Record<
+      string,
+      | {
+          thread: {
+            worktree?: {
+              root: string;
+              source_workspace_root: string;
+            } | null;
+          };
+        }
+      | undefined
+    >;
+  };
+  current_project: {
+    workspaceRoots?: string[];
+  };
+};
+
+const EMPTY_WORKSPACE_ROOTS: string[] = [];
+
 export const selectTabs = (state: WorkspaceRootState) => state.workspace.tabs;
 
 export const selectPanelsForced = (state: WorkspaceRootState) =>
@@ -1413,5 +1435,42 @@ export const selectFocusedWorkspaceChatId = (
     ? surfaceKey.slice("chat:".length)
     : null;
 };
+
+export const selectFocusedChatWorktreeRoot = (
+  state: FocusedChatWorkspaceRootState,
+): string | null => {
+  const chatId = selectFocusedWorkspaceChatId(state);
+  return chatId
+    ? (state.chat.threads[chatId]?.thread.worktree?.root ?? null)
+    : null;
+};
+
+export const selectFocusedChatWorktreeSourceRoot = (
+  state: FocusedChatWorkspaceRootState,
+): string | null => {
+  const chatId = selectFocusedWorkspaceChatId(state);
+  return chatId
+    ? (state.chat.threads[chatId]?.thread.worktree?.source_workspace_root ??
+        null)
+    : null;
+};
+
+const selectConfiguredWorkspaceRoots = (
+  state: FocusedChatWorkspaceRootState,
+): string[] => state.current_project.workspaceRoots ?? EMPTY_WORKSPACE_ROOTS;
+
+export const selectFocusedChatWorkspaceRoot = createSelector(
+  [selectFocusedChatWorktreeRoot, selectConfiguredWorkspaceRoots],
+  (worktreeRoot, workspaceRoots): string => {
+    if (worktreeRoot) return worktreeRoot;
+    return workspaceRoots.length > 0 ? workspaceRoots[0] : "";
+  },
+);
+
+export const selectFocusedChatWorkspaceRoots = createSelector(
+  [selectFocusedChatWorktreeRoot, selectConfiguredWorkspaceRoots],
+  (worktreeRoot, workspaceRoots): string[] =>
+    worktreeRoot ? [worktreeRoot] : workspaceRoots,
+);
 
 export default workspaceSlice.reducer;

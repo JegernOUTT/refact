@@ -20,9 +20,8 @@ import {
   setActiveGitRoot,
 } from "./gitPanelSlice";
 import { StatusList } from "./StatusList";
+import { selectFocusedChatWorkspaceRoots } from "../workspaceSlice";
 import styles from "./GitPanel.module.css";
-
-const EMPTY_ROOTS: string[] = [];
 
 function rootLabel(root: string): string {
   const normalized = root.replace(/[/\\]+$/, "");
@@ -41,12 +40,10 @@ function first<T>(values: T[]): T | undefined {
 
 export function GitDock() {
   const dispatch = useAppDispatch();
-  const configuredRoots = useAppSelector(
-    (state) => state.current_project.workspaceRoots ?? EMPTY_ROOTS,
-  );
+  const contextRoots = useAppSelector(selectFocusedChatWorkspaceRoots);
   const activeRoot = useAppSelector(selectActiveGitRoot);
   const selected = useAppSelector(selectSelectedGitFile);
-  const statusQuery = useGetGitStatusQuery(configuredRoots);
+  const statusQuery = useGetGitStatusQuery(contextRoots);
   const [stage] = useStageGitPathsMutation();
   const [unstage] = useUnstageGitPathsMutation();
   const [pendingPath, setPendingPath] = useState<string | null>(null);

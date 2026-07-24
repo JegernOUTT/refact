@@ -13,10 +13,22 @@ import { setProjectStorageNamespace } from "../../../utils/chatUiPersistence";
 import { FilesPanel } from "./FilesPanel";
 import { FileViewer } from "./FileViewer";
 import { openFileInFilesPanel } from "./filesPanelSlice";
+import { createChatWithId } from "../../Chat/Thread/actions";
+import { openTab, setActiveTab } from "../workspaceSlice";
+import type { WorktreeMeta } from "../../../services/refact/worktrees";
 
 const rootPath = "/workspace";
 const sourcePath = `${rootPath}/src`;
 const filePath = `${sourcePath}/main.ts`;
+
+const worktree = (id: string): WorktreeMeta => ({
+  id,
+  kind: "chat",
+  root: `/worktrees/${id}`,
+  source_workspace_root: rootPath,
+  repo_root: rootPath,
+  enforce: false,
+});
 
 const treeResponse = (path: string, entries: unknown[]) => ({
   path,
@@ -154,6 +166,43 @@ describe("FilesPanel", () => {
     expect(sourceRequests).toBe(1);
   });
 
+  it("roots and re-roots the tree with the focused chat worktree", async () => {
+    const requestedPaths: string[] = [];
+    server.use(
+      http.get("*/v1/files/tree", ({ request }) => {
+        const path = new URL(request.url).searchParams.get("path") ?? "";
+        requestedPaths.push(path);
+        const name = path.split("/").pop() ?? path;
+        return HttpResponse.json(
+          treeResponse(path, [{ name, path, kind: "dir", size: null }]),
+        );
+      }),
+    );
+
+    const view = render(<FilesPanel />, {
+      preloadedState: {
+        current_project: { name: "workspace", workspaceRoots: [rootPath] },
+      },
+    });
+    view.store.dispatch(
+      createChatWithId({ id: "chat-a", worktree: worktree("a") }),
+    );
+    view.store.dispatch(
+      createChatWithId({ id: "chat-b", worktree: worktree("b") }),
+    );
+    view.store.dispatch(openTab("chat:chat-a"));
+
+    expect(await screen.findByRole("treeitem", { name: "a" })).toBeVisible();
+    await waitFor(() => expect(requestedPaths).toContain("/worktrees/a"));
+
+    view.store.dispatch(openTab("chat:chat-b"));
+    view.store.dispatch(setActiveTab("chat:chat-b"));
+
+    expect(await screen.findByRole("treeitem", { name: "b" })).toBeVisible();
+    await waitFor(() => expect(requestedPaths).toContain("/worktrees/b"));
+    expect(screen.queryByRole("treeitem", { name: "a" })).toBeNull();
+  });
+
   it("renders file content and highlights the requested line", async () => {
     server.use(
       rootHandler(),
@@ -230,6 +279,33 @@ describe("FilesPanel", () => {
     expect(breadcrumbs).not.toHaveTextContent("home");
     expect(breadcrumbs).not.toHaveTextContent("user");
     expect(within(breadcrumbs).getAllByRole("button")).toHaveLength(2);
+  });
+
+  it("keeps file breadcrumbs relative to the focused chat worktree", async () => {
+    const worktreeRoot = "/worktrees/a";
+    const worktreeFile = `${worktreeRoot}/src/main.ts`;
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(readResponse({ path: worktreeFile })),
+      ),
+    );
+    const view = render(<FileViewer path={worktreeFile} />, {
+      preloadedState: {
+        current_project: { name: "workspace", workspaceRoots: [rootPath] },
+      },
+    });
+    view.store.dispatch(
+      createChatWithId({ id: "chat-a", worktree: worktree("a") }),
+    );
+    view.store.dispatch(openTab("chat:chat-a"));
+
+    const breadcrumbs = await screen.findByRole("navigation", {
+      name: "File path",
+    });
+    await waitFor(() =>
+      expect(breadcrumbs).toHaveTextContent("a/src/main.ts"),
+    );
+    expect(breadcrumbs).not.toHaveTextContent("worktrees");
   });
 
   it("shows an honest privacy-blocked state", async () => {

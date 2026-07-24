@@ -1,7 +1,12 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
 import { makeSurfaceKey } from "../surfaceKey";
-import { openTab, setDockOpen } from "../workspaceSlice";
+import type { WorkspaceState } from "../workspaceSlice";
+import {
+  openTab,
+  selectFocusedChatWorktreeRoot,
+  setDockOpen,
+} from "../workspaceSlice";
 
 export type FileViewerTarget = {
   path: string;
@@ -46,6 +51,10 @@ export const filesPanelSlice = createSlice({
     selectTreePath: (state, action: PayloadAction<string>) => {
       state.selectedPath = action.payload;
     },
+    resetFileTree: (state) => {
+      state.expandedDirectories = [];
+      state.selectedPath = null;
+    },
     setViewerTarget: (
       state,
       action: PayloadAction<FileViewerTarget | null>,
@@ -62,6 +71,7 @@ export const filesPanelSlice = createSlice({
 export const {
   collapseDirectory,
   expandDirectory,
+  resetFileTree,
   selectTreePath,
   setViewerTarget,
   toggleDirectory,
@@ -71,6 +81,7 @@ type FilesPanelDispatch = (
   action:
     | ReturnType<typeof openTab>
     | ReturnType<typeof expandDirectory>
+    | ReturnType<typeof resetFileTree>
     | ReturnType<typeof setViewerTarget>
     | ReturnType<typeof setDockOpen>,
 ) => void;
@@ -120,6 +131,21 @@ const parentDirectories = (path: string): string[] => {
 };
 
 type FilesPanelThunkState = {
+  workspace: WorkspaceState;
+  chat: {
+    threads: Record<
+      string,
+      | {
+          thread: {
+            worktree?: {
+              root: string;
+              source_workspace_root: string;
+            } | null;
+          };
+        }
+      | undefined
+    >;
+  };
   current_project: {
     workspaceRoots?: string[];
   };
@@ -129,7 +155,11 @@ export const openFileInFilesPanel =
   (target: FileViewerTarget) =>
   (dispatch: FilesPanelDispatch, getState: () => FilesPanelThunkState) => {
     dispatch(openTab(makeSurfaceKey("file", target.path)));
-    const workspaceRoots = getState().current_project.workspaceRoots ?? [];
+    const state = getState();
+    const worktreeRoot = selectFocusedChatWorktreeRoot(state);
+    const workspaceRoots = worktreeRoot
+      ? [worktreeRoot]
+      : (state.current_project.workspaceRoots ?? []);
     for (const directory of parentDirectories(target.path)) {
       if (isPathWithinWorkspaceRoots(directory, workspaceRoots)) {
         dispatch(expandDirectory(directory));

@@ -9,6 +9,10 @@ import { DiffView } from "./DiffView";
 import { selectActiveGitRoot, selectSelectedGitFile } from "./gitPanelSlice";
 import { workspaceRootForGitRoot } from "./gitRoots";
 import { WorktreesSection } from "./WorktreesSection";
+import {
+  selectFocusedChatWorkspaceRoots,
+  selectFocusedChatWorktreeSourceRoot,
+} from "../workspaceSlice";
 import styles from "./GitPanel.module.css";
 
 const EMPTY_ROOTS: string[] = [];
@@ -21,9 +25,13 @@ export function GitPanel() {
   const configuredRoots = useAppSelector(
     (state) => state.current_project.workspaceRoots ?? EMPTY_ROOTS,
   );
+  const contextRoots = useAppSelector(selectFocusedChatWorkspaceRoots);
+  const worktreeSourceRoot = useAppSelector(
+    selectFocusedChatWorktreeSourceRoot,
+  );
   const activeRoot = useAppSelector(selectActiveGitRoot);
   const selected = useAppSelector(selectSelectedGitFile);
-  const statusQuery = useGetGitStatusQuery(configuredRoots);
+  const statusQuery = useGetGitStatusQuery(contextRoots);
   const roots = useMemo(
     () => statusQuery.data?.roots ?? [],
     [statusQuery.data?.roots],
@@ -36,7 +44,9 @@ export function GitPanel() {
       ? selected.root
       : "";
   const selectedForRoot = selected?.root === resolvedRoot ? selected : null;
-  const worktreesRoot = workspaceRootForGitRoot(configuredRoots, resolvedRoot);
+  const worktreesRoot =
+    worktreeSourceRoot ??
+    workspaceRootForGitRoot(configuredRoots, resolvedRoot);
 
   return (
     <div className={styles.panel} data-testid="git-main-panel">

@@ -16,6 +16,7 @@ import {
   useCopyToClipboard,
 } from "../../../hooks";
 import { useReadFileQuery } from "../../../services/refact/files";
+import { selectFocusedChatWorktreeRoot } from "../workspaceSlice";
 import {
   expandDirectory,
   isPathWithinWorkspaceRoots,
@@ -89,8 +90,13 @@ export function FileViewer({ path }: { path: string }) {
   const storedTarget = useAppSelector((state) =>
     selectFileViewerTargetByPath(state, path),
   );
-  const workspaceRoots = useAppSelector(
+  const configuredWorkspaceRoots = useAppSelector(
     (state) => state.current_project.workspaceRoots ?? EMPTY_ROOTS,
+  );
+  const worktreeRoot = useAppSelector(selectFocusedChatWorktreeRoot);
+  const workspaceRoots = useMemo(
+    () => (worktreeRoot ? [worktreeRoot] : configuredWorkspaceRoots),
+    [configuredWorkspaceRoots, worktreeRoot],
   );
   const target = storedTarget ?? { path };
   const { data, error, isFetching, refetch } = useReadFileQuery({ path });

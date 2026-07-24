@@ -18,6 +18,7 @@ import {
   reorderTabs,
   selectActiveGroup,
   selectActiveTabId,
+  selectFocusedChatWorkspaceRoot,
   selectFocusedWorkspaceChatId,
   selectGroupForTab,
   selectIsTabSplit,
@@ -72,6 +73,25 @@ const leaf = (
 });
 
 const rootState = (workspace: WorkspaceState) => ({ workspace });
+
+const contextState = (
+  workspace: WorkspaceState,
+  worktrees: Record<
+    string,
+    { root: string; source_workspace_root: string } | null
+  >,
+) => ({
+  workspace,
+  chat: {
+    threads: Object.fromEntries(
+      Object.entries(worktrees).map(([id, worktree]) => [
+        id,
+        { thread: { worktree } },
+      ]),
+    ),
+  },
+  current_project: { workspaceRoots: ["/project", "/secondary"] },
+});
 
 const renderedSurfaces = (workspace: WorkspaceState): SurfaceKey[] =>
   workspace.tabs.flatMap((tabId) => {
@@ -751,6 +771,32 @@ describe("workspaceSlice", () => {
 
     expect(selectVisibleThreadIds(rootState(state))).toEqual(["a", "b"]);
     expect(selectFocusedWorkspaceChatId(rootState(state))).toBe("b");
+  });
+
+  test("focused chat workspace root follows worktrees and falls back to the project root", () => {
+    const chatA = chat("a");
+    const chatB = chat("b");
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(state, openTab(chatB));
+
+    const roots = {
+      a: { root: "/worktrees/a", source_workspace_root: "/project" },
+      b: null,
+    };
+
+    expect(selectFocusedChatWorkspaceRoot(contextState(state, roots))).toBe(
+      "/project",
+    );
+
+    state = reducer(state, setActiveTab(chatA));
+    expect(selectFocusedChatWorkspaceRoot(contextState(state, roots))).toBe(
+      "/worktrees/a",
+    );
+
+    state = reducer(state, setActiveTab(chatB));
+    expect(selectFocusedChatWorkspaceRoot(contextState(state, roots))).toBe(
+      "/project",
+    );
   });
 
   test("openTab enforces the top-level tab cap", () => {

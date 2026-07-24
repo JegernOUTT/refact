@@ -23,6 +23,7 @@ import { FilesPanel } from "../FilesPanel";
 import { GitDock } from "../GitPanel";
 import {
   normalizeDockWidth,
+  selectFocusedChatWorkspaceRoots,
   selectPanelsForced,
   selectWorkspaceDock,
   setDockOpen,
@@ -34,7 +35,6 @@ import styles from "./Dock.module.css";
 import { TasksSection } from "./TasksSection";
 
 const narrowQuery = "(max-width: 767px)";
-const EMPTY_ROOTS: string[] = [];
 
 type DockStyle = CSSProperties & {
   "--workspace-dock-w": string;
@@ -47,10 +47,8 @@ type DockOption = {
 };
 
 function GitDockLabel() {
-  const configuredRoots = useAppSelector(
-    (state) => state.current_project.workspaceRoots ?? EMPTY_ROOTS,
-  );
-  const { data } = useGetGitStatusQuery(configuredRoots);
+  const contextRoots = useAppSelector(selectFocusedChatWorkspaceRoots);
+  const { data } = useGetGitStatusQuery(contextRoots);
   const changedCount =
     data?.roots.reduce(
       (count, root) => count + root.staged.length + root.unstaged.length,
