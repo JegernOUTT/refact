@@ -105,6 +105,15 @@ pub struct WorkspaceChanges {
     pub files_changed: Vec<FileChange>,
 }
 
+fn decode_legacy_project_path(project_path: &Url) -> Result<PathBuf, ScratchError> {
+    project_path.to_file_path().map_err(|_| {
+        ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Invalid project_path file URL".to_string(),
+        )
+    })
+}
+
 pub async fn handle_v1_git_commit(
     State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
@@ -125,16 +134,22 @@ pub async fn handle_v1_git_commit(
         let repo_path = if let Some(root) = commit.root.as_ref() {
             super::git_read::resolve_requested_root(gcx.clone(), root.clone()).await
         } else {
-            commit
+            let project_path = commit
                 .project_path
                 .as_ref()
-                .ok_or_else(|| "A commit root or project_path is required".to_string())
-                .and_then(|project_path| {
-                    project_path
-                        .to_file_path()
-                        .map_err(|_| "Invalid project_path file URL".to_string())
-                })
-                .map(|path| crate::files_correction::canonical_path(&path.display().to_string()))
+                .ok_or_else(|| "A commit root or project_path is required".to_string());
+            match project_path {
+                Ok(project_path) => {
+                    let requested = decode_legacy_project_path(project_path)?;
+                    Ok(super::git_read::resolve_requested_root(
+                        gcx.clone(),
+                        requested.to_string_lossy().into_owned(),
+                    )
+                    .await
+                    .map_err(|error| ScratchError::new(StatusCode::NOT_FOUND, error))?)
+                }
+                Err(error) => Err(error),
+            }
         };
         let repo_path = match repo_path {
             Ok(repo_path) => repo_path,
@@ -386,11 +401,16 @@ mod tests {
 
     fn init_repo() -> (tempfile::TempDir, Repository) {
         let dir = tempfile::tempdir().unwrap();
-        let repo = Repository::init(dir.path()).unwrap();
+        let repo = init_repo_at(dir.path());
+        (dir, repo)
+    }
+
+    fn init_repo_at(path: &Path) -> Repository {
+        let repo = Repository::init(path).unwrap();
         let mut config = repo.config().unwrap();
         config.set_str("user.name", "Test User").unwrap();
         config.set_str("user.email", "test@example.com").unwrap();
-        fs::write(dir.path().join("file.txt"), "base\n").unwrap();
+        fs::write(path.join("file.txt"), "base\n").unwrap();
         let mut index = repo.index().unwrap();
         index.add_path(Path::new("file.txt")).unwrap();
         index.write().unwrap();
@@ -407,15 +427,15 @@ mod tests {
         )
         .unwrap();
         drop(tree);
-        fs::write(dir.path().join("file.txt"), "changed\n").unwrap();
+        fs::write(path.join("file.txt"), "changed\n").unwrap();
         let mut index = repo.index().unwrap();
         index.add_path(Path::new("file.txt")).unwrap();
         index.write().unwrap();
         drop(index);
-        (dir, repo)
+        repo
     }
 
-    async fn post_commit(gcx: Arc<GlobalContext>, commit: Value) -> Value {
+    async fn post_commit_response(gcx: Arc<GlobalContext>, commit: Value) -> (StatusCode, Value) {
         let app = crate::app_state::AppState::from_gcx(gcx).await;
         let router = crate::http::routers::make_refact_http_server(app);
         let response = router
@@ -429,9 +449,15 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        let status = response.status();
         let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
-        serde_json::from_slice(&bytes).unwrap()
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    async fn post_commit(gcx: Arc<GlobalContext>, commit: Value) -> Value {
+        let (status, response) = post_commit_response(gcx, commit).await;
+        assert_eq!(status, StatusCode::OK);
+        response
     }
 
     fn commit_body(project_field: Value, message: &str) -> Value {
@@ -498,6 +524,7 @@ mod tests {
     async fn git_commit_keeps_legacy_project_path_request_working() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let (dir, repo) = init_repo();
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![dir.path().to_path_buf()];
         let project_path = Url::from_file_path(dir.path()).unwrap();
 
         let response = post_commit(
@@ -514,6 +541,122 @@ mod tests {
         assert_eq!(
             repo.head().unwrap().peel_to_commit().unwrap().message(),
             Some("Legacy path commit")
+        );
+    }
+
+    #[tokio::test]
+    async fn git_commit_maps_legacy_project_subdir_to_active_enclosing_repo() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (dir, repo) = init_repo();
+        let subdir = dir.path().join("refact-agent").join("engine");
+        fs::create_dir_all(&subdir).unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![subdir.clone()];
+
+        let response = post_commit(
+            gcx,
+            commit_body(
+                json!({ "project_path": Url::from_file_path(&subdir).unwrap() }),
+                "Legacy subdir commit",
+            ),
+        )
+        .await;
+
+        assert_eq!(response["commits_applied"].as_array().unwrap().len(), 1);
+        assert!(response["error_log"].as_array().unwrap().is_empty());
+        assert_eq!(
+            repo.head().unwrap().peel_to_commit().unwrap().message(),
+            Some("Legacy subdir commit")
+        );
+    }
+
+    #[tokio::test]
+    async fn git_commit_rejects_legacy_project_path_outside_active_roots() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (active_dir, _active_repo) = init_repo();
+        let (outside_dir, outside_repo) = init_repo();
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() =
+            vec![active_dir.path().to_path_buf()];
+
+        let (status, response) = post_commit_response(
+            gcx,
+            commit_body(
+                json!({
+                    "project_path": Url::from_file_path(outside_dir.path()).unwrap()
+                }),
+                "Outside commit",
+            ),
+        )
+        .await;
+
+        assert!(status.is_client_error());
+        assert_eq!(
+            response["detail"],
+            "Git root is not an active workspace root"
+        );
+        assert_eq!(
+            outside_repo
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .message(),
+            Some("Initial commit")
+        );
+    }
+
+    #[tokio::test]
+    async fn git_commit_rejects_non_file_legacy_project_url() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+
+        let (status, response) = post_commit_response(
+            gcx,
+            commit_body(
+                json!({ "project_path": "https://example.com/repository" }),
+                "Invalid URL commit",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["detail"], "Invalid project_path file URL");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_commit_decodes_windows_legacy_file_url_shape() {
+        let project_path = Url::parse("file:///C:/Users/Test%20User/repository").unwrap();
+
+        let decoded = decode_legacy_project_path(&project_path).unwrap();
+
+        assert_eq!(decoded, PathBuf::from(r"C:\Users\Test User\repository"));
+    }
+
+    #[tokio::test]
+    async fn git_commit_decodes_legacy_localhost_file_url() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let dir = tempfile::Builder::new()
+            .prefix("legacy git workspace ")
+            .tempdir()
+            .unwrap();
+        let repo = init_repo_at(dir.path());
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let mut project_path = Url::from_file_path(dir.path()).unwrap();
+        project_path.set_host(Some("localhost")).unwrap();
+        assert!(project_path.as_str().contains("%20"));
+
+        let response = post_commit(
+            gcx,
+            commit_body(
+                json!({ "project_path": project_path }),
+                "Decoded legacy URL commit",
+            ),
+        )
+        .await;
+
+        assert_eq!(response["commits_applied"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            repo.head().unwrap().peel_to_commit().unwrap().message(),
+            Some("Decoded legacy URL commit")
         );
     }
 }
