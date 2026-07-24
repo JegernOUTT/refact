@@ -33,6 +33,7 @@ import {
   selectIsTabSplit,
   selectPanelsForced,
   selectTabs,
+  selectWorkspaceDock,
   selectWorkspaceGroups,
   splitTab,
 } from "./workspaceSlice";
@@ -50,9 +51,12 @@ export function WorkspaceView() {
   const groups = useAppSelector(selectWorkspaceGroups);
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
+  const workspaceDock = useAppSelector(selectWorkspaceDock);
   const dockAvailable =
     capabilities.filesPanel || capabilities.gitPanel || panelsForced;
   const terminalAvailable = capabilities.terminalPanel || panelsForced;
+  const panelsVisible =
+    (dockAvailable || terminalAvailable) && workspaceDock.open;
   const currentSurfaceKey = currentThreadId
     ? makeSurfaceKey("chat", currentThreadId)
     : null;
@@ -258,7 +262,7 @@ export function WorkspaceView() {
             </div>
           )}
         </div>
-        {terminalAvailable ? (
+        {terminalAvailable && panelsVisible ? (
           <Drawer>
             <TerminalPanel />
           </Drawer>

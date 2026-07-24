@@ -74,14 +74,45 @@ describe("TerminalPanel spawn dimensions", () => {
       }),
     );
 
-    const { user } = render(<TerminalPanel />, {
-      preloadedState: CONFIG_STATE,
+    const { user, store } = render(<TerminalPanel />, {
+      preloadedState: {
+        ...CONFIG_STATE,
+        current_project: { name: "workspace", workspaceRoots: ["/project"] },
+      },
     });
+    const [{ createChatWithId }, { openTab }, { makeSurfaceKey }] =
+      await Promise.all([
+        import("../../Chat/Thread"),
+        import("../workspaceSlice"),
+        import("../surfaceKey"),
+      ]);
+    store.dispatch(
+      createChatWithId({
+        id: "chat-a",
+        worktree: {
+          id: "worktree-a",
+          kind: "task_agent",
+          root: "/worktrees/chat-a",
+          source_workspace_root: "/project",
+          repo_root: "/project",
+          enforce: true,
+        },
+      }),
+    );
+    store.dispatch(openTab(makeSurfaceKey("chat", "chat-a")));
     await screen.findByRole("tab", { name: /\/bin\/zsh · seed-123/i });
 
     await user.click(screen.getByRole("button", { name: "New terminal" }));
 
     await waitFor(() => expect(spawnBodies).toHaveLength(1));
-    expect(spawnBodies).toEqual([{ pty: true, rows: 48, cols: 132 }]);
+    expect(spawnBodies).toEqual([
+      {
+        chat_id: "chat-a",
+        cwd: "/worktrees/chat-a",
+        pty: true,
+        rows: 48,
+        cols: 132,
+      },
+    ]);
   });
 });

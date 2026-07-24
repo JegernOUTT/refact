@@ -19,6 +19,7 @@ import {
 } from "../TerminalPanel";
 import {
   clampDrawerHeight,
+  selectFocusedWorkspaceChatId,
   selectWorkspaceDrawer,
   setDrawerHeight,
   setDrawerOpen,
@@ -47,7 +48,10 @@ function sessionStatusLabel(session: TerminalSessionMetadata): string {
 export function Drawer({ children }: DrawerProps) {
   const dispatch = useAppDispatch();
   const drawer = useAppSelector(selectWorkspaceDrawer);
-  const sessions = useAppSelector(selectTerminalSessions);
+  const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
+  const sessions = useAppSelector((state) =>
+    selectTerminalSessions(state, focusedChatId),
+  );
   const drawerRef = useRef<HTMLElement>(null);
   const liveHeightRef = useRef(drawer.height);
   const dragCleanupRef = useRef<(() => void) | null>(null);

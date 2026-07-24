@@ -19,6 +19,10 @@ import {
 } from "../../../services/refact/exec";
 import { TerminalSession } from "./TerminalSession";
 import {
+  selectFocusedChatWorkspaceRoot,
+  selectFocusedWorkspaceChatId,
+} from "../workspaceSlice";
+import {
   activeSessionChanged,
   selectActiveTerminalProcessId,
   selectTerminalSessions,
@@ -55,8 +59,14 @@ function statusDot(status: ExecStatus): "running" | "error" | "idle" {
 export function TerminalPanel() {
   const dispatch = useAppDispatch();
   const config = useConfig();
-  const sessions = useAppSelector(selectTerminalSessions);
-  const activeProcessId = useAppSelector(selectActiveTerminalProcessId);
+  const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
+  const workspaceRoot = useAppSelector(selectFocusedChatWorkspaceRoot);
+  const sessions = useAppSelector((state) =>
+    selectTerminalSessions(state, focusedChatId),
+  );
+  const activeProcessId = useAppSelector((state) =>
+    selectActiveTerminalProcessId(state, focusedChatId),
+  );
   const [loading, setLoading] = useState(true);
   const [spawning, setSpawning] = useState(false);
   const [disabled, setDisabled] = useState(false);
@@ -83,13 +93,20 @@ export function TerminalPanel() {
   );
 
   useEffect(() => {
+    setLoading(true);
+    setError(null);
+    if (!focusedChatId) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
-    void listExec(connection, apiKey)
+    void listExec(connection, apiKey, focusedChatId)
       .then((response) => {
         if (cancelled) return;
         dispatch(
-          sessionsReattached(
-            response.processes
+          sessionsReattached({
+            chatId: focusedChatId,
+            sessions: response.processes
               .filter((process) => process.tty && process.status === "running")
               .map((process) => ({
                 process_id: process.process_id,
@@ -99,7 +116,7 @@ export function TerminalPanel() {
                 ),
                 status: process.status,
               })),
-          ),
+          }),
         );
       })
       .catch((cause: unknown) => {
@@ -113,15 +130,18 @@ export function TerminalPanel() {
     return () => {
       cancelled = true;
     };
-  }, [apiKey, connection, dispatch]);
+  }, [apiKey, connection, dispatch, focusedChatId]);
 
   const handleNewSession = useCallback(async () => {
+    if (!focusedChatId) return;
     setSpawning(true);
     setError(null);
     try {
       const fitted = lastFittedRef.current;
       const result = await spawnExec(
         {
+          chat_id: focusedChatId,
+          ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
           pty: true,
           rows: fitted?.rows ?? DEFAULT_PTY_ROWS,
           cols: fitted?.cols ?? DEFAULT_PTY_COLS,
@@ -131,9 +151,12 @@ export function TerminalPanel() {
       );
       dispatch(
         sessionAdded({
-          process_id: result.process_id,
-          title: terminalTitle(result.process_id, result.command_preview),
-          status: result.status,
+          chatId: focusedChatId,
+          session: {
+            process_id: result.process_id,
+            title: terminalTitle(result.process_id, result.command_preview),
+            status: result.status,
+          },
         }),
       );
     } catch (cause) {
@@ -145,7 +168,7 @@ export function TerminalPanel() {
     } finally {
       setSpawning(false);
     }
-  }, [apiKey, connection, dispatch]);
+  }, [apiKey, connection, dispatch, focusedChatId, workspaceRoot]);
 
   const handleCloseSession = useCallback(
     async (processId: string, status: ExecStatus) => {
@@ -159,19 +182,25 @@ export function TerminalPanel() {
       setError(null);
       try {
         if (running) await killExec(processId, connection, apiKey);
-        dispatch(sessionRemoved(processId));
+        if (focusedChatId) {
+          dispatch(sessionRemoved({ chatId: focusedChatId, processId }));
+        }
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     },
-    [apiKey, connection, dispatch],
+    [apiKey, connection, dispatch, focusedChatId],
   );
 
   const handleStatusChange = useCallback(
     (processId: string, status: ExecStatus) => {
-      dispatch(sessionStatusChanged({ processId, status }));
+      if (focusedChatId) {
+        dispatch(
+          sessionStatusChanged({ chatId: focusedChatId, processId, status }),
+        );
+      }
     },
-    [dispatch],
+    [dispatch, focusedChatId],
   );
 
   const handleSessionResize = useCallback(
@@ -216,7 +245,13 @@ export function TerminalPanel() {
                   aria-selected={active}
                   className={styles.tabSelect}
                   onClick={() =>
-                    dispatch(activeSessionChanged(session.process_id))
+                    focusedChatId &&
+                    dispatch(
+                      activeSessionChanged({
+                        chatId: focusedChatId,
+                        processId: session.process_id,
+                      }),
+                    )
                   }
                 >
                   <StatusDot status={statusDot(session.status)} />
@@ -242,6 +277,7 @@ export function TerminalPanel() {
           size="sm"
           variant="plain"
           loading={spawning}
+          disabled={!focusedChatId}
           onClick={() => void handleNewSession()}
         />
       </header>
@@ -268,17 +304,23 @@ export function TerminalPanel() {
         {!loading && sessions.length === 0 ? (
           <EmptyState
             icon={SquareTerminal}
-            title="No terminal sessions"
-            description="Start an interactive shell in the active workspace."
+            title={focusedChatId ? "No terminal sessions" : "No focused chat"}
+            description={
+              focusedChatId
+                ? "Start an interactive shell in the active workspace."
+                : "Focus a chat to view its terminal sessions."
+            }
             variant="full"
             action={
-              <Button
-                leftIcon={Plus}
-                loading={spawning}
-                onClick={() => void handleNewSession()}
-              >
-                New terminal
-              </Button>
+              focusedChatId ? (
+                <Button
+                  leftIcon={Plus}
+                  loading={spawning}
+                  onClick={() => void handleNewSession()}
+                >
+                  New terminal
+                </Button>
+              ) : undefined
             }
           />
         ) : null}

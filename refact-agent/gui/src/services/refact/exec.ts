@@ -14,6 +14,7 @@ export type ExecSpawnRequest = {
   argv?: string[];
   cwd?: string;
   env?: Record<string, string>;
+  chat_id?: string;
   pty?: boolean;
   rows?: number;
   cols?: number;
@@ -141,8 +142,11 @@ export function spawnExec(
 export function listExec(
   connection: PortOrConnection,
   apiKey?: string,
+  chatId?: string,
 ): Promise<ExecListResponse> {
-  return execRequest(connection, "/v1/exec/list", apiKey);
+  return execRequest(connection, "/v1/exec/list", apiKey, undefined, {
+    chat_id: chatId,
+  });
 }
 
 export function readExec(

@@ -17,6 +17,7 @@ import {
   openTab,
   setPanelsForced,
   setActiveTab,
+  setDockOpen,
   splitTab,
 } from "./workspaceSlice";
 import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
@@ -123,6 +124,25 @@ describe("WorkspaceView", () => {
     expect(screen.getByLabelText("Terminal drawer")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Files" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Git" })).toBeInTheDocument();
+  });
+
+  it("hides the drawer strip when workspace panels are fully collapsed", async () => {
+    const store = createWorkspaceStore();
+    renderWorkspaceView(store);
+
+    expect(screen.getByLabelText("Terminal drawer")).toBeInTheDocument();
+
+    store.dispatch(setDockOpen(false));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByLabelText("Terminal drawer"),
+      ).not.toBeInTheDocument();
+    });
+
+    store.dispatch(setDockOpen(true));
+
+    expect(await screen.findByLabelText("Terminal drawer")).toBeInTheDocument();
   });
 
   it("renders an unsplit surface without pane chrome", () => {

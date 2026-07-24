@@ -4,6 +4,9 @@ import { act } from "react-dom/test-utils";
 import { fireEvent, render, screen } from "../../../utils/test-utils";
 import statusDotStyles from "../../../components/ui/StatusDot/StatusDot.module.css";
 import { sessionAdded } from "../TerminalPanel";
+import { createChatWithId } from "../../Chat/Thread";
+import { openTab } from "../workspaceSlice";
+import { makeSurfaceKey } from "../surfaceKey";
 import {
   DRAWER_MIN_HEIGHT,
   clampDrawerHeight,
@@ -15,25 +18,36 @@ describe("Drawer", () => {
   it("renders collapsed session status dots and expands and collapses", async () => {
     const view = render(<Drawer>Terminal body</Drawer>);
     act(() => {
+      view.store.dispatch(createChatWithId({ id: "chat-a" }));
+      view.store.dispatch(openTab(makeSurfaceKey("chat", "chat-a")));
       view.store.dispatch(
         sessionAdded({
-          process_id: "running-one",
-          title: "zsh · running",
-          status: "running",
+          chatId: "chat-a",
+          session: {
+            process_id: "running-one",
+            title: "zsh · running",
+            status: "running",
+          },
         }),
       );
       view.store.dispatch(
         sessionAdded({
-          process_id: "killed-three",
-          title: "build · killed",
-          status: "killed",
+          chatId: "chat-a",
+          session: {
+            process_id: "killed-three",
+            title: "build · killed",
+            status: "killed",
+          },
         }),
       );
       view.store.dispatch(
         sessionAdded({
-          process_id: "failed-two",
-          title: "tests · failed",
-          status: "failed",
+          chatId: "chat-a",
+          session: {
+            process_id: "failed-two",
+            title: "tests · failed",
+            status: "failed",
+          },
         }),
       );
     });
