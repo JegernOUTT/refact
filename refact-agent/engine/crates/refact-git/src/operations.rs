@@ -257,6 +257,7 @@ pub fn get_diff_statuses(
     let repo_workdir = repo
         .workdir()
         .ok_or("Failed to get workdir from repository".to_string())?;
+    let absolute_workdir = include_abs_paths.then(|| canonical_path(repo_workdir.to_path_buf()));
 
     let mut staged_changes = Vec::new();
     let mut unstaged_changes = Vec::new();
@@ -286,12 +287,11 @@ pub fn get_diff_statuses(
             continue;
         }
 
-        let absolute_path =
-            if include_abs_paths && (is_changed_in_index(status) || is_changed_in_wt(status)) {
-                canonical_path(repo_workdir.join(&relative_path))
-            } else {
-                PathBuf::new()
-            };
+        let absolute_path = absolute_workdir
+            .as_ref()
+            .filter(|_| is_changed_in_index(status) || is_changed_in_wt(status))
+            .map(|workdir| workdir.join(&relative_path))
+            .unwrap_or_default();
 
         if is_changed_in_index(status) {
             staged_changes.push(FileChange {
@@ -1090,6 +1090,8 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     fn init_repo() -> (tempfile::TempDir, Repository) {
         let dir = tempfile::tempdir().unwrap();
@@ -1400,5 +1402,77 @@ mod tests {
         assert!(staged.is_empty());
         assert_eq!(unstaged.len(), 1);
         assert_eq!(unstaged[0].relative_path, PathBuf::from("file.txt"));
+    }
+
+    #[test]
+    fn normal_status_absolute_path_joins_native_relative_path() {
+        let (dir, repo) = init_repo();
+        let relative_path = PathBuf::from("nested").join("file.txt");
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join(&relative_path), "content\n").unwrap();
+
+        let (_, unstaged) =
+            get_diff_statuses(git2::StatusShow::IndexAndWorkdir, &repo, true).unwrap();
+        let change = unstaged
+            .iter()
+            .find(|change| change.relative_path == relative_path)
+            .unwrap();
+
+        assert_eq!(
+            change.absolute_path,
+            canonical_path(dir.path().to_path_buf()).join(&relative_path)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untracked_external_symlink_status_keeps_absolute_path_in_repo() {
+        let (dir, repo) = init_repo();
+        let external = tempfile::tempdir().unwrap();
+        let target = external.path().join("untracked-secret.txt");
+        fs::write(&target, "secret\n").unwrap();
+        symlink(&target, dir.path().join("external-link")).unwrap();
+
+        let (staged, unstaged) =
+            get_diff_statuses(git2::StatusShow::IndexAndWorkdir, &repo, true).unwrap();
+        let change = unstaged
+            .iter()
+            .find(|change| change.relative_path == Path::new("external-link"))
+            .unwrap();
+        let repo_root = canonical_path(dir.path().to_path_buf());
+        let external_root = canonical_path(external.path().to_path_buf());
+
+        assert!(staged.is_empty());
+        assert_eq!(change.absolute_path, repo_root.join("external-link"));
+        assert!(!change.absolute_path.starts_with(external_root));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_external_symlink_status_keeps_absolute_path_in_repo() {
+        let (dir, repo) = init_repo();
+        let external = tempfile::tempdir().unwrap();
+        let first_target = external.path().join("first-secret.txt");
+        let second_target = external.path().join("second-secret.txt");
+        fs::write(&first_target, "first\n").unwrap();
+        fs::write(&second_target, "second\n").unwrap();
+        let link_path = dir.path().join("tracked-link");
+        symlink(&first_target, &link_path).unwrap();
+        commit_paths(&repo, &["tracked-link"], "track symlink");
+        fs::remove_file(&link_path).unwrap();
+        symlink(&second_target, &link_path).unwrap();
+
+        let (staged, unstaged) =
+            get_diff_statuses(git2::StatusShow::IndexAndWorkdir, &repo, true).unwrap();
+        let change = unstaged
+            .iter()
+            .find(|change| change.relative_path == Path::new("tracked-link"))
+            .unwrap();
+        let repo_root = canonical_path(dir.path().to_path_buf());
+        let external_root = canonical_path(external.path().to_path_buf());
+
+        assert!(staged.is_empty());
+        assert_eq!(change.absolute_path, repo_root.join("tracked-link"));
+        assert!(!change.absolute_path.starts_with(external_root));
     }
 }
