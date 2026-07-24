@@ -325,6 +325,23 @@
   justify-content: flex-end;
 }
 
+.commitMessageRow {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: var(--rf-space-2);
+}
+
+.commitMessageRow textarea {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.generateButtonWrap {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
 .branchList li,
 .commitList li {
   align-items: center;

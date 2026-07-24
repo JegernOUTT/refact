@@ -119,6 +119,11 @@ export type GitCommitMutationRequest = {
   body: GitCommitRequest;
 };
 
+export type GenerateCommitMessageRequest = {
+  diff: string;
+  text?: string;
+};
+
 function gitUrl(
   state: RootState,
   path: string,
@@ -267,6 +272,22 @@ export const gitReadApi = createApi({
         { type: "GitBranches" as const, id: root },
       ],
     }),
+    generateCommitMessage: builder.mutation<
+      string,
+      GenerateCommitMessageRequest
+    >({
+      queryFn: async (body, api, _options, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: gitUrl(state, "/commit-message-from-diff"),
+          method: "POST",
+          body,
+          responseHandler: "text",
+        });
+        if (result.error) return { error: result.error };
+        return { data: String(result.data ?? "") };
+      },
+    }),
   }),
 });
 
@@ -278,4 +299,5 @@ export const {
   useStageGitPathsMutation,
   useUnstageGitPathsMutation,
   useCommitGitChangesMutation,
+  useGenerateCommitMessageMutation,
 } = gitReadApi;

@@ -114,6 +114,9 @@ function installHandlers(options?: {
   statusCalls?: (string | null)[];
   diffCalls?: URLSearchParams[];
   commitBodies?: unknown[];
+  generateBodies?: unknown[];
+  generatedMessage?: string;
+  generateError?: string;
   worktreeCalls?: URLSearchParams[];
   openCalls?: string[];
   deleteCalls?: string[];
@@ -121,9 +124,7 @@ function installHandlers(options?: {
   const record = worktreeRecord();
   server.use(
     http.get("*/v1/git/status", ({ request }) => {
-      options?.statusCalls?.push(
-        new URL(request.url).searchParams.get("root"),
-      );
+      options?.statusCalls?.push(new URL(request.url).searchParams.get("root"));
       return HttpResponse.json({
         roots: options?.status?.() ?? [statusRoot("/repo", [], [APP_CHANGE])],
       });
@@ -190,6 +191,15 @@ function installHandlers(options?: {
         ],
         error_log: [],
       });
+    }),
+    http.post("*/v1/commit-message-from-diff", async ({ request }) => {
+      options?.generateBodies?.push(await request.json());
+      if (options?.generateError) {
+        return HttpResponse.text(options.generateError, { status: 422 });
+      }
+      return HttpResponse.text(
+        options?.generatedMessage ?? "Generated commit message",
+      );
     }),
     http.get("*/v1/worktrees", ({ request }) => {
       options?.worktreeCalls?.push(new URL(request.url).searchParams);
@@ -382,8 +392,8 @@ describe("GitPanel", () => {
       ).toBeEnabled(),
     );
     expect(
-      screen.queryByRole("button", { name: /generate message/i }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "Generate commit message" }),
+    ).toBeEnabled();
     await user.click(
       screen.getByRole("button", { name: "Commit staged changes" }),
     );
@@ -401,6 +411,71 @@ describe("GitPanel", () => {
     });
     expect(await screen.findByText("Committed 01234567")).toBeInTheDocument();
     expect(statusCalls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("disables commit message generation when nothing is staged", async () => {
+    installHandlers({ status: () => [statusRoot("/repo", [], [APP_CHANGE])] });
+    renderPanel();
+
+    expect(
+      await screen.findByRole("button", { name: "Generate commit message" }),
+    ).toBeDisabled();
+  });
+
+  test("generates a commit message from the staged diff and steering text", async () => {
+    const diffCalls: URLSearchParams[] = [];
+    const generateBodies: unknown[] = [];
+    installHandlers({
+      diffCalls,
+      generateBodies,
+      generatedMessage: "feat: generate commit messages",
+      status: () => [statusRoot("/repo", [APP_CHANGE], [])],
+    });
+    const { user } = renderPanel();
+    const textarea = await screen.findByRole("textbox", {
+      name: "Commit message",
+    });
+    const generateButton = screen.getByRole("button", {
+      name: "Generate commit message",
+    });
+
+    await waitFor(() => expect(generateButton).toBeEnabled());
+    await user.type(textarea, "Use conventional commits");
+    await user.click(generateButton);
+
+    await waitFor(() => expect(generateBodies).toHaveLength(1));
+    expect(generateBodies[0]).toEqual({
+      diff: "diff --git a/src/app.ts b/src/app.ts\n+const value = 1;",
+      text: "Use conventional commits",
+    });
+    expect(diffCalls.some((call) => call.get("root") === "/repo")).toBe(true);
+    expect(diffCalls.some((call) => call.get("staged") === "true")).toBe(true);
+    await waitFor(() =>
+      expect(textarea).toHaveValue("feat: generate commit messages"),
+    );
+  });
+
+  test("surfaces generation errors without replacing the typed message", async () => {
+    installHandlers({
+      generateError: "Unable to generate a commit message.",
+      status: () => [statusRoot("/repo", [APP_CHANGE], [])],
+    });
+    const { user } = renderPanel();
+    const textarea = await screen.findByRole("textbox", {
+      name: "Commit message",
+    });
+    const generateButton = screen.getByRole("button", {
+      name: "Generate commit message",
+    });
+
+    await waitFor(() => expect(generateButton).toBeEnabled());
+    await user.type(textarea, "Keep my draft");
+    await user.click(generateButton);
+
+    expect(
+      await screen.findByText("Unable to generate a commit message."),
+    ).toBeInTheDocument();
+    expect(textarea).toHaveValue("Keep my draft");
   });
 
   test.each(["C:\\repo", "/repo#reserved"])(
