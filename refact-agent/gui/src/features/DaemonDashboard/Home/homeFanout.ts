@@ -38,13 +38,33 @@ type FanoutTask =
   | { kind: "trajectories"; worker: DaemonWorker }
   | { kind: "cron"; worker: DaemonWorker };
 
-export function homeFanoutWorkerSignature(workers: DaemonWorker[]): string {
+function recentReadyWorkers(workers: DaemonWorker[]): DaemonWorker[] {
   return workers
+    .filter(isReadyWorker)
+    .sort((left, right) => {
+      const recency = (right.last_active_ms ?? 0) - (left.last_active_ms ?? 0);
+      if (recency !== 0) return recency;
+      if (left.project_id < right.project_id) return -1;
+      if (left.project_id > right.project_id) return 1;
+      return 0;
+    })
+    .slice(0, MAX_RECENT_PROJECTS);
+}
+
+export function homeFanoutWorkerSignature(workers: DaemonWorker[]): string {
+  const readyWorkers = workers
+    .filter(isReadyWorker)
     .map((worker) =>
-      JSON.stringify([worker.project_id, worker.root, worker.state]),
+      JSON.stringify([worker.project_id, worker.slug, worker.root]),
     )
-    .sort()
-    .join("|");
+    .sort();
+  const recentWorkers = recentReadyWorkers(workers).map((worker) => [
+    worker.project_id,
+    worker.slug,
+    worker.root,
+    worker.last_active_ms,
+  ]);
+  return JSON.stringify([readyWorkers, recentWorkers]);
 }
 
 async function fetchJson(url: string, signal?: AbortSignal): Promise<unknown> {
@@ -127,15 +147,12 @@ export async function fetchHomeFanout(
   signal?: AbortSignal,
 ): Promise<HomeFanoutResult> {
   const readyWorkers = workers.filter(isReadyWorker);
-  const recentWorkers = [...readyWorkers]
-    .sort(
-      (left, right) => (right.last_active_ms ?? 0) - (left.last_active_ms ?? 0),
-    )
-    .slice(0, MAX_RECENT_PROJECTS);
+  const recentWorkers = recentReadyWorkers(workers);
   const tasks: FanoutTask[] = [
-    ...recentWorkers.map(
-      (worker): FanoutTask => ({ kind: "trajectories", worker }),
-    ),
+    ...recentWorkers.map((worker): FanoutTask => ({
+      kind: "trajectories",
+      worker,
+    })),
     ...readyWorkers.map((worker): FanoutTask => ({ kind: "cron", worker })),
   ];
   const chats: RecentProjectChat[] = [];

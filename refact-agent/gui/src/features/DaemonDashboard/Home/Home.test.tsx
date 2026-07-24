@@ -412,9 +412,10 @@ describe("Dashboard Home", () => {
     expect(screen.queryByText("Loading recent chats…")).not.toBeInTheDocument();
   });
 
-  it("keeps identical worker polls stable and silently refreshes on state changes", async () => {
+  it("keeps stable polls quiet and refreshes exactly once when recency changes", async () => {
     window.localStorage.setItem(WIZARD_DONE_KEY, "true");
-    let watchedState = "stopped";
+    let lastActiveMs = 1;
+    let lastStatusReportMs = 1;
     let trajectoryRequests = 0;
     let releaseRefresh: () => void = () => undefined;
     const refreshBlocked = new Promise<void>((resolve) => {
@@ -423,8 +424,10 @@ describe("Dashboard Home", () => {
     server.use(
       http.get("https://daemon.example.test/daemon/v1/workers", () =>
         HttpResponse.json([
-          worker("ready", "ready"),
-          worker("watched", watchedState),
+          worker("ready", "ready", {
+            last_active_ms: lastActiveMs,
+            last_status_report_ms: lastStatusReportMs,
+          }),
         ]),
       ),
       http.get(
@@ -453,18 +456,22 @@ describe("Dashboard Home", () => {
     expect(await screen.findByText("Initial chat")).toBeInTheDocument();
     expect(trajectoryRequests).toBe(1);
 
+    lastStatusReportMs = 2;
     await refetchWorkers(view.store);
+    lastStatusReportMs = 3;
     await refetchWorkers(view.store);
 
     expect(trajectoryRequests).toBe(1);
     expect(screen.queryByText("Loading recent chats…")).not.toBeInTheDocument();
 
-    watchedState = "crashed";
+    lastActiveMs = 2;
     await refetchWorkers(view.store);
     await waitFor(() => expect(trajectoryRequests).toBe(2));
+    await refetchWorkers(view.store);
 
     expect(screen.getByText("Initial chat")).toBeInTheDocument();
     expect(screen.queryByText("Loading recent chats…")).not.toBeInTheDocument();
+    expect(trajectoryRequests).toBe(2);
 
     releaseRefresh();
 
@@ -472,11 +479,11 @@ describe("Dashboard Home", () => {
     expect(trajectoryRequests).toBe(2);
   });
 
-  it("uses worker identity and state for a deterministic fan-out signature", () => {
+  it("uses worker state and selected recency for a deterministic fan-out signature", () => {
     const workers = [worker("beta", "ready"), worker("alpha", "stopped")];
     const reorderedCopies = [
-      worker("alpha", "stopped"),
-      worker("beta", "ready"),
+      worker("alpha", "stopped", { last_status_report_ms: 2 }),
+      worker("beta", "ready", { busy_chats: 2 }),
     ];
 
     expect(homeFanoutWorkerSignature(workers)).toBe(
@@ -485,8 +492,39 @@ describe("Dashboard Home", () => {
     expect(homeFanoutWorkerSignature(workers)).not.toBe(
       homeFanoutWorkerSignature([
         worker("beta", "ready"),
-        worker("alpha", "crashed"),
+        worker("alpha", "ready"),
       ]),
+    );
+    expect(homeFanoutWorkerSignature(workers)).not.toBe(
+      homeFanoutWorkerSignature([
+        worker("beta", "ready", { last_active_ms: 2 }),
+        worker("alpha", "stopped"),
+      ]),
+    );
+  });
+
+  it("only tracks recency for the deterministic recent-worker selection", () => {
+    const workers = Array.from({ length: 6 }, (_, index) =>
+      worker(`project-${String(index)}`, "ready", {
+        last_active_ms: 10 - index,
+      }),
+    );
+    const outsideRecentSelection = workers.map((item) =>
+      item.project_id === "project-5"
+        ? { ...item, last_active_ms: 6 }
+        : { ...item },
+    );
+    const enteringRecentSelection = workers.map((item) =>
+      item.project_id === "project-5"
+        ? { ...item, last_active_ms: 11 }
+        : { ...item },
+    );
+
+    expect(homeFanoutWorkerSignature(workers)).toBe(
+      homeFanoutWorkerSignature(outsideRecentSelection.reverse()),
+    );
+    expect(homeFanoutWorkerSignature(workers)).not.toBe(
+      homeFanoutWorkerSignature(enteringRecentSelection),
     );
   });
 
