@@ -357,6 +357,43 @@ describe("GitPanel", () => {
     );
   });
 
+  test("renders one compact state and no commit UI for a clean repository", async () => {
+    installHandlers({ status: () => [statusRoot("/repo", [], [])] });
+    renderPanel();
+
+    expect(
+      await screen.findByText("No changes — working tree clean"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No staged changes.")).not.toBeInTheDocument();
+    expect(screen.queryByText("No unstaged changes.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "Commit message" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Commit staged changes" }),
+    ).not.toBeInTheDocument();
+  });
+
+  test("keeps status lists and commit UI when changes exist", async () => {
+    installHandlers({
+      status: () => [statusRoot("/repo", [APP_CHANGE], [OTHER_CHANGE])],
+    });
+    renderPanel();
+
+    expect(
+      await screen.findByRole("checkbox", { name: "Unstage src/app.ts" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: "Stage README.md" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "Commit message" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Generate commit message" }),
+    ).toBeInTheDocument();
+  });
+
   test("commits only the active root staged files and refreshes status", async () => {
     const commitBodies: unknown[] = [];
     const statusCalls: (string | null)[] = [];

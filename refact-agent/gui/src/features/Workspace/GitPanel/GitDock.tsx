@@ -68,6 +68,11 @@ export function GitDock() {
   const statusError = statusQuery.error
     ? worktreeErrorText(statusQuery.error)
     : mutationError;
+  const isClean =
+    activeStatus !== undefined &&
+    statusError === null &&
+    activeStatus.staged.length === 0 &&
+    activeStatus.unstaged.length === 0;
 
   const mutatePath = async (change: GitFileChange, staged: boolean) => {
     if (!resolvedRoot) return;
@@ -149,39 +154,47 @@ export function GitDock() {
         </p>
       ) : (
         <div className={styles.dockContent}>
-          <section
-            className={styles.dockSection}
-            aria-labelledby="git-changes-heading"
-          >
-            <h3 id="git-changes-heading" className={styles.srOnly}>
-              Changed files
-            </h3>
-            <StatusList
-              status={activeStatus}
-              selected={selectedForRoot}
-              pendingPath={pendingPath}
-              isLoading={statusQuery.isLoading}
-              error={statusError ?? null}
-              onSelect={(file) =>
-                dispatch(openGitFile({ ...file, root: resolvedRoot }))
-              }
-              onStage={(change) => void mutatePath(change, false)}
-              onUnstage={(change) => void mutatePath(change, true)}
-              onRefresh={() => void statusQuery.refetch()}
-            />
-          </section>
-          {resolvedRoot ? (
-            <CommitBox
-              key={resolvedRoot}
-              root={resolvedRoot}
-              stagedChanges={activeStatus ? activeStatus.staged : []}
-              onCommitted={(shortOid) => {
-                setFeedback(`Committed ${shortOid}`);
-                dispatch(selectGitFile(null));
-                void statusQuery.refetch();
-              }}
-            />
-          ) : null}
+          {isClean ? (
+            <p className={styles.dockCleanState} role="status">
+              No changes — working tree clean
+            </p>
+          ) : (
+            <>
+              <section
+                className={styles.dockSection}
+                aria-labelledby="git-changes-heading"
+              >
+                <h3 id="git-changes-heading" className={styles.srOnly}>
+                  Changed files
+                </h3>
+                <StatusList
+                  status={activeStatus}
+                  selected={selectedForRoot}
+                  pendingPath={pendingPath}
+                  isLoading={statusQuery.isLoading}
+                  error={statusError ?? null}
+                  onSelect={(file) =>
+                    dispatch(openGitFile({ ...file, root: resolvedRoot }))
+                  }
+                  onStage={(change) => void mutatePath(change, false)}
+                  onUnstage={(change) => void mutatePath(change, true)}
+                  onRefresh={() => void statusQuery.refetch()}
+                />
+              </section>
+              {resolvedRoot ? (
+                <CommitBox
+                  key={resolvedRoot}
+                  root={resolvedRoot}
+                  stagedChanges={activeStatus ? activeStatus.staged : []}
+                  onCommitted={(shortOid) => {
+                    setFeedback(`Committed ${shortOid}`);
+                    dispatch(selectGitFile(null));
+                    void statusQuery.refetch();
+                  }}
+                />
+              ) : null}
+            </>
+          )}
         </div>
       )}
     </div>

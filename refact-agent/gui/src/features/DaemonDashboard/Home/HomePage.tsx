@@ -193,19 +193,24 @@ export function HomePage() {
           hadErrors={fanout.hadErrors}
           loading={fanoutLoading}
         />
-        <NeedsAttentionWidget
-          crashedWorkers={crashedWorkers}
-          failedCrons={fanout.failedCrons}
-          loading={fanoutLoading || updateLoading}
-          onNavigate={navigate}
-          updateAvailable={updateCheck?.update_available === true}
-        />
-        <QuickActions
-          onAddProject={() => setAddProjectOpen(true)}
-          onNavigate={navigate}
-          onSetup={openSetup}
-          setupAvailable={wizardDone}
-        />
+        <div
+          className={styles.secondaryWidgets}
+          data-testid="home-secondary-column"
+        >
+          <NeedsAttentionWidget
+            crashedWorkers={crashedWorkers}
+            failedCrons={fanout.failedCrons}
+            loading={fanoutLoading || updateLoading}
+            onNavigate={navigate}
+            updateAvailable={updateCheck?.update_available === true}
+          />
+          <QuickActions
+            onAddProject={() => setAddProjectOpen(true)}
+            onNavigate={navigate}
+            onSetup={openSetup}
+            setupAvailable={wizardDone}
+          />
+        </div>
       </div>
 
       <AddProjectDialog

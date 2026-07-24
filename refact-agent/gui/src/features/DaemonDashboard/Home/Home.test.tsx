@@ -344,6 +344,34 @@ describe("Dashboard Home", () => {
     expect(screen.getByText("All clear")).toBeInTheDocument();
   });
 
+  it("balances health and quick actions in the secondary column", async () => {
+    window.localStorage.setItem(WIZARD_DONE_KEY, "true");
+    server.use(
+      http.get("https://daemon.example.test/daemon/v1/workers", () =>
+        HttpResponse.json([]),
+      ),
+      updateCheck(),
+    );
+
+    renderHome();
+
+    const secondaryColumn = await screen.findByTestId("home-secondary-column");
+    const continueWidget = screen
+      .getByRole("heading", { name: "Continue recent chats" })
+      .closest("section");
+    const attentionWidget = screen
+      .getByRole("heading", { name: "Needs attention" })
+      .closest("section");
+    const quickActions = screen
+      .getByRole("heading", { name: "Quick actions" })
+      .closest("section");
+
+    expect(secondaryColumn).toContainElement(attentionWidget);
+    expect(secondaryColumn).toContainElement(quickActions);
+    expect(secondaryColumn).not.toContainElement(continueWidget);
+    expect(secondaryColumn.parentElement).toContainElement(continueWidget);
+  });
+
   it("shows loading until the first fan-out resolves", async () => {
     window.localStorage.setItem(WIZARD_DONE_KEY, "true");
     let releaseTrajectories: () => void = () => undefined;
