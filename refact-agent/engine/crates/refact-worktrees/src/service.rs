@@ -1222,6 +1222,15 @@ impl WorktreeService {
             .last_seen_at
             .clone()
             .or_else(|| Some(record.updated_at.clone()));
+        if let Err(error) = validate_registered_record_checkout(record) {
+            return self.inspect_invalid_registered_record(
+                record,
+                age_hours,
+                last_used_at,
+                min_age_hours,
+                error,
+            );
+        }
         let mut item = self.inspect_root(
             record.meta.id.clone(),
             "registered".to_string(),
@@ -1236,6 +1245,68 @@ impl WorktreeService {
             false,
             min_age_hours,
         );
+        item.attached_chat_ids = attached_chat_ids(&item.references);
+        item.attached_task_ids = attached_task_ids(&item.references);
+        item
+    }
+
+    fn inspect_invalid_registered_record(
+        &self,
+        record: &WorktreeRegistryRecord,
+        age_hours: Option<u64>,
+        last_used_at: Option<String>,
+        min_age_hours: u64,
+        error: String,
+    ) -> WorktreeInspection {
+        let references = record.references.clone();
+        let mut item = WorktreeInspection {
+            id: record.meta.id.clone(),
+            source: "registered".to_string(),
+            root: record.meta.root.clone(),
+            branch: record.meta.branch.clone(),
+            base_branch: record.meta.base_branch.clone(),
+            base_commit: record.meta.base_commit.clone(),
+            status: WorktreeStatus {
+                path_exists: record.meta.root.exists(),
+                is_git_worktree: false,
+                dirty: false,
+                conflicted: false,
+                staged_count: 0,
+                unstaged_count: 0,
+                untracked_count: 0,
+                branch: None,
+                head_commit: None,
+                error: Some(format!("checkout validation failed: {}", error)),
+            },
+            reference_count: references.len(),
+            shared: references.len() > 1,
+            references,
+            stale: true,
+            conflicted: false,
+            changed_files: 0,
+            committed_files: 0,
+            staged_files: 0,
+            unstaged_files: 0,
+            untracked_files: 0,
+            additions: 0,
+            deletions: 0,
+            cleanup_candidate: false,
+            cleanup_blockers: Vec::new(),
+            disk_usage_bytes: None,
+            age_hours,
+            last_used_at,
+            branch_merged: None,
+            registry_missing: false,
+            cache_dir_missing_from_registry: false,
+            attached_chat_ids: Vec::new(),
+            attached_task_ids: Vec::new(),
+        };
+        let request = WorktreeCleanupRequest {
+            ids: vec![item.id.clone()],
+            min_age_hours,
+            ..WorktreeCleanupRequest::default()
+        };
+        item.cleanup_blockers = cleanup_blockers_for_item(&item, &request);
         item.attached_chat_ids = attached_chat_ids(&item.references);
         item.attached_task_ids = attached_task_ids(&item.references);
         item
@@ -1461,6 +1532,7 @@ impl WorktreeService {
         record: &WorktreeRegistryRecord,
         delete_branch: bool,
     ) -> Result<WorktreeRemovalResult, String> {
+        validate_registered_record_checkout(record)?;
         let stale_path = !record.meta.root.exists();
         let mut warnings = git::remove_worktree(
             &record.meta.source_workspace_root,
@@ -4117,6 +4189,156 @@ mod worktree_registry_tests {
         record.updated_at = ts.clone();
         record.last_seen_at = Some(ts);
         service.save_registry(&registry).await.unwrap();
+    }
+
+    fn replace_registered_root_with_unrelated_repo(source: &Path, root: &Path, branch: &str) {
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::create_dir_all(root).unwrap();
+        run_git(root, &["init"]);
+        run_git(root, &["config", "core.autocrlf", "false"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        run_git(root, &["config", "user.name", "Test User"]);
+        run_git(root, &["fetch", source.to_str().unwrap(), "main"]);
+        run_git(root, &["checkout", "-b", branch, "FETCH_HEAD"]);
+        std::fs::write(root.join("replacement-only.txt"), "replacement contents\n").unwrap();
+        run_git(root, &["add", "replacement-only.txt"]);
+        run_git(root, &["commit", "-m", "replacement contents"]);
+    }
+
+    #[tokio::test]
+    async fn worktree_summary_marks_replaced_registered_root_invalid_without_analyzing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/replaced-summary-root".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let id = created.worktree.meta.id.clone();
+        let root = created.worktree.meta.root.clone();
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        replace_registered_root_with_unrelated_repo(&source, &root, &branch);
+
+        let inventory = service.inspect_worktrees_with_min_age(24).await.unwrap();
+
+        let item = inventory
+            .worktrees
+            .iter()
+            .find(|item| item.id == id)
+            .unwrap();
+        assert!(item.stale);
+        assert!(!item.status.is_git_worktree);
+        assert_eq!(item.changed_files, 0);
+        assert_eq!(item.additions, 0);
+        assert_eq!(item.deletions, 0);
+        assert!(item.disk_usage_bytes.is_none());
+        assert!(item.branch_merged.is_none());
+        assert!(item
+            .status
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("different repository")));
+        assert!(!item.cleanup_candidate);
+        assert!(!inventory.cleanup_candidates.contains(&id));
+        assert_eq!(inventory.summary.dirty, 0);
+        assert_eq!(inventory.summary.changed_files, 0);
+        assert_eq!(inventory.summary.additions, 0);
+        assert_eq!(inventory.summary.deletions, 0);
+        assert!(root.join("replacement-only.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn worktree_cleanup_dry_run_skips_replaced_registered_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/replaced-cleanup-dry-run".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let id = created.worktree.meta.id.clone();
+        let root = created.worktree.meta.root.clone();
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        mark_worktree_old(&service, &id, 48).await;
+        replace_registered_root_with_unrelated_repo(&source, &root, &branch);
+
+        let plan = service
+            .cleanup_worktrees_dry_run(WorktreeCleanupRequest {
+                ids: vec![id.clone()],
+                clean_only: false,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(plan.candidates.is_empty());
+        assert!(plan.skipped.iter().any(|item| {
+            item.id == id
+                && item.reason == "not_git_worktree"
+                && item.details.contains(&"diff_error".to_string())
+        }));
+        assert!(root.join("replacement-only.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn worktree_cleanup_execution_skips_replaced_registered_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/replaced-cleanup-execute".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let id = created.worktree.meta.id.clone();
+        let root = created.worktree.meta.root.clone();
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        mark_worktree_old(&service, &id, 48).await;
+        replace_registered_root_with_unrelated_repo(&source, &root, &branch);
+
+        let result = service
+            .cleanup_worktrees(WorktreeCleanupRequest {
+                ids: vec![id.clone()],
+                clean_only: false,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(result.deleted.is_empty());
+        assert!(result.skipped.iter().any(|item| {
+            item.id == id
+                && item.reason == "not_git_worktree"
+                && item.details.contains(&"diff_error".to_string())
+        }));
+        assert!(root.join("replacement-only.txt").is_file());
+        assert!(service
+            .load_registry()
+            .await
+            .unwrap()
+            .records
+            .iter()
+            .any(|record| record.meta.id == id));
     }
 
     #[tokio::test]
