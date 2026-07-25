@@ -12,6 +12,8 @@ import {
 } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { setProjectStorageNamespace } from "../../../utils/chatUiPersistence";
+import { filesApi, type FilesTreeEntry } from "../../../services/refact/files";
+import { applyChatEvent } from "../../Chat/Thread";
 import { FilesPanel } from "./FilesPanel";
 import { FileViewer } from "./FileViewer";
 import {
@@ -203,8 +205,11 @@ describe("FilesPanel", () => {
     );
   });
 
-  it("fetches an expanded directory once and reuses its cached children", async () => {
+  it("replaces refetched children while keeping the directory expanded", async () => {
     let sourceRequests = 0;
+    let sourceEntries: FilesTreeEntry[] = [
+      { name: "main.ts", path: filePath, kind: "file", size: 22 },
+    ];
     server.use(
       http.get("*/v1/files/tree", ({ request }) => {
         const path = new URL(request.url).searchParams.get("path") ?? "";
@@ -223,15 +228,11 @@ describe("FilesPanel", () => {
             ]),
           );
         }
-        return HttpResponse.json(
-          treeResponse(sourcePath, [
-            { name: "main.ts", path: filePath, kind: "file", size: 22 },
-          ]),
-        );
+        return HttpResponse.json(treeResponse(sourcePath, sourceEntries));
       }),
     );
 
-    const { user } = render(<FilesPanel />);
+    const { store, user } = render(<FilesPanel />);
     await user.click(
       await screen.findByRole("treeitem", { name: /workspace/i }),
     );
@@ -242,15 +243,143 @@ describe("FilesPanel", () => {
     ).toBeVisible();
     expect(sourceRequests).toBe(1);
 
-    await user.click(source);
+    sourceEntries = [
+      {
+        name: "replacement.ts",
+        path: `${sourcePath}/replacement.ts`,
+        kind: "file",
+        size: 12,
+      },
+    ];
+    store.dispatch(
+      filesApi.util.invalidateTags([{ type: "Tree", id: sourcePath }]),
+    );
+
     await waitFor(() => {
       expect(screen.queryByRole("treeitem", { name: /main\.ts/i })).toBeNull();
+      expect(
+        screen.getByRole("treeitem", { name: /replacement\.ts/i }),
+      ).toBeVisible();
     });
-    await user.click(source);
+    expect(source).toHaveAttribute("aria-expanded", "true");
+    expect(sourceRequests).toBe(2);
+  });
+
+  it("refreshes expanded parents after live create delete and rename", async () => {
+    const testsPath = `${rootPath}/tests`;
+    const createdPath = `${sourcePath}/created.ts`;
+    const renamedFrom = `${sourcePath}/old.ts`;
+    const renamedTo = `${testsPath}/new.ts`;
+    let sourceEntries: FilesTreeEntry[] = [
+      { name: "old.ts", path: renamedFrom, kind: "file", size: 8 },
+    ];
+    let testEntries: FilesTreeEntry[] = [];
+    server.use(
+      http.get("*/v1/files/tree", ({ request }) => {
+        const path = new URL(request.url).searchParams.get("path") ?? "";
+        if (path === "") {
+          return HttpResponse.json(
+            treeResponse("", [
+              { name: "workspace", path: rootPath, kind: "dir", size: null },
+            ]),
+          );
+        }
+        if (path === rootPath) {
+          return HttpResponse.json(
+            treeResponse(rootPath, [
+              { name: "src", path: sourcePath, kind: "dir", size: null },
+              { name: "tests", path: testsPath, kind: "dir", size: null },
+            ]),
+          );
+        }
+        if (path === sourcePath) {
+          return HttpResponse.json(treeResponse(sourcePath, sourceEntries));
+        }
+        if (path === testsPath) {
+          return HttpResponse.json(treeResponse(testsPath, testEntries));
+        }
+        return HttpResponse.json(treeResponse(path, []));
+      }),
+      http.get("*/v1/files/read", ({ request }) => {
+        const path = new URL(request.url).searchParams.get("path") ?? "";
+        return HttpResponse.json(readResponse({ path, content: "content\n" }));
+      }),
+    );
+
+    const view = render(<FilesPanel />, {
+      preloadedState: {
+        current_project: { name: "workspace", workspaceRoots: [rootPath] },
+      },
+    });
+    const source = await screen.findByRole("treeitem", { name: /src/i });
+    const tests = await screen.findByRole("treeitem", { name: /tests/i });
+    await view.user.click(source);
+    await view.user.click(tests);
     expect(
-      await screen.findByRole("treeitem", { name: /main\.ts/i }),
+      await screen.findByRole("treeitem", { name: /old\.ts/i }),
     ).toBeVisible();
-    expect(sourceRequests).toBe(1);
+
+    const chatId = view.store.getState().chat.current_thread_id;
+    const dispatchDiff = (
+      seq: string,
+      chunk: {
+        file_name: string;
+        file_action: string;
+        file_name_rename?: string;
+      },
+    ) =>
+      view.store.dispatch(
+        applyChatEvent({
+          chat_id: chatId,
+          seq,
+          type: "message_added",
+          index: Number(seq),
+          message: {
+            role: "diff",
+            tool_call_id: `edit-${seq}`,
+            content: [
+              {
+                ...chunk,
+                line1: 1,
+                line2: 1,
+                lines_remove: "",
+                lines_add: "content\n",
+              },
+            ],
+          },
+        }),
+      );
+
+    sourceEntries = [
+      ...sourceEntries,
+      { name: "created.ts", path: createdPath, kind: "file", size: 8 },
+    ];
+    dispatchDiff("1", { file_name: createdPath, file_action: "add" });
+    expect(
+      await screen.findByRole("treeitem", { name: /created\.ts/i }),
+    ).toBeVisible();
+
+    sourceEntries = sourceEntries.filter((entry) => entry.path !== createdPath);
+    dispatchDiff("2", { file_name: createdPath, file_action: "remove" });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("treeitem", { name: /created\.ts/i }),
+      ).toBeNull(),
+    );
+
+    sourceEntries = [];
+    testEntries = [{ name: "new.ts", path: renamedTo, kind: "file", size: 8 }];
+    dispatchDiff("3", {
+      file_name: renamedFrom,
+      file_action: "rename",
+      file_name_rename: renamedTo,
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("treeitem", { name: /old\.ts/i })).toBeNull();
+      expect(screen.getByRole("treeitem", { name: /new\.ts/i })).toBeVisible();
+    });
+    expect(source).toHaveAttribute("aria-expanded", "true");
+    expect(tests).toHaveAttribute("aria-expanded", "true");
   });
 
   it("roots and re-roots the tree with the focused chat worktree", async () => {

@@ -194,9 +194,7 @@ export function FileTree() {
 
   const handleDirectoryLoaded = useCallback(
     (path: string, entries: FilesTreeEntry[]) => {
-      setChildrenByPath((current) =>
-        current[path] ? current : { ...current, [path]: entries },
-      );
+      setChildrenByPath((current) => ({ ...current, [path]: entries }));
     },
     [],
   );

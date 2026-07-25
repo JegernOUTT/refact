@@ -172,6 +172,7 @@ import {
   clearLiveFileUpdatesForChat,
   markLiveFileUpdateAuthoritative,
 } from "../features/Workspace/FilesPanel/filesPanelSlice";
+import { parentDirectoryPath } from "../features/Workspace/FilesPanel/fileTreeModel";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
@@ -459,6 +460,24 @@ startListening({
       chunksByPath.set(chunk.file_name, [...chunks, chunk]);
     }
 
+    const changedParentPaths = new Set<string>();
+    for (const [path, chunks] of chunksByPath) {
+      changedParentPaths.add(parentDirectoryPath(path) ?? "");
+      const renamedPath = chunks.find(
+        (chunk) => chunk.file_action === "rename" && chunk.file_name_rename,
+      )?.file_name_rename;
+      if (renamedPath) {
+        changedParentPaths.add(parentDirectoryPath(renamedPath) ?? "");
+      }
+    }
+    if (changedParentPaths.size > 0) {
+      listenerApi.dispatch(
+        filesApi.util.invalidateTags(
+          [...changedParentPaths].map((id) => ({ type: "Tree" as const, id })),
+        ),
+      );
+    }
+
     const liveEdits = selectLiveEditsForChat(state, event.chat_id);
     for (const [path, chunks] of chunksByPath) {
       const renameChunk = chunks.find(
@@ -546,20 +565,11 @@ startListening({
         }
       } else {
         listenerApi.dispatch(
-          filesApi.util.invalidateTags([
-            { type: "File", id: path },
-            { type: "Tree", id: path.slice(0, path.lastIndexOf("/")) },
-          ]),
+          filesApi.util.invalidateTags([{ type: "File", id: path }]),
         );
         if (operation === "rename") {
           listenerApi.dispatch(
-            filesApi.util.invalidateTags([
-              { type: "File", id: displayedPath },
-              {
-                type: "Tree",
-                id: displayedPath.slice(0, displayedPath.lastIndexOf("/")),
-              },
-            ]),
+            filesApi.util.invalidateTags([{ type: "File", id: displayedPath }]),
           );
         }
       }
