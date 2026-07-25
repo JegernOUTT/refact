@@ -326,3 +326,7 @@ plugins/intellij/src/main/resources/webview/dist/
 .playwright-mcp/
 issue-18.png
 ui-audit-*.html
+/ui-*.png
+/cockpit-*.png
+/final-*.png
+refact-agent/engine/e2e-*.txt
