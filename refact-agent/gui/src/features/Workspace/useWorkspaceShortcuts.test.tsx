@@ -7,7 +7,7 @@ import { setUpStore } from "../../app/store";
 import { createChatWithId } from "../Chat/Thread";
 import { updateConfig } from "../Config/configSlice";
 import { setTerminalWorkbenchOpen } from "./TerminalPanel/terminalSlice";
-import { openTab, setDockOpen } from "./workspaceSlice";
+import { openTab, setDockOpen, setDockSection } from "./workspaceSlice";
 import { makeSurfaceKey } from "./surfaceKey";
 import { useWorkspaceShortcuts } from "./useWorkspaceShortcuts";
 
@@ -101,10 +101,11 @@ describe("useWorkspaceShortcuts", () => {
     const wrapper = ({ children }: { children: ReactNode }) => (
       <Provider store={store}>{children}</Provider>
     );
+    store.dispatch(setDockSection("tasks"));
     renderHook(() => useWorkspaceShortcuts(), { wrapper });
 
     fireEvent.keyDown(window, { key: "1", ctrlKey: true });
-    expect(store.getState().workspace.dock?.section).toBe("files");
+    expect(store.getState().workspace.dock?.section).toBe("tasks");
     fireEvent.keyDown(window, { key: "2", ctrlKey: true });
     expect(store.getState().workspace.dock?.section).toBe("git");
   });
