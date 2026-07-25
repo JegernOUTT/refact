@@ -68,6 +68,17 @@
   font-weight: 600;
 }
 
+.resourceError {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.resourceError p {
+  margin: 0;
+}
+
 .factGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));

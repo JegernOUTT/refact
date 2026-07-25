@@ -1,4 +1,4 @@
-import { http, HttpResponse } from "msw";
+import { delay, http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 
 import { setUpStore } from "../../../../app/store";
@@ -8,6 +8,8 @@ import { render, screen, waitFor, within } from "../../../../utils/test-utils";
 import { daemonEventsReceived } from "../../dashboardSlice";
 import { ProjectsPage } from "../ProjectsPage";
 import { ProjectDetailPage } from "./ProjectDetailPage";
+import { codeIntelData, useProjectResource } from "./projectResource";
+import { ResourceView } from "./tabs/shared";
 
 const config = {
   apiKey: "",
@@ -127,6 +129,30 @@ const codeIntelHealth = {
     },
   ],
 };
+
+function parseHealth(data: unknown): typeof codeIntelHealth | null {
+  return codeIntelData<typeof codeIntelHealth>(data);
+}
+
+function TimeoutResourceHarness() {
+  const health = useProjectResource(
+    BASE,
+    PROJECT,
+    "/code-intel/health",
+    parseHealth,
+    20,
+  );
+  return (
+    <ResourceView
+      errorText="Code health could not be loaded."
+      onRetry={health.refetch}
+      resource={health.resource}
+      timeoutText="Code health request timed out."
+    >
+      {(data) => <span>{data.aggregate.file_count} files ready</span>}
+    </ResourceView>
+  );
+}
 
 const gitStatus = {
   roots: [
@@ -440,6 +466,108 @@ describe("ProjectDetailPage", () => {
 
     await view.user.click(screen.getByRole("tab", { name: "Git" }));
     await waitFor(() => expect(counters["git-status"]).toBe(1));
+  });
+
+  it("renders a slow health response for a large project", async () => {
+    registerProxyHandlers(() => [worker("ready")]);
+    server.use(
+      http.get(`${BASE}/p/${PROJECT}/v1/code-intel/health`, async () => {
+        await delay(3_100);
+        return HttpResponse.json({
+          ...codeIntelHealth,
+          aggregate: { ...codeIntelHealth.aggregate, file_count: 4_053 },
+        });
+      }),
+    );
+    const { view } = renderDetail();
+
+    await view.user.click(await screen.findByRole("tab", { name: "Health" }));
+
+    expect(
+      await screen.findByText("4,053", {}, { timeout: 5_000 }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Health hotspots")).toBeInTheDocument();
+  }, 10_000);
+
+  it("keeps an in-flight health request when switching tabs", async () => {
+    registerProxyHandlers(() => [worker("ready")]);
+    let healthRequests = 0;
+    let releaseFirstResponse: () => void = () => undefined;
+    server.use(
+      http.get(`${BASE}/p/${PROJECT}/v1/code-intel/health`, async () => {
+        healthRequests += 1;
+        if (healthRequests === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirstResponse = resolve;
+          });
+        }
+        return HttpResponse.json(codeIntelHealth);
+      }),
+    );
+    const { view } = renderDetail();
+
+    await view.user.click(await screen.findByRole("tab", { name: "Health" }));
+    await waitFor(() => expect(healthRequests).toBe(1));
+    await view.user.click(screen.getByRole("tab", { name: "Git" }));
+    releaseFirstResponse();
+    expect(await screen.findByText("main")).toBeInTheDocument();
+    await view.user.click(screen.getByRole("tab", { name: "Health" }));
+
+    expect(await screen.findByText("src/messy.ts")).toBeInTheDocument();
+    expect(healthRequests).toBe(1);
+  });
+
+  it("distinguishes a timed-out health request and retries it", async () => {
+    let healthRequests = 0;
+    server.use(
+      http.get(`${BASE}/p/${PROJECT}/v1/code-intel/health`, async () => {
+        healthRequests += 1;
+        if (healthRequests === 1) await delay(100);
+        return HttpResponse.json(codeIntelHealth);
+      }),
+    );
+    const view = render(<TimeoutResourceHarness />, {
+      store: setUpStore({ config }),
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Code health request timed out.",
+    );
+    expect(
+      screen.queryByText("Code health could not be loaded."),
+    ).not.toBeInTheDocument();
+
+    await view.user.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText("25 files ready")).toBeInTheDocument();
+    expect(healthRequests).toBe(2);
+  });
+
+  it("renders genuine health failures honestly and retries them", async () => {
+    registerProxyHandlers(() => [worker("ready")]);
+    let healthRequests = 0;
+    server.use(
+      http.get(`${BASE}/p/${PROJECT}/v1/code-intel/health`, () => {
+        healthRequests += 1;
+        return healthRequests === 1
+          ? HttpResponse.json({ error: "failed" }, { status: 500 })
+          : HttpResponse.json(codeIntelHealth);
+      }),
+    );
+    const { view } = renderDetail();
+
+    await view.user.click(await screen.findByRole("tab", { name: "Health" }));
+    expect(
+      await screen.findByText("Code health could not be loaded."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Code health request timed out."),
+    ).not.toBeInTheDocument();
+
+    await view.user.click(screen.getAllByRole("button", { name: "Retry" })[0]);
+
+    expect(await screen.findByText("src/messy.ts")).toBeInTheDocument();
+    expect(healthRequests).toBe(2);
   });
 
   it("navigates to the detail route from a project card title", async () => {

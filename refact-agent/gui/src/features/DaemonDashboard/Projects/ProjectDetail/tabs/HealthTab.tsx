@@ -61,11 +61,17 @@ function HealthContent({
       <Surface className={styles.section} radius="card" variant="glass">
         <h3 className={styles.sectionTitle}>Code health</h3>
         <ResourceView
-          errorText="Code health is unavailable."
+          errorText="Code health could not be loaded."
+          onRetry={health.refetch}
           resource={health.resource}
+          timeoutText="Code health request timed out."
         >
           {(data) => (
             <dl className={styles.factGrid}>
+              <Fact
+                label="Files analyzed"
+                value={data.aggregate.file_count.toLocaleString()}
+              />
               <Fact label="Grade" value={data.aggregate.grade} />
               <Fact
                 label="Average score"
@@ -99,8 +105,10 @@ function HealthContent({
       <Surface className={styles.section} radius="card" variant="glass">
         <h3 className={styles.sectionTitle}>Hotspots</h3>
         <ResourceView
-          errorText="Hotspots are unavailable."
+          errorText="Hotspots could not be loaded."
+          onRetry={health.refetch}
           resource={health.resource}
+          timeoutText="Hotspots request timed out."
         >
           {(data) =>
             data.files.length === 0 ? (

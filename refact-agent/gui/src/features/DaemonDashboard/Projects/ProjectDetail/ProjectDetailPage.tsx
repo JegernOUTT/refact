@@ -48,6 +48,7 @@ export function ProjectDetailPage({ projectId }: ProjectDetailPageProps) {
   const config = useAppSelector(selectConfig);
   const daemonBase = resolveDaemonBaseUrl(config);
   const [tab, setTab] = useState<(typeof TAB_VALUES)[number]>("overview");
+  const [healthMounted, setHealthMounted] = useState(false);
   const { data, isLoading, refetch } = useListProjectsQuery(undefined, {
     pollingInterval: WORKERS_POLLING_INTERVAL_MS,
   });
@@ -116,7 +117,11 @@ export function ProjectDetailPage({ projectId }: ProjectDetailPageProps) {
       </header>
 
       <Tabs
-        onValueChange={(value) => setTab(value as (typeof TAB_VALUES)[number])}
+        onValueChange={(value) => {
+          const nextTab = value as (typeof TAB_VALUES)[number];
+          if (nextTab === "health") setHealthMounted(true);
+          setTab(nextTab);
+        }}
         value={tab}
       >
         <Tabs.List
@@ -138,14 +143,16 @@ export function ProjectDetailPage({ projectId }: ProjectDetailPageProps) {
             worker={worker}
           />
         </Tabs.Content>
-        <Tabs.Content value="health">
-          <HealthTab
-            daemonBase={daemonBase}
-            onMutated={onMutated}
-            openUrl={openUrl}
-            worker={worker}
-          />
-        </Tabs.Content>
+        {healthMounted ? (
+          <Tabs.Content forceMount value="health">
+            <HealthTab
+              daemonBase={daemonBase}
+              onMutated={onMutated}
+              openUrl={openUrl}
+              worker={worker}
+            />
+          </Tabs.Content>
+        ) : null}
         <Tabs.Content value="git">
           <GitTab
             daemonBase={daemonBase}

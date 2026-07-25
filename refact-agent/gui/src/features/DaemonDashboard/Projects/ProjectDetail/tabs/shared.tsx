@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import classNames from "classnames";
 
+import { Button } from "../../../../../components/ui";
 import type { ProjectResource } from "../projectResource";
 import styles from "../ProjectDetail.module.css";
 
@@ -29,17 +30,32 @@ export function Fact({
 export function ResourceView<T>({
   resource,
   errorText,
+  onRetry,
+  timeoutText = "Request timed out.",
   children,
 }: {
   resource: ProjectResource<T>;
   errorText: string;
+  onRetry?: () => void;
+  timeoutText?: string;
   children: (data: T) => ReactNode;
 }) {
   if (resource.state === "loading") {
     return <p className={styles.muted}>Loading…</p>;
   }
   if (resource.state === "error") {
-    return <p className={styles.muted}>{errorText}</p>;
+    return (
+      <div className={styles.resourceError} role="alert">
+        <p className={styles.muted}>
+          {resource.kind === "timeout" ? timeoutText : errorText}
+        </p>
+        {onRetry ? (
+          <Button onClick={onRetry} size="sm" variant="soft">
+            Retry
+          </Button>
+        ) : null}
+      </div>
+    );
   }
   return <>{children(resource.data)}</>;
 }
