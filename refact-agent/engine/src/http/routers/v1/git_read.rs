@@ -372,9 +372,11 @@ fn diff_for_repo(root: &Path, path: Option<&str>, staged: bool) -> Result<GitDif
     let mut patch = String::new();
     let mut truncated = false;
     diff.print(git2::DiffFormat::Patch, |_, _, line| {
-        let mut prefix = [0u8; 4];
-        let prefix = line.origin().encode_utf8(&mut prefix);
-        append_patch_text(&mut patch, prefix, &mut truncated);
+        if matches!(line.origin(), '+' | '-' | ' ') {
+            let mut prefix = [0u8; 4];
+            let prefix = line.origin().encode_utf8(&mut prefix);
+            append_patch_text(&mut patch, prefix, &mut truncated);
+        }
         append_patch_text(
             &mut patch,
             &String::from_utf8_lossy(line.content()),
@@ -677,6 +679,57 @@ mod tests {
         assert!(unstaged.patch.contains("+unstaged"));
         assert!(!staged.truncated);
         assert!(!unstaged.truncated);
+    }
+
+    #[test]
+    fn diff_for_repo_preserves_content_prefixes_and_cleans_metadata_origins() {
+        let (dir, repo) = init_repo();
+        let base = (1..=24)
+            .map(|line| format!("line {line:02}\n"))
+            .collect::<String>();
+        fs::write(dir.path().join("file.txt"), &base).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("Test User", "test@example.com").unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Initial commit",
+            &tree,
+            &[],
+        )
+        .unwrap();
+
+        let modified = base
+            .replace("line 02\n", "changed 02\n")
+            .replace("line 22\n", "changed 22\n");
+        fs::write(dir.path().join("file.txt"), modified).unwrap();
+        fs::write(
+            dir.path().join("image.bin"),
+            b"\x89PNG\r\n\x1a\n\0binary payload",
+        )
+        .unwrap();
+
+        let patch = diff_for_repo(dir.path(), None, false).unwrap().patch;
+        let lines = patch.lines().collect::<Vec<_>>();
+
+        assert!(lines.iter().any(|line| *line == "-line 02"));
+        assert!(lines.iter().any(|line| *line == "+changed 02"));
+        assert!(lines.iter().any(|line| *line == " line 03"));
+        assert!(lines.iter().filter(|line| line.starts_with("@@ ")).count() >= 2);
+        assert!(lines
+            .iter()
+            .any(|line| *line == "diff --git a/image.bin b/image.bin"));
+        assert!(lines
+            .iter()
+            .any(|line| *line == "Binary files /dev/null and b/image.bin differ"));
+        assert!(!patch.contains("Fdiff"));
+        assert!(!patch.contains("BBinary"));
+        assert!(!patch.contains("H@@"));
     }
 
     #[test]

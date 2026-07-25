@@ -1020,6 +1020,7 @@ pub fn git_diff_head_to_workdir<'repo>(
     let mut diff_options = DiffOptions::new();
     diff_options.include_untracked(true);
     diff_options.recurse_untracked_dirs(true);
+    diff_options.show_untracked_content(true);
 
     let head = repository
         .head()
@@ -1043,7 +1044,9 @@ pub fn git_diff_head_to_workdir_as_string(
     diff.print(git2::DiffFormat::Patch, |_, _, line| {
         let line_content = std::str::from_utf8(line.content()).unwrap_or("");
         if diff_str.len() + line_content.len() < max_size {
-            diff_str.push(line.origin());
+            if matches!(line.origin(), '+' | '-' | ' ') {
+                diff_str.push(line.origin());
+            }
             diff_str.push_str(line_content);
             if diff_str.len() > max_size {
                 diff_str.truncate(max_size - 4);
@@ -1196,6 +1199,42 @@ mod tests {
         assert!(report.commits[0]
             .classifications
             .contains(&GitCommitClassification::Decision));
+    }
+
+    #[test]
+    fn workdir_diff_preserves_content_prefixes_and_cleans_metadata_origins() {
+        let (dir, repo) = init_repo();
+        let base = (1..=24)
+            .map(|line| format!("line {line:02}\n"))
+            .collect::<String>();
+        commit_file(&repo, dir.path(), "file.txt", &base, "initial");
+
+        let modified = base
+            .replace("line 02\n", "changed 02\n")
+            .replace("line 22\n", "changed 22\n");
+        fs::write(dir.path().join("file.txt"), modified).unwrap();
+        fs::write(
+            dir.path().join("image.bin"),
+            b"\x89PNG\r\n\x1a\n\0binary payload",
+        )
+        .unwrap();
+
+        let patch = git_diff_head_to_workdir_as_string(&repo, usize::MAX).unwrap();
+        let lines = patch.lines().collect::<Vec<_>>();
+
+        assert!(lines.iter().any(|line| *line == "-line 02"));
+        assert!(lines.iter().any(|line| *line == "+changed 02"));
+        assert!(lines.iter().any(|line| *line == " line 03"));
+        assert!(lines.iter().filter(|line| line.starts_with("@@ ")).count() >= 2);
+        assert!(lines
+            .iter()
+            .any(|line| *line == "diff --git a/image.bin b/image.bin"));
+        assert!(lines
+            .iter()
+            .any(|line| *line == "Binary files /dev/null and b/image.bin differ"));
+        assert!(!patch.contains("Fdiff"));
+        assert!(!patch.contains("BBinary"));
+        assert!(!patch.contains("H@@"));
     }
 
     #[test]
