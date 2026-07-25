@@ -49,6 +49,7 @@ import {
   resolveEngineBaseUrl,
   type EngineApiConfig,
 } from "../../services/refact/apiUrl";
+import { resolveWorkspaceDockAvailability } from "../../features/Workspace/workspaceAvailability";
 import { IconButton, Tooltip } from "../ui";
 import {
   ConnectionStatusIndicator,
@@ -191,21 +192,22 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
   const workspaceDock = useAppSelector(selectWorkspaceDock);
-  const hasWorkspaceChrome =
-    capabilities.filesPanel ||
-    capabilities.gitPanel ||
-    capabilities.terminalPanel;
-  const workspacePanelsPressed = hasWorkspaceChrome
+  const workspaceAvailability = resolveWorkspaceDockAvailability(
+    host,
+    capabilities,
+    panelsForced,
+  );
+  const showWorkspacePanels = host !== "web" || workspaceAvailability.dock;
+  const workspacePanelsPressed = workspaceAvailability.dock
     ? workspaceDock.open
-    : panelsForced;
+    : false;
   const liveEdits = useAppSelector((state) =>
     focusedWorkspaceChatId
       ? selectLiveEditsForChat(state, focusedWorkspaceChatId)
       : false,
   );
   const showLiveEdits =
-    focusedWorkspaceChatId !== null &&
-    (capabilities.filesPanel || panelsForced);
+    focusedWorkspaceChatId !== null && workspaceAvailability.files;
   const { openSettings } = useEventsBusForIDE();
   const toolbarChatId =
     activeTab.type === "chat"
@@ -217,7 +219,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     workspaceTabs.length > 0 ||
     openTasks.length > 0 ||
     pages.some((page) => page.name === "buddy") ||
-    hasWorkspaceChrome;
+    workspaceAvailability.dock;
   const [createTask] = useCreateTaskMutation();
 
   const goHome = useCallback(() => {
@@ -309,14 +311,13 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   }, [engineUrl, openUrl]);
 
   const onToggleWorkspacePanels = useCallback(() => {
-    if (hasWorkspaceChrome) {
+    if (workspaceAvailability.dock) {
       dispatch(toggleDock());
       return;
     }
-    const next = !panelsForced;
-    dispatch(setPanelsForced(next));
-    if (next) dispatch(setDockOpen(true));
-  }, [dispatch, hasWorkspaceChrome, panelsForced]);
+    dispatch(setPanelsForced(true));
+    dispatch(setDockOpen(true));
+  }, [dispatch, workspaceAvailability.dock]);
 
   const onToggleLiveEdits = useCallback(() => {
     if (!focusedWorkspaceChatId) return;
@@ -337,13 +338,15 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           icon={Home}
           onClick={goHome}
         />
-        <ToolbarIconButton
-          label="Workspace panels"
-          className={styles.workspacePanelsButton}
-          icon={PanelLeft}
-          onClick={onToggleWorkspacePanels}
-          pressed={workspacePanelsPressed}
-        />
+        {showWorkspacePanels ? (
+          <ToolbarIconButton
+            label="Workspace panels"
+            className={styles.workspacePanelsButton}
+            icon={PanelLeft}
+            onClick={onToggleWorkspacePanels}
+            pressed={workspacePanelsPressed}
+          />
+        ) : null}
         {showLiveEdits ? (
           <ToolbarIconButton
             label="Live edits"

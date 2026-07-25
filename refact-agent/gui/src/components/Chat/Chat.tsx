@@ -28,8 +28,12 @@ import {
   registerVisibleChatMount,
   unregisterVisibleChatMount,
 } from "../../features/Connection";
-import { selectCapabilities } from "../../features/Config/configSlice";
+import {
+  selectCapabilities,
+  selectHost,
+} from "../../features/Config/configSlice";
 import { TerminalPanel } from "../../features/Workspace/TerminalPanel";
+import { resolveWorkspaceDockAvailability } from "../../features/Workspace/workspaceAvailability";
 import {
   selectPanelsForced,
   selectWorkspaceDock,
@@ -66,11 +70,18 @@ export const Chat: React.FC<ChatProps> = ({
   const browserOversizeInfo = useAppSelector((state) =>
     selectBrowserContextOversize(state, chatId),
   );
+  const host = useAppSelector(selectHost);
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
   const workspaceDock = useAppSelector(selectWorkspaceDock);
+  const workspaceAvailability = resolveWorkspaceDockAvailability(
+    host,
+    capabilities,
+    panelsForced,
+  );
   const showTerminalWorkbench =
-    (capabilities.terminalPanel || panelsForced) && workspaceDock.open;
+    workspaceAvailability.terminal &&
+    (!workspaceAvailability.dock || workspaceDock.open);
 
   const { submit, abort, retryFromIndex } = useChatActions(chatId);
 

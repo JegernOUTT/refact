@@ -44,7 +44,7 @@ export function useWorkspaceShortcuts() {
       git: gitAvailable,
       tasks: tasksAvailable,
       terminal: terminalAvailable,
-    } = resolveWorkspaceDockAvailability(capabilities, panelsForced);
+    } = resolveWorkspaceDockAvailability(host, capabilities, panelsForced);
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
@@ -67,13 +67,13 @@ export function useWorkspaceShortcuts() {
       }
       if (key === "j" && terminalAvailable && focusedChatId) {
         event.preventDefault();
-        if (dock.open) {
-          dispatch(toggleTerminalWorkbench({ chatId: focusedChatId }));
-        } else {
+        if (dockAvailable && !dock.open) {
           dispatch(setDockOpen(true));
           dispatch(
             setTerminalWorkbenchOpen({ chatId: focusedChatId, open: true }),
           );
+        } else {
+          dispatch(toggleTerminalWorkbench({ chatId: focusedChatId }));
         }
         return;
       }

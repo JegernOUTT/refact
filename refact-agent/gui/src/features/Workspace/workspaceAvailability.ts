@@ -1,4 +1,4 @@
-import type { Capabilities } from "../Config/configSlice";
+import type { Capabilities, Config } from "../Config/configSlice";
 
 type WorkspacePanelCapabilities = Pick<
   Capabilities,
@@ -14,11 +14,14 @@ export type WorkspaceDockAvailability = {
 };
 
 export function resolveWorkspaceDockAvailability(
+  host: Config["host"],
   capabilities: WorkspacePanelCapabilities,
   panelsForced: boolean,
 ): WorkspaceDockAvailability {
-  const files = capabilities.filesPanel || panelsForced;
-  const git = capabilities.gitPanel || panelsForced;
+  const capabilitiesEnabled = host === "web";
+  const files =
+    panelsForced || (capabilitiesEnabled && capabilities.filesPanel);
+  const git = panelsForced || (capabilitiesEnabled && capabilities.gitPanel);
   const dock = files || git;
 
   return {
@@ -26,6 +29,7 @@ export function resolveWorkspaceDockAvailability(
     files,
     git,
     tasks: dock,
-    terminal: capabilities.terminalPanel || panelsForced,
+    terminal:
+      panelsForced || (capabilitiesEnabled && capabilities.terminalPanel),
   };
 }

@@ -244,6 +244,40 @@ describe("IDE characterization: zero new chrome", () => {
   );
 
   it.each(ideHosts)(
+    "keeps %s capability overrides behind the opt-in panel button",
+    async (host) => {
+      const { store } = renderApp(
+        {
+          host,
+          capabilities: {
+            filesPanel: true,
+            gitPanel: true,
+            terminalPanel: true,
+          },
+        },
+        (appStore) => {
+          appStore.dispatch(
+            createChatWithId({
+              id: "chat-a",
+              title: "Chat Alpha",
+              mode: "agent",
+            }),
+          );
+        },
+      );
+
+      await screen.findByRole("tab", { name: /Chat Alpha/ });
+
+      expectNoPanelChrome();
+      expect(screen.queryByLabelText("Workspace dock")).toBeNull();
+      expect(
+        screen.queryByLabelText("Terminal workbench for chat-a"),
+      ).toBeNull();
+      expect(store.getState().workspace.panelsForced).toBe(false);
+    },
+  );
+
+  it.each(ideHosts)(
     "mounts workspace panels after opting in on %s",
     async (host) => {
       const { user } = renderApp({ host }, (appStore) => {

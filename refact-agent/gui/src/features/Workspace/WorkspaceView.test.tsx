@@ -167,6 +167,33 @@ describe("WorkspaceView", () => {
     ).not.toBeInTheDocument();
   });
 
+  it.each(["ide", "vscode", "jetbrains"] as const)(
+    "keeps %s capability overrides hidden until panels are forced",
+    async (host) => {
+      const store = createWorkspaceStore();
+      store.dispatch(updateConfig({ host }));
+      setWorkspaceAvailability(store, {
+        filesPanel: true,
+        gitPanel: true,
+        terminalPanel: true,
+      });
+
+      renderWorkspaceView(store);
+
+      expect(screen.queryByLabelText("Workspace dock")).not.toBeInTheDocument();
+      expect(
+        screen.queryByLabelText("Terminal workbench for chat-a"),
+      ).not.toBeInTheDocument();
+
+      store.dispatch(setPanelsForced(true));
+
+      expect(await screen.findByLabelText("Workspace dock")).toBeVisible();
+      expect(
+        screen.getByLabelText("Terminal workbench for chat-a"),
+      ).toBeInTheDocument();
+    },
+  );
+
   it("never renders the legacy global terminal drawer", () => {
     const webStore = createWorkspaceStore();
     const webView = renderWorkspaceView(webStore);

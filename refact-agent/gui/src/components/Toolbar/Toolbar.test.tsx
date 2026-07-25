@@ -221,6 +221,60 @@ describe("Toolbar single workspace tab row", () => {
     },
   );
 
+  it("hides the workspace panels button for a terminal-only web host without mutating dock state", () => {
+    useToolbarHandlers();
+    const view = render(<Toolbar activeTab={{ type: "dashboard" }} />, {
+      preloadedState: {
+        config: {
+          ...baseConfig,
+          capabilities: {
+            filesPanel: false,
+            gitPanel: false,
+            terminalPanel: true,
+          },
+        },
+        pages: pagesForActiveTab({ type: "dashboard" }),
+      },
+    });
+
+    expect(
+      screen.queryByRole("button", { name: "Workspace panels" }),
+    ).not.toBeInTheDocument();
+    expect(view.store.getState().workspace.dock?.open).toBe(true);
+    expect(view.store.getState().workspace.panelsForced).toBe(false);
+  });
+
+  it.each(["ide", "vscode", "jetbrains"] as const)(
+    "keeps %s capability overrides behind the panelsForced opt-in",
+    async (host) => {
+      useToolbarHandlers();
+      const view = render(<Toolbar activeTab={{ type: "dashboard" }} />, {
+        preloadedState: {
+          config: {
+            ...baseConfig,
+            host,
+            capabilities: {
+              filesPanel: true,
+              gitPanel: true,
+              terminalPanel: true,
+            },
+          },
+          pages: pagesForActiveTab({ type: "dashboard" }),
+        },
+      });
+      const button = screen.getByRole("button", { name: "Workspace panels" });
+
+      expect(button).toHaveAttribute("aria-pressed", "false");
+      expect(view.store.getState().workspace.panelsForced).toBe(false);
+
+      await view.user.click(button);
+
+      expect(view.store.getState().workspace.panelsForced).toBe(true);
+      expect(view.store.getState().workspace.dock?.open).toBe(true);
+      expect(button).toHaveAttribute("aria-pressed", "true");
+    },
+  );
+
   it("reflects externally collapsed web dock state", async () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "dashboard" });

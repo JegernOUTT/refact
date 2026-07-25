@@ -314,6 +314,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
       : null;
   const buddySurfaceOpen = pages.some((page) => page.name === "buddy");
   const { dock: dockAvailable } = resolveWorkspaceDockAvailability(
+    host,
     capabilities,
     panelsForced,
   );

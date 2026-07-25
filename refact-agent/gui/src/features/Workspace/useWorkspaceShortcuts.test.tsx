@@ -131,7 +131,7 @@ describe("useWorkspaceShortcuts", () => {
     expect(store.getState().workspace.dock?.open).toBe(false);
 
     fireEvent.keyDown(window, { key: "j", metaKey: true });
-    expect(store.getState().workspace.dock?.open).toBe(true);
+    expect(store.getState().workspace.dock?.open).toBe(false);
     expect(store.getState().terminal.workbenchOpenByChat["chat-a"]).toBe(true);
 
     fireEvent.keyDown(window, { key: "3", ctrlKey: true });
@@ -304,6 +304,38 @@ describe("useWorkspaceShortcuts", () => {
     editable.remove();
     terminal.remove();
   });
+
+  it.each(["ide", "vscode", "jetbrains"] as const)(
+    "keeps %s capability overrides from registering workspace shortcuts before opt-in",
+    (host) => {
+      const { store, rerender } = renderShortcuts();
+      store.dispatch(
+        updateConfig({
+          host,
+          capabilities: {
+            filesPanel: true,
+            gitPanel: true,
+            terminalPanel: true,
+          },
+        }),
+      );
+      store.dispatch(setDockSection("tasks"));
+      store.dispatch(setDockOpen(false));
+      rerender();
+
+      for (const key of ["b", "j", "1", "2", "3"]) {
+        fireEvent.keyDown(window, { key, ctrlKey: true });
+      }
+
+      expect(store.getState().workspace.dock).toMatchObject({
+        open: false,
+        section: "tasks",
+      });
+      expect(
+        store.getState().terminal.workbenchOpenByChat["chat-a"],
+      ).toBeUndefined();
+    },
+  );
 
   it("does not register workspace shortcuts for IDE hosts", () => {
     const { store, rerender } = renderShortcuts();

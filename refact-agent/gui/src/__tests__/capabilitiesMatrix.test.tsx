@@ -176,19 +176,26 @@ describe("TabBar panel launcher reflects capabilities", () => {
     ).toBeNull();
   });
 
-  it("keeps panel chrome hidden for IDE hosts with overrides", () => {
-    const store = createStoreWithChat(
-      makeConfig("vscode", { filesPanel: true }),
-    );
-    render(<TabBar />, { store });
+  it.each(["ide", "vscode", "jetbrains"] as const)(
+    "keeps panel chrome hidden for %s capability overrides",
+    (host) => {
+      const store = createStoreWithChat(
+        makeConfig(host, {
+          filesPanel: true,
+          gitPanel: true,
+          terminalPanel: true,
+        }),
+      );
+      render(<TabBar />, { store });
 
-    expect(
-      screen.queryByRole("button", { name: "Toggle workspace dock" }),
-    ).toBeNull();
-    expect(
-      screen.queryByRole("button", { name: "Open workspace panel" }),
-    ).toBeNull();
-  });
+      expect(
+        screen.queryByRole("button", { name: "Toggle workspace dock" }),
+      ).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Open workspace panel" }),
+      ).toBeNull();
+    },
+  );
 });
 
 describe("useOpenFileInApp precedence: app > ide > none", () => {

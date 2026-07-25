@@ -202,6 +202,31 @@ describe("TabBar", () => {
     expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();
   });
 
+  it.each(["ide", "vscode", "jetbrains"] as const)(
+    "keeps %s capability overrides out of workspace-placement chrome before opt-in",
+    (host) => {
+      const store = createStoreWithChatTabs();
+      store.dispatch(
+        updateConfig({
+          host,
+          capabilities: {
+            filesPanel: true,
+            gitPanel: true,
+            terminalPanel: true,
+          },
+        }),
+      );
+      store.dispatch(setDockOpen(false));
+
+      renderTabBar(store);
+
+      expect(
+        screen.queryByRole("button", { name: "Toggle workspace dock" }),
+      ).not.toBeInTheDocument();
+      expect(store.getState().workspace.dock?.open).toBe(false);
+    },
+  );
+
   it("renders all open tabs in one tablist with status and unread badges", () => {
     const store = createStoreWithChatTabs();
     store.dispatch({

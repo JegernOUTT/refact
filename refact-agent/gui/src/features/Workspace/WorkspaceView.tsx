@@ -10,7 +10,7 @@ import {
   switchToThread,
 } from "../Chat/Thread";
 import { collectTabIds } from "../ChatPanes/panesTree";
-import { selectCapabilities } from "../Config/configSlice";
+import { selectCapabilities, selectHost } from "../Config/configSlice";
 import {
   hasTabDragType,
   readTabDragSurfaceKey,
@@ -47,9 +47,11 @@ export function WorkspaceView() {
   const openThreadIds = useAppSelector(selectOpenThreadIds);
   const tabs = useAppSelector(selectTabs);
   const groups = useAppSelector(selectWorkspaceGroups);
+  const host = useAppSelector(selectHost);
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
   const { dock: dockAvailable } = resolveWorkspaceDockAvailability(
+    host,
     capabilities,
     panelsForced,
   );
