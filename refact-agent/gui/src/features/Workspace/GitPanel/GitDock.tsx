@@ -11,6 +11,7 @@ import {
   type GitStatusRoot,
 } from "../../../services/refact/gitRead";
 import { worktreeErrorText } from "../../Worktrees/worktreeError";
+import { changedFileCount } from "./changedFileCount";
 import { CommitBox } from "./CommitBox";
 import {
   openGitFile,
@@ -36,6 +37,10 @@ function branchLabel(status?: GitStatusRoot): string {
 
 function first<T>(values: T[]): T | undefined {
   return values.length > 0 ? values[0] : undefined;
+}
+
+function changedFilesLabel(count: number): string {
+  return `${count} changed ${count === 1 ? "file" : "files"}`;
 }
 
 export function GitDock() {
@@ -73,6 +78,7 @@ export function GitDock() {
     statusError === null &&
     activeStatus.staged.length === 0 &&
     activeStatus.unstaged.length === 0;
+  const activeChangedCount = activeStatus ? changedFileCount(activeStatus) : 0;
 
   const mutatePath = async (change: GitFileChange, staged: boolean) => {
     if (!resolvedRoot) return;
@@ -107,10 +113,11 @@ export function GitDock() {
           <p>{branchLabel(activeStatus)}</p>
         </div>
         <div className={styles.dockHeaderActions}>
-          <Badge tone="muted">
-            {activeStatus
-              ? activeStatus.staged.length + activeStatus.unstaged.length
-              : 0}
+          <Badge
+            aria-label={changedFilesLabel(activeChangedCount)}
+            tone="muted"
+          >
+            {activeChangedCount}
           </Badge>
           <IconButton
             aria-label="Refresh Git status"

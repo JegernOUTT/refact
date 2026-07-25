@@ -111,13 +111,10 @@ export const WorktreeDiffPanel: React.FC<WorktreeDiffPanelProps> = ({
     sourceWorkspaceRoot ??
     record?.meta.source_workspace_root ??
     worktree?.source_workspace_root;
-  const canQueryDiff =
-    open &&
-    queryId.length > 0 &&
-    (record !== undefined || worktreeId === undefined || worktreeId === null);
+  const canQueryDiff = open && queryId.length > 0;
   const diffQuery = canQueryDiff
     ? {
-        id: record?.meta.id ?? queryId,
+        id: queryId,
         source_workspace_root: resolvedSourceRoot,
         max_patch_bytes: 120000,
       }

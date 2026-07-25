@@ -290,6 +290,28 @@ describe("Worktree lifecycle GUI", () => {
     ).toBeInTheDocument();
   });
 
+  test("diff panel queries when only a worktree id is provided", async () => {
+    const requestedIds: string[] = [];
+    server.use(
+      http.get("*/v1/worktrees/:id/diff", ({ params }) => {
+        requestedIds.push(String(params.id));
+        return HttpResponse.json(makeDiff("wt-id-only"));
+      }),
+    );
+
+    render(
+      <WorktreeDiffPanel
+        open
+        worktreeId="wt-id-only"
+        onOpenChange={() => undefined}
+      />,
+      { preloadedState: { config: configState() } },
+    );
+
+    expect(await screen.findByText("src/lib.rs")).toBeInTheDocument();
+    expect(requestedIds).toEqual(["wt-id-only"]);
+  });
+
   test("merge modal success path invalidates task queries and shows summary", async () => {
     const record = makeRecord();
     const mergeCalls: JsonObject[] = [];

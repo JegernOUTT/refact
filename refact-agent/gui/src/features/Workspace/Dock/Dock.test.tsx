@@ -129,7 +129,7 @@ describe("Dock", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows the aggregate changed-file count on the Git switcher entry", async () => {
+  it("counts unique changed paths on the Git switcher entry", async () => {
     mockNarrow(false);
     server.use(
       http.get("*/v1/files/tree", () =>
@@ -153,13 +153,13 @@ describe("Dock", () => {
               ],
               unstaged: [
                 {
-                  relative_path: "b",
-                  absolute_path: "/repo/b",
-                  status: "ADDED",
+                  relative_path: "a",
+                  absolute_path: "/repo/a",
+                  status: "MODIFIED",
                 },
                 {
-                  relative_path: "c",
-                  absolute_path: "/repo/c",
+                  relative_path: "b",
+                  absolute_path: "/repo/b",
                   status: "DELETED",
                 },
               ],
@@ -172,8 +172,8 @@ describe("Dock", () => {
 
     render(<Dock />);
 
-    const badge = await screen.findByLabelText("3 changed files");
-    expect(badge).toHaveTextContent("3");
+    const badge = await screen.findByLabelText("2 changed files");
+    expect(badge).toHaveTextContent("2");
     expect(badge).toHaveClass(badgeStyles.warning, badgeStyles["size-xs"]);
   });
 });

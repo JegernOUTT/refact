@@ -21,7 +21,7 @@ import { useAppDispatch, useAppSelector } from "../../../hooks";
 import { useGetGitStatusQuery } from "../../../services/refact/gitRead";
 import { selectCapabilities } from "../../Config/configSlice";
 import { FilesPanel } from "../FilesPanel";
-import { GitDock } from "../GitPanel";
+import { changedFileCount, GitDock } from "../GitPanel";
 import {
   normalizeDockWidth,
   selectFocusedChatWorkspaceRoots,
@@ -51,17 +51,16 @@ function GitDockLabel() {
   const contextRoots = useAppSelector(selectFocusedChatWorkspaceRoots);
   const { data } = useGetGitStatusQuery(contextRoots);
   const changedCount =
-    data?.roots.reduce(
-      (count, root) => count + root.staged.length + root.unstaged.length,
-      0,
-    ) ?? 0;
+    data?.roots.reduce((count, root) => count + changedFileCount(root), 0) ?? 0;
 
   return (
     <>
       <Icon icon={GitBranch} size="sm" />
       Git
       <Badge
-        aria-label={`${changedCount} changed files`}
+        aria-label={`${changedCount} changed ${
+          changedCount === 1 ? "file" : "files"
+        }`}
         className={styles.sectionBadge}
         size="xs"
         tone={changedCount > 0 ? "warning" : "muted"}

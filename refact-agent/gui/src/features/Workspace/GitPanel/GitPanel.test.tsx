@@ -394,6 +394,16 @@ describe("GitPanel", () => {
     ).toBeInTheDocument();
   });
 
+  test("counts a partially staged path once in the dock badge", async () => {
+    installHandlers({
+      status: () => [statusRoot("/repo", [APP_CHANGE], [APP_CHANGE])],
+    });
+    renderPanel();
+
+    const badge = await screen.findByLabelText("1 changed file");
+    expect(badge).toHaveTextContent("1");
+  });
+
   test("commits only the active root staged files and refreshes status", async () => {
     const commitBodies: unknown[] = [];
     const statusCalls: (string | null)[] = [];

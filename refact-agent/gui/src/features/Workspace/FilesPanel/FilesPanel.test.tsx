@@ -16,7 +16,12 @@ import { FilesPanel } from "./FilesPanel";
 import { FileViewer } from "./FileViewer";
 import { applyLiveFileUpdate, openFileInFilesPanel } from "./filesPanelSlice";
 import { createChatWithId } from "../../Chat/Thread/actions";
-import { openTab, setActiveTab } from "../workspaceSlice";
+import {
+  openTab,
+  setActiveTab,
+  setDockOpen,
+  setDockSection,
+} from "../workspaceSlice";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 
 const rootPath = "/workspace";
@@ -319,6 +324,8 @@ describe("FilesPanel", () => {
         },
       },
     });
+    view.store.dispatch(setDockOpen(false));
+    view.store.dispatch(setDockSection("git"));
 
     expect(await screen.findByRole("button", { name: "engine" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "src" })).toBeEnabled();
@@ -328,9 +335,14 @@ describe("FilesPanel", () => {
     expect(screen.queryByRole("button", { name: "b" })).toBeNull();
 
     await view.user.click(screen.getByRole("button", { name: "engine" }));
+    expect(view.store.getState().workspace.dock).toMatchObject({
+      open: true,
+      section: "files",
+    });
     expect(view.store.getState().filesPanel.expandedDirectories).toEqual([
       deepRoot,
     ]);
+    expect(view.store.getState().filesPanel.selectedPath).toBe(deepRoot);
   });
 
   it("uses the enclosing root when multiple workspace roots are configured", async () => {

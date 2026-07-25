@@ -16,7 +16,11 @@ import {
   useCopyToClipboard,
 } from "../../../hooks";
 import { useReadFileQuery } from "../../../services/refact/files";
-import { selectFocusedChatWorktreeRoot } from "../workspaceSlice";
+import {
+  selectFocusedChatWorktreeRoot,
+  setDockOpen,
+  setDockSection,
+} from "../workspaceSlice";
 import {
   expandDirectory,
   isPathWithinWorkspaceRoots,
@@ -146,6 +150,8 @@ export function FileViewer({ path }: { path: string }) {
       ) {
         return;
       }
+      dispatch(setDockOpen(true));
+      dispatch(setDockSection("files"));
       dispatch(expandDirectory(crumb.path));
       dispatch(selectTreePath(crumb.path));
     },
