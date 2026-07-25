@@ -19,7 +19,7 @@ class FakeTerminal {
   cols = 80;
   loadAddon = (): undefined => undefined;
   open = (): undefined => undefined;
-  focus = (): undefined => undefined;
+  focus = vi.fn<() => undefined>();
   dispose = (): undefined => undefined;
   onData = () => ({ dispose: (): undefined => undefined });
   write = (): undefined => undefined;
@@ -114,6 +114,7 @@ describe("TerminalSession", () => {
       expect.objectContaining({ processId: "proc-theme", chatId: "chat-a" }),
     );
     const constructed = FakeTerminal.instances[0].constructorOptions;
+    expect(FakeTerminal.instances[0].focus).toHaveBeenCalledOnce();
     expect(constructed.theme?.background).not.toBe("#ffffff");
     expect(constructed.theme?.background).toBe("#0c0d0f");
     expect(constructed.theme?.foreground).toBe("rgba(255, 255, 255, 0.92)");
@@ -178,5 +179,34 @@ describe("TerminalSession", () => {
     expect(constructed.theme?.background).toBeUndefined();
     expect(constructed.theme?.foreground).toBeUndefined();
     expect(constructed.fontFamily).toBeUndefined();
+  });
+
+  test("focuses an existing terminal when focus is requested", async () => {
+    const view = render(
+      <TerminalSession
+        processId="proc-focus"
+        chatId="chat-a"
+        focusRequest={0}
+        onStatusChange={vi.fn()}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+    await waitFor(() => expect(FakeTerminal.instances).toHaveLength(1));
+    const terminal = FakeTerminal.instances[0];
+    const callsAfterMount = terminal.focus.mock.calls.length;
+
+    view.rerender(
+      <TerminalSession
+        processId="proc-focus"
+        chatId="chat-a"
+        focusRequest={1}
+        onStatusChange={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(terminal.focus).toHaveBeenCalledTimes(callsAfterMount + 1),
+    );
+    expect(FakeTerminal.instances).toHaveLength(1);
   });
 });

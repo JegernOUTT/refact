@@ -75,14 +75,21 @@
   top: var(--rf-space-2);
   right: var(--rf-space-2);
   z-index: var(--rf-z-dropdown);
-  opacity: var(--rf-motion-opacity-hidden);
-  transform: translateY(calc(-1 * var(--rf-motion-distance-xs)));
-}
-
-.unsplitSurfaceWrap:hover .unsplitSplitAffordance,
-.unsplitSurfaceWrap:focus-within .unsplitSplitAffordance {
   opacity: var(--rf-motion-opacity-visible);
   transform: translateY(var(--rf-motion-distance-none));
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .unsplitSplitAffordance {
+    opacity: var(--rf-motion-opacity-hidden);
+    transform: translateY(calc(-1 * var(--rf-motion-distance-xs)));
+  }
+
+  .unsplitSurfaceWrap:hover .unsplitSplitAffordance,
+  .unsplitSurfaceWrap:focus-within .unsplitSplitAffordance {
+    opacity: var(--rf-motion-opacity-visible);
+    transform: translateY(var(--rf-motion-distance-none));
+  }
 }
 
 .unsplitSplitButton {

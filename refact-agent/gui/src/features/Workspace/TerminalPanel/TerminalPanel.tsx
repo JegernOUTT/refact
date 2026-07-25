@@ -1,7 +1,15 @@
 import "@xterm/xterm/css/xterm.css";
 
 import { ChevronDown, ChevronUp, Plus, SquareTerminal, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 
 import {
   Button,
@@ -81,6 +89,10 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [listAttempt, setListAttempt] = useState(0);
   const lastFittedRef = useRef<{ rows: number; cols: number } | null>(null);
+  const tabListId = useId();
+  const tabRefs = useRef(new Map<string, HTMLButtonElement>());
+  const [focusedProcessId, setFocusedProcessId] = useState<string | null>(null);
+  const [terminalFocusRequest, setTerminalFocusRequest] = useState(0);
   const apiKey = config.apiKey ?? undefined;
   const connection = useMemo(
     () => ({
@@ -216,6 +228,56 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
     [],
   );
 
+  useEffect(() => {
+    if (
+      focusedProcessId &&
+      sessions.some((session) => session.process_id === focusedProcessId)
+    ) {
+      return;
+    }
+    setFocusedProcessId(activeProcessId);
+  }, [activeProcessId, focusedProcessId, sessions]);
+
+  const activateSession = useCallback(
+    (processId: string) => {
+      setFocusedProcessId(processId);
+      setTerminalFocusRequest((request) => request + 1);
+      dispatch(activeSessionChanged({ chatId, processId }));
+    },
+    [chatId, dispatch],
+  );
+
+  const handleTabKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLButtonElement>, processId: string) => {
+      const currentIndex = sessions.findIndex(
+        (session) => session.process_id === processId,
+      );
+      if (currentIndex < 0 || sessions.length === 0) return;
+      let nextIndex: number;
+      switch (event.key) {
+        case "ArrowLeft":
+          nextIndex = (currentIndex - 1 + sessions.length) % sessions.length;
+          break;
+        case "ArrowRight":
+          nextIndex = (currentIndex + 1) % sessions.length;
+          break;
+        case "Home":
+          nextIndex = 0;
+          break;
+        case "End":
+          nextIndex = sessions.length - 1;
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+      const nextProcessId = sessions[nextIndex].process_id;
+      setFocusedProcessId(nextProcessId);
+      tabRefs.current.get(nextProcessId)?.focus();
+    },
+    [sessions],
+  );
+
   return (
     <section
       className={styles.panel}
@@ -232,8 +294,10 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
           role="tablist"
           aria-label="Terminal sessions"
         >
-          {sessions.map((session) => {
+          {sessions.map((session, index) => {
             const active = session.process_id === activeProcessId;
+            const tabId = `${tabListId}-tab-${index}`;
+            const panelId = `${tabListId}-panel-${index}`;
             return (
               <div
                 key={session.process_id}
@@ -242,15 +306,26 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
                 <button
                   type="button"
                   role="tab"
+                  id={tabId}
+                  aria-controls={panelId}
                   aria-selected={active}
                   className={styles.tabSelect}
-                  onClick={() =>
-                    dispatch(
-                      activeSessionChanged({
-                        chatId,
-                        processId: session.process_id,
-                      }),
-                    )
+                  onClick={() => activateSession(session.process_id)}
+                  onKeyDown={(event) =>
+                    handleTabKeyDown(event, session.process_id)
+                  }
+                  onFocus={() => setFocusedProcessId(session.process_id)}
+                  ref={(node) => {
+                    if (node) tabRefs.current.set(session.process_id, node);
+                    else tabRefs.current.delete(session.process_id);
+                  }}
+                  tabIndex={
+                    session.process_id ===
+                    (focusedProcessId ??
+                      activeProcessId ??
+                      sessions[0]?.process_id)
+                      ? 0
+                      : -1
                   }
                 >
                   <StatusDot status={statusDot(session.status)} />
@@ -317,24 +392,33 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
             </div>
           ) : (
             <>
-              {workbenchOpen
-                ? sessions
-                    .filter((session) => session.process_id === activeProcessId)
-                    .map((session) => (
-                      <div
-                        key={session.process_id}
-                        className={styles.sessionActive}
-                      >
-                        <TerminalSession
-                          processId={session.process_id}
-                          chatId={chatId}
-                          apiKey={apiKey}
-                          onStatusChange={handleStatusChange}
-                          onResize={handleSessionResize}
-                        />
-                      </div>
-                    ))
-                : null}
+              {sessions.map((session, index) => {
+                const active = session.process_id === activeProcessId;
+                return (
+                  <div
+                    key={session.process_id}
+                    id={`${tabListId}-panel-${index}`}
+                    aria-labelledby={`${tabListId}-tab-${index}`}
+                    className={
+                      active ? styles.sessionActive : styles.sessionHidden
+                    }
+                    hidden={!active}
+                    role="tabpanel"
+                    tabIndex={0}
+                  >
+                    {active && workbenchOpen ? (
+                      <TerminalSession
+                        processId={session.process_id}
+                        chatId={chatId}
+                        apiKey={apiKey}
+                        focusRequest={terminalFocusRequest}
+                        onStatusChange={handleStatusChange}
+                        onResize={handleSessionResize}
+                      />
+                    ) : null}
+                  </div>
+                );
+              })}
               {!loading && sessions.length === 0 ? (
                 <EmptyState
                   icon={SquareTerminal}

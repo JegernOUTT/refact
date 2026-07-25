@@ -157,6 +157,7 @@ import {
   setDrawerOpen,
   toggleDock,
   toggleDrawer,
+  clearWorkspaceChatState,
   selectFocusedWorkspaceChatId,
   selectLiveEditsForChat,
   setLiveEditsForChat,
@@ -173,6 +174,7 @@ import {
   markLiveFileUpdateAuthoritative,
 } from "../features/Workspace/FilesPanel/filesPanelSlice";
 import { parentDirectoryPath } from "../features/Workspace/FilesPanel/fileTreeModel";
+import { clearTerminalChatState } from "../features/Workspace/TerminalPanel";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
@@ -412,6 +414,7 @@ startListening({
     setDrawerOpen,
     toggleDock,
     toggleDrawer,
+    clearWorkspaceChatState,
     hydrateWorkspace,
     reconcileWorkspace,
     newChatAction,
@@ -593,6 +596,8 @@ startListening({
   effect: (action, listenerApi) => {
     const payload = action.payload as { id: string };
     listenerApi.dispatch(clearLiveFileUpdatesForChat(payload.id));
+    listenerApi.dispatch(clearWorkspaceChatState(payload.id));
+    listenerApi.dispatch(clearTerminalChatState(payload.id));
   },
 });
 

@@ -10,6 +10,7 @@ import {
   newBuddyChatAction,
   newChatAction,
   openBuddyChat,
+  removeChatFromCache,
   setChatModel,
   setMaxNewTokens,
   switchToThread,
@@ -42,6 +43,10 @@ import { http, HttpResponse } from "msw";
 import { server } from "../utils/mockServer";
 import { filesApi } from "../services/refact/files";
 import { applyLiveFileUpdate } from "../features/Workspace/FilesPanel";
+import {
+  sessionAdded,
+  setTerminalWorkbenchOpen,
+} from "../features/Workspace/TerminalPanel";
 
 function makeThread(id: string): ChatThreadRuntime {
   const mode = id.startsWith("chat-") ? "agent" : undefined;
@@ -845,6 +850,9 @@ describe("workspace routing middleware", () => {
         activeTabId: chatSurface("chat-a"),
         groups: {},
         liveEditsByChat: { "chat-a": false },
+        contextChatByTab: {
+          [makeSurfaceKey("file", filePath)]: "chat-a",
+        },
       },
     });
     store.dispatch(
@@ -889,10 +897,69 @@ describe("workspace routing middleware", () => {
         update: { revision: "2", chunks: [], operation: "remove" },
       }),
     );
+    store.dispatch(
+      sessionAdded({
+        chatId: "chat-a",
+        session: {
+          process_id: "process-a",
+          title: "shell · process-a",
+          status: "running",
+        },
+      }),
+    );
+    store.dispatch(setTerminalWorkbenchOpen({ chatId: "chat-a", open: true }));
     store.dispatch(closeThread({ id: "chat-a", force: true }));
-    expect(
-      store.getState().filesPanel.liveUpdatesByChat["chat-a"],
-    ).toBeUndefined();
+    await waitFor(() => {
+      expect(
+        store.getState().filesPanel.liveUpdatesByChat["chat-a"],
+      ).toBeUndefined();
+      expect(
+        store.getState().workspace.liveEditsByChat?.["chat-a"],
+      ).toBeUndefined();
+      expect(
+        Object.values(store.getState().workspace.contextChatByTab ?? {}),
+      ).not.toContain("chat-a");
+      expect(
+        store.getState().terminal.sessionsByChat["chat-a"],
+      ).toBeUndefined();
+      expect(
+        store.getState().terminal.activeProcessIdByChat["chat-a"],
+      ).toBeUndefined();
+      expect(
+        store.getState().terminal.workbenchOpenByChat["chat-a"],
+      ).toBeUndefined();
+    });
+  });
+
+  it("prunes per-chat cockpit state when cached chat data is removed", async () => {
+    const store = setUpStore({
+      chat: makeChatState("chat-a", ["chat-a"]),
+      workspace: {
+        tabs: [chatSurface("chat-a")],
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+        liveEditsByChat: { "chat-a": true },
+      },
+    });
+    store.dispatch(
+      sessionAdded({
+        chatId: "chat-a",
+        session: {
+          process_id: "process-a",
+          title: "shell · process-a",
+          status: "exited",
+        },
+      }),
+    );
+
+    store.dispatch(removeChatFromCache({ id: "chat-a" }));
+
+    await waitFor(() => {
+      expect(store.getState().workspace.liveEditsByChat).toBeUndefined();
+      expect(
+        store.getState().terminal.sessionsByChat["chat-a"],
+      ).toBeUndefined();
+    });
   });
 
   it("keeps task-internal openTab false switches out of workspace tabs", async () => {

@@ -8,6 +8,7 @@ import {
 import {
   addSurfaceToPane,
   bindSurfaceToChat,
+  clearWorkspaceChatState,
   closePane,
   closeTab,
   ensureLiveEditSplit,
@@ -744,6 +745,23 @@ describe("workspaceSlice", () => {
         "a",
       ),
     ).toBe(false);
+  });
+
+  test("clears live-edit preferences and surface context for one chat", () => {
+    const fileA = makeSurfaceKey("file", "/worktrees/a/main.ts");
+    const fileB = makeSurfaceKey("file", "/worktrees/b/main.ts");
+    const state: WorkspaceState = {
+      tabs: [fileA, fileB],
+      activeTabId: fileA,
+      groups: {},
+      liveEditsByChat: { a: true, b: false },
+      contextChatByTab: { [fileA]: "a", [fileB]: "b" },
+    };
+
+    const next = reducer(state, clearWorkspaceChatState("a"));
+
+    expect(next.liveEditsByChat).toEqual({ b: false });
+    expect(next.contextChatByTab).toEqual({ [fileB]: "b" });
   });
 
   test("live edit split reuses one horizontal file pane and follows paths", () => {

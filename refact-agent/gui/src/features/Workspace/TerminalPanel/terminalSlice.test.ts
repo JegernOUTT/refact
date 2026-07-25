@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import reducer, {
   activeSessionChanged,
+  clearTerminalChatState,
   selectActiveTerminalProcessId,
   selectTerminalSessions,
   selectTerminalWorkbenchOpen,
@@ -172,5 +173,39 @@ describe("terminalSlice", () => {
 
     expect(state.sessionsByChat["chat-a"]).toEqual([session("two")]);
     expect(state.activeProcessIdByChat["chat-a"]).toBe("two");
+  });
+
+  test("clears every per-chat map without disturbing other chats", () => {
+    let state = reducer(
+      undefined,
+      sessionsReattached({
+        chatId: "chat-a",
+        sessions: [session("a-one")],
+      }),
+    );
+    state = reducer(
+      state,
+      sessionsReattached({
+        chatId: "chat-b",
+        sessions: [session("b-one")],
+      }),
+    );
+    state = reducer(
+      state,
+      setTerminalWorkbenchOpen({ chatId: "chat-a", open: true }),
+    );
+    state = reducer(
+      state,
+      setTerminalWorkbenchOpen({ chatId: "chat-b", open: true }),
+    );
+
+    state = reducer(state, clearTerminalChatState("chat-a"));
+
+    expect(state.sessionsByChat["chat-a"]).toBeUndefined();
+    expect(state.activeProcessIdByChat["chat-a"]).toBeUndefined();
+    expect(state.workbenchOpenByChat["chat-a"]).toBeUndefined();
+    expect(state.sessionsByChat["chat-b"]).toEqual([session("b-one")]);
+    expect(state.activeProcessIdByChat["chat-b"]).toBe("b-one");
+    expect(state.workbenchOpenByChat["chat-b"]).toBe(true);
   });
 });

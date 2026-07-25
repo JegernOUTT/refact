@@ -34,6 +34,7 @@ type TerminalSessionProps = {
   processId: string;
   chatId: string;
   apiKey?: string;
+  focusRequest?: number;
   onStatusChange: (processId: string, status: ExecStatus) => void;
   onResize?: (processId: string, rows: number, cols: number) => void;
 };
@@ -42,6 +43,7 @@ export function TerminalSession({
   processId,
   chatId,
   apiKey,
+  focusRequest,
   onStatusChange,
   onResize,
 }: TerminalSessionProps) {
@@ -149,6 +151,11 @@ export function TerminalSession({
     runtime.terminal.options.theme = theme;
     if (fontFamily) runtime.terminal.options.fontFamily = fontFamily;
   }, [fontFamily, runtime, theme]);
+
+  useEffect(() => {
+    if (!runtime || focusRequest === undefined) return;
+    runtime.terminal.focus();
+  }, [focusRequest, runtime]);
 
   const handleStatusChange = useCallback(
     (status: ExecStatus) => onStatusChange(processId, status),

@@ -725,5 +725,10 @@ describe("FilesPanel", () => {
     expect(
       within(tree).getByRole("treeitem", { name: /README\.md/i }),
     ).toHaveAttribute("aria-selected", "true");
+    const selectedRow = within(tree).getByRole("treeitem", {
+      name: /README\.md/i,
+    });
+    expect(selectedRow.id).not.toBe("");
+    expect(tree).toHaveAttribute("aria-activedescendant", selectedRow.id);
   });
 });

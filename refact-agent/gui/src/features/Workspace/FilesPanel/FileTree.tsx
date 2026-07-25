@@ -9,6 +9,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -89,11 +90,13 @@ const TreeRow = ({
   entry,
   expanded,
   selected,
+  rowId,
   onActivate,
 }: {
   entry: VisibleTreeEntry;
   expanded: boolean;
   selected: boolean;
+  rowId: string;
   onActivate: (entry: VisibleTreeEntry) => void;
 }) => {
   const isDirectory = entry.kind === "dir";
@@ -112,6 +115,7 @@ const TreeRow = ({
       data-selected={selected ? "true" : undefined}
       onClick={() => onActivate(entry)}
       onMouseDown={(event) => event.preventDefault()}
+      id={rowId}
       role="treeitem"
       tabIndex={-1}
       type="button"
@@ -146,6 +150,7 @@ const TreeRow = ({
 
 export function FileTree() {
   const dispatch = useAppDispatch();
+  const treeId = useId();
   const treeRef = useRef<HTMLDivElement>(null);
   const expandedDirectories = useAppSelector(selectExpandedDirectories);
   const selectedPath = useAppSelector(selectFilesPanelSelectedPath);
@@ -290,18 +295,26 @@ export function FileTree() {
     );
   }
 
+  const rowId = (path: string) => `${treeId}-item-${encodeURIComponent(path)}`;
+  const activeDescendant = visibleEntries.some(
+    (entry) => entry.path === selectedPath,
+  )
+    ? rowId(selectedPath ?? "")
+    : undefined;
   const renderEntry = (entry: VisibleTreeEntry) => (
     <TreeRow
       key={entry.path}
       entry={entry}
       expanded={expandedSet.has(entry.path)}
       selected={selectedPath === entry.path}
+      rowId={rowId(entry.path)}
       onActivate={activateEntry}
     />
   );
 
   return (
     <div
+      aria-activedescendant={activeDescendant}
       aria-label="Workspace files"
       className={styles.tree}
       onKeyDown={handleKeyDown}

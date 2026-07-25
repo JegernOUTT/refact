@@ -27,6 +27,10 @@ const groupSplitViewCss = readFileSync(
   "src/features/Workspace/GroupSplitView.module.css",
   "utf8",
 );
+const workspaceViewCss = readFileSync(
+  "src/features/Workspace/WorkspaceView.module.css",
+  "utf8",
+);
 
 const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
 const task = (id: string): SurfaceKey => makeSurfaceKey("task", id);
@@ -146,6 +150,15 @@ describe("WorkspaceView", () => {
     expect(screen.queryByRole("button", { name: "Close Pane" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Split Right" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Split Down" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Split active tab" }),
+    ).toBeVisible();
+    expect(workspaceViewCss).toMatch(
+      /\.unsplitSplitAffordance\s*\{[^}]*opacity: var\(--rf-motion-opacity-visible\)/u,
+    );
+    expect(workspaceViewCss).toMatch(
+      /@media \(hover: hover\) and \(pointer: fine\)[\s\S]*:focus-within \.unsplitSplitAffordance[\s\S]*opacity: var\(--rf-motion-opacity-visible\)/u,
+    );
   });
 
   it("does not render a pane or split affordance for a non-chat active tab", () => {

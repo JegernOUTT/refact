@@ -118,11 +118,23 @@ export const terminalSlice = createSlice({
         state.workbenchOpenByChat[chatId] ?? false
       );
     },
+    clearTerminalChatState: (state, action: PayloadAction<string>) => {
+      const { [action.payload]: _sessions, ...otherSessions } =
+        state.sessionsByChat;
+      const { [action.payload]: _activeProcessId, ...otherActiveProcessIds } =
+        state.activeProcessIdByChat;
+      const { [action.payload]: _workbenchOpen, ...otherWorkbenchOpen } =
+        state.workbenchOpenByChat;
+      state.sessionsByChat = otherSessions;
+      state.activeProcessIdByChat = otherActiveProcessIds;
+      state.workbenchOpenByChat = otherWorkbenchOpen;
+    },
   },
 });
 
 export const {
   activeSessionChanged,
+  clearTerminalChatState,
   sessionAdded,
   sessionRemoved,
   sessionsReattached,

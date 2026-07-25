@@ -203,6 +203,74 @@ describe("TerminalPanel", () => {
     expect(container.querySelector("[data-terminal-process-id]")).toBeNull();
   });
 
+  test("links tab panels and supports roving terminal tab keys", async () => {
+    server.use(
+      http.get("*/v1/exec/list", () =>
+        HttpResponse.json({
+          processes: ["first-123456", "second-12345", "third-123456"].map(
+            (process_id) => ({
+              process_id,
+              status: "running",
+              command_preview: "/bin/zsh",
+              created_at_ms: 1,
+              tty: true,
+              service_name: null,
+            }),
+          ),
+        }),
+      ),
+      http.get("*/v1/exec/:processId/read", () =>
+        HttpResponse.json({ chunks: [], next_seq: 0, status: "running" }),
+      ),
+      http.post("*/v1/exec/:processId/resize", () => HttpResponse.json({})),
+    );
+
+    const view = renderTerminalPanel();
+    openWorkbench(view);
+    const tabs = await screen.findAllByRole("tab");
+    const first = tabs[0];
+    const second = tabs[1];
+    const third = tabs[2];
+
+    expect(first).toHaveAttribute("tabindex", "0");
+    expect(second).toHaveAttribute("tabindex", "-1");
+    expect(
+      document.getElementById(first.getAttribute("aria-controls") ?? ""),
+    ).toHaveAttribute("role", "tabpanel");
+    expect(first.id).toBe(
+      document
+        .getElementById(first.getAttribute("aria-controls") ?? "")
+        ?.getAttribute("aria-labelledby"),
+    );
+
+    first.focus();
+    await view.user.keyboard("{ArrowRight}");
+    expect(second).toHaveFocus();
+    expect(second).toHaveAttribute("aria-selected", "false");
+    expect(first).toHaveAttribute("aria-selected", "true");
+    expect(first).toHaveAttribute("tabindex", "-1");
+
+    await view.user.keyboard("{End}");
+    expect(third).toHaveFocus();
+    await view.user.keyboard("{Home}");
+    expect(first).toHaveFocus();
+    await view.user.keyboard("{ArrowLeft}");
+    expect(third).toHaveFocus();
+    await view.user.keyboard("{Enter}");
+    expect(third).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByLabelText("Terminal input")).toHaveFocus();
+    await view.user.click(third);
+    expect(screen.getByLabelText("Terminal input")).toHaveFocus();
+
+    await view.user.click(
+      screen.getByRole("button", { name: "Collapse terminal workbench" }),
+    );
+    await view.user.click(
+      screen.getByRole("button", { name: "Expand terminal workbench" }),
+    );
+    expect(await screen.findByLabelText("Terminal input")).toHaveFocus();
+  });
+
   test("reattaches every TTY status without opening hidden transports", async () => {
     server.use(
       http.get("*/v1/exec/list", () =>

@@ -1168,6 +1168,25 @@ export const workspaceSlice = createSlice({
         [action.payload.chatId]: action.payload.enabled,
       };
     },
+    clearWorkspaceChatState: (state, action: PayloadAction<string>) => {
+      if (state.liveEditsByChat) {
+        const { [action.payload]: _liveEdits, ...otherLiveEdits } =
+          state.liveEditsByChat;
+        state.liveEditsByChat =
+          Object.keys(otherLiveEdits).length > 0 ? otherLiveEdits : undefined;
+      }
+      if (state.contextChatByTab) {
+        const otherContextChats = Object.fromEntries(
+          Object.entries(state.contextChatByTab).filter(
+            ([, chatId]) => chatId !== action.payload,
+          ),
+        );
+        state.contextChatByTab =
+          Object.keys(otherContextChats).length > 0
+            ? otherContextChats
+            : undefined;
+      }
+    },
     setDockOpen: (state, action: PayloadAction<boolean>) => {
       state.dock = {
         ...normalizeWorkspaceDock(state.dock),
@@ -1695,6 +1714,7 @@ export const workspaceSlice = createSlice({
 });
 
 export const {
+  clearWorkspaceChatState,
   setPanelsForced,
   setLiveEditsForChat,
   setDockOpen,
