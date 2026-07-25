@@ -14,7 +14,11 @@ import { server } from "../../../utils/mockServer";
 import { setProjectStorageNamespace } from "../../../utils/chatUiPersistence";
 import { FilesPanel } from "./FilesPanel";
 import { FileViewer } from "./FileViewer";
-import { applyLiveFileUpdate, openFileInFilesPanel } from "./filesPanelSlice";
+import {
+  applyLiveFileUpdate,
+  markLiveFileUpdateAuthoritative,
+  openFileInFilesPanel,
+} from "./filesPanelSlice";
 import { createChatWithId } from "../../Chat/Thread/actions";
 import {
   openTab,
@@ -427,23 +431,43 @@ describe("FilesPanel", () => {
     expect(await screen.findByText("File truncated at 1 MiB")).toBeVisible();
   });
 
-  it("renders live content and changed-line highlights without rereading", async () => {
+  it("renders reread content and keeps changed-line highlights", async () => {
     let readRequests = 0;
+    let authoritative = false;
     server.use(
       rootHandler(),
       http.get("*/v1/files/read", () => {
         readRequests += 1;
-        return HttpResponse.json(readResponse({ content: "old\nkeep\n" }));
+        return HttpResponse.json(
+          readResponse({
+            content: authoritative ? "new\nkeep\n" : "old\nkeep\n",
+          }),
+        );
       }),
     );
-    const view = render(<FileViewer path={filePath} />);
+    const view = render(<FileViewer path={filePath} />, {
+      preloadedState: {
+        current_project: { name: "workspace", workspaceRoots: [rootPath] },
+        workspace: {
+          tabs: [],
+          activeTabId: null,
+          groups: {},
+        },
+      },
+    });
+    view.store.dispatch(createChatWithId({ id: "chat-a" }));
+    view.store.dispatch(openTab("chat:chat-a"));
     await screen.findByText("old");
+    view.store.dispatch(openFileInFilesPanel({ path: filePath }));
 
+    authoritative = true;
     view.store.dispatch(
       applyLiveFileUpdate({
+        chatId: "chat-a",
         path: filePath,
         update: {
           revision: "7",
+          operation: "write",
           chunks: [
             {
               file_name: filePath,
@@ -457,13 +481,69 @@ describe("FilesPanel", () => {
         },
       }),
     );
+    view.store.dispatch(
+      markLiveFileUpdateAuthoritative({
+        chatId: "chat-a",
+        path: filePath,
+        revision: "7",
+      }),
+    );
 
     expect(await screen.findByText("new")).toBeVisible();
     expect(screen.getByText("new").closest('[role="row"]')).toHaveAttribute(
       "data-live-change",
       "true",
     );
-    expect(readRequests).toBe(1);
+    expect(readRequests).toBeGreaterThan(1);
+  });
+
+  it("does not render stale content after delete or rename", async () => {
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(readResponse({ content: "stale\n" })),
+      ),
+    );
+    const view = render(<FileViewer path={filePath} />, {
+      preloadedState: {
+        current_project: { name: "workspace", workspaceRoots: [rootPath] },
+        workspace: {
+          tabs: [],
+          activeTabId: null,
+          groups: {},
+        },
+      },
+    });
+    view.store.dispatch(createChatWithId({ id: "chat-a" }));
+    view.store.dispatch(openTab("chat:chat-a"));
+    await screen.findByText("stale");
+    view.store.dispatch(openFileInFilesPanel({ path: filePath }));
+
+    view.store.dispatch(
+      applyLiveFileUpdate({
+        chatId: "chat-a",
+        path: filePath,
+        update: { revision: "8", chunks: [], operation: "remove" },
+      }),
+    );
+    expect(await screen.findByText("File deleted")).toBeVisible();
+    expect(screen.queryByText("stale")).toBeNull();
+
+    view.store.dispatch(
+      applyLiveFileUpdate({
+        chatId: "chat-a",
+        path: filePath,
+        update: {
+          revision: "9",
+          chunks: [],
+          operation: "rename",
+          renamedTo: "/workspace/src/renamed.ts",
+        },
+      }),
+    );
+    expect(await screen.findByText("File renamed")).toBeVisible();
+    expect(
+      screen.getByText("This file was renamed to /workspace/src/renamed.ts."),
+    ).toBeVisible();
   });
 
   it("keeps the reduced-motion rule for live change highlights", () => {

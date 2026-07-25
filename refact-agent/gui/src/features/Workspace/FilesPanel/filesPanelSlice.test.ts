@@ -4,7 +4,13 @@ import { setUpStore } from "../../../app/store";
 import { createChatWithId } from "../../Chat/Thread";
 import { openTab, selectFocusedWorkspaceChatId } from "../workspaceSlice";
 import { makeSurfaceKey } from "../surfaceKey";
-import { applyLiveFileUpdate, openFileInFilesPanel } from "./filesPanelSlice";
+import {
+  applyLiveFileUpdate,
+  clearLiveFileUpdate,
+  clearLiveFileUpdatesForChat,
+  markLiveFileUpdateAuthoritative,
+  openFileInFilesPanel,
+} from "./filesPanelSlice";
 
 describe("openFileInFilesPanel", () => {
   it("opens and focuses a deduplicated file viewer tab", () => {
@@ -143,22 +149,110 @@ describe("live file updates", () => {
     const store = setUpStore();
     store.dispatch(
       applyLiveFileUpdate({
+        chatId: "chat-a",
         path: chunk.file_name,
-        update: { revision: "10", chunks: [chunk] },
+        update: { revision: "10", chunks: [chunk], operation: "write" },
       }),
     );
     store.dispatch(
       applyLiveFileUpdate({
+        chatId: "chat-a",
         path: chunk.file_name,
         update: {
           revision: "9",
           chunks: [{ ...chunk, lines_add: "stale\n" }],
+          operation: "write",
         },
       }),
     );
 
     expect(
-      store.getState().filesPanel.liveUpdatesByPath[chunk.file_name],
-    ).toEqual([{ revision: "10", chunks: [chunk] }]);
+      store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[
+        chunk.file_name
+      ],
+    ).toEqual({
+      revision: "10",
+      chunks: [chunk],
+      operation: "write",
+      authoritative: false,
+    });
+  });
+
+  it("isolates the same path by chat and accepts only the latest reread", () => {
+    const store = setUpStore();
+    store.dispatch(
+      applyLiveFileUpdate({
+        chatId: "chat-a",
+        path: chunk.file_name,
+        update: { revision: "10", chunks: [chunk], operation: "write" },
+      }),
+    );
+    store.dispatch(
+      applyLiveFileUpdate({
+        chatId: "chat-b",
+        path: chunk.file_name,
+        update: { revision: "4", chunks: [chunk], operation: "write" },
+      }),
+    );
+    store.dispatch(
+      applyLiveFileUpdate({
+        chatId: "chat-a",
+        path: chunk.file_name,
+        update: { revision: "11", chunks: [chunk], operation: "write" },
+      }),
+    );
+    store.dispatch(
+      markLiveFileUpdateAuthoritative({
+        chatId: "chat-a",
+        path: chunk.file_name,
+        revision: "10",
+      }),
+    );
+    store.dispatch(
+      markLiveFileUpdateAuthoritative({
+        chatId: "chat-a",
+        path: chunk.file_name,
+        revision: "11",
+      }),
+    );
+
+    expect(
+      store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[
+        chunk.file_name
+      ],
+    ).toMatchObject({ revision: "11", authoritative: true });
+    expect(
+      store.getState().filesPanel.liveUpdatesByChat["chat-b"]?.[
+        chunk.file_name
+      ],
+    ).toMatchObject({ revision: "4", authoritative: false });
+  });
+
+  it("cleans a path conditionally and clears a closed chat", () => {
+    const store = setUpStore();
+    store.dispatch(
+      applyLiveFileUpdate({
+        chatId: "chat-a",
+        path: chunk.file_name,
+        update: { revision: "12", chunks: [chunk], operation: "write" },
+      }),
+    );
+    store.dispatch(
+      clearLiveFileUpdate({
+        chatId: "chat-a",
+        path: chunk.file_name,
+        revision: "11",
+      }),
+    );
+    expect(
+      store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[
+        chunk.file_name
+      ],
+    ).toBeDefined();
+
+    store.dispatch(clearLiveFileUpdatesForChat("chat-a"));
+    expect(
+      store.getState().filesPanel.liveUpdatesByChat["chat-a"],
+    ).toBeUndefined();
   });
 });

@@ -38,6 +38,10 @@ import {
 import { collectTabIds } from "../features/ChatPanes/panesTree";
 import { makeSurfaceKey } from "../features/Workspace/surfaceKey";
 import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
+import { http, HttpResponse } from "msw";
+import { server } from "../utils/mockServer";
+import { filesApi } from "../services/refact/files";
+import { applyLiveFileUpdate } from "../features/Workspace/FilesPanel";
 
 function makeThread(id: string): ChatThreadRuntime {
   const mode = id.startsWith("chat-") ? "agent" : undefined;
@@ -109,6 +113,13 @@ function makeChatState(currentThreadId: string, ids: string[]) {
 }
 
 const chatSurface = (id: string) => makeSurfaceKey("chat", id);
+
+const workspaceSurfaceKeys = (workspace: WorkspaceState): string[] => [
+  ...workspace.tabs,
+  ...Object.values(workspace.groups).flatMap((group) =>
+    group ? collectTabIds(group.root) : [],
+  ),
+];
 
 const setWorkspaceActionType = "test/setWorkspace";
 
@@ -406,6 +417,20 @@ describe("workspace routing middleware", () => {
 
   it("refreshes open files without focus stealing when live edits are off", async () => {
     const filePath = "/workspace/src/open.ts";
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json({
+          path: filePath,
+          content: "new\n",
+          language: "typescript",
+          size: 4,
+          truncated: false,
+          line_start: null,
+          line_end: null,
+          mtime_ms: 1,
+        }),
+      ),
+    );
     const store = setUpStore({
       config: { host: "web", lspPort: 8001, themeProps: {} },
       chat: makeChatState("chat-a", ["chat-a"]),
@@ -446,12 +471,123 @@ describe("workspace routing middleware", () => {
       );
       expect(store.getState().workspace.groups).toEqual({});
       expect(
-        store.getState().filesPanel.liveUpdatesByPath[filePath],
-      ).toHaveLength(1);
+        store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[filePath],
+      ).toMatchObject({
+        revision: "1",
+        operation: "write",
+        authoritative: true,
+      });
+    });
+  });
+
+  it("keeps the latest revision when rereads finish out of order", async () => {
+    const filePath = "/workspace/src/latest.ts";
+    let readCount = 0;
+    let releaseFirst: () => void = () => undefined;
+    let releaseSecond: () => void = () => undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    server.use(
+      http.get("*/v1/files/read", async () => {
+        readCount += 1;
+        const currentRead = readCount;
+        await (currentRead === 1 ? firstGate : secondGate);
+        const content = currentRead === 1 ? "older\n" : "latest\n";
+        return HttpResponse.json({
+          path: filePath,
+          content,
+          language: "typescript",
+          size: content.length,
+          truncated: false,
+          line_start: null,
+          line_end: null,
+          mtime_ms: currentRead,
+        });
+      }),
+    );
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a"]),
+      workspace: {
+        tabs: [chatSurface("chat-a"), makeSurfaceKey("file", filePath)],
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+        liveEditsByChat: { "chat-a": false },
+      },
+    });
+    const dispatchDiff = (seq: string, linesAdd: string) =>
+      store.dispatch(
+        applyChatEvent({
+          chat_id: "chat-a",
+          seq,
+          type: "message_added",
+          index: Number(seq),
+          message: {
+            role: "diff",
+            tool_call_id: `edit-${seq}`,
+            content: [
+              {
+                file_name: filePath,
+                file_action: "edit",
+                line1: 1,
+                line2: 1,
+                lines_remove: "",
+                lines_add: linesAdd,
+              },
+            ],
+          },
+        }),
+      );
+
+    dispatchDiff("1", "older\n");
+    await waitFor(() => expect(readCount).toBe(1));
+    dispatchDiff("2", "latest\n");
+    await waitFor(() => expect(readCount).toBe(2));
+
+    releaseSecond();
+    await waitFor(() => {
+      expect(
+        store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[filePath],
+      ).toMatchObject({ revision: "2", authoritative: true });
+      expect(
+        filesApi.endpoints.readFile.select({
+          path: filePath,
+          chatId: "chat-a",
+        })(store.getState()).data?.content,
+      ).toBe("latest\n");
+    });
+
+    releaseFirst();
+    await waitFor(() => {
+      expect(
+        filesApi.endpoints.readFile.select({
+          path: filePath,
+          chatId: "chat-a",
+        })(store.getState()).data?.content,
+      ).toBe("latest\n");
     });
   });
 
   it("uses the focused chat Live edits preference for real diff auto-splits", async () => {
+    server.use(
+      http.get("*/v1/files/read", ({ request }) => {
+        const path = new URL(request.url).searchParams.get("path") ?? "";
+        return HttpResponse.json({
+          path,
+          content: path,
+          language: "typescript",
+          size: path.length,
+          truncated: false,
+          line_start: null,
+          line_end: null,
+          mtime_ms: 1,
+        });
+      }),
+    );
     const store = setUpStore({
       config: { host: "vscode", lspPort: 8001, themeProps: {} },
       chat: makeChatState("chat-a", ["chat-a", "chat-b"]),
@@ -497,8 +633,8 @@ describe("workspace routing middleware", () => {
         chatSurface("chat-a"),
       );
       expect(
-        store.getState().filesPanel.liveUpdatesByPath[openFilePath],
-      ).toHaveLength(1);
+        store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[openFilePath],
+      ).toMatchObject({ revision: "1", operation: "write" });
     });
 
     store.dispatch(setLiveEditsForChat({ chatId: "chat-a", enabled: true }));
@@ -533,7 +669,21 @@ describe("workspace routing middleware", () => {
     );
   });
 
-  it("enriches a diff revision with paired file_after content", async () => {
+  it("does not trust paired file_after content", async () => {
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json({
+          path: "/workspace/src/source.ts",
+          content: "after\nrest\n",
+          language: "typescript",
+          size: 11,
+          truncated: false,
+          line_start: null,
+          line_end: null,
+          mtime_ms: 1,
+        }),
+      ),
+    );
     const filePath = "/workspace/src/source.ts";
     const chunk = {
       file_name: filePath,
@@ -582,9 +732,167 @@ describe("workspace routing middleware", () => {
 
     await waitFor(() => {
       expect(
-        store.getState().filesPanel.liveUpdatesByPath[filePath]?.[0].fileAfter,
-      ).toBe("after\nrest\n");
+        store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[filePath],
+      ).toMatchObject({ revision: "1", operation: "write" });
     });
+    expect(
+      store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[filePath],
+    ).not.toHaveProperty("fileAfter");
+  });
+
+  it("handles delete and rename without leaving stale live surfaces", async () => {
+    const removedPath = "/workspace/src/removed.ts";
+    const renamedPath = "/workspace/src/old.ts";
+    const renamedTo = "/workspace/src/new.ts";
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a"]),
+      workspace: {
+        tabs: [chatSurface("chat-a")],
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+        liveEditsByChat: { "chat-a": true },
+      },
+    });
+
+    store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "1",
+        type: "message_added",
+        index: 0,
+        message: {
+          role: "diff",
+          tool_call_id: "remove",
+          content: [
+            {
+              file_name: removedPath,
+              file_action: "remove",
+              line1: 1,
+              line2: 1,
+              lines_remove: "gone\n",
+              lines_add: "",
+            },
+          ],
+        },
+      }),
+    );
+    expect(
+      store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[removedPath],
+    ).toMatchObject({ operation: "remove" });
+    expect(workspaceSurfaceKeys(store.getState().workspace)).not.toContain(
+      makeSurfaceKey("file", removedPath),
+    );
+
+    store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "2",
+        type: "message_added",
+        index: 1,
+        message: {
+          role: "diff",
+          tool_call_id: "rename",
+          content: [
+            {
+              file_name: renamedPath,
+              file_action: "rename",
+              file_name_rename: renamedTo,
+              line1: 1,
+              line2: 1,
+              lines_remove: "old\n",
+              lines_add: "old\n",
+            },
+          ],
+        },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(workspaceSurfaceKeys(store.getState().workspace)).toContain(
+        makeSurfaceKey("file", renamedTo),
+      );
+    });
+    expect(workspaceSurfaceKeys(store.getState().workspace)).not.toContain(
+      makeSurfaceKey("file", renamedPath),
+    );
+    expect(
+      store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[renamedPath],
+    ).toMatchObject({ operation: "rename", renamedTo });
+  });
+
+  it("cleans live state when a chat or file surface closes", async () => {
+    const filePath = "/workspace/src/close.ts";
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json({
+          path: filePath,
+          content: "closed\n",
+          language: "typescript",
+          size: 7,
+          truncated: false,
+          line_start: null,
+          line_end: null,
+          mtime_ms: 1,
+        }),
+      ),
+    );
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a"]),
+      workspace: {
+        tabs: [chatSurface("chat-a"), makeSurfaceKey("file", filePath)],
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+        liveEditsByChat: { "chat-a": false },
+      },
+    });
+    store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "1",
+        type: "message_added",
+        index: 0,
+        message: {
+          role: "diff",
+          tool_call_id: "close",
+          content: [
+            {
+              file_name: filePath,
+              file_action: "edit",
+              line1: 1,
+              line2: 1,
+              lines_remove: "",
+              lines_add: "closed\n",
+            },
+          ],
+        },
+      }),
+    );
+    await waitFor(() => {
+      expect(
+        store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[filePath],
+      ).toBeDefined();
+    });
+
+    store.dispatch(closeWorkspaceTab(makeSurfaceKey("file", filePath)));
+    await waitFor(() => {
+      expect(
+        store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[filePath],
+      ).toBeUndefined();
+    });
+
+    store.dispatch(
+      applyLiveFileUpdate({
+        chatId: "chat-a",
+        path: filePath,
+        update: { revision: "2", chunks: [], operation: "remove" },
+      }),
+    );
+    store.dispatch(closeThread({ id: "chat-a", force: true }));
+    expect(
+      store.getState().filesPanel.liveUpdatesByChat["chat-a"],
+    ).toBeUndefined();
   });
 
   it("keeps task-internal openTab false switches out of workspace tabs", async () => {

@@ -115,14 +115,13 @@ import {
   getEventMetadata,
   isEventMessage,
   isDiffMessage,
-  isToolEditResult,
   isToolMessage,
   modelsApi,
   providersApi,
   type ChatMessage,
-  type ToolEditFileResult,
 } from "../services/refact";
 import { sendChatCommand } from "../services/refact/chatCommands";
+import { filesApi } from "../services/refact/files";
 import { schedulerApi } from "../services/refact/schedulerApi";
 import { taskDocumentsApi } from "../services/refact/taskDocumentsApi";
 import { taskMemoriesApi } from "../services/refact/taskMemoriesApi";
@@ -144,6 +143,7 @@ import {
   focusPane as focusWorkspacePane,
   hydrateWorkspace,
   isChatSurface,
+  isFileSurface,
   makeSurfaceKey,
   openTab as openWorkspaceTab,
   reconcileWorkspace,
@@ -168,7 +168,9 @@ import {
 } from "../features/Workspace";
 import {
   applyLiveFileUpdate,
-  enrichLiveFileUpdate,
+  clearLiveFileUpdate,
+  clearLiveFileUpdatesForChat,
+  markLiveFileUpdateAuthoritative,
 } from "../features/Workspace/FilesPanel/filesPanelSlice";
 
 const AUTH_ERROR_MESSAGE =
@@ -242,32 +244,6 @@ function persistOpenChatTabs(state: RootState): void {
 function persistWorkspaceLayout(state: RootState): void {
   syncProjectStorageNamespace(state);
   savePersistedWorkspace(state.workspace, state.config.host);
-}
-
-function toolEditFiles(message: ChatMessage): ToolEditFileResult[] {
-  if (!isToolMessage(message) || typeof message.content !== "string") return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(message.content);
-  } catch {
-    return [];
-  }
-  if (!isToolEditResult(parsed)) return [];
-  if (parsed.files) return parsed.files;
-  if (
-    parsed.chunks.length > 0 &&
-    new Set(parsed.chunks.map((chunk) => chunk.file_name)).size === 1
-  ) {
-    return [
-      {
-        path: parsed.chunks[0].file_name,
-        file_before: parsed.file_before,
-        file_after: parsed.file_after,
-        chunks: parsed.chunks,
-      },
-    ];
-  }
-  return [];
 }
 
 function hydratePersistedChatUi(listenerApi: {
@@ -468,50 +444,16 @@ startListening({
 
 startListening({
   actionCreator: applyChatEvent,
-  effect: (action, listenerApi) => {
+  effect: async (action, listenerApi) => {
     const event = action.payload;
     if (event.type !== "message_added") return;
     const state = listenerApi.getState();
-    if (selectFocusedWorkspaceChatId(state) !== event.chat_id) return;
     if (state.chat.threads[event.chat_id]?.last_applied_seq !== event.seq)
       return;
-
-    if (isToolMessage(event.message)) {
-      for (const file of toolEditFiles(event.message)) {
-        const updates = state.filesPanel.liveUpdatesByPath[file.path] ?? [];
-        const matchingUpdate = [...updates]
-          .reverse()
-          .find((update) =>
-            update.chunks.some((chunk) =>
-              file.chunks.some(
-                (resultChunk) =>
-                  resultChunk.file_name === chunk.file_name &&
-                  resultChunk.line1 === chunk.line1,
-              ),
-            ),
-          );
-        if (!matchingUpdate) continue;
-        listenerApi.dispatch(
-          enrichLiveFileUpdate({
-            path: file.path,
-            revision: matchingUpdate.revision,
-            fileAfter: file.file_after,
-          }),
-        );
-      }
-      return;
-    }
     if (!isDiffMessage(event.message)) return;
-    const toolCallId = event.message.tool_call_id;
-    const pairedFiles = state.chat.threads[
-      event.chat_id
-    ]?.thread.messages.flatMap((message) =>
-      isToolMessage(message) && message.tool_call_id === toolCallId
-        ? toolEditFiles(message)
-        : [],
-    );
 
     const chunksByPath = new Map<string, typeof event.message.content>();
+    const authoritativeUpdates: { path: string; revision: string }[] = [];
     for (const chunk of event.message.content) {
       const chunks = chunksByPath.get(chunk.file_name) ?? [];
       chunksByPath.set(chunk.file_name, [...chunks, chunk]);
@@ -519,29 +461,165 @@ startListening({
 
     const liveEdits = selectLiveEditsForChat(state, event.chat_id);
     for (const [path, chunks] of chunksByPath) {
+      const renameChunk = chunks.find(
+        (chunk) => chunk.file_action === "rename" && chunk.file_name_rename,
+      );
+      const operation = renameChunk
+        ? "rename"
+        : chunks.every((chunk) => chunk.file_action === "remove")
+          ? "remove"
+          : "write";
+      const displayedPath = renameChunk?.file_name_rename ?? path;
       const fileKey = makeSurfaceKey("file", path);
       const fileIsOpen =
         state.workspace.tabs.includes(fileKey) ||
         Object.values(state.workspace.groups).some((group) =>
           group ? collectTabIds(group.root).includes(fileKey) : false,
         );
-      if (!fileIsOpen && !liveEdits) continue;
+      const renamedFileIsOpen =
+        displayedPath !== path &&
+        (state.workspace.tabs.includes(makeSurfaceKey("file", displayedPath)) ||
+          Object.values(state.workspace.groups).some((group) =>
+            group
+              ? collectTabIds(group.root).includes(
+                  makeSurfaceKey("file", displayedPath),
+                )
+              : false,
+          ));
+      if (!fileIsOpen && !renamedFileIsOpen && !liveEdits) continue;
 
       listenerApi.dispatch(
         applyLiveFileUpdate({
+          chatId: event.chat_id,
           path,
           update: {
             revision: event.seq,
             chunks,
-            fileAfter: pairedFiles?.find((file) => file.path === path)
-              ?.file_after,
+            operation,
+            renamedTo: renameChunk?.file_name_rename ?? undefined,
           },
         }),
       );
-      if (liveEdits) {
+
+      if (liveEdits && operation !== "remove") {
         listenerApi.dispatch(
-          ensureLiveEditSplit({ chatId: event.chat_id, filePath: path }),
+          ensureLiveEditSplit({
+            chatId: event.chat_id,
+            filePath: displayedPath,
+          }),
         );
+      }
+
+      if (operation === "write") {
+        const request = listenerApi.dispatch(
+          filesApi.endpoints.readFile.initiate(
+            { path, chatId: event.chat_id, revision: event.seq },
+            { forceRefetch: true, subscribe: false },
+          ),
+        );
+        try {
+          const response = await request.unwrap();
+          const currentUpdate =
+            listenerApi.getState().filesPanel.liveUpdatesByChat[
+              event.chat_id
+            ]?.[path];
+          if (currentUpdate?.revision !== event.seq) continue;
+          await listenerApi.dispatch(
+            filesApi.util.upsertQueryData(
+              "readFile",
+              { path, chatId: event.chat_id },
+              response,
+            ),
+          );
+          listenerApi.dispatch(
+            markLiveFileUpdateAuthoritative({
+              chatId: event.chat_id,
+              path,
+              revision: event.seq,
+            }),
+          );
+          authoritativeUpdates.push({ path, revision: event.seq });
+        } catch {
+          continue;
+        } finally {
+          request.unsubscribe();
+        }
+      } else {
+        listenerApi.dispatch(
+          filesApi.util.invalidateTags([
+            { type: "File", id: path },
+            { type: "Tree", id: path.slice(0, path.lastIndexOf("/")) },
+          ]),
+        );
+        if (operation === "rename") {
+          listenerApi.dispatch(
+            filesApi.util.invalidateTags([
+              { type: "File", id: displayedPath },
+              {
+                type: "Tree",
+                id: displayedPath.slice(0, displayedPath.lastIndexOf("/")),
+              },
+            ]),
+          );
+        }
+      }
+    }
+    if (authoritativeUpdates.length === 0) return;
+    await listenerApi.delay(1_800);
+    for (const update of authoritativeUpdates) {
+      listenerApi.dispatch(
+        clearLiveFileUpdate({
+          chatId: event.chat_id,
+          path: update.path,
+          revision: update.revision,
+        }),
+      );
+    }
+  },
+});
+
+startListening({
+  matcher: isAnyOf(removeChatFromCache, closeThread),
+  effect: (action, listenerApi) => {
+    const payload = action.payload as { id: string };
+    listenerApi.dispatch(clearLiveFileUpdatesForChat(payload.id));
+  },
+});
+
+startListening({
+  matcher: isAnyOf(closeWorkspaceTab, closeWorkspacePane),
+  effect: (action, listenerApi) => {
+    const originalState = listenerApi.getOriginalState();
+    const removedSurfaces = new Set<string>();
+    if (closeWorkspaceTab.match(action)) {
+      removedSurfaces.add(action.payload);
+      const group = originalState.workspace.groups[action.payload];
+      if (group) {
+        for (const surface of collectTabIds(group.root)) {
+          removedSurfaces.add(surface);
+        }
+      }
+    } else {
+      const payload = action.payload as { tabId: string; leafId: string };
+      const group = originalState.workspace.groups[payload.tabId];
+      const leaf = group ? findLeaf(group.root, payload.leafId) : null;
+      for (const surface of leaf?.tabIds ?? []) removedSurfaces.add(surface);
+    }
+    const remainingSurfaces = collectWorkspaceSurfaceKeys(
+      listenerApi.getState().workspace,
+    );
+    const removedFilePaths = new Set(
+      [...removedSurfaces]
+        .filter(isFileSurface)
+        .map((surface) => surface.slice("file:".length)),
+    );
+    for (const [chatId, updates] of Object.entries(
+      originalState.filesPanel.liveUpdatesByChat,
+    )) {
+      for (const path of Object.keys(updates ?? {})) {
+        if (!removedFilePaths.has(path)) continue;
+        if (remainingSurfaces.has(makeSurfaceKey("file", path))) continue;
+        listenerApi.dispatch(clearLiveFileUpdate({ chatId, path }));
       }
     }
   },

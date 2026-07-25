@@ -19,8 +19,10 @@ export type FilesTreeResponse = {
 
 export type ReadFileRequest = {
   path: string;
+  chatId?: string;
   lineStart?: number;
   lineEnd?: number;
+  revision?: string;
 };
 
 export type ReadFileResponse = {
@@ -37,6 +39,7 @@ export type ReadFileResponse = {
 
 export const filesApi = createApi({
   reducerPath: "filesApi",
+  tagTypes: ["File", "Tree"],
   baseQuery: fetchBaseQuery({
     prepareHeaders: (headers, { getState }) => {
       const token = (getState() as RootState).config.apiKey;
@@ -56,6 +59,7 @@ export const filesApi = createApi({
         if (result.error) return { error: result.error };
         return { data: result.data as FilesTreeResponse };
       },
+      providesTags: (_result, _error, path) => [{ type: "Tree", id: path }],
     }),
     readFile: builder.query<ReadFileResponse, ReadFileRequest>({
       queryFn: async (request, api, _extraOptions, baseQuery) => {
@@ -72,6 +76,9 @@ export const filesApi = createApi({
         if (result.error) return { error: result.error };
         return { data: result.data as ReadFileResponse };
       },
+      providesTags: (_result, _error, request) => [
+        { type: "File", id: request.path },
+      ],
     }),
   }),
 });

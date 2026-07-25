@@ -24,7 +24,9 @@ export type FileViewerTarget = {
 export type LiveFileUpdate = {
   revision: string;
   chunks: DiffChunk[];
-  fileAfter?: string;
+  operation: "write" | "remove" | "rename";
+  renamedTo?: string;
+  authoritative: boolean;
 };
 
 export type FilesPanelState = {
@@ -33,7 +35,10 @@ export type FilesPanelState = {
   showIgnored: boolean;
   viewerTarget: FileViewerTarget | null;
   viewerTargets: Record<string, FileViewerTarget | undefined>;
-  liveUpdatesByPath: Record<string, LiveFileUpdate[] | undefined>;
+  liveUpdatesByChat: Record<
+    string,
+    Record<string, LiveFileUpdate | undefined> | undefined
+  >;
 };
 
 const initialState: FilesPanelState = {
@@ -42,7 +47,7 @@ const initialState: FilesPanelState = {
   showIgnored: false,
   viewerTarget: null,
   viewerTargets: {},
-  liveUpdatesByPath: {},
+  liveUpdatesByChat: {},
 };
 
 const compareRevision = (left: string, right: string): number => {
@@ -129,45 +134,84 @@ export const filesPanelSlice = createSlice({
     },
     applyLiveFileUpdate: (
       state,
-      action: PayloadAction<{ path: string; update: LiveFileUpdate }>,
+      action: PayloadAction<{
+        chatId: string;
+        path: string;
+        update: Omit<LiveFileUpdate, "authoritative">;
+      }>,
     ) => {
-      const updates = state.liveUpdatesByPath[action.payload.path] ?? [];
-      const latest = updates.at(-1);
+      const updates = state.liveUpdatesByChat[action.payload.chatId] ?? {};
+      const latest = updates[action.payload.path];
       if (
         latest &&
         compareRevision(action.payload.update.revision, latest.revision) <= 0
       ) {
         return;
       }
-      state.liveUpdatesByPath[action.payload.path] = [
+      state.liveUpdatesByChat[action.payload.chatId] = {
         ...updates,
-        action.payload.update,
-      ].slice(-20);
+        [action.payload.path]: {
+          ...action.payload.update,
+          authoritative: false,
+        },
+      };
     },
-    enrichLiveFileUpdate: (
+    markLiveFileUpdateAuthoritative: (
       state,
       action: PayloadAction<{
+        chatId: string;
         path: string;
         revision: string;
-        fileAfter: string;
       }>,
     ) => {
-      const updates = state.liveUpdatesByPath[action.payload.path];
-      if (!updates) return;
-      const update = updates.find(
-        (candidate) => candidate.revision === action.payload.revision,
-      );
-      if (update) update.fileAfter = action.payload.fileAfter;
+      const update =
+        state.liveUpdatesByChat[action.payload.chatId]?.[action.payload.path];
+      if (update?.revision === action.payload.revision) {
+        update.authoritative = true;
+      }
+    },
+    clearLiveFileUpdate: (
+      state,
+      action: PayloadAction<{
+        chatId: string;
+        path: string;
+        revision?: string;
+      }>,
+    ) => {
+      const updates = state.liveUpdatesByChat[action.payload.chatId];
+      const update = updates?.[action.payload.path];
+      if (!update) return;
+      if (
+        action.payload.revision &&
+        update.revision !== action.payload.revision
+      ) {
+        return;
+      }
+      const { [action.payload.path]: _removed, ...remaining } = updates;
+      if (Object.keys(remaining).length > 0) {
+        state.liveUpdatesByChat[action.payload.chatId] = remaining;
+      } else {
+        const { [action.payload.chatId]: _chat, ...otherChats } =
+          state.liveUpdatesByChat;
+        state.liveUpdatesByChat = otherChats;
+      }
+    },
+    clearLiveFileUpdatesForChat: (state, action: PayloadAction<string>) => {
+      const { [action.payload]: _chat, ...otherChats } =
+        state.liveUpdatesByChat;
+      state.liveUpdatesByChat = otherChats;
     },
   },
 });
 
 export const {
+  clearLiveFileUpdate,
+  clearLiveFileUpdatesForChat,
   collapseDirectory,
-  enrichLiveFileUpdate,
   applyLiveFileUpdate,
   expandDirectory,
   hydrateShowIgnored,
+  markLiveFileUpdateAuthoritative,
   resetFileTree,
   selectTreePath,
   setShowIgnored,
@@ -287,8 +331,6 @@ type FilesPanelRootState = {
   filesPanel: FilesPanelState;
 };
 
-const EMPTY_LIVE_FILE_UPDATES: LiveFileUpdate[] = [];
-
 export const selectExpandedDirectories = (state: FilesPanelRootState) =>
   state.filesPanel.expandedDirectories;
 
@@ -306,8 +348,9 @@ export const selectFileViewerTargetByPath = (
   path: string,
 ): FileViewerTarget | undefined => state.filesPanel.viewerTargets[path];
 
-export const selectLiveFileUpdatesByPath = (
+export const selectLiveFileUpdate = (
   state: FilesPanelRootState,
+  chatId: string | null,
   path: string,
-): LiveFileUpdate[] =>
-  state.filesPanel.liveUpdatesByPath[path] ?? EMPTY_LIVE_FILE_UPDATES;
+): LiveFileUpdate | undefined =>
+  chatId ? state.filesPanel.liveUpdatesByChat[chatId]?.[path] : undefined;

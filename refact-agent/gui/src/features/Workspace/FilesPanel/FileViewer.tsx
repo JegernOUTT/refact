@@ -18,6 +18,7 @@ import {
 import { useReadFileQuery } from "../../../services/refact/files";
 import {
   selectFocusedChatWorktreeRoot,
+  selectFocusedWorkspaceChatId,
   setDockOpen,
   setDockSection,
 } from "../workspaceSlice";
@@ -25,12 +26,12 @@ import {
   expandDirectory,
   isPathWithinWorkspaceRoots,
   selectFileViewerTargetByPath,
-  selectLiveFileUpdatesByPath,
+  selectLiveFileUpdate,
   selectTreePath,
 } from "./filesPanelSlice";
 import { pathBasename } from "./fileTreeModel";
 import { HighlightedFile } from "./HighlightedFile";
-import { applyLiveFileUpdates, changedLineNumbers } from "./liveFileModel";
+import { changedLineNumbers } from "./liveFileModel";
 import styles from "./FilesPanel.module.css";
 
 const errorStatus = (error: unknown): number | string | null => {
@@ -96,8 +97,9 @@ export function FileViewer({ path }: { path: string }) {
   const storedTarget = useAppSelector((state) =>
     selectFileViewerTargetByPath(state, path),
   );
-  const liveUpdates = useAppSelector((state) =>
-    selectLiveFileUpdatesByPath(state, path),
+  const chatId = useAppSelector(selectFocusedWorkspaceChatId);
+  const liveUpdate = useAppSelector((state) =>
+    selectLiveFileUpdate(state, chatId, path),
   );
   const configuredWorkspaceRoots = useAppSelector(
     (state) => state.current_project.workspaceRoots ?? EMPTY_ROOTS,
@@ -108,28 +110,22 @@ export function FileViewer({ path }: { path: string }) {
     [configuredWorkspaceRoots, worktreeRoot],
   );
   const target = storedTarget ?? { path };
-  const { data, error, isFetching, refetch } = useReadFileQuery({ path });
+  const { data, error, isFetching, refetch } = useReadFileQuery({
+    path,
+    chatId: chatId ?? undefined,
+    revision:
+      liveUpdate?.operation === "write" ? liveUpdate.revision : undefined,
+  });
   const breadcrumbs = useMemo(
     () => breadcrumbsForPath(path, workspaceRoots),
     [path, workspaceRoots],
   );
-  const firstAuthoritativeUpdate = liveUpdates.findIndex(
-    (update) => update.fileAfter !== undefined,
-  );
-  const displayedContent = useMemo(() => {
-    if (firstAuthoritativeUpdate >= 0) {
-      const authoritativeUpdate = liveUpdates[firstAuthoritativeUpdate];
-      return applyLiveFileUpdates(
-        authoritativeUpdate.fileAfter ?? "",
-        liveUpdates.slice(firstAuthoritativeUpdate + 1),
-      );
-    }
-    return data ? applyLiveFileUpdates(data.content, liveUpdates) : null;
-  }, [data, firstAuthoritativeUpdate, liveUpdates]);
-  const latestLiveUpdate = liveUpdates.at(-1);
+  const unavailable =
+    liveUpdate?.operation === "remove" || liveUpdate?.operation === "rename";
+  const displayedContent = unavailable ? null : data?.content ?? null;
   const changedLines = useMemo(
-    () => changedLineNumbers(latestLiveUpdate?.chunks ?? []),
-    [latestLiveUpdate],
+    () => changedLineNumbers(liveUpdate?.chunks ?? []),
+    [liveUpdate],
   );
 
   useEffect(() => {
@@ -193,7 +189,19 @@ export function FileViewer({ path }: { path: string }) {
         </Tooltip>
       </header>
 
-      {isFetching && !data && displayedContent === null ? (
+      {unavailable ? (
+        <ErrorState
+          description={
+            liveUpdate.operation === "rename" && liveUpdate.renamedTo
+              ? `This file was renamed to ${liveUpdate.renamedTo}.`
+              : "This file was deleted from the workspace."
+          }
+          title={
+            liveUpdate.operation === "rename" ? "File renamed" : "File deleted"
+          }
+          variant="full"
+        />
+      ) : isFetching && !data ? (
         <LoadingState
           label={`Loading ${pathBasename(target.path)}`}
           variant="full"
@@ -217,7 +225,7 @@ export function FileViewer({ path }: { path: string }) {
           title={blocked ? "File blocked" : "File unavailable"}
           variant="full"
         />
-      ) : data?.binary && firstAuthoritativeUpdate < 0 ? (
+      ) : data?.binary ? (
         <EmptyState
           icon={FileQuestion}
           title="Binary file"
@@ -241,7 +249,9 @@ export function FileViewer({ path }: { path: string }) {
             <HighlightedFile
               content={displayedContent}
               changedLines={changedLines}
-              changeRevision={latestLiveUpdate?.revision}
+              changeRevision={
+                liveUpdate?.authoritative ? liveUpdate.revision : undefined
+              }
               language={data?.language ?? null}
               lineStart={data ? lineStart : 1}
               targetLine={target.line}
