@@ -4,7 +4,7 @@
   align-items: center;
   flex-shrink: 0;
   min-width: 0;
-  height: 36px;
+  height: var(--rf-control-h-lg);
   padding: 0 var(--rf-space-2);
   gap: 0;
   overflow: hidden;

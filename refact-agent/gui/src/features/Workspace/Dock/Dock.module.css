@@ -81,6 +81,8 @@
 }
 
 .sheet {
+  top: calc(var(--rf-control-h-lg) + var(--rf-space-3));
+  max-height: calc(100dvh - var(--rf-control-h-lg) - var(--rf-space-5));
   gap: 0;
 }
 

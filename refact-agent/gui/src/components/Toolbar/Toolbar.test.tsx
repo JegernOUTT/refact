@@ -715,7 +715,7 @@ describe("Toolbar chrome containment", () => {
     expect(match).not.toBeNull();
     const block = match?.[0] ?? "";
     expect(block).toContain("flex-shrink: 0");
-    expect(block).toContain("height: 36px");
+    expect(block).toContain("height: var(--rf-control-h-lg)");
   });
 
   it("toolbar_spacer_grows_to_keep_right_controls_pinned_to_the_edge", async () => {

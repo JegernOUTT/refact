@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -6,8 +8,33 @@ import { server } from "../../../utils/mockServer";
 import { setDockOpen } from "../workspaceSlice";
 import { Dock } from "./Dock";
 import badgeStyles from "../../../components/ui/Badge/Badge.module.css";
+import sheetStyles from "../../../components/ui/Sheet/Sheet.module.css";
+import dockStyles from "./Dock.module.css";
 
 const originalMatchMedia = window.matchMedia;
+const dockCss = readFileSync(
+  "src/features/Workspace/Dock/Dock.module.css",
+  "utf8",
+);
+const toolbarCss = readFileSync(
+  "src/components/Toolbar/Toolbar.module.css",
+  "utf8",
+);
+const sheetCss = readFileSync(
+  "src/components/ui/Sheet/Sheet.module.css",
+  "utf8",
+);
+const tokensCss = readFileSync("src/styles/tokens.css", "utf8");
+
+function cssBlock(css: string, selector: string): string {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`${escapedSelector} \\{[^}]*\\}`).exec(css)?.[0] ?? "";
+}
+
+function tokenPixels(name: string): number {
+  const value = new RegExp(`${name}:\\s*(\\d+)px`).exec(tokensCss)?.[1];
+  return Number(value);
+}
 
 function mockNarrow(narrow: boolean) {
   Object.defineProperty(window, "matchMedia", {
@@ -106,6 +133,40 @@ describe("Dock", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     view.store.dispatch(setDockOpen(false));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("keeps the narrow Sheet below the fixed toolbar without blocking toolbar input", () => {
+    const sheetBlock = cssBlock(dockCss, ".sheet");
+    const toolbarBlock = cssBlock(toolbarCss, ".toolbar");
+    const toolbarHeight = tokenPixels("--rf-control-h-lg");
+    const viewportInset = tokenPixels("--rf-space-3");
+
+    expect(toolbarBlock).toContain("height: var(--rf-control-h-lg)");
+    expect(sheetBlock).toContain(
+      "top: calc(var(--rf-control-h-lg) + var(--rf-space-3))",
+    );
+    expect(sheetBlock).toContain(
+      "100dvh - var(--rf-control-h-lg) - var(--rf-space-5)",
+    );
+    expect(sheetCss).toMatch(
+      /\.left,\s*\.right\s*\{[\s\S]*?width:\s*min\([\s\S]*?calc\(100vw - 2 \* var\(--rf-space-3\)\)/,
+    );
+    for (const viewportWidth of [360, 480, 640]) {
+      expect(toolbarHeight + viewportInset).toBeGreaterThan(toolbarHeight);
+      expect(viewportWidth - 2 * viewportInset).toBeLessThan(viewportWidth);
+    }
+
+    mockNarrow(true);
+    server.use(
+      http.get("*/v1/files/tree", () =>
+        HttpResponse.json({ path: "", entries: [], truncated: false }),
+      ),
+    );
+    render(<Dock />);
+
+    expect(screen.getByRole("dialog")).toHaveClass(dockStyles.sheet);
+    expect(document.querySelector(`.${sheetStyles.overlay}`)).toBeNull();
+    expect(document.body.style.pointerEvents).not.toBe("none");
   });
 
   it("switches to the Git dock section", async () => {

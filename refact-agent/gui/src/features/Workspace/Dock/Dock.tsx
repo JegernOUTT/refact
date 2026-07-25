@@ -199,6 +199,7 @@ export function Dock() {
   if (isNarrow) {
     return (
       <Sheet
+        modal={false}
         open={dock.open}
         onOpenChange={(open) => dispatch(setDockOpen(open))}
       >
