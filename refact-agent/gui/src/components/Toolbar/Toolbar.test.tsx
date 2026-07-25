@@ -13,6 +13,7 @@ import { push } from "../../features/Pages/pagesSlice";
 import { openTask } from "../../features/Tasks";
 import {
   makeSurfaceKey,
+  bindSurfaceToChat,
   openTab,
   setPanelsForced,
   setDockOpen,
@@ -282,6 +283,33 @@ describe("Toolbar single workspace tab row", () => {
     });
     await waitFor(() =>
       expect(liveEdits).toHaveAttribute("aria-pressed", "false"),
+    );
+  });
+
+  it("keeps Live edits bound to the originating chat while a file tab is active", async () => {
+    useToolbarHandlers();
+    const activeTab = { type: "chat" as const, id: "chat-a" };
+    const view = renderToolbar(activeTab);
+    const chatA = makeSurfaceKey("chat", "chat-a");
+    const file = makeSurfaceKey("file", "/worktrees/chat-a/src/main.ts");
+
+    act(() => {
+      view.store.dispatch(
+        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
+      );
+      view.store.dispatch(openTab(chatA));
+      view.store.dispatch(openTab(file));
+      view.store.dispatch(
+        bindSurfaceToChat({ surfaceKey: file, chatId: "chat-a" }),
+      );
+    });
+    rerenderToolbar(view, activeTab);
+
+    const liveEdits = screen.getByRole("button", { name: "Live edits" });
+    expect(liveEdits).toHaveAttribute("aria-pressed", "true");
+    await view.user.click(liveEdits);
+    expect(view.store.getState().workspace.liveEditsByChat?.["chat-a"]).toBe(
+      false,
     );
   });
 

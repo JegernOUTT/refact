@@ -276,12 +276,42 @@ describe("chatUiPersistence", () => {
     });
     const workspace = {
       ...splitWorkspace(),
+      contextChatByTab: {
+        [chatSurface("chat-a")]: "chat-b",
+      },
       liveEditsByChat: { "chat-a": false, "chat-b": true },
     };
 
     savePersistedWorkspace(workspace);
 
     expect(loadPersistedWorkspace()).toEqual(workspace);
+  });
+
+  it("prunes restored context mappings for closed chats and tabs", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a"],
+      currentThreadId: "chat-a",
+      tabs: [{ id: "chat-a" }],
+    });
+    const file = makeSurfaceKey("file", "/project/src/main.ts");
+    localStorage.setItem(
+      workspaceStorageKey(),
+      JSON.stringify({
+        version: 4,
+        tabs: [chatSurface("chat-a"), file],
+        activeTabId: file,
+        groups: {},
+        contextChatByTab: {
+          [file]: "chat-a",
+          missing: "chat-a",
+          [chatSurface("chat-a")]: "chat-b",
+        },
+      }),
+    );
+
+    expect(loadPersistedWorkspace().contextChatByTab).toEqual({
+      [file]: "chat-a",
+    });
   });
 
   it("persists workspace panel opt-in per project and host", () => {

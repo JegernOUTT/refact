@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import { setUpStore } from "../../../app/store";
+import { createChatWithId } from "../../Chat/Thread";
+import { openTab, selectFocusedWorkspaceChatId } from "../workspaceSlice";
+import { makeSurfaceKey } from "../surfaceKey";
 import { applyLiveFileUpdate, openFileInFilesPanel } from "./filesPanelSlice";
 
 describe("openFileInFilesPanel", () => {
@@ -84,6 +87,45 @@ describe("openFileInFilesPanel", () => {
     store.dispatch(openFileInFilesPanel({ path: "/outside/src/x.rs" }));
 
     expect(store.getState().filesPanel.expandedDirectories).toEqual([]);
+  });
+
+  it("captures chat and worktree context before file focus changes", () => {
+    const store = setUpStore({
+      current_project: {
+        name: "workspace",
+        workspaceRoots: ["/project"],
+      },
+    });
+    store.dispatch(createChatWithId({ id: "chat-a", title: "Chat A" }));
+    store.dispatch(
+      createChatWithId({
+        id: "chat-b",
+        title: "Chat B",
+        worktree: {
+          id: "worktree-b",
+          kind: "chat",
+          root: "/worktrees/chat-b",
+          source_workspace_root: "/project",
+          repo_root: "/project",
+          enforce: true,
+        },
+      }),
+    );
+    store.dispatch(openTab(makeSurfaceKey("chat", "chat-b")));
+
+    store.dispatch(
+      openFileInFilesPanel({ path: "/worktrees/chat-b/src/main.ts" }),
+    );
+
+    const fileSurface = makeSurfaceKey("file", "/worktrees/chat-b/src/main.ts");
+    expect(store.getState().workspace.contextChatByTab).toEqual({
+      [fileSurface]: "chat-b",
+    });
+    expect(selectFocusedWorkspaceChatId(store.getState())).toBe("chat-b");
+    expect(store.getState().filesPanel.expandedDirectories).toEqual([
+      "/worktrees/chat-b",
+      "/worktrees/chat-b/src",
+    ]);
   });
 });
 

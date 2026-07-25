@@ -7,6 +7,7 @@ import {
 } from "../ChatPanes/panesTree";
 import {
   addSurfaceToPane,
+  bindSurfaceToChat,
   closePane,
   closeTab,
   ensureLiveEditSplit,
@@ -830,6 +831,75 @@ describe("workspaceSlice", () => {
 
     expect(selectVisibleThreadIds(rootState(state))).toEqual(["a", "b"]);
     expect(selectFocusedWorkspaceChatId(rootState(state))).toBe("b");
+  });
+
+  test("top-level file focus retains its originating chat context", () => {
+    const chatA = chat("a");
+    const file = makeSurfaceKey("file", "/worktrees/a/src/main.ts");
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(state, openTab(file));
+
+    expect(state.contextChatByTab).toEqual({ [file]: "a" });
+    expect(selectFocusedWorkspaceChatId(rootState(state))).toBe("a");
+
+    state = reducer(state, closeTab(file));
+    expect(state.contextChatByTab).toBeUndefined();
+  });
+
+  test("focused files in a multi-chat group retain the most recently associated chat", () => {
+    const chatA = chat("a");
+    const chatB = chat("b");
+    const file = makeSurfaceKey("file", "/worktrees/b/src/main.ts");
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
+    state = reducer(state, openTab(chatB));
+    state = reducer(
+      state,
+      addSurfaceToPane({
+        tabId: chatA,
+        leafId: "root:sibling:chat:a",
+        surfaceKey: chatB,
+      }),
+    );
+    state = reducer(
+      state,
+      ensureLiveEditSplit({
+        chatId: "b",
+        filePath: "/worktrees/b/src/main.ts",
+      }),
+    );
+    state = reducer(
+      state,
+      bindSurfaceToChat({ surfaceKey: file, chatId: "b" }),
+    );
+
+    expect(state.contextChatByTab).toEqual({ [chatA]: "b" });
+    expect(selectFocusedWorkspaceChatId(rootState(state))).toBe("b");
+    expect(
+      selectFocusedChatWorkspaceRoot(
+        contextState(state, {
+          a: { root: "/worktrees/a", source_workspace_root: "/project" },
+          b: { root: "/worktrees/b", source_workspace_root: "/project" },
+        }),
+      ),
+    ).toBe("/worktrees/b");
+  });
+
+  test("hydrateWorkspace prunes stale context mappings", () => {
+    const chatA = chat("a");
+    const file = makeSurfaceKey("file", "/project/src/main.ts");
+    const state = reducer(
+      undefined,
+      hydrateWorkspace({
+        tabs: [chatA, file],
+        activeTabId: file,
+        groups: {},
+        contextChatByTab: { [file]: "a", missing: "b" },
+      }),
+    );
+
+    expect(state.contextChatByTab).toEqual({ [file]: "a" });
+    expect(selectFocusedWorkspaceChatId(rootState(state))).toBe("a");
   });
 
   test("focused chat workspace root follows worktrees and falls back to the project root", () => {

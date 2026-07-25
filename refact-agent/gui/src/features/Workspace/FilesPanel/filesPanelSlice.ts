@@ -9,7 +9,9 @@ import {
 import { makeSurfaceKey } from "../surfaceKey";
 import type { WorkspaceState } from "../workspaceSlice";
 import {
+  bindSurfaceToChat,
   openTab,
+  selectFocusedWorkspaceChatId,
   selectFocusedChatWorktreeRoot,
   setDockOpen,
 } from "../workspaceSlice";
@@ -183,6 +185,7 @@ export const updateShowIgnored =
 type FilesPanelDispatch = (
   action:
     | ReturnType<typeof openTab>
+    | ReturnType<typeof bindSurfaceToChat>
     | ReturnType<typeof expandDirectory>
     | ReturnType<typeof resetFileTree>
     | ReturnType<typeof setViewerTarget>
@@ -257,12 +260,15 @@ type FilesPanelThunkState = {
 export const openFileInFilesPanel =
   (target: FileViewerTarget) =>
   (dispatch: FilesPanelDispatch, getState: () => FilesPanelThunkState) => {
-    dispatch(openTab(makeSurfaceKey("file", target.path)));
     const state = getState();
+    const chatId = selectFocusedWorkspaceChatId(state);
     const worktreeRoot = selectFocusedChatWorktreeRoot(state);
     const workspaceRoots = worktreeRoot
       ? [worktreeRoot]
       : state.current_project.workspaceRoots ?? [];
+    const surfaceKey = makeSurfaceKey("file", target.path);
+    dispatch(openTab(surfaceKey));
+    if (chatId) dispatch(bindSurfaceToChat({ surfaceKey, chatId }));
     for (const directory of parentDirectories(target.path)) {
       if (isPathWithinWorkspaceRoots(directory, workspaceRoots)) {
         dispatch(expandDirectory(directory));

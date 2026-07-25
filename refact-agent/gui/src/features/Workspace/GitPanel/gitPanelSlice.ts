@@ -1,7 +1,13 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
 import { makeSurfaceKey } from "../surfaceKey";
-import { openTab, setDockOpen } from "../workspaceSlice";
+import {
+  bindSurfaceToChat,
+  openTab,
+  selectFocusedWorkspaceChatId,
+  setDockOpen,
+  type WorkspaceState,
+} from "../workspaceSlice";
 import type { SelectedGitFile } from "./StatusList";
 
 export type GitFileSelection = SelectedGitFile & {
@@ -40,14 +46,23 @@ export const { selectGitFile, setActiveGitRoot } = gitPanelSlice.actions;
 type GitPanelDispatch = (
   action:
     | ReturnType<typeof openTab>
+    | ReturnType<typeof bindSurfaceToChat>
     | ReturnType<typeof selectGitFile>
     | ReturnType<typeof setDockOpen>,
 ) => void;
 
+type GitPanelThunkState = {
+  workspace: WorkspaceState;
+};
+
 export const openGitFile =
-  (selection: GitFileSelection) => (dispatch: GitPanelDispatch) => {
+  (selection: GitFileSelection) =>
+  (dispatch: GitPanelDispatch, getState: () => GitPanelThunkState) => {
+    const chatId = selectFocusedWorkspaceChatId(getState());
+    const surfaceKey = makeSurfaceKey("git", "main");
     dispatch(selectGitFile(selection));
-    dispatch(openTab(makeSurfaceKey("git", "main")));
+    dispatch(openTab(surfaceKey));
+    if (chatId) dispatch(bindSurfaceToChat({ surfaceKey, chatId }));
     if (
       typeof window !== "undefined" &&
       window.matchMedia("(max-width: 767px)").matches

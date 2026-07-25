@@ -583,7 +583,10 @@ export function loadPersistedWorkspace(
   );
   const record = trustedKey ? readRecord(trustedKey) : null;
   const panelsRecord = panelsKey ? readRecord(panelsKey) : null;
-  if (!record || (record.version !== 2 && record.version !== 3)) {
+  if (
+    !record ||
+    (record.version !== 2 && record.version !== 3 && record.version !== 4)
+  ) {
     return fallback;
   }
 
@@ -652,6 +655,16 @@ export function loadPersistedWorkspace(
           ? rawActiveTabId
           : tabs[0] ?? null,
       groups,
+      contextChatByTab: isRecord(record.contextChatByTab)
+        ? Object.fromEntries(
+            Object.entries(record.contextChatByTab).filter(
+              (entry): entry is [string, string] =>
+                tabs.includes(entry[0]) &&
+                typeof entry[1] === "string" &&
+                openThreadIds.has(entry[1]),
+            ),
+          )
+        : undefined,
       panelsForced: panelsRecord?.panelsForced === true ? true : undefined,
       liveEditsByChat: isRecord(record.liveEditsByChat)
         ? Object.fromEntries(
@@ -682,10 +695,11 @@ export function savePersistedWorkspace(
   if (!storageKey || !panelsKey) return;
 
   writeRecord(storageKey, {
-    version: 3,
+    version: 4,
     tabs: workspace.tabs.slice(0, MAX_WORKSPACE_TABS),
     activeTabId: workspace.activeTabId,
     groups: workspace.groups,
+    contextChatByTab: workspace.contextChatByTab,
     liveEditsByChat: workspace.liveEditsByChat,
     dock: normalizeWorkspaceDock(workspace.dock),
     drawer: normalizeWorkspaceDrawer(workspace.drawer),

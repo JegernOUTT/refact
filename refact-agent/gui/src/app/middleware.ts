@@ -137,6 +137,7 @@ import {
 } from "../features/ChatPanes/panesTree";
 import {
   addSurfaceToPane as addSurfaceToWorkspacePane,
+  bindSurfaceToChat,
   closePane as closeWorkspacePane,
   ensureLiveEditSplit,
   closeTab as closeWorkspaceTab,
@@ -414,6 +415,7 @@ startListening({
 startListening({
   matcher: isAnyOf(
     openWorkspaceTab,
+    bindSurfaceToChat,
     closeWorkspaceTab,
     setWorkspaceActiveTab,
     reorderWorkspaceTabs,
