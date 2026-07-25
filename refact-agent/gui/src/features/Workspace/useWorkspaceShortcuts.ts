@@ -17,13 +17,29 @@ import {
 } from "./workspaceSlice";
 import { resolveWorkspaceDockAvailability } from "./workspaceAvailability";
 
+const TEXT_ENTRY_INPUT_TYPES = new Set([
+  "text",
+  "search",
+  "email",
+  "url",
+  "password",
+  "number",
+  "tel",
+]);
+
 function ownsWorkspaceShortcut(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
   if (target instanceof HTMLElement && target.isContentEditable) return true;
-  return Boolean(
+  if (
     target.closest(
-      'input, textarea, select, [contenteditable]:not([contenteditable="false"]), .xterm',
-    ),
+      'textarea, select, [contenteditable]:not([contenteditable="false"]), .xterm',
+    )
+  ) {
+    return true;
+  }
+  const input = target.closest("input");
+  return (
+    input instanceof HTMLInputElement && TEXT_ENTRY_INPUT_TYPES.has(input.type)
   );
 }
 

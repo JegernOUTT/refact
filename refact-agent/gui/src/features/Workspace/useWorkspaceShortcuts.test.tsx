@@ -280,17 +280,53 @@ describe("useWorkspaceShortcuts", () => {
     ).toBeUndefined();
   });
 
-  it("does not fire from editable controls, contenteditable regions, or xterm", () => {
+  it("fires from non-typing input controls", () => {
     const { store } = renderShortcuts();
-    const input = document.body.appendChild(document.createElement("input"));
+    const radio = document.body.appendChild(document.createElement("input"));
+    radio.type = "radio";
+    const checkbox = document.body.appendChild(document.createElement("input"));
+    checkbox.type = "checkbox";
+
+    fireEvent.keyDown(radio, { key: "2", ctrlKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("git");
+    fireEvent.keyDown(checkbox, { key: "3", ctrlKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("tasks");
+    fireEvent.keyDown(radio, { key: "1", ctrlKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("files");
+    fireEvent.keyDown(checkbox, { key: "j", ctrlKey: true });
+    expect(store.getState().terminal.workbenchOpenByChat["chat-a"]).toBe(true);
+    fireEvent.keyDown(radio, { key: "b", ctrlKey: true });
+    expect(store.getState().workspace.dock?.open).toBe(false);
+
+    radio.remove();
+    checkbox.remove();
+  });
+
+  it("does not fire from typing controls, contenteditable regions, or xterm", () => {
+    const { store } = renderShortcuts();
+    const textInput = document.body.appendChild(
+      document.createElement("input"),
+    );
+    textInput.type = "text";
+    const bareInput = document.body.appendChild(
+      document.createElement("input"),
+    );
+    const textarea = document.body.appendChild(
+      document.createElement("textarea"),
+    );
+    const select = document.body.appendChild(document.createElement("select"));
     const editable = document.body.appendChild(document.createElement("div"));
     editable.contentEditable = "true";
     const terminal = document.body.appendChild(document.createElement("div"));
     terminal.className = "xterm";
+    const terminalChild = terminal.appendChild(document.createElement("span"));
 
-    fireEvent.keyDown(input, { key: "j", ctrlKey: true });
+    fireEvent.keyDown(textInput, { key: "b", ctrlKey: true });
+    fireEvent.keyDown(bareInput, { key: "1", ctrlKey: true });
+    fireEvent.keyDown(textarea, { key: "2", ctrlKey: true });
+    fireEvent.keyDown(select, { key: "3", ctrlKey: true });
     fireEvent.keyDown(editable, { key: "2", ctrlKey: true });
-    fireEvent.keyDown(terminal, { key: "j", metaKey: true });
+    fireEvent.keyDown(terminalChild, { key: "j", metaKey: true });
 
     expect(store.getState().workspace.dock).toMatchObject({
       open: true,
@@ -300,9 +336,32 @@ describe("useWorkspaceShortcuts", () => {
       store.getState().terminal.workbenchOpenByChat["chat-a"],
     ).toBeUndefined();
 
-    input.remove();
+    textInput.remove();
+    bareInput.remove();
+    textarea.remove();
+    select.remove();
     editable.remove();
     terminal.remove();
+  });
+
+  it("toggles the dock after a section shortcut focuses its radio", () => {
+    const { store } = renderShortcuts();
+    const radio = document.body.appendChild(document.createElement("input"));
+    radio.type = "radio";
+    radio.ariaLabel = "Git";
+
+    fireEvent.keyDown(window, { key: "2", ctrlKey: true });
+    radio.focus();
+    expect(document.activeElement).toBe(radio);
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: true,
+      section: "git",
+    });
+
+    fireEvent.keyDown(radio, { key: "b", ctrlKey: true });
+    expect(store.getState().workspace.dock?.open).toBe(false);
+
+    radio.remove();
   });
 
   it.each(["ide", "vscode", "jetbrains"] as const)(
