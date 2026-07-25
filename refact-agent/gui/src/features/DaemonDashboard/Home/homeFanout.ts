@@ -149,10 +149,12 @@ export async function fetchHomeFanout(
   const readyWorkers = workers.filter(isReadyWorker);
   const recentWorkers = recentReadyWorkers(workers);
   const tasks: FanoutTask[] = [
-    ...recentWorkers.map((worker): FanoutTask => ({
-      kind: "trajectories",
-      worker,
-    })),
+    ...recentWorkers.map(
+      (worker): FanoutTask => ({
+        kind: "trajectories",
+        worker,
+      }),
+    ),
     ...readyWorkers.map((worker): FanoutTask => ({ kind: "cron", worker })),
   ];
   const chats: RecentProjectChat[] = [];

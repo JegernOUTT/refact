@@ -2,7 +2,12 @@ import { buildApiUrl } from "./apiUrl";
 import { normalizeConnection, type PortOrConnection } from "./chatCommands";
 
 export type ExecStatus =
-  "starting" | "running" | "exited" | "failed" | "killed" | "timed_out";
+  | "starting"
+  | "running"
+  | "exited"
+  | "failed"
+  | "killed"
+  | "timed_out";
 
 export type ExecSpawnRequest = {
   command?: string;
