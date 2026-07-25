@@ -113,12 +113,14 @@ import {
 import { upsertToolCallIntoHistory } from "../features/History/historySlice";
 import {
   getEventMetadata,
+  isDiffChunk,
   isEventMessage,
   isDiffMessage,
   isToolMessage,
   modelsApi,
   providersApi,
   type ChatMessage,
+  type DiffChunk,
 } from "../services/refact";
 import { sendChatCommand } from "../services/refact/chatCommands";
 import { filesApi } from "../services/refact/files";
@@ -236,6 +238,25 @@ const startListening = listenerMiddleware.startListening.withTypes<
   RootState,
   AppDispatch
 >();
+
+function diffChunksFromMessage(message: ChatMessage): DiffChunk[] | null {
+  if (isDiffMessage(message)) return message.content;
+
+  const wireMessage = message as unknown as {
+    role?: unknown;
+    content?: unknown;
+  };
+  if (wireMessage.role !== "diff" || typeof wireMessage.content !== "string") {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(wireMessage.content);
+    return Array.isArray(parsed) && parsed.every(isDiffChunk) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 
 function syncProjectStorageNamespace(state: RootState): boolean {
   const previous = getProjectStorageNamespace();
@@ -550,11 +571,12 @@ startListening({
     const state = listenerApi.getState();
     if (state.chat.threads[event.chat_id]?.last_applied_seq !== event.seq)
       return;
-    if (!isDiffMessage(event.message)) return;
+    const diffChunks = diffChunksFromMessage(event.message);
+    if (!diffChunks) return;
 
-    const chunksByPath = new Map<string, typeof event.message.content>();
+    const chunksByPath = new Map<string, DiffChunk[]>();
     const authoritativeUpdates: { path: string; revision: string }[] = [];
-    for (const chunk of event.message.content) {
+    for (const chunk of diffChunks) {
       const chunks = chunksByPath.get(chunk.file_name) ?? [];
       chunksByPath.set(chunk.file_name, [...chunks, chunk]);
     }

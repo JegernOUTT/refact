@@ -836,6 +836,9 @@ describe("workspaceSlice", () => {
       chatA,
       "file:/workspace/one.ts",
     ]);
+    expect(findLeaf(first.root, first.focusedLeafId)?.activeTabId).toBe(
+      "file:/workspace/one.ts",
+    );
 
     state = reducer(
       state,

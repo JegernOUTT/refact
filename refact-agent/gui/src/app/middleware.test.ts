@@ -28,15 +28,12 @@ import {
   closePane as closeWorkspacePane,
   closeTab as closeWorkspaceTab,
   focusPane as focusWorkspacePane,
-  openTab as openWorkspaceTab,
   selectFocusedWorkspaceChatId,
-  setActiveTab as setWorkspaceActiveTab,
-  setLiveEditsForChat,
   setPaneActive as setWorkspacePaneActive,
   workspaceSlice,
   type WorkspaceState,
 } from "../features/Workspace";
-import { collectTabIds } from "../features/ChatPanes/panesTree";
+import { collectTabIds, findLeaf } from "../features/ChatPanes/panesTree";
 import { makeSurfaceKey } from "../features/Workspace/surfaceKey";
 import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
 import { http, HttpResponse } from "msw";
@@ -119,6 +116,8 @@ function makeChatState(currentThreadId: string, ids: string[]) {
 }
 
 const chatSurface = (id: string) => makeSurfaceKey("chat", id);
+
+type MessageAddedEvent = Extract<ChatEventEnvelope, { type: "message_added" }>;
 
 const workspaceSurfaceKeys = (workspace: WorkspaceState): string[] => [
   ...workspace.tabs,
@@ -457,7 +456,7 @@ describe("workspace routing middleware", () => {
         message: {
           role: "diff",
           tool_call_id: "edit-1",
-          content: [
+          content: JSON.stringify([
             {
               file_name: filePath,
               file_action: "edit",
@@ -466,8 +465,8 @@ describe("workspace routing middleware", () => {
               lines_remove: "old\n",
               lines_add: "new\n",
             },
-          ],
-        },
+          ]),
+        } as unknown as MessageAddedEvent["message"],
       }),
     );
 
@@ -710,7 +709,7 @@ describe("workspace routing middleware", () => {
     });
   });
 
-  it("uses the focused chat Live edits preference for real diff auto-splits", async () => {
+  it("auto-opens the first wire diff for the focused chat with Live edits on", async () => {
     server.use(
       http.get("*/v1/files/read", ({ request }) => {
         const path = new URL(request.url).searchParams.get("path") ?? "";
@@ -727,13 +726,13 @@ describe("workspace routing middleware", () => {
       }),
     );
     const store = setUpStore({
-      config: { host: "vscode", lspPort: 8001, themeProps: {} },
+      config: { host: "web", lspPort: 8001, themeProps: {} },
       chat: makeChatState("chat-a", ["chat-a", "chat-b"]),
       workspace: {
         tabs: [chatSurface("chat-a"), chatSurface("chat-b")],
         activeTabId: chatSurface("chat-a"),
         groups: {},
-        panelsForced: true,
+        liveEditsByChat: { "chat-a": true },
       },
     });
     const dispatchDiff = (chatId: string, seq: string, path: string) =>
@@ -746,7 +745,7 @@ describe("workspace routing middleware", () => {
           message: {
             role: "diff",
             tool_call_id: `edit-${seq}`,
-            content: [
+            content: JSON.stringify([
               {
                 file_name: path,
                 file_action: "edit",
@@ -755,28 +754,12 @@ describe("workspace routing middleware", () => {
                 lines_remove: "",
                 lines_add: `${path}\n`,
               },
-            ],
-          },
+            ]),
+          } as unknown as MessageAddedEvent["message"],
         }),
       );
 
-    const openFilePath = "/workspace/open.ts";
-    store.dispatch(openWorkspaceTab(makeSurfaceKey("file", openFilePath)));
-    store.dispatch(setWorkspaceActiveTab(chatSurface("chat-a")));
-
-    dispatchDiff("chat-a", "1", openFilePath);
-    await waitFor(() => {
-      expect(store.getState().workspace.groups).toEqual({});
-      expect(store.getState().workspace.activeTabId).toBe(
-        chatSurface("chat-a"),
-      );
-      expect(
-        store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[openFilePath],
-      ).toMatchObject({ revision: "1", operation: "write" });
-    });
-
-    store.dispatch(setLiveEditsForChat({ chatId: "chat-a", enabled: true }));
-    dispatchDiff("chat-a", "2", "/workspace/one.ts");
+    dispatchDiff("chat-a", "1", "/workspace/one.ts");
     await waitFor(() => {
       const group = store.getState().workspace.groups[chatSurface("chat-a")];
       expect(group).toBeDefined();
@@ -788,9 +771,15 @@ describe("workspace routing middleware", () => {
         chatSurface("chat-a"),
         "file:/workspace/one.ts",
       ]);
+      expect(
+        group ? findLeaf(group.root, group.focusedLeafId)?.activeTabId : null,
+      ).toBe("file:/workspace/one.ts");
+      expect(store.getState().workspace.activeTabId).toBe(
+        chatSurface("chat-a"),
+      );
     });
 
-    dispatchDiff("chat-a", "3", "/workspace/two.ts");
+    dispatchDiff("chat-a", "2", "/workspace/two.ts");
     await waitFor(() => {
       const group = store.getState().workspace.groups[chatSurface("chat-a")];
       expect(group ? collectTabIds(group.root) : []).toEqual([
@@ -799,7 +788,7 @@ describe("workspace routing middleware", () => {
       ]);
     });
 
-    dispatchDiff("chat-b", "4", "/workspace/background.ts");
+    dispatchDiff("chat-b", "1", "/workspace/background.ts");
     await new Promise((resolve) => setTimeout(resolve, 0));
     const group = store.getState().workspace.groups[chatSurface("chat-a")];
     expect(group ? collectTabIds(group.root) : []).not.toContain(
