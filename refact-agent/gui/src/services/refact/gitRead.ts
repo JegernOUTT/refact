@@ -164,9 +164,14 @@ export const gitReadApi = createApi({
         if (result.error) return { error: result.error };
         return { data: result.data as GitRootsResponse<GitStatusRoot> };
       },
-      providesTags: (result) => [
+      providesTags: (result, _error, roots) => [
         { type: "GitStatus", id: "LIST" },
-        ...(result?.roots.map((root) => rootTag(root.root)) ?? []),
+        ...[
+          ...new Set([
+            ...roots,
+            ...(result?.roots.map((root) => root.root) ?? []),
+          ]),
+        ].map(rootTag),
       ],
     }),
     getGitDiff: builder.query<GitRootsResponse<GitDiffRoot>, GitDiffRequest>({

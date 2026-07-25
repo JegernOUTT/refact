@@ -158,6 +158,7 @@ import {
   toggleDock,
   toggleDrawer,
   clearWorkspaceChatState,
+  selectFocusedChatWorkspaceRoot,
   selectFocusedWorkspaceChatId,
   selectLiveEditsForChat,
   setLiveEditsForChat,
@@ -174,10 +175,61 @@ import {
   markLiveFileUpdateAuthoritative,
 } from "../features/Workspace/FilesPanel/filesPanelSlice";
 import { parentDirectoryPath } from "../features/Workspace/FilesPanel/fileTreeModel";
+import { selectActiveGitRoot } from "../features/Workspace/GitPanel/gitPanelSlice";
+import { gitReadApi } from "../services/refact/gitRead";
 import { clearTerminalChatState } from "../features/Workspace/TerminalPanel";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
+const WORKSPACE_DIFF_REFRESH_DEBOUNCE_MS = 250;
+
+type WorkspaceDiffRefreshQueue = {
+  parentPaths: Set<string>;
+  gitRoots: Set<string>;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+const workspaceDiffRefreshQueues = new WeakMap<
+  AppDispatch,
+  WorkspaceDiffRefreshQueue
+>();
+
+function scheduleWorkspaceDiffRefresh(
+  dispatch: AppDispatch,
+  parentPaths: Iterable<string>,
+  gitRoot: string,
+): void {
+  let queue = workspaceDiffRefreshQueues.get(dispatch);
+  if (!queue) {
+    queue = {
+      parentPaths: new Set(),
+      gitRoots: new Set(),
+      timer: null,
+    };
+    workspaceDiffRefreshQueues.set(dispatch, queue);
+  }
+
+  for (const path of parentPaths) queue.parentPaths.add(path);
+  if (gitRoot) queue.gitRoots.add(gitRoot);
+  if (queue.parentPaths.size === 0 && queue.gitRoots.size === 0) return;
+  if (queue.timer !== null) clearTimeout(queue.timer);
+
+  queue.timer = setTimeout(() => {
+    queue.timer = null;
+    const treeTags = [...queue.parentPaths].map((id) => ({
+      type: "Tree" as const,
+      id,
+    }));
+    const gitTags = [...queue.gitRoots].map((id) => ({
+      type: "GitStatus" as const,
+      id,
+    }));
+    queue.parentPaths.clear();
+    queue.gitRoots.clear();
+    if (treeTags.length > 0) dispatch(filesApi.util.invalidateTags(treeTags));
+    if (gitTags.length > 0) dispatch(gitReadApi.util.invalidateTags(gitTags));
+  }, WORKSPACE_DIFF_REFRESH_DEBOUNCE_MS);
+}
 
 export const listenerMiddleware = createListenerMiddleware();
 const startListening = listenerMiddleware.startListening.withTypes<
@@ -452,6 +504,46 @@ startListening({
 
 startListening({
   actionCreator: applyChatEvent,
+  effect: (action, listenerApi) => {
+    const event = action.payload;
+    if (event.type !== "message_added") return;
+    const state = listenerApi.getState();
+    if (state.chat.threads[event.chat_id]?.last_applied_seq !== event.seq)
+      return;
+    if (!isDiffMessage(event.message)) return;
+    const eventIsFocused =
+      selectFocusedWorkspaceChatId(state) === event.chat_id;
+
+    const loadedTreePaths = new Set([
+      selectFocusedChatWorkspaceRoot(state),
+      ...state.filesPanel.expandedDirectories,
+    ]);
+    const changedParentPaths = new Set<string>();
+    for (const chunk of event.message.content) {
+      const parent = parentDirectoryPath(chunk.file_name) ?? "";
+      if (loadedTreePaths.has(parent)) changedParentPaths.add(parent);
+      if (chunk.file_action === "rename" && chunk.file_name_rename) {
+        const renamedParent = parentDirectoryPath(chunk.file_name_rename) ?? "";
+        if (loadedTreePaths.has(renamedParent)) {
+          changedParentPaths.add(renamedParent);
+        }
+      }
+    }
+
+    const activeGitRoot = eventIsFocused
+      ? selectActiveGitRoot(state, event.chat_id) ||
+        selectFocusedChatWorkspaceRoot(state)
+      : "";
+    scheduleWorkspaceDiffRefresh(
+      listenerApi.dispatch,
+      changedParentPaths,
+      activeGitRoot,
+    );
+  },
+});
+
+startListening({
+  actionCreator: applyChatEvent,
   effect: async (action, listenerApi) => {
     const event = action.payload;
     if (event.type !== "message_added") return;
@@ -465,24 +557,6 @@ startListening({
     for (const chunk of event.message.content) {
       const chunks = chunksByPath.get(chunk.file_name) ?? [];
       chunksByPath.set(chunk.file_name, [...chunks, chunk]);
-    }
-
-    const changedParentPaths = new Set<string>();
-    for (const [path, chunks] of chunksByPath) {
-      changedParentPaths.add(parentDirectoryPath(path) ?? "");
-      const renamedPath = chunks.find(
-        (chunk) => chunk.file_action === "rename" && chunk.file_name_rename,
-      )?.file_name_rename;
-      if (renamedPath) {
-        changedParentPaths.add(parentDirectoryPath(renamedPath) ?? "");
-      }
-    }
-    if (changedParentPaths.size > 0) {
-      listenerApi.dispatch(
-        filesApi.util.invalidateTags(
-          [...changedParentPaths].map((id) => ({ type: "Tree" as const, id })),
-        ),
-      );
     }
 
     const liveEdits = selectLiveEditsForChat(state, event.chat_id);

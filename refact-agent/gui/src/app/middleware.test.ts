@@ -42,6 +42,7 @@ import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
 import { http, HttpResponse } from "msw";
 import { server } from "../utils/mockServer";
 import { filesApi } from "../services/refact/files";
+import { gitReadApi } from "../services/refact/gitRead";
 import { applyLiveFileUpdate } from "../features/Workspace/FilesPanel";
 import {
   sessionAdded,
@@ -483,6 +484,138 @@ describe("workspace routing middleware", () => {
         authoritative: true,
       });
     });
+  });
+
+  it("coalesces accepted diff refreshes for loaded tree parents and the active Git root", async () => {
+    const root = "/workspace";
+    const parent = `${root}/src`;
+    let treeRequests = 0;
+    let gitRequests = 0;
+    server.use(
+      http.get("*/v1/files/tree", ({ request }) => {
+        if (new URL(request.url).searchParams.get("path") === parent) {
+          treeRequests += 1;
+        }
+        return HttpResponse.json({
+          path: parent,
+          entries: [],
+          truncated: false,
+        });
+      }),
+      http.get("*/v1/files/read", ({ request }) => {
+        const path = new URL(request.url).searchParams.get("path") ?? "";
+        return HttpResponse.json({
+          path,
+          content: "content\n",
+          language: "typescript",
+          size: 8,
+          truncated: false,
+          line_start: null,
+          line_end: null,
+          mtime_ms: 1,
+        });
+      }),
+      http.get("*/v1/git/status", () => {
+        gitRequests += 1;
+        return HttpResponse.json({
+          roots: [
+            {
+              root,
+              branch: "main",
+              head_detached: false,
+              ahead: 0,
+              behind: 0,
+              staged: [],
+              unstaged: [],
+              untracked_included: true,
+            },
+          ],
+        });
+      }),
+    );
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      current_project: { name: "workspace", workspaceRoots: [root] },
+      chat: makeChatState("chat-a", ["chat-a"]),
+      workspace: {
+        tabs: [chatSurface("chat-a")],
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+      },
+      filesPanel: {
+        expandedDirectories: [parent],
+        selectedPath: null,
+        showIgnored: false,
+        viewerTarget: null,
+        viewerTargets: {},
+        liveUpdatesByChat: {},
+      },
+      gitPanel: {
+        contexts: {
+          "chat:chat-a": { activeRoot: root, selectedFile: null },
+        },
+      },
+    });
+    const treeRequest = store.dispatch(
+      filesApi.endpoints.getFilesTree.initiate(parent),
+    );
+    const gitRequest = store.dispatch(
+      gitReadApi.endpoints.getGitStatus.initiate([root]),
+    );
+    await waitFor(() => {
+      expect(treeRequests).toBe(1);
+      expect(gitRequests).toBe(1);
+    });
+
+    const dispatchDiff = (seq: string, path: string, fileAction: string) =>
+      store.dispatch(
+        applyChatEvent({
+          chat_id: "chat-a",
+          seq,
+          type: "message_added",
+          index: Number(seq),
+          message: {
+            role: "diff",
+            tool_call_id: `edit-${seq}`,
+            content: [
+              {
+                file_name: path,
+                file_action: fileAction,
+                line1: 1,
+                line2: 1,
+                lines_remove: "",
+                lines_add: "content\n",
+              },
+            ],
+          },
+        }),
+      );
+
+    dispatchDiff("1", `${parent}/created.ts`, "add");
+    await waitFor(() => {
+      expect(treeRequests).toBe(2);
+      expect(gitRequests).toBe(2);
+    });
+
+    dispatchDiff("2", `${parent}/created.ts`, "remove");
+    await waitFor(() => {
+      expect(treeRequests).toBe(3);
+      expect(gitRequests).toBe(3);
+    });
+
+    dispatchDiff("3", `${parent}/one.ts`, "edit");
+    dispatchDiff("4", `${parent}/two.ts`, "edit");
+    dispatchDiff("5", `${parent}/three.ts`, "edit");
+    await waitFor(() => {
+      expect(treeRequests).toBe(4);
+      expect(gitRequests).toBe(4);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(treeRequests).toBe(4);
+    expect(gitRequests).toBe(4);
+
+    treeRequest.unsubscribe();
+    gitRequest.unsubscribe();
   });
 
   it("keeps the latest revision when rereads finish out of order", async () => {
