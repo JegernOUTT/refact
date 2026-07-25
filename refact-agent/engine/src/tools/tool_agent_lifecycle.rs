@@ -142,15 +142,9 @@ fn optional_string(args: &HashMap<String, Value>, key: &str) -> Option<String> {
 }
 
 fn optional_bool(args: &HashMap<String, Value>, key: &str, default: bool) -> bool {
-    match args.get(key) {
-        Some(Value::Bool(value)) => *value,
-        Some(Value::String(value)) => match value.to_ascii_lowercase().as_str() {
-            "true" | "yes" | "1" => true,
-            "false" | "no" | "0" => false,
-            _ => default,
-        },
-        _ => default,
-    }
+    args.get(key)
+        .and_then(refact_tool_api::coerce_bool)
+        .unwrap_or(default)
 }
 
 fn user_message_command(content: String) -> ChatCommand {

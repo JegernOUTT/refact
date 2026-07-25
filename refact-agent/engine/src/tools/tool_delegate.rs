@@ -322,8 +322,8 @@ fn parse_optional_bool(
     default: bool,
 ) -> Result<bool, String> {
     match args.get(key) {
-        Some(Value::Bool(value)) => Ok(*value),
-        Some(v) => Err(format!("argument `{key}` is not a boolean: {v:?}")),
+        Some(value) => refact_tool_api::coerce_bool(value)
+            .ok_or_else(|| format!("argument `{key}` is not a boolean: {value:?}")),
         None => Ok(default),
     }
 }

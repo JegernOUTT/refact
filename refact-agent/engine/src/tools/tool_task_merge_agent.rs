@@ -195,8 +195,8 @@ fn parse_schema_bool_arg(
 ) -> Result<bool, String> {
     match args.get(name) {
         None => Ok(default),
-        Some(Value::Bool(value)) => Ok(*value),
-        Some(_) => Err(format!("'{}' must be a boolean", name)),
+        Some(value) => refact_tool_api::coerce_bool(value)
+            .ok_or_else(|| format!("'{}' must be a boolean", name)),
     }
 }
 
@@ -1578,16 +1578,18 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn merge_agent_bool_args_reject_non_boolean_values() {
+    fn merge_agent_bool_args_accept_string_spellings_and_reject_garbage() {
         let args = HashMap::from([("force".to_string(), Value::String("false".to_string()))]);
 
-        assert!(parse_force(&args)
-            .unwrap_err()
-            .contains("must be a boolean"));
+        assert_eq!(parse_force(&args), Ok(false));
+
+        let args = HashMap::from([("auto_revert".to_string(), Value::String("True".to_string()))]);
+
+        assert_eq!(parse_auto_revert(&args), Ok(true));
 
         let args = HashMap::from([(
             "auto_revert".to_string(),
-            Value::String("false".to_string()),
+            Value::String("sometimes".to_string()),
         )]);
 
         assert!(parse_auto_revert(&args)

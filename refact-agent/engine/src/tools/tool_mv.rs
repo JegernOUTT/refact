@@ -43,13 +43,12 @@ impl ToolMv {
     // Parse the overwrite flag.
     fn parse_overwrite(args: &HashMap<String, Value>) -> Result<bool, String> {
         match args.get("overwrite") {
-            Some(Value::Bool(b)) => Ok(*b),
-            Some(Value::String(s)) => {
-                let lower = s.to_lowercase();
-                Ok(lower == "true")
-            }
+            Some(value) => match refact_tool_api::coerce_bool(value) {
+                Some(value) => Ok(value),
+                None if value.is_string() => Ok(false),
+                None => Err(format!("Expected boolean for 'overwrite', got {:?}", value)),
+            },
             None => Ok(false),
-            Some(other) => Err(format!("Expected boolean for 'overwrite', got {:?}", other)),
         }
     }
 }

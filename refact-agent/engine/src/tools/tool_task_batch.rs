@@ -851,7 +851,7 @@ impl Tool for ToolMergeReadyInOrder {
         }
         let stop_on_conflict = args
             .get("stop_on_conflict")
-            .and_then(|v| v.as_bool())
+            .and_then(refact_tool_api::coerce_bool)
             .unwrap_or(true);
         let max_merges = usize_arg(args, "max_merges", MAX_MERGE_BATCH)?.min(MAX_MERGE_BATCH);
         let board = storage::load_board(gcx, &task_id).await?;

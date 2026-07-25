@@ -89,7 +89,7 @@ impl Tool for ToolBuddyGetLogs {
             .map(|s| s.to_string());
         let errors_only = args
             .get("errors_only")
-            .and_then(|v| v.as_bool())
+            .and_then(refact_tool_api::coerce_bool)
             .unwrap_or(false);
 
         let filter_re = match &filter_pat {

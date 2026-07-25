@@ -81,9 +81,9 @@ impl Tool for ToolTree {
         };
         let path_mb_for_related = path_mb.clone();
         let use_ast = match args.get("use_ast") {
-            Some(Value::Bool(b)) => *b,
-            Some(v) => return Err(format!("argument `use_ast` is not a boolean: {:?}", v)),
-            None => false,
+            Some(Value::Null) | None => false,
+            Some(value) => refact_tool_api::coerce_bool(value)
+                .ok_or_else(|| format!("argument `use_ast` is not a boolean: {:?}", value))?,
         };
         let max_files = match args.get("max_files") {
             Some(Value::Number(n)) => n.as_u64().unwrap_or(10) as usize,

@@ -42,25 +42,21 @@ impl ToolRm {
 
     fn parse_recursive(args: &HashMap<String, Value>) -> Result<(bool, Option<u32>, bool), String> {
         let recursive = match args.get("recursive") {
-            Some(Value::Bool(b)) => *b,
-            Some(Value::String(s)) => {
-                let s = s.trim().to_lowercase();
-                s == "true"
-            }
-            None => false,
-            Some(other) => {
-                return Err(format!("Expected boolean for 'recursive', got {:?}", other))
-            }
+            Some(Value::Null) | None => false,
+            Some(value) => match refact_tool_api::coerce_bool(value) {
+                Some(value) => value,
+                None if value.is_string() => false,
+                None => return Err(format!("Expected boolean for 'recursive', got {:?}", value)),
+            },
         };
         let max_depth = match args.get("max_depth") {
             Some(Value::Number(n)) => n.as_u64().map(|v| v as u32),
             _ => None,
         };
-        let dry_run = match args.get("dry_run") {
-            Some(Value::Bool(b)) => *b,
-            Some(Value::String(s)) => s.trim().eq_ignore_ascii_case("true"),
-            _ => false,
-        };
+        let dry_run = args
+            .get("dry_run")
+            .and_then(refact_tool_api::coerce_bool)
+            .unwrap_or(false);
         Ok((recursive, max_depth, dry_run))
     }
 }

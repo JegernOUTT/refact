@@ -120,7 +120,7 @@ impl Tool for ToolBuddySay {
             .to_string();
         let persistent = args
             .get("persistent")
-            .and_then(|v| v.as_bool())
+            .and_then(refact_tool_api::coerce_bool)
             .unwrap_or(false);
         let ttl_seconds = args
             .get("ttl_seconds")

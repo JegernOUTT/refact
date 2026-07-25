@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
+use refact_tool_api::coerce_args_to_schema;
 
 /// Maximum bytes of text content returned from a single MCP tool call.
 /// Prevents runaway context window growth from excessively large tool responses.
@@ -204,7 +205,10 @@ impl Tool for ToolMCP {
         let call_start = session_metrics.lock().await.record_call_start();
         let call_params = {
             let mut p = CallToolRequestParams::new(self.mcp_tool.name.clone());
-            if let serde_json::Value::Object(map) = json_args {
+            if let serde_json::Value::Object(mut map) = json_args {
+                let input_schema =
+                    serde_json::Value::Object(self.mcp_tool.input_schema.as_ref().clone());
+                coerce_args_to_schema(&mut map, &input_schema);
                 p = p.with_arguments(map);
             }
             p

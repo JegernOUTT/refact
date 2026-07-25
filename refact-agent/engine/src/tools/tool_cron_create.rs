@@ -309,9 +309,10 @@ fn optional_string_arg(
 
 fn optional_bool_arg(args: &HashMap<String, Value>, name: &str) -> Result<Option<bool>, String> {
     match args.get(name) {
-        Some(Value::Bool(value)) => Ok(Some(*value)),
         Some(Value::Null) | None => Ok(None),
-        Some(value) => Err(format!("argument `{name}` is not a boolean: {value:?}")),
+        Some(value) => refact_tool_api::coerce_bool(value)
+            .map(Some)
+            .ok_or_else(|| format!("argument `{name}` is not a boolean: {value:?}")),
     }
 }
 

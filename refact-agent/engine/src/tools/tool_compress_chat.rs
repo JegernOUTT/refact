@@ -1986,11 +1986,9 @@ fn extract_context_files(message: &ChatMessage) -> Vec<ContextFile> {
 }
 
 fn parse_bool(args: &HashMap<String, Value>, key: &str) -> bool {
-    match args.get(key) {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) => s.trim().eq_ignore_ascii_case("true"),
-        _ => false,
-    }
+    args.get(key)
+        .and_then(refact_tool_api::coerce_bool)
+        .unwrap_or(false)
 }
 
 fn parse_string_list(args: &HashMap<String, Value>, key: &str) -> Vec<String> {

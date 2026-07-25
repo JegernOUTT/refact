@@ -226,7 +226,7 @@ pub async fn handle_v1_tools_check_if_confirmation_needed(
             }
         };
 
-        let args = match tool_call.function.parse_args() {
+        let mut args = match tool_call.function.parse_args() {
             Ok(args) => args,
             Err(e) => {
                 return Ok(reply(
@@ -241,6 +241,8 @@ pub async fn handle_v1_tools_check_if_confirmation_needed(
                 ));
             }
         };
+        let desc = tool.tool_description();
+        refact_tool_api::coerce_hashmap_to_schema(&mut args, &desc.input_schema);
 
         let should_confirm = match tool.match_against_confirm_deny(ccx.clone(), &args).await {
             Ok(should_confirm) => should_confirm,

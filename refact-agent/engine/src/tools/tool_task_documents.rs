@@ -593,14 +593,13 @@ fn optional_u64_arg(args: &HashMap<String, Value>, name: &str) -> Result<Option<
 
 fn optional_bool_arg(args: &HashMap<String, Value>, name: &str) -> Result<Option<bool>, String> {
     match args.get(name) {
-        Some(Value::Bool(value)) => Ok(Some(*value)),
-        Some(Value::String(value)) => match value.as_str() {
-            "true" => Ok(Some(true)),
-            "false" => Ok(Some(false)),
-            _ => Err(format!("argument `{}` must be true or false", name)),
-        },
         Some(Value::Null) | None => Ok(None),
-        Some(value) => Err(format!("argument `{}` must be boolean: {:?}", name, value)),
+        Some(value) => refact_tool_api::coerce_bool(value)
+            .map(Some)
+            .ok_or_else(|| match value {
+                Value::String(_) => format!("argument `{}` must be true or false", name),
+                _ => format!("argument `{}` must be boolean: {:?}", name, value),
+            }),
     }
 }
 

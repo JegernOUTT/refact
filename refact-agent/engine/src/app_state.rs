@@ -363,7 +363,6 @@ impl ToolRegistry for AppToolRegistry {
                 ))
             }
         };
-        let args: HashMap<String, serde_json::Value> = args.into_iter().collect();
         let raw_tools =
             crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await;
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
@@ -371,9 +370,12 @@ impl ToolRegistry for AppToolRegistry {
         for tool in tools {
             let desc = tool.tool_description();
             if desc.name == tool_name || desc.name == resolved.as_str() {
+                let mut coerced_args: HashMap<String, serde_json::Value> =
+                    args.into_iter().collect();
+                refact_tool_api::coerce_hashmap_to_schema(&mut coerced_args, &desc.input_schema);
                 let integr_config_path = tool.has_config_path();
                 return Some(
-                    tool.match_against_confirm_deny(ccx, &args)
+                    tool.match_against_confirm_deny(ccx, &coerced_args)
                         .await
                         .map(|result| ToolConfirmationCheck {
                             tool_name: desc.name,
@@ -437,16 +439,28 @@ impl ToolRegistry for AppToolRegistry {
             crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode, model_id).await;
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
-        let args: HashMap<String, serde_json::Value> = args.into_iter().collect();
         for mut tool in tools {
-            let name = tool.tool_description().name;
-            if name == tool_name || name == resolved.as_str() {
+            let desc = tool.tool_description();
+            if desc.name == tool_name || desc.name == resolved.as_str() {
+                let mut coerced_args: HashMap<String, serde_json::Value> =
+                    args.into_iter().collect();
+                let coercion_notes = refact_tool_api::coerce_hashmap_to_schema(
+                    &mut coerced_args,
+                    &desc.input_schema,
+                );
+                if !coercion_notes.is_empty() {
+                    tracing::info!(
+                        "Coerced arguments for tool {}: {:?}",
+                        desc.name,
+                        coercion_notes
+                    );
+                }
                 {
                     let mut cgcx = ccx.lock().await;
                     cgcx.app = AppState::from_gcx(gcx.clone()).await;
                 }
                 let result = tool
-                    .tool_execute(ccx, &tool_call_id.to_string(), &args)
+                    .tool_execute(ccx, &tool_call_id.to_string(), &coerced_args)
                     .await?;
                 let mut messages = Vec::new();
                 let mut context_files = Vec::new();

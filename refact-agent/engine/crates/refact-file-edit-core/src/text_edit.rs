@@ -20,13 +20,10 @@ pub fn parse_bool_arg(
     default: bool,
 ) -> Result<bool, String> {
     match args.get(name) {
-        Some(Value::Bool(b)) => Ok(*b),
-        Some(Value::String(s)) => match s.to_lowercase().as_str() {
-            "true" => Ok(true),
-            "false" => Ok(false),
-            _ => Err(format!("⚠️ '{}' must be true/false, got: {}", name, s)),
-        },
-        Some(v) => Err(format!("⚠️ '{}' must be a boolean, got: {:?}", name, v)),
+        Some(value) => refact_tool_api::coerce_bool(value).ok_or_else(|| match value {
+            Value::String(s) => format!("⚠️ '{}' must be true/false, got: {}", name, s),
+            _ => format!("⚠️ '{}' must be a boolean, got: {:?}", name, value),
+        }),
         None => Ok(default),
     }
 }

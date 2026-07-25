@@ -191,12 +191,10 @@ async fn refresh_finish_heartbeat_if_current(
 
 fn parse_success_arg(args: &HashMap<String, Value>) -> Result<bool, String> {
     match args.get("success") {
-        Some(Value::Bool(b)) => Ok(*b),
-        Some(Value::String(s)) => match s.trim().to_ascii_lowercase().as_str() {
-            "true" => Ok(true),
-            "false" => Ok(false),
-            _ => Err("Invalid 'success' string; expected true or false".to_string()),
-        },
+        Some(value) => refact_tool_api::coerce_bool(value).ok_or_else(|| match value {
+            Value::String(_) => "Invalid 'success' string; expected true or false".to_string(),
+            _ => "Missing or invalid 'success' parameter (must be boolean)".to_string(),
+        }),
         _ => Err("Missing or invalid 'success' parameter (must be boolean)".to_string()),
     }
 }
@@ -1617,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_finish_rejects_invalid_success_string() {
+    fn agent_finish_accepts_yes_and_rejects_garbage_success_string() {
         let tru_args = HashMap::from_iter([
             ("success".to_string(), json!("tru")),
             ("report".to_string(), json!("invalid success")),
@@ -1628,16 +1626,12 @@ mod tests {
         ]);
 
         let tru_error = parse_success_arg(&tru_args).unwrap_err();
-        let yes_error = parse_success_arg(&yes_args).unwrap_err();
 
         assert_eq!(
             tru_error,
             "Invalid 'success' string; expected true or false"
         );
-        assert_eq!(
-            yes_error,
-            "Invalid 'success' string; expected true or false"
-        );
+        assert_eq!(parse_success_arg(&yes_args), Ok(true));
     }
 
     #[test]

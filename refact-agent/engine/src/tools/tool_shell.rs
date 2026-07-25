@@ -679,17 +679,15 @@ async fn parse_args_with_filter(
     };
 
     let tty = match args.get("tty") {
-        Some(Value::Bool(value)) => Some(*value),
-        Some(v) => return Err(format!("argument `tty` is not a boolean: {v:?}")),
+        Some(value) => Some(
+            refact_tool_api::coerce_bool(value)
+                .ok_or_else(|| format!("argument `tty` is not a boolean: {value:?}"))?,
+        ),
         None => Some(false),
     };
     let run_in_background = match args.get("run_in_background") {
-        Some(Value::Bool(value)) => *value,
-        Some(v) => {
-            return Err(format!(
-                "argument `run_in_background` is not a boolean: {v:?}"
-            ))
-        }
+        Some(value) => refact_tool_api::coerce_bool(value)
+            .ok_or_else(|| format!("argument `run_in_background` is not a boolean: {value:?}"))?,
         None => false,
     };
 

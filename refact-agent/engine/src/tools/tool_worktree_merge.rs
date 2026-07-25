@@ -103,19 +103,24 @@ mod tests {
     }
 
     #[test]
-    fn bool_arg_rejects_non_boolean_values() {
+    fn bool_arg_accepts_model_spellings_and_rejects_garbage() {
         let args = HashMap::from([(
             "delete_after_merge".to_string(),
             Value::String("false".to_string()),
         )]);
 
-        assert!(bool_arg(&args, "delete_after_merge", true)
-            .unwrap_err()
-            .contains("must be a boolean"));
+        assert_eq!(bool_arg(&args, "delete_after_merge", true), Ok(false));
 
         let args = HashMap::from([(
             "include_uncommitted".to_string(),
-            Value::String("false".to_string()),
+            Value::String("True".to_string()),
+        )]);
+
+        assert_eq!(bool_arg(&args, "include_uncommitted", false), Ok(true));
+
+        let args = HashMap::from([(
+            "include_uncommitted".to_string(),
+            Value::String("maybe".to_string()),
         )]);
 
         assert!(bool_arg(&args, "include_uncommitted", true)
@@ -135,9 +140,9 @@ mod tests {
 
 fn bool_arg(args: &HashMap<String, Value>, name: &str, default: bool) -> Result<bool, String> {
     match args.get(name) {
-        None => Ok(default),
-        Some(Value::Bool(value)) => Ok(*value),
-        Some(_) => Err(format!("'{}' must be a boolean", name)),
+        None | Some(Value::Null) => Ok(default),
+        Some(value) => refact_tool_api::coerce_bool(value)
+            .ok_or_else(|| format!("'{}' must be a boolean", name)),
     }
 }
 

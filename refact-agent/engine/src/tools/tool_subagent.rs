@@ -263,16 +263,11 @@ fn parse_optional_bool(
 ) -> Result<bool, String> {
     match args.get(name) {
         None | Some(Value::Null) => Ok(default),
-        Some(Value::Bool(value)) => Ok(*value),
         Some(Value::String(value)) if value.trim().is_empty() => Ok(default),
-        Some(Value::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" => Ok(true),
-            "false" | "0" | "no" => Ok(false),
-            _ => Err(format!("argument `{name}` must be true or false")),
-        },
-        Some(value) => Err(format!(
-            "argument `{name}` must be true or false: {value:?}"
-        )),
+        Some(value) => refact_tool_api::coerce_bool(value).ok_or_else(|| match value {
+            Value::String(_) => format!("argument `{name}` must be true or false"),
+            _ => format!("argument `{name}` must be true or false: {value:?}"),
+        }),
     }
 }
 

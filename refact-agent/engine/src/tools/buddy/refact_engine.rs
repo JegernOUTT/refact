@@ -103,8 +103,7 @@ fn optional_string_arg(args: &HashMap<String, Value>, name: &str) -> Option<Stri
 fn bool_arg(args: &HashMap<String, Value>, name: &str, default: bool) -> Result<bool, String> {
     args.get(name)
         .map(|value| {
-            value
-                .as_bool()
+            refact_tool_api::coerce_bool(value)
                 .ok_or_else(|| format!("argument `{name}` must be a boolean"))
         })
         .unwrap_or(Ok(default))

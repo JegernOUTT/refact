@@ -282,7 +282,10 @@ impl Tool for ToolTaskRestartAgent {
                 mode
             ));
         }
-        let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+        let force = args
+            .get("force")
+            .and_then(refact_tool_api::coerce_bool)
+            .unwrap_or(false);
         let suggested_steps: usize = match args
             .get("suggested_steps")
             .or_else(|| args.get("max_steps"))

@@ -167,9 +167,9 @@ fn parse_optional_bool(
     default: bool,
 ) -> Result<bool, String> {
     match args.get(key) {
-        Some(Value::Bool(value)) => Ok(*value),
         Some(Value::Null) | None => Ok(default),
-        Some(value) => Err(format!("{key} must be a boolean, got {value}")),
+        Some(value) => refact_tool_api::coerce_bool(value)
+            .ok_or_else(|| format!("{key} must be a boolean, got {value}")),
     }
 }
 

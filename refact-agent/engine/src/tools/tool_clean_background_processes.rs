@@ -173,10 +173,8 @@ fn parse_scope(args: &HashMap<String, Value>) -> Result<CleanScope, String> {
 
 fn parse_include_services(args: &HashMap<String, Value>) -> Result<bool, String> {
     match args.get("include_services") {
-        Some(Value::Bool(value)) => Ok(*value),
-        Some(value) => Err(format!(
-            "argument `include_services` is not a boolean: {value:?}"
-        )),
+        Some(value) => refact_tool_api::coerce_bool(value)
+            .ok_or_else(|| format!("argument `include_services` is not a boolean: {value:?}")),
         None => Ok(false),
     }
 }
