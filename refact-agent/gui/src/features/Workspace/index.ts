@@ -6,4 +6,5 @@ export { WorkspaceView } from "./WorkspaceView";
 export * from "./FilesPanel";
 export * from "./GitPanel";
 export * from "./surfaceKey";
+export * from "./workspaceAvailability";
 export * from "./workspaceSlice";

@@ -56,6 +56,7 @@ import {
   closeTab,
   reorderTabs,
   selectActiveTabId,
+  selectPanelsForced,
   selectTabs,
   selectWorkspaceGroups,
   setActiveTab,
@@ -70,6 +71,7 @@ import {
   type MainSurfaceKind,
   type SurfaceKey,
 } from "./surfaceKey";
+import { resolveWorkspaceDockAvailability } from "./workspaceAvailability";
 import { getStatusFromSessionState } from "../../utils/sessionStatus";
 import styles from "./TabBar.module.css";
 
@@ -271,6 +273,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
   const pages = useAppSelector(selectPages);
   const capabilities = useAppSelector(selectCapabilities);
   const host = useAppSelector(selectHost);
+  const panelsForced = useAppSelector(selectPanelsForced);
   const dock = useAppSelector(selectWorkspaceDock);
   const reducedMotion = useReducedMotion();
   const [draggingTabId, setDraggingTabId] = useState<SurfaceKey | null>(null);
@@ -310,10 +313,11 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
       ? makeSurfaceKey("task", currentPage.taskId)
       : null;
   const buddySurfaceOpen = pages.some((page) => page.name === "buddy");
-  const showDockToggle =
-    !toolbarPlacement &&
-    host === "web" &&
-    (capabilities.filesPanel || capabilities.gitPanel);
+  const { dock: dockAvailable } = resolveWorkspaceDockAvailability(
+    capabilities,
+    panelsForced,
+  );
+  const showDockToggle = !toolbarPlacement && host === "web" && dockAvailable;
 
   const visibleTabKeys = useMemo(
     () =>

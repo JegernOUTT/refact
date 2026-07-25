@@ -95,12 +95,78 @@ function renderWorkspaceView(store: AppStore) {
   return render(<WorkspaceView />, { store });
 }
 
+function setWorkspaceAvailability(
+  store: AppStore,
+  {
+    filesPanel,
+    gitPanel,
+    terminalPanel,
+    panelsForced = false,
+  }: {
+    filesPanel: boolean;
+    gitPanel: boolean;
+    terminalPanel: boolean;
+    panelsForced?: boolean;
+  },
+) {
+  store.dispatch(
+    updateConfig({ capabilities: { filesPanel, gitPanel, terminalPanel } }),
+  );
+  store.dispatch(setPanelsForced(panelsForced));
+}
+
 function expectSurface(key: SurfaceKey) {
   const element = document.querySelector(`[data-surface-key="${key}"]`);
   expect(element).toBeInTheDocument();
 }
 
 describe("WorkspaceView", () => {
+  it.each([
+    ["terminal only", false, false, true, false, false],
+    ["forced panels", false, false, false, true, true],
+    ["files only", true, false, false, false, true],
+    ["git only", false, true, false, false, true],
+    ["no capabilities", false, false, false, false, false],
+  ] as const)(
+    "matches dock rendering for web %s",
+    (_name, filesPanel, gitPanel, terminalPanel, panelsForced, expected) => {
+      const store = createWorkspaceStore();
+      setWorkspaceAvailability(store, {
+        filesPanel,
+        gitPanel,
+        terminalPanel,
+        panelsForced,
+      });
+
+      renderWorkspaceView(store);
+
+      const dock = screen.queryByLabelText("Workspace dock");
+      if (expected) {
+        expect(dock).toBeVisible();
+      } else {
+        expect(dock).not.toBeInTheDocument();
+      }
+    },
+  );
+
+  it("renders forced IDE dock chrome without a duplicate workspace toggle", () => {
+    const store = createWorkspaceStore();
+    store.dispatch(updateConfig({ host: "vscode" }));
+    setWorkspaceAvailability(store, {
+      filesPanel: false,
+      gitPanel: false,
+      terminalPanel: false,
+      panelsForced: true,
+    });
+
+    renderWorkspaceView(store);
+
+    expect(screen.getByLabelText("Workspace dock")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Toggle workspace dock" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("never renders the legacy global terminal drawer", () => {
     const webStore = createWorkspaceStore();
     const webView = renderWorkspaceView(webStore);

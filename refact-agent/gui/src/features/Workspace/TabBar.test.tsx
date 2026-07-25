@@ -23,6 +23,8 @@ import {
   closeTab,
   openTab,
   reorderTabs,
+  setDockOpen,
+  setPanelsForced,
   setActiveTab,
   splitTab,
 } from "./workspaceSlice";
@@ -137,6 +139,51 @@ describe("TabBar", () => {
 
     expect(
       screen.queryByRole("button", { name: "Open workspace panel" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["terminal only", false, false, true, false],
+    ["forced panels", false, false, false, true],
+    ["files only", true, false, false, true],
+    ["git only", false, true, false, true],
+    ["no capabilities", false, false, false, false],
+  ] as const)(
+    "renders the dock reopen control for %s availability",
+    (_name, filesPanel, gitPanel, terminalPanel, expected) => {
+      const store = createStoreWithChatTabs();
+      store.dispatch(
+        updateConfig({
+          capabilities: { filesPanel, gitPanel, terminalPanel },
+        }),
+      );
+      if (_name === "forced panels") store.dispatch(setPanelsForced(true));
+      store.dispatch(setDockOpen(false));
+
+      const view = renderTabBar(store);
+
+      const toggle = screen.queryByRole("button", {
+        name: "Toggle workspace dock",
+      });
+      if (expected) {
+        expect(toggle).toBeVisible();
+        if (!toggle) throw new Error("missing dock toggle");
+        fireEvent.click(toggle);
+        expect(store.getState().workspace.dock?.open).toBe(true);
+      } else {
+        expect(toggle).not.toBeInTheDocument();
+        expect(store.getState().workspace.dock?.open).toBe(false);
+      }
+      view.unmount();
+    },
+  );
+
+  it("keeps dock toggle ownership out of toolbar placement", () => {
+    const store = createStoreWithChatTabs();
+    render(<TabBar placement="toolbar" />, { store });
+
+    expect(
+      screen.queryByRole("button", { name: "Toggle workspace dock" }),
     ).not.toBeInTheDocument();
   });
 

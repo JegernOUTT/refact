@@ -35,6 +35,7 @@ import {
   splitTab,
 } from "./workspaceSlice";
 import { useWorkspaceShortcuts } from "./useWorkspaceShortcuts";
+import { resolveWorkspaceDockAvailability } from "./workspaceAvailability";
 import styles from "./WorkspaceView.module.css";
 
 export function WorkspaceView() {
@@ -48,8 +49,10 @@ export function WorkspaceView() {
   const groups = useAppSelector(selectWorkspaceGroups);
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
-  const dockAvailable =
-    capabilities.filesPanel || capabilities.gitPanel || panelsForced;
+  const { dock: dockAvailable } = resolveWorkspaceDockAvailability(
+    capabilities,
+    panelsForced,
+  );
   const currentSurfaceKey = currentThreadId
     ? makeSurfaceKey("chat", currentThreadId)
     : null;

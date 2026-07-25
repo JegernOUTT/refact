@@ -113,7 +113,7 @@ describe("useWorkspaceShortcuts", () => {
     expect(store.getState().workspace.dock?.section).toBe("git");
   });
 
-  it("supports terminal-only workspace shortcuts", () => {
+  it("keeps terminal-only workspaces on the terminal-specific shortcut", () => {
     const { store, rerender } = renderShortcuts();
     store.dispatch(
       updateConfig({
@@ -128,10 +128,8 @@ describe("useWorkspaceShortcuts", () => {
     rerender();
 
     fireEvent.keyDown(window, { key: "b", ctrlKey: true });
-    expect(store.getState().workspace.dock?.open).toBe(true);
+    expect(store.getState().workspace.dock?.open).toBe(false);
 
-    store.dispatch(setDockOpen(false));
-    rerender();
     fireEvent.keyDown(window, { key: "j", metaKey: true });
     expect(store.getState().workspace.dock?.open).toBe(true);
     expect(store.getState().terminal.workbenchOpenByChat["chat-a"]).toBe(true);
@@ -162,6 +160,29 @@ describe("useWorkspaceShortcuts", () => {
     expect(store.getState().workspace.dock).toMatchObject({
       open: true,
       section: "tasks",
+    });
+  });
+
+  it("ignores task shortcuts when only task state exists without dock chrome", () => {
+    const { store, rerender } = renderShortcuts();
+    store.dispatch(
+      updateConfig({
+        capabilities: {
+          filesPanel: false,
+          gitPanel: false,
+          terminalPanel: false,
+        },
+      }),
+    );
+    store.dispatch(setDockSection("files"));
+    store.dispatch(setDockOpen(false));
+    rerender();
+
+    fireEvent.keyDown(window, { key: "3", ctrlKey: true });
+
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: false,
+      section: "files",
     });
   });
 

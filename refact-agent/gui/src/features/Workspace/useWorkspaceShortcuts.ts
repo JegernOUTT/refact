@@ -15,6 +15,7 @@ import {
   toggleDock,
   type WorkspaceDockSection,
 } from "./workspaceSlice";
+import { resolveWorkspaceDockAvailability } from "./workspaceAvailability";
 
 function ownsWorkspaceShortcut(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
@@ -37,16 +38,13 @@ export function useWorkspaceShortcuts() {
   useEffect(() => {
     if (host !== "web") return;
 
-    const filesAvailable = capabilities.filesPanel || panelsForced;
-    const gitAvailable = capabilities.gitPanel || panelsForced;
-    const terminalAvailable = capabilities.terminalPanel || panelsForced;
-    const tasksAvailable =
-      capabilities.filesPanel || capabilities.gitPanel || panelsForced;
-    const workbenchAvailable =
-      filesAvailable ||
-      gitAvailable ||
-      tasksAvailable ||
-      (terminalAvailable && Boolean(focusedChatId));
+    const {
+      dock: dockAvailable,
+      files: filesAvailable,
+      git: gitAvailable,
+      tasks: tasksAvailable,
+      terminal: terminalAvailable,
+    } = resolveWorkspaceDockAvailability(capabilities, panelsForced);
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
@@ -62,7 +60,7 @@ export function useWorkspaceShortcuts() {
       }
 
       const key = event.key.toLowerCase();
-      if (key === "b" && workbenchAvailable) {
+      if (key === "b" && dockAvailable) {
         event.preventDefault();
         dispatch(toggleDock());
         return;
