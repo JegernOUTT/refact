@@ -903,18 +903,38 @@ pub async fn handle_v1_code_intel_git_risk(
     let Some(dir) = crate::tools::tool_codegraph::project_dir(app.gcx.clone()).await else {
         return detail_response("no project directory available");
     };
-    let intel =
-        crate::tools::tool_codegraph::cached_mine_history_async(&dir, GIT_HISTORY_MAX_COMMITS)
+    let repo_root = super::git_read::resolve_requested_root(
+        app.gcx.clone(),
+        dir.to_string_lossy().into_owned(),
+    )
+    .await
+    .ok();
+    let (intel, assembly) = match repo_root {
+        Some(repo_root) => {
+            let intel = crate::tools::tool_codegraph::cached_mine_history_async(
+                &repo_root,
+                GIT_HISTORY_MAX_COMMITS,
+            )
             .await
             .map_err(store_error)?;
-    let assembly = crate::tools::tool_codegraph::build_git_risk_assembly(
-        &intel,
-        &dir,
-        Some(&service),
-        limit,
-        filter.as_deref(),
-    )
-    .await;
+            let assembly = crate::tools::tool_codegraph::build_git_risk_assembly(
+                &intel,
+                &repo_root,
+                Some(&service),
+                limit,
+                filter.as_deref(),
+            )
+            .await;
+            (intel, assembly)
+        }
+        None => (
+            refact_git_intel::GitIntel::default(),
+            crate::tools::tool_codegraph::GitRiskAssembly {
+                files: Vec::new(),
+                recent_commit_risks: Vec::new(),
+            },
+        ),
+    };
 
     let hotspots = assembly
         .files
@@ -1594,7 +1614,9 @@ mod tests {
         make_refact_http_server(app)
     }
 
-    async fn router_with_git_risk_codegraph() -> (axum::Router, tempfile::TempDir) {
+    async fn router_with_git_risk_codegraph(
+        nested_workspace: bool,
+    ) -> (axum::Router, tempfile::TempDir) {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
@@ -1630,13 +1652,30 @@ mod tests {
             "Carol",
             "carol@example.com",
         );
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let workspace = if nested_workspace {
+            let workspace = dir.path().join("refact-agent").join("engine");
+            std::fs::create_dir_all(&workspace).unwrap();
+            workspace
+        } else {
+            dir.path().to_path_buf()
+        };
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace];
         let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
         codegraph
             .index_file("src/a.rs", &git_risk_source(3, 1, 1), "rust")
             .await
             .unwrap();
         codegraph.connect_usages().await.unwrap();
+        *gcx.codegraph.lock().await = Some(codegraph);
+        let app = AppState::from_gcx(gcx).await;
+        (make_refact_http_server(app), dir)
+    }
+
+    async fn router_with_non_repo_git_risk_codegraph() -> (axum::Router, tempfile::TempDir) {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let dir = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let codegraph = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
         *gcx.codegraph.lock().await = Some(codegraph);
         let app = AppState::from_gcx(gcx).await;
         (make_refact_http_server(app), dir)
@@ -1875,8 +1914,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn code_intel_git_risk_populated_returns_shape() {
-        let (router, _dir) = router_with_git_risk_codegraph().await;
+    async fn code_intel_git_risk_repo_root_returns_shape() {
+        let (router, _dir) = router_with_git_risk_codegraph(false).await;
 
         let (status, json) = get_json(router, "/v1/code-intel/git-risk?limit=2").await;
 
@@ -1900,6 +1939,42 @@ mod tests {
                 && finding["biomarker"].as_str() == Some("prior_defect")
         }));
         assert!(!json["recent_commit_risks"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn code_intel_git_risk_nested_workspace_uses_enclosing_repo() {
+        let (router, _dir) = router_with_git_risk_codegraph(true).await;
+
+        let (status, json) = get_json(router, "/v1/code-intel/git-risk?limit=2").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["commits_analyzed"], 4);
+        assert!(json["hotspots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"].as_str() == Some("src/a.rs")));
+    }
+
+    #[tokio::test]
+    async fn code_intel_git_risk_non_repo_returns_empty_payload() {
+        let (router, _dir) = router_with_non_repo_git_risk_codegraph().await;
+
+        let (status, json) = get_json(router, "/v1/code-intel/git-risk").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["commits_analyzed"], 0);
+        for field in [
+            "hotspots",
+            "ownership",
+            "co_change",
+            "coupling",
+            "reviewers",
+            "findings",
+            "recent_commit_risks",
+        ] {
+            assert_eq!(json[field].as_array().unwrap().len(), 0, "{field}");
+        }
     }
 
     #[tokio::test]
