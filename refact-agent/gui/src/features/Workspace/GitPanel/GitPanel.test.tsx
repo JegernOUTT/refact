@@ -11,7 +11,7 @@ import type {
 import type { WorktreeRecordView } from "../../../services/refact/worktrees";
 import { GitDock } from "./GitDock";
 import { GitPanel } from "./GitPanel";
-import { setActiveGitRoot } from "./gitPanelSlice";
+import { selectSelectedGitFile, setActiveGitRoot } from "./gitPanelSlice";
 import { createChatWithId } from "../../Chat/Thread/actions";
 import { openTab, setActiveTab } from "../workspaceSlice";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
@@ -86,6 +86,14 @@ function chatWorktree(id: string): WorktreeMeta {
   };
 }
 
+function chatWorktreeForSource(id: string, sourceWorkspaceRoot: string) {
+  return {
+    ...chatWorktree(id),
+    source_workspace_root: sourceWorkspaceRoot,
+    repo_root: sourceWorkspaceRoot,
+  };
+}
+
 function renderPanel(workspaceRoots = ["/repo"]) {
   return render(
     <>
@@ -119,7 +127,7 @@ function installHandlers(options?: {
   generateError?: string;
   worktreeCalls?: URLSearchParams[];
   openCalls?: string[];
-  deleteCalls?: string[];
+  deleteCalls?: { id: string; sourceWorkspaceRoot: string | null }[];
 }) {
   const record = worktreeRecord();
   server.use(
@@ -235,8 +243,13 @@ function installHandlers(options?: {
         can_open_folder: false,
       });
     }),
-    http.delete("*/v1/worktrees/:id", ({ params }) => {
-      options?.deleteCalls?.push(String(params.id));
+    http.delete("*/v1/worktrees/:id", ({ params, request }) => {
+      options?.deleteCalls?.push({
+        id: String(params.id),
+        sourceWorkspaceRoot: new URL(request.url).searchParams.get(
+          "source_workspace_root",
+        ),
+      });
       return HttpResponse.json({
         deleted: true,
         branch_deleted: false,
@@ -321,7 +334,7 @@ describe("GitPanel", () => {
 
     expect(store.getState().workspace.tabs).toContain("git:main");
     expect(store.getState().workspace.activeTabId).toBe("git:main");
-    expect(store.getState().gitPanel.selectedFile).toEqual({
+    expect(selectSelectedGitFile(store.getState(), null)).toEqual({
       root: "/repo",
       path: "src/app.ts",
       staged: false,
@@ -418,7 +431,7 @@ describe("GitPanel", () => {
     const { store, user } = renderPanel(["/repo", "/other"]);
 
     await screen.findByRole("combobox", { name: "Git root" });
-    store.dispatch(setActiveGitRoot("/other"));
+    store.dispatch(setActiveGitRoot({ chatId: null, root: "/other" }));
     await waitFor(() =>
       expect(
         screen.getByRole("combobox", { name: "Git root" }),
@@ -564,7 +577,10 @@ describe("GitPanel", () => {
 
   test("lists worktrees and supports diff, open, and cleanup actions", async () => {
     const openCalls: string[] = [];
-    const deleteCalls: string[] = [];
+    const deleteCalls: {
+      id: string;
+      sourceWorkspaceRoot: string | null;
+    }[] = [];
     installHandlers({ openCalls, deleteCalls });
     const { user } = renderPanel();
 
@@ -585,7 +601,11 @@ describe("GitPanel", () => {
     await user.click(
       within(worktreesSection).getByRole("button", { name: "Cleanup" }),
     );
-    await waitFor(() => expect(deleteCalls).toEqual(["wt-1"]));
+    await waitFor(() =>
+      expect(deleteCalls).toEqual([
+        { id: "wt-1", sourceWorkspaceRoot: "/repo" },
+      ]),
+    );
   });
 
   test("drives git requests with status-provided roots for subdirectory workspaces", async () => {
@@ -636,6 +656,46 @@ describe("GitPanel", () => {
       "/repo/refact-agent/engine",
     );
     expect(await screen.findByText("refact/wt-1")).toBeInTheDocument();
+  });
+
+  test("routes worktree actions through the focused chat explicit source root", async () => {
+    const worktreeCalls: URLSearchParams[] = [];
+    const deleteCalls: {
+      id: string;
+      sourceWorkspaceRoot: string | null;
+    }[] = [];
+    installHandlers({ worktreeCalls, deleteCalls });
+    const { store, user } = renderPanel([
+      "/repo/packages/a",
+      "/repo/packages/b",
+    ]);
+    store.dispatch(
+      createChatWithId({
+        id: "chat-b",
+        worktree: chatWorktreeForSource("b", "/repo/packages/b"),
+      }),
+    );
+    store.dispatch(openTab("chat:chat-b"));
+
+    const worktreesHeading = await screen.findByRole("heading", {
+      name: "Worktrees",
+    });
+    const worktreesSection = worktreesHeading.closest("section");
+    expect(worktreesSection).not.toBeNull();
+    if (!worktreesSection) return;
+    await waitFor(() => expect(worktreeCalls).toHaveLength(1));
+    expect(worktreeCalls[0]?.get("source_workspace_root")).toBe(
+      "/repo/packages/b",
+    );
+
+    await user.click(
+      within(worktreesSection).getByRole("button", { name: "Cleanup" }),
+    );
+    await waitFor(() =>
+      expect(deleteCalls).toEqual([
+        { id: "wt-1", sourceWorkspaceRoot: "/repo/packages/b" },
+      ]),
+    );
   });
 
   test("shows a no-repository empty state when status returns zero roots", async () => {

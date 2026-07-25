@@ -12,6 +12,7 @@ import { WorktreesSection } from "./WorktreesSection";
 import {
   selectFocusedChatWorkspaceRoots,
   selectFocusedChatWorktreeSourceRoot,
+  selectFocusedWorkspaceChatId,
 } from "../workspaceSlice";
 import styles from "./GitPanel.module.css";
 
@@ -22,6 +23,7 @@ function first<T>(values: T[]): T | undefined {
 }
 
 export function GitPanel() {
+  const chatId = useAppSelector(selectFocusedWorkspaceChatId);
   const configuredRoots = useAppSelector(
     (state) => state.current_project.workspaceRoots ?? EMPTY_ROOTS,
   );
@@ -29,8 +31,12 @@ export function GitPanel() {
   const worktreeSourceRoot = useAppSelector(
     selectFocusedChatWorktreeSourceRoot,
   );
-  const activeRoot = useAppSelector(selectActiveGitRoot);
-  const selected = useAppSelector(selectSelectedGitFile);
+  const activeRoot = useAppSelector((state) =>
+    selectActiveGitRoot(state, chatId),
+  );
+  const selected = useAppSelector((state) =>
+    selectSelectedGitFile(state, chatId),
+  );
   const statusQuery = useGetGitStatusQuery(contextRoots);
   const roots = useMemo(
     () => statusQuery.data?.roots ?? [],
@@ -44,9 +50,11 @@ export function GitPanel() {
       ? selected.root
       : "";
   const selectedForRoot = selected?.root === resolvedRoot ? selected : null;
-  const worktreesRoot =
-    worktreeSourceRoot ??
-    workspaceRootForGitRoot(configuredRoots, resolvedRoot);
+  const worktreesRoot = workspaceRootForGitRoot(
+    configuredRoots,
+    resolvedRoot,
+    worktreeSourceRoot,
+  );
 
   return (
     <div className={styles.panel} data-testid="git-main-panel">

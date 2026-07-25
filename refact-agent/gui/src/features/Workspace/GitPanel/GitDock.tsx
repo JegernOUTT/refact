@@ -21,7 +21,10 @@ import {
   setActiveGitRoot,
 } from "./gitPanelSlice";
 import { StatusList } from "./StatusList";
-import { selectFocusedChatWorkspaceRoots } from "../workspaceSlice";
+import {
+  selectFocusedChatWorkspaceRoots,
+  selectFocusedWorkspaceChatId,
+} from "../workspaceSlice";
 import styles from "./GitPanel.module.css";
 
 function rootLabel(root: string): string {
@@ -45,9 +48,14 @@ function changedFilesLabel(count: number): string {
 
 export function GitDock() {
   const dispatch = useAppDispatch();
+  const chatId = useAppSelector(selectFocusedWorkspaceChatId);
   const contextRoots = useAppSelector(selectFocusedChatWorkspaceRoots);
-  const activeRoot = useAppSelector(selectActiveGitRoot);
-  const selected = useAppSelector(selectSelectedGitFile);
+  const activeRoot = useAppSelector((state) =>
+    selectActiveGitRoot(state, chatId),
+  );
+  const selected = useAppSelector((state) =>
+    selectSelectedGitFile(state, chatId),
+  );
   const statusQuery = useGetGitStatusQuery(contextRoots);
   const [stage] = useStageGitPathsMutation();
   const [unstage] = useUnstageGitPathsMutation();
@@ -62,8 +70,8 @@ export function GitDock() {
 
   useEffect(() => {
     if (rootPaths.length === 0 || rootPaths.includes(activeRoot)) return;
-    dispatch(setActiveGitRoot(rootPaths[0] ?? ""));
-  }, [activeRoot, dispatch, rootPaths]);
+    dispatch(setActiveGitRoot({ chatId, root: rootPaths[0] ?? "" }));
+  }, [activeRoot, chatId, dispatch, rootPaths]);
 
   const activeStatus =
     roots.find((root) => root.root === activeRoot) ?? first(roots);
@@ -93,9 +101,12 @@ export function GitDock() {
       }).unwrap();
       dispatch(
         selectGitFile({
-          root: resolvedRoot,
-          path: change.relative_path,
-          staged: !staged,
+          chatId,
+          selection: {
+            root: resolvedRoot,
+            path: change.relative_path,
+            staged: !staged,
+          },
         }),
       );
     } catch (error) {
@@ -136,7 +147,7 @@ export function GitDock() {
           <FieldSelect
             aria-label="Git root"
             onChange={(root) => {
-              dispatch(setActiveGitRoot(root));
+              dispatch(setActiveGitRoot({ chatId, root }));
               setMutationError(null);
               setFeedback(null);
             }}
@@ -195,7 +206,7 @@ export function GitDock() {
                   stagedChanges={activeStatus ? activeStatus.staged : []}
                   onCommitted={(shortOid) => {
                     setFeedback(`Committed ${shortOid}`);
-                    dispatch(selectGitFile(null));
+                    dispatch(selectGitFile({ chatId, selection: null }));
                     void statusQuery.refetch();
                   }}
                 />

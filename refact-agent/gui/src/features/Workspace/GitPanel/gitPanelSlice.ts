@@ -14,14 +14,35 @@ export type GitFileSelection = SelectedGitFile & {
   root: string;
 };
 
-export type GitPanelState = {
+export type GitPanelContextState = {
   activeRoot: string;
   selectedFile: GitFileSelection | null;
 };
 
+export type GitPanelState = {
+  contexts: Record<string, GitPanelContextState | undefined>;
+};
+
 const initialState: GitPanelState = {
+  contexts: {},
+};
+
+const EMPTY_GIT_PANEL_CONTEXT: GitPanelContextState = {
   activeRoot: "",
   selectedFile: null,
+};
+
+const gitPanelContextKey = (chatId: string | null): string =>
+  chatId ? `chat:${chatId}` : "workspace";
+
+type ActiveGitRootPayload = {
+  chatId: string | null;
+  root: string;
+};
+
+type GitFileSelectionPayload = {
+  chatId: string | null;
+  selection: GitFileSelection | null;
 };
 
 export const gitPanelSlice = createSlice({
@@ -29,14 +50,23 @@ export const gitPanelSlice = createSlice({
   reducerPath: "gitPanel",
   initialState,
   reducers: {
-    setActiveGitRoot: (state, action: PayloadAction<string>) => {
-      if (state.activeRoot === action.payload) return;
-      state.activeRoot = action.payload;
-      state.selectedFile = null;
+    setActiveGitRoot: (state, action: PayloadAction<ActiveGitRootPayload>) => {
+      const key = gitPanelContextKey(action.payload.chatId);
+      const context = state.contexts[key];
+      if ((context?.activeRoot ?? "") === action.payload.root) return;
+      state.contexts[key] = {
+        activeRoot: action.payload.root,
+        selectedFile: null,
+      };
     },
-    selectGitFile: (state, action: PayloadAction<GitFileSelection | null>) => {
-      state.selectedFile = action.payload;
-      if (action.payload) state.activeRoot = action.payload.root;
+    selectGitFile: (state, action: PayloadAction<GitFileSelectionPayload>) => {
+      const key = gitPanelContextKey(action.payload.chatId);
+      const context = state.contexts[key];
+      if (!action.payload.selection && !context) return;
+      state.contexts[key] = {
+        activeRoot: action.payload.selection?.root ?? context?.activeRoot ?? "",
+        selectedFile: action.payload.selection,
+      };
     },
   },
 });
@@ -60,7 +90,7 @@ export const openGitFile =
   (dispatch: GitPanelDispatch, getState: () => GitPanelThunkState) => {
     const chatId = selectFocusedWorkspaceChatId(getState());
     const surfaceKey = makeSurfaceKey("git", "main");
-    dispatch(selectGitFile(selection));
+    dispatch(selectGitFile({ chatId, selection }));
     dispatch(openTab(surfaceKey));
     if (chatId) dispatch(bindSurfaceToChat({ surfaceKey, chatId }));
     if (
@@ -75,10 +105,21 @@ type GitPanelRootState = {
   gitPanel: GitPanelState;
 };
 
-export const selectActiveGitRoot = (state: GitPanelRootState) =>
-  state.gitPanel.activeRoot;
+const selectGitPanelContext = (
+  state: GitPanelRootState,
+  chatId: string | null,
+): GitPanelContextState =>
+  state.gitPanel.contexts[gitPanelContextKey(chatId)] ??
+  EMPTY_GIT_PANEL_CONTEXT;
 
-export const selectSelectedGitFile = (state: GitPanelRootState) =>
-  state.gitPanel.selectedFile;
+export const selectActiveGitRoot = (
+  state: GitPanelRootState,
+  chatId: string | null,
+) => selectGitPanelContext(state, chatId).activeRoot;
+
+export const selectSelectedGitFile = (
+  state: GitPanelRootState,
+  chatId: string | null,
+) => selectGitPanelContext(state, chatId).selectedFile;
 
 export default gitPanelSlice.reducer;
