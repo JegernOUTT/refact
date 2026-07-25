@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { screen, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, test, vi } from "vitest";
@@ -42,6 +44,11 @@ const CONFIG_STATE = {
     themeProps: {},
   },
 };
+
+const terminalPanelCss = readFileSync(
+  "src/features/Workspace/TerminalPanel/TerminalPanel.module.css",
+  "utf8",
+);
 
 function renderTerminalPanel(chatId = "chat-a") {
   const view = render(<TerminalPanel chatId={chatId} />, {
@@ -99,6 +106,18 @@ describe("TerminalPanel", () => {
     FakeEventSource.instances = [];
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.spyOn(window, "confirm").mockReturnValue(true);
+  });
+
+  test("gives the expand-grid body an explicit tokenized block size", () => {
+    const bodyRule = terminalPanelCss.match(/\.body\s*\{([^}]*)\}/u)?.[1];
+
+    expect(bodyRule).toMatch(
+      /block-size:\s*calc\(var\(--rf-control-h\)\s*\*\s*6\)/u,
+    );
+    expect(bodyRule).not.toMatch(/\bflex\s*:/u);
+    expect(terminalPanelCss).toMatch(
+      /\.body\[hidden\]\s*\{[^}]*display:\s*none/u,
+    );
   });
 
   test("reattaches running PTYs and seeds backfill before streaming", async () => {
