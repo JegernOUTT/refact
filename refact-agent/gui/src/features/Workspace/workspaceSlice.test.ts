@@ -747,12 +747,66 @@ describe("workspaceSlice", () => {
     ).toBe(false);
   });
 
-  test("clears live-edit preferences and surface context for one chat", () => {
+  test("closes an active top-level contextual file with its chat state", () => {
+    const fileA = makeSurfaceKey("file", "/worktrees/a/main.ts");
+    const chatA = chat("a");
+    const chatB = chat("b");
+    const state: WorkspaceState = {
+      tabs: [chatA, fileA, chatB],
+      activeTabId: fileA,
+      groups: {},
+      liveEditsByChat: { a: true, b: false },
+      contextChatByTab: { [fileA]: "a" },
+    };
+
+    const next = reducer(state, clearWorkspaceChatState("a"));
+
+    expect(next.tabs).toEqual([chatA, chatB]);
+    expect(next.activeTabId).toBe(chatB);
+    expect(next.liveEditsByChat).toEqual({ b: false });
+    expect(next.contextChatByTab).toBeUndefined();
+  });
+
+  test("collapses a split after closing its contextual file surface", () => {
+    const chatA = chat("a");
+    const fileA = makeSurfaceKey("file", "/worktrees/a/main.ts");
+    const state: WorkspaceState = {
+      tabs: [chatA],
+      activeTabId: chatA,
+      groups: {
+        [chatA]: {
+          focusedLeafId: "file",
+          root: {
+            kind: "split",
+            id: "root:split:row",
+            dir: "row",
+            sizes: [0.5, 0.5],
+            children: [
+              leaf("chat", [chatA], chatA),
+              leaf("file", [fileA], fileA),
+            ],
+          },
+        },
+      },
+      contextChatByTab: { [chatA]: "a" },
+    };
+
+    const next = reducer(state, clearWorkspaceChatState("a"));
+
+    expect(next.tabs).toEqual([chatA]);
+    expect(next.groups).toEqual({});
+    expect(next.activeTabId).toBe(chatA);
+    expect(next.contextChatByTab).toBeUndefined();
+  });
+
+  test("closing one chat preserves surfaces owned by another chat", () => {
+    const chatA = chat("a");
+    const chatB = chat("b");
     const fileA = makeSurfaceKey("file", "/worktrees/a/main.ts");
     const fileB = makeSurfaceKey("file", "/worktrees/b/main.ts");
     const state: WorkspaceState = {
-      tabs: [fileA, fileB],
-      activeTabId: fileA,
+      tabs: [chatA, fileA, chatB, fileB],
+      activeTabId: fileB,
       groups: {},
       liveEditsByChat: { a: true, b: false },
       contextChatByTab: { [fileA]: "a", [fileB]: "b" },
@@ -760,6 +814,8 @@ describe("workspaceSlice", () => {
 
     const next = reducer(state, clearWorkspaceChatState("a"));
 
+    expect(next.tabs).toEqual([chatA, chatB, fileB]);
+    expect(next.activeTabId).toBe(fileB);
     expect(next.liveEditsByChat).toEqual({ b: false });
     expect(next.contextChatByTab).toEqual({ [fileB]: "b" });
   });
@@ -819,6 +875,24 @@ describe("workspaceSlice", () => {
     expect(state.activeTabId).toBe(chatA);
     expect(state.groups).toEqual({});
     expect(selectVisibleThreadIds(rootState(state))).toEqual(["a"]);
+  });
+
+  test("reconcileWorkspace closes files whose context chat is no longer open", () => {
+    const chatA = chat("a");
+    const fileA = makeSurfaceKey("file", "/worktrees/a/main.ts");
+    const state: WorkspaceState = {
+      tabs: [chatA, fileA],
+      activeTabId: fileA,
+      groups: {},
+      contextChatByTab: { [fileA]: "a" },
+    };
+
+    const next = reducer(state, reconcileWorkspace({ openThreadIds: [] }));
+
+    expect(next.tabs).toEqual([]);
+    expect(next.activeTabId).toBeNull();
+    expect(next.groups).toEqual({});
+    expect(next.contextChatByTab).toBeUndefined();
   });
 
   test("selectVisibleSurfaceKeys returns the active tab when unsplit", () => {
@@ -918,6 +992,40 @@ describe("workspaceSlice", () => {
 
     expect(state.contextChatByTab).toEqual({ [file]: "a" });
     expect(selectFocusedWorkspaceChatId(rootState(state))).toBe("a");
+  });
+
+  test("hydrateWorkspace drops contextual files owned by closed chats", () => {
+    const chatA = chat("a");
+    const fileA = makeSurfaceKey("file", "/worktrees/a/src/main.ts");
+    const state = reducer(
+      undefined,
+      hydrateWorkspace({
+        tabs: [chatA],
+        activeTabId: chatA,
+        groups: {
+          [chatA]: {
+            focusedLeafId: "file",
+            root: {
+              kind: "split",
+              id: "root:split:row",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                leaf("chat", [chatA], chatA),
+                leaf("file", [fileA], fileA),
+              ],
+            },
+          },
+        },
+        contextChatByTab: { [chatA]: "b" },
+        openThreadIds: ["a"],
+      }),
+    );
+
+    expect(state.tabs).toEqual([chatA]);
+    expect(state.activeTabId).toBe(chatA);
+    expect(state.groups).toEqual({});
+    expect(state.contextChatByTab).toBeUndefined();
   });
 
   test("focused chat workspace root follows worktrees and falls back to the project root", () => {

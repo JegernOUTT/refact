@@ -287,30 +287,34 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedWorkspace()).toEqual(workspace);
   });
 
-  it("prunes restored context mappings for closed chats and tabs", () => {
+  it("prunes restored contextual surfaces for closed chats", () => {
     savePersistedChatTabs({
       openThreadIds: ["chat-a"],
       currentThreadId: "chat-a",
       tabs: [{ id: "chat-a" }],
     });
-    const file = makeSurfaceKey("file", "/project/src/main.ts");
+    const file = makeSurfaceKey("file", "/worktrees/chat-a/src/main.ts");
+    const orphan = makeSurfaceKey("file", "/worktrees/chat-b/src/main.ts");
     localStorage.setItem(
       workspaceStorageKey(),
       JSON.stringify({
         version: 4,
-        tabs: [chatSurface("chat-a"), file],
-        activeTabId: file,
+        tabs: [chatSurface("chat-a"), file, orphan],
+        activeTabId: orphan,
         groups: {},
         contextChatByTab: {
           [file]: "chat-a",
+          [orphan]: "chat-b",
           missing: "chat-a",
           [chatSurface("chat-a")]: "chat-b",
         },
       }),
     );
 
-    expect(loadPersistedWorkspace().contextChatByTab).toEqual({
-      [file]: "chat-a",
+    expect(loadPersistedWorkspace()).toMatchObject({
+      tabs: [chatSurface("chat-a"), file],
+      activeTabId: chatSurface("chat-a"),
+      contextChatByTab: { [file]: "chat-a" },
     });
   });
 

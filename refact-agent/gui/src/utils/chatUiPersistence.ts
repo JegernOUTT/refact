@@ -646,40 +646,46 @@ export function loadPersistedWorkspace(
       ? null
       : normalizeSurfaceKey(record.activeTabId);
   if (record.activeTabId && !rawActiveTabId) return fallback;
+  const contextChatEntries = isRecord(record.contextChatByTab)
+    ? Object.entries(record.contextChatByTab).filter(
+        (entry): entry is [string, string] =>
+          tabs.includes(entry[0]) &&
+          typeof entry[1] === "string" &&
+          entry[1].trim().length > 0,
+      )
+    : [];
+  const contextChatByTab =
+    contextChatEntries.length > 0
+      ? Object.fromEntries(contextChatEntries)
+      : undefined;
 
+  const sanitizedWorkspace = sanitizeWorkspaceSurfaceUniqueness({
+    tabs,
+    activeTabId:
+      rawActiveTabId && tabs.includes(rawActiveTabId)
+        ? rawActiveTabId
+        : tabs[0] ?? null,
+    groups,
+    contextChatByTab,
+    panelsForced: panelsRecord?.panelsForced === true ? true : undefined,
+    liveEditsByChat: isRecord(record.liveEditsByChat)
+      ? Object.fromEntries(
+          Object.entries(record.liveEditsByChat).filter(
+            (entry): entry is [string, boolean] =>
+              entry[0].trim().length > 0 && typeof entry[1] === "boolean",
+          ),
+        )
+      : undefined,
+    dock: normalizePersistedDock(record.dock),
+    drawer: {
+      ...normalizePersistedDrawer(record.drawer),
+      open: legacyTerminalTab || normalizePersistedDrawer(record.drawer).open,
+    },
+  });
   return reconcileWorkspaceState(
-    sanitizeWorkspaceSurfaceUniqueness({
-      tabs,
-      activeTabId:
-        rawActiveTabId && tabs.includes(rawActiveTabId)
-          ? rawActiveTabId
-          : tabs[0] ?? null,
-      groups,
-      contextChatByTab: isRecord(record.contextChatByTab)
-        ? Object.fromEntries(
-            Object.entries(record.contextChatByTab).filter(
-              (entry): entry is [string, string] =>
-                tabs.includes(entry[0]) &&
-                typeof entry[1] === "string" &&
-                openThreadIds.has(entry[1]),
-            ),
-          )
-        : undefined,
-      panelsForced: panelsRecord?.panelsForced === true ? true : undefined,
-      liveEditsByChat: isRecord(record.liveEditsByChat)
-        ? Object.fromEntries(
-            Object.entries(record.liveEditsByChat).filter(
-              (entry): entry is [string, boolean] =>
-                entry[0].trim().length > 0 && typeof entry[1] === "boolean",
-            ),
-          )
-        : undefined,
-      dock: normalizePersistedDock(record.dock),
-      drawer: {
-        ...normalizePersistedDrawer(record.drawer),
-        open: legacyTerminalTab || normalizePersistedDrawer(record.drawer).open,
-      },
-    }),
+    contextChatByTab
+      ? { ...sanitizedWorkspace, contextChatByTab }
+      : sanitizedWorkspace,
     persistedTabs.openThreadIds,
   );
 }

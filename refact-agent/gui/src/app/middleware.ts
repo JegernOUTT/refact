@@ -261,7 +261,11 @@ function hydratePersistedChatUi(listenerApi: {
   if (trustedWorkspace) {
     const workspaceCapabilities = selectCapabilities(listenerApi.getState());
     listenerApi.dispatch(
-      hydrateWorkspace({ ...trustedWorkspace, workspaceCapabilities }),
+      hydrateWorkspace({
+        ...trustedWorkspace,
+        workspaceCapabilities,
+        openThreadIds: listenerApi.getState().chat.open_thread_ids,
+      }),
     );
     listenerApi.dispatch(
       reconcileWorkspace({

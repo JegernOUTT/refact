@@ -814,6 +814,50 @@ const removeSurfaceFromGroups = (
   }
 };
 
+const closeWorkspaceSurface = (
+  state: WorkspaceState,
+  surfaceKey: SurfaceKey,
+): void => {
+  const neighbor = removeTopLevelTab(state, surfaceKey);
+  state.groups = withoutGroup(state.groups, surfaceKey);
+  removeContextChatForTab(state, surfaceKey);
+  removeSurfaceFromGroups(state, surfaceKey);
+
+  if (state.activeTabId === surfaceKey) {
+    state.activeTabId =
+      neighbor && state.tabs.includes(neighbor)
+        ? neighbor
+        : state.tabs[0] ?? null;
+  } else if (state.activeTabId && !state.tabs.includes(state.activeTabId)) {
+    state.activeTabId = state.tabs[0] ?? null;
+  }
+};
+
+const closeContextSurfacesForChat = (
+  state: WorkspaceState,
+  chatId: string,
+): void => {
+  const ownedTabIds = Object.entries(state.contextChatByTab ?? {})
+    .filter(([, contextChatId]) => contextChatId === chatId)
+    .map(([tabId]) => tabId);
+  const ownedSurfaceKeys = unique(
+    ownedTabIds.flatMap((tabId) => {
+      const group = state.groups[tabId];
+      if (group) {
+        return collectTabIds(group.root).filter((key) => !isChatSurface(key));
+      }
+      return isChatSurface(tabId) ? [] : [tabId];
+    }),
+  );
+
+  for (const surfaceKey of ownedSurfaceKeys) {
+    closeWorkspaceSurface(state, surfaceKey);
+  }
+  for (const tabId of ownedTabIds) {
+    removeContextChatForTab(state, tabId);
+  }
+};
+
 const detachSurfaceForGroup = (
   state: WorkspaceState,
   tabId: SurfaceKey,
@@ -1096,14 +1140,19 @@ export const reconcileWorkspaceState = (
     workspaceCapabilities,
   );
   const openThreads = new Set(openThreadIds);
+  const contextOwnerIsOpen = (tabId: SurfaceKey): boolean => {
+    const chatId = state.contextChatByTab?.[tabId]?.trim();
+    return !chatId || openThreads.has(chatId);
+  };
   const nextState: WorkspaceState = {
     tabs: unique(state.tabs)
       .filter(
         (key) =>
           openChatSurface(key, openThreads) ||
-          (isFileSurface(key) && effectiveCapabilities.filesPanel) ||
-          (!isFilesSurface(key) &&
-            isMainSurfaceEnabled(key, effectiveCapabilities)),
+          (contextOwnerIsOpen(key) &&
+            ((isFileSurface(key) && effectiveCapabilities.filesPanel) ||
+              (!isFilesSurface(key) &&
+                isMainSurfaceEnabled(key, effectiveCapabilities)))),
       )
       .slice(0, MAX_WORKSPACE_TABS),
     activeTabId: state.activeTabId,
@@ -1124,7 +1173,7 @@ export const reconcileWorkspaceState = (
     const pruned = pruneNodeToOpenThreads(
       group.root,
       openThreads,
-      effectiveCapabilities.filesPanel,
+      effectiveCapabilities.filesPanel && contextOwnerIsOpen(tabId),
     );
     const nextGroup = {
       root: pruned.node,
@@ -1169,6 +1218,7 @@ export const workspaceSlice = createSlice({
       };
     },
     clearWorkspaceChatState: (state, action: PayloadAction<string>) => {
+      closeContextSurfacesForChat(state, action.payload);
       if (state.liveEditsByChat) {
         const { [action.payload]: _liveEdits, ...otherLiveEdits } =
           state.liveEditsByChat;
@@ -1266,20 +1316,8 @@ export const workspaceSlice = createSlice({
       bindContextChatForSurface(state, action.payload, contextChatId);
     },
     closeTab: (state, action: PayloadAction<SurfaceKey>) => {
-      const neighbor = removeTopLevelTab(state, action.payload);
-      state.groups = withoutGroup(state.groups, action.payload);
-      removeContextChatForTab(state, action.payload);
-      removeSurfaceFromGroups(state, action.payload);
+      closeWorkspaceSurface(state, action.payload);
       pruneContextChatByTab(state);
-
-      if (state.activeTabId === action.payload) {
-        state.activeTabId =
-          neighbor && state.tabs.includes(neighbor)
-            ? neighbor
-            : state.tabs[0] ?? null;
-      } else if (state.activeTabId && !state.tabs.includes(state.activeTabId)) {
-        state.activeTabId = state.tabs[0] ?? null;
-      }
     },
     setActiveTab: (state, action: PayloadAction<SurfaceKey>) => {
       if (!state.tabs.includes(action.payload)) return;
@@ -1643,6 +1681,7 @@ export const workspaceSlice = createSlice({
       action: PayloadAction<
         WorkspaceHydrationState & {
           workspaceCapabilities?: WorkspaceCapabilities;
+          openThreadIds?: string[];
         }
       >,
     ) => {
@@ -1671,8 +1710,13 @@ export const workspaceSlice = createSlice({
       }
 
       const activeTabId = action.payload.activeTabId;
+      const persistedContextChatByTab = sanitizeContextChatByTab(
+        action.payload.contextChatByTab,
+        tabs,
+        {},
+      );
 
-      return sanitizeWorkspaceSurfaceUniqueness(
+      const hydratedState = sanitizeWorkspaceSurfaceUniqueness(
         {
           tabs,
           activeTabId:
@@ -1709,6 +1753,18 @@ export const workspaceSlice = createSlice({
         },
         workspaceCapabilities,
       );
+      return action.payload.openThreadIds
+        ? reconcileWorkspaceState(
+            persistedContextChatByTab
+              ? {
+                  ...hydratedState,
+                  contextChatByTab: persistedContextChatByTab,
+                }
+              : hydratedState,
+            action.payload.openThreadIds,
+            workspaceCapabilities,
+          )
+        : hydratedState;
     },
   },
 });
