@@ -57,6 +57,10 @@ function statusDot(status: ExecStatus): "running" | "error" | "idle" {
 }
 
 export function TerminalPanel({ chatId }: { chatId: string }) {
+  return <ChatTerminalPanel key={chatId} chatId={chatId} />;
+}
+
+function ChatTerminalPanel({ chatId }: { chatId: string }) {
   const dispatch = useAppDispatch();
   const config = useConfig();
   const workspaceRoot = useAppSelector((state) =>
@@ -75,6 +79,7 @@ export function TerminalPanel({ chatId }: { chatId: string }) {
   const [spawning, setSpawning] = useState(false);
   const [disabled, setDisabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [listAttempt, setListAttempt] = useState(0);
   const lastFittedRef = useRef<{ rows: number; cols: number } | null>(null);
   const apiKey = config.apiKey ?? undefined;
   const connection = useMemo(
@@ -98,16 +103,19 @@ export function TerminalPanel({ chatId }: { chatId: string }) {
 
   useEffect(() => {
     setLoading(true);
+    setDisabled(false);
     setError(null);
     let cancelled = false;
     void listExec(connection, apiKey, chatId)
       .then((response) => {
         if (cancelled) return;
+        setDisabled(false);
+        setError(null);
         dispatch(
           sessionsReattached({
             chatId,
             sessions: response.processes
-              .filter((process) => process.tty && process.status === "running")
+              .filter((process) => process.tty)
               .map((process) => ({
                 process_id: process.process_id,
                 title: terminalTitle(
@@ -120,7 +128,11 @@ export function TerminalPanel({ chatId }: { chatId: string }) {
         );
       })
       .catch((cause: unknown) => {
-        if (!cancelled) {
+        if (cancelled) return;
+        if (cause instanceof ExecHttpError && cause.status === 403) {
+          setDisabled(true);
+          setError(null);
+        } else {
           setError(cause instanceof Error ? cause.message : String(cause));
         }
       })
@@ -130,7 +142,7 @@ export function TerminalPanel({ chatId }: { chatId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [apiKey, chatId, connection, dispatch]);
+  }, [apiKey, chatId, connection, dispatch, listAttempt]);
 
   const handleNewSession = useCallback(async () => {
     dispatch(setTerminalWorkbenchOpen({ chatId, open: true }));
@@ -295,31 +307,34 @@ export function TerminalPanel({ chatId }: { chatId: string }) {
                 description="Terminal access is disabled by the daemon or REFACT_DISABLE_EXEC_HTTP policy. Enable exec HTTP access and try again."
                 variant="full"
                 action={
-                  <Button onClick={() => setDisabled(false)}>Try again</Button>
+                  <Button
+                    onClick={() => setListAttempt((attempt) => attempt + 1)}
+                  >
+                    Try again
+                  </Button>
                 }
               />
             </div>
           ) : (
             <>
-              {sessions.map((session) => (
-                <div
-                  key={session.process_id}
-                  className={
-                    session.process_id === activeProcessId
-                      ? styles.sessionActive
-                      : styles.sessionHidden
-                  }
-                  aria-hidden={session.process_id !== activeProcessId}
-                >
-                  <TerminalSession
-                    processId={session.process_id}
-                    chatId={chatId}
-                    apiKey={apiKey}
-                    onStatusChange={handleStatusChange}
-                    onResize={handleSessionResize}
-                  />
-                </div>
-              ))}
+              {workbenchOpen
+                ? sessions
+                    .filter((session) => session.process_id === activeProcessId)
+                    .map((session) => (
+                      <div
+                        key={session.process_id}
+                        className={styles.sessionActive}
+                      >
+                        <TerminalSession
+                          processId={session.process_id}
+                          chatId={chatId}
+                          apiKey={apiKey}
+                          onStatusChange={handleStatusChange}
+                          onResize={handleSessionResize}
+                        />
+                      </div>
+                    ))
+                : null}
               {!loading && sessions.length === 0 ? (
                 <EmptyState
                   icon={SquareTerminal}

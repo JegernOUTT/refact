@@ -55,20 +55,15 @@ export const terminalSlice = createSlice({
     },
     sessionsReattached: (state, action: PayloadAction<ChatSessionsPayload>) => {
       const { chatId, sessions: reattachedSessions } = action.payload;
-      const sessions = (state.sessionsByChat[chatId] ??= []);
-      for (const session of reattachedSessions) {
-        const existing = sessions.find(
-          (item) => item.process_id === session.process_id,
-        );
-        if (existing) {
-          Object.assign(existing, session);
-        } else {
-          sessions.push(session);
-        }
-      }
-      if (!state.activeProcessIdByChat[chatId] && sessions.length > 0) {
-        state.activeProcessIdByChat[chatId] = sessions[0].process_id;
-      }
+      const activeProcessId = state.activeProcessIdByChat[chatId];
+      state.sessionsByChat[chatId] = reattachedSessions;
+      state.activeProcessIdByChat[chatId] =
+        activeProcessId &&
+        reattachedSessions.some(
+          (session) => session.process_id === activeProcessId,
+        )
+          ? activeProcessId
+          : reattachedSessions[0]?.process_id ?? null;
     },
     activeSessionChanged: (
       state,

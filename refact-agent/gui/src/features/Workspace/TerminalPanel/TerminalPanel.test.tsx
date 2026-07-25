@@ -150,7 +150,7 @@ describe("TerminalPanel", () => {
     expect(screen.queryByText("background")).not.toBeInTheDocument();
   });
 
-  test("keeps terminal sessions mounted while switching internal tabs", async () => {
+  test("closes transports while switching tabs and collapsing", async () => {
     server.use(
       http.get("*/v1/exec/list", () =>
         HttpResponse.json({
@@ -174,22 +174,70 @@ describe("TerminalPanel", () => {
     openWorkbench(view);
     const { container, user } = view;
     await screen.findByRole("tab", { name: /\/bin\/zsh · first/i });
-    const first = container.querySelector(
-      '[data-terminal-process-id="first-123456"]',
-    );
-    const second = container.querySelector(
-      '[data-terminal-process-id="second-12345"]',
-    );
-    expect(first).toBeInTheDocument();
-    expect(second).toBeInTheDocument();
-
-    await user.click(screen.getByRole("tab", { name: /\/bin\/zsh · first/i }));
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     expect(
       container.querySelector('[data-terminal-process-id="first-123456"]'),
-    ).toBe(first);
+    ).toBeInTheDocument();
     expect(
       container.querySelector('[data-terminal-process-id="second-12345"]'),
-    ).toBe(second);
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: /\/bin\/zsh · second/i }));
+    await waitFor(() =>
+      expect(FakeEventSource.instances[0].close).toHaveBeenCalled(),
+    );
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(2));
+    expect(
+      container.querySelector('[data-terminal-process-id="first-123456"]'),
+    ).not.toBeInTheDocument();
+    expect(
+      container.querySelector('[data-terminal-process-id="second-12345"]'),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Collapse terminal workbench" }),
+    );
+    await waitFor(() =>
+      expect(FakeEventSource.instances[1].close).toHaveBeenCalled(),
+    );
+    expect(container.querySelector("[data-terminal-process-id]")).toBeNull();
+  });
+
+  test("reattaches every TTY status without opening hidden transports", async () => {
+    server.use(
+      http.get("*/v1/exec/list", () =>
+        HttpResponse.json({
+          processes: [
+            {
+              process_id: "starting-1234",
+              status: "starting",
+              command_preview: "starting-shell",
+              created_at_ms: 1,
+              tty: true,
+              service_name: null,
+            },
+            {
+              process_id: "exited-12345",
+              status: "exited",
+              command_preview: "finished-shell",
+              created_at_ms: 2,
+              tty: true,
+              service_name: null,
+            },
+          ],
+        }),
+      ),
+    );
+
+    renderTerminalPanel();
+
+    expect(
+      await screen.findByRole("tab", { name: /starting-shell · starting/i }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("tab", { name: /finished-shell · exited/i }),
+    ).toBeVisible();
+    expect(FakeEventSource.instances).toHaveLength(0);
   });
 
   test("keeps two explicit chat workbenches isolated", async () => {
@@ -365,5 +413,52 @@ describe("TerminalPanel", () => {
 
     expect(await screen.findByText("Browser terminal disabled")).toBeVisible();
     expect(screen.getByText(/REFACT_DISABLE_EXEC_HTTP policy/i)).toBeVisible();
+  });
+
+  test("resets an initial list 403 when switching chats", async () => {
+    const listChatIds: (string | null)[] = [];
+    server.use(
+      http.get("*/v1/exec/list", ({ request }) => {
+        const chatId = new URL(request.url).searchParams.get("chat_id");
+        listChatIds.push(chatId);
+        return chatId === "chat-a"
+          ? HttpResponse.text("forbidden", { status: 403 })
+          : HttpResponse.json({ processes: [] });
+      }),
+    );
+
+    const view = renderTerminalPanel();
+    openWorkbench(view);
+    expect(await screen.findByText("Browser terminal disabled")).toBeVisible();
+
+    addChat(view, "chat-b");
+    view.rerender(<TerminalPanel chatId="chat-b" />);
+    openWorkbench(view, "chat-b");
+
+    expect(await screen.findByText("No terminal sessions")).toBeVisible();
+    expect(screen.queryByText("Browser terminal disabled")).toBeNull();
+    expect(listChatIds).toEqual(expect.arrayContaining(["chat-a", "chat-b"]));
+  });
+
+  test("successful retry clears an initial list 403", async () => {
+    let listCount = 0;
+    server.use(
+      http.get("*/v1/exec/list", () => {
+        listCount += 1;
+        return listCount === 1
+          ? HttpResponse.text("forbidden", { status: 403 })
+          : HttpResponse.json({ processes: [] });
+      }),
+    );
+
+    const view = renderTerminalPanel();
+    openWorkbench(view);
+    await view.user.click(
+      await screen.findByRole("button", { name: "Try again" }),
+    );
+
+    expect(await screen.findByText("No terminal sessions")).toBeVisible();
+    expect(screen.queryByText("Browser terminal disabled")).toBeNull();
+    expect(listCount).toBe(2);
   });
 });

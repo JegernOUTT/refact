@@ -13,10 +13,13 @@ import reducer, {
   toggleTerminalWorkbench,
 } from "./terminalSlice";
 
-const session = (processId: string) => ({
+const session = (
+  processId: string,
+  status: "starting" | "running" | "exited" = "running",
+) => ({
   process_id: processId,
   title: `zsh · ${processId}`,
-  status: "running" as const,
+  status,
 });
 
 describe("terminalSlice", () => {
@@ -102,12 +105,12 @@ describe("terminalSlice", () => {
     );
   });
 
-  test("merges reattached sessions and selects the nearest tab per chat on close", () => {
+  test("reattach replaces the snapshot and keeps active only while present", () => {
     let state = reducer(
       undefined,
       sessionsReattached({
         chatId: "chat-a",
-        sessions: [session("one"), session("two")],
+        sessions: [session("stale"), session("kept")],
       }),
     );
     state = reducer(
@@ -119,18 +122,55 @@ describe("terminalSlice", () => {
     );
     state = reducer(
       state,
-      activeSessionChanged({ chatId: "chat-a", processId: "one" }),
+      activeSessionChanged({ chatId: "chat-a", processId: "kept" }),
+    );
+    state = reducer(
+      state,
+      sessionsReattached({
+        chatId: "chat-a",
+        sessions: [session("kept", "starting"), session("new", "exited")],
+      }),
+    );
+
+    expect(state.sessionsByChat["chat-a"]).toEqual([
+      session("kept", "starting"),
+      session("new", "exited"),
+    ]);
+    expect(state.activeProcessIdByChat["chat-a"]).toBe("kept");
+    expect(state.sessionsByChat["chat-b"]).toEqual([session("other")]);
+
+    state = reducer(
+      state,
+      sessionsReattached({
+        chatId: "chat-a",
+        sessions: [session("replacement")],
+      }),
+    );
+    expect(state.sessionsByChat["chat-a"]).toEqual([session("replacement")]);
+    expect(state.activeProcessIdByChat["chat-a"]).toBe("replacement");
+
+    state = reducer(
+      state,
+      sessionsReattached({ chatId: "chat-a", sessions: [] }),
+    );
+    expect(state.sessionsByChat["chat-a"]).toEqual([]);
+    expect(state.activeProcessIdByChat["chat-a"]).toBeNull();
+  });
+
+  test("selects the nearest tab after a session closes", () => {
+    let state = reducer(
+      undefined,
+      sessionsReattached({
+        chatId: "chat-a",
+        sessions: [session("one"), session("two")],
+      }),
     );
     state = reducer(
       state,
       sessionRemoved({ chatId: "chat-a", processId: "one" }),
     );
 
+    expect(state.sessionsByChat["chat-a"]).toEqual([session("two")]);
     expect(state.activeProcessIdByChat["chat-a"]).toBe("two");
-    expect(
-      state.sessionsByChat["chat-a"]?.map((item) => item.process_id),
-    ).toEqual(["two"]);
-    expect(state.activeProcessIdByChat["chat-b"]).toBe("other");
-    expect(state.sessionsByChat["chat-b"]).toEqual([session("other")]);
   });
 });

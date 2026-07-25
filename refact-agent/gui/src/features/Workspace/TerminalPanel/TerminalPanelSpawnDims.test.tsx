@@ -104,6 +104,9 @@ describe("TerminalPanel spawn dimensions", () => {
     );
     store.dispatch(openTab(makeSurfaceKey("chat", "chat-a")));
     await screen.findByRole("tab", { name: /\/bin\/zsh · seed-123/i });
+    await user.click(
+      screen.getByRole("button", { name: "Expand terminal workbench" }),
+    );
 
     await user.click(screen.getByRole("button", { name: "New terminal" }));
 
