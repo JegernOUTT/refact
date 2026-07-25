@@ -7,7 +7,12 @@ import { setUpStore } from "../../app/store";
 import { createChatWithId } from "../Chat/Thread";
 import { updateConfig } from "../Config/configSlice";
 import { setTerminalWorkbenchOpen } from "./TerminalPanel/terminalSlice";
-import { openTab, setDockOpen, setDockSection } from "./workspaceSlice";
+import {
+  openTab,
+  setDockOpen,
+  setDockSection,
+  setPanelsForced,
+} from "./workspaceSlice";
 import { makeSurfaceKey } from "./surfaceKey";
 import { useWorkspaceShortcuts } from "./useWorkspaceShortcuts";
 
@@ -25,9 +30,7 @@ function renderShortcuts() {
 describe("useWorkspaceShortcuts", () => {
   it("opens the dock and current chat terminal when the dock is closed", () => {
     const { store, rerender } = renderShortcuts();
-    store.dispatch(
-      setTerminalWorkbenchOpen({ chatId: "chat-a", open: true }),
-    );
+    store.dispatch(setTerminalWorkbenchOpen({ chatId: "chat-a", open: true }));
     store.dispatch(setDockOpen(false));
     rerender();
 
@@ -110,6 +113,152 @@ describe("useWorkspaceShortcuts", () => {
     expect(store.getState().workspace.dock?.section).toBe("git");
   });
 
+  it("supports terminal-only workspace shortcuts", () => {
+    const { store, rerender } = renderShortcuts();
+    store.dispatch(
+      updateConfig({
+        capabilities: {
+          filesPanel: false,
+          gitPanel: false,
+          terminalPanel: true,
+        },
+      }),
+    );
+    store.dispatch(setDockOpen(false));
+    rerender();
+
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    expect(store.getState().workspace.dock?.open).toBe(true);
+
+    store.dispatch(setDockOpen(false));
+    rerender();
+    fireEvent.keyDown(window, { key: "j", metaKey: true });
+    expect(store.getState().workspace.dock?.open).toBe(true);
+    expect(store.getState().terminal.workbenchOpenByChat["chat-a"]).toBe(true);
+
+    fireEvent.keyDown(window, { key: "3", ctrlKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("files");
+  });
+
+  it("supports task shortcuts when workspace panels are forced", () => {
+    const { store, rerender } = renderShortcuts();
+    store.dispatch(
+      updateConfig({
+        capabilities: {
+          filesPanel: false,
+          gitPanel: false,
+          terminalPanel: false,
+        },
+      }),
+    );
+    store.dispatch(setPanelsForced(true));
+    store.dispatch(setDockOpen(false));
+    rerender();
+
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    expect(store.getState().workspace.dock?.open).toBe(true);
+
+    fireEvent.keyDown(window, { key: "3", metaKey: true });
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: true,
+      section: "tasks",
+    });
+  });
+
+  it("gates files-only workspace shortcuts by target", () => {
+    const { store, rerender } = renderShortcuts();
+    store.dispatch(
+      updateConfig({
+        capabilities: {
+          filesPanel: true,
+          gitPanel: false,
+          terminalPanel: false,
+        },
+      }),
+    );
+    store.dispatch(setDockSection("tasks"));
+    store.dispatch(setDockOpen(false));
+    rerender();
+
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "1", ctrlKey: true });
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: true,
+      section: "files",
+    });
+
+    fireEvent.keyDown(window, { key: "3", ctrlKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("tasks");
+    fireEvent.keyDown(window, { key: "1", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "2", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "j", ctrlKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("files");
+    expect(
+      store.getState().terminal.workbenchOpenByChat["chat-a"],
+    ).toBeUndefined();
+  });
+
+  it("gates git-only workspace shortcuts by target", () => {
+    const { store, rerender } = renderShortcuts();
+    store.dispatch(
+      updateConfig({
+        capabilities: {
+          filesPanel: false,
+          gitPanel: true,
+          terminalPanel: false,
+        },
+      }),
+    );
+    store.dispatch(setDockSection("tasks"));
+    store.dispatch(setDockOpen(false));
+    rerender();
+
+    fireEvent.keyDown(window, { key: "b", metaKey: true });
+    fireEvent.keyDown(window, { key: "2", metaKey: true });
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: true,
+      section: "git",
+    });
+
+    fireEvent.keyDown(window, { key: "3", metaKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("tasks");
+    fireEvent.keyDown(window, { key: "2", metaKey: true });
+    fireEvent.keyDown(window, { key: "1", metaKey: true });
+    fireEvent.keyDown(window, { key: "j", metaKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("git");
+    expect(
+      store.getState().terminal.workbenchOpenByChat["chat-a"],
+    ).toBeUndefined();
+  });
+
+  it("ignores workspace shortcuts when no target is available", () => {
+    const { store, rerender } = renderShortcuts();
+    store.dispatch(
+      updateConfig({
+        capabilities: {
+          filesPanel: false,
+          gitPanel: false,
+          terminalPanel: false,
+        },
+      }),
+    );
+    store.dispatch(setDockSection("tasks"));
+    store.dispatch(setDockOpen(false));
+    rerender();
+
+    for (const key of ["b", "j", "1", "2", "3"]) {
+      fireEvent.keyDown(window, { key, ctrlKey: true });
+    }
+
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: false,
+      section: "tasks",
+    });
+    expect(
+      store.getState().terminal.workbenchOpenByChat["chat-a"],
+    ).toBeUndefined();
+  });
+
   it("does not fire from editable controls, contenteditable regions, or xterm", () => {
     const { store } = renderShortcuts();
     const input = document.body.appendChild(document.createElement("input"));
@@ -147,6 +296,27 @@ describe("useWorkspaceShortcuts", () => {
     expect(store.getState().workspace.dock).toMatchObject({
       open: true,
       section: "files",
+    });
+    expect(
+      store.getState().terminal.workbenchOpenByChat["chat-a"],
+    ).toBeUndefined();
+  });
+
+  it("does not register forced panel shortcuts for IDE hosts", () => {
+    const { store, rerender } = renderShortcuts();
+    store.dispatch(updateConfig({ host: "vscode" }));
+    store.dispatch(setPanelsForced(true));
+    store.dispatch(setDockSection("tasks"));
+    store.dispatch(setDockOpen(false));
+    rerender();
+
+    for (const key of ["b", "j", "1", "2", "3"]) {
+      fireEvent.keyDown(window, { key, ctrlKey: true });
+    }
+
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: false,
+      section: "tasks",
     });
     expect(
       store.getState().terminal.workbenchOpenByChat["chat-a"],

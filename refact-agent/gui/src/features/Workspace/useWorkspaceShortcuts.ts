@@ -37,7 +37,16 @@ export function useWorkspaceShortcuts() {
   useEffect(() => {
     if (host !== "web") return;
 
-    const dockAvailable = capabilities.filesPanel || capabilities.gitPanel;
+    const filesAvailable = capabilities.filesPanel || panelsForced;
+    const gitAvailable = capabilities.gitPanel || panelsForced;
+    const terminalAvailable = capabilities.terminalPanel || panelsForced;
+    const tasksAvailable =
+      capabilities.filesPanel || capabilities.gitPanel || panelsForced;
+    const workbenchAvailable =
+      filesAvailable ||
+      gitAvailable ||
+      tasksAvailable ||
+      (terminalAvailable && Boolean(focusedChatId));
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
@@ -53,16 +62,12 @@ export function useWorkspaceShortcuts() {
       }
 
       const key = event.key.toLowerCase();
-      if (key === "b" && dockAvailable) {
+      if (key === "b" && workbenchAvailable) {
         event.preventDefault();
         dispatch(toggleDock());
         return;
       }
-      if (
-        key === "j" &&
-        (capabilities.terminalPanel || panelsForced) &&
-        focusedChatId
-      ) {
+      if (key === "j" && terminalAvailable && focusedChatId) {
         event.preventDefault();
         if (dock.open) {
           dispatch(toggleTerminalWorkbench({ chatId: focusedChatId }));
@@ -81,10 +86,10 @@ export function useWorkspaceShortcuts() {
       else if (key === "3") section = "tasks";
       else return;
       const sectionAvailable =
-        section === "tasks" ||
-        (section === "files" && capabilities.filesPanel) ||
-        (section === "git" && capabilities.gitPanel);
-      if (!dockAvailable || !sectionAvailable) return;
+        (section === "files" && filesAvailable) ||
+        (section === "git" && gitAvailable) ||
+        (section === "tasks" && tasksAvailable);
+      if (!sectionAvailable) return;
       event.preventDefault();
       dispatch(setDockSection(section));
       dispatch(setDockOpen(true));
