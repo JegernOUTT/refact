@@ -41,6 +41,7 @@ src/
   llm/                 — LLM adapters (OpenAI, Anthropic wire formats), streaming
   tools/               — 50+ tools (file_edit/, search, codegraph analysis, web, shell, subagent, knowledge, tasks)
   codegraph/           — CodeGraph startup, persistent DB path, background queue drain, status
+  codegraph/code_intel_api.rs — shared code-intel response structs + ToolJson envelope (HTTP + agent tools)
   indexing_routing.rs  — memory-plane firewall: memory roots to VecDB, source files to CodeGraph
   vecdb/               — SQLite vec0 memory/knowledge semantic search
   providers/           — 15+ LLM providers (Anthropic, OpenAI, Codex, DeepSeek, Gemini, Groq, LM Studio, Ollama, OpenRouter, vLLM, xAI, Claude Code, custom)
@@ -352,6 +353,16 @@ CodeGraph-dependent tools are visible only when `gcx.codegraph` is available. `s
 | `security_scan` | Per-file/file-text security heuristics for deduped hardcoded secrets, dynamic SQL, command execution, dangerous eval/deserialization, TLS verification disabled, weak crypto, and insecure randomness. |
 | `pr_blast` | Blast-radius analysis for changed files: indexed-path resolution, reverse CodeGraph dependency walk to bounded depth, direct/transitive impacted symbols, structural vs behavioral impact kind, impacted file count, risk score, git-ownership reviewer suggestions with bot authors filtered, and readiness/partial-index warnings. |
 | `code_map` | Documentation-worthy map from CodeGraph and git signals: file centrality, churn hotspots, real symbol kinds and parsed visibility when present, file/module/SCC/API/infra pages, edge-derived links and backlink hubs, readiness warnings, optional hybrid query filtering, token budget trimming, and markdown or `claude_md` output. |
+
+All nine tools return **JSON**, never formatted prose. The envelope is `ToolJson<T>` from `src/codegraph/code_intel_api.rs`:
+
+```jsonc
+{ "tool": "pr_blast", "summary": "PR blast radius: 10 impacted files, risk 0.71", /* ...flattened payload... */ }
+```
+
+`code_intel_api.rs` is the single source of truth for these shapes and is shared by the `/v1/code-intel/*` HTTP handlers and the agent tools, so the GUI types match both surfaces. Payloads: `codegraph_overview` → `OverviewResponse` plus `communities`/`execution_flows`/`dead_code`/`entry_points`/`api_contract_files`; `code_health` → `HealthResponse` plus `file_category`/`file_role`/`call_graph`/`coverage`/`warm_cache`; `git_risk` → `GitRiskResponse`; `code_duplication` → `DuplicationResponse`; `pr_blast` → `PrBlastResponse` plus `max_depth`; `dead_code` → `DeadCodeReport` plus `shown`/`total_candidates`; `security_scan` → `SecurityScanResponse`; `code_map` → page/link/hub arrays plus optional `markdown` for `claude_md`; `code_why` → `decisions`/`related` arrays.
+
+Rules when changing them: readiness warnings are a `warning` field (never a `⚠` text prefix); empty/not-indexed branches still return valid JSON with an explanatory `summary`; only hard failures return `Err`; existing truncation limits stay so token cost does not grow; and a new field must be added to the Rust struct, the GUI interface in `engineAnalysisJson.ts`, and its adapter in the same change.
 
 Code-intelligence surfaces use readiness fields rather than pretending a building index is complete. `CodeGraphService::index_readiness()` reports `queued`, `dirty_paths`, `pending_refs`, `cross_file_edges`, and `cross_file_ready`; overview, graph, health, PR blast, communities, dead-code, and code-map surfaces expose the relevant subset or warning text. `code_health` intentionally exposes two maintainability scales: `maintainability_index` is the classic MI-style structural metric, while `maintainability_score` / `avg_maintainability_signal` are normalized 1-10 health dimensions after findings are applied.
 
@@ -889,7 +900,7 @@ Status and code-intelligence surfaces:
 - `POST /v1/codegraph-search` accepts `{ "query": string, "top_n": number }` and returns `{ query_text, results: [{ path, line1, line2, symbol, score }] }`.
 - `GET /v1/rag-status` embeds `codegraph` plus top-level `codegraph_alive` and `codegraph_error`, alongside legacy `ast`/`ast_alive` and VecDB status fields.
 - `GET /v1/ast-status` is a legacy compatibility alias that returns CodeGraph status; `/v1/ast-file-symbols` reads file definitions from CodeGraph.
-- `/v1/code-intel/overview`, `/graph`, `/communities`, `/dead-code`, `/health`, `/git-risk`, `/duplication`, `/pr-blast`, and `/security-scan` back the GUI code-intelligence page and mirror the tool implementations where applicable. Overview/graph/health/pr-blast responses carry top-level `index_state`; communities/dead-code keep their array response shape and attach readiness per item; PR blast also returns `partial` and `warning` when impact may be under-reported.
+- `/v1/code-intel/overview`, `/graph`, `/communities`, `/dead-code`, `/health`, `/git-risk`, `/duplication`, `/pr-blast`, and `/security-scan` back the GUI code-intelligence page and mirror the tool implementations where applicable. Overview/graph/health/pr-blast responses carry top-level `index_state`; `/communities` returns an array with readiness attached per item; `/dead-code` returns a `DeadCodeReport` envelope (`entries`, `index_state`, `partial`, optional `warning`); PR blast also returns `partial` and `warning` when impact may be under-reported. Response structs live in `src/codegraph/code_intel_api.rs` and are shared with the agent tools, so changing one changes both surfaces.
 
 Current worker CLI flags are `--ast`, `--wait-ast`, `--vecdb`, `--vecdb-max-files`, `--vecdb-force-path`, and `--wait-vecdb`. CodeGraph opens during startup and readiness is observed through the status routes. Daemon and IDE project settings may carry CodeGraph feature switches for host coordination, but worker process arguments still gate only AST compatibility and VecDB; do not add CodeGraph-specific CLI switches to docs unless they exist in `global_context.rs`.
 

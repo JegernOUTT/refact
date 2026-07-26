@@ -257,6 +257,14 @@ Largest component (~1900 lines). Dispatches a `ToolCall` list to the right speci
 
 CodeGraph tools render through the engine-analysis tool-card path. The recognized names are `codegraph_overview`, `code_health`, `git_risk`, `code_why`, `code_duplication`, `code_map`, `security_scan`, `pr_blast`, and `dead_code`; keep icons/status rendering aligned with the backend tool descriptions. Code Intelligence response severity unions no longer include `Info`; keep GUI unions to `Low`, `Medium`, `High`, and `Critical`. Page-level index-readiness banners should be driven from loaded response `index_state` data and disappear once `cross_file_ready` is true.
 
+These nine tools return **structured plain text**, not JSONThese nine tools return **JSON**, shaped by `engine/src/codegraph/code_intel_api.rs` — the same response structs the `/v1/code-intel/*` HTTP endpoints serialize. Every result is `{ "tool": "<name>", "summary": "<one line>", ...payload }`. Never text-parse a tool result.
+
+- `engineAnalysisJson.ts` owns the contract: per-tool TypeScript interfaces, `parseEngineAnalysisJson` (safe `JSON.parse`, returns `null` for non-object payloads such as tool error strings), and `buildAnalysisReport(toolName, value)` which narrows with runtime guards and maps into the presentational `AnalysisReport` view model.
+- `AnalysisReport.tsx` is presentation only — warnings, `summary` headline, `index_state` chips, fact metric cards, and sections of rows (`title`, `detail`, `severity`, `lead`, `metrics`, `paths`, `tags`). Rows and sections carry a unique `line` counter used as the React key.
+- `EngineAnalysisTool.tsx` renders the report when the payload parses, falls back to a `ShikiCodeBlock` of the raw string otherwise (tool errors), and renders `code_map.markdown` through `Markdown`.
+- Adding a field: extend the Rust struct in `code_intel_api.rs`, the TS interface in `engineAnalysisJson.ts`, and the adapter that surfaces it — in the same change.
+- Absolute paths are shortened by the report-wide common prefix (`shortenPath`), full path kept in `title`, prefix disclosed once at the bottom.
+
 ### Tool Confirmation
 
 `pause_required` event → ToolConfirmation popup → Allow Once / Allow Chat / Stop.

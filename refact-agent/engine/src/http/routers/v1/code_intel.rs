@@ -8,6 +8,7 @@ use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
+use crate::codegraph::code_intel_api::*;
 use crate::custom_error::ScratchError;
 
 const CODEGRAPH_OFF: &str = "codegraph turned off";
@@ -33,81 +34,9 @@ struct DetailResponse<'a> {
     detail: &'a str,
 }
 
-#[derive(Serialize)]
-struct ScoreEntry {
-    symbol: String,
-    path: String,
-    score: f64,
-}
-
-#[derive(Serialize)]
-struct FileScoreEntry {
-    path: String,
-    score: f64,
-}
-
-#[derive(Serialize)]
-struct FileCentralityResponse {
-    top_pagerank: Vec<FileScoreEntry>,
-    top_betweenness: Vec<FileScoreEntry>,
-}
-
-#[derive(Serialize)]
-struct CodeIntelCounts {
-    nodes: i64,
-    edges: i64,
-    files: i64,
-}
-
-#[derive(Serialize)]
-struct OverviewResponse {
-    counts: CodeIntelCounts,
-    index_state: crate::tools::tool_codegraph::PrBlastIndexState,
-    scc_count: usize,
-    largest_scc: usize,
-    component_count: usize,
-    top_pagerank: Vec<ScoreEntry>,
-    top_betweenness: Vec<ScoreEntry>,
-    file_centrality: FileCentralityResponse,
-    community_count: usize,
-    dead_code_count: usize,
-}
-
 #[derive(Deserialize)]
 pub struct GraphQuery {
     limit: Option<usize>,
-}
-
-#[derive(Serialize)]
-struct GraphNodeResponse {
-    id: i64,
-    name: String,
-    path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<String>,
-}
-
-#[derive(Serialize)]
-struct GraphEdgeResponse {
-    source: i64,
-    target: i64,
-    kind: String,
-}
-
-#[derive(Serialize)]
-struct GraphResponse {
-    index_state: crate::tools::tool_codegraph::PrBlastIndexState,
-    nodes: Vec<GraphNodeResponse>,
-    edges: Vec<GraphEdgeResponse>,
-}
-
-#[derive(Serialize)]
-struct CommunityResponse {
-    id: usize,
-    label: String,
-    member_count: usize,
-    cohesion: f64,
-    index_state: crate::tools::tool_codegraph::PrBlastIndexState,
 }
 
 #[derive(Deserialize)]
@@ -123,20 +52,6 @@ pub struct PrBlastRequest {
     max_depth: Option<usize>,
 }
 
-#[derive(Serialize)]
-struct PrBlastResponse {
-    changed_files: Vec<String>,
-    directly_impacted: Vec<refact_codegraph::pr_blast::BlastImpact>,
-    transitively_impacted: Vec<refact_codegraph::pr_blast::BlastImpact>,
-    impacted_file_count: usize,
-    risk_score: f64,
-    suggested_reviewers: Vec<crate::tools::tool_codegraph::SuggestedReviewer>,
-    index_state: crate::tools::tool_codegraph::PrBlastIndexState,
-    partial: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    warning: Option<String>,
-}
-
 #[derive(Deserialize)]
 pub struct SecurityScanRequest {
     path: Option<String>,
@@ -149,179 +64,6 @@ pub struct SecurityScanRequest {
 pub struct CodeIntelListQuery {
     path: Option<String>,
     limit: Option<usize>,
-}
-
-#[derive(Serialize)]
-struct HealthAggregateResponse {
-    file_count: usize,
-    function_count: usize,
-    avg_score: f64,
-    grade: char,
-    max_complexity: u32,
-    avg_maintainability: f64,
-    avg_maintainability_index: f64,
-    avg_maintainability_signal: f64,
-    avg_duplication_pct: f64,
-    biomarker_count: usize,
-    refactoring_count: usize,
-}
-
-#[derive(Serialize)]
-struct HealthFunctionResponse {
-    name: String,
-    line1: usize,
-    complexity: u32,
-    nesting: u32,
-    loc: u32,
-    maintainability: f64,
-    maintainability_index: f64,
-}
-
-#[derive(Serialize)]
-struct HealthFileResponse {
-    path: String,
-    lang: String,
-    score: f64,
-    grade: char,
-    complexity: u32,
-    maintainability: f64,
-    maintainability_index: f64,
-    maintainability_signal: f64,
-    max_complexity: u32,
-    avg_maintainability: f64,
-    function_count: usize,
-    duplication_pct: f64,
-    dry_violation: bool,
-    defect_score: f64,
-    maintainability_score: f64,
-    performance_score: f64,
-    biomarker_count: usize,
-    refactoring_count: usize,
-    functions: Vec<HealthFunctionResponse>,
-    findings: Vec<crate::tools::tool_codegraph::HealthFinding>,
-    health_impact: Vec<crate::tools::tool_codegraph::HealthImpactContributor>,
-    cache_hit: bool,
-    refactorings: Vec<refact_codehealth::refactoring::RefactoringSuggestion>,
-}
-
-#[derive(Serialize)]
-struct HealthResponse {
-    index_state: crate::tools::tool_codegraph::PrBlastIndexState,
-    aggregate: HealthAggregateResponse,
-    files: Vec<HealthFileResponse>,
-}
-
-#[derive(Serialize)]
-struct GitHotspotResponse {
-    path: String,
-    churn: u32,
-    risk: f64,
-    churn_risk: f64,
-    churn_percentile: f64,
-    temporal_score: f64,
-    change_entropy: f64,
-    change_entropy_pct: f64,
-    bus_factor: usize,
-    ownership_risk: bool,
-    knowledge_loss: bool,
-}
-
-#[derive(Serialize)]
-struct GitOwnerResponse {
-    author: String,
-    commits: u32,
-    share: f64,
-}
-
-#[derive(Serialize)]
-struct GitOwnershipResponse {
-    path: String,
-    top_owner: String,
-    top_owner_share: f64,
-    bus_factor: usize,
-    owner_count: usize,
-    ownership_risk: bool,
-    knowledge_loss: bool,
-    owners: Vec<GitOwnerResponse>,
-}
-
-#[derive(Serialize)]
-struct GitCoChangeResponse {
-    path_a: String,
-    path_b: String,
-    count: u32,
-}
-
-#[derive(Serialize)]
-struct GitReviewerResponse {
-    author: String,
-    score: f64,
-}
-
-#[derive(Serialize)]
-struct GitFindingResponse {
-    path: String,
-    biomarker: String,
-    category: String,
-    dimension: refact_codehealth::biomarkers::Dimension,
-    severity: refact_codehealth::biomarkers::Severity,
-    line: usize,
-    detail: String,
-}
-
-#[derive(Serialize)]
-struct GitRiskResponse {
-    commits_analyzed: u32,
-    agent_authored_pct: f64,
-    hotspots: Vec<GitHotspotResponse>,
-    ownership: Vec<GitOwnershipResponse>,
-    co_change: Vec<GitCoChangeResponse>,
-    coupling: Vec<refact_git_intel::coupling::CouplingEdge>,
-    reviewers: Vec<GitReviewerResponse>,
-    findings: Vec<GitFindingResponse>,
-    recent_commit_risks: Vec<crate::tools::tool_codegraph::RecentCommitRiskSummary>,
-}
-
-#[derive(Serialize)]
-struct DuplicationAggregateResponse {
-    file_count: usize,
-    clone_pair_count: usize,
-    duplication_pct: f64,
-    duplication_percent: f64,
-}
-
-#[derive(Serialize)]
-struct DuplicationCloneResponse {
-    path_a: String,
-    path_b: String,
-    line_a: usize,
-    line_b: usize,
-    a_start_line: usize,
-    a_end_line: usize,
-    b_start_line: usize,
-    b_end_line: usize,
-    lines: usize,
-    token_len: usize,
-    co_change: u32,
-}
-
-#[derive(Serialize)]
-struct DuplicationFindingResponse {
-    path: String,
-    biomarker: String,
-    category: String,
-    dimension: refact_codehealth::biomarkers::Dimension,
-    severity: refact_codehealth::biomarkers::Severity,
-    line: usize,
-    detail: String,
-}
-
-#[derive(Serialize)]
-struct DuplicationResponse {
-    aggregate: DuplicationAggregateResponse,
-    clones: Vec<DuplicationCloneResponse>,
-    dry_violations: Vec<DuplicationFindingResponse>,
-    test_smells: Vec<DuplicationFindingResponse>,
 }
 
 fn json_response<T: Serialize>(value: &T) -> Result<Response<Body>, ScratchError> {

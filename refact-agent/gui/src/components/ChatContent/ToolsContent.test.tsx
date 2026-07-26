@@ -190,7 +190,10 @@ describe("ToolsContent routing", () => {
     "pr_blast",
     "dead_code",
   ])("routes %s to EngineAnalysisTool", (name) => {
-    renderToolContent(name, "# Analysis\n\n- useful result");
+    renderToolContent(
+      name,
+      JSON.stringify({ tool: name, summary: "Analysis" }),
+    );
 
     expect(screen.getByTestId("engine-analysis-tool")).toBeInTheDocument();
     expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
@@ -199,51 +202,80 @@ describe("ToolsContent routing", () => {
   it("renders security_scan summary instead of GenericTool fallback", () => {
     renderToolContent(
       "security_scan",
-      [
-        "Security scan for `src/server.ts` found 2 findings (lang: TypeScript).",
-        "Severity counts: Critical=1 High=0 Medium=1 Low=0",
-        "",
-        "  src/server.ts:12 [Critical] dangerous-eval — eval(userInput)",
-        "  src/server.ts:20 [Medium] insecure-random — Math.random()",
-      ].join("\n"),
+      JSON.stringify({
+        tool: "security_scan",
+        summary: "Security scan",
+        path: "src/server.ts",
+        lang: "TypeScript",
+        finding_count: 2,
+        counts: { Critical: 1, High: 0, Medium: 1, Low: 0 },
+        findings: [
+          {
+            rule: "dangerous-eval",
+            severity: "Critical",
+            line: 12,
+            snippet: "eval(userInput)",
+          },
+          {
+            rule: "insecure-random",
+            severity: "Medium",
+            line: 20,
+            snippet: "Math.random()",
+          },
+        ],
+        omitted: 0,
+      }),
     );
 
     expect(screen.getByTestId("engine-analysis-tool")).toBeInTheDocument();
     expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
     openToolCard();
     expect(screen.getAllByText("dangerous-eval").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Critical 1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Critical").length).toBeGreaterThan(0);
     expect(screen.getAllByText("eval(userInput)").length).toBeGreaterThan(0);
   });
 
   it("renders pr_blast summary with reviewers and impact kinds", () => {
     renderToolContent(
       "pr_blast",
-      [
-        "⚠ index still building (3 files queued, 5 cross-file edges) — impact may be under-reported",
-        "PR blast radius (max depth 3) for 2 changed files:",
-        "Index state: queued=3 cross_file_edges=5 cross_file_ready=false partial=true",
-        "  changed: src/main.rs",
-        "  changed: src/router.ts",
-        "",
-        "Impacted files: 2",
-        "Risk score: 0.62",
-        "",
-        "Directly impacted symbols (1):",
-        "  d1 renderApp @ src/app.rs via calls (behavioral)",
-        "",
-        "Transitively impacted symbols (1):",
-        "  d2 createStore @ src/state.ts via inherits (structural)",
-        "",
-        "Suggested reviewers (git ownership):",
-        "  ada@example.com (score 0.95)",
-      ].join("\n"),
+      JSON.stringify({
+        tool: "pr_blast",
+        summary: "Blast radius",
+        max_depth: 3,
+        changed_files: ["src/main.rs", "src/router.ts"],
+        directly_impacted: [
+          {
+            path: "src/app.rs",
+            symbol: "renderApp",
+            distance: 1,
+            via: "calls",
+            kind: "behavioral",
+          },
+        ],
+        transitively_impacted: [
+          {
+            path: "src/state.ts",
+            symbol: "createStore",
+            distance: 2,
+            via: "inherits",
+            kind: "structural",
+          },
+        ],
+        impacted_file_count: 2,
+        risk_score: 0.62,
+        suggested_reviewers: [{ author: "ada@example.com", score: 0.95 }],
+        index_state: { queued: 3 },
+        partial: true,
+        warning: "index still building",
+      }),
     );
 
     expect(screen.getByTestId("engine-analysis-tool")).toBeInTheDocument();
     expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
     openToolCard();
-    expect(screen.getAllByText("partial index").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("index still building").length).toBeGreaterThan(
+      0,
+    );
     expect(screen.getAllByText("structural").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/ada@example.com/).length).toBeGreaterThan(0);
   });
@@ -251,20 +283,169 @@ describe("ToolsContent routing", () => {
   it("renders dead_code confidence preview", () => {
     renderToolContent(
       "dead_code",
-      [
-        "Dead code candidates: 1 shown of 4 matching candidates.",
-        "Index state: queued=0 dirty_paths=0 pending_refs=0 cross_file_edges=10 cross_file_ready=true partial=false",
-        "",
-        "src/unused.ts:",
-        "  0.91  line 42  unusedHelper — unreachable; last touched 400d ago; churn 1 in mined window",
-      ].join("\n"),
+      JSON.stringify({
+        tool: "dead_code",
+        summary: "Dead code",
+        entries: [
+          {
+            name: "unusedHelper",
+            path: "src/unused.ts",
+            line: 42,
+            reason: "unreachable",
+            confidence: 0.91,
+            git_recency: 400,
+            incoming_edges: 0,
+          },
+        ],
+        shown: 1,
+        total_candidates: 4,
+        index_state: {
+          queued: 0,
+          dirty_paths: 0,
+          pending_refs: 0,
+          cross_file_edges: 10,
+          cross_file_ready: true,
+        },
+        partial: false,
+      }),
     );
 
     expect(screen.getByTestId("engine-analysis-tool")).toBeInTheDocument();
     expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
     openToolCard();
     expect(screen.getAllByText("unusedHelper").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("confidence 0.9100").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("0.91").length).toBeGreaterThan(0);
+  });
+  it("renders git_risk as a structured report instead of a raw text dump", () => {
+    renderToolContent(
+      "git_risk",
+      JSON.stringify({
+        tool: "git_risk",
+        summary: "Git risk",
+        commits_analyzed: 1000,
+        agent_authored_pct: 2,
+        hotspots: [
+          {
+            path: "src/app.rs",
+            churn: 67,
+            risk: 0.8,
+            churn_risk: 0.8,
+            churn_percentile: 1,
+            temporal_score: 106.2,
+            change_entropy: 1,
+            change_entropy_pct: 1,
+            bus_factor: 2,
+            ownership_risk: true,
+            knowledge_loss: false,
+          },
+        ],
+        ownership: [],
+        co_change: [],
+        coupling: [],
+        reviewers: [],
+        findings: [
+          {
+            path: "src/app.rs",
+            biomarker: "change_entropy",
+            category: "git",
+            dimension: "defect",
+            severity: "Critical",
+            line: 1,
+            detail: "change entropy pct 1.00 across 67 commits",
+          },
+        ],
+        recent_commit_risks: [],
+      }),
+    );
+
+    openToolCard();
+    expect(screen.getByTestId("analysis-report")).toBeInTheDocument();
+    expect(screen.getAllByText("churn 67").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("ownership-risk").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Critical").length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText("change entropy pct 1.00 across 67 commits").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("renders codegraph_overview counts as a metric grid", () => {
+    renderToolContent(
+      "codegraph_overview",
+      JSON.stringify({
+        tool: "codegraph_overview",
+        summary: "Code graph overview",
+        counts: { nodes: 100205, edges: 212738, files: 20 },
+        index_state: {
+          queued: 1,
+          cross_file_edges: 5,
+          cross_file_ready: false,
+        },
+        scc_count: 2,
+        largest_scc: 10,
+        component_count: 3,
+        top_pagerank: [],
+        top_betweenness: [],
+        file_centrality: { top_pagerank: [], top_betweenness: [] },
+        community_count: 2,
+        dead_code_count: 1,
+        partial: true,
+        communities: [],
+        execution_flows: [],
+        dead_code: [],
+        entry_points: ["src/main.rs"],
+        api_contract_files: [],
+      }),
+    );
+
+    openToolCard();
+    expect(screen.getByTestId("analysis-report")).toBeInTheDocument();
+    expect(screen.getAllByText("Nodes").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("100205").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("queued 1").length).toBeGreaterThan(0);
+  });
+
+  it("renders non-JSON engine errors without crashing", () => {
+    renderToolContent("dead_code", "engine unavailable");
+
+    openToolCard();
+    expect(screen.queryByTestId("analysis-report")).not.toBeInTheDocument();
+    expect(screen.getByText("engine unavailable")).toBeInTheDocument();
+  });
+
+  it("expands a long section on demand", () => {
+    const rows = Array.from({ length: 15 }, (_, index) => ({
+      path: `src/a${index}.ts`,
+      biomarker: `entry-${index}`,
+      category: "dry",
+      dimension: "maintainability",
+      severity: "Low",
+      line: index + 1,
+      detail: `value-${index}`,
+    }));
+    renderToolContent(
+      "code_duplication",
+      JSON.stringify({
+        tool: "code_duplication",
+        summary: "Duplication",
+        aggregate: {
+          file_count: 15,
+          clone_pair_count: 0,
+          duplication_pct: 0,
+          duplication_percent: 0,
+        },
+        clones: [],
+        dry_violations: rows,
+        test_smells: [],
+      }),
+    );
+
+    openToolCard();
+    expect(screen.queryByText("entry-14")).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show 3 more in DRY violations" }),
+    );
+    expect(screen.getByText("entry-14")).toBeInTheDocument();
   });
 
   it("routes plain-text agent_finish results through FinalReportView legacy fallback", () => {

@@ -1,0 +1,173 @@
+.report {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-3);
+}
+
+.warning {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  padding: var(--rf-space-2);
+  gap: var(--rf-space-2);
+  color: var(--rf-color-warning);
+  background: color-mix(in oklab, var(--rf-color-warning) 12%, transparent);
+  border: var(--rf-hairline) solid
+    color-mix(in oklab, var(--rf-color-warning) 40%, transparent);
+  border-radius: var(--rf-radius-card);
+  font: var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  overflow-wrap: anywhere;
+}
+
+.headline {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  overflow-wrap: anywhere;
+}
+
+.chipRow {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+}
+
+.metricGrid {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, calc(var(--rf-control-h-lg) * 2.6)), 1fr)
+  );
+}
+
+.metricCard {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2);
+  background: color-mix(in oklab, var(--rf-surface-glass) 48%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+}
+
+.metricLabel {
+  color: var(--rf-color-muted);
+  font: var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  overflow-wrap: anywhere;
+}
+
+.metricValue {
+  color: var(--rf-color-fg);
+  font: 600 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+  overflow-wrap: anywhere;
+}
+
+.section {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.sectionHeader {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.sectionTitle {
+  color: var(--rf-color-muted);
+  font: 600 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.sectionTitlePath {
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.rowList {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2);
+  background: color-mix(in oklab, var(--rf-surface-glass) 40%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.rowMain {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.lead {
+  color: var(--rf-color-accent);
+  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-mono);
+  white-space: nowrap;
+}
+
+.rowTitle {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--rf-color-fg);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  overflow-wrap: anywhere;
+}
+
+.rowTitleMono {
+  font-family: var(--rf-font-mono);
+}
+
+.detail {
+  color: var(--rf-color-muted);
+  font: var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  overflow-wrap: anywhere;
+}
+
+.path {
+  color: var(--rf-color-muted);
+  font: var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.controlRow {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.prefixNote {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .metricCard,
+  .row {
+    background: var(--rf-surface-glass);
+  }
+}
