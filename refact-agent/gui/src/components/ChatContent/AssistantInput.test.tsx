@@ -22,9 +22,17 @@ vi.mock("../../features/Buddy/reportBuddyFrontendError", async () => {
   };
 });
 
-import { render, screen, waitFor } from "../../utils/test-utils";
+import { fireEvent, render, screen, waitFor } from "../../utils/test-utils";
 import { AssistantInput } from "./AssistantInput";
-import type { DiffChunk, ToolCall } from "../../services/refact/types";
+import type {
+  DiffChunk,
+  ThinkingBlock,
+  ToolCall,
+} from "../../services/refact/types";
+
+function expandReasoning() {
+  fireEvent.click(screen.getByRole("button", { name: /Thought/i }));
+}
 
 type MermaidInitializeConfig = {
   themeVariables?: Record<string, string>;
@@ -208,5 +216,132 @@ describe("AssistantInput", () => {
 
     expect(screen.getAllByText(/debug_codex_models\.py/i)).toHaveLength(1);
     expect(screen.queryByText(/Tasks 0\/3/i)).not.toBeInTheDocument();
+  });
+
+  test("renders the Responses reasoning summary as a fallback when reasoningContent is missing", () => {
+    const thinkingBlocks: ThinkingBlock[] = [
+      {
+        type: "reasoning",
+        summary: [
+          null,
+          {
+            type: "summary_text",
+            text: "Responses summary is visible",
+          },
+        ],
+        encrypted_content: "SECRET_ENCRYPTED_PAYLOAD",
+        content: [{ type: "reasoning_text", text: "RAW_HIDDEN_COT" }],
+      },
+    ];
+
+    render(
+      <AssistantInput
+        message="Answer body"
+        thinkingBlocks={thinkingBlocks}
+        messageId="msg-summary-fallback"
+      />,
+    );
+
+    expandReasoning();
+
+    expect(
+      screen.getByText("Responses summary is visible"),
+    ).toBeInTheDocument();
+  });
+
+  test("never renders encrypted content or raw reasoning content from Responses reasoning blocks", () => {
+    const thinkingBlocks: ThinkingBlock[] = [
+      {
+        type: "reasoning",
+        summary: [
+          {
+            type: "summary_text",
+            text: "Safe summary text",
+          },
+          {
+            type: "reasoning_text",
+            text: "UNTYPED_RAW_COT_SHOULD_NOT_APPEAR",
+          },
+        ],
+        encrypted_content: "ENCRYPTED_SHOULD_NOT_APPEAR",
+        content: [
+          { type: "reasoning_text", text: "RAW_COT_SHOULD_NOT_APPEAR" },
+        ],
+      },
+    ];
+
+    render(
+      <AssistantInput
+        message="Answer body"
+        thinkingBlocks={thinkingBlocks}
+        messageId="msg-no-leak"
+      />,
+    );
+
+    expandReasoning();
+
+    expect(screen.getByText("Safe summary text")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/ENCRYPTED_SHOULD_NOT_APPEAR/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/RAW_COT_SHOULD_NOT_APPEAR/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/UNTYPED_RAW_COT_SHOULD_NOT_APPEAR/),
+    ).not.toBeInTheDocument();
+  });
+
+  test("keeps explicit reasoningContent authoritative and does not duplicate a matching Responses summary", () => {
+    const reasoning = "Explicit reasoning content";
+    const thinkingBlocks: ThinkingBlock[] = [
+      {
+        type: "reasoning",
+        summary: [
+          {
+            type: "summary_text",
+            text: reasoning,
+          },
+        ],
+        encrypted_content: "ENCRYPTED",
+      },
+    ];
+
+    render(
+      <AssistantInput
+        message="Answer body"
+        reasoningContent={reasoning}
+        thinkingBlocks={thinkingBlocks}
+        messageId="msg-authoritative"
+      />,
+    );
+
+    expandReasoning();
+
+    expect(screen.getAllByText(reasoning)).toHaveLength(1);
+  });
+
+  test("collapses repeated identical Responses summary entries into a single rendering", () => {
+    const thinkingBlocks: ThinkingBlock[] = [
+      {
+        type: "reasoning",
+        summary: [
+          { type: "summary_text", text: "Repeated summary entry" },
+          { type: "summary_text", text: "Repeated summary entry" },
+        ],
+      },
+    ];
+
+    render(
+      <AssistantInput
+        message="Answer body"
+        thinkingBlocks={thinkingBlocks}
+        messageId="msg-dedupe"
+      />,
+    );
+
+    expandReasoning();
+
+    expect(screen.getAllByText("Repeated summary entry")).toHaveLength(1);
   });
 });

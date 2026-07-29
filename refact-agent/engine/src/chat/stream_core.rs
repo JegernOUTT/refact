@@ -777,7 +777,9 @@ fn push_content_delta(
             .or_default()
             .push_str(&text);
     }
-    ops.push(DeltaOp::AppendContent { text });
+    ops.push(DeltaOp::AppendContent {
+        text,
+    });
 }
 
 fn push_reasoning_delta(
@@ -796,7 +798,98 @@ fn push_reasoning_delta(
             .or_default()
             .push_str(&text);
     }
-    ops.push(DeltaOp::AppendReasoning { text });
+    ops.push(DeltaOp::AppendReasoning {
+        text,
+    });
+}
+
+fn joined_keyed_reasoning(acc: &ChoiceAccumulator) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for key in &acc.reasoning_key_order {
+        if let Some(text) = acc.reasoning_per_key.get(key) {
+            if text.is_empty() {
+                continue;
+            }
+
+            let mut insert_at = parts.len();
+            let mut part_index = 0;
+            let mut covered = false;
+            while part_index < parts.len() {
+                let existing = parts[part_index];
+                if existing == text || existing.starts_with(text.as_str()) {
+                    covered = true;
+                    break;
+                }
+                if text.starts_with(existing) {
+                    insert_at = insert_at.min(part_index);
+                    parts.remove(part_index);
+                    continue;
+                }
+                part_index += 1;
+            }
+            if covered {
+                continue;
+            }
+            parts.insert(insert_at.min(parts.len()), text.as_str());
+        }
+    }
+    parts.join("\n\n")
+}
+
+fn push_keyed_reasoning_delta(
+    acc: &mut ChoiceAccumulator,
+    ops: &mut Vec<DeltaOp>,
+    text: String,
+    reasoning_key: String,
+) {
+    if text.is_empty() {
+        return;
+    }
+    if acc.reasoning_key_finalized.get(&reasoning_key).copied() == Some(true) {
+        return;
+    }
+    if !acc.reasoning_per_key.contains_key(&reasoning_key) {
+        acc.reasoning_key_order.push(reasoning_key.clone());
+    }
+    acc.reasoning_per_key
+        .entry(reasoning_key)
+        .or_default()
+        .push_str(&text);
+    let joined = joined_keyed_reasoning(acc);
+    acc.reasoning = joined.clone();
+    ops.push(DeltaOp::SetReasoning {
+        text: joined,
+    });
+}
+
+fn finalize_keyed_reasoning(
+    acc: &mut ChoiceAccumulator,
+    ops: &mut Vec<DeltaOp>,
+    text: String,
+    reasoning_key: String,
+) {
+    if text.is_empty() {
+        return;
+    }
+    if acc.reasoning_key_finalized.get(&reasoning_key).copied() == Some(true)
+        && acc
+            .reasoning_per_key
+            .get(&reasoning_key)
+            .map(|s| s.as_str())
+            == Some(text.as_str())
+    {
+        return;
+    }
+    if !acc.reasoning_per_key.contains_key(&reasoning_key) {
+        acc.reasoning_key_order.push(reasoning_key.clone());
+    }
+    acc.reasoning_per_key.insert(reasoning_key.clone(), text);
+    acc.reasoning_key_finalized.insert(reasoning_key, true);
+    let joined = joined_keyed_reasoning(acc);
+    acc.reasoning = joined.clone();
+    ops.push(DeltaOp::SetReasoning {
+        text: joined,
+    });
 }
 
 fn route_append_content_with_think_tags(
@@ -910,14 +1003,23 @@ fn process_stream_event_data<C: StreamCollector>(
 
     for delta in deltas {
         match delta {
-            LlmStreamDelta::AppendContent { text, block_index } => {
+            LlmStreamDelta::AppendContent {
+                text,
+                block_index,
+            } => {
                 route_append_content_without_function_calls(acc, &mut ops, text, block_index);
             }
-            LlmStreamDelta::AppendReasoning { text, block_index } => {
+            LlmStreamDelta::AppendReasoning {
+                text,
+                block_index,
+            } => {
                 flush_pending_think_parse(acc, &mut ops);
                 push_reasoning_delta(acc, &mut ops, text, block_index);
             }
-            LlmStreamDelta::FinalizeReasoning { text, block_index } => {
+            LlmStreamDelta::FinalizeReasoning {
+                text,
+                block_index,
+            } => {
                 if let Some(block_index) = block_index {
                     acc.finalized_reasoning_per_block
                         .insert(block_index, text.clone());
@@ -935,9 +1037,27 @@ fn process_stream_event_data<C: StreamCollector>(
                 } else {
                     text
                 };
-                ops.push(DeltaOp::SetReasoning { text: replacement });
+                ops.push(DeltaOp::SetReasoning {
+                    text: replacement,
+                });
             }
-            LlmStreamDelta::SetToolCalls { tool_calls } => {
+            LlmStreamDelta::AppendKeyedReasoning {
+                text,
+                reasoning_key,
+            } => {
+                flush_pending_think_parse(acc, &mut ops);
+                push_keyed_reasoning_delta(acc, &mut ops, text, reasoning_key);
+            }
+            LlmStreamDelta::FinalizeKeyedReasoning {
+                text,
+                reasoning_key,
+            } => {
+                flush_pending_think_parse(acc, &mut ops);
+                finalize_keyed_reasoning(acc, &mut ops, text, reasoning_key);
+            }
+            LlmStreamDelta::SetToolCalls {
+                tool_calls,
+            } => {
                 let tool_calls = if !auth_token.is_empty() {
                     tool_calls
                         .into_iter()
@@ -956,7 +1076,9 @@ fn process_stream_event_data<C: StreamCollector>(
                     tool_calls: acc.tool_calls.finalize(),
                 });
             }
-            LlmStreamDelta::FinalizeToolCalls { tool_calls } => {
+            LlmStreamDelta::FinalizeToolCalls {
+                tool_calls,
+            } => {
                 let tool_calls = if !auth_token.is_empty() {
                     tool_calls
                         .into_iter()
@@ -975,21 +1097,33 @@ fn process_stream_event_data<C: StreamCollector>(
                     tool_calls: acc.tool_calls.finalize(),
                 });
             }
-            LlmStreamDelta::SetThinkingBlocks { blocks } => {
+            LlmStreamDelta::SetThinkingBlocks {
+                blocks,
+            } => {
                 merge_thinking_blocks(&mut acc.thinking_blocks, blocks);
                 ops.push(DeltaOp::SetThinkingBlocks {
                     blocks: acc.thinking_blocks.clone(),
                 });
             }
-            LlmStreamDelta::AddCitation { citation } => {
+            LlmStreamDelta::AddCitation {
+                citation,
+            } => {
                 acc.citations.push(citation.clone());
-                ops.push(DeltaOp::AddCitation { citation });
+                ops.push(DeltaOp::AddCitation {
+                    citation,
+                });
             }
-            LlmStreamDelta::AddServerContentBlock { block } => {
+            LlmStreamDelta::AddServerContentBlock {
+                block,
+            } => {
                 acc.server_content_blocks.push(block.clone());
-                ops.push(DeltaOp::AddServerContentBlock { block });
+                ops.push(DeltaOp::AddServerContentBlock {
+                    block,
+                });
             }
-            LlmStreamDelta::SetUsage { usage } => {
+            LlmStreamDelta::SetUsage {
+                usage,
+            } => {
                 acc.usage = Some(merge_usage(acc.usage.take(), usage.clone()));
                 if let Some(ref merged) = acc.usage {
                     collector.on_usage(merged);
@@ -998,10 +1132,14 @@ fn process_stream_event_data<C: StreamCollector>(
                     });
                 }
             }
-            LlmStreamDelta::SetFinishReason { reason } => {
+            LlmStreamDelta::SetFinishReason {
+                reason,
+            } => {
                 acc.finish_reason = Some(reason);
             }
-            LlmStreamDelta::MergeExtra { extra } => {
+            LlmStreamDelta::MergeExtra {
+                extra,
+            } => {
                 for (k, v) in &extra {
                     match (acc.extra.get_mut(k), v) {
                         (Some(Value::Array(existing)), Value::Array(incoming)) => {
@@ -1017,7 +1155,9 @@ fn process_stream_event_data<C: StreamCollector>(
                         }
                     }
                 }
-                ops.push(DeltaOp::MergeExtra { extra });
+                ops.push(DeltaOp::MergeExtra {
+                    extra,
+                });
             }
             LlmStreamDelta::Done => {
                 stream_done = true;
@@ -1151,7 +1291,10 @@ fn finalize_accumulators<C: StreamCollector>(
         .enumerate()
         .map(|(idx, acc)| {
             collector.on_finish(idx, acc.finish_reason.clone());
-            let reasoning = if !acc.finalized_reasoning_per_block.is_empty() {
+            let keyed_reasoning = joined_keyed_reasoning(&acc);
+            let reasoning = if !acc.reasoning_per_key.is_empty() {
+                keyed_reasoning
+            } else if !acc.finalized_reasoning_per_block.is_empty() {
                 let mut blocks: Vec<_> = acc.finalized_reasoning_per_block.into_iter().collect();
                 blocks.sort_by_key(|(block_index, _)| *block_index);
                 blocks
@@ -2160,7 +2303,9 @@ pub async fn run_llm_stream<C: StreamCollector>(
                 crate::chat::cache_guard::CacheGuardOutcome::Pass(s) => {
                     sanitized_for_commit = s;
                 }
-                crate::chat::cache_guard::CacheGuardOutcome::Paused { reason } => {
+                crate::chat::cache_guard::CacheGuardOutcome::Paused {
+                    reason,
+                } => {
                     tracing::info!("Generation paused by cache guard: {}", reason);
                     return Ok(LlmStreamOutcome::PausedForCacheGuard);
                 }
@@ -2634,6 +2779,17 @@ pub(crate) fn merge_thinking_blocks(
                     obj.insert("signature".to_string(), json!(new_sig));
                 }
             }
+            if block_type == "reasoning" {
+                if let (Some(existing), Some(incoming)) =
+                    (dst[pos].as_object_mut(), block.as_object())
+                {
+                    for (key, value) in incoming {
+                        if key != "signature" && !value.is_null() {
+                            existing.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+            }
         } else {
             dst.push(block);
         }
@@ -2652,6 +2808,9 @@ struct ChoiceAccumulator {
     reasoning_per_block: HashMap<u64, String>,
     finalized_reasoning: Option<String>,
     finalized_reasoning_per_block: HashMap<u64, String>,
+    reasoning_per_key: HashMap<String, String>,
+    reasoning_key_finalized: HashMap<String, bool>,
+    reasoning_key_order: Vec<String>,
     thinking_blocks: Vec<serde_json::Value>,
     tool_calls: ToolCallAccumulator,
     citations: Vec<serde_json::Value>,
@@ -3285,7 +3444,9 @@ mod tests {
 
         assert_eq!(acc.content, "Before  after");
         assert!(ops.iter().all(|op| match op {
-            DeltaOp::AppendContent { text } =>
+            DeltaOp::AppendContent {
+                text,
+            } =>
                 !text.contains("<function_calls>")
                     && !text.contains("<invoke")
                     && !text.contains("<parameter"),
@@ -3677,7 +3838,10 @@ mod tests {
 
     /// Helper: simulate accumulator finalization (same logic as run_llm_stream).
     fn finalize_accumulator(acc: ChoiceAccumulator) -> ChoiceFinal {
-        let reasoning = if !acc.finalized_reasoning_per_block.is_empty() {
+        let keyed_reasoning = joined_keyed_reasoning(&acc);
+        let reasoning = if !acc.reasoning_per_key.is_empty() {
+            keyed_reasoning
+        } else if !acc.finalized_reasoning_per_block.is_empty() {
             let mut blocks: Vec<_> = acc.finalized_reasoning_per_block.into_iter().collect();
             blocks.sort_by_key(|(block_index, _)| *block_index);
             blocks
@@ -4149,6 +4313,257 @@ mod tests {
 
         assert_eq!(dst.len(), 1, "Same id should dedupe");
         assert_eq!(dst[0]["signature"], "sig_new");
+    }
+
+    #[test]
+    fn test_merge_thinking_blocks_same_id_enriches_sparse_reasoning() {
+        // OpenAI Responses: an early sparse reasoning item (id only) must be enriched
+        // by the later complete object, and remain exactly one block.
+        let mut dst = vec![json!({"id": "rs_1", "type": "reasoning", "summary": []})];
+
+        merge_thinking_blocks(
+            &mut dst,
+            vec![json!({
+                "id": "rs_1",
+                "type": "reasoning",
+                "encrypted_content": "gAAAA",
+                "summary": [{"type": "summary_text", "text": "Complete summary"}]
+            })],
+        );
+
+        assert_eq!(dst.len(), 1, "Same id must remain exactly one block");
+        assert_eq!(dst[0]["encrypted_content"], "gAAAA");
+        assert_eq!(
+            dst[0]["summary"][0]["text"], "Complete summary",
+            "Sparse block must be enriched by the later complete object"
+        );
+    }
+
+    #[test]
+    fn test_two_reasoning_items_same_summary_index_stay_distinct() {
+        // Two distinct reasoning item keys both derived with summary_index=0.
+        // Each must be present once, in first-seen order.
+        let mut acc = ChoiceAccumulator::default();
+        let mut ops = Vec::new();
+        push_keyed_reasoning_delta(
+            &mut acc,
+            &mut ops,
+            "First item summary".into(),
+            "item:rs_a#s0".into(),
+        );
+        push_keyed_reasoning_delta(
+            &mut acc,
+            &mut ops,
+            "Second item summary".into(),
+            "item:rs_b#s0".into(),
+        );
+
+        let joined = joined_keyed_reasoning(&acc);
+        assert_eq!(joined, "First item summary\n\nSecond item summary");
+        assert_eq!(joined.matches("First item summary").count(), 1);
+        assert_eq!(joined.matches("Second item summary").count(), 1);
+    }
+
+    #[test]
+    fn test_keyed_reasoning_replay_replaces_not_duplicates() {
+        // A sequential-cutoff replay finalizes the same key with the full text.
+        // The visible joined text must be replaced, not duplicated.
+        let mut acc = ChoiceAccumulator::default();
+        let mut ops = Vec::new();
+        push_keyed_reasoning_delta(
+            &mut acc,
+            &mut ops,
+            "**Checking parser**".into(),
+            "item:rs_a#s0".into(),
+        );
+        finalize_keyed_reasoning(
+            &mut acc,
+            &mut ops,
+            "**Checking parser**\n\nThe completed reasoning body.".into(),
+            "item:rs_a#s0".into(),
+        );
+
+        let joined = joined_keyed_reasoning(&acc);
+        assert_eq!(
+            joined,
+            "**Checking parser**\n\nThe completed reasoning body."
+        );
+        assert_eq!(joined.matches("Checking parser").count(), 1);
+
+        // A later replayed delta for the finalized key must not clobber it.
+        push_keyed_reasoning_delta(
+            &mut acc,
+            &mut ops,
+            "**Checking parser**".into(),
+            "item:rs_a#s0".into(),
+        );
+        assert_eq!(
+            joined_keyed_reasoning(&acc),
+            "**Checking parser**\n\nThe completed reasoning body.",
+            "Replayed delta must not clobber finalized keyed reasoning"
+        );
+    }
+
+    #[test]
+    fn test_keyed_reasoning_final_uses_summary_when_no_stream_events() {
+        // Only a finalize (from the completed reasoning item's safe summary) arrived.
+        let mut acc = ChoiceAccumulator::default();
+        let mut ops = Vec::new();
+        finalize_keyed_reasoning(
+            &mut acc,
+            &mut ops,
+            "Final visible summary".into(),
+            "item:rs_final#s0".into(),
+        );
+
+        let final_ = finalize_accumulator(acc);
+        assert_eq!(final_.reasoning, "Final visible summary");
+    }
+
+    #[test]
+    fn test_keyed_reasoning_duplicate_finalization_is_noop() {
+        // Same authoritative content arriving twice (summary-text done + completed item)
+        // must not emit a redundant SetReasoning.
+        let mut acc = ChoiceAccumulator::default();
+        let mut ops = Vec::new();
+        finalize_keyed_reasoning(
+            &mut acc,
+            &mut ops,
+            "Authoritative summary".into(),
+            "item:rs_a#s0".into(),
+        );
+        let ops_after_first = ops.len();
+        finalize_keyed_reasoning(
+            &mut acc,
+            &mut ops,
+            "Authoritative summary".into(),
+            "item:rs_a#s0".into(),
+        );
+        assert_eq!(
+            ops.len(),
+            ops_after_first,
+            "Duplicate identical finalization must be a no-op"
+        );
+    }
+
+    #[test]
+    fn test_responses_reasoning_event_sequence_stays_unique_and_survives_completion() {
+        let adapter = get_adapter(WireFormat::OpenaiResponses);
+        let mut accumulators = vec![ChoiceAccumulator::default()];
+        let mut collector = ReplayCollector::default();
+        let summaries = [
+            ("rs_a", 0, "Analyzing search performance"),
+            ("rs_b", 1, "Diagnosing redundant file reading"),
+            ("rs_c", 2, "Analyzing search performance"),
+            ("rs_d", 3, "Diagnosing redundant file reading"),
+        ];
+
+        for (item_id, output_index, text) in summaries {
+            let delta = json!({
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": item_id,
+                "output_index": output_index,
+                "summary_index": 0,
+                "delta": text
+            });
+            let done = json!({
+                "type": "response.reasoning_summary_text.done",
+                "item_id": item_id,
+                "output_index": output_index,
+                "summary_index": 0,
+                "text": text
+            });
+
+            assert!(!process_stream_event_data(
+                adapter,
+                "",
+                &delta.to_string(),
+                &mut accumulators,
+                &mut collector,
+                true,
+            )
+            .unwrap());
+            assert!(!process_stream_event_data(
+                adapter,
+                "",
+                &done.to_string(),
+                &mut accumulators,
+                &mut collector,
+                true,
+            )
+            .unwrap());
+            assert!(accumulators[0].reasoning.matches(text).count() <= 1);
+        }
+
+        assert_eq!(
+            accumulators[0].reasoning,
+            "Analyzing search performance\n\nDiagnosing redundant file reading"
+        );
+
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output": [
+                    {"id": "rs_a", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Analyzing search performance"}], "encrypted_content": "encrypted-a"},
+                    {"id": "rs_b", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Diagnosing redundant file reading"}], "encrypted_content": "encrypted-b"},
+                    {"id": "rs_c", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Analyzing search performance"}], "encrypted_content": "encrypted-c"},
+                    {"id": "rs_d", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Diagnosing redundant file reading"}], "encrypted_content": "encrypted-d"}
+                ]
+            }
+        });
+
+        assert!(process_stream_event_data(
+            adapter,
+            "",
+            &completed.to_string(),
+            &mut accumulators,
+            &mut collector,
+            true,
+        )
+        .unwrap());
+
+        let results = finalize_accumulators(accumulators, &mut collector);
+        assert_eq!(
+            results[0].reasoning,
+            "Analyzing search performance\n\nDiagnosing redundant file reading"
+        );
+        assert_eq!(results[0].thinking_blocks.len(), 4);
+    }
+
+    #[test]
+    fn test_responses_completion_only_restores_safe_reasoning_summary() {
+        let adapter = get_adapter(WireFormat::OpenaiResponses);
+        let mut accumulators = vec![ChoiceAccumulator::default()];
+        let mut collector = ReplayCollector::default();
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output": [{
+                    "id": "rs_final",
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "Final visible summary"}],
+                    "content": [{"type": "reasoning_text", "text": "raw private reasoning"}],
+                    "encrypted_content": "encrypted-private-content"
+                }]
+            }
+        });
+
+        assert!(process_stream_event_data(
+            adapter,
+            "",
+            &completed.to_string(),
+            &mut accumulators,
+            &mut collector,
+            true,
+        )
+        .unwrap());
+
+        let results = finalize_accumulators(accumulators, &mut collector);
+        assert_eq!(results[0].reasoning, "Final visible summary");
+        assert!(!results[0].reasoning.contains("raw private reasoning"));
+        assert!(!results[0].reasoning.contains("encrypted-private-content"));
     }
 
     #[test]

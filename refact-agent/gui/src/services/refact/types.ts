@@ -1148,10 +1148,18 @@ export function isToolCallDelta(delta: unknown): delta is ToolCallDelta {
   return Array.isArray(delta.tool_calls);
 }
 
+export type ResponsesReasoningSummaryEntry = {
+  type?: string;
+  text?: unknown;
+};
+
 export type ThinkingBlock = {
-  type?: "thinking";
-  thinking: null | string;
-  signature: null | string;
+  type?: "thinking" | "reasoning";
+  thinking?: null | string;
+  signature?: null | string;
+  summary?: (ResponsesReasoningSummaryEntry | null)[] | null;
+  encrypted_content?: string | null;
+  content?: unknown[] | null;
 };
 
 interface ThinkingBlocksDelta extends BaseDelta {

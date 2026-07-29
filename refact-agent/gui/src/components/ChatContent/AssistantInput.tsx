@@ -81,16 +81,38 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
   }, []);
 
   const combinedReasoning = useMemo(() => {
-    if (reasoningContent) {
+    if (reasoningContent?.trim()) {
       return reasoningContent;
     }
     if (thinkingBlocks && thinkingBlocks.length > 0) {
-      const thinkingText = thinkingBlocks
-        .filter((block) => block.thinking)
-        .map((block) => block.thinking)
-        .join("\n\n");
-      if (thinkingText) {
-        return thinkingText;
+      const seen = new Set<string>();
+      const parts: string[] = [];
+      const push = (value: string | null | undefined) => {
+        if (typeof value !== "string") return;
+        const trimmed = value.trim();
+        if (!trimmed) return;
+        if (seen.has(trimmed)) return;
+        seen.add(trimmed);
+        parts.push(value);
+      };
+
+      for (const block of thinkingBlocks) {
+        push(block.thinking);
+        if (block.summary && block.summary.length > 0) {
+          for (const entry of block.summary) {
+            if (
+              entry?.type === "summary_text" &&
+              typeof entry.text === "string"
+            ) {
+              push(entry.text);
+            }
+          }
+        }
+      }
+
+      const combined = parts.join("\n\n");
+      if (combined) {
+        return combined;
       }
     }
     return null;

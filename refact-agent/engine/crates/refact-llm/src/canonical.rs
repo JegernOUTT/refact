@@ -144,6 +144,14 @@ pub enum LlmStreamDelta {
         text: String,
         block_index: Option<u64>,
     },
+    AppendKeyedReasoning {
+        text: String,
+        reasoning_key: String,
+    },
+    FinalizeKeyedReasoning {
+        text: String,
+        reasoning_key: String,
+    },
     SetToolCalls {
         tool_calls: Vec<Value>,
     },

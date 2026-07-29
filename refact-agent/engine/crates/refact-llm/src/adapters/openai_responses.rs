@@ -277,16 +277,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
         match event_type {
             // ── Response lifecycle (extract ID only, no server content block) ──
             "response.created" | "response.queued" | "response.in_progress" => {
-                if let Some(resp_id) = json
-                    .get("response")
-                    .and_then(|r| r.get("id"))
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                {
-                    let mut extra = serde_json::Map::new();
-                    extra.insert("openai_response_id".to_string(), json!(resp_id));
-                    deltas.push(LlmStreamDelta::MergeExtra { extra });
-                }
+                push_response_id(&json, &mut deltas);
             }
 
             // ── Text content streaming ──
@@ -304,34 +295,27 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                 tracing::trace!("output_text.done (redundant, text already streamed via deltas)");
             }
 
-            // ── Reasoning streaming ──
-            // 1. Legacy: response.reasoning.delta (older models)
-            // 2. GPT-OSS: response.reasoning_text.delta (reasoning content)
+            // Raw reasoning content is not safe for end-user display.
             "response.reasoning.delta" | "response.reasoning_text.delta" => {
-                if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
-                    deltas.push(LlmStreamDelta::AppendReasoning {
-                        text: delta.to_string(),
-                        block_index: None,
-                    });
-                }
+                tracing::trace!("{} (raw reasoning, skipping display)", event_type);
             }
 
             // Summary deltas keep standard Responses streams live. Sequential-cutoff may only
             // expose a partial heading here; reasoning_summary_text.done is authoritative.
             "response.reasoning_summary_text.delta" => {
                 if let Some(delta) = json.get("delta").and_then(|value| value.as_str()) {
-                    deltas.push(LlmStreamDelta::AppendReasoning {
+                    deltas.push(LlmStreamDelta::AppendKeyedReasoning {
                         text: delta.to_string(),
-                        block_index: json.get("summary_index").and_then(|value| value.as_u64()),
+                        reasoning_key: reasoning_summary_key(&json),
                     });
                 }
             }
             "response.reasoning_summary_text.done" => {
                 if let Some(text) = json.get("text").and_then(|value| value.as_str()) {
                     if !text.is_empty() {
-                        deltas.push(LlmStreamDelta::FinalizeReasoning {
+                        deltas.push(LlmStreamDelta::FinalizeKeyedReasoning {
                             text: text.to_string(),
-                            block_index: json.get("summary_index").and_then(|value| value.as_u64()),
+                            reasoning_key: reasoning_summary_key(&json),
                         });
                     }
                 }
@@ -493,11 +477,18 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                             }
                         }
                         Some("reasoning") => {
-                            // Capture opaque reasoning items (id + encrypted_content)
-                            // for multi-turn tool-calling flows.
                             deltas.push(LlmStreamDelta::SetThinkingBlocks {
                                 blocks: vec![item.clone()],
                             });
+                            let item_id = item.get("id").and_then(|v| v.as_str());
+                            let output_index = json.get("output_index").and_then(|v| v.as_u64());
+                            for (text, key) in safe_reasoning_summaries(item, item_id, output_index)
+                            {
+                                deltas.push(LlmStreamDelta::FinalizeKeyedReasoning {
+                                    text,
+                                    reasoning_key: key,
+                                });
+                            }
                         }
                         // Server-executed tools with results — emit content block
                         Some("file_search_call")
@@ -540,6 +531,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
 
             // ── Incomplete response (hit max_output_tokens or content_filter) ──
             "response.incomplete" => {
+                push_response_id(&json, &mut deltas);
                 let finish_reason = json
                     .get("response")
                     .and_then(|r| r.get("incomplete_details"))
@@ -555,22 +547,17 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                     reason: finish_reason.to_string(),
                 });
                 if let Some(usage) = extract_usage(&json) {
-                    deltas.push(LlmStreamDelta::SetUsage { usage });
+                    deltas.push(LlmStreamDelta::SetUsage {
+                        usage,
+                    });
                 }
+                rehydrate_response_output(&json, &mut deltas, event_type);
                 deltas.push(LlmStreamDelta::Done);
             }
 
             // ── Completed response ──
             "response.completed" => {
-                if let Some(resp_id) = json
-                    .get("response")
-                    .and_then(|r| r.get("id"))
-                    .and_then(|v| v.as_str())
-                {
-                    let mut extra = serde_json::Map::new();
-                    extra.insert("openai_response_id".to_string(), json!(resp_id));
-                    deltas.push(LlmStreamDelta::MergeExtra { extra });
-                }
+                push_response_id(&json, &mut deltas);
 
                 let raw_status = json
                     .get("response")
@@ -595,74 +582,11 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                     reason: finish_reason.to_string(),
                 });
                 if let Some(usage) = extract_usage(&json) {
-                    deltas.push(LlmStreamDelta::SetUsage { usage });
+                    deltas.push(LlmStreamDelta::SetUsage {
+                        usage,
+                    });
                 }
-                // Safety net: extract tool calls and reasoning from response.output[]
-                // in case output_item.done events were missed during streaming.
-                if let Some(output) = json
-                    .get("response")
-                    .and_then(|r| r.get("output"))
-                    .and_then(|o| o.as_array())
-                {
-                    let output_types: Vec<_> = output
-                        .iter()
-                        .map(|item| {
-                            item.get("type")
-                                .and_then(|t| t.as_str())
-                                .unwrap_or("unknown")
-                        })
-                        .collect();
-                    tracing::info!("response.completed output items: {:?}", output_types);
-                    for (idx, item) in output.iter().enumerate() {
-                        let item_type = item.get("type").and_then(|t| t.as_str());
-                        match item_type {
-                            Some("function_call") => {
-                                let event_wrapper = json!({"output_index": idx});
-                                if let Some(tc) = extract_tool_call_from_item(item, &event_wrapper)
-                                {
-                                    deltas.push(LlmStreamDelta::FinalizeToolCalls {
-                                        tool_calls: vec![tc],
-                                    });
-                                }
-                            }
-                            Some("reasoning") => {
-                                deltas.push(LlmStreamDelta::SetThinkingBlocks {
-                                    blocks: vec![item.clone()],
-                                });
-                            }
-                            // Rehydrate server-executed tool cards in case we missed output_item.done events.
-                            Some(
-                                "web_search_call"
-                                | "file_search_call"
-                                | "code_interpreter_call"
-                                | "computer_call"
-                                | "computer_call_output"
-                                | "image_generation_call"
-                                | "audio"
-                                | "mcp_call"
-                                | "mcp_list_tools",
-                            ) => {
-                                let event_wrapper = json!({"output_index": idx});
-                                if let Some(tc) =
-                                    extract_server_tool_call_from_output_item(item, &event_wrapper)
-                                {
-                                    deltas.push(LlmStreamDelta::FinalizeToolCalls {
-                                        tool_calls: vec![tc],
-                                    });
-                                }
-                                deltas.push(LlmStreamDelta::AddServerContentBlock {
-                                    block: json!({
-                                        "type": item_type.unwrap_or("output_item"),
-                                        "payload": item,
-                                    }),
-                                });
-                            }
-                            // message, output_text, refusal — already streamed via deltas
-                            Some("message") | Some("output_text") | Some("refusal") => {}
-                            _ => {}
-                        }
-                    }
-                }
+                rehydrate_response_output(&json, &mut deltas, event_type);
                 deltas.push(LlmStreamDelta::Done);
             }
             // ── Codex metadata events — preserve but do not render as server blocks ──
@@ -677,7 +601,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                         }
                     ]),
                 );
-                deltas.push(LlmStreamDelta::MergeExtra { extra });
+                deltas.push(LlmStreamDelta::MergeExtra {
+                    extra,
+                });
             }
             // Carries response headers such as x-codex-safety-buffering-enabled and
             // x-codex-safety-buffering-faster-model (the internal draft model).
@@ -692,7 +618,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                         }
                     ]),
                 );
-                deltas.push(LlmStreamDelta::MergeExtra { extra });
+                deltas.push(LlmStreamDelta::MergeExtra {
+                    extra,
+                });
             }
 
             // ── Error events ──
@@ -748,7 +676,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                             }
                         ]),
                     );
-                    deltas.push(LlmStreamDelta::MergeExtra { extra });
+                    deltas.push(LlmStreamDelta::MergeExtra {
+                        extra,
+                    });
                 } else {
                     tracing::warn!("Unhandled Responses API event: {}", event_type);
                     // Keep an append-only array in extra (don't overwrite prior events).
@@ -764,7 +694,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                             }
                         ]),
                     );
-                    deltas.push(LlmStreamDelta::MergeExtra { extra });
+                    deltas.push(LlmStreamDelta::MergeExtra {
+                        extra,
+                    });
                     deltas.push(LlmStreamDelta::AddServerContentBlock {
                         block: json!({
                             "type": "unhandled_openai_responses_event",
@@ -780,7 +712,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
         // This handles both top-level and nested "response" wrapper fields
         let extra = extract_extra_fields(&json);
         if !extra.is_empty() {
-            deltas.push(LlmStreamDelta::MergeExtra { extra });
+            deltas.push(LlmStreamDelta::MergeExtra {
+                extra,
+            });
         }
 
         Ok(deltas)
@@ -1023,7 +957,9 @@ fn tool_choice_to_responses(choice: &CanonicalToolChoice) -> Value {
         CanonicalToolChoice::Auto => json!("auto"),
         CanonicalToolChoice::None => json!("none"),
         CanonicalToolChoice::Required => json!("required"),
-        CanonicalToolChoice::Function { name } => json!({"type": "function", "name": name}),
+        CanonicalToolChoice::Function {
+            name,
+        } => json!({"type": "function", "name": name}),
     }
 }
 
@@ -1212,6 +1148,150 @@ fn extract_usage(json: &Value) -> Option<ChatUsage> {
         cache_read_tokens: cache_read,
         metering_usd: None,
     })
+}
+
+fn push_response_id(json: &Value, deltas: &mut Vec<LlmStreamDelta>) {
+    let response_id = json
+        .get("response")
+        .and_then(|response| response.get("id"))
+        .or_else(|| json.get("id"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty());
+    if let Some(response_id) = response_id {
+        let mut extra = serde_json::Map::new();
+        extra.insert("openai_response_id".to_string(), json!(response_id));
+        deltas.push(LlmStreamDelta::MergeExtra {
+            extra,
+        });
+    }
+}
+
+fn rehydrate_response_output(json: &Value, deltas: &mut Vec<LlmStreamDelta>, event_type: &str) {
+    let Some(output) = json
+        .get("response")
+        .and_then(|response| response.get("output"))
+        .or_else(|| json.get("output"))
+        .and_then(|value| value.as_array())
+    else {
+        return;
+    };
+
+    let output_types: Vec<_> = output
+        .iter()
+        .map(|item| {
+            item.get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+        })
+        .collect();
+    tracing::info!("{} output items: {:?}", event_type, output_types);
+
+    for (output_index, item) in output.iter().enumerate() {
+        let item_type = item.get("type").and_then(|value| value.as_str());
+        match item_type {
+            Some("function_call") => {
+                let event_wrapper = json!({"output_index": output_index});
+                if let Some(tool_call) = extract_tool_call_from_item(item, &event_wrapper) {
+                    deltas.push(LlmStreamDelta::FinalizeToolCalls {
+                        tool_calls: vec![tool_call],
+                    });
+                }
+            }
+            Some("reasoning") => {
+                deltas.push(LlmStreamDelta::SetThinkingBlocks {
+                    blocks: vec![item.clone()],
+                });
+                let item_id = item.get("id").and_then(|value| value.as_str());
+                for (text, reasoning_key) in
+                    safe_reasoning_summaries(item, item_id, Some(output_index as u64))
+                {
+                    deltas.push(LlmStreamDelta::FinalizeKeyedReasoning {
+                        text,
+                        reasoning_key,
+                    });
+                }
+            }
+            Some(
+                "web_search_call"
+                | "file_search_call"
+                | "code_interpreter_call"
+                | "computer_call"
+                | "computer_call_output"
+                | "image_generation_call"
+                | "audio"
+                | "mcp_call"
+                | "mcp_list_tools",
+            ) => {
+                let event_wrapper = json!({"output_index": output_index});
+                if let Some(tool_call) =
+                    extract_server_tool_call_from_output_item(item, &event_wrapper)
+                {
+                    deltas.push(LlmStreamDelta::FinalizeToolCalls {
+                        tool_calls: vec![tool_call],
+                    });
+                }
+                deltas.push(LlmStreamDelta::AddServerContentBlock {
+                    block: json!({
+                        "type": item_type.unwrap_or("output_item"),
+                        "payload": item,
+                    }),
+                });
+            }
+            Some("message") | Some("output_text") | Some("refusal") => {}
+            _ => {}
+        }
+    }
+}
+
+fn reasoning_summary_key(json: &Value) -> String {
+    let summary_index = json
+        .get("summary_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if let Some(item_id) = json
+        .get("item_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        format!("item:{item_id}#s{summary_index}")
+    } else {
+        let output_index = json
+            .get("output_index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        format!("out:{output_index}#s{summary_index}")
+    }
+}
+
+fn reasoning_summary_key_for_item(
+    item_id: Option<&str>,
+    output_index: Option<u64>,
+    summary_index: u64,
+) -> String {
+    match item_id.filter(|s| !s.is_empty()) {
+        Some(id) => format!("item:{id}#s{summary_index}"),
+        None => format!("out:{}#s{summary_index}", output_index.unwrap_or(0)),
+    }
+}
+
+fn safe_reasoning_summaries(
+    item: &Value,
+    item_id: Option<&str>,
+    output_index: Option<u64>,
+) -> Vec<(String, String)> {
+    let Some(summary) = item.get("summary").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (summary_index, entry) in summary.iter().enumerate() {
+        let is_summary_text = entry.get("type").and_then(|v| v.as_str()) == Some("summary_text");
+        let text = entry.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        if is_summary_text && !text.is_empty() {
+            let key = reasoning_summary_key_for_item(item_id, output_index, summary_index as u64);
+            out.push((text.to_string(), key));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1711,7 +1791,9 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::AppendContent { text, .. } => assert_eq!(text, "Hello"),
+            LlmStreamDelta::AppendContent {
+                text, ..
+            } => assert_eq!(text, "Hello"),
             _ => panic!("expected AppendContent"),
         }
     }
@@ -1744,6 +1826,48 @@ mod tests {
     }
 
     #[test]
+    fn test_flattened_lifecycle_event_persists_response_id() {
+        let adapter = OpenAiResponsesAdapter;
+        let chunk = r#"{"type":"response.in_progress","id":"resp_flat_lifecycle"}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+
+        assert!(deltas.iter().any(|delta| matches!(
+            delta,
+            LlmStreamDelta::MergeExtra { extra }
+                if extra.get("openai_response_id") == Some(&json!("resp_flat_lifecycle"))
+        )));
+    }
+
+    #[test]
+    fn test_incomplete_response_persists_response_id() {
+        let adapter = OpenAiResponsesAdapter;
+        let chunk = r#"{"type":"response.incomplete","response":{"id":"resp_incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"id":"rs_incomplete","type":"reasoning","summary":[{"type":"summary_text","text":"Incomplete visible summary"}],"encrypted_content":"encrypted"},{"id":"fc_incomplete","type":"function_call","call_id":"call_incomplete","name":"inspect","arguments":"{}"}]}}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+
+        assert!(deltas.iter().any(|delta| matches!(
+            delta,
+            LlmStreamDelta::MergeExtra { extra }
+                if extra.get("openai_response_id") == Some(&json!("resp_incomplete"))
+        )));
+        assert!(deltas.iter().any(|delta| matches!(
+            delta,
+            LlmStreamDelta::SetFinishReason { reason } if reason == "length"
+        )));
+        assert!(deltas.iter().any(|delta| matches!(
+            delta,
+            LlmStreamDelta::FinalizeKeyedReasoning { text, .. }
+                if text == "Incomplete visible summary"
+        )));
+        assert!(deltas.iter().any(|delta| matches!(
+            delta,
+            LlmStreamDelta::FinalizeToolCalls { tool_calls }
+                if tool_calls.iter().any(|tool_call| tool_call.get("id") == Some(&json!("call_incomplete")))
+        )));
+    }
+
+    #[test]
     fn test_parse_stream_chunk_failed() {
         let adapter = OpenAiResponsesAdapter;
         let chunk = r#"{"type":"response.failed","error":{"message":"rate limit"}}"#;
@@ -1772,7 +1896,9 @@ mod tests {
                 .any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })),
             "codex.rate_limits should not create a visible server block"
         );
-        if let Some(LlmStreamDelta::MergeExtra { extra }) = deltas
+        if let Some(LlmStreamDelta::MergeExtra {
+            extra,
+        }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::MergeExtra { .. }))
         {
@@ -1797,7 +1923,9 @@ mod tests {
                 .any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })),
             "codex.response.metadata should not create a visible server block"
         );
-        let Some(LlmStreamDelta::MergeExtra { extra }) = deltas
+        let Some(LlmStreamDelta::MergeExtra {
+            extra,
+        }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::MergeExtra { .. }))
         else {
@@ -1829,7 +1957,9 @@ mod tests {
                 .any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })),
             "unknown codex.* events should never create visible server blocks"
         );
-        let Some(LlmStreamDelta::MergeExtra { extra }) = deltas
+        let Some(LlmStreamDelta::MergeExtra {
+            extra,
+        }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::MergeExtra { .. }))
         else {
@@ -1921,7 +2051,9 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::SetToolCalls { tool_calls } => {
+            LlmStreamDelta::SetToolCalls {
+                tool_calls,
+            } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0]["id"], "call_abc123");
                 assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
@@ -1939,7 +2071,9 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::SetToolCalls { tool_calls } => {
+            LlmStreamDelta::SetToolCalls {
+                tool_calls,
+            } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0]["index"], 0);
                 assert_eq!(tool_calls[0]["function"]["arguments"], "{\"loc");
@@ -1961,7 +2095,9 @@ mod tests {
                 .any(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })),
             "arguments.done should emit FinalizeToolCalls"
         );
-        if let Some(LlmStreamDelta::FinalizeToolCalls { tool_calls }) = deltas
+        if let Some(LlmStreamDelta::FinalizeToolCalls {
+            tool_calls,
+        }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. }))
         {
@@ -1987,7 +2123,9 @@ mod tests {
                 .any(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })),
             "output_item.done (function_call) should emit FinalizeToolCalls"
         );
-        if let Some(LlmStreamDelta::FinalizeToolCalls { tool_calls }) = deltas
+        if let Some(LlmStreamDelta::FinalizeToolCalls {
+            tool_calls,
+        }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. }))
         {
@@ -2011,7 +2149,9 @@ mod tests {
         let tool_calls: Vec<_> = deltas
             .iter()
             .filter_map(|d| match d {
-                LlmStreamDelta::SetToolCalls { tool_calls } => Some(tool_calls.clone()),
+                LlmStreamDelta::SetToolCalls {
+                    tool_calls,
+                } => Some(tool_calls.clone()),
                 _ => None,
             })
             .flatten()
@@ -2041,7 +2181,9 @@ mod tests {
             .find(|d| matches!(d, LlmStreamDelta::SetUsage { .. }));
         assert!(usage_delta.is_some());
         match usage_delta.unwrap() {
-            LlmStreamDelta::SetUsage { usage } => {
+            LlmStreamDelta::SetUsage {
+                usage,
+            } => {
                 assert_eq!(usage.prompt_tokens, 100);
                 assert_eq!(usage.completion_tokens, 50);
                 assert_eq!(usage.total_tokens, 150);
@@ -2062,7 +2204,9 @@ mod tests {
             .find(|d| matches!(d, LlmStreamDelta::SetUsage { .. }));
         assert!(usage_delta.is_some());
         match usage_delta.unwrap() {
-            LlmStreamDelta::SetUsage { usage } => {
+            LlmStreamDelta::SetUsage {
+                usage,
+            } => {
                 assert_eq!(usage.prompt_tokens, 200);
                 assert_eq!(usage.completion_tokens, 100);
                 assert_eq!(usage.total_tokens, 1100);
@@ -2085,7 +2229,9 @@ mod tests {
             .find(|d| matches!(d, LlmStreamDelta::SetUsage { .. }));
         assert!(usage_delta.is_some());
         match usage_delta.unwrap() {
-            LlmStreamDelta::SetUsage { usage } => {
+            LlmStreamDelta::SetUsage {
+                usage,
+            } => {
                 assert_eq!(usage.prompt_tokens, 250);
                 assert_eq!(usage.completion_tokens, 100);
                 assert_eq!(usage.total_tokens, 1100);
@@ -2161,7 +2307,10 @@ mod tests {
         let citations: Vec<_> = deltas
             .iter()
             .filter_map(|d| {
-                if let LlmStreamDelta::AddCitation { citation } = d {
+                if let LlmStreamDelta::AddCitation {
+                    citation,
+                } = d
+                {
                     Some(citation)
                 } else {
                     None
@@ -2210,7 +2359,9 @@ mod tests {
             "Should capture reasoning item as SetThinkingBlocks"
         );
 
-        if let Some(LlmStreamDelta::SetThinkingBlocks { blocks }) = deltas
+        if let Some(LlmStreamDelta::SetThinkingBlocks {
+            blocks,
+        }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. }))
         {
@@ -2227,7 +2378,9 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        if let Some(LlmStreamDelta::SetThinkingBlocks { blocks }) = deltas
+        if let Some(LlmStreamDelta::SetThinkingBlocks {
+            blocks,
+        }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. }))
         {
@@ -2372,10 +2525,10 @@ mod tests {
 
         assert!(matches!(
             deltas.as_slice(),
-            [LlmStreamDelta::AppendReasoning {
+            [LlmStreamDelta::AppendKeyedReasoning {
                 text,
-                block_index: Some(0)
-            }] if text == "Thinking about"
+                reasoning_key,
+            }] if text == "Thinking about" && reasoning_key == "item:rs_abc#s0"
         ));
     }
 
@@ -2388,11 +2541,12 @@ mod tests {
 
         assert!(matches!(
             deltas.as_slice(),
-            [LlmStreamDelta::FinalizeReasoning {
+            [LlmStreamDelta::FinalizeKeyedReasoning {
                 text,
-                block_index: Some(0)
+                reasoning_key,
             }]
                 if text == "**Checking parser**\n\nThe completed reasoning body."
+                    && reasoning_key == "item:rs_abc#s0"
         ));
     }
 
@@ -2423,18 +2577,21 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_text_delta() {
+    fn test_raw_reasoning_deltas_are_not_displayed() {
         let adapter = OpenAiResponsesAdapter;
-        let chunk = r#"{"type":"response.reasoning_text.delta","item_id":"rs_abc","output_index":0,"content_index":0,"delta":"Let me reason"}"#;
+        for event_type in ["response.reasoning.delta", "response.reasoning_text.delta"] {
+            let chunk = json!({
+                "type": event_type,
+                "item_id": "rs_abc",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "Let me reason"
+            });
 
-        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+            let deltas = adapter.parse_stream_chunk(&chunk.to_string()).unwrap();
 
-        assert!(
-            deltas
-                .iter()
-                .any(|d| matches!(d, LlmStreamDelta::AppendReasoning { .. })),
-            "reasoning_text.delta should produce AppendReasoning"
-        );
+            assert!(deltas.is_empty(), "{event_type} must not be displayed");
+        }
     }
 
     #[test]
@@ -2460,7 +2617,9 @@ mod tests {
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
         assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::Done)));
-        if let Some(LlmStreamDelta::SetFinishReason { reason }) = deltas
+        if let Some(LlmStreamDelta::SetFinishReason {
+            reason,
+        }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::SetFinishReason { .. }))
         {
@@ -2581,5 +2740,114 @@ mod tests {
         let converted = result.as_array().unwrap();
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["name"], json!("already_converted"));
+    }
+
+    #[test]
+    fn test_reasoning_summary_key_distinguishes_items_with_same_summary_index() {
+        // Two distinct reasoning items each reuse summary_index:0.
+        // Keys must differ so their summaries are not collapsed.
+        let a = json!({"item_id":"rs_a","output_index":0,"summary_index":0});
+        let b = json!({"item_id":"rs_b","output_index":1,"summary_index":0});
+        let key_a = reasoning_summary_key(&a);
+        let key_b = reasoning_summary_key(&b);
+        assert_ne!(key_a, key_b);
+        assert_eq!(key_a, "item:rs_a#s0");
+        assert_eq!(key_b, "item:rs_b#s0");
+    }
+
+    #[test]
+    fn test_reasoning_summary_key_falls_back_to_output_index() {
+        let no_item = json!({"output_index":3,"summary_index":2});
+        assert_eq!(reasoning_summary_key(&no_item), "out:3#s2");
+    }
+
+    #[test]
+    fn test_safe_reasoning_summaries_only_uses_summary_text() {
+        // Must extract summary_text entries only, and NEVER encrypted_content
+        // or content[].reasoning_text.
+        let item = json!({
+            "id": "rs_final",
+            "type": "reasoning",
+            "encrypted_content": "gAAAA...secret",
+            "content": [{"type": "reasoning_text", "text": "raw private chain"}],
+            "summary": [
+                {"type": "summary_text", "text": "Safe summary one"},
+                {"type": "summary_text", "text": "Safe summary two"},
+                {"type": "other", "text": "ignored"}
+            ]
+        });
+        let summaries = safe_reasoning_summaries(&item, Some("rs_final"), Some(0));
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].0, "Safe summary one");
+        assert_eq!(summaries[0].1, "item:rs_final#s0");
+        assert_eq!(summaries[1].0, "Safe summary two");
+        assert_eq!(summaries[1].1, "item:rs_final#s1");
+        // Nothing leaks the private/raw fields.
+        for (text, _) in &summaries {
+            assert!(!text.contains("secret"));
+            assert!(!text.contains("raw private chain"));
+        }
+    }
+
+    #[test]
+    fn test_completed_reasoning_item_finalizes_only_safe_summary() {
+        // When no reasoning_summary_text events arrived, the final reasoning item's
+        // safe summary is used as the authoritative display text.
+        let adapter = OpenAiResponsesAdapter;
+        let chunk = r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"rs_final","type":"reasoning","encrypted_content":"gAAAA","content":[{"type":"reasoning_text","text":"private"}],"summary":[{"type":"summary_text","text":"Final visible summary"}]}]}}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+
+        // Full item preserved for continuation.
+        assert!(deltas
+            .iter()
+            .any(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. })));
+        // Safe summary finalized, keyed by item id.
+        let finalized: Vec<_> = deltas
+            .iter()
+            .filter_map(|d| match d {
+                LlmStreamDelta::FinalizeKeyedReasoning {
+                    text,
+                    reasoning_key,
+                } => Some((text.clone(), reasoning_key.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finalized.len(), 1);
+        assert_eq!(finalized[0].0, "Final visible summary");
+        assert_eq!(finalized[0].1, "item:rs_final#s0");
+        // Private/raw fields never surface as finalized reasoning.
+        for (text, _) in &finalized {
+            assert!(!text.contains("private"));
+            assert!(!text.contains("gAAAA"));
+        }
+    }
+
+    #[test]
+    fn test_flattened_completed_reasoning_item_finalizes_safe_summary() {
+        let adapter = OpenAiResponsesAdapter;
+        let chunk = r#"{"type":"response.completed","id":"resp_flat","status":"completed","output":[{"id":"rs_flat","type":"reasoning","encrypted_content":"gAAAA","content":[{"type":"reasoning_text","text":"private"}],"summary":[{"type":"summary_text","text":"Flattened visible summary"}]}]}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+        assert!(deltas.iter().any(|delta| matches!(
+            delta,
+            LlmStreamDelta::MergeExtra { extra }
+                if extra.get("openai_response_id") == Some(&json!("resp_flat"))
+        )));
+        let finalized: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                LlmStreamDelta::FinalizeKeyedReasoning {
+                    text,
+                    reasoning_key,
+                } => Some((text.as_str(), reasoning_key.as_str())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            finalized,
+            vec![("Flattened visible summary", "item:rs_flat#s0")]
+        );
     }
 }
