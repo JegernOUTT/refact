@@ -1293,6 +1293,22 @@ impl ChatSession {
         result_ids
     }
 
+    fn answered_tool_call_ids_for_interruption(&self, assistant_index: usize) -> HashSet<String> {
+        let mut result_ids = HashSet::new();
+        for message in self.messages.iter().skip(assistant_index + 1) {
+            match message.role.as_str() {
+                "tool" | "diff" if !message.tool_call_id.is_empty() => {
+                    result_ids.insert(message.tool_call_id.clone());
+                }
+                role if role == crate::chat::internal_roles::EVENT_ROLE
+                    || role == crate::chat::internal_roles::PLAN_ROLE
+                    || role == crate::chat::internal_roles::GOAL_ROLE => {}
+                _ => break,
+            }
+        }
+        result_ids
+    }
+
     fn all_tool_call_ids_have_results_after(
         &self,
         assistant_index: usize,
@@ -2155,7 +2171,7 @@ impl ChatSession {
         let latest_window = self.latest_assistant_tool_call_window(None);
         let mut updated_message = None;
         if let Some((assistant_index, _)) = latest_window {
-            let answered_ids = self.result_ids_after_assistant(assistant_index);
+            let answered_ids = self.answered_tool_call_ids_for_interruption(assistant_index);
             let Some(message) = self.messages.get_mut(assistant_index) else {
                 return;
             };
@@ -3699,6 +3715,45 @@ mod tests {
     }
 
     #[test]
+    fn direct_abort_clears_running_sleep_tool_card() {
+        let mut session = make_session();
+        session.set_runtime_state(SessionState::ExecutingTools, None);
+        session.messages.push(ChatMessage {
+            message_id: "assistant-with-sleep".to_string(),
+            role: "assistant".to_string(),
+            tool_calls: Some(vec![ChatToolCall {
+                id: "sleep-call".to_string(),
+                index: Some(0),
+                tool_type: "function".to_string(),
+                function: ChatToolFunction {
+                    name: "sleep".to_string(),
+                    arguments: r#"{"duration_ms":30000,"description":"Wait briefly"}"#.to_string(),
+                },
+                extra_content: None,
+            }]),
+            ..Default::default()
+        });
+        let mut events = session.subscribe();
+
+        session.abort_stream();
+        session.clear_pending_tool_calls_for_interruption();
+
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert!(session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(session.messages[0].tool_calls.is_none());
+        assert!(session.trajectory_dirty);
+        let mut saw_sleep_removed = false;
+        while let Ok(json) = events.try_recv() {
+            let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+            if let ChatEvent::MessageUpdated { message, .. } = envelope.event {
+                saw_sleep_removed =
+                    message.message_id == "assistant-with-sleep" && message.tool_calls.is_none();
+            }
+        }
+        assert!(saw_sleep_removed);
+    }
+
+    #[test]
     fn test_emit_stream_delta_without_draft_is_noop() {
         let mut session = make_session();
         session.emit_stream_delta(vec![DeltaOp::AppendContent { text: "x".into() }]);
@@ -4039,6 +4094,12 @@ mod tests {
             ]),
             ..Default::default()
         });
+        session.messages.push(crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::Tick,
+            "tool.sleep",
+            json!({"elapsed_ms": 5_000, "remaining_ms": 25_000}),
+            "tick".to_string(),
+        ));
         session.messages.push(ChatMessage {
             role: "tool".into(),
             tool_call_id: "tool-answered".into(),

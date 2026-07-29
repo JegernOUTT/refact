@@ -186,7 +186,9 @@ pub async fn handle_v1_chat_command(
 
     if matches!(request.command, ChatCommand::Abort {}) {
         session.abort_stream();
-        let goal_stopped = session.stop_goal_on_manual_abort();
+        session.clear_pending_tool_calls_for_interruption();
+        session.stop_goal_on_manual_abort();
+        let should_save_trajectory = session.trajectory_dirty;
         session.remember_accepted_request(&request.client_request_id);
         session.emit(ChatEvent::Ack {
             client_request_id: request.client_request_id,
@@ -194,7 +196,7 @@ pub async fn handle_v1_chat_command(
             result: Some(serde_json::json!({"aborted": true})),
         });
         drop(session);
-        if goal_stopped {
+        if should_save_trajectory {
             super::trajectories::maybe_save_trajectory(app.clone(), session_arc.clone()).await;
         }
         return Ok(Response::builder()
@@ -501,5 +503,110 @@ pub async fn handle_v1_chat_cancel_queued(
             .header("Content-Type", "application/json")
             .body(Body::from(r#"{"status":"not_found"}"#))
             .unwrap())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ChatToolFunction};
+    use crate::chat::types::SessionState;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    async fn test_app_with_workspace(root: &std::path::Path) -> AppState {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![root.to_path_buf()];
+        app
+    }
+
+    #[tokio::test]
+    async fn abort_command_clears_and_persists_running_sleep_tool_call() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "abort-running-sleep";
+        let session_arc = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
+            chat_id.to_string(),
+        )));
+        let mut events = {
+            let mut session = session_arc.lock().await;
+            session.set_runtime_state(SessionState::ExecutingTools, None);
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "Wait briefly".to_string(),
+            ));
+            session.messages.push(ChatMessage {
+                message_id: "assistant-with-sleep".to_string(),
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Waiting briefly.".to_string()),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "sleep-call".to_string(),
+                    index: Some(0),
+                    tool_type: "function".to_string(),
+                    function: ChatToolFunction {
+                        name: "sleep".to_string(),
+                        arguments: json!({
+                            "duration_ms": 30_000,
+                            "description": "Wait briefly",
+                        })
+                        .to_string(),
+                    },
+                    extra_content: None,
+                }]),
+                ..Default::default()
+            });
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        let request = CommandRequest {
+            client_request_id: "wake-up-request".to_string(),
+            priority: false,
+            command: ChatCommand::Abort {},
+        };
+        let body = hyper::body::Bytes::from(serde_json::to_vec(&request).unwrap());
+
+        let response = handle_v1_chat_command(State(app.clone()), Path(chat_id.to_string()), body)
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let session = session_arc.lock().await;
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert!(session.messages[1].tool_calls.is_none());
+        assert!(!session.trajectory_dirty);
+        drop(session);
+
+        let mut saw_sleep_removed = false;
+        while let Ok(json) = events.try_recv() {
+            let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+            if let ChatEvent::MessageUpdated { message, .. } = envelope.event {
+                saw_sleep_removed =
+                    message.message_id == "assistant-with-sleep" && message.tool_calls.is_none();
+            }
+        }
+        assert!(saw_sleep_removed);
+
+        let trajectory_path = workspace
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        let trajectory: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(trajectory_path).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            trajectory["messages"][1]["tool_calls"],
+            serde_json::Value::Null
+        );
     }
 }
