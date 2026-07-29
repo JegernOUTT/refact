@@ -95,11 +95,13 @@ function compressionProgressText(
 export type ChatContentProps = {
   onRetry: (index: number, question: UserMessage["content"]) => void;
   onStopStreaming: () => void;
+  onRetryGeneration?: () => void;
 };
 
 export const ChatContent: React.FC<ChatContentProps> = ({
   onStopStreaming,
   onRetry,
+  onRetryGeneration,
 }) => {
   const dispatch = useAppDispatch();
   const chatId = useThreadId();
@@ -389,7 +391,12 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           return <PlainText>{item.content}</PlainText>;
 
         case "error":
-          return <ErrorMessageCard errors={item.errors} />;
+          return (
+            <ErrorMessageCard
+              errors={item.errors}
+              onRetryGeneration={onRetryGeneration}
+            />
+          );
 
         case "assistant":
           return (
@@ -494,6 +501,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       onRetryWrapper,
       collapsibleState,
       renderChatId,
+      onRetryGeneration,
     ],
   );
 

@@ -2375,6 +2375,41 @@ async fn test_report_error_unicode_safe() {
     assert_eq!(svc.recent_diagnostics.len(), 1);
 }
 
+#[tokio::test]
+async fn test_report_error_with_model_stream_corrupted_is_medium() {
+    let mut svc = make_service();
+    svc.report_error_with_model(
+        "llm_error",
+        "stream ended unexpectedly while decoding response body",
+        Some("chat/generation.rs"),
+        Some("chat-1"),
+        Some("gpt-4"),
+    );
+    assert_eq!(svc.recent_diagnostics.len(), 1);
+    assert_eq!(
+        svc.recent_diagnostics[0].severity,
+        DiagnosticSeverity::Medium
+    );
+    assert_eq!(
+        refact_buddy_core::diagnostics::diagnostic_priority_label(
+            "stream ended unexpectedly while decoding response body"
+        ),
+        "normal"
+    );
+}
+
+#[tokio::test]
+async fn test_report_error_with_model_generic_stays_high() {
+    let mut svc = make_service();
+    svc.report_error_with_model("llm_error", "some error occurred", None, None, None);
+    assert_eq!(svc.recent_diagnostics.len(), 1);
+    assert_eq!(svc.recent_diagnostics[0].severity, DiagnosticSeverity::High);
+    assert_eq!(
+        refact_buddy_core::diagnostics::diagnostic_priority_label("some error occurred"),
+        "high"
+    );
+}
+
 #[test]
 fn test_error_redaction_strips_tokens() {
     let output = super::actor::redact_sensitive("Error: Bearer sk-abc123xyz failed");

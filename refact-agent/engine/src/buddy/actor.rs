@@ -1705,16 +1705,7 @@ impl BuddyService {
         chat_id: Option<&str>,
         model_id: Option<&str>,
     ) {
-        let lower = error_msg.to_lowercase();
-        let severity = if lower.contains("critical") || lower.contains("panic") {
-            super::diagnostics::DiagnosticSeverity::Critical
-        } else if lower.contains("error") {
-            super::diagnostics::DiagnosticSeverity::High
-        } else if lower.contains("warn") {
-            super::diagnostics::DiagnosticSeverity::Medium
-        } else {
-            super::diagnostics::DiagnosticSeverity::High
-        };
+        let severity = refact_buddy_core::diagnostics::classify_diagnostic_severity(error_msg);
         let ctx = super::diagnostics::DiagnosticContext {
             error_type: error_type.to_string(),
             error_message: error_msg.to_string(),

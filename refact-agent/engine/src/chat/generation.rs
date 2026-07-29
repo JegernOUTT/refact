@@ -1546,13 +1546,17 @@ pub fn start_generation(
                                 )
                                 .await;
                             let short_err: String = err_clone.chars().take(60).collect();
+                            let priority =
+                                refact_buddy_core::diagnostics::diagnostic_priority_label(
+                                    &err_clone,
+                                );
                             let mut ev = make_runtime_event(
                                 "chat_error",
                                 &format!("Error in '{}': {}", chat_label2, short_err),
                                 "chat",
                                 &format!("chat_{}", chat_id2),
                                 "failed",
-                                Some("high"),
+                                Some(priority),
                             );
                             ev.chat_id = Some(chat_id2.to_string());
                             app2.buddy_event_sink.mark_chat_error(ev).await;

@@ -83,7 +83,7 @@ export const Chat: React.FC<ChatProps> = ({
     workspaceAvailability.terminal &&
     (!workspaceAvailability.dock || workspaceDock.open);
 
-  const { submit, abort, retryFromIndex } = useChatActions(chatId);
+  const { submit, abort, retryFromIndex, regenerate } = useChatActions(chatId);
 
   const { shouldCheckpointsPopupBeShown } = useCheckpoints();
 
@@ -124,6 +124,10 @@ export const Chat: React.FC<ChatProps> = ({
     [retryFromIndex],
   );
 
+  const handleRetryGeneration = useCallback(() => {
+    void regenerate();
+  }, [regenerate]);
+
   return (
     <DropzoneProvider asChild>
       <Flex
@@ -153,7 +157,11 @@ export const Chat: React.FC<ChatProps> = ({
             overflow: "hidden",
           }}
         >
-          <ChatContent onRetry={handleRetry} onStopStreaming={handleAbort} />
+          <ChatContent
+            onRetry={handleRetry}
+            onStopStreaming={handleAbort}
+            onRetryGeneration={handleRetryGeneration}
+          />
         </Flex>
 
         <Flex

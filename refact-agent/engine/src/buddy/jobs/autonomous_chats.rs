@@ -2398,7 +2398,7 @@ fn error_detective_definition() -> AutonomousJobDefinition {
         meta: autonomous_workflow_meta(ERROR_DETECTIVE_WORKFLOW_ID).unwrap(),
         cooldown_seconds: 15 * 60,
         scheduler_priority: 5,
-        prompt: "Analyze the diagnostic pattern using only the summaries below. Explain the likely failure cluster, risk, and the smallest safe next checks. Do not invent log details that are not in evidence.",
+        prompt: "Analyze the diagnostic pattern using only the summaries below. Explain the likely failure cluster, risk, and the smallest safe next checks. Do not invent log details that are not in evidence. Treat retryable StreamCorrupted diagnostics (category=StreamCorrupted recoverable=true) as a generation-level failure that is recoverable by retry or regenerate, not a terminal chat failure.",
     }
 }
 
@@ -2635,12 +2635,17 @@ fn format_diagnostic_summary(diag: &DiagnosticContext) -> String {
         .or(diag.tool_name.as_deref())
         .unwrap_or("unknown");
     let preview = preview_text(&diag.error_message, 240);
+    let user_error = refact_core::retry_policy::user_error_info(
+        refact_core::retry_policy::classify_user_error(&diag.error_message),
+    );
     // NOTE: collected_at (timestamp) is intentionally excluded so the same recurring cluster
     // renders a stable summary and does not re-trigger the investigation every occurrence.
     format!(
-        "type={} severity={:?} source={} preview={}",
+        "type={} severity={:?} category={:?} recoverable={} source={} preview={}",
         clean_evidence_value(&diag.error_type),
         diag.severity,
+        user_error.category,
+        user_error.is_retryable,
         clean_evidence_value(source),
         preview
     )
@@ -3884,6 +3889,40 @@ mod tests {
         assert!(DependencyRadarJob.records_empty_result());
         assert!(DocsGardenerJob.records_empty_result());
         assert!(ArchitectureDriftWatcherJob.records_empty_result());
+    }
+
+    fn stream_corrupted_diagnostic() -> DiagnosticContext {
+        DiagnosticContext {
+            error_type: "parse".to_string(),
+            error_message: "stream ended unexpectedly while decoding response body".to_string(),
+            source_file: Some("chat/generation.rs".to_string()),
+            tool_name: None,
+            chat_id: Some("chat-1".to_string()),
+            model_id: Some("gpt-4".to_string()),
+            collected_at: Utc::now().to_rfc3339(),
+            severity: DiagnosticSeverity::Medium,
+        }
+    }
+
+    #[test]
+    fn format_diagnostic_summary_includes_category_and_recoverable_for_stream_corrupted() {
+        let summary = format_diagnostic_summary(&stream_corrupted_diagnostic());
+        assert!(summary.contains("category=StreamCorrupted"), "{summary}");
+        assert!(summary.contains("recoverable=true"), "{summary}");
+        assert!(summary.contains("severity=Medium"), "{summary}");
+    }
+
+    #[test]
+    fn diagnostic_evidence_preserves_occurrence_telemetry_for_stream_corrupted() {
+        let mut ctx = context_with_last_result(None);
+        ctx.recent_diagnostics = (0..5).map(|_| stream_corrupted_diagnostic()).collect();
+        let evidence = diagnostic_evidence(&ctx).expect("expected diagnostic evidence");
+        assert_eq!(evidence.repeated_error_type.as_deref(), Some("parse"));
+        assert_eq!(evidence.repeated_count, 5);
+        assert!(evidence
+            .summaries
+            .iter()
+            .any(|s| s.contains("category=StreamCorrupted") && s.contains("recoverable=true")));
     }
 
     fn test_fact(kind: BuddyFactKind, payload: serde_json::Value) -> BuddyFact {

@@ -12,6 +12,7 @@ import type {
 
 export type ErrorMessageCardProps = {
   errors: ErrorMessage[];
+  onRetryGeneration?: () => void;
 };
 
 type ParsedError = {
@@ -169,7 +170,9 @@ const RetryingBadge: React.FC<{
 const ClassifiedError: React.FC<{
   error: ParsedError;
   showHeader: boolean;
-}> = ({ error, showHeader }) => {
+  autoRetryActive: boolean;
+  onRetryGeneration?: () => void;
+}> = ({ error, showHeader, autoRetryActive, onRetryGeneration }) => {
   const info = error.info;
   if (!info) {
     return <div className={styles.errorMessageBody}>{error.message}</div>;
@@ -178,6 +181,11 @@ const ClassifiedError: React.FC<{
   const tone = CATEGORY_TONES[info.category];
   const rawError = info.raw_error ?? error.message;
   const retry = error.retry?.in_progress ? error.retry : undefined;
+  const canRetry =
+    !autoRetryActive &&
+    info.is_retryable &&
+    info.suggested_action === "retry" &&
+    typeof onRetryGeneration === "function";
 
   return (
     <Flex direction="column" gap="2" className={styles.errorMessageBody}>
@@ -191,11 +199,19 @@ const ClassifiedError: React.FC<{
           </Flex>
           {retry ? (
             <RetryingBadge retry={retry} tone={tone} />
-          ) : (
+          ) : canRetry ? (
+            <Button
+              size="sm"
+              variant={tone === "danger" ? "danger" : "soft"}
+              onClick={onRetryGeneration}
+            >
+              {errorActionLabel(info.suggested_action)}
+            </Button>
+          ) : info.suggested_action !== "retry" ? (
             <Button size="sm" variant={tone === "danger" ? "danger" : "soft"}>
               {errorActionLabel(info.suggested_action)}
             </Button>
-          )}
+          ) : null}
         </Flex>
       )}
       <Text size="2">{info.explanation}</Text>
@@ -215,6 +231,7 @@ const ClassifiedError: React.FC<{
 
 export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
   errors,
+  onRetryGeneration,
 }) => {
   const parsedErrors = errors.map(parseStructuredError);
   const firstClassified = parsedErrors.find((error) => error.info)?.info;
@@ -231,6 +248,11 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
     ? CATEGORY_TONES[firstClassified.category]
     : "danger";
   const showPerErrorHeader = parsedErrors.length > 1;
+  const canRetry =
+    !latestRetry &&
+    firstClassified?.is_retryable &&
+    firstClassified.suggested_action === "retry" &&
+    typeof onRetryGeneration === "function";
 
   return (
     <div className={`${styles.errorMessageCard} rf-enter-rise`}>
@@ -251,11 +273,19 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
             !showPerErrorHeader &&
             (latestRetry ? (
               <RetryingBadge retry={latestRetry} tone={tone} />
-            ) : (
+            ) : canRetry ? (
+              <Button
+                size="sm"
+                variant={tone === "danger" ? "danger" : "soft"}
+                onClick={onRetryGeneration}
+              >
+                {errorActionLabel(firstClassified.suggested_action)}
+              </Button>
+            ) : firstClassified.suggested_action !== "retry" ? (
               <Button size="sm" variant={tone === "danger" ? "danger" : "soft"}>
                 {errorActionLabel(firstClassified.suggested_action)}
               </Button>
-            ))}
+            ) : null)}
         </Flex>
         <Flex direction="column" gap="3">
           {parsedErrors.map((error, index) => (
@@ -263,6 +293,8 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
               key={`${index}-${error.message}-${error.info?.category ?? "raw"}`}
               error={error}
               showHeader={showPerErrorHeader}
+              autoRetryActive={Boolean(latestRetry)}
+              onRetryGeneration={onRetryGeneration}
             />
           ))}
         </Flex>
