@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: setup_modes
 title: Setup Modes
 description: Guided setup for project-specific chat modes
@@ -200,6 +200,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

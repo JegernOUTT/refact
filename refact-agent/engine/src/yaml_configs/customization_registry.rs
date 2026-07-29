@@ -1939,7 +1939,7 @@ mod tests {
             .get("delegate_with_editing")
             .expect("delegate_with_editing subagent should load");
         assert_eq!(delegate.id, "delegate_with_editing");
-        assert_eq!(delegate.schema_version, 3);
+        assert_eq!(delegate.schema_version, 4);
         assert_eq!(delegate.title, "Delegate with Editing");
         assert_eq!(delegate.expose_as_tool, false);
         assert_eq!(delegate.has_code, true);
@@ -1954,6 +1954,7 @@ mod tests {
             vec![
                 "tree".to_string(),
                 "cat".to_string(),
+                "glob".to_string(),
                 "search_pattern".to_string(),
                 "search_symbol_definition".to_string(),
                 "search_semantic".to_string(),
@@ -1993,6 +1994,7 @@ mod tests {
             vec![
                 "tree".to_string(),
                 "cat".to_string(),
+                "glob".to_string(),
                 "search_pattern".to_string(),
                 "search_symbol_definition".to_string(),
                 "search_semantic".to_string(),

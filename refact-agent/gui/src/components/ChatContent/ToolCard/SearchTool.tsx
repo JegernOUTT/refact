@@ -1,4 +1,4 @@
-import { Search } from "lucide-react";
+import { Search, FolderSearch } from "lucide-react";
 import React, { useMemo } from "react";
 import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
@@ -14,7 +14,8 @@ import styles from "./SearchTool.module.css";
 type SearchToolType =
   | "search_pattern"
   | "search_semantic"
-  | "search_symbol_definition";
+  | "search_symbol_definition"
+  | "glob";
 
 interface SearchPatternArgs {
   pattern?: string;
@@ -28,6 +29,11 @@ interface SearchSemanticArgs {
 
 interface SearchSymbolArgs {
   symbols?: string;
+}
+
+interface GlobArgs {
+  pattern?: string;
+  path?: string;
 }
 
 interface SearchToolProps {
@@ -77,11 +83,16 @@ export const SearchTool: React.FC<SearchToolProps> = ({
   const args = useMemo(():
     | SearchPatternArgs
     | SearchSemanticArgs
-    | SearchSymbolArgs => {
+    | SearchSymbolArgs
+    | GlobArgs => {
     try {
       const parsed = JSON.parse(toolCall.function.arguments) as unknown;
       return parsed && typeof parsed === "object"
-        ? (parsed as SearchPatternArgs | SearchSemanticArgs | SearchSymbolArgs)
+        ? (parsed as
+            | SearchPatternArgs
+            | SearchSemanticArgs
+            | SearchSymbolArgs
+            | GlobArgs)
         : {};
     } catch {
       return {};
@@ -152,10 +163,30 @@ export const SearchTool: React.FC<SearchToolProps> = ({
           </>
         );
       }
+      case "glob": {
+        const globArgs = args as GlobArgs;
+        const pattern = getString(globArgs.pattern, "pattern");
+        return (
+          <>
+            Find files <span className={styles.query}>{pattern}</span>
+            {matchCount !== null && (
+              <span className={styles.count}> → {matchCount} files</span>
+            )}
+          </>
+        );
+      }
     }
   }, [toolType, args, matchCount]);
 
   const meta = useMemo(() => {
+    if (toolType === "glob") {
+      const globArgs = args as GlobArgs;
+      const path = getString(globArgs.path, "");
+      if (path && path !== "workspace") {
+        return path;
+      }
+      return null;
+    }
     if (toolType === "search_pattern" || toolType === "search_semantic") {
       const scopeArgs = args as SearchPatternArgs | SearchSemanticArgs;
       const scope = getString(scopeArgs.scope, "");
@@ -168,7 +199,7 @@ export const SearchTool: React.FC<SearchToolProps> = ({
 
   return (
     <ToolCard
-      icon={<Search />}
+      icon={toolType === "glob" ? <FolderSearch /> : <Search />}
       summary={summary}
       meta={meta}
       status={status}

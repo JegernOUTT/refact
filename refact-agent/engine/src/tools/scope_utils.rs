@@ -10,7 +10,10 @@ pub use refact_scope_utils::{
 use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_or_a_good_error};
 use crate::call_validation::ContextFile;
 use crate::files_correction::{canonical_path, correct_to_nearest_dir_path, get_unscoped_project_dirs};
-use crate::files_in_workspace::{check_file_privacy_for_send, filter_privacy_allowed_files, ls_files};
+use crate::files_in_workspace::{
+    check_file_privacy_for_send, filter_privacy_allowed_files, ls_files, ls_files_limited,
+    LsFilesLimited,
+};
 use crate::global_context::GlobalContext;
 use crate::worktrees::scope::ExecutionScope;
 
@@ -26,6 +29,27 @@ async fn get_workspace_files(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
         .into_iter()
         .filter(|file| project_dirs.iter().any(|dir| file.starts_with(dir)))
         .collect()
+}
+
+async fn resolve_scope_legacy_limited(
+    gcx: Arc<GlobalContext>,
+    scope: &str,
+    max_entries: usize,
+    abort: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<ScopedFiles, String> {
+    if abort.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err("⚠️ File listing aborted before completion (cancelled by caller).".to_string());
+    }
+    let mut files = resolve_scope_legacy(gcx, scope).await?;
+    let truncated = files.len() > max_entries;
+    files.truncate(max_entries);
+    Ok(ScopedFiles {
+        files,
+        notices: truncated
+            .then(|| truncation_notice(max_entries))
+            .into_iter()
+            .collect(),
+    })
 }
 
 pub async fn resolve_existing_path_with_execution_scope(
@@ -91,6 +115,77 @@ pub async fn list_execution_scope_root(
         &execution_scope.effective_root().to_path_buf(),
         recursive,
         true,
+    )
+    .await
+}
+
+pub struct ScopedListingLimited {
+    pub files: Vec<PathBuf>,
+    pub truncated: bool,
+}
+
+pub fn truncation_notice(max_entries: usize) -> String {
+    format!(
+        "⚠️ Listing truncated after examining {} directory entries. 💡 Narrow the scope to a subdirectory to see the rest.",
+        max_entries
+    )
+}
+
+async fn list_files_under_dir_limited(
+    gcx: Arc<GlobalContext>,
+    dir: &PathBuf,
+    recursive: bool,
+    privacy_filter: bool,
+    max_entries: usize,
+    abort: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<ScopedListingLimited, String> {
+    let indexing_everywhere =
+        crate::files_blocklist::reload_indexing_everywhere_if_needed(gcx.clone()).await;
+    let LsFilesLimited {
+        files,
+        truncated,
+        aborted,
+    } = ls_files_limited(&indexing_everywhere, dir, recursive, max_entries, abort)?;
+    if aborted {
+        return Err(format!(
+            "⚠️ Directory listing of '{}' was aborted before completion.",
+            dir.display()
+        ));
+    }
+    let files = if privacy_filter {
+        filter_privacy_allowed_files(gcx, files).await
+    } else {
+        files
+    };
+    Ok(ScopedListingLimited { files, truncated })
+}
+
+pub async fn list_scoped_files_under_dir_limited(
+    gcx: Arc<GlobalContext>,
+    dir: &PathBuf,
+    recursive: bool,
+    privacy_filter: bool,
+    max_entries: usize,
+    abort: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<ScopedListingLimited, String> {
+    list_files_under_dir_limited(gcx, dir, recursive, privacy_filter, max_entries, abort).await
+}
+
+pub async fn list_execution_scope_root_limited(
+    gcx: Arc<GlobalContext>,
+    execution_scope: &ExecutionScope,
+    recursive: bool,
+    max_entries: usize,
+    abort: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<ScopedListingLimited, String> {
+    execution_scope.ensure_active_root()?;
+    list_files_under_dir_limited(
+        gcx,
+        &execution_scope.effective_root().to_path_buf(),
+        recursive,
+        true,
+        max_entries,
+        abort,
     )
     .await
 }
@@ -242,6 +337,78 @@ pub async fn resolve_scope_with_execution_scope(
     Ok(ScopedFiles {
         files,
         notices: scoped_path_notices(&scoped),
+    })
+}
+
+pub async fn resolve_scope_with_execution_scope_limited(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
+    scope: &str,
+    max_entries: usize,
+    abort: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<ScopedFiles, String> {
+    let Some(execution_scope) = execution_scope else {
+        return resolve_scope_legacy_limited(gcx, scope, max_entries, abort).await;
+    };
+    if !execution_scope.is_enforced() {
+        return resolve_scope_legacy_limited(gcx, scope, max_entries, abort).await;
+    }
+
+    if is_worktree_root_alias(scope) {
+        let listing =
+            list_execution_scope_root_limited(gcx, execution_scope, true, max_entries, abort)
+                .await?;
+        let mut notices = vec![];
+        if listing.truncated {
+            notices.push(truncation_notice(max_entries));
+        }
+        return Ok(ScopedFiles {
+            files: listing
+                .files
+                .into_iter()
+                .map(|file| path_to_string(&file))
+                .collect(),
+            notices,
+        });
+    }
+
+    let scope_is_dir = scope.ends_with('/') || scope.ends_with('\\');
+    let scoped = execution_scope.resolve_existing_path(&PathBuf::from(scope))?;
+    if scoped.path.is_file() {
+        if scope_is_dir {
+            return Err(format!(
+                "⚠️ '{}' is a file, not a directory. 💡 Remove the trailing slash or use a directory scope",
+                scope
+            ));
+        }
+        check_file_privacy_for_send(gcx, &scoped.path).await?;
+        return Ok(ScopedFiles {
+            files: vec![path_to_string(&scoped.path)],
+            notices: scoped_path_notices(&scoped),
+        });
+    }
+    if !scoped.path.is_dir() {
+        return Err(format!(
+            "Path '{}' is not a file or directory",
+            scoped.path.display()
+        ));
+    }
+
+    let listing =
+        list_scoped_files_under_dir_limited(gcx, &scoped.path, true, true, max_entries, abort)
+            .await?;
+    let mut notices = scoped_path_notices(&scoped);
+    if listing.truncated {
+        notices.push(truncation_notice(max_entries));
+    }
+
+    Ok(ScopedFiles {
+        files: listing
+            .files
+            .into_iter()
+            .map(|file| path_to_string(&file))
+            .collect(),
+        notices,
     })
 }
 
@@ -1115,6 +1282,51 @@ mod worktree_scope_read_tools {
             .files
             .iter()
             .any(|path| path.ends_with("old_name.rs")));
+    }
+
+    #[tokio::test]
+    async fn worktree_scope_limited_resolution_reports_truncation_notice() {
+        let fixture = make_fixture();
+        for i in 0..20 {
+            fs::write(
+                fixture.root.join("src").join(format!("extra_{:02}.rs", i)),
+                "pub fn extra() {}\n",
+            )
+            .unwrap();
+        }
+        let gcx = make_gcx(&fixture, vec![]).await;
+        let scope = ExecutionScope::from_worktree(&fixture.worktree);
+
+        let resolved =
+            resolve_scope_with_execution_scope_limited(gcx, Some(&scope), "workspace", 2, None)
+                .await
+                .unwrap();
+
+        assert!(
+            resolved.notices.iter().any(|n| n.contains("truncated")),
+            "expected a truncation notice, got: {:?}",
+            resolved.notices
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_scope_limited_resolution_reports_truncation_notice() {
+        let fixture = make_fixture();
+        let gcx = make_gcx(&fixture, vec![]).await;
+        {
+            let mut files = gcx.documents_state.workspace_files.lock().unwrap();
+            files.extend((0..10).map(|index| fixture.source.join(format!("extra_{index}.rs"))));
+        }
+
+        let resolved = resolve_scope_with_execution_scope_limited(gcx, None, "workspace", 2, None)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.files.len(), 2);
+        assert!(resolved
+            .notices
+            .iter()
+            .any(|notice| notice.contains("truncated")));
     }
 
     #[tokio::test]

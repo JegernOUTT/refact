@@ -1,4 +1,4 @@
-schema_version: 22
+schema_version: 23
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -224,6 +224,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

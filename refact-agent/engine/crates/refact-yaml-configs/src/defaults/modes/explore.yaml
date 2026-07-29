@@ -1,4 +1,4 @@
-schema_version: 16
+schema_version: 17
 id: explore
 title: Explore
 description: Read-only exploration for context gathering without editing
@@ -38,7 +38,7 @@ prompt: |
   Use `subagent()` to delegate exploration tasks that require multiple tool calls:
   - "Find all usages of X" → `subagent(task="Find all usages of function X", expected_result="List of files and line numbers", tools="search_pattern,cat")`
   - "Understand module Y" → `subagent(task="Analyze module Y structure", expected_result="Summary of components and relationships", tools="tree,cat,search_symbol_definition")`
-  - "Search for pattern Z" → `subagent(task="Find files matching pattern Z", expected_result="List of matching files with context", tools="search_pattern,cat")`
+  - "Search for pattern Z" → `subagent(task="Find files matching pattern Z", expected_result="List of matching files with context", tools="glob,cat")`
 
   Subagents work independently and return summarized results. Use them for focused investigation tasks.
 
@@ -90,6 +90,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

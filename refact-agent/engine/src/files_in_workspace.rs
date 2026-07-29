@@ -8,6 +8,7 @@ use indexmap::IndexSet;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind};
 use ropey::Rope;
+use tokio::io::AsyncReadExt;
 use tokio::sync::{RwLock as ARwLock, Mutex as AMutex, Notify};
 use walkdir::WalkDir;
 use which::which;
@@ -138,13 +139,77 @@ pub async fn get_file_text_from_memory_or_disk(
     global_context: Arc<GlobalContext>,
     file_path: &PathBuf,
 ) -> Result<String, String> {
+    let read_context = prepare_file_read_context(global_context.clone()).await;
+    get_file_text_from_memory_or_disk_with_context(global_context, file_path, &read_context, None)
+        .await
+}
+
+pub(crate) struct FileReadContext {
+    privacy_settings: Arc<PrivacySettings>,
+    worktree_mappings: Vec<crate::files_correction::RegisteredWorktreePathMapping>,
+}
+
+fn registered_alias_paths(
+    path: &Path,
+    mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
+) -> Vec<PathBuf> {
+    let path = crate::files_correction::canonicalize_normalized_path(path.to_path_buf());
+    let mut aliases = vec![path.clone()];
+    for mapping in mappings {
+        if let Ok(suffix) = path.strip_prefix(&mapping.root) {
+            aliases.push(crate::files_correction::canonicalize_normalized_path(
+                mapping.source_root.join(suffix),
+            ));
+        }
+        if let Ok(suffix) = path.strip_prefix(&mapping.source_root) {
+            aliases.push(crate::files_correction::canonicalize_normalized_path(
+                mapping.root.join(suffix),
+            ));
+        }
+    }
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+pub(crate) fn check_file_privacy_with_context(
+    read_context: &FileReadContext,
+    path: &Path,
+) -> Result<(), String> {
+    for alias in registered_alias_paths(path, &read_context.worktree_mappings) {
+        check_file_privacy(
+            read_context.privacy_settings.clone(),
+            &alias,
+            &FilePrivacyLevel::AllowToSendAnywhere,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn prepare_file_read_context(
+    global_context: Arc<GlobalContext>,
+) -> FileReadContext {
+    FileReadContext {
+        privacy_settings: load_privacy_if_needed(global_context.clone()).await,
+        worktree_mappings: crate::files_correction::registered_worktree_path_mappings(
+            global_context.cache_dir.as_path(),
+        ),
+    }
+}
+
+pub(crate) async fn get_file_text_from_memory_or_disk_with_context(
+    global_context: Arc<GlobalContext>,
+    file_path: &PathBuf,
+    read_context: &FileReadContext,
+    max_bytes: Option<usize>,
+) -> Result<String, String> {
     let requested_path = crate::files_correction::canonical_path(file_path.to_string_lossy());
-    let mapped_path = normalize_path_for_workspace_state(&global_context, &requested_path);
-    check_file_privacy(
-        load_privacy_if_needed(global_context.clone()).await,
+    let mapped_path = crate::files_correction::normalize_path_for_unscoped_root_selection(
         &requested_path,
-        &FilePrivacyLevel::AllowToSendAnywhere,
-    )?;
+        &read_context.worktree_mappings,
+    )
+    .unwrap_or_else(|| requested_path.clone());
+    check_file_privacy_with_context(read_context, &requested_path)?;
 
     let doc = {
         let doc_map = global_context
@@ -162,42 +227,41 @@ pub async fn get_file_text_from_memory_or_disk(
     };
     if let Some(doc) = doc {
         let doc = doc.read().await;
-        if doc.doc_text.is_some() {
-            return Ok(doc.doc_text.as_ref().unwrap().to_string());
+        if let Some(text) = doc.doc_text.as_ref() {
+            if let Some(limit) = max_bytes {
+                if text.len_bytes() > limit {
+                    return Err(format!("File exceeds {} byte search limit", limit));
+                }
+            }
+            return Ok(text.to_string());
         }
     }
-    read_file_from_disk_without_privacy_check(&requested_path)
-        .await
-        .map(|x| x.to_string())
-        .map_err(|e| format!("Not found in memory, not found on disk: {}", e))
+    let text = match max_bytes {
+        Some(limit) => {
+            read_file_from_disk_without_privacy_check_limited(&requested_path, limit).await
+        }
+        None => read_file_from_disk_without_privacy_check(&requested_path).await,
+    }
+    .map_err(|e| format!("Not found in memory, not found on disk: {}", e))?;
+    Ok(text.to_string())
 }
 
 pub async fn check_file_privacy_for_send(
     global_context: Arc<GlobalContext>,
     file_path: &PathBuf,
 ) -> Result<(), String> {
-    check_file_privacy(
-        load_privacy_if_needed(global_context).await,
-        file_path,
-        &FilePrivacyLevel::AllowToSendAnywhere,
-    )
+    let read_context = prepare_file_read_context(global_context).await;
+    check_file_privacy_with_context(&read_context, file_path)
 }
 
 pub async fn filter_privacy_allowed_files(
     global_context: Arc<GlobalContext>,
     files: Vec<PathBuf>,
 ) -> Vec<PathBuf> {
-    let privacy = load_privacy_if_needed(global_context).await;
+    let read_context = prepare_file_read_context(global_context).await;
     files
         .into_iter()
-        .filter(|path| {
-            check_file_privacy(
-                privacy.clone(),
-                path,
-                &FilePrivacyLevel::AllowToSendAnywhere,
-            )
-            .is_ok()
-        })
+        .filter(|path| check_file_privacy_with_context(&read_context, path).is_ok())
         .collect()
 }
 
@@ -412,6 +476,47 @@ async fn read_file_from_disk_without_privacy_check(path: &PathBuf) -> Result<Rop
         })
 }
 
+async fn read_file_from_disk_without_privacy_check_limited(
+    path: &PathBuf,
+    max_bytes: usize,
+) -> Result<Rope, String> {
+    if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > max_bytes as u64) {
+        return Err(format!("File exceeds {} byte search limit", max_bytes));
+    }
+    let file = tokio::fs::File::open(path).await.map_err(|error| {
+        format!(
+            "failed to read file {}: {}",
+            crate::nicer_logs::last_n_chars(&path.display().to_string(), 30),
+            error
+        )
+    })?;
+    let read_limit = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX - 1)
+        .saturating_add(1);
+    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024).saturating_add(1));
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to read file {}: {}",
+                crate::nicer_logs::last_n_chars(&path.display().to_string(), 30),
+                error
+            )
+        })?;
+    if bytes.len() > max_bytes {
+        return Err(format!("File exceeds {} byte search limit", max_bytes));
+    }
+    let text = String::from_utf8(bytes).map_err(|error| {
+        format!(
+            "failed to read file {} as UTF-8: {}",
+            crate::nicer_logs::last_n_chars(&path.display().to_string(), 30),
+            error
+        )
+    })?;
+    Ok(Rope::from_str(&text))
+}
+
 pub async fn read_file_from_disk(
     privacy_settings: Arc<PrivacySettings>,
     path: &PathBuf,
@@ -568,6 +673,130 @@ pub fn ls_files(
     }
 
     Ok(paths)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LsFilesLimited {
+    pub files: Vec<PathBuf>,
+    pub truncated: bool,
+    pub aborted: bool,
+}
+
+impl LsFilesLimited {
+    fn stopped(&self) -> bool {
+        self.truncated || self.aborted
+    }
+}
+
+fn _ls_files_limited(
+    indexing_everywhere: &IndexingEverywhere,
+    scan_root: &Path,
+    path: &PathBuf,
+    recursive: bool,
+    blocklist_check: bool,
+    budget: &mut usize,
+    abort: Option<&AtomicBool>,
+    out: &mut LsFilesLimited,
+) {
+    let mut dirs_to_visit = vec![path.clone()];
+
+    while let Some(dir) = dirs_to_visit.pop() {
+        if abort.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            out.aborted = true;
+            return;
+        }
+        let ls_maybe = fs::read_dir(&dir);
+        if ls_maybe.is_err() {
+            info!(
+                "failed to read directory {}: {}",
+                dir.display(),
+                ls_maybe.unwrap_err()
+            );
+            continue;
+        }
+        let ls: fs::ReadDir = ls_maybe.unwrap();
+        let entries_maybe = ls.collect::<Result<Vec<_>, _>>();
+        if entries_maybe.is_err() {
+            info!(
+                "failed to read directory {}: {}",
+                dir.display(),
+                entries_maybe.unwrap_err()
+            );
+            continue;
+        }
+        let mut entries = entries_maybe.unwrap();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            if abort.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                out.aborted = true;
+                return;
+            }
+            if *budget == 0 {
+                out.truncated = true;
+                return;
+            }
+            *budget -= 1;
+
+            let abs_path = entry.path();
+            let indexing_settings = indexing_everywhere.indexing_for_path(&abs_path);
+            let rel_path = abs_path.strip_prefix(scan_root).unwrap_or(&abs_path);
+            if recursive && abs_path.is_dir() {
+                if !blocklist_check || !is_blocklisted(&indexing_settings, rel_path) {
+                    dirs_to_visit.push(abs_path);
+                }
+            } else if abs_path.is_file() {
+                out.files.push(abs_path);
+            }
+        }
+    }
+}
+
+pub fn ls_files_limited(
+    indexing_everywhere: &IndexingEverywhere,
+    path: &PathBuf,
+    recursive: bool,
+    max_entries: usize,
+    abort: Option<&AtomicBool>,
+) -> Result<LsFilesLimited, String> {
+    if !path.is_dir() {
+        return Err(format!("path '{}' is not a directory", path.display()));
+    }
+
+    let indexing_settings = indexing_everywhere.indexing_for_path(path);
+    let mut out = LsFilesLimited::default();
+    let mut budget = max_entries;
+
+    _ls_files_limited(
+        indexing_everywhere,
+        path.as_path(),
+        path,
+        recursive,
+        true,
+        &mut budget,
+        abort,
+        &mut out,
+    );
+
+    if recursive && !out.stopped() {
+        for additional_indexing_dir in indexing_settings.additional_indexing_dirs.iter() {
+            if out.stopped() {
+                break;
+            }
+            let additional_path = PathBuf::from(additional_indexing_dir);
+            _ls_files_limited(
+                indexing_everywhere,
+                additional_path.as_path(),
+                &additional_path,
+                recursive,
+                false,
+                &mut budget,
+                abort,
+                &mut out,
+            );
+        }
+    }
+
+    Ok(out)
 }
 
 pub async fn detect_vcs_for_a_file_path(file_path: &Path) -> Option<(PathBuf, &'static str)> {
@@ -2262,12 +2491,110 @@ mod tests {
         });
     }
 
+    fn set_blocked_privacy(gcx: &Arc<GlobalContext>, blocked: Vec<String>) {
+        *gcx.privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
+            privacy_rules: crate::privacy::FilePrivacySettings {
+                only_send_to_servers_I_control: Vec::new(),
+                blocked,
+            },
+            loaded_ts: u64::MAX / 2,
+        });
+    }
+
     fn path_counts(paths: &[PathBuf]) -> HashMap<PathBuf, usize> {
         let mut counts = HashMap::new();
         for path in paths {
             *counts.entry(path.clone()).or_insert(0) += 1;
         }
         counts
+    }
+
+    #[test]
+    fn ls_files_limited_stops_after_small_entry_budget_and_reports_truncation() {
+        let temp = tempfile::tempdir().unwrap();
+        for i in 0..50 {
+            write_file(&temp.path().join(format!("file_{:03}.txt", i)), "x");
+        }
+        let indexing_everywhere = IndexingEverywhere::default();
+        let result = ls_files_limited(
+            &indexing_everywhere,
+            &temp.path().to_path_buf(),
+            true,
+            5,
+            None,
+        )
+        .unwrap();
+        assert!(result.truncated, "expected truncated result");
+        assert!(!result.aborted, "did not expect abort");
+        assert!(
+            result.files.len() <= 5,
+            "collected {} files, expected <= budget",
+            result.files.len()
+        );
+        assert!(!result.files.is_empty(), "expected some files collected");
+    }
+
+    #[test]
+    fn ls_files_limited_observes_preset_abort_flag() {
+        let temp = tempfile::tempdir().unwrap();
+        for i in 0..10 {
+            write_file(&temp.path().join(format!("file_{:03}.txt", i)), "x");
+        }
+        let indexing_everywhere = IndexingEverywhere::default();
+        let abort = AtomicBool::new(true);
+        let result = ls_files_limited(
+            &indexing_everywhere,
+            &temp.path().to_path_buf(),
+            true,
+            usize::MAX,
+            Some(&abort),
+        )
+        .unwrap();
+        assert!(result.aborted, "expected aborted result");
+        assert!(
+            result.files.is_empty(),
+            "expected no files when aborted up-front"
+        );
+    }
+
+    #[test]
+    fn ls_files_limited_unlimited_budget_matches_small_directory_listing() {
+        let temp = tempfile::tempdir().unwrap();
+        write_file(&temp.path().join("a.txt"), "a");
+        write_file(&temp.path().join("sub").join("b.txt"), "b");
+        write_file(&temp.path().join("sub").join("c.txt"), "c");
+        let indexing_everywhere = IndexingEverywhere::default();
+
+        let unlimited = ls_files(&indexing_everywhere, &temp.path().to_path_buf(), true).unwrap();
+        let limited = ls_files_limited(
+            &indexing_everywhere,
+            &temp.path().to_path_buf(),
+            true,
+            usize::MAX,
+            None,
+        )
+        .unwrap();
+
+        assert!(!limited.truncated, "small dir should not be truncated");
+        assert!(!limited.aborted, "small dir should not be aborted");
+        assert_eq!(
+            path_counts(&limited.files),
+            path_counts(&unlimited),
+            "limited (unlimited budget) should match ls_files output"
+        );
+    }
+
+    #[test]
+    fn ls_files_limited_errors_on_non_directory_like_ls_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("not_a_dir.txt");
+        write_file(&file, "x");
+        let indexing_everywhere = IndexingEverywhere::default();
+        let err = ls_files_limited(&indexing_everywhere, &file, true, 10, None).unwrap_err();
+        assert!(
+            err.contains("is not a directory"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -2549,6 +2876,88 @@ mod tests {
         let memory_doc_map = gcx.documents_state.memory_document_map.lock().await;
         assert!(memory_doc_map.contains_key(&normalized(&source_file)));
         assert!(!memory_doc_map.contains_key(&normalized(&worktree_file)));
+    }
+
+    #[tokio::test]
+    async fn worktree_read_rejects_blocked_mapped_source_alias() {
+        let source_temp = tempfile::Builder::new()
+            .prefix("refact-src-")
+            .tempdir()
+            .unwrap();
+        let source = source_temp.path().join("blocked_source");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let source_file = source.join("src").join("lib.rs");
+        write_file(&source_file, "fn source() {}\n");
+        let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
+        let worktree_file = worktree.join("src").join("lib.rs");
+        write_file(&worktree_file, "fn worktree() {}\n");
+        write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+        set_blocked_privacy(&gcx, vec!["*/blocked_source/*".to_string()]);
+
+        let error = get_file_text_from_memory_or_disk(gcx, &worktree_file)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("privacy"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn source_read_rejects_blocked_worktree_alias_buffer() {
+        let source_temp = tempfile::Builder::new()
+            .prefix("refact-src-")
+            .tempdir()
+            .unwrap();
+        let source = source_temp.path().join("source");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let source_file = source.join("src").join("lib.rs");
+        write_file(&source_file, "fn source() {}\n");
+        let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
+        let worktree_file = worktree.join("src").join("lib.rs");
+        write_file(&worktree_file, "fn worktree() {}\n");
+        write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+        allow_all_privacy(&gcx);
+        on_did_open(
+            gcx.clone(),
+            &worktree_file,
+            &"fn unsaved() {}\n".to_string(),
+            &"rust".to_string(),
+        )
+        .await;
+        set_blocked_privacy(&gcx, vec!["*/worktrees/*/wt/*".to_string()]);
+
+        let error = get_file_text_from_memory_or_disk(gcx, &source_file)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("privacy"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn bounded_disk_read_accepts_limit_and_rejects_limit_plus_one() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        allow_all_privacy(&gcx);
+        let temp = tempfile::tempdir().unwrap();
+        let exact = temp.path().join("exact.txt");
+        let oversized = temp.path().join("oversized.txt");
+        std::fs::write(&exact, b"1234").unwrap();
+        std::fs::write(&oversized, b"12345").unwrap();
+        let read_context = prepare_file_read_context(gcx.clone()).await;
+
+        let exact_text = get_file_text_from_memory_or_disk_with_context(
+            gcx.clone(),
+            &exact,
+            &read_context,
+            Some(4),
+        )
+        .await
+        .unwrap();
+        let oversized_error =
+            get_file_text_from_memory_or_disk_with_context(gcx, &oversized, &read_context, Some(4))
+                .await
+                .unwrap_err();
+
+        assert_eq!(exact_text, "1234");
+        assert!(oversized_error.contains("exceeds 4 byte"));
     }
 
     #[tokio::test]

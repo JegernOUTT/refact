@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: setup_hooks
 title: Setup Hooks
 description: Guided setup for lifecycle hooks that run shell commands on agent events
@@ -156,6 +156,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: delegate_with_editing
 title: Delegate with Editing
 description: Editable delegate for scoped implementation tasks in the parent workspace
@@ -62,6 +62,7 @@ messages:
 tools:
   - tree
   - cat
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

@@ -2,11 +2,12 @@ use std::collections::HashSet;
 
 use super::types::ToolPolicy;
 
-pub const READ_ONLY_TOOLS: &[&str] = &["tree", "cat", "search_pattern"];
+pub const READ_ONLY_TOOLS: &[&str] = &["tree", "cat", "glob", "search_pattern"];
 
 const ALL_CANONICAL_TOOLS: &[&str] = &[
     "tree",
     "cat",
+    "glob",
     "search_pattern",
     "shell",
     "apply_patch",
@@ -26,7 +27,8 @@ pub struct ToolMappingResult {
 pub fn map_known_tool_alias(input: &str) -> Option<&'static str> {
     match normalized_tool_key(input).as_str() {
         "cat" | "read" | "read_file" => Some("cat"),
-        "tree" | "glob" | "list" | "ls" | "list_files" => Some("tree"),
+        "tree" | "list" | "ls" | "list_files" => Some("tree"),
+        "glob" => Some("glob"),
         "search_pattern" | "grep" | "search" | "search_files" => Some("search_pattern"),
         "shell" | "bash" | "execute_command" => Some("shell"),
         "apply_patch" | "write" | "edit" | "multiedit" | "patch" => Some("apply_patch"),
@@ -173,6 +175,7 @@ mod tests {
             result.tools,
             strings(&[
                 "cat",
+                "glob",
                 "tree",
                 "search_pattern",
                 "shell",
@@ -189,7 +192,10 @@ mod tests {
     fn missing_tool_policy_defaults_subagent_to_read_only() {
         let result = resolve_subagent_tools(&ToolPolicy::missing());
 
-        assert_eq!(result.tools, strings(&["tree", "cat", "search_pattern"]));
+        assert_eq!(
+            result.tools,
+            strings(&["tree", "cat", "glob", "search_pattern"])
+        );
         assert!(result.used_default);
     }
 
@@ -197,7 +203,10 @@ mod tests {
     fn ambiguous_unknown_only_policy_defaults_read_only_and_keeps_unknown() {
         let result = resolve_subagent_tools(&ToolPolicy::allow(strings(&["unknown_tool"])));
 
-        assert_eq!(result.tools, strings(&["tree", "cat", "search_pattern"]));
+        assert_eq!(
+            result.tools,
+            strings(&["tree", "cat", "glob", "search_pattern"])
+        );
         assert_eq!(result.unknown, strings(&["unknown_tool"]));
         assert!(result.used_default);
     }
@@ -206,7 +215,10 @@ mod tests {
     fn broad_allowed_policy_maps_to_read_only_tools() {
         let result = resolve_subagent_tools(&ToolPolicy::allow(strings(&["all", "*"])));
 
-        assert_eq!(result.tools, strings(&["tree", "cat", "search_pattern"]));
+        assert_eq!(
+            result.tools,
+            strings(&["tree", "cat", "glob", "search_pattern"])
+        );
         assert!(!result.tools.contains(&"shell".to_string()));
         assert!(!result.tools.contains(&"apply_patch".to_string()));
     }
@@ -217,7 +229,14 @@ mod tests {
 
         assert_eq!(
             result.tools,
-            strings(&["tree", "cat", "search_pattern", "shell", "apply_patch"])
+            strings(&[
+                "tree",
+                "cat",
+                "glob",
+                "search_pattern",
+                "shell",
+                "apply_patch",
+            ])
         );
     }
 

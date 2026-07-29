@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::info;
 
@@ -10,11 +11,13 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::{vec_context_file_to_context_tools, AtCommandsContext};
 use crate::at_commands::at_search::execute_at_search;
-use crate::files_in_workspace::get_file_text_from_memory_or_disk;
+use crate::files_in_workspace::{
+    get_file_text_from_memory_or_disk_with_context, prepare_file_read_context, FileReadContext,
+};
 use crate::global_context::GlobalContext;
 use crate::tools::scope_utils::{
     create_scope_filter_with_execution_scope, format_scope_notices, is_worktree_only_path,
-    remap_context_files_for_execution_scope, resolve_scope_with_execution_scope,
+    remap_context_files_for_execution_scope, resolve_scope_with_execution_scope_limited,
 };
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
@@ -32,10 +35,31 @@ const DEFAULT_MAX_FILES: usize = 50;
 const DEFAULT_MAX_RECS_PER_FILE: usize = 10;
 const DEFAULT_MAX_TOTAL_RECS: usize = 200;
 
+const CAP_CONTEXT_LINES: usize = 100;
+const CAP_MAX_FILES: usize = 1000;
+const CAP_MAX_RECS_PER_FILE: usize = 1000;
+const CAP_MAX_TOTAL_RECS: usize = 10000;
+
+const FALLBACK_MAX_CANDIDATE_FILES: usize = 5000;
+const MAX_SEARCH_FILE_BYTES: usize = 4 * 1024 * 1024;
+
+const ABORTED_ERROR: &str =
+    "⚠️ semantic_search worktree fallback aborted before completion (cancelled by caller).";
+
 fn parse_usize_arg(args: &HashMap<String, Value>, key: &str) -> Result<Option<usize>, String> {
     match args.get(key) {
-        Some(Value::Number(n)) => Ok(Some(n.as_u64().unwrap_or(0) as usize)),
-        Some(Value::String(s)) => Ok(Some(s.parse::<usize>().unwrap_or(0))),
+        Some(Value::Number(n)) => {
+            let value = n
+                .as_u64()
+                .ok_or_else(|| format!("argument `{}` must be a non-negative integer", key))?;
+            let value =
+                usize::try_from(value).map_err(|_| format!("argument `{}` is too large", key))?;
+            Ok(Some(value))
+        }
+        Some(Value::String(s)) => s
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|_| format!("argument `{}` must be a non-negative integer", key)),
         Some(v) => Err(format!("argument `{}` is not an integer: {:?}", key, v)),
         None => Ok(None),
     }
@@ -122,49 +146,89 @@ fn append_unseen_context_files(
     added
 }
 
+#[derive(Debug)]
+struct FallbackOutcome {
+    context_files: Vec<ContextFile>,
+    truncated: bool,
+}
+
 async fn direct_worktree_fallback_search(
     gcx: Arc<GlobalContext>,
     execution_scope: Option<&ExecutionScope>,
+    read_context: &FileReadContext,
     scope: &str,
     query: &str,
     context_lines: usize,
     limit: usize,
-) -> Result<Vec<ContextFile>, String> {
+    abort_flag: &AtomicBool,
+) -> Result<FallbackOutcome, String> {
+    let empty = FallbackOutcome {
+        context_files: Vec::new(),
+        truncated: false,
+    };
     let Some(execution_scope) = execution_scope else {
-        return Ok(Vec::new());
+        return Ok(empty);
     };
     if !execution_scope.is_enforced() || limit == 0 {
-        return Ok(Vec::new());
+        return Ok(empty);
+    }
+
+    if abort_flag.load(Ordering::Relaxed) {
+        return Err(ABORTED_ERROR.to_string());
     }
 
     let terms = query_terms(query);
     if terms.is_empty() {
-        return Ok(Vec::new());
+        return Ok(empty);
     }
 
-    let scoped_files =
-        resolve_scope_with_execution_scope(gcx.clone(), Some(execution_scope), scope).await?;
+    let scoped_files = resolve_scope_with_execution_scope_limited(
+        gcx.clone(),
+        Some(execution_scope),
+        scope,
+        FALLBACK_MAX_CANDIDATE_FILES,
+        Some(abort_flag),
+    )
+    .await?;
     let mut files = scoped_files.files;
     files.sort();
-    let mut context_files = Vec::new();
 
-    for file in files {
+    let mut context_files = Vec::new();
+    let mut candidates_inspected: usize = 0;
+    let mut truncated = !scoped_files.notices.is_empty();
+
+    for (idx, file) in files.iter().enumerate() {
+        if (idx & 0x3F) == 0 && abort_flag.load(Ordering::Relaxed) {
+            return Err(ABORTED_ERROR.to_string());
+        }
         if context_files.len() >= limit {
             break;
         }
-        let file_path = PathBuf::from(&file);
+        let file_path = PathBuf::from(file);
         if !is_worktree_only_path(execution_scope, &file_path) {
             continue;
         }
-        let file_content = match get_file_text_from_memory_or_disk(gcx.clone(), &file_path).await {
-            Ok(content) => content.to_string(),
+        if candidates_inspected >= FALLBACK_MAX_CANDIDATE_FILES {
+            truncated = true;
+            break;
+        }
+        candidates_inspected += 1;
+        let file_content = match get_file_text_from_memory_or_disk_with_context(
+            gcx.clone(),
+            &file_path,
+            read_context,
+            Some(MAX_SEARCH_FILE_BYTES),
+        )
+        .await
+        {
+            Ok(content) => content,
             Err(_) => continue,
         };
         if let Some((line1, line2, usefulness)) =
-            direct_fallback_window(&file, &file_content, &terms, context_lines)
+            direct_fallback_window(file, &file_content, &terms, context_lines)
         {
             context_files.push(ContextFile {
-                file_name: file,
+                file_name: file.clone(),
                 file_content: String::new(),
                 line1,
                 line2,
@@ -177,7 +241,10 @@ async fn direct_worktree_fallback_search(
         }
     }
 
-    Ok(context_files)
+    Ok(FallbackOutcome {
+        context_files,
+        truncated,
+    })
 }
 
 async fn execute_att_search(
@@ -187,9 +254,13 @@ async fn execute_att_search(
     context_lines: usize,
     fallback_limit: usize,
 ) -> Result<(Vec<ContextFile>, Vec<String>), String> {
-    let (gcx, execution_scope) = {
+    let (gcx, execution_scope, abort_flag) = {
         let cgcx = ccx.lock().await;
-        (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
+        (
+            cgcx.app.gcx.clone(),
+            cgcx.execution_scope.clone(),
+            cgcx.abort_flag.clone(),
+        )
     };
 
     let scoped_filter =
@@ -206,20 +277,34 @@ async fn execute_att_search(
     .await?;
     let mut notices = scoped_filter.notices;
     notices.extend(remap_notices);
-    let fallback_context_files = direct_worktree_fallback_search(
+
+    let read_context = prepare_file_read_context(gcx.clone()).await;
+    let fallback_outcome = direct_worktree_fallback_search(
         gcx.clone(),
         execution_scope.as_ref(),
+        &read_context,
         scope,
         query,
         context_lines,
         fallback_limit,
+        &abort_flag,
     )
     .await?;
+    let FallbackOutcome {
+        context_files: fallback_context_files,
+        truncated,
+    } = fallback_outcome;
     let added = append_unseen_context_files(&mut context_files, fallback_context_files);
     if added > 0 {
         notices.push(format!(
             "⚠️ Direct worktree filesystem fallback added {} worktree-only result(s) not present in the source index.",
             added
+        ));
+    }
+    if truncated {
+        notices.push(format!(
+            "⚠️ Direct worktree filesystem fallback inspected only the first {} worktree-only candidate file(s); results may be incomplete. Narrow the scope for a complete fallback.",
+            FALLBACK_MAX_CANDIDATE_FILES
         ));
     }
     Ok((context_files, notices))
@@ -265,13 +350,18 @@ impl Tool for ToolSearch {
             }
         };
 
-        let context_lines =
-            parse_usize_arg(args, "context_lines")?.unwrap_or(DEFAULT_CONTEXT_LINES);
-        let max_files = parse_usize_arg(args, "max_files")?.unwrap_or(DEFAULT_MAX_FILES);
-        let max_recs_per_file =
-            parse_usize_arg(args, "max_recs_per_file")?.unwrap_or(DEFAULT_MAX_RECS_PER_FILE);
-        let max_total_recs =
-            parse_usize_arg(args, "max_total_recs")?.unwrap_or(DEFAULT_MAX_TOTAL_RECS);
+        let context_lines = parse_usize_arg(args, "context_lines")?
+            .unwrap_or(DEFAULT_CONTEXT_LINES)
+            .min(CAP_CONTEXT_LINES);
+        let max_files = parse_usize_arg(args, "max_files")?
+            .unwrap_or(DEFAULT_MAX_FILES)
+            .clamp(1, CAP_MAX_FILES);
+        let max_recs_per_file = parse_usize_arg(args, "max_recs_per_file")?
+            .unwrap_or(DEFAULT_MAX_RECS_PER_FILE)
+            .clamp(1, CAP_MAX_RECS_PER_FILE);
+        let max_total_recs = parse_usize_arg(args, "max_total_recs")?
+            .unwrap_or(DEFAULT_MAX_TOTAL_RECS)
+            .clamp(1, CAP_MAX_TOTAL_RECS);
 
         let queries: Vec<String> = query_str
             .split(',')
@@ -438,5 +528,187 @@ impl Tool for ToolSearch {
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec!["vecdb".to_string()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::privacy::{FilePrivacySettings, PrivacySettings};
+    use crate::worktrees::types::WorktreeMeta;
+    use std::fs;
+    use std::sync::atomic::AtomicBool;
+
+    async fn make_gcx() -> Arc<GlobalContext> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
+            privacy_rules: FilePrivacySettings {
+                only_send_to_servers_I_control: Vec::new(),
+                blocked: Vec::new(),
+            },
+            loaded_ts: u64::MAX / 2,
+        });
+        gcx
+    }
+
+    struct FallbackFixture {
+        _temp: tempfile::TempDir,
+        worktree: WorktreeMeta,
+        root: PathBuf,
+    }
+
+    fn make_fallback_fixture() -> FallbackFixture {
+        let temp = tempfile::Builder::new()
+            .prefix("refact-semantic-fallback-")
+            .tempdir()
+            .unwrap();
+        let root = temp
+            .path()
+            .join(".cache")
+            .join("refact")
+            .join("worktrees")
+            .join("wt")
+            .join("engine");
+        let source = temp.path().join("source");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(source.join("src")).unwrap();
+        let root = dunce::simplified(&fs::canonicalize(&root).unwrap()).to_path_buf();
+        let source = dunce::simplified(&fs::canonicalize(&source).unwrap()).to_path_buf();
+        let worktree = WorktreeMeta {
+            id: "wt-semantic-fallback".to_string(),
+            kind: "chat".to_string(),
+            root: root.clone(),
+            source_workspace_root: source.clone(),
+            repo_root: source.clone(),
+            branch: Some("feature".to_string()),
+            base_branch: Some("main".to_string()),
+            base_commit: Some("base".to_string()),
+            task_id: None,
+            card_id: None,
+            agent_id: None,
+            enforce: true,
+        };
+        FallbackFixture {
+            _temp: temp,
+            worktree,
+            root,
+        }
+    }
+
+    #[test]
+    fn parse_usize_arg_rejects_invalid_values() {
+        let invalid_string =
+            HashMap::from_iter([("max_files".to_string(), Value::String("many".to_string()))]);
+        let negative = HashMap::from_iter([("max_files".to_string(), Value::from(-1))]);
+        let fractional = HashMap::from_iter([("context_lines".to_string(), Value::from(1.5))]);
+
+        assert!(parse_usize_arg(&invalid_string, "max_files").is_err());
+        assert!(parse_usize_arg(&negative, "max_files").is_err());
+        assert!(parse_usize_arg(&fractional, "context_lines").is_err());
+        assert_eq!(parse_usize_arg(&HashMap::new(), "max_files").unwrap(), None);
+        assert_eq!(
+            parse_usize_arg(
+                &HashMap::from_iter([("max_files".to_string(), Value::from(7u64))]),
+                "max_files"
+            )
+            .unwrap(),
+            Some(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_skips_oversized_worktree_only_file() {
+        let gcx = make_gcx().await;
+        let fixture = make_fallback_fixture();
+        let big = fixture.root.join("src").join("huge.rs");
+        let mut content = String::from("needle marker\n");
+        content.push_str(&"a".repeat(MAX_SEARCH_FILE_BYTES + 1));
+        fs::write(&big, content).unwrap();
+
+        let scope = ExecutionScope::from_worktree(&fixture.worktree);
+        let read_context = prepare_file_read_context(gcx.clone()).await;
+        let abort = AtomicBool::new(false);
+
+        let outcome = direct_worktree_fallback_search(
+            gcx,
+            Some(&scope),
+            &read_context,
+            "workspace",
+            "needle",
+            0,
+            50,
+            &abort,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            outcome.context_files.is_empty(),
+            "oversized worktree-only file must be skipped by the capped read"
+        );
+        assert!(!outcome.truncated);
+    }
+
+    #[tokio::test]
+    async fn fallback_stops_at_candidate_budget_and_reports_truncation() {
+        let gcx = make_gcx().await;
+        let fixture = make_fallback_fixture();
+        for idx in 0..(FALLBACK_MAX_CANDIDATE_FILES + 5) {
+            let path = fixture.root.join("src").join(format!("f_{idx:05}.rs"));
+            fs::write(&path, "harmless content\n").unwrap();
+        }
+
+        let scope = ExecutionScope::from_worktree(&fixture.worktree);
+        let read_context = prepare_file_read_context(gcx.clone()).await;
+        let abort = AtomicBool::new(false);
+
+        let outcome = direct_worktree_fallback_search(
+            gcx,
+            Some(&scope),
+            &read_context,
+            "workspace",
+            "needle",
+            0,
+            50,
+            &abort,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            outcome.truncated,
+            "candidate budget must stop the fallback and flag truncation"
+        );
+        assert!(outcome.context_files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fallback_respects_preset_abort_flag() {
+        let gcx = make_gcx().await;
+        let fixture = make_fallback_fixture();
+        let file = fixture.root.join("src").join("worktree_only.rs");
+        fs::write(&file, "needle marker\n").unwrap();
+
+        let scope = ExecutionScope::from_worktree(&fixture.worktree);
+        let read_context = prepare_file_read_context(gcx.clone()).await;
+        let abort = AtomicBool::new(true);
+
+        let result = direct_worktree_fallback_search(
+            gcx,
+            Some(&scope),
+            &read_context,
+            "workspace",
+            "needle",
+            0,
+            50,
+            &abort,
+        )
+        .await;
+
+        assert!(result.is_err(), "preset abort must return an error");
+        assert!(
+            result.unwrap_err().contains("aborted"),
+            "error should mention the abort"
+        );
     }
 }

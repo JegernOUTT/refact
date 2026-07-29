@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: subagent
 title: Subagent
 description: General-purpose focused read-only subagent for delegated research and exploration tasks
@@ -87,6 +87,7 @@ messages:
 tools:
   - tree
   - cat
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

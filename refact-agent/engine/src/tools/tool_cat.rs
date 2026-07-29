@@ -18,12 +18,14 @@ use crate::files_correction::{
     preprocess_path_for_normalization,
 };
 use crate::files_in_workspace::{
-    check_file_privacy_for_send, get_file_text_from_memory_or_disk, ls_files,
+    check_file_privacy_for_send, get_file_text_from_memory_or_disk_with_context, ls_files_limited,
+    prepare_file_read_context,
 };
 use crate::scratchpads::multimodality::MultimodalElement;
 use crate::knowledge_index::format_related_memories_section;
 use crate::tools::scope_utils::{
-    format_scope_notices, list_scoped_files_under_dir, resolve_existing_path_with_execution_scope,
+    format_scope_notices, list_scoped_files_under_dir_limited,
+    resolve_existing_path_with_execution_scope,
 };
 
 use std::io::Cursor;
@@ -36,6 +38,11 @@ pub struct ToolCat {
 
 const CAT_MAX_IMAGES_CNT: usize = 1;
 const CAT_MAX_LINES: usize = 2000;
+const CAT_MAX_INPUT_PATHS: usize = 128;
+const CAT_MAX_EXPANDED_FILES: usize = 512;
+const CAT_MAX_RANGE_SPAN: usize = CAT_MAX_LINES;
+const CAT_MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
+const CAT_MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 
 type CatLineRange = (usize, usize);
 
@@ -116,6 +123,10 @@ fn parse_cat_args(
             path: file_path,
             line_range: range,
         });
+    }
+
+    if paths.len() > CAT_MAX_INPUT_PATHS {
+        paths.truncate(CAT_MAX_INPUT_PATHS);
     }
 
     let symbols = match args.get("symbols") {
@@ -287,6 +298,15 @@ fn get_file_type(path: &PathBuf) -> String {
 }
 
 async fn load_image(path: &String, f_type: &String) -> Result<MultimodalElement, String> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| format!("{} image metadata failed: {}", path, error))?;
+    if metadata.len() > CAT_MAX_IMAGE_BYTES {
+        return Err(format!(
+            "{} image exceeds the {} byte input limit",
+            path, CAT_MAX_IMAGE_BYTES
+        ));
+    }
     let extension = path.split(".").last().unwrap().to_string();
     let mut f_type = f_type.clone();
 
@@ -358,6 +378,14 @@ async fn load_image(path: &String, f_type: &String) -> Result<MultimodalElement,
     let m_content = base64::encode(&data);
 
     MultimodalElement::new(f_type.clone(), m_content)
+}
+
+fn clamp_cat_line_range(line_range: Option<CatLineRange>) -> Option<CatLineRange> {
+    line_range.map(|(start, end)| {
+        let start = start.max(1);
+        let max_end = start.saturating_add(CAT_MAX_RANGE_SPAN.saturating_sub(1));
+        (start, end.min(max_end))
+    })
 }
 
 fn cat_resolved_path_key(path: &str) -> String {
@@ -490,21 +518,28 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
     Vec<MultimodalElement>,
     Vec<String>,
 ) {
-    let (gcx, top_n, execution_scope) = {
+    let (gcx, top_n, execution_scope, abort_flag) = {
         let cgcx = ccx.lock().await;
         (
             cgcx.app.gcx.clone(),
             cgcx.top_n,
             cgcx.execution_scope.clone(),
+            cgcx.abort_flag.clone(),
         )
     };
+    let aborted = || abort_flag.load(std::sync::atomic::Ordering::Relaxed);
     let mut not_found_messages = vec![];
     let mut scope_notices = vec![];
     let mut resolved_paths = vec![];
     let mut seen_by_path = HashMap::new();
+    let mut expanded_files_count: usize = 0;
+    let mut expansion_capped = false;
 
     for request in paths {
-        let line_range = request.line_range;
+        if aborted() {
+            break;
+        }
+        let line_range = clamp_cat_line_range(request.line_range);
         let p = request.path;
         if execution_scope
             .as_ref()
@@ -521,11 +556,24 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
                 Ok(Some(resolved)) => {
                     scope_notices.extend(resolved.notices);
                     if resolved.path.is_dir() {
-                        match list_scoped_files_under_dir(gcx.clone(), &resolved.path, false, true)
-                            .await
+                        let remaining = CAT_MAX_EXPANDED_FILES.saturating_sub(expanded_files_count);
+                        match list_scoped_files_under_dir_limited(
+                            gcx.clone(),
+                            &resolved.path,
+                            false,
+                            true,
+                            remaining.saturating_add(1),
+                            Some(&abort_flag),
+                        )
+                        .await
                         {
-                            Ok(files_in_dir) => {
-                                for file in files_in_dir {
+                            Ok(listing) => {
+                                expansion_capped |= listing.truncated;
+                                for file in listing.files {
+                                    if expanded_files_count >= CAT_MAX_EXPANDED_FILES {
+                                        expansion_capped = true;
+                                        break;
+                                    }
                                     let file_str = file.to_string_lossy().to_string();
                                     push_cat_resolved_file(
                                         &mut resolved_paths,
@@ -534,6 +582,7 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
                                         line_range,
                                         CatResolvedSource::DirectoryExpansion,
                                     );
+                                    expanded_files_count += 1;
                                 }
                             }
                             Err(e) => not_found_messages.push(e),
@@ -614,8 +663,21 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
             let path_buf = PathBuf::from(candidate);
             let indexing_everywhere =
                 crate::files_blocklist::reload_indexing_everywhere_if_needed(gcx.clone()).await;
-            let files_in_dir = ls_files(&indexing_everywhere, &path_buf, false).unwrap_or(vec![]);
-            for file in files_in_dir {
+            let remaining = CAT_MAX_EXPANDED_FILES.saturating_sub(expanded_files_count);
+            let listing = ls_files_limited(
+                &indexing_everywhere,
+                &path_buf,
+                false,
+                remaining.saturating_add(1),
+                Some(&abort_flag),
+            )
+            .unwrap_or_default();
+            expansion_capped |= listing.truncated;
+            for file in listing.files {
+                if expanded_files_count >= CAT_MAX_EXPANDED_FILES {
+                    expansion_capped = true;
+                    break;
+                }
                 let file_str = file.to_string_lossy().to_string();
                 push_cat_resolved_file(
                     &mut resolved_paths,
@@ -624,8 +686,32 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
                     line_range,
                     CatResolvedSource::DirectoryExpansion,
                 );
+                expanded_files_count += 1;
             }
         }
+    }
+
+    if expansion_capped {
+        not_found_messages.push(format!(
+            "⚠️ directory expansion produced more than {} files, showing the first {}. 💡 Narrow the path or cat() specific files.",
+            CAT_MAX_EXPANDED_FILES, CAT_MAX_EXPANDED_FILES
+        ));
+    }
+
+    {
+        let mut allowed_paths: Vec<CatResolvedPath> = Vec::with_capacity(resolved_paths.len());
+        for request in resolved_paths.into_iter() {
+            let path_buf = PathBuf::from(&request.path);
+            if check_file_privacy_for_send(gcx.clone(), &path_buf)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            allowed_paths.push(request);
+        }
+        resolved_paths = allowed_paths;
+        rebuild_cat_seen_by_path(&resolved_paths, &mut seen_by_path);
     }
 
     let mut context_enums = vec![];
@@ -634,7 +720,11 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
     let mut filenames_present = vec![];
     let mut multimodal: Vec<MultimodalElement> = vec![];
 
-    let codegraph_opt = gcx.codegraph.lock().await.clone();
+    let codegraph_opt = if aborted() {
+        None
+    } else {
+        gcx.codegraph.lock().await.clone()
+    };
     if let Some(service) = &codegraph_opt {
         for request in resolved_paths.iter() {
             let p = &request.path;
@@ -709,11 +799,15 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
         })
         .collect::<Vec<_>>();
 
+    let read_context = prepare_file_read_context(gcx.clone()).await;
     let mut image_counter = 0;
     for request in resolved_paths
         .iter()
         .filter(|request| !filenames_got_symbols_for.contains(&request.path))
     {
+        if aborted() {
+            break;
+        }
         let p = &request.path;
         let line_range = request.line_range;
 
@@ -744,7 +838,14 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
                 }
             }
         } else {
-            match get_file_text_from_memory_or_disk(gcx.clone(), &path_buf).await {
+            match get_file_text_from_memory_or_disk_with_context(
+                gcx.clone(),
+                &path_buf,
+                &read_context,
+                Some(CAT_MAX_FILE_BYTES),
+            )
+            .await
+            {
                 Ok(text) => {
                     let total_lines = text.lines().count();
                     let (start_line, end_line) = match line_range {
@@ -786,7 +887,16 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
                     context_enums.push(ContextEnum::ContextFile(cf));
                 }
                 Err(e) => {
-                    not_found_messages.push(format!("{}: {}", p, e));
+                    if e.contains("byte search limit") {
+                        filenames_present
+                            .push(refact_core::chat_types::normalize_file_name(p.clone()));
+                        not_found_messages.push(format!(
+                            "⚠️ {} exceeds the {} byte read limit and was skipped. 💡 Use cat('{}:START-END') to read a specific line range.",
+                            p, CAT_MAX_FILE_BYTES, p
+                        ));
+                    } else {
+                        not_found_messages.push(format!("{}: {}", p, e));
+                    }
                 }
             }
         }
@@ -817,13 +927,20 @@ mod tests {
     use crate::privacy::{FilePrivacySettings, PrivacySettings};
 
     async fn ccx_for_root(root: &std::path::Path) -> Arc<AMutex<AtCommandsContext>> {
+        ccx_for_root_with_blocked(root, vec![]).await
+    }
+
+    async fn ccx_for_root_with_blocked(
+        root: &std::path::Path,
+        blocked: Vec<String>,
+    ) -> Arc<AMutex<AtCommandsContext>> {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![canonical_path(root.to_string_lossy())];
         *gcx.privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
             privacy_rules: FilePrivacySettings {
                 only_send_to_servers_I_control: vec![],
-                blocked: vec![],
+                blocked,
             },
             loaded_ts: u64::MAX / 2,
         });
@@ -999,6 +1116,116 @@ mod tests {
         assert_eq!(
             context_file_ranges(&results),
             vec![(normalized(&other), 1, 4), (normalized(&file), 3, 5)]
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_cat_blocked_file_is_never_disclosed() {
+        let temp = tempfile::Builder::new()
+            .prefix("refact-tool-cat-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path().join("src");
+        let visible = dir.join("visible.rs");
+        let secret = dir.join("secret.rs");
+        write_lines(&visible, 4);
+        write_lines(&secret, 4);
+        let ccx = ccx_for_root_with_blocked(temp.path(), vec!["*/secret.rs".to_string()]).await;
+
+        let results = run_cat(
+            ccx,
+            format!("{},{}", dir.to_string_lossy(), secret.to_string_lossy()),
+        )
+        .await;
+
+        let secret_norm = normalized(&secret);
+        assert!(
+            context_file_ranges(&results)
+                .iter()
+                .all(|(name, _, _)| name != &secret_norm),
+            "blocked file leaked as a context file: {}",
+            tool_text(&results)
+        );
+        let text = tool_text(&results);
+        assert!(
+            !text.contains("secret.rs"),
+            "blocked file path leaked in text output: {}",
+            text
+        );
+        let visible_norm = normalized(&visible);
+        assert!(
+            context_file_ranges(&results)
+                .iter()
+                .any(|(name, _, _)| name == &visible_norm),
+            "visible file was unexpectedly dropped: {}",
+            text
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_cat_directory_expansion_is_bounded() {
+        let temp = tempfile::Builder::new()
+            .prefix("refact-tool-cat-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path().join("many");
+        std::fs::create_dir_all(&dir).unwrap();
+        let total = CAT_MAX_EXPANDED_FILES + 5;
+        for i in 0..total {
+            let f = dir.join(format!("f{:04}.rs", i));
+            std::fs::write(&f, "line 1\n").unwrap();
+        }
+        let ccx = ccx_for_root(temp.path()).await;
+
+        let results = run_cat(ccx, dir.to_string_lossy().to_string()).await;
+
+        let emitted = context_file_ranges(&results).len();
+        assert!(
+            emitted <= CAT_MAX_EXPANDED_FILES,
+            "directory expansion was not bounded: emitted {} > cap {}",
+            emitted,
+            CAT_MAX_EXPANDED_FILES
+        );
+        let text = tool_text(&results);
+        assert!(
+            text.contains("directory expansion produced more than"),
+            "expected an expansion-cap notice, got: {}",
+            text
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_cat_large_file_is_bounded() {
+        let temp = tempfile::Builder::new()
+            .prefix("refact-tool-cat-")
+            .tempdir()
+            .unwrap();
+        let big = temp.path().join("big.rs");
+        std::fs::create_dir_all(big.parent().unwrap()).unwrap();
+        let chunk = "x".repeat(1024);
+        let mut content = String::with_capacity(CAT_MAX_FILE_BYTES + 4096);
+        while content.len() <= CAT_MAX_FILE_BYTES + 2048 {
+            content.push_str(&chunk);
+            content.push('\n');
+        }
+        std::fs::write(&big, content).unwrap();
+        let ccx = ccx_for_root(temp.path()).await;
+
+        let results = run_cat(ccx, big.to_string_lossy().to_string()).await;
+
+        let big_norm = normalized(&big);
+        assert!(
+            context_file_ranges(&results)
+                .iter()
+                .all(|(name, _, _)| name != &big_norm),
+            "oversized file was emitted despite the byte cap: {}",
+            tool_text(&results)
+        );
+        let text = tool_text(&results);
+        assert!(
+            text.contains("exceeds the") && text.contains("byte read limit"),
+            "expected an oversized-file notice, got: {}",
+            text
         );
     }
 }

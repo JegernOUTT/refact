@@ -12,6 +12,7 @@ const CC_TOOL_ALIASES: Partial<Record<string, string>> = {
   symbol_def: "search_symbol_definition",
   semantic_search: "search_semantic",
   regex_search: "search_pattern",
+  glob: "glob",
   plan: "strategic_planning",
   research: "deep_research",
   review: "code_review",
@@ -42,7 +43,7 @@ const CC_TOOL_ALIASES: Partial<Record<string, string>> = {
 const CLAUDE_CODE_TOOL_ALIASES: Partial<Record<string, string>> = {
   task: "subagent",
   bash: "shell",
-  glob: "search_pattern",
+  glob: "glob",
   grep: "search_pattern",
   ls: "tree",
   read: "cat",

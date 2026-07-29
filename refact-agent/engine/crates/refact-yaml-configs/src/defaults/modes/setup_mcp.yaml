@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: setup_mcp
 title: Setup MCP
 description: Discover and configure suitable MCP servers for the project
@@ -182,6 +182,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

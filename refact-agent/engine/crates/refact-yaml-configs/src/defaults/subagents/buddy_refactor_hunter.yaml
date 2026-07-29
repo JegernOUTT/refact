@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: buddy_refactor_hunter
 title: Refactor Hunter
 description: Weekly hunt for small refactor wins
@@ -35,6 +35,7 @@ tools:
   - tree
   - cat
   - symbol_def
+  - glob
   - search_pattern
   - buddy_runtime_event
   - buddy_memory_create

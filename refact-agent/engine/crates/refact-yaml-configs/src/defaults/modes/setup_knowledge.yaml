@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: setup_knowledge
 title: Seed Knowledge
 description: Guided seeding of durable project knowledge and memory
@@ -106,6 +106,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

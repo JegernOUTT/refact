@@ -1,4 +1,4 @@
-schema_version: 17
+schema_version: 18
 id: setup_subagents
 title: Setup Subagents
 description: Guided setup for project-specific subagents
@@ -197,6 +197,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

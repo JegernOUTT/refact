@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: buddy_security_whisperer
 title: Security Whisperer
 description: Review security-sensitive evidence and nudge the user toward safer defaults.
@@ -48,6 +48,7 @@ messages:
 
 tools:
   - cat
+  - glob
   - search_pattern
   - buddy_runtime_event
   - buddy_open_issue

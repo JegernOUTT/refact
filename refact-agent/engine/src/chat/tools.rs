@@ -63,6 +63,17 @@ pub struct ExecuteToolsOptions {
     pub allowed_tools: Vec<String>,
 }
 
+fn tool_execution_messages(
+    messages: &[ChatMessage],
+    last_prompt_messages: &[ChatMessage],
+) -> Vec<ChatMessage> {
+    if last_prompt_messages.is_empty() {
+        messages.to_vec()
+    } else {
+        last_prompt_messages.to_vec()
+    }
+}
+
 pub enum ToolStepOutcome {
     NoToolCalls,
     Paused,
@@ -124,27 +135,6 @@ fn is_server_executed_tool(tool_call_id: &str) -> bool {
     tool_call_id.starts_with("srvtoolu_")
 }
 
-fn glob_pattern_to_regex(pattern: &str) -> String {
-    let mut out = String::new();
-    let mut chars = pattern.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '*' if chars.peek() == Some(&'*') => {
-                chars.next();
-                out.push_str(".*");
-            }
-            '*' => out.push_str("[^/]*"),
-            '?' => out.push('.'),
-            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' | '\\' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 fn rewrite_cc_native_stub_tool_call(tc: &mut ChatToolCall) {
     let name = tc.function.name.as_str();
     if name != "Grep" && name != "Glob" {
@@ -153,7 +143,7 @@ fn rewrite_cc_native_stub_tool_call(tc: &mut ChatToolCall) {
 
     let args = tc.function.parse_args().unwrap_or_default();
     let mut mapped = serde_json::Map::new();
-    match name {
+    let canonical_name = match name {
         "Grep" => {
             let pattern = args
                 .get("pattern")
@@ -169,25 +159,30 @@ fn rewrite_cc_native_stub_tool_call(tc: &mut ChatToolCall) {
                 "scope".to_string(),
                 serde_json::Value::String(scope.to_string()),
             );
+            "search_pattern"
         }
         "Glob" => {
             let pattern = args
                 .get("pattern")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::String(String::new()));
+            mapped.insert("pattern".to_string(), pattern);
+            if let Some(path) = args
+                .get("path")
                 .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            mapped.insert(
-                "pattern".to_string(),
-                serde_json::Value::String(glob_pattern_to_regex(pattern)),
-            );
-            mapped.insert(
-                "scope".to_string(),
-                serde_json::Value::String("workspace".to_string()),
-            );
+                .filter(|s| !s.trim().is_empty())
+            {
+                mapped.insert(
+                    "path".to_string(),
+                    serde_json::Value::String(path.to_string()),
+                );
+            }
+            "glob"
         }
         _ => return,
-    }
+    };
 
-    tc.function.name = "search_pattern".to_string();
+    tc.function.name = canonical_name.to_string();
     tc.function.arguments = serde_json::Value::Object(mapped).to_string();
 }
 
@@ -219,12 +214,15 @@ pub async fn resolve_tool_call_aliases(
     tool_calls
         .into_iter()
         .map(|mut tc| {
+            if matches!(tc.function.name.as_str(), "Grep" | "Glob") {
+                rewrite_cc_native_stub_tool_call(&mut tc);
+                return tc;
+            }
             if tc
                 .function
                 .name
                 .starts_with(crate::llm::adapters::claude_code_compat::MCP_TOOL_PREFIX)
             {
-                // t_-prefixed CC builtin: reverse CC rename, then try alias registry.
                 let cc_resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
                     &tc.function.name,
                 );
@@ -238,9 +236,13 @@ pub async fn resolve_tool_call_aliases(
                 } else {
                     tc.function.name = cc_resolved;
                 }
-            } else if needs_cc {
-                // CC mode: bare names are MCP tools with mcp_ stripped outbound.
-                // Re-add mcp_ so confirmation and dispatch find them in the registry.
+            } else if let Some(internal_name) = registry.resolve_alias(&tc.function.name) {
+                tc.function.name = internal_name.to_string();
+            } else if needs_cc
+                && !tool_names
+                    .iter()
+                    .any(|tool_name| tool_name == &tc.function.name)
+            {
                 let cc_resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
                     &tc.function.name,
                 );
@@ -249,10 +251,7 @@ pub async fn resolve_tool_call_aliases(
                 } else {
                     tc.function.name = cc_resolved;
                 }
-            } else if let Some(internal_name) = registry.resolve_alias(&tc.function.name) {
-                tc.function.name = internal_name.to_string();
             }
-            rewrite_cc_native_stub_tool_call(&mut tc);
             tc
         })
         .collect()
@@ -533,6 +532,18 @@ mod tests {
     }
 
     #[test]
+    fn tool_execution_messages_prefers_prepared_prompt_history() {
+        let raw = vec![ChatMessage::new("user".to_string(), "raw".to_string())];
+        let prepared = vec![ChatMessage::new("user".to_string(), "prepared".to_string())];
+
+        let selected_prepared = tool_execution_messages(&raw, &prepared);
+        let selected_raw = tool_execution_messages(&raw, &[]);
+
+        assert_eq!(selected_prepared[0].content.content_text_only(), "prepared");
+        assert_eq!(selected_raw[0].content.content_text_only(), "raw");
+    }
+
+    #[test]
     fn test_rewrite_cc_native_grep_tool_call() {
         let mut tc = ChatToolCall {
             id: "call-1".to_string(),
@@ -568,16 +579,114 @@ mod tests {
 
         rewrite_cc_native_stub_tool_call(&mut tc);
 
-        assert_eq!(tc.function.name, "search_pattern");
+        assert_eq!(tc.function.name, "glob");
         let args = tc.function.parse_args().unwrap();
         assert_eq!(
             args.get("pattern").and_then(|v| v.as_str()),
-            Some("src/.*/[^/]*\\.rs")
+            Some("src/**/*.rs")
         );
+        assert!(args.get("path").is_none());
+        assert!(args.get("scope").is_none());
+    }
+
+    #[test]
+    fn test_rewrite_cc_native_glob_preserves_path() {
+        let mut tc = ChatToolCall {
+            id: "call-2".to_string(),
+            index: None,
+            function: crate::call_validation::ChatToolFunction {
+                name: "Glob".to_string(),
+                arguments: r#"{"pattern":"*.rs","path":"engine/src"}"#.to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+        };
+
+        rewrite_cc_native_stub_tool_call(&mut tc);
+
+        assert_eq!(tc.function.name, "glob");
+        let args = tc.function.parse_args().unwrap();
+        assert_eq!(args.get("pattern").and_then(|v| v.as_str()), Some("*.rs"));
         assert_eq!(
-            args.get("scope").and_then(|v| v.as_str()),
-            Some("workspace")
+            args.get("path").and_then(|v| v.as_str()),
+            Some("engine/src")
         );
+    }
+
+    #[test]
+    fn test_mixed_cc_batch_preserves_native_stub_rewrites() {
+        let mut glob = ChatToolCall {
+            id: "call-glob".to_string(),
+            index: None,
+            function: crate::call_validation::ChatToolFunction {
+                name: "Glob".to_string(),
+                arguments: r#"{"pattern":"src/**/*.rs"}"#.to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+        };
+        let mut grep = ChatToolCall {
+            id: "call-grep".to_string(),
+            index: None,
+            function: crate::call_validation::ChatToolFunction {
+                name: "Grep".to_string(),
+                arguments: r#"{"pattern":"needle"}"#.to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+        };
+
+        rewrite_cc_native_stub_tool_call(&mut glob);
+        rewrite_cc_native_stub_tool_call(&mut grep);
+
+        assert_eq!(glob.function.name, "glob");
+        assert_eq!(grep.function.name, "search_pattern");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_tool_call_aliases_handles_mixed_cc_batch_per_call() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let calls = vec![
+            ChatToolCall {
+                id: "call-cat".to_string(),
+                index: None,
+                function: crate::call_validation::ChatToolFunction {
+                    name: "t_cat".to_string(),
+                    arguments: r#"{"paths":"src/lib.rs"}"#.to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            },
+            ChatToolCall {
+                id: "call-tree".to_string(),
+                index: None,
+                function: crate::call_validation::ChatToolFunction {
+                    name: "tree".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            },
+            ChatToolCall {
+                id: "call-glob".to_string(),
+                index: None,
+                function: crate::call_validation::ChatToolFunction {
+                    name: "Glob".to_string(),
+                    arguments: r#"{"pattern":"src/**/*.rs"}"#.to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            },
+        ];
+
+        let resolved = resolve_tool_call_aliases(app, calls, "agent", None).await;
+        let names = resolved
+            .into_iter()
+            .map(|call| call.function.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["cat", "tree", "glob"]);
     }
 
     #[test]
@@ -1709,11 +1818,7 @@ pub async fn execute_tools_with_session(
 
     let (prompt_messages, session_abort_flag, session_allowed_tools) = {
         let session = session_arc.lock().await;
-        let msgs = if session.last_prompt_messages.is_empty() {
-            messages.to_vec()
-        } else {
-            session.last_prompt_messages.clone()
-        };
+        let msgs = tool_execution_messages(messages, &session.last_prompt_messages);
         (
             msgs,
             session.abort_flag.clone(),
@@ -1746,7 +1851,7 @@ pub async fn execute_tools_with_session(
     let ccx = build_tool_execution_context(
         app.clone(),
         n_ctx,
-        messages,
+        &prompt_messages,
         thread,
         Some(session_abort_flag),
     )
@@ -2146,9 +2251,8 @@ async fn execute_tools_inner(
     let truncation_exempt_ids: std::collections::HashSet<String> = tool_calls
         .iter()
         .filter(|tc| {
-            let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
-                &tc.function.name,
-            );
+            let resolved =
+                crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&tc.function.name);
             is_tool_result_truncation_exempt(&tc.function.name)
                 || is_tool_result_truncation_exempt(resolved.as_str())
         })

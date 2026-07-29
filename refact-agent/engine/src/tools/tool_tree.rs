@@ -7,7 +7,7 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
-use crate::at_commands::at_tree::{tree_for_tools, TreeNode};
+use crate::at_commands::at_tree::{tree_for_tools_ex, BuildBudget, TreeNode, MAX_TREE_PATHS};
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
@@ -17,11 +17,11 @@ use crate::files_correction::{
     correct_to_nearest_dir_path, correct_to_nearest_filename, get_unscoped_project_dirs,
     paths_from_anywhere,
 };
-use crate::files_in_workspace::ls_files;
+use crate::files_in_workspace::{filter_privacy_allowed_files, ls_files_limited};
 use crate::knowledge_index::format_related_memories_section;
 use crate::tools::scope_utils::{
-    format_scope_notices, is_worktree_root_alias, list_execution_scope_root,
-    list_scoped_files_under_dir, resolve_existing_path_with_execution_scope,
+    format_scope_notices, is_worktree_root_alias, list_execution_scope_root_limited,
+    list_scoped_files_under_dir_limited, resolve_existing_path_with_execution_scope,
 };
 
 pub struct ToolTree {
@@ -60,10 +60,15 @@ impl Tool for ToolTree {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, execution_scope) = {
+        let (gcx, execution_scope, abort_flag) = {
             let cgcx = ccx.lock().await;
-            (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
+            (
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
+                cgcx.abort_flag.clone(),
+            )
         };
+        let mut build_budget = BuildBudget::new(MAX_TREE_PATHS, Some(abort_flag.clone()));
         let scoped_enforced = execution_scope
             .as_ref()
             .map(|scope| scope.is_enforced())
@@ -97,10 +102,21 @@ impl Tool for ToolTree {
             match path_mb.clone() {
                 Some(path) => {
                     if is_worktree_root_alias(&path) {
-                        let paths_in_dir =
-                            list_execution_scope_root(gcx.clone(), scope, true).await?;
+                        let listing = list_execution_scope_root_limited(
+                            gcx.clone(),
+                            scope,
+                            true,
+                            MAX_TREE_PATHS,
+                            Some(&abort_flag),
+                        )
+                        .await?;
+                        build_budget.truncated |= listing.truncated;
                         (
-                            TreeNode::build_relative(&paths_in_dir, scope.effective_root()),
+                            TreeNode::build_relative_with_budget(
+                                &listing.files,
+                                scope.effective_root(),
+                                &mut build_budget,
+                            ),
                             true,
                         )
                     } else {
@@ -121,23 +137,42 @@ impl Tool for ToolTree {
                                 resolved.path.display()
                             ));
                         }
-                        let paths_in_dir = list_scoped_files_under_dir(
+                        let listing = list_scoped_files_under_dir_limited(
                             gcx.clone(),
                             &resolved.path,
                             true,
-                            resolved.outside_absolute_path,
+                            true,
+                            MAX_TREE_PATHS,
+                            Some(&abort_flag),
                         )
                         .await?;
+                        build_budget.truncated |= listing.truncated;
                         (
-                            TreeNode::build_relative(&paths_in_dir, &resolved.path),
+                            TreeNode::build_relative_with_budget(
+                                &listing.files,
+                                &resolved.path,
+                                &mut build_budget,
+                            ),
                             false,
                         )
                     }
                 }
                 None => {
-                    let paths_in_dir = list_execution_scope_root(gcx.clone(), scope, true).await?;
+                    let listing = list_execution_scope_root_limited(
+                        gcx.clone(),
+                        scope,
+                        true,
+                        MAX_TREE_PATHS,
+                        Some(&abort_flag),
+                    )
+                    .await?;
+                    build_budget.truncated |= listing.truncated;
                     (
-                        TreeNode::build_relative(&paths_in_dir, scope.effective_root()),
+                        TreeNode::build_relative_with_budget(
+                            &listing.files,
+                            scope.effective_root(),
+                            &mut build_budget,
+                        ),
                         true,
                     )
                 }
@@ -175,21 +210,43 @@ impl Tool for ToolTree {
                     let indexing_everywhere =
                         crate::files_blocklist::reload_indexing_everywhere_if_needed(gcx.clone())
                             .await;
+                    let listing = ls_files_limited(
+                        &indexing_everywhere,
+                        &true_path,
+                        true,
+                        MAX_TREE_PATHS,
+                        Some(&abort_flag),
+                    )
+                    .unwrap_or_default();
+                    build_budget.truncated |= listing.truncated;
                     let paths_in_dir =
-                        ls_files(&indexing_everywhere, &true_path, true).unwrap_or(vec![]);
+                        filter_privacy_allowed_files(gcx.clone(), listing.files).await;
 
-                    (TreeNode::build(&paths_in_dir), false)
+                    (
+                        TreeNode::build_with_budget(&paths_in_dir, &mut build_budget),
+                        false,
+                    )
                 }
-                None => (TreeNode::build(&paths_from_anywhere), true),
+                None => (
+                    TreeNode::build_with_budget(&paths_from_anywhere, &mut build_budget),
+                    true,
+                ),
             }
         };
 
-        let content = tree_for_tools(ccx.clone(), &tree, use_ast, max_files, is_root_query)
-            .await
-            .map_err(|err| {
-                warn!("tree_for_tools err: {}", err);
-                err
-            })?;
+        let content = tree_for_tools_ex(
+            ccx.clone(),
+            &tree,
+            use_ast,
+            max_files,
+            is_root_query,
+            build_budget.truncated,
+        )
+        .await
+        .map_err(|err| {
+            warn!("tree_for_tools err: {}", err);
+            err
+        })?;
         let content = if content.is_empty() {
             "No files found in the specified path.".to_string()
         } else {
@@ -225,5 +282,149 @@ impl Tool for ToolTree {
                 ..Default::default()
             })],
         ))
+    }
+}
+
+#[cfg(test)]
+mod privacy_and_bounds_tests {
+    use super::*;
+    use crate::at_commands::at_commands::AtCommandsContext;
+    use crate::call_validation::{ChatContent, ContextEnum};
+    use crate::privacy::{FilePrivacySettings, PrivacySettings};
+    use crate::worktrees::types::WorktreeMeta;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        worktree: WorktreeMeta,
+        root: PathBuf,
+        source: PathBuf,
+    }
+
+    fn make_fixture() -> Fixture {
+        let temp = tempfile::Builder::new()
+            .prefix("refact-tree-privacy-")
+            .tempdir()
+            .unwrap();
+        let root = temp
+            .path()
+            .join(".cache")
+            .join("refact")
+            .join("worktrees")
+            .join("wt")
+            .join("proj");
+        let source = temp.path().join("source");
+        fs::create_dir_all(root.join("subdir")).unwrap();
+        fs::create_dir_all(source.join("subdir")).unwrap();
+        fs::write(root.join("subdir").join("allowed.rs"), "fn allowed() {}\n").unwrap();
+        fs::write(
+            root.join("subdir").join("secret.blocked"),
+            "SECRET_TOKEN=abcdef\n",
+        )
+        .unwrap();
+        let root = dunce::simplified(&fs::canonicalize(root).unwrap()).to_path_buf();
+        let source = dunce::simplified(&fs::canonicalize(source).unwrap()).to_path_buf();
+        let worktree = WorktreeMeta {
+            id: "wt-tree-privacy".to_string(),
+            kind: "chat".to_string(),
+            root: root.clone(),
+            source_workspace_root: source.clone(),
+            repo_root: source.clone(),
+            branch: Some("feature".to_string()),
+            base_branch: Some("main".to_string()),
+            base_commit: Some("base".to_string()),
+            task_id: None,
+            card_id: None,
+            agent_id: None,
+            enforce: true,
+        };
+        Fixture {
+            _temp: temp,
+            worktree,
+            root,
+            source,
+        }
+    }
+
+    async fn make_gcx(
+        fixture: &Fixture,
+        blocked: Vec<String>,
+    ) -> Arc<crate::global_context::GlobalContext> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            let privacy_settings = gcx.privacy_settings.clone();
+            let workspace_folders = gcx.documents_state.workspace_folders.clone();
+            *privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
+                privacy_rules: FilePrivacySettings {
+                    only_send_to_servers_I_control: vec![],
+                    blocked,
+                },
+                loaded_ts: u64::MAX / 2,
+            });
+            *workspace_folders.lock().unwrap() = vec![fixture.source.clone()];
+        }
+        gcx
+    }
+
+    async fn make_ccx(
+        gcx: Arc<crate::global_context::GlobalContext>,
+        worktree: WorktreeMeta,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                crate::app_state::AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                Some(worktree),
+            )
+            .await,
+        ))
+    }
+
+    fn tool_text(results: &[ContextEnum]) -> String {
+        results
+            .iter()
+            .filter_map(|item| match item {
+                ContextEnum::ChatMessage(message) => match &message.content {
+                    ChatContent::SimpleText(text) => Some(text.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn scoped_subdir_tree_hides_privacy_blocked_files() {
+        let fixture = make_fixture();
+        let gcx = make_gcx(&fixture, vec!["*.blocked".to_string()]).await;
+        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
+        let mut tool = ToolTree {
+            config_path: String::new(),
+        };
+        let tool_call_id = "tree-call".to_string();
+        let subdir = fixture.root.join("subdir").to_string_lossy().to_string();
+        let args = HashMap::from_iter([("path".to_string(), Value::String(subdir))]);
+
+        let (_corrections, results) = tool.tool_execute(ccx, &tool_call_id, &args).await.unwrap();
+        let text = tool_text(&results);
+
+        assert!(
+            text.contains("allowed.rs"),
+            "allowed file must be listed: {text}"
+        );
+        assert!(
+            !text.contains("secret.blocked"),
+            "privacy-blocked file must not leak into the tree listing: {text}"
+        );
+        assert!(!text.contains("SECRET_TOKEN"), "{text}");
     }
 }

@@ -736,7 +736,10 @@ mod tests {
         assert_eq!(config.id, "security-review");
         assert_eq!(config.description, "Review security issues");
         assert_eq!(config.subchat.max_steps, Some(10));
-        assert_eq!(config.tools, strings(&["tree", "cat", "search_pattern"]));
+        assert_eq!(
+            config.tools,
+            strings(&["tree", "cat", "glob", "search_pattern"])
+        );
     }
 
     #[test]

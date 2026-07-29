@@ -1,4 +1,4 @@
-schema_version: 17
+schema_version: 18
 id: plan
 title: Plan
 description: Turn approved designs or requirements into precise implementation plans
@@ -197,6 +197,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

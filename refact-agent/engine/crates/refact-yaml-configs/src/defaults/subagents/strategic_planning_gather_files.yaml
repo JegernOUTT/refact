@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: strategic_planning_gather_files
 title: Strategic Planning File Gatherer
 description: File gatherer for strategic planning
@@ -23,6 +23,7 @@ messages:
 tools:
   - tree
   - cat
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

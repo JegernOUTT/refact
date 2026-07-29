@@ -22,6 +22,7 @@ const ALLOWED_FOR_SUBAGENT: &[&str] = &[
     "cat",
     "tree",
     "search_pattern",
+    "glob",
     "search_symbol_definition",
     "search_semantic",
     "codegraph_overview",
@@ -307,8 +308,11 @@ fn canonical_subagent_tool(tool: &str) -> String {
     if normalized.starts_with(crate::llm::adapters::claude_code_compat::MCP_TOOL_PREFIX) {
         normalized = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&normalized);
     }
-    if matches!(normalized.as_str(), "grep" | "glob") {
+    if normalized == "grep" {
         return "search_pattern".to_string();
+    }
+    if normalized == "glob" {
+        return "glob".to_string();
     }
     crate::llm::adapters::claude_code_compat::CC_TOOL_RENAMES
         .iter()
@@ -497,6 +501,7 @@ mod tests {
         [
             "tree",
             "cat",
+            "glob",
             "search_pattern",
             "search_symbol_definition",
             "search_semantic",
@@ -534,7 +539,7 @@ mod tests {
         assert_eq!(
             format_allowed_tools(&configured_tools),
             concat!(
-                "cat, tree, search_pattern, search_symbol_definition, search_semantic, ",
+                "cat, tree, search_pattern, glob, search_symbol_definition, search_semantic, ",
                 "codegraph_overview, code_health, git_risk, code_why, code_duplication, ",
                 "dead_code, security_scan, pr_blast, code_map, knowledge, search_trajectories, ",
                 "get_trajectory_context, web, ",
@@ -706,7 +711,7 @@ mod tests {
         );
         assert_eq!(
             normalize_read_only_tools(&["Glob".to_string()], &configured_tools).unwrap(),
-            vec!["search_pattern".to_string()]
+            vec!["glob".to_string()]
         );
     }
 

@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: setup_commands
 title: Setup Commands
 description: Create project-specific slash commands, toolbox prompts, and cmdline/service configs
@@ -149,6 +149,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

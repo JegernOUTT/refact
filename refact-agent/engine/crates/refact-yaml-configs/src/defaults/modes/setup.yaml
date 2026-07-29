@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: setup
 title: Setup Project
 description: Analyze the project and configure Refact artifacts (AGENTS, commands, skills, subagents, integrations, knowledge)
@@ -246,6 +246,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

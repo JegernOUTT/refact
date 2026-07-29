@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::fs;
 
@@ -15,8 +16,8 @@ use crate::files_correction::{
     correct_to_nearest_dir_path, get_unscoped_project_dirs, paths_from_anywhere,
 };
 use crate::tools::scope_utils::{
-    format_scope_notices, is_worktree_root_alias, list_execution_scope_root,
-    list_scoped_files_under_dir, resolve_existing_path_with_execution_scope,
+    format_scope_notices, is_worktree_root_alias, list_execution_scope_root_limited,
+    list_scoped_files_under_dir_limited, resolve_existing_path_with_execution_scope,
 };
 
 const BINARY_EXTENSIONS: &[&str] = &[
@@ -39,6 +40,50 @@ const SKIP_DIRS: &[&str] = &[
     ".next",
     ".nuxt",
 ];
+
+pub const MAX_FILES_HARD_CAP: usize = 1000;
+
+pub const MAX_TREE_PATHS: usize = 20_000;
+
+pub fn sanitize_max_files(requested: usize) -> usize {
+    requested.clamp(1, MAX_FILES_HARD_CAP)
+}
+
+pub struct BuildBudget {
+    remaining_paths: usize,
+    pub truncated: bool,
+    abort_flag: Option<Arc<AtomicBool>>,
+}
+
+impl BuildBudget {
+    pub fn new(max_paths: usize, abort_flag: Option<Arc<AtomicBool>>) -> Self {
+        BuildBudget {
+            remaining_paths: max_paths,
+            truncated: false,
+            abort_flag,
+        }
+    }
+
+    fn aborted(&self) -> bool {
+        self.abort_flag
+            .as_ref()
+            .map(|flag| flag.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
+    fn take_one(&mut self) -> bool {
+        if self.aborted() {
+            self.truncated = true;
+            return false;
+        }
+        if self.remaining_paths == 0 {
+            self.truncated = true;
+            return false;
+        }
+        self.remaining_paths -= 1;
+        true
+    }
+}
 
 pub struct AtTree {
     pub params: Vec<Box<dyn AtParam>>,
@@ -68,10 +113,18 @@ impl TreeNode {
     }
 
     pub fn build(paths: &[PathBuf]) -> Self {
+        let mut budget = BuildBudget::new(MAX_TREE_PATHS, None);
+        TreeNode::build_with_budget(paths, &mut budget)
+    }
+
+    pub fn build_with_budget(paths: &[PathBuf], budget: &mut BuildBudget) -> Self {
         let mut root = TreeNode::new();
         for path in paths {
             if should_skip_path(path) {
                 continue;
+            }
+            if !budget.take_one() {
+                break;
             }
             root.insert_path(path, path);
         }
@@ -79,6 +132,15 @@ impl TreeNode {
     }
 
     pub fn build_relative(paths: &[PathBuf], base: &Path) -> Self {
+        let mut budget = BuildBudget::new(MAX_TREE_PATHS, None);
+        TreeNode::build_relative_with_budget(paths, base, &mut budget)
+    }
+
+    pub fn build_relative_with_budget(
+        paths: &[PathBuf],
+        base: &Path,
+        budget: &mut BuildBudget,
+    ) -> Self {
         let mut root = TreeNode::new();
         for path in paths {
             let display_path = path
@@ -87,6 +149,9 @@ impl TreeNode {
                 .to_path_buf();
             if should_skip_path(&display_path) {
                 continue;
+            }
+            if !budget.take_one() {
+                break;
             }
             root.insert_path(&display_path, path);
         }
@@ -327,9 +392,25 @@ pub async fn tree_for_tools(
     max_files: usize,
     is_root_query: bool,
 ) -> Result<String, String> {
-    let (tokens_for_rag, gcx) = {
+    tree_for_tools_ex(ccx, tree, use_ast, max_files, is_root_query, false).await
+}
+
+pub async fn tree_for_tools_ex(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tree: &TreeNode,
+    use_ast: bool,
+    max_files: usize,
+    is_root_query: bool,
+    build_truncated: bool,
+) -> Result<String, String> {
+    let max_files = sanitize_max_files(max_files);
+    let (tokens_for_rag, gcx, abort_flag) = {
         let cgcx = ccx.lock().await;
-        (cgcx.tokens_for_rag, cgcx.app.gcx.clone())
+        (
+            cgcx.tokens_for_rag,
+            cgcx.app.gcx.clone(),
+            cgcx.abort_flag.clone(),
+        )
     };
     const CHARS_PER_TOKEN: f32 = 3.5;
     let char_limit = ((tokens_for_rag as f32) * CHARS_PER_TOKEN) as usize;
@@ -342,8 +423,12 @@ pub async fn tree_for_tools(
             Some(service) => {
                 let mut source_paths = Vec::new();
                 collect_source_paths(tree, &mut source_paths);
+                source_paths.truncate(MAX_TREE_PATHS);
                 let mut map = HashMap::new();
                 for sp in source_paths {
+                    if abort_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let defs = service.doc_defs(&sp).await.unwrap_or_default();
                     let formatted = refact_codegraph::symbols_fmt::format_symbols_from_defs(&defs);
                     if !formatted.is_empty() {
@@ -356,13 +441,15 @@ pub async fn tree_for_tools(
         }
     };
 
-    Ok(print_files_tree_with_budget(
-        tree,
-        char_limit,
-        ast_db,
-        max_files,
-        is_root_query,
-    ))
+    let mut output =
+        print_files_tree_with_budget(tree, char_limit, ast_db, max_files, is_root_query);
+    if build_truncated {
+        output.push_str(&format!(
+            "\n⚠️ tree(): listing truncated at {} entries; some files/directories are not shown. 💡 Narrow the path to see a complete subtree.\n",
+            MAX_TREE_PATHS
+        ));
+    }
+    Ok(output)
 }
 
 #[async_trait]
@@ -377,10 +464,15 @@ impl AtCommand for AtTree {
         cmd: &mut AtCommandMember,
         args: &mut Vec<AtCommandMember>,
     ) -> Result<(Vec<ContextEnum>, String), String> {
-        let (gcx, execution_scope) = {
+        let (gcx, execution_scope, abort_flag) = {
             let cgcx = ccx.lock().await;
-            (cgcx.global_context.clone(), cgcx.execution_scope.clone())
+            (
+                cgcx.global_context.clone(),
+                cgcx.execution_scope.clone(),
+                cgcx.abort_flag.clone(),
+            )
         };
+        let mut build_budget = BuildBudget::new(MAX_TREE_PATHS, Some(abort_flag.clone()));
         let scoped_enforced = execution_scope
             .as_ref()
             .map(|scope| scope.is_enforced())
@@ -408,18 +500,42 @@ impl AtCommand for AtTree {
             let scope = execution_scope.as_ref().unwrap();
             match args.iter().find(|x| x.text != "--ast") {
                 None => {
-                    let paths = list_execution_scope_root(gcx.clone(), scope, true).await?;
+                    let listing = list_execution_scope_root_limited(
+                        gcx.clone(),
+                        scope,
+                        true,
+                        MAX_TREE_PATHS,
+                        Some(&abort_flag),
+                    )
+                    .await?;
+                    build_budget.truncated |= listing.truncated;
                     (
-                        TreeNode::build_relative(&paths, scope.effective_root()),
+                        TreeNode::build_relative_with_budget(
+                            &listing.files,
+                            scope.effective_root(),
+                            &mut build_budget,
+                        ),
                         true,
                     )
                 }
                 Some(arg) => {
                     let path = arg.text.clone();
                     if is_worktree_root_alias(&path) {
-                        let paths = list_execution_scope_root(gcx.clone(), scope, true).await?;
+                        let listing = list_execution_scope_root_limited(
+                            gcx.clone(),
+                            scope,
+                            true,
+                            MAX_TREE_PATHS,
+                            Some(&abort_flag),
+                        )
+                        .await?;
+                        build_budget.truncated |= listing.truncated;
                         (
-                            TreeNode::build_relative(&paths, scope.effective_root()),
+                            TreeNode::build_relative_with_budget(
+                                &listing.files,
+                                scope.effective_root(),
+                                &mut build_budget,
+                            ),
                             true,
                         )
                     } else {
@@ -439,20 +555,33 @@ impl AtCommand for AtTree {
                             args.clear();
                             return Err(e);
                         }
-                        let paths = list_scoped_files_under_dir(
+                        let listing = list_scoped_files_under_dir_limited(
                             gcx.clone(),
                             &resolved.path,
                             true,
-                            resolved.outside_absolute_path,
+                            true,
+                            MAX_TREE_PATHS,
+                            Some(&abort_flag),
                         )
                         .await?;
-                        (TreeNode::build_relative(&paths, &resolved.path), false)
+                        build_budget.truncated |= listing.truncated;
+                        (
+                            TreeNode::build_relative_with_budget(
+                                &listing.files,
+                                &resolved.path,
+                                &mut build_budget,
+                            ),
+                            false,
+                        )
                     }
                 }
             }
         } else {
             match args.iter().find(|x| x.text != "--ast") {
-                None => (TreeNode::build(&filtered_paths), true),
+                None => (
+                    TreeNode::build_with_budget(&filtered_paths, &mut build_budget),
+                    true,
+                ),
                 Some(arg) => {
                     let path = arg.text.clone();
                     let candidates =
@@ -477,18 +606,28 @@ impl AtCommand for AtTree {
                         .filter(|f| f.starts_with(&start_dir))
                         .cloned()
                         .collect();
-                    (TreeNode::build(&paths), false)
+                    (
+                        TreeNode::build_with_budget(&paths, &mut build_budget),
+                        false,
+                    )
                 }
             }
         };
 
         let use_ast = args.iter().any(|x| x.text == "--ast");
-        let tree = tree_for_tools(ccx.clone(), &tree, use_ast, 10, is_root_query)
-            .await
-            .map_err(|err| {
-                warn!("{}", err);
-                err
-            })?;
+        let tree = tree_for_tools_ex(
+            ccx.clone(),
+            &tree,
+            use_ast,
+            10,
+            is_root_query,
+            build_budget.truncated,
+        )
+        .await
+        .map_err(|err| {
+            warn!("{}", err);
+            err
+        })?;
 
         let tree = if tree.is_empty() {
             "tree(): directory is empty".to_string()
@@ -503,5 +642,88 @@ impl AtCommand for AtTree {
             ))],
             "".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod bounded_work_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    fn count_leaves(node: &TreeNode) -> usize {
+        if !node.is_dir() {
+            return if node.source_path.is_some() { 1 } else { 0 };
+        }
+        node.children.values().map(count_leaves).sum()
+    }
+
+    #[test]
+    fn sanitize_max_files_clamps_into_positive_bounded_range() {
+        assert_eq!(
+            sanitize_max_files(0),
+            1,
+            "zero must become a positive value"
+        );
+        assert_eq!(sanitize_max_files(10), 10);
+        assert_eq!(sanitize_max_files(MAX_FILES_HARD_CAP), MAX_FILES_HARD_CAP);
+        assert_eq!(
+            sanitize_max_files(MAX_FILES_HARD_CAP + 1),
+            MAX_FILES_HARD_CAP,
+            "huge requests must be capped"
+        );
+        assert_eq!(sanitize_max_files(usize::MAX), MAX_FILES_HARD_CAP);
+    }
+
+    #[test]
+    fn build_with_budget_bounds_enumeration_and_reports_truncation() {
+        let base = PathBuf::from("/tmp/refact-bounded-work-fixture");
+        let paths: Vec<PathBuf> = (0..500)
+            .map(|i| base.join(format!("file_{i}.rs")))
+            .collect();
+
+        let mut budget = BuildBudget::new(7, None);
+        let tree = TreeNode::build_relative_with_budget(&paths, &base, &mut budget);
+
+        assert!(
+            budget.truncated,
+            "budget should be marked truncated when input exceeds the cap"
+        );
+        let leaves = count_leaves(&tree);
+        assert!(
+            leaves <= 7,
+            "only budgeted paths should be enumerated, got {leaves}"
+        );
+        assert!(leaves > 0, "some paths should still be enumerated");
+    }
+
+    #[test]
+    fn build_with_budget_not_truncated_when_within_budget() {
+        let base = PathBuf::from("/tmp/refact-bounded-work-small");
+        let paths: Vec<PathBuf> = (0..3).map(|i| base.join(format!("file_{i}.rs"))).collect();
+
+        let mut budget = BuildBudget::new(MAX_TREE_PATHS, None);
+        let tree = TreeNode::build_relative_with_budget(&paths, &base, &mut budget);
+
+        assert!(!budget.truncated, "small input should not truncate");
+        assert_eq!(count_leaves(&tree), 3);
+    }
+
+    #[test]
+    fn build_with_budget_stops_immediately_when_aborted() {
+        let base = PathBuf::from("/tmp/refact-bounded-work-abort");
+        let paths: Vec<PathBuf> = (0..100)
+            .map(|i| base.join(format!("file_{i}.rs")))
+            .collect();
+
+        let abort = Arc::new(AtomicBool::new(true));
+        let mut budget = BuildBudget::new(MAX_TREE_PATHS, Some(abort));
+        let tree = TreeNode::build_relative_with_budget(&paths, &base, &mut budget);
+
+        assert!(budget.truncated, "aborted build should report truncation");
+        assert_eq!(
+            count_leaves(&tree),
+            0,
+            "no paths should be enumerated once aborted"
+        );
     }
 }

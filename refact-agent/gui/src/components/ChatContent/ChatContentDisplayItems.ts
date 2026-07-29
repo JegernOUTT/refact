@@ -39,6 +39,7 @@ function getMessageKey(message: ChatMessages[number], index: number): string {
 const READ_TOOLS = new Set([
   "cat",
   "tree",
+  "glob",
   "search_pattern",
   "search_semantic",
   "search_symbol_definition",
@@ -50,6 +51,7 @@ const READ_TOOLS = new Set([
   // CC OAuth mode aliases
   "t_cat",
   "t_tree",
+  "t_glob",
   "t_search_pattern",
   "t_search_semantic",
   "t_search_symbol_definition",

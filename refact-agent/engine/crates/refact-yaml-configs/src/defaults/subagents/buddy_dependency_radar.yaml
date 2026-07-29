@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: buddy_dependency_radar
 title: Dependency Radar
 description: Watch dependency manifests for risks, stale versions, and upgrade opportunities.
@@ -48,6 +48,7 @@ messages:
 
 tools:
   - cat
+  - glob
   - search_pattern
   - web_search
   - buddy_runtime_event

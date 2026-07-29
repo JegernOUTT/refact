@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: brainstorming
 title: Brainstorming
 description: Turn rough ideas into approved designs before planning or implementation
@@ -120,6 +120,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

@@ -37,6 +37,7 @@ mod tool_deep_research;
 pub mod tool_delegate;
 mod tool_get_goal;
 mod tool_get_plan;
+mod tool_glob;
 pub mod tool_goal_pursuit_controls;
 mod tool_handoff_to_mode;
 mod tool_knowledge;

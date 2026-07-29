@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: gemini3_agent
 title: Gemini 3 Agent
 description: Optimized for Gemini 3 and latest Gemini models with function calling, thinking levels, and inherited Agent tools
@@ -82,9 +82,9 @@ override:
     - Break complex tasks into independent subtasks
 
     2. **Delegate exploration to subagent() or explore yourself**:
-    - "Find all usages of symbol X" → subagent with search_symbol_usages, cat, knowledge
+    - "Find all usages of symbol X" → subagent with search_symbol_definition, search_pattern, cat, knowledge
     - "Understand how module Y works" → subagent with cat, tree, search_pattern, knowledge
-    - "Find files matching pattern Z" → subagent with search_pattern, tree
+    - "Find files matching pattern Z" → subagent with glob, tree
     - "Trace data flow from A to B" → subagent with search_symbol_definition, cat, knowledge
     - "Find the usage of a lib in the web" → subagent with web, knowledge
     - "Find similar past work" → subagent with search_trajectories, get_trajectory_context

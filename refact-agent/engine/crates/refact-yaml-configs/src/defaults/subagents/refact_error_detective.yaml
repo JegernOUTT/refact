@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: refact_error_detective
 title: Error Detective
 description: Investigate repeated engine errors and surface actionable fixes.
@@ -60,6 +60,7 @@ messages:
 
 tools:
   - cat
+  - glob
   - search_pattern
   - symbol_def
   - tree

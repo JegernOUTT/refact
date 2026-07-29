@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: my_custom_subagent
 title: My Custom Subagent
 description: Example of a user-defined subagent tool
@@ -51,6 +51,7 @@ messages:
 tools:
   - tree
   - cat
+  - glob
   - search_pattern
   - search_semantic
   - knowledge

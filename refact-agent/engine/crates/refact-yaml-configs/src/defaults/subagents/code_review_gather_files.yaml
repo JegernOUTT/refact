@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: code_review_gather_files
 title: Code Review File Gatherer
 description: File gatherer for code review
@@ -55,6 +55,7 @@ messages:
 tools:
   - tree
   - cat
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

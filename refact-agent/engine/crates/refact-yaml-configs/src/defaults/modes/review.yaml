@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: review
 title: Review
 description: Autonomous code review that fans out waves of parallel reviews
@@ -132,6 +132,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

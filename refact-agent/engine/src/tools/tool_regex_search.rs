@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -14,10 +15,13 @@ use crate::at_commands::at_commands::{vec_context_file_to_context_tools, AtComma
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::files_correction::shortify_paths;
-use crate::files_in_workspace::get_file_text_from_memory_or_disk;
+use crate::files_in_workspace::{
+    check_file_privacy_with_context, get_file_text_from_memory_or_disk_with_context,
+    prepare_file_read_context, FileReadContext,
+};
 use crate::global_context::GlobalContext;
 use crate::tools::scope_utils::{
-    format_scope_notices, resolve_scope_with_execution_scope, validate_scope_files,
+    format_scope_notices, resolve_scope_with_execution_scope_limited, validate_scope_files,
 };
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
@@ -33,6 +37,15 @@ const DEFAULT_MAX_FILES: usize = 50;
 const DEFAULT_MAX_MATCHES_PER_FILE: usize = 25;
 const DEFAULT_MAX_TOTAL_MATCHES: usize = 200;
 
+const CAP_CONTEXT_LINES: usize = 100;
+const CAP_MAX_FILES: usize = 1000;
+const CAP_MAX_MATCHES_PER_FILE: usize = 1000;
+const CAP_MAX_TOTAL_MATCHES: usize = 10000;
+const MAX_SEARCH_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SEARCH_CANDIDATE_ENTRIES: usize = 20_000;
+
+const ABORTED_ERROR: &str = "⚠️ search_pattern aborted before completion (cancelled by caller).";
+
 #[derive(Clone, Debug)]
 struct RegexMatch {
     file_name: String,
@@ -40,6 +53,14 @@ struct RegexMatch {
     context_start: usize, // 1-based
     context_end_inclusive: usize,
     preview: String,
+}
+
+#[derive(Debug)]
+struct RegexSearchOutcome {
+    matches: Vec<RegexMatch>,
+    files_scanned: usize,
+    files_total: usize,
+    stopped_early: bool,
 }
 
 fn format_preview(
@@ -64,17 +85,33 @@ async fn search_single_file(
     file_path: String,
     regex: &Regex,
     context_lines: usize,
+    max_matches_per_file: usize,
+    abort_flag: &AtomicBool,
+    read_context: &FileReadContext,
 ) -> Vec<RegexMatch> {
-    let file_content =
-        match get_file_text_from_memory_or_disk(gcx.clone(), &PathBuf::from(&file_path)).await {
-            Ok(content) => content.to_string(),
-            Err(_) => return Vec::new(),
-        };
+    if abort_flag.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
+    let file_path_buf = PathBuf::from(&file_path);
+    let file_content = match get_file_text_from_memory_or_disk_with_context(
+        gcx.clone(),
+        &file_path_buf,
+        read_context,
+        Some(MAX_SEARCH_FILE_BYTES as usize),
+    )
+    .await
+    {
+        Ok(content) => content.to_string(),
+        Err(_) => return Vec::new(),
+    };
 
     let lines: Vec<&str> = file_content.lines().collect();
     let mut file_results = Vec::new();
 
     for (line_idx, line) in lines.iter().enumerate() {
+        if (line_idx & 0x3FF) == 0 && abort_flag.load(Ordering::Relaxed) {
+            break;
+        }
         if regex.is_match(line) {
             let match_line = line_idx + 1;
             let context_start_idx = line_idx.saturating_sub(context_lines);
@@ -87,6 +124,9 @@ async fn search_single_file(
                 context_end_inclusive: context_end_excl,
                 preview,
             });
+            if file_results.len() >= max_matches_per_file {
+                break;
+            }
         }
     }
 
@@ -101,32 +141,83 @@ async fn search_files_with_regex(
     pattern: &str,
     files_to_search: &[String],
     context_lines: usize,
-) -> Result<Vec<RegexMatch>, String> {
+    max_files: usize,
+    max_matches_per_file: usize,
+    max_total_matches: usize,
+    abort_flag: Arc<AtomicBool>,
+    read_context: Arc<FileReadContext>,
+) -> Result<RegexSearchOutcome, String> {
     let regex = Regex::new(pattern).map_err(|e| format!("Invalid regex pattern: {}", e))?;
     let regex_arc = Arc::new(regex);
 
-    // Use bounded concurrency to avoid overwhelming I/O with thousands of files
-    let results: Vec<Vec<RegexMatch>> =
-        stream::iter(files_to_search.iter().cloned())
+    if abort_flag.load(Ordering::Relaxed) {
+        return Err(ABORTED_ERROR.to_string());
+    }
+
+    let mut ordered_files = files_to_search.to_vec();
+    ordered_files.sort();
+    let files_total = ordered_files.len();
+    let mut matches = Vec::new();
+    let mut files_scanned = 0;
+    let mut files_matched = 0;
+    'batches: for batch in ordered_files.chunks(MAX_CONCURRENT_FILE_READS) {
+        if abort_flag.load(Ordering::Relaxed) {
+            return Err(ABORTED_ERROR.to_string());
+        }
+
+        let batch_results: Vec<Vec<RegexMatch>> = stream::iter(batch.iter().cloned())
             .map(|file_path| {
                 let gcx_clone = gcx.clone();
                 let regex_clone = regex_arc.clone();
-                let context_lines = context_lines;
+                let abort_clone = abort_flag.clone();
+                let read_context = read_context.clone();
                 async move {
-                    search_single_file(gcx_clone, file_path, &regex_clone, context_lines).await
+                    search_single_file(
+                        gcx_clone,
+                        file_path,
+                        &regex_clone,
+                        context_lines,
+                        max_matches_per_file,
+                        &abort_clone,
+                        &read_context,
+                    )
+                    .await
                 }
             })
-            .buffer_unordered(MAX_CONCURRENT_FILE_READS)
+            .buffered(MAX_CONCURRENT_FILE_READS)
             .collect()
             .await;
 
-    let mut flat_results: Vec<RegexMatch> = results.into_iter().flatten().collect();
-    flat_results.sort_by(|a, b| {
+        if abort_flag.load(Ordering::Relaxed) {
+            return Err(ABORTED_ERROR.to_string());
+        }
+        files_scanned += batch_results.len();
+
+        for mut file_matches in batch_results {
+            if file_matches.is_empty() {
+                continue;
+            }
+            files_matched += 1;
+            let remaining = max_total_matches.saturating_sub(matches.len());
+            file_matches.truncate(remaining);
+            matches.extend(file_matches);
+            if files_matched >= max_files || matches.len() >= max_total_matches {
+                break 'batches;
+            }
+        }
+    }
+
+    matches.sort_by(|a, b| {
         a.file_name
             .cmp(&b.file_name)
             .then(a.match_line.cmp(&b.match_line))
     });
-    Ok(flat_results)
+    Ok(RegexSearchOutcome {
+        matches,
+        files_scanned,
+        files_total,
+        stopped_early: files_scanned < files_total,
+    })
 }
 
 fn path_depth(path: &str) -> usize {
@@ -236,8 +327,18 @@ async fn smart_compress_results(
 
 fn parse_usize_arg(args: &HashMap<String, Value>, key: &str) -> Result<Option<usize>, String> {
     match args.get(key) {
-        Some(Value::Number(n)) => Ok(Some(n.as_u64().unwrap_or(0) as usize)),
-        Some(Value::String(s)) => Ok(Some(s.parse::<usize>().unwrap_or(0))),
+        Some(Value::Number(n)) => {
+            let value = n
+                .as_u64()
+                .ok_or_else(|| format!("argument `{}` must be a non-negative integer", key))?;
+            let value =
+                usize::try_from(value).map_err(|_| format!("argument `{}` is too large", key))?;
+            Ok(Some(value))
+        }
+        Some(Value::String(s)) => s
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|_| format!("argument `{}` must be a non-negative integer", key)),
         Some(v) => Err(format!("argument `{}` is not an integer: {:?}", key, v)),
         None => Ok(None),
     }
@@ -255,8 +356,8 @@ impl Tool for ToolRegexSearch {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Search for files and folders whose names or paths match the given regular expression pattern, and also search for text matches inside files using the same pattern. Reports both path matches and text matches in separate sections.".to_string(),
-            input_schema: json_schema_from_params(&[("pattern", "string", "The pattern is used to search for matching file/folder names/paths, and also for matching text inside files. Use (?i) at the start for case-insensitive search."), ("scope", "string", "'workspace' to search all files in workspace, 'dir/subdir/' to search in files within a directory, 'dir/file.ext' to search in a single file."), ("context_lines", "integer", "Lines of context before/after each match (default: 5)."), ("max_files", "integer", "Max files to attach as context (default: 50)."), ("max_matches_per_file", "integer", "Max matches per file to include (default: 25)."), ("max_total_matches", "integer", "Max total matches to attach as context (default: 200).")], &["pattern", "scope"]),
+            description: "Search for text matches inside files using a regular expression pattern.".to_string(),
+            input_schema: json_schema_from_params(&[("pattern", "string", "The regular expression used to search file contents. Use (?i) at the start for case-insensitive search."), ("scope", "string", "'workspace' to search all files in workspace, 'dir/subdir/' to search in files within a directory, 'dir/file.ext' to search in a single file."), ("context_lines", "integer", "Lines of context before/after each match (default: 5)."), ("max_files", "integer", "Max files to attach as context (default: 50)."), ("max_matches_per_file", "integer", "Max matches collected per file (default: 25, hard cap 1000). Scanning of a file stops once this many matches are found."), ("max_total_matches", "integer", "Max total matches to attach as context (default: 200, hard cap 10000).")], &["pattern", "scope"]),
             output_schema: None,
             annotations: None,
         }
@@ -284,75 +385,71 @@ impl Tool for ToolRegexSearch {
             }
         };
 
-        let context_lines =
-            parse_usize_arg(args, "context_lines")?.unwrap_or(DEFAULT_CONTEXT_LINES);
-        let max_files = parse_usize_arg(args, "max_files")?.unwrap_or(DEFAULT_MAX_FILES);
-        let max_matches_per_file =
-            parse_usize_arg(args, "max_matches_per_file")?.unwrap_or(DEFAULT_MAX_MATCHES_PER_FILE);
-        let max_total_matches =
-            parse_usize_arg(args, "max_total_matches")?.unwrap_or(DEFAULT_MAX_TOTAL_MATCHES);
+        let context_lines = parse_usize_arg(args, "context_lines")?
+            .unwrap_or(DEFAULT_CONTEXT_LINES)
+            .min(CAP_CONTEXT_LINES);
+        let max_files = parse_usize_arg(args, "max_files")?
+            .unwrap_or(DEFAULT_MAX_FILES)
+            .clamp(1, CAP_MAX_FILES);
+        let max_matches_per_file = parse_usize_arg(args, "max_matches_per_file")?
+            .unwrap_or(DEFAULT_MAX_MATCHES_PER_FILE)
+            .clamp(1, CAP_MAX_MATCHES_PER_FILE);
+        let max_total_matches = parse_usize_arg(args, "max_total_matches")?
+            .unwrap_or(DEFAULT_MAX_TOTAL_MATCHES)
+            .clamp(1, CAP_MAX_TOTAL_MATCHES);
 
-        let (gcx, execution_scope) = {
+        let (gcx, execution_scope, abort_flag) = {
             let cgcx = ccx.lock().await;
-            (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
+            (
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
+                cgcx.abort_flag.clone(),
+            )
         };
 
-        let scoped_files =
-            resolve_scope_with_execution_scope(gcx.clone(), execution_scope.as_ref(), &scope)
-                .await?;
-        let files_in_scope = validate_scope_files(scoped_files.files, &scope)?;
+        let scoped_files = resolve_scope_with_execution_scope_limited(
+            gcx.clone(),
+            execution_scope.as_ref(),
+            &scope,
+            MAX_SEARCH_CANDIDATE_ENTRIES,
+            Some(&abort_flag),
+        )
+        .await?;
+        let read_context = Arc::new(prepare_file_read_context(gcx.clone()).await);
+        let files_in_scope = validate_scope_files(scoped_files.files, &scope)?
+            .into_iter()
+            .filter(|path| {
+                check_file_privacy_with_context(&read_context, &PathBuf::from(path)).is_ok()
+            })
+            .collect::<Vec<_>>();
 
         let mut all_content = format_scope_notices(&scoped_files.notices);
         let mut all_search_results = Vec::new();
 
-        // 1. Path matches
         let regex = match Regex::new(&pattern) {
             Ok(r) => r,
             Err(e) => return Err(format!("⚠️ Invalid regex '{}': {}. 💡 Use (?i) for case-insensitive, escape special chars with \\", pattern, e)),
         };
-        let mut path_matches: Vec<String> = files_in_scope
-            .iter()
-            .filter(|path| regex.is_match(path))
-            .cloned()
-            .collect();
-        path_matches.sort();
+        drop(regex);
 
-        const MAX_PATH_MATCHES_TO_LIST: usize = 25;
-        const MAX_PATH_MATCHES_TO_ATTACH: usize = 10;
-        const PATH_MATCH_PREVIEW_LINES: usize = 30;
-
-        all_content.push_str("Path matches (file/folder names):\n");
-        if path_matches.is_empty() {
-            all_content.push_str("  No files or folders matched by name.\n");
-        } else {
-            for path in path_matches.iter().take(MAX_PATH_MATCHES_TO_LIST) {
-                all_content.push_str(&format!("  {}\n", path));
-            }
-            if path_matches.len() > MAX_PATH_MATCHES_TO_LIST {
-                all_content.push_str(&format!(
-                    "  ... and {} more path matches\n",
-                    path_matches.len() - MAX_PATH_MATCHES_TO_LIST
-                ));
-            }
-        }
-
-        for path in path_matches.iter().take(MAX_PATH_MATCHES_TO_ATTACH) {
-            let cf = ContextFile {
-                file_name: path.clone(),
-                file_content: "".to_string(),
-                line1: 1,
-                line2: PATH_MATCH_PREVIEW_LINES,
-                file_rev: None,
-                symbols: vec![],
-                gradient_type: 4,
-                usefulness: 80.0,
-                skip_pp: true,
-            };
-            all_search_results.push(cf);
-        }
-
-        let search_results =
-            search_files_with_regex(gcx.clone(), &pattern, &files_in_scope, context_lines).await?;
+        let search_outcome = search_files_with_regex(
+            gcx.clone(),
+            &pattern,
+            &files_in_scope,
+            context_lines,
+            max_files,
+            max_matches_per_file,
+            max_total_matches,
+            abort_flag.clone(),
+            read_context,
+        )
+        .await?;
+        let RegexSearchOutcome {
+            matches: search_results,
+            files_scanned,
+            files_total,
+            stopped_early,
+        } = search_outcome;
         all_content.push_str("\nText matches inside files:\n");
         if search_results.is_empty() {
             all_content.push_str("  No text matches found in any file.\n");
@@ -418,6 +515,13 @@ impl Tool for ToolRegexSearch {
             }
         }
 
+        if stopped_early {
+            all_content.push_str(&format!(
+                "\n⚠️ Search stopped after scanning {} of {} files because the requested match limits were reached. Narrow the scope or raise max_files/max_total_matches for more results.\n",
+                files_scanned, files_total
+            ));
+        }
+
         if all_search_results.is_empty() {
             return Err("⚠️ No matches found for pattern or path. 💡 Try broader scope ('workspace'), simpler pattern, or use (?i) for case-insensitive".to_string());
         }
@@ -453,5 +557,213 @@ impl Tool for ToolRegexSearch {
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::AtomicBool;
+
+    async fn make_gcx() -> Arc<GlobalContext> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.privacy_settings.write().unwrap() = Arc::new(crate::privacy::PrivacySettings {
+            privacy_rules: crate::privacy::FilePrivacySettings {
+                only_send_to_servers_I_control: Vec::new(),
+                blocked: Vec::new(),
+            },
+            loaded_ts: u64::MAX / 2,
+        });
+        gcx
+    }
+
+    #[tokio::test]
+    async fn search_single_file_stops_at_max_matches_per_file() {
+        let gcx = make_gcx().await;
+        let temp = tempfile::Builder::new()
+            .prefix("refact-regex-early-stop-")
+            .tempdir()
+            .unwrap();
+        let file = temp.path().join("many_matches.rs");
+        let content = (0..100)
+            .map(|i| format!("needle line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&file, content).unwrap();
+
+        let regex = Regex::new("needle").unwrap();
+        let abort = AtomicBool::new(false);
+        let read_context = prepare_file_read_context(gcx.clone()).await;
+        let matches = search_single_file(
+            gcx,
+            file.to_string_lossy().to_string(),
+            &regex,
+            0,
+            7,
+            &abort,
+            &read_context,
+        )
+        .await;
+
+        assert_eq!(
+            matches.len(),
+            7,
+            "search_single_file must stop scanning at max_matches_per_file"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_single_file_respects_preset_abort_flag() {
+        let gcx = make_gcx().await;
+        let temp = tempfile::Builder::new()
+            .prefix("refact-regex-abort-file-")
+            .tempdir()
+            .unwrap();
+        let file = temp.path().join("has_matches.rs");
+        fs::write(&file, "needle one\nneedle two\n").unwrap();
+
+        let regex = Regex::new("needle").unwrap();
+        let abort = AtomicBool::new(true);
+        let read_context = prepare_file_read_context(gcx.clone()).await;
+        let matches = search_single_file(
+            gcx,
+            file.to_string_lossy().to_string(),
+            &regex,
+            0,
+            25,
+            &abort,
+            &read_context,
+        )
+        .await;
+
+        assert!(
+            matches.is_empty(),
+            "aborted search must not collect matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_files_with_regex_aborts_promptly() {
+        let gcx = make_gcx().await;
+        let temp = tempfile::Builder::new()
+            .prefix("refact-regex-abort-batch-")
+            .tempdir()
+            .unwrap();
+        let mut files = Vec::new();
+        for i in 0..8 {
+            let file = temp.path().join(format!("file_{i}.rs"));
+            fs::write(&file, format!("needle in file {i}\n")).unwrap();
+            files.push(file.to_string_lossy().to_string());
+        }
+
+        let abort = Arc::new(AtomicBool::new(true));
+        let read_context = Arc::new(prepare_file_read_context(gcx.clone()).await);
+        let result =
+            search_files_with_regex(gcx, "needle", &files, 0, 50, 25, 200, abort, read_context)
+                .await;
+
+        assert!(result.is_err(), "aborted batch search must return an error");
+        assert!(
+            result.unwrap_err().contains("aborted"),
+            "error should mention the abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_files_with_regex_finds_matches_when_not_aborted() {
+        let gcx = make_gcx().await;
+        let temp = tempfile::Builder::new()
+            .prefix("refact-regex-happy-")
+            .tempdir()
+            .unwrap();
+        let file = temp.path().join("normal.rs");
+        fs::write(&file, "alpha\nneedle here\nbeta\n").unwrap();
+        let files = vec![file.to_string_lossy().to_string()];
+
+        let abort = Arc::new(AtomicBool::new(false));
+        let read_context = Arc::new(prepare_file_read_context(gcx.clone()).await);
+        let outcome =
+            search_files_with_regex(gcx, "needle", &files, 1, 50, 25, 200, abort, read_context)
+                .await
+                .unwrap();
+
+        assert_eq!(outcome.matches.len(), 1);
+        assert_eq!(outcome.matches[0].match_line, 2);
+        assert!(!outcome.stopped_early);
+    }
+
+    #[tokio::test]
+    async fn search_files_with_regex_stops_at_global_limits() {
+        let gcx = make_gcx().await;
+        let temp = tempfile::Builder::new()
+            .prefix("refact-regex-global-limit-")
+            .tempdir()
+            .unwrap();
+        let mut files = Vec::new();
+        for index in 0..64 {
+            let name = format!("file_{index:03}.rs");
+            let file = temp.path().join(name);
+            fs::write(&file, "needle one\nneedle two\n").unwrap();
+            files.push(file.to_string_lossy().to_string());
+        }
+
+        let read_context = Arc::new(prepare_file_read_context(gcx.clone()).await);
+        let outcome = search_files_with_regex(
+            gcx,
+            "needle",
+            &files,
+            0,
+            1,
+            25,
+            200,
+            Arc::new(AtomicBool::new(false)),
+            read_context,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.files_scanned, MAX_CONCURRENT_FILE_READS);
+        assert_eq!(outcome.matches.len(), 2);
+        assert!(outcome
+            .matches
+            .iter()
+            .all(|m| m.file_name.ends_with("file_000.rs")));
+        assert!(outcome.stopped_early);
+    }
+
+    #[tokio::test]
+    async fn search_single_file_skips_oversized_files() {
+        let gcx = make_gcx().await;
+        let temp = tempfile::Builder::new()
+            .prefix("refact-regex-oversized-")
+            .tempdir()
+            .unwrap();
+        let file = temp.path().join("oversized.rs");
+        fs::write(&file, vec![b'a'; MAX_SEARCH_FILE_BYTES as usize + 1]).unwrap();
+        let read_context = prepare_file_read_context(gcx.clone()).await;
+
+        let matches = search_single_file(
+            gcx,
+            file.to_string_lossy().to_string(),
+            &Regex::new("a").unwrap(),
+            0,
+            25,
+            &AtomicBool::new(false),
+            &read_context,
+        )
+        .await;
+
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn parse_usize_arg_rejects_invalid_values() {
+        let invalid_string =
+            HashMap::from_iter([("max_files".to_string(), Value::String("many".to_string()))]);
+        let negative = HashMap::from_iter([("max_files".to_string(), Value::from(-1))]);
+
+        assert!(parse_usize_arg(&invalid_string, "max_files").is_err());
+        assert!(parse_usize_arg(&negative, "max_files").is_err());
     }
 }

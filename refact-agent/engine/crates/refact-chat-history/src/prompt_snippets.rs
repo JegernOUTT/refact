@@ -20,9 +20,9 @@ Here is another example:
 🧩SETTINGS:service_hypercorn"#;
 
 pub const AGENT_EXPLORATION_INSTRUCTIONS: &str = r#"2. **Delegate exploration to subagent()**:
-- "Find all usages of symbol X" → subagent with search_symbol_usages, cat, knowledge
+- "Find all usages of symbol X" → subagent with search_symbol_definition, search_pattern, cat, knowledge
 - "Understand how module Y works" → subagent with cat, tree, search_pattern, knowledge
-- "Find files matching pattern Z" → subagent with search_pattern, tree
+- "Find files matching pattern Z" → subagent with glob, tree
 - "Trace data flow from A to B" → subagent with search_symbol_definition, cat, knowledge
 - "Find the usage of a lib in the web" → subagent with web, knowledge
 - "Find similar past work" → subagent with search_trajectories, get_trajectory_context
@@ -31,8 +31,9 @@ pub const AGENT_EXPLORATION_INSTRUCTIONS: &str = r#"2. **Delegate exploration to
 **Tools available for subagents**:
 - `tree()` - project structure; add `use_ast=true` for symbols
 - `cat()` - read files; supports line ranges like `file.rs:10-50`
+- `glob()` - find files by path pattern
 - `search_symbol_definition()` - trace code flow
-- `search_pattern()` - regex search across file names and contents
+- `search_pattern()` - regex search inside file contents
 - `search_semantic()` - conceptual/similarity matches
 - `web()`, `web_search()` - external documentation
 - `knowledge()` - search project knowledge base

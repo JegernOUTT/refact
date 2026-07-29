@@ -884,7 +884,7 @@ mod tests {
         assert_eq!(kilo.tools, strings(&["apply_patch"]));
         assert_eq!(
             continue_check.tools,
-            strings(&["tree", "cat", "search_pattern"])
+            strings(&["tree", "cat", "glob", "search_pattern"])
         );
         for config in [&claude, &opencode, &kilo, &continue_check] {
             assert_eq!(config.schema_version, 2);

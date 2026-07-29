@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: setup_skills
 title: Setup Skills
 description: Guided setup for project-specific skills
@@ -182,6 +182,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

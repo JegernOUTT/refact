@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: setup_agents_md
 title: Setup AGENTS.md
 description: Guided creation or update of AGENTS.md project instructions
@@ -184,6 +184,7 @@ tools:
   - tree
   - cat
   - add_workspace_folder
+  - glob
   - search_pattern
   - search_symbol_definition
   - search_semantic

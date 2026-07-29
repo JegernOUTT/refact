@@ -1,4 +1,4 @@
-schema_version: 21
+schema_version: 22
 id: openai_agent
 title: OpenAI Agent
 description: Optimized for GPT-4o/GPT-5 models using OpenAI Codex-style agentic workflow
@@ -171,7 +171,7 @@ override:
     **For exploration/investigation - delegate to subagent():**
     - "Find all usages of X" → subagent with search_symbol_definition, cat
     - "Understand how module Y works" → subagent with cat, tree, search_pattern
-    - "Find files matching pattern Z" → subagent with search_pattern, tree
+    - "Find files matching pattern Z" → subagent with glob, tree
 
     **For complex analysis:** use `strategic_planning()` which automatically gathers relevant files
 

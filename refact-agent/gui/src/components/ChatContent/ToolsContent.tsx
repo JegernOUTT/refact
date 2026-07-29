@@ -782,6 +782,29 @@ function processToolCalls(
     );
   }
 
+  if (headName === "glob") {
+    const elem = (
+      <SearchTool
+        key={`glob-tool-${processed.length}`}
+        toolCall={normalizedHead}
+        toolType="glob"
+        contextFiles={contextFiles}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+      activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
+      threadId,
+    );
+  }
+
   if (isProcessToolName(headName)) {
     const elem = (
       <ExecToolCard

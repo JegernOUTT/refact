@@ -1233,7 +1233,10 @@ mod tests {
 
         assert_eq!(config.description, "Research things");
         assert_eq!(config.subchat.max_steps, Some(10));
-        assert_eq!(config.tools, strings(&["tree", "cat", "search_pattern"]));
+        assert_eq!(
+            config.tools,
+            strings(&["tree", "cat", "glob", "search_pattern"])
+        );
         assert_eq!(
             candidate.metadata.get("defaulted_tools"),
             Some(&JsonValue::Bool(true))

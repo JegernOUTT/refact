@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: claude_opus47_agent
 title: Claude Opus 4.7 Agent
 description: Claude Opus 4.7 overlay for adaptive thinking and agentic coding while inheriting all Agent tools.
@@ -76,9 +76,9 @@ override:
     - Break complex tasks into independent subtasks
 
     2. **Delegate exploration to subagent() or explore yourself**:
-    - "Find all usages of symbol X" → subagent with search_symbol_usages, cat, knowledge
+    - "Find all usages of symbol X" → subagent with search_symbol_definition, search_pattern, cat, knowledge
     - "Understand how module Y works" → subagent with cat, tree, search_pattern, knowledge
-    - "Find files matching pattern Z" → subagent with search_pattern, tree
+    - "Find files matching pattern Z" → subagent with glob, tree
     - "Trace data flow from A to B" → subagent with search_symbol_definition, cat, knowledge
     - "Find the usage of a lib in the web" → subagent with web, knowledge
     - "Find similar past work" → subagent with search_trajectories, get_trajectory_context

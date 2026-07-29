@@ -5,6 +5,7 @@ describe("toolNameAliases", () => {
   it.each([
     ["t_cat", "cat"],
     ["t_tree", "tree"],
+    ["t_glob", "glob"],
     ["t_plan", "strategic_planning"],
     ["t_delegate", "subagent"],
     ["t_regex_search", "search_pattern"],
@@ -26,6 +27,9 @@ describe("toolNameAliases", () => {
     ["tool_search", "mcp_tool_search"],
     ["github_create_issue", "mcp_github_create_issue"],
     ["postgres_query", "mcp_postgres_query"],
+    ["Glob", "glob"],
+    ["Grep", "search_pattern"],
+    ["LS", "tree"],
   ])("normalizes Claude Code augmented alias %s", (name, expected) => {
     expect(normalizeToolName(name)).toBe(expected);
   });
@@ -33,7 +37,7 @@ describe("toolNameAliases", () => {
   it.each([
     ["Task", "subagent"],
     ["Bash", "shell"],
-    ["Glob", "search_pattern"],
+    ["Glob", "glob"],
     ["Grep", "search_pattern"],
     ["LS", "tree"],
     ["Read", "cat"],

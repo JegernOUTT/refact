@@ -243,6 +243,9 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_regex_search::ToolRegexSearch {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_glob::ToolGlob {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_search::ToolSearch {
             config_path: config_path.clone(),
         }),
