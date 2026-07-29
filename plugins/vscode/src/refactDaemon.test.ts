@@ -43,9 +43,23 @@ import {
     extractRefactVersion,
     parsePublishedEngineVersions,
     refactReleaseAsset,
+    resolveCompatibleSharedRefactBinaryOrNull,
     resolveRefactBinary,
     resolveRefactBinaryDetailed,
+    isSharedRefactBinaryPath,
+    sharedRefactBinaryPath,
+    sharedRefactBinaryDir,
 } from "./refactBinaryResolver";
+import {
+    REFACT_PATH_MARKER_BEGIN,
+    REFACT_PATH_MARKER_END,
+    classifyWindowsPathUpdateOutput,
+    chooseUnixProfile,
+    refactPathBlock,
+    registerSharedRefactPath,
+    upsertRefactPathBlock,
+    windowsPathUpdateScript,
+} from "./refactPathRegistration";
 import {
     backendConfigForStatus,
     effectiveLspPortForStatus,
@@ -175,6 +189,9 @@ export async function runRefactDaemonTests() {
     await runDiskPortTokenMismatchRecoveryTest();
     await runProjectProxyRetryTest();
     await runSpawnFailureSurfacesLogTest();
+    runSharedRefactPathMatchingTests();
+    runRefactPathRegistrationPolicyTests();
+    await runRefactPathUnixBlockTests();
 }
 
 function runDaemonSpawnPortTests() {
@@ -585,6 +602,14 @@ async function runStandaloneResolutionTests() {
         assert.strictEqual(bundledPreferred, path.resolve(bundledRefact));
         assert.deepStrictEqual(bundledVersionChecks, [bundledRefact]);
         assert.strictEqual(shortcutDownloadStarts, 0);
+
+        const compatibleSharedAlongsideBundle = await resolveCompatibleSharedRefactBinaryOrNull(
+            homeDir,
+            "8.1.0",
+            "linux",
+            async binPath => fs.readFileSync(binPath, "utf8"),
+        );
+        assert.strictEqual(compatibleSharedAlongsideBundle?.binPath, homeRefact);
 
         const versionChecks: string[] = [];
         const sharedPreferred = await resolveRefactBinary({
@@ -1623,6 +1648,173 @@ async function runSpawnFailureSurfacesLogTest() {
     } finally {
         fs.rmSync(root, { recursive: true, force: true });
     }
+}
+
+function runSharedRefactPathMatchingTests() {
+    // POSIX: case-sensitive matching of the canonical shared path.
+    const posixHome = "/home/tester";
+    const posixShared = sharedRefactBinaryPath(posixHome, "linux");
+    assert.strictEqual(isSharedRefactBinaryPath(posixShared, posixHome, "linux"), true);
+    assert.strictEqual(isSharedRefactBinaryPath(`${posixShared} `, posixHome, "linux"), true);
+    assert.strictEqual(isSharedRefactBinaryPath(posixShared.toUpperCase(), posixHome, "linux"), false);
+    assert.strictEqual(isSharedRefactBinaryPath("/usr/local/bin/refact", posixHome, "linux"), false);
+    assert.strictEqual(isSharedRefactBinaryPath(undefined, posixHome, "linux"), false);
+    assert.strictEqual(isSharedRefactBinaryPath("", posixHome, "linux"), false);
+    assert.strictEqual(sharedRefactBinaryDir(posixHome), path.resolve("/home/tester/.refact/bin"));
+
+    // Windows: case-insensitive matching of the canonical shared path.
+    const winHome = "C:\\Users\\Tester";
+    const winShared = sharedRefactBinaryPath(winHome, "win32");
+    assert.strictEqual(isSharedRefactBinaryPath(winShared, winHome, "win32"), true);
+    assert.strictEqual(isSharedRefactBinaryPath(winShared.toLowerCase(), winHome, "win32"), true);
+    assert.strictEqual(isSharedRefactBinaryPath(winShared.toUpperCase(), winHome, "win32"), true);
+    assert.strictEqual(isSharedRefactBinaryPath("C:\\other\\refact.exe", winHome, "win32"), false);
+}
+
+function runRefactPathRegistrationPolicyTests() {
+    // Profile selection follows the Codex-style layout.
+    assert.deepStrictEqual(
+        chooseUnixProfile("/home/t", "darwin", "/bin/zsh", {}),
+        { file: path.join("/home/t", ".zprofile"), family: "zsh" },
+    );
+    assert.deepStrictEqual(
+        chooseUnixProfile("/home/t", "darwin", "/bin/bash", {}),
+        { file: path.join("/home/t", ".bash_profile"), family: "bash" },
+    );
+    assert.deepStrictEqual(
+        chooseUnixProfile("/home/t", "linux", "/usr/bin/zsh", {}),
+        { file: path.join("/home/t", ".zshrc"), family: "zsh" },
+    );
+    assert.deepStrictEqual(
+        chooseUnixProfile("/home/t", "linux", "/bin/bash", {}),
+        { file: path.join("/home/t", ".bashrc"), family: "bash" },
+    );
+    assert.deepStrictEqual(
+        chooseUnixProfile("/home/t", "linux", "/usr/bin/fish", {}),
+        { file: path.join("/home/t", ".config", "fish", "config.fish"), family: "fish" },
+    );
+    assert.deepStrictEqual(
+        chooseUnixProfile("/home/t", "linux", "/usr/bin/fish", Object.fromEntries([["XDG_CONFIG_HOME", "/cfg"]])),
+        { file: path.join("/cfg", "fish", "config.fish"), family: "fish" },
+    );
+    assert.deepStrictEqual(
+        chooseUnixProfile("/home/t", "linux", "/bin/dash", {}),
+        { file: path.join("/home/t", ".profile"), family: "sh" },
+    );
+
+    // Windows PowerShell script is idempotent and case-insensitive by design.
+    const script = windowsPathUpdateScript();
+    assert.strictEqual(script.includes("-ieq"), true);
+    assert.strictEqual(script.includes("SetEnvironmentVariable('Path'"), true);
+    assert.strictEqual(script.includes("'User'"), true);
+    assert.strictEqual(script.includes("[Console]::In.ReadToEnd()"), true);
+    assert.strictEqual(script.includes("FromBase64String"), true);
+    assert.strictEqual(script.includes("C:\\Users"), false);
+}
+
+async function runRefactPathUnixBlockTests() {
+    const dir = "/home/tester/.refact/bin";
+    const block = refactPathBlock(dir, "bash");
+    assert.strictEqual(block.startsWith(REFACT_PATH_MARKER_BEGIN), true);
+    assert.strictEqual(block.trimEnd().endsWith(REFACT_PATH_MARKER_END), true);
+    assert.strictEqual(block.includes('export PATH="$HOME/.refact/bin:$PATH"'), true);
+
+    // Add into empty content.
+    const added = upsertRefactPathBlock(undefined, dir, "bash");
+    assert.strictEqual(added.outcome, "added");
+    assert.strictEqual(added.content?.includes(block), true);
+
+    // Add into existing content without markers preserves prior content.
+    const withExisting = upsertRefactPathBlock("# existing profile\n", dir, "bash");
+    assert.strictEqual(withExisting.outcome, "added");
+    assert.strictEqual(withExisting.content?.startsWith("# existing profile\n"), true);
+    assert.strictEqual(withExisting.content?.includes(block), true);
+
+    // Idempotent no-op when the block is already current.
+    const current = added.content ?? "";
+    const unchanged = upsertRefactPathBlock(current, dir, "bash");
+    assert.strictEqual(unchanged.outcome, "unchanged");
+    assert.strictEqual(unchanged.content, undefined);
+
+    // Update replaces a stale owned body while keeping surrounding content.
+    const stale = `header\n${REFACT_PATH_MARKER_BEGIN}\nexport PATH="/old/path:$PATH"\n${REFACT_PATH_MARKER_END}\nfooter\n`;
+    const updated = upsertRefactPathBlock(stale, dir, "bash");
+    assert.strictEqual(updated.outcome, "updated");
+    assert.strictEqual(updated.content?.startsWith("header\n"), true);
+    assert.strictEqual(updated.content?.trimEnd().endsWith("footer"), true);
+    assert.strictEqual(updated.content?.includes('export PATH="$HOME/.refact/bin:$PATH"'), true);
+    assert.strictEqual(updated.content?.includes("/old/path"), false);
+    // Only one owned block should remain after update.
+    assert.strictEqual((updated.content?.match(new RegExp(escapeRegExp(REFACT_PATH_MARKER_BEGIN), "g")) ?? []).length, 1);
+
+    // Malformed markers -> warning, no mutation.
+    const malformed = upsertRefactPathBlock(`${REFACT_PATH_MARKER_BEGIN}\nbody\n`, dir, "bash");
+    assert.strictEqual(malformed.outcome, "warning");
+    assert.strictEqual(malformed.content, undefined);
+    const doubled = upsertRefactPathBlock(
+        `${REFACT_PATH_MARKER_BEGIN}\na\n${REFACT_PATH_MARKER_END}\n${REFACT_PATH_MARKER_BEGIN}\nb\n${REFACT_PATH_MARKER_END}\n`,
+        dir,
+        "bash",
+    );
+    assert.strictEqual(doubled.outcome, "warning");
+
+    // registerSharedRefactPath integration through injected seams (Unix).
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-path-reg-"));
+    try {
+        const home = path.join(root, "home");
+        const files = new Map<string, string>();
+        const options = {
+            homeDir: home,
+            platform: "linux",
+            shell: "/bin/bash",
+            env: {},
+            mkdir: () => undefined,
+            readFile: (p: string) => files.get(p),
+            writeFile: (p: string, c: string) => { files.set(p, c); },
+        };
+        const first = await registerSharedRefactPath(options);
+        assert.strictEqual(first.outcome, "added");
+        assert.strictEqual(first.file, path.join(home, ".bashrc"));
+        const second = await registerSharedRefactPath(options);
+        assert.strictEqual(second.outcome, "unchanged");
+
+        // Malformed existing profile yields a non-throwing warning.
+        files.set(path.join(home, ".bashrc"), `${REFACT_PATH_MARKER_BEGIN}\nonly begin\n`);
+        const malformedResult = await registerSharedRefactPath(options);
+        assert.strictEqual(malformedResult.outcome, "warning");
+
+        // I/O failure surfaces as a warning rather than throwing.
+        const ioResult = await registerSharedRefactPath({
+            ...options,
+            readFile: () => undefined,
+            writeFile: () => { throw new Error("disk full"); },
+        });
+        assert.strictEqual(ioResult.outcome, "warning");
+        assert.strictEqual(ioResult.message?.includes("disk full"), true);
+
+        // Windows path uses the injected PowerShell runner and never throws.
+        const winAdded = await registerSharedRefactPath({
+            homeDir: "C:\\Users\\Tester",
+            platform: "win32",
+            runWindowsPathUpdate: async () => ({ outcome: "added" as const }),
+        });
+        assert.strictEqual(winAdded.outcome, "added");
+        assert.strictEqual(classifyWindowsPathUpdateOutput("UNCHANGED").outcome, "unchanged");
+        assert.strictEqual(classifyWindowsPathUpdateOutput("ADDED").outcome, "added");
+        const winFailure = await registerSharedRefactPath({
+            homeDir: "C:\\Users\\Tester",
+            platform: "win32",
+            runWindowsPathUpdate: async () => { throw new Error("powershell missing"); },
+        });
+        assert.strictEqual(winFailure.outcome, "warning");
+        assert.strictEqual(winFailure.message?.includes("powershell missing"), true);
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+}
+
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function writeExecutable(filePath: string, contents: string): void {

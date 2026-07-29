@@ -16,11 +16,13 @@ curl -fsSL https://raw.githubusercontent.com/JegernOUTT/refact/main/install.sh |
 irm https://raw.githubusercontent.com/JegernOUTT/refact/main/install.ps1 | iex
 ```
 
-The installer places `refact` on your `PATH`. No dependencies, no runtime, no sudo — just the binary.
+The installer writes the standalone binary to `~/.refact/bin/refact` (Unix/macOS) or `%USERPROFILE%\.refact\bin\refact.exe` (Windows) and adds that directory to your `PATH`. No dependencies, no runtime, no sudo — just the binary.
+
+Because `PATH` is updated in your shell startup files, open a **new terminal** (or `source` the profile the installer reports on Unix/macOS) before running `refact`. If you pass `--no-modify-path` (Unix/macOS) or `-NoModifyPath` (Windows), the installer leaves `PATH` untouched: add `~/.refact/bin` (or `%USERPROFILE%\.refact\bin`) to `PATH` yourself, or invoke the binary by its full path.
 
 Additional packaging channels (Homebrew, Winget, Scoop, npm) are coming — watch the [releases page](https://github.com/JegernOUTT/refact/releases) for availability.
 
-Verify it worked:
+Verify it worked (in a new terminal):
 
 ```sh
 refact version

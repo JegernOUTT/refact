@@ -175,8 +175,45 @@ function systemRefactCandidates(pathEnv: string, homeDir: string, platform: stri
     return Array.from(new Set(candidates.map(candidate => path.resolve(candidate))));
 }
 
-function sharedRefactBinaryPath(homeDir: string, platform: string): string {
-    return path.resolve(path.join(homeDir, ".refact", "bin", binaryNameForPlatform(platform)));
+export function sharedRefactBinaryDir(homeDir: string): string {
+    return path.resolve(path.join(homeDir, ".refact", "bin"));
+}
+
+export function sharedRefactBinaryPath(homeDir: string, platform: string = process.platform): string {
+    return path.resolve(path.join(sharedRefactBinaryDir(homeDir), binaryNameForPlatform(platform)));
+}
+
+/**
+ * Pure helper: returns true when `candidate` resolves to exactly the canonical
+ * IDE-managed / shell-shared refact binary path (`~/.refact/bin/refact[.exe]`).
+ * Path comparison is case-insensitive on Windows and case-sensitive elsewhere.
+ */
+export function isSharedRefactBinaryPath(
+    candidate: string | undefined,
+    homeDir: string,
+    platform: string = process.platform,
+): boolean {
+    const trimmed = candidate?.trim();
+    if (!trimmed) {
+        return false;
+    }
+    const resolvedCandidate = path.resolve(trimmed);
+    const canonical = sharedRefactBinaryPath(homeDir, platform);
+    if (platform === "win32") {
+        return resolvedCandidate.toLowerCase() === canonical.toLowerCase();
+    }
+    return resolvedCandidate === canonical;
+}
+
+export async function resolveCompatibleSharedRefactBinaryOrNull(
+    homeDir: string,
+    minVersion: string,
+    platform: string = process.platform,
+    runVersion: (binPath: string) => Promise<string | undefined> = readRefactVersion,
+): Promise<ResolvedRefactBinary | undefined> {
+    const binPath = sharedRefactBinaryPath(homeDir, platform);
+    const version = await compatibleRefactBinaryVersion(binPath, minVersion, runVersion);
+    return version ? { binPath, version } : undefined;
 }
 
 async function compatibleRefactBinaryVersion(

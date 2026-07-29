@@ -24,17 +24,33 @@
 
 ## Install
 
+By default, the installer writes a shared standalone binary to `~/.refact/bin/refact` (Unix/macOS) or `%USERPROFILE%\.refact\bin\refact.exe` (Windows) and adds that directory to your `PATH`.
+
 **Unix/macOS**
+
+Install:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/JegernOUTT/refact/main/install.sh | sh
+```
+
+Then open a **new terminal** (or `source` the shell profile the installer reports) so `refact` is on your `PATH`, and run:
+
+```sh
 refact ui
 ```
 
 **Windows PowerShell**
 
+Install:
+
 ```powershell
 irm https://raw.githubusercontent.com/JegernOUTT/refact/main/install.ps1 | iex
+```
+
+Then open a **new terminal** so `refact.exe` is on your `PATH`, and run:
+
+```powershell
 refact ui
 ```
 
@@ -219,6 +235,8 @@ IDE plugins are optional clients for the same daemon-backed projects:
 
 - [VS Code](https://github.com/JegernOUTT/refact/wiki/Installation-VS-Code)
 - [JetBrains](https://github.com/JegernOUTT/refact/wiki/Installation-JetBrains)
+
+VS Code and JetBrains install downloaded engines at `~/.refact/bin/refact` (or `%USERPROFILE%\.refact\bin\refact.exe`) and register that shared directory so future terminal sessions can run `refact` too. A configured or bundled compatible engine can still take precedence inside the IDE. Open a new terminal after the first IDE-managed download to pick up the updated `PATH`.
 
 After installation, configure a provider or local runtime with [BYOK](https://github.com/JegernOUTT/refact/wiki/BYOK), then start with the [Quickstart](https://github.com/JegernOUTT/refact/wiki/Quickstart) or the full [Installation](https://github.com/JegernOUTT/refact/wiki/Installation) guide.
 

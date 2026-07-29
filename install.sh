@@ -12,6 +12,7 @@ binary_path=""
 modify_path=1
 install_dir="${HOME:-}/.refact/bin"
 modified_path_files=""
+path_update_warning=0
 
 usage() {
     cat <<'EOF'
@@ -209,16 +210,104 @@ install_binary() {
     mv "$temp_target" "$install_path"
 }
 
-append_path_file() {
-    path_file=$1
-    path_line=$2
-    path_dir=$(dirname "$path_file")
-    mkdir -p "$path_dir"
-    if [ -f "$path_file" ] && grep -F '.refact/bin' "$path_file" >/dev/null 2>&1; then
+block_begin_marker='# >>> Refact installer >>>'
+block_end_marker='# <<< Refact installer <<<'
+
+select_profile() {
+    profile_shell=$(basename "${SHELL:-sh}")
+    case "$profile_shell" in
+        fish)
+            printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
+            return 0
+            ;;
+        zsh)
+            if [ "$os" = "darwin" ]; then
+                printf '%s\n' "$HOME/.zprofile"
+            else
+                printf '%s\n' "$HOME/.zshrc"
+            fi
+            return 0
+            ;;
+        bash)
+            if [ "$os" = "darwin" ]; then
+                printf '%s\n' "$HOME/.bash_profile"
+            else
+                printf '%s\n' "$HOME/.bashrc"
+            fi
+            return 0
+            ;;
+        *)
+            printf '%s\n' "$HOME/.profile"
+            return 0
+            ;;
+    esac
+}
+
+upsert_path_block() {
+    profile_file=$1
+    body_line=$2
+    profile_dir=$(dirname "$profile_file")
+    mkdir -p "$profile_dir"
+
+    begin_count=0
+    end_count=0
+    if [ -f "$profile_file" ]; then
+        begin_count=$(awk -v marker="$block_begin_marker" '{ sub(/\r$/, "") } $0 == marker { count++ } END { print count + 0 }' "$profile_file")
+        end_count=$(awk -v marker="$block_end_marker" '{ sub(/\r$/, "") } $0 == marker { count++ } END { print count + 0 }' "$profile_file")
+    fi
+
+    if [ "$begin_count" -ne 0 ] || [ "$end_count" -ne 0 ]; then
+        if [ "$begin_count" -ne 1 ] || [ "$end_count" -ne 1 ]; then
+            err "found malformed Refact installer markers in $profile_file; leaving it untouched"
+            path_update_warning=1
+            return 0
+        fi
+        begin_line=$(awk -v marker="$block_begin_marker" '{ sub(/\r$/, "") } $0 == marker { print NR; exit }' "$profile_file")
+        end_line=$(awk -v marker="$block_end_marker" '{ sub(/\r$/, "") } $0 == marker { print NR; exit }' "$profile_file")
+        if [ "$end_line" -le "$begin_line" ]; then
+            err "found reversed Refact installer markers in $profile_file; leaving it untouched"
+            path_update_warning=1
+            return 0
+        fi
+    fi
+
+    if [ "$begin_count" -ne "$end_count" ]; then
+        err "found an unbalanced Refact installer block in $profile_file; leaving it untouched"
+        path_update_warning=1
         return 0
     fi
-    printf '\n%s\n' "$path_line" >> "$path_file"
-    modified_path_files="$modified_path_files${modified_path_files:+ }$path_file"
+
+    desired_block=$(printf '%s\n%s\n%s\n' "$block_begin_marker" "$body_line" "$block_end_marker")
+
+    if [ "$begin_count" -eq 1 ]; then
+        current_block=$(awk -v b="$block_begin_marker" -v e="$block_end_marker" '
+            { sub(/\r$/, "") }
+            $0 == b { capture = 1 }
+            capture == 1 { print }
+            capture == 1 && $0 == e { exit }
+        ' "$profile_file")
+        if [ "$current_block" = "$desired_block" ]; then
+            return 0
+        fi
+        tmp_profile="$profile_file.tmp.$$"
+        awk -v b="$block_begin_marker" -v e="$block_end_marker" -v line="$body_line" '
+            { normalized = $0; sub(/\r$/, "", normalized) }
+            normalized == b { skip = 1; print b; print line; print e; next }
+            normalized == e { skip = 0; next }
+            skip == 1 { next }
+            { print }
+        ' "$profile_file" > "$tmp_profile"
+        mv "$tmp_profile" "$profile_file"
+        modified_path_files="$modified_path_files${modified_path_files:+ }$profile_file"
+        return 0
+    fi
+
+    if [ -f "$profile_file" ] && [ -s "$profile_file" ]; then
+        printf '\n%s\n' "$desired_block" >> "$profile_file"
+    else
+        printf '%s\n' "$desired_block" >> "$profile_file"
+    fi
+    modified_path_files="$modified_path_files${modified_path_files:+ }$profile_file"
 }
 
 update_shell_path() {
@@ -228,48 +317,12 @@ update_shell_path() {
 
     export_line='export PATH="$HOME/.refact/bin:$PATH"'
     fish_line='fish_add_path "$HOME/.refact/bin"'
-    shell_name=$(basename "${SHELL:-sh}")
-    xdg_config_home=${XDG_CONFIG_HOME:-$HOME/.config}
+    profile_file=$(select_profile)
+    profile_shell=$(basename "${SHELL:-sh}")
 
-    case "$shell_name" in
-        fish)
-            config_files="$HOME/.config/fish/config.fish"
-            ;;
-        zsh)
-            zdotdir=${ZDOTDIR:-$HOME}
-            config_files="$zdotdir/.zshrc $zdotdir/.zshenv $xdg_config_home/zsh/.zshrc $xdg_config_home/zsh/.zshenv"
-            ;;
-        bash)
-            config_files="$HOME/.bashrc $HOME/.bash_profile $HOME/.profile $xdg_config_home/bash/.bashrc $xdg_config_home/bash/.bash_profile"
-            ;;
-        ash|sh)
-            config_files="$HOME/.ashrc $HOME/.profile"
-            ;;
-        *)
-            config_files="$HOME/.bashrc $HOME/.bash_profile $HOME/.profile $xdg_config_home/bash/.bashrc $xdg_config_home/bash/.bash_profile"
-            ;;
-    esac
-
-    config_file=""
-    for candidate in $config_files; do
-        if [ -f "$candidate" ]; then
-            config_file=$candidate
-            break
-        fi
-    done
-    if [ -z "$config_file" ]; then
-        for candidate in $config_files; do
-            config_file=$candidate
-            break
-        done
-    fi
-    if [ -z "$config_file" ]; then
-        return 0
-    fi
-
-    case "$shell_name" in
-        fish) append_path_file "$config_file" "$fish_line" ;;
-        *) append_path_file "$config_file" "$export_line" ;;
+    case "$profile_shell" in
+        fish) upsert_path_block "$profile_file" "$fish_line" ;;
+        *) upsert_path_block "$profile_file" "$export_line" ;;
     esac
 }
 
@@ -335,6 +388,8 @@ update_shell_path
 info "Refact installed successfully at $install_path"
 if [ "$modify_path" -eq 0 ]; then
     info "PATH was not modified. Add $install_dir to PATH to run refact from anywhere."
+elif [ "$path_update_warning" -eq 1 ]; then
+    info "PATH was not changed because the selected shell profile contains malformed Refact installer markers."
 elif [ -n "$modified_path_files" ]; then
     info "Added $install_dir to PATH in: $modified_path_files"
     info "Restart your terminal or source the updated shell file before running refact."

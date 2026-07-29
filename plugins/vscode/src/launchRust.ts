@@ -7,8 +7,10 @@ import * as net from 'net';
 import * as path from 'path';
 import { register_commands } from './rconsoleCommands';
 import { QuickActionProvider } from './quickProvider';
+import * as os from 'os';
 import * as refactBinary from './refactBinaryResolver';
 import * as refactDaemon from './refactDaemon';
+import { registerSharedRefactPath } from './refactPathRegistration';
 import { backendReadyForStatus, type RefactBackendConnectionStatus } from './backendStatus';
 import {
     lspClientReadyTimeoutMs,
@@ -324,6 +326,12 @@ export class RustBinaryBlob {
             return;
         }
         this.set_attach_state(attachStateForDaemonOpenProject());
+        if (daemon) {
+            const sharedResolved = await refactBinary.resolveCompatibleSharedRefactBinaryOrNull(os.homedir(), pluginVersion);
+            if (sharedResolved) {
+                this.maybe_register_shared_refact_path(sharedResolved.binPath);
+            }
+        }
         if (!daemon) {
             const configuredBinary = vscode.workspace.getConfiguration().get<string>("refactai.binaryPath")?.trim();
             const resolved = await refactBinary.resolveRefactBinaryDetailed({
@@ -342,6 +350,7 @@ export class RustBinaryBlob {
             if (!this.is_current_generation(generation)) {
                 return;
             }
+            this.maybe_register_shared_refact_path(resolved.binPath);
             daemon = await refactDaemon.ensureDaemon(resolved.binPath, {
                 port: daemonPort,
                 pluginVersion: resolved.version ?? pluginVersion,
@@ -838,6 +847,25 @@ export class RustBinaryBlob {
             return undefined;
         }
         return refactDaemon.normalizeDaemonSpawnPort(configuration.get<number>("refactai.daemonPort"));
+    }
+
+    private maybe_register_shared_refact_path(binPath: string): void {
+        // Only register the canonical IDE-managed / shared binary
+        // (~/.refact/bin/refact[.exe]). Never register explicit, bundled, or
+        // arbitrary PATH binaries. Failures must never abort attach.
+        const homeDir = os.homedir();
+        if (!refactBinary.isSharedRefactBinaryPath(binPath, homeDir)) {
+            return;
+        }
+        void registerSharedRefactPath({ homeDir })
+            .then(result => {
+                if (result.outcome === "warning") {
+                    console.warn(`Refact PATH registration skipped: ${result.message ?? "unknown reason"}`);
+                }
+            })
+            .catch(error => {
+                console.warn(`Refact PATH registration failed: ${error instanceof Error ? error.message : String(error)}`);
+            });
     }
 
     private plugin_version(): string {

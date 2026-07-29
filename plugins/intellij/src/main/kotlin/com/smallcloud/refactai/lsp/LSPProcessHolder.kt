@@ -493,6 +493,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 daemonClient.ensureDaemon(bin, requiredDaemonVersion())
             } else {
                 clearBinaryResolutionFailure()
+                compatibleSharedBinaryPathOrNull(requiredDaemonVersion())?.let(::registerSharedBinaryPathForTerminal)
                 logger.debug("LSP daemon attach existing pid=${compatibleDaemonStatus.pid} version=${compatibleDaemonStatus.version} ${newConfig.toSafeLogString()}")
                 compatibleDaemonStatus
             }
@@ -547,7 +548,12 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     }
 
     protected open fun localBinaryExecutableSha256OrNull(requiredVersion: String): String? {
-        val localBinary = runCatching {
+        val localBinary = localBinaryPathOrNull(requiredVersion) ?: return null
+        return RefactBinaryHashCache.sha256OrNull(java.nio.file.Path.of(localBinary))
+    }
+
+    protected open fun localBinaryPathOrNull(requiredVersion: String): String? {
+        return runCatching {
             RefactBinaryResolver.resolveLocalOrNull(
                 RefactBinaryResolverOptions(
                     explicitPath = InferenceGlobalContext.refactBinaryPath,
@@ -557,8 +563,23 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                     cacheDir = BIN_CACHE_DIR,
                 ),
             )
-        }.getOrNull() ?: return null
-        return RefactBinaryHashCache.sha256OrNull(java.nio.file.Path.of(localBinary))
+        }.getOrNull()
+    }
+
+    protected open fun compatibleSharedBinaryPathOrNull(requiredVersion: String): String? {
+        return runCatching {
+            RefactBinaryResolver.resolveCompatibleSharedOrNull(
+                RefactBinaryResolverOptions(
+                    minVersion = requiredVersion,
+                    pinnedVersion = requiredVersion,
+                    cacheDir = BIN_CACHE_DIR,
+                ),
+            )?.path
+        }.getOrNull()
+    }
+
+    protected open fun registerSharedBinaryPathForTerminal(resolvedPath: String) {
+        registerSharedBinaryPathIfCanonical(resolvedPath)
     }
 
     protected open fun requiredDaemonVersion(): String {
@@ -627,6 +648,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 clearBinaryResolutionFailure()
                 daemonClient.ensureDaemon(bin, requiredDaemonVersion())
             } else {
+                compatibleSharedBinaryPathOrNull(requiredDaemonVersion())?.let(::registerSharedBinaryPathForTerminal)
                 compatibleDaemonStatus
             }
             attachedProject = daemonClient.openProject(root, config, daemonStatus)
@@ -948,7 +970,46 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 "LSP initialize BIN_PATH=$BIN_PATH engineVersion=${resolved.version}" +
                     (resolved.fallbackFromVersion?.let { " fallbackFrom=v$it" } ?: "")
             )
+            registerSharedBinaryPathIfCanonical(resolved.path)
             return resolved.path
+        }
+
+        /**
+         * Registers `<home>/.refact/bin` on the user's PATH, but only when [resolvedPath] is exactly
+         * the canonical shared binary location. Bundled/explicit/PATH binaries are never registered.
+         * Registration is best-effort: outcomes are logged but never surfaced as IDE notifications and
+         * never fail binary resolution.
+         */
+        private fun registerSharedBinaryPathIfCanonical(resolvedPath: String) {
+            try {
+                val homeProp = System.getProperty("user.home") ?: return
+                val home = Path.of(homeProp)
+                val osName = System.getProperty("os.name")
+                val canonical = sharedRefactBinaryPath(home, osName).toString()
+                val resolvedNormalized = runCatching {
+                    Path.of(resolvedPath).toAbsolutePath().normalize().toString()
+                }.getOrDefault(resolvedPath)
+                val isWindows = osName.lowercase().contains("win")
+                val matches = if (isWindows) {
+                    resolvedNormalized.equals(canonical, ignoreCase = true)
+                } else {
+                    resolvedNormalized == canonical
+                }
+                if (!matches) {
+                    logger.info("Skipping PATH registration; resolved binary is not the shared install")
+                    return
+                }
+                AppExecutorUtil.getAppExecutorService().execute {
+                    when (val result = RefactPathRegistrar.register(home, osName)) {
+                        is RegistrationResult.Changed -> logger.info("Refact PATH registration: ${result.detail}")
+                        is RegistrationResult.Unchanged -> logger.info("Refact PATH registration: ${result.detail}")
+                        is RegistrationResult.Skipped -> logger.info("Refact PATH registration skipped: ${result.detail}")
+                        is RegistrationResult.Warning -> logger.warn("Refact PATH registration: ${result.message}")
+                    }
+                }
+            } catch (e: Exception) {
+                logger.warn("Refact PATH registration failed unexpectedly: ${e.message}")
+            }
         }
 
         private fun warnAboutEngineVersionFallback(pinned: String, chosen: String) {

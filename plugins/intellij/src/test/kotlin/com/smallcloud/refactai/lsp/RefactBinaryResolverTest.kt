@@ -14,6 +14,26 @@ import java.util.Comparator
 
 class RefactBinaryResolverTest {
     @Test
+    fun compatibleSharedProbeIgnoresBundledPrecedence() {
+        val root = Files.createTempDirectory("refact-binary-resolver-shared-probe")
+        val bundled = root.resolve("plugin").resolve("bin").resolve("dist-x86_64-unknown-linux-gnu").resolve("refact")
+        val home = root.resolve("home")
+        val shared = sharedRefactBinaryPath(home, "Linux")
+        try {
+            writeBinary(bundled)
+            writeBinary(shared)
+
+            val resolved = RefactBinaryResolver.resolveCompatibleSharedOrNull(
+                options(root = root, bundledDir = root.resolve("plugin")).copy(homeDir = home)
+            )
+
+            assertEquals(shared.toAbsolutePath().normalize().toString(), resolved?.path)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun explicitBinaryWinsOverBundledSystemAndDownload() {
         val root = Files.createTempDirectory("refact-binary-resolver-explicit-precedence")
         val explicit = root.resolve("explicit").resolve("refact")

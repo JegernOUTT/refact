@@ -103,6 +103,13 @@ internal object RefactBinaryResolver {
 
         return null
     }
+
+    fun resolveCompatibleSharedOrNull(options: RefactBinaryResolverOptions): ResolvedRefactBinary? {
+        val candidate = sharedRefactBinaryPath(options.homeDir, options.osName)
+        return compatibleRefactBinaryVersion(candidate, options.minVersion, options.versionReader)?.let {
+            ResolvedRefactBinary(candidate.toString(), it)
+        }
+    }
 }
 
 internal fun refactBinaryName(osName: String = System.getProperty("os.name")): String {

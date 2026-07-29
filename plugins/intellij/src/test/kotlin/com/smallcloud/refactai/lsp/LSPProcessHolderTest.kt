@@ -118,6 +118,8 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         var signalDownloadStartDuringResolution = false
         var initializeError: RuntimeException? = null
         var probeResult = true
+        var compatibleSharedBinaryPathResult: String? = null
+        val terminalRegistrationPaths = Collections.synchronizedList(mutableListOf<String>())
         var binaryFailureMessage = "Failed to download the Refact engine (version 8.1.0) from GitHub releases"
 
         override val daemonClient: RefactDaemonClient
@@ -138,6 +140,14 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
 
         override fun requiredDaemonVersion(): String {
             return requiredVersion
+        }
+
+        override fun compatibleSharedBinaryPathOrNull(requiredVersion: String): String? {
+            return compatibleSharedBinaryPathResult ?: super.compatibleSharedBinaryPathOrNull(requiredVersion)
+        }
+
+        override fun registerSharedBinaryPathForTerminal(resolvedPath: String) {
+            terminalRegistrationPaths.add(resolvedPath)
         }
 
         override fun sleepBeforeWakeRetry(attempt: Int) {
@@ -343,6 +353,24 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             assertTrue(fake.statusCalls.get() >= 1)
             assertEquals(DaemonStatus(version = "8.1.0", port = 8488), fake.openedDaemons.single())
             assertEquals(URI("http://127.0.0.1:8488/p/project-123/"), holder.baseUrlOrNull())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testExistingDaemonRegistersResolvedSharedBinaryForTerminal() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply { statusVersion = "8.1.0" }
+        val holder = TestLspProcessHolder(mockProject(root), fake).apply {
+            compatibleSharedBinaryPathResult = "/home/tester/.refact/bin/refact"
+        }
+        LSPProcessHolder.BIN_PATH = null
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("existing-daemon-terminal-registration") }
+
+            assertEquals(0, fake.ensureDaemonCalls.get())
+            assertEquals(listOf("/home/tester/.refact/bin/refact"), holder.terminalRegistrationPaths)
         } finally {
             holder.dispose()
         }
@@ -977,6 +1005,27 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
             assertEquals(2, holder.initializeCalls.get())
             assertEquals(2, fake.openProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testWakeRetryRegistersCompatibleSharedBinaryWhenReusingDaemon() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root), fake).apply {
+            compatibleSharedBinaryPathResult = "/home/tester/.refact/bin/refact"
+        }
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("wake-terminal-registration-start") }
+            holder.terminalRegistrationPaths.clear()
+
+            val recovered = runOffEdt { holder.wakeWorkerForRetry("wake-terminal-registration") }
+
+            assertTrue(recovered)
+            assertEquals(listOf("/home/tester/.refact/bin/refact"), holder.terminalRegistrationPaths)
         } finally {
             holder.dispose()
         }
