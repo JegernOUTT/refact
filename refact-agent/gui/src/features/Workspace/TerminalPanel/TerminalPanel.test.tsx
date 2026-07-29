@@ -11,6 +11,8 @@ import { makeSurfaceKey } from "../surfaceKey";
 import { openTab } from "../workspaceSlice";
 import { TerminalPanel } from "./TerminalPanel";
 import { setTerminalWorkbenchOpen } from "./terminalSlice";
+import emptyStateStyles from "../../../components/ui/EmptyState/EmptyState.module.css";
+import terminalPanelStyles from "./TerminalPanel.module.css";
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -108,11 +110,11 @@ describe("TerminalPanel", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
-  test("gives the expand-grid body an explicit tokenized block size", () => {
+  test("gives the expand-grid body a bounded responsive block size", () => {
     const bodyRule = terminalPanelCss.match(/\.body\s*\{([^}]*)\}/u)?.[1];
 
     expect(bodyRule).toMatch(
-      /block-size:\s*calc\(var\(--rf-control-h\)\s*\*\s*6\)/u,
+      /block-size:\s*clamp\([\s\S]*calc\(var\(--rf-control-h\)\s*\*\s*6\)[\s\S]*30dvh[\s\S]*calc\(var\(--rf-control-h\)\s*\*\s*10\)[\s\S]*\)/u,
     );
     expect(bodyRule).not.toMatch(/\bflex\s*:/u);
     expect(terminalPanelCss).toMatch(
@@ -393,7 +395,12 @@ describe("TerminalPanel", () => {
       screen.getByRole("button", { name: "Expand terminal workbench" }),
     );
 
-    expect(await screen.findByText("No terminal sessions")).toBeVisible();
+    const emptyTitle = await screen.findByText("No terminal sessions");
+    expect(emptyTitle).toBeVisible();
+    expect(emptyTitle.closest("section")).toHaveClass(
+      emptyStateStyles.compact,
+      terminalPanelStyles.emptyState,
+    );
 
     await user.click(
       screen.getByRole("button", { name: "Collapse terminal workbench" }),
@@ -498,7 +505,12 @@ describe("TerminalPanel", () => {
       await screen.findByRole("button", { name: "New terminal" }),
     );
 
-    expect(await screen.findByText("Browser terminal disabled")).toBeVisible();
+    const disabledTitle = await screen.findByText("Browser terminal disabled");
+    expect(disabledTitle).toBeVisible();
+    expect(disabledTitle.closest("section")).toHaveClass(
+      emptyStateStyles.compact,
+      terminalPanelStyles.emptyState,
+    );
     expect(screen.getByText(/REFACT_DISABLE_EXEC_HTTP policy/i)).toBeVisible();
   });
 

@@ -45,8 +45,12 @@ const routes = [
     path: "/tests/e2e/route-showcase.html?route=chat-split",
   },
   {
-    name: "workspace dock and drawer",
+    name: "workspace dock and terminal workbench",
     path: "/tests/e2e/route-showcase.html?route=workspace-chrome",
+  },
+  {
+    name: "workspace disabled terminal workbench",
+    path: "/tests/e2e/route-showcase.html?route=workspace-chrome-disabled",
   },
   {
     name: "buddy",
@@ -146,9 +150,52 @@ test.describe("no page-level horizontal scroll", () => {
           ).toBeVisible();
         }
         if (route.path.includes("route=workspace-chrome")) {
+          const terminalDisabled = route.path.includes(
+            "route=workspace-chrome-disabled",
+          );
+          const terminalWorkbench = page.getByLabel(
+            "Terminal workbench for showcase-chat",
+          );
+          const terminalBody = page.getByTestId("terminal-workbench-body");
+          await expect(terminalWorkbench).toBeVisible();
           await expect(
-            page.locator('section[aria-label="Terminal drawer"]'),
+            terminalWorkbench.getByText(
+              terminalDisabled
+                ? "Browser terminal disabled"
+                : "No terminal sessions",
+            ),
           ).toBeVisible();
+          const readTerminalGeometry = () =>
+            terminalBody.evaluate((body) => {
+              const emptyState = body.querySelector("section");
+              const bodyRect = body.getBoundingClientRect();
+              const emptyRect = emptyState?.getBoundingClientRect();
+              return {
+                bodyHeight: bodyRect.height,
+                bodyWidth: bodyRect.width,
+                emptyHeight: emptyRect?.height ?? 0,
+                emptyWidth: emptyRect?.width ?? 0,
+                emptyScrollHeight: emptyState?.scrollHeight ?? 0,
+                emptyClientHeight: emptyState?.clientHeight ?? 0,
+              };
+            });
+          await expect
+            .poll(async () => (await readTerminalGeometry()).bodyHeight)
+            .toBeGreaterThanOrEqual(179);
+          const terminalGeometry = await readTerminalGeometry();
+          expect(terminalGeometry.bodyHeight).toBeGreaterThanOrEqual(179);
+          expect(terminalGeometry.bodyHeight).toBeLessThanOrEqual(301);
+          expect(
+            Math.abs(terminalGeometry.bodyWidth - terminalGeometry.emptyWidth),
+          ).toBeLessThanOrEqual(1);
+          expect(
+            Math.abs(
+              terminalGeometry.bodyHeight - terminalGeometry.emptyHeight,
+            ),
+          ).toBeLessThanOrEqual(1);
+          expect(terminalGeometry.emptyScrollHeight).toBeLessThanOrEqual(
+            terminalGeometry.emptyClientHeight + 1,
+          );
           if (width < 768) {
             await expect(page.getByRole("dialog")).toBeVisible();
           } else {

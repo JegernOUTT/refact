@@ -371,16 +371,18 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
       <div className="rf-expand-grid" data-open={workbenchOpen}>
         <div
           className={styles.body}
+          data-testid="terminal-workbench-body"
           hidden={!workbenchOpen}
           aria-hidden={!workbenchOpen}
         >
           {disabled ? (
             <div className={styles.fullState}>
               <EmptyState
+                className={styles.emptyState}
                 icon={SquareTerminal}
                 title="Browser terminal disabled"
                 description="Terminal access is disabled by the daemon or REFACT_DISABLE_EXEC_HTTP policy. Enable exec HTTP access and try again."
-                variant="full"
+                variant="compact"
                 action={
                   <Button
                     onClick={() => setListAttempt((attempt) => attempt + 1)}
@@ -421,10 +423,11 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
               })}
               {!loading && sessions.length === 0 ? (
                 <EmptyState
+                  className={styles.emptyState}
                   icon={SquareTerminal}
                   title="No terminal sessions"
                   description="Start an interactive shell in this chat's workspace."
-                  variant="full"
+                  variant="compact"
                   action={
                     <Button
                       leftIcon={Plus}

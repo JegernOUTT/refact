@@ -61,7 +61,9 @@ const splitChatId = "showcase-chat-b";
 const chatSurface = (id: string) => makeSurfaceKey("chat", id);
 const route =
   new URLSearchParams(window.location.search).get("route") ?? "dashboard";
-const workspaceChromeRoute = route === "workspace-chrome";
+const terminalDisabledRoute = route === "workspace-chrome-disabled";
+const workspaceChromeRoute =
+  route === "workspace-chrome" || terminalDisabledRoute;
 const chatRoute =
   route === "chat" || route === "chat-split" || workspaceChromeRoute;
 const chatDndRoute = route === "chat-dnd";
@@ -971,7 +973,43 @@ window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
     );
   }
   if (path === "/v1/exec/list") {
+    if (terminalDisabledRoute) {
+      return Promise.resolve(
+        new Response("exec HTTP is disabled", { status: 403 }),
+      );
+    }
     return Promise.resolve(jsonResponse({ processes: [] }));
+  }
+  if (path === "/v1/worktrees") {
+    return Promise.resolve(
+      jsonResponse({
+        project_hash: "route-showcase",
+        source_workspace_root: "/workspace/refact",
+        source_current_branch: "main",
+        source_branches: ["main"],
+        worktrees: [],
+      }),
+    );
+  }
+  if (path === "/v1/voice/status") {
+    return Promise.resolve(
+      jsonResponse({
+        enabled: false,
+        model_loaded: false,
+        model_name: "",
+        is_downloading: false,
+        download_progress: 0,
+      }),
+    );
+  }
+  if (path === "/v1/at-command-completion") {
+    return Promise.resolve(
+      jsonResponse({
+        completions: [],
+        replace: [0, 0],
+        is_cmd_executable: false,
+      }),
+    );
   }
   if (path === "/v1/buddy") return Promise.resolve(jsonResponse(buddySnapshot));
   if (path === "/v1/buddy/settings") {
@@ -1194,6 +1232,15 @@ const preloadedState: Partial<RootState> = {
                     }
                   : {}),
               },
+      }
+    : {}),
+  ...(workspaceChromeRoute
+    ? {
+        terminal: {
+          sessionsByChat: {},
+          activeProcessIdByChat: {},
+          workbenchOpenByChat: { [chatId]: true },
+        },
       }
     : {}),
   history: {

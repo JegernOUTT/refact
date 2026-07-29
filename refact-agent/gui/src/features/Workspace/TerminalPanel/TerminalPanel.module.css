@@ -82,7 +82,11 @@
 .body {
   position: relative;
   display: flex;
-  block-size: calc(var(--rf-control-h) * 6);
+  block-size: clamp(
+    calc(var(--rf-control-h) * 6),
+    30dvh,
+    calc(var(--rf-control-h) * 10)
+  );
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -155,6 +159,13 @@
 
 .fullState {
   display: flex;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.emptyState {
   flex: 1 1 auto;
   width: 100%;
   min-width: 0;
