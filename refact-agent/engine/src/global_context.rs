@@ -271,6 +271,7 @@ pub struct GlobalContext {
     pub documents_state: DocumentsState,
     pub at_commands_preview_cache: Arc<AMutex<AtCommandsPreviewCache>>,
     pub privacy_settings: Arc<StdRwLock<Arc<PrivacySettings>>>,
+    pub privacy_policy_load: Arc<StdRwLock<refact_privacy::PolicyLoad>>,
     pub indexing_everywhere: Arc<crate::files_blocklist::IndexingEverywhere>,
     pub integration_sessions:
         Arc<AMutex<HashMap<String, Arc<AMutex<Box<dyn IntegrationSession>>>>>>,
@@ -746,6 +747,7 @@ pub async fn create_global_context(
         documents_state: DocumentsState::new(workspace_dirs.clone()).await,
         at_commands_preview_cache: Arc::new(AMutex::new(AtCommandsPreviewCache::new())),
         privacy_settings: Arc::new(StdRwLock::new(Arc::new(PrivacySettings::default()))),
+        privacy_policy_load: Arc::new(StdRwLock::new(refact_privacy::PolicyLoad::default())),
         indexing_everywhere: Arc::new(crate::files_blocklist::IndexingEverywhere::default()),
         integration_sessions: Arc::new(AMutex::new(HashMap::new())),
         browser_runtimes: Arc::new(AMutex::new(HashMap::new())),
@@ -953,6 +955,7 @@ pub mod tests {
             documents_state: DocumentsState::new(vec![]).await,
             at_commands_preview_cache: Arc::new(AMutex::new(AtCommandsPreviewCache::new())),
             privacy_settings: Arc::new(StdRwLock::new(Arc::new(PrivacySettings::default()))),
+            privacy_policy_load: Arc::new(StdRwLock::new(refact_privacy::PolicyLoad::default())),
             indexing_everywhere: Arc::new(crate::files_blocklist::IndexingEverywhere::default()),
             integration_sessions: Arc::new(AMutex::new(HashMap::new())),
             browser_runtimes: Arc::new(AMutex::new(HashMap::new())),

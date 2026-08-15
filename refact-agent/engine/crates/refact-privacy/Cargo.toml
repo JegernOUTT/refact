@@ -13,6 +13,7 @@ glob = "0.3.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 serde_yaml = "0.9.31"
+tokio.workspace = true
 unicode-normalization = "0.1"
 
 [dev-dependencies]

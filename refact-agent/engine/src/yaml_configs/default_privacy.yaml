@@ -1,10 +1,11 @@
 # This config file determines if Refact is allowed to read, index or send a file to remote servers.
 #
-# If you have a syntax error in this file, the refact-lsp will revert to the default "block everything".
+# If this file or a project privacy file has a syntax error, Refact keeps the last valid policy and reports the error.
+# On first-load failure, Refact uses an empty policy and still reports the error.
 #
 # Uses glob patterns: https://en.wikipedia.org/wiki/Glob_(programming)
 #
-# The most restrictive rule applies if a file matches multiple patterns.
+# The first matching zone applies.
 
 privacy_rules:
   blocked:
@@ -15,6 +16,23 @@ privacy_rules:
 
   only_send_to_servers_I_control:       # You can set up which providers you control in ~/.config/refact/providers.d/*.yaml, otherwise you control none
     - "secret_passwords.txt"
+
+  # Zones replace the legacy lists above. Project `.refact/privacy.yaml` files may add
+  # patterns but can only remove destinations or make shell handling stricter.
+  # zones:
+  #   - name: secrets
+  #     patterns:
+  #       - "secrets.yaml"
+  #       - ".env*"
+  #       - "*.pem"
+  #     send_to: []
+  #     on_shell_read: deny
+  #   - name: normal
+  #     patterns:
+  #       - "*"
+  #     send_to:
+  #       - "*"
+  #     on_shell_read: withhold
 
 
 # See unit tests in privacy.rs for more examples.

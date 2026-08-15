@@ -4444,6 +4444,7 @@ dependencies = [
  "refact-llm",
  "refact-postprocessing",
  "refact-pricing-core",
+ "refact-privacy",
  "refact-providers",
  "refact-runtime-api",
  "refact-sandbox",
@@ -4547,6 +4548,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "tokio",
  "unicode-normalization",
 ]
 

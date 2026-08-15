@@ -252,6 +252,7 @@ refact-sandbox = { path = "crates/refact-sandbox" }
 refact-agents-core = { path = "crates/refact-agents-core" }
 refact-self-update = { path = "crates/refact-self-update" }
 refact-tui = { path = "crates/refact-tui" }
+refact-privacy = { path = "crates/refact-privacy" }
 
 astral-tokio-tar = "0.5.2"
 axum = { version = "0.6.20", features = ["default", "http2"] }

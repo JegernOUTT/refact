@@ -1,33 +1,39 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use tokio::fs;
 use tokio::time::Duration;
 use tracing::error;
 
-use crate::files_correction::any_glob_matches_path;
-use crate::files_correction::canonical_path;
+use crate::files_correction::{any_glob_matches_path, canonical_path, get_project_dirs};
 use crate::global_context::GlobalContext;
 
 pub use refact_core::privacy_types::{FilePrivacyLevel, FilePrivacySettings, PrivacySettings};
+pub use refact_privacy::{PolicyLoad, PrivacyPolicy};
 
 const PRIVACY_TOO_OLD: Duration = Duration::from_secs(3);
 
-async fn read_privacy_yaml(path: &Path) -> PrivacySettings {
-    match fs::read_to_string(&path).await {
-        Ok(content) => match serde_yaml::from_str(&content) {
-            Ok(privacy_settings) => privacy_settings,
-            Err(e) => {
-                error!("parsing {} failed\n{}", path.display(), e);
-                return PrivacySettings::default();
-            }
+fn legacy_settings(policy: &PrivacyPolicy, loaded_ts: u64) -> PrivacySettings {
+    let only_send_to_servers_i_control = policy
+        .zones
+        .iter()
+        .filter(|zone| zone.name == "only_send_to_servers_i_control")
+        .flat_map(|zone| zone.patterns.iter().cloned())
+        .collect();
+    PrivacySettings {
+        privacy_rules: FilePrivacySettings {
+            blocked: policy.blocked.clone(),
+            only_send_to_servers_I_control: only_send_to_servers_i_control,
         },
-        Err(e) => {
-            error!("unable to read content from {}\n{}", path.display(), e);
-            return PrivacySettings::default();
-        }
+        loaded_ts,
     }
+}
+
+fn project_privacy_paths(project_dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    project_dirs
+        .into_iter()
+        .map(|project_dir| project_dir.join(".refact").join("privacy.yaml"))
+        .collect()
 }
 
 pub async fn load_privacy_if_needed(gcx: Arc<GlobalContext>) -> Arc<PrivacySettings> {
@@ -35,29 +41,38 @@ pub async fn load_privacy_if_needed(gcx: Arc<GlobalContext>) -> Arc<PrivacySetti
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let (config_dir, privacy_yaml) = {
-        let should_reload = gcx.privacy_settings.read().unwrap().loaded_ts
-            + PRIVACY_TOO_OLD.as_secs()
-            <= current_time;
+    let (config_dir, privacy_yaml, previous_settings, previous_load) = {
+        let previous_settings = gcx.privacy_settings.read().unwrap().clone();
+        let should_reload = previous_settings.loaded_ts + PRIVACY_TOO_OLD.as_secs() <= current_time;
         if !should_reload {
-            return gcx.privacy_settings.read().unwrap().clone();
+            return previous_settings;
         }
-        (gcx.config_dir.clone(), gcx.cmdline.privacy_yaml.clone())
+        (
+            gcx.config_dir.clone(),
+            gcx.cmdline.privacy_yaml.clone(),
+            previous_settings,
+            gcx.privacy_policy_load.read().unwrap().clone(),
+        )
     };
 
-    let path = if privacy_yaml.is_empty() {
+    let global_path = if privacy_yaml.is_empty() {
         config_dir.join("privacy.yaml")
     } else {
         canonical_path(privacy_yaml)
     };
+    let project_paths = project_privacy_paths(get_project_dirs(gcx.clone()).await);
+    let loaded =
+        refact_privacy::load_policy(&global_path, &project_paths, Some(&previous_load)).await;
 
-    let mut new_privacy_settings = read_privacy_yaml(&path).await;
-    new_privacy_settings.loaded_ts = current_time;
-
-    let new_privacy_settings = Arc::new(new_privacy_settings);
-    {
-        *gcx.privacy_settings.write().unwrap() = new_privacy_settings.clone();
+    if let Some(error_message) = &loaded.error {
+        error!("{error_message}");
+        *gcx.privacy_policy_load.write().unwrap() = loaded;
+        return previous_settings;
     }
+
+    let new_privacy_settings = Arc::new(legacy_settings(&loaded.policy, current_time));
+    *gcx.privacy_policy_load.write().unwrap() = loaded;
+    *gcx.privacy_settings.write().unwrap() = new_privacy_settings.clone();
     new_privacy_settings
 }
 

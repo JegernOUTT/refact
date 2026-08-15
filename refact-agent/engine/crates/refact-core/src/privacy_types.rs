@@ -25,7 +25,7 @@ impl Default for PrivacySettings {
     fn default() -> Self {
         PrivacySettings {
             privacy_rules: FilePrivacySettings {
-                blocked: vec!["*".to_string()],
+                blocked: vec![],
                 only_send_to_servers_I_control: vec![],
             },
             loaded_ts: 0,
@@ -46,9 +46,9 @@ mod tests {
     }
 
     #[test]
-    fn default_privacy_settings_block_all_paths() {
+    fn default_privacy_settings_has_no_implicit_block() {
         let settings = PrivacySettings::default();
-        assert_eq!(settings.privacy_rules.blocked, vec!["*".to_string()]);
+        assert!(settings.privacy_rules.blocked.is_empty());
         assert!(settings
             .privacy_rules
             .only_send_to_servers_I_control
