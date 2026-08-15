@@ -40,6 +40,7 @@ members = [
     "crates/refact-agents-core",
     "crates/refact-self-update",
     "crates/refact-tui",
+    "crates/refact-privacy",
 ]
 resolver = "2"
 

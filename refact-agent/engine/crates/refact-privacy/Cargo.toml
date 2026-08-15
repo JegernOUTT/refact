@@ -1,0 +1,15 @@
+[package]
+name = "refact-privacy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refact-core = { path = "../refact-core" }
+glob = "0.3.1"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9.31"
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }
