@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Contenteditable</title>
+  <style>
+    #editor { min-height: 3rem; border: 1px solid; padding: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div id="editor" contenteditable="true" role="textbox" aria-label="Editor"></div>
+  <output id="result"></output>
+  <script>
+    document.querySelector('#editor').addEventListener('input', event => {
+      document.querySelector('#result').textContent = event.currentTarget.textContent.trim();
+    });
+  </script>
+</body>
+</html>

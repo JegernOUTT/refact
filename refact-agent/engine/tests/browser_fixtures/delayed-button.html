@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Delayed button</title>
+  <style>
+    #delayed { display: none; }
+  </style>
+</head>
+<body>
+  <p id="spinner" role="status">loading</p>
+  <button id="delayed" disabled>Delayed button</button>
+  <output id="result"></output>
+  <script>
+    const button = document.querySelector('#delayed');
+    setTimeout(() => {
+      document.querySelector('#spinner').remove();
+      button.disabled = false;
+      button.style.display = 'inline-block';
+    }, 800);
+    button.addEventListener('click', () => {
+      document.querySelector('#result').textContent = 'delayed clicked';
+    });
+  </script>
+</body>
+</html>

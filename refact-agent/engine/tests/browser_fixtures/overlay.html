@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Temporary overlay</title>
+  <style>
+    #overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: rgba(20, 20, 20, 0.85); color: white; }
+  </style>
+</head>
+<body>
+  <button id="target">Target button</button>
+  <output id="result"></output>
+  <div id="overlay">blocking overlay</div>
+  <script>
+    setTimeout(() => document.querySelector('#overlay').remove(), 700);
+    document.querySelector('#target').addEventListener('click', () => {
+      document.querySelector('#result').textContent = document.querySelector('#overlay')
+        ? 'clicked while obscured'
+        : 'clicked after overlay';
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>JavaScript dialog</title>
+</head>
+<body>
+  <button id="confirm">Open confirm</button>
+  <output id="result"></output>
+  <script>
+    document.querySelector('#confirm').addEventListener('click', () => {
+      document.querySelector('#result').textContent = confirm('Continue with fixture?') ? 'confirmed' : 'dismissed';
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Upload</title>
+</head>
+<body>
+  <form id="upload-form">
+    <label for="visible-file">Visible upload</label>
+    <input id="visible-file" name="visible" type="file">
+    <input id="hidden-file" name="hidden" type="file" hidden>
+    <button>Upload</button>
+  </form>
+  <output id="result"></output>
+  <script>
+    document.querySelector('#upload-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const response = await fetch('/upload', { method: 'POST', body: new FormData(event.currentTarget) });
+      const value = await response.json();
+      document.querySelector('#result').textContent = value.accepted ? 'upload accepted' : 'upload rejected';
+    });
+  </script>
+</body>
+</html>

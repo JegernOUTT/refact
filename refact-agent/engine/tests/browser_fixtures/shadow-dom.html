@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Nested shadow DOM</title>
+</head>
+<body>
+  <div id="outer-host"></div>
+  <output id="result"></output>
+  <script>
+    const outer = document.querySelector('#outer-host').attachShadow({ mode: 'open' });
+    const innerHost = document.createElement('div');
+    innerHost.id = 'inner-host';
+    outer.append(innerHost);
+    const inner = innerHost.attachShadow({ mode: 'open' });
+    inner.innerHTML = '<label>Shadow value <input id="shadow-input"></label><button id="shadow-button">Use shadow value</button>';
+    inner.querySelector('#shadow-button').addEventListener('click', () => {
+      document.querySelector('#result').textContent = inner.querySelector('#shadow-input').value;
+    });
+  </script>
+</body>
+</html>

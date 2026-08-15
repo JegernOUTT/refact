@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Popup</title>
+</head>
+<body>
+  <button id="open">Open popup</button>
+  <script>
+    document.querySelector('#open').addEventListener('click', () => {
+      const popup = window.open('', 'refact-fixture-popup', 'width=420,height=240');
+      popup.document.write('<!doctype html><html lang="en"><title>Fixture child</title><body><h1>Popup child</h1></body></html>');
+      popup.document.close();
+    });
+  </script>
+</body>
+</html>

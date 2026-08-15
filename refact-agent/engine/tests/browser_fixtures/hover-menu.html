@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CSS hover menu</title>
+  <style>
+    #menu { display: none; }
+    #trigger:hover + #menu { display: block; }
+  </style>
+</head>
+<body>
+  <button id="trigger">Hover for menu</button>
+  <nav id="menu" aria-label="Hover menu"><a href="#hovered">Hovered action</a></nav>
+</body>
+</html>

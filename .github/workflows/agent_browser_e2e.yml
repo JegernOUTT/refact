@@ -1,0 +1,55 @@
+name: Refact Browser E2E
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-browser-e2e-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: refact-agent/engine
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  browser-e2e:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'browser-e2e')
+    name: Browser E2E (Linux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup update --no-self-update stable
+
+      - name: Install build tools and Google Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang mold lld wget
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/google-chrome.deb
+          sudo apt-get install -y /tmp/google-chrome.deb
+
+      - name: Restore cached cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: refact-agent/engine -> target
+          key: ubuntu-browser-e2e-cargo
+          shared-key: ubuntu-browser-e2e-cargo
+          cache-bin: false
+
+      - name: Run browser E2E suite
+        env:
+          REFACT_BROWSER_E2E: "1"
+        run: cargo test --test browser_e2e -- --ignored --test-threads=1

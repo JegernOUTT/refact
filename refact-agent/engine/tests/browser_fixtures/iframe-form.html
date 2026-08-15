@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Same-origin iframe form</title>
+</head>
+<body>
+  <h1>Iframe form</h1>
+  <iframe id="form-frame" title="Profile form"></iframe>
+  <output id="result"></output>
+  <script>
+    document.querySelector('#form-frame').srcdoc = `
+      <!doctype html><html lang="en"><body>
+      <form id="profile"><label for="frame-name">Name</label>
+      <input id="frame-name" name="name"><button id="frame-submit">Submit</button></form>
+      <script>document.querySelector('#profile').addEventListener('submit', event => {
+        event.preventDefault();
+        parent.document.querySelector('#result').textContent = 'submitted ' + document.querySelector('#frame-name').value;
+      });<\/script></body></html>`;
+  </script>
+</body>
+</html>

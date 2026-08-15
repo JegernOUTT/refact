@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Controlled input</title>
+</head>
+<body>
+  <label for="controlled">Controlled value</label>
+  <input id="controlled" autocomplete="off">
+  <output id="state"></output>
+  <script>
+    const input = document.querySelector('#controlled');
+    const output = document.querySelector('#state');
+    const value = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    let state = '';
+    let rendering = false;
+    Object.defineProperty(input, 'value', {
+      configurable: true,
+      get() { return value.get.call(input); },
+      set(next) { if (rendering) value.set.call(input, next); }
+    });
+    const render = () => {
+      rendering = true;
+      value.set.call(input, state);
+      rendering = false;
+      output.textContent = state;
+    };
+    input.addEventListener('input', event => {
+      if (event.isTrusted) state = value.get.call(input);
+      render();
+    });
+    render();
+  </script>
+</body>
+</html>

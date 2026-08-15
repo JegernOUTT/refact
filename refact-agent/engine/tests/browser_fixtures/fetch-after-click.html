@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Fetch after click</title>
+</head>
+<body>
+  <button id="fetch">Fetch slow echo</button>
+  <output id="result"></output>
+  <script>
+    document.querySelector('#fetch').addEventListener('click', async () => {
+      document.querySelector('#result').textContent = 'fetching';
+      const response = await fetch('/slow-echo?ms=400');
+      const value = await response.json();
+      document.querySelector('#result').textContent = `echo ${value.echo} after ${value.delay_ms}ms`;
+    });
+  </script>
+</body>
+</html>
