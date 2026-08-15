@@ -44,6 +44,12 @@ pub struct Refusal {
     pub message: String,
 }
 
+impl Refusal {
+    pub fn model_facing(&self) -> &'static str {
+        "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry."
+    }
+}
+
 impl fmt::Display for Refusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message)
@@ -213,6 +219,24 @@ mod tests {
         assert_eq!(refusal.offending[0], (1, record(".env", "secrets")));
         assert!(refusal.message.contains("message 1"));
         assert!(refusal.message.contains(".env"));
+    }
+
+    #[test]
+    fn refusal_model_facing_text_is_canonical() {
+        let audited = AuditedRecords {
+            value: "payload".to_string(),
+            records: vec![record(".env", "secrets")],
+        };
+
+        let refusal = match clear(audited, &destination("untrusted"), &policy()) {
+            Ok(_) => panic!("untrusted destination should be refused"),
+            Err(refusal) => refusal,
+        };
+
+        assert_eq!(
+            refusal.model_facing(),
+            "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry."
+        );
     }
 
     #[test]
