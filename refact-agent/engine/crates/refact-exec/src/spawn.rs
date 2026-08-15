@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::env::{apply_pty_child_env, apply_tokio_child_env};
+use crate::observe::ObservationStatus;
 use crate::registry::{ExecProcessCommand, ExecProcessRuntime};
 use crate::types::{
     ExecMode, ExecOutputStream, ExecProcessId, ExecProcessMeta, ExecProcessSnapshot,
@@ -36,6 +37,16 @@ const READINESS_PORT_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub struct ExecSpawnResult {
     pub snapshot: ExecProcessSnapshot,
+    pub observation: ObservationStatus,
+}
+
+impl ExecSpawnResult {
+    fn new(snapshot: ExecProcessSnapshot, observe: bool) -> Self {
+        Self {
+            snapshot,
+            observation: crate::observe::status(observe),
+        }
+    }
 }
 
 struct PtyRuntimeProcess {
@@ -770,9 +781,10 @@ impl ExecRegistry {
         ));
         let snapshot = self.mark_started(&process_id).await?;
         if matches!(request.mode, ExecMode::Foreground) {
-            return Ok(ExecSpawnResult {
-                snapshot: self.wait(&process_id).await?,
-            });
+            return Ok(ExecSpawnResult::new(
+                self.wait(&process_id).await?,
+                request.observe,
+            ));
         }
         if let Some(readiness) = request.readiness.as_ref() {
             let startup_wait = startup_wait.unwrap_or(Duration::from_secs(10));
@@ -788,20 +800,21 @@ impl ExecRegistry {
                     )
                     .await
                 {
-                    return Ok(ExecSpawnResult { snapshot });
+                    return Ok(ExecSpawnResult::new(snapshot, request.observe));
                 }
                 let snapshot = self
                     .mark_failed(&process_id, message)
                     .await
                     .unwrap_or_else(|_| snapshot.clone());
-                return Ok(ExecSpawnResult { snapshot });
+                return Ok(ExecSpawnResult::new(snapshot, request.observe));
             }
         } else if let Some(startup_wait) = startup_wait {
             tokio::time::sleep(startup_wait).await;
         }
-        Ok(ExecSpawnResult {
-            snapshot: self.get(&process_id).await.unwrap_or(snapshot),
-        })
+        Ok(ExecSpawnResult::new(
+            self.get(&process_id).await.unwrap_or(snapshot),
+            request.observe,
+        ))
     }
 
     async fn spawn_pty(&self, request: ExecSpawnRequest) -> Result<ExecSpawnResult, String> {
@@ -861,9 +874,10 @@ impl ExecRegistry {
         ));
         let snapshot = self.mark_started(&process_id).await?;
         if matches!(request.mode, ExecMode::Foreground) {
-            return Ok(ExecSpawnResult {
-                snapshot: self.wait(&process_id).await?,
-            });
+            return Ok(ExecSpawnResult::new(
+                self.wait(&process_id).await?,
+                request.observe,
+            ));
         }
         if let Some(readiness) = request.readiness.as_ref() {
             let startup_wait = startup_wait.unwrap_or(Duration::from_secs(10));
@@ -879,20 +893,21 @@ impl ExecRegistry {
                     )
                     .await
                 {
-                    return Ok(ExecSpawnResult { snapshot });
+                    return Ok(ExecSpawnResult::new(snapshot, request.observe));
                 }
                 let snapshot = self
                     .mark_failed(&process_id, message)
                     .await
                     .unwrap_or_else(|_| snapshot.clone());
-                return Ok(ExecSpawnResult { snapshot });
+                return Ok(ExecSpawnResult::new(snapshot, request.observe));
             }
         } else if let Some(startup_wait) = startup_wait {
             tokio::time::sleep(startup_wait).await;
         }
-        Ok(ExecSpawnResult {
-            snapshot: self.get(&process_id).await.unwrap_or(snapshot),
-        })
+        Ok(ExecSpawnResult::new(
+            self.get(&process_id).await.unwrap_or(snapshot),
+            request.observe,
+        ))
     }
 }
 
@@ -1269,6 +1284,31 @@ mod tests {
         assert_eq!(read.chunks.len(), 1);
         assert_eq!(read.chunks[0].stream, ExecOutputStream::Stdout);
         assert_eq!(read.chunks[0].text, "hello");
+    }
+
+    #[tokio::test]
+    async fn observe_request_reports_unavailable_for_pipe_and_pty() {
+        let command = if cfg!(windows) {
+            "[Console]::Out.Write('observed')"
+        } else {
+            "printf observed"
+        };
+
+        for tty in [false, true] {
+            let result = ExecRegistry::new()
+                .spawn(
+                    ExecSpawnRequest::foreground(shell_script(command))
+                        .with_observe(true)
+                        .with_tty(tty),
+                )
+                .await
+                .unwrap();
+
+            let ObservationStatus::Unavailable(reason) = result.observation else {
+                panic!("unsupported observer returned observed access");
+            };
+            assert_eq!(reason, "backend unavailable");
+        }
     }
 
     #[tokio::test]

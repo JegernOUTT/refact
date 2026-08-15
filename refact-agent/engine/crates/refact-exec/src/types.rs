@@ -288,6 +288,7 @@ pub struct ExecSpawnRequest {
     pub sandbox: Option<ExecSandboxSpec>,
     pub env_policy: ExecEnvPolicy,
     pub audit: Option<ExecAuditMeta>,
+    pub observe: bool,
     pub mode: ExecMode,
     pub tty: bool,
     pub rows: u16,
@@ -315,6 +316,7 @@ impl ExecSpawnRequest {
                 passthrough: Vec::new(),
             },
             audit: None,
+            observe: false,
             mode,
             tty: false,
             rows: 24,
@@ -383,6 +385,11 @@ impl ExecSpawnRequest {
 
     pub fn with_audit(mut self, audit: ExecAuditMeta) -> Self {
         self.audit = Some(audit);
+        self
+    }
+
+    pub fn with_observe(mut self, observe: bool) -> Self {
+        self.observe = observe;
         self
     }
 
@@ -771,6 +778,7 @@ mod tests {
             }
         );
         assert_eq!(request.audit, None);
+        assert!(!request.observe);
     }
 
     #[test]
@@ -792,11 +800,13 @@ mod tests {
         let request = ExecSpawnRequest::foreground("cargo test")
             .with_sandbox(sandbox.clone())
             .with_env_policy(env_policy.clone())
-            .with_audit(audit.clone());
+            .with_audit(audit.clone())
+            .with_observe(true);
 
         assert_eq!(request.sandbox, Some(sandbox));
         assert_eq!(request.env_policy, env_policy);
         assert_eq!(request.audit, Some(audit));
+        assert!(request.observe);
     }
 
     #[test]
