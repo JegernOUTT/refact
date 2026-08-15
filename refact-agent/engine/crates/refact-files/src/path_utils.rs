@@ -133,7 +133,13 @@ pub fn canonicalize_normalized_path(p: PathBuf) -> PathBuf {
 
 pub fn any_glob_matches_path(globs: &[String], path: &Path) -> bool {
     globs.iter().any(|glob| {
-        let pattern = glob::Pattern::new(glob).unwrap();
+        let pattern = match glob::Pattern::new(glob) {
+            Ok(pattern) => pattern,
+            Err(error) => {
+                tracing::warn!("Invalid glob pattern '{}': {}", glob, error);
+                return false;
+            }
+        };
         let mut matches = pattern.matches_path(path);
         matches |= path.to_str().map_or(false, |s: &str| s.ends_with(glob));
         matches
@@ -188,6 +194,11 @@ pub fn shortify_paths_from_indexed(
 mod tests {
     use super::*;
     use crate::correction_cache::CacheCorrection;
+
+    #[test]
+    fn test_any_glob_matches_path_rejects_malformed_glob() {
+        assert!(!any_glob_matches_path(&["[".to_string()], Path::new("/a")));
+    }
 
     #[test]
     fn test_shortify_paths_from_indexed() {
