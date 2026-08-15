@@ -13,9 +13,10 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::exec::types::normalize_workspace_path;
+use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
 use crate::exec::{
     sanitize_short_description, ExecOutputChunk, ExecOutputStream, ExecOwnerMeta,
-    ExecProcessSnapshot, ExecRawOutput, ExecReadResult, ExecSpawnRequest, ExecStatus,
+    ExecProcessSnapshot, ExecRawOutput, ExecReadResult, ExecStatus,
 };
 use crate::files_correction::canonical_path;
 use crate::files_correction::canonicalize_normalized_path;
@@ -201,20 +202,31 @@ impl Tool for ToolShell {
                 ))),
             )
         };
-        let mut request = (if parsed.run_in_background {
-            ExecSpawnRequest::background(parsed.command.clone())
+        let mut request = build_exec_request(
+            gcx,
+            CommandPolicyInput {
+                source: ExecSource::ShellTool,
+                command: CommandKind::Shell(&parsed.command),
+                cwd,
+                env: env_variables,
+                chat_mode: None,
+            },
+        )
+        .await?;
+        request.mode = if parsed.run_in_background {
+            crate::exec::ExecMode::Background
         } else {
-            ExecSpawnRequest::foreground(parsed.command.clone())
+            crate::exec::ExecMode::Foreground
+        };
+        request = request
+            .with_owner(owner)
+            .with_transcript_limit(SHELL_TRANSCRIPT_MAX_BYTES)
+            .with_short_description(short_description)
+            .with_tty(tty);
+        if !parsed.run_in_background {
+            request = request
                 .with_timeout(Duration::from_secs(timeout))
-                .with_abort_flag(abort_flag)
-        })
-        .with_env_map(env_variables)
-        .with_owner(owner)
-        .with_transcript_limit(SHELL_TRANSCRIPT_MAX_BYTES)
-        .with_short_description(short_description)
-        .with_tty(tty);
-        if let Some(cwd) = cwd {
-            request = request.with_cwd(cwd);
+                .with_abort_flag(abort_flag);
         }
         if let Some(progress_tx) = progress_tx {
             request = request.with_output_progress_tx(progress_tx);

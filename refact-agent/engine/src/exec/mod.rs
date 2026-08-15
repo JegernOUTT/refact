@@ -1,3 +1,5 @@
+pub mod command_policy;
+
 pub use refact_exec::{pty, registry, spawn, spill, transcript, types};
 pub use refact_exec::{
     ExecRegistry, ExecShutdownCleanupSummary, ExecSpawnResult, ProcessCompletionEvent,
@@ -5,8 +7,8 @@ pub use refact_exec::{
 };
 pub use refact_exec::{ExecRawOutput, ExecRawRead, ExecTranscript};
 pub use refact_exec::{
-    generate_short_description, sanitize_short_description, ExecMode, ExecOutputChunk,
-    ExecOutputLimits, ExecOutputStream, ExecOwnerMeta, ExecProcessFilter, ExecProcessId,
-    ExecProcessMeta, ExecProcessSnapshot, ExecReadResult, ExecReadinessProbe, ExecServiceLookup,
-    ExecSpawnRequest, ExecStatus, ExecStatusKind, ExecWriteStdinResult,
+    generate_short_description, sanitize_short_description, ExecAuditMeta, ExecEnvPolicy, ExecMode,
+    ExecOutputChunk, ExecOutputLimits, ExecOutputStream, ExecOwnerMeta, ExecProcessFilter,
+    ExecProcessId, ExecProcessMeta, ExecProcessSnapshot, ExecReadResult, ExecReadinessProbe,
+    ExecServiceLookup, ExecSpawnRequest, ExecStatus, ExecStatusKind, ExecWriteStdinResult,
 };

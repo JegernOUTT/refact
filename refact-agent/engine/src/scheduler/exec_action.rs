@@ -7,9 +7,10 @@ use serde_json::json;
 use crate::app_state::AppState;
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::chat::internal_roles::{event, EventSubkind};
+use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
 use crate::exec::{
     sanitize_short_description, ExecOutputStream, ExecOwnerMeta, ExecRawOutput, ExecReadResult,
-    ExecSpawnRequest, ExecStatus,
+    ExecStatus,
 };
 use crate::files_correction::get_active_project_path;
 use crate::scheduler::types::{CommandSpec, Job};
@@ -42,7 +43,7 @@ async fn run_command_inner(
     job: &Job,
     cmd: &CommandSpec,
 ) -> Result<CommandRunResult, String> {
-    let command = command_from_argv(&cmd.argv)?;
+    validate_argv(&cmd.argv)?;
     let project_root = get_active_project_path(app.gcx.clone()).await;
     let cwd = resolve_cwd(project_root.as_deref(), cmd.cwd.as_deref())?;
     let owner = ExecOwnerMeta {
@@ -55,16 +56,22 @@ async fn run_command_inner(
         .timeout_secs
         .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
         .min(MAX_COMMAND_TIMEOUT_SECS);
-    let mut request = ExecSpawnRequest::foreground(command)
-        .with_timeout(Duration::from_secs(timeout_secs))
-        .with_owner(owner)
-        .with_transcript_limit(COMMAND_TRANSCRIPT_MAX_BYTES)
-        .with_short_description(sanitize_short_description(&job.description))
-        .with_tty(false);
-    if let Some(cwd) = cwd {
-        request = request.with_cwd(cwd);
-    }
-    request = request.with_env_map(command_env(cmd));
+    let request = build_exec_request(
+        app.gcx.clone(),
+        CommandPolicyInput {
+            source: ExecSource::SchedulerJob,
+            command: CommandKind::Argv(&cmd.argv),
+            cwd,
+            env: command_env(cmd),
+            chat_mode: None,
+        },
+    )
+    .await?
+    .with_timeout(Duration::from_secs(timeout_secs))
+    .with_owner(owner)
+    .with_transcript_limit(COMMAND_TRANSCRIPT_MAX_BYTES)
+    .with_short_description(sanitize_short_description(&job.description))
+    .with_tty(false);
     let result = app.runtime.exec_registry.spawn(request).await?;
     let process_id = result.snapshot.meta.process_id.clone();
     let read = app.runtime.exec_registry.read(&process_id, 0, None).await;
@@ -148,25 +155,14 @@ pub fn command_error_summary(result: &CommandRunResult) -> String {
     format!("Scheduled command failed: {}", first_line(stderr))
 }
 
-fn command_from_argv(argv: &[String]) -> Result<String, String> {
+fn validate_argv(argv: &[String]) -> Result<(), String> {
     if argv.is_empty() {
         return Err("command argv is empty".to_string());
     }
     if argv.iter().any(|part| part.trim().is_empty()) {
         return Err("command argv contains an empty argument".to_string());
     }
-    #[cfg(target_os = "windows")]
-    {
-        Ok(argv
-            .iter()
-            .map(|part| powershell_escape(part))
-            .collect::<Vec<_>>()
-            .join(" "))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(shell_words::join(argv))
-    }
+    Ok(())
 }
 
 fn command_env(cmd: &CommandSpec) -> HashMap<String, String> {
@@ -301,39 +297,6 @@ fn first_line(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-#[cfg(target_os = "windows")]
-fn powershell_escape(value: &str) -> String {
-    let mut needs_escape = value.is_empty();
-    for ch in value.chars() {
-        match ch {
-            ' ' | '"' | '\'' | '$' | '`' | '[' | ']' | '{' | '}' | '(' | ')' | '@' | '&' | '#'
-            | ',' | ';' | '.' | '\t' | '\n' | '|' | '<' | '>' | '\\' => {
-                needs_escape = true;
-                break;
-            }
-            _ => {}
-        }
-    }
-    if !needs_escape {
-        return value.to_string();
-    }
-    let mut escaped = String::with_capacity(value.len() + 2);
-    escaped.push('"');
-    for ch in value.chars() {
-        match ch {
-            '"' => escaped.push_str("`\""),
-            '$' => escaped.push_str("`$"),
-            '`' => escaped.push_str("``"),
-            '\t' => escaped.push_str("`t"),
-            '\n' => escaped.push_str("`n"),
-            '\\' => escaped.push_str("\\"),
-            _ => escaped.push(ch),
-        }
-    }
-    escaped.push('"');
-    escaped
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -374,17 +337,14 @@ mod tests {
     }
 
     #[test]
-    fn command_from_argv_quotes_arguments() {
-        let command = command_from_argv(&[
+    fn validate_argv_accepts_arguments_with_spaces() {
+        let result = validate_argv(&[
             "printf".to_string(),
             "%s".to_string(),
             "hello world".to_string(),
-        ])
-        .unwrap();
+        ]);
 
-        assert!(command.contains("printf"));
-        assert!(command.contains("hello"));
-        assert_eq!(shell_words::split(&command).unwrap()[2], "hello world");
+        assert_eq!(result, Ok(()));
     }
 
     #[test]

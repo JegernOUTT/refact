@@ -1,22 +1,17 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use process_wrap::tokio::TokioCommandWrap;
-#[cfg(unix)]
-use process_wrap::tokio::ProcessGroup;
-#[cfg(windows)]
-use process_wrap::tokio::JobObject;
 use serde_json::{json, Value};
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::verifier_diff::{git_changed_files_summary, resolve_verifier_diff_base};
 use crate::chat::verify_cmd::parse_restricted_argv;
+use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
+use crate::exec::{ExecOutputStream, ExecStatus};
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate, VerificationResult, VerifierReport};
@@ -119,7 +114,9 @@ trait VerificationCommandRunner: Send {
     ) -> VerificationResult;
 }
 
-struct SystemVerificationCommandRunner;
+struct SystemVerificationCommandRunner {
+    gcx: Arc<GlobalContext>,
+}
 
 #[async_trait]
 impl VerificationCommandRunner for SystemVerificationCommandRunner {
@@ -130,17 +127,8 @@ impl VerificationCommandRunner for SystemVerificationCommandRunner {
         cwd: Option<PathBuf>,
         argv: Vec<String>,
     ) -> VerificationResult {
-        run_verification_argv(worktree, command, cwd, argv).await
+        run_verification_argv(self.gcx.clone(), worktree, command, cwd, argv).await
     }
-}
-
-fn wrap_verifier_command(command: Command) -> TokioCommandWrap {
-    let mut command_wrap = TokioCommandWrap::from(command);
-    #[cfg(unix)]
-    command_wrap.wrap(ProcessGroup::leader());
-    #[cfg(windows)]
-    command_wrap.wrap(JobObject);
-    command_wrap
 }
 
 fn check_cwd_in_worktree(worktree: &Path, effective_cwd: &Path) -> Result<(), String> {
@@ -155,32 +143,6 @@ fn check_cwd_in_worktree(worktree: &Path, effective_cwd: &Path) -> Result<(), St
         }
     }
     Ok(())
-}
-
-async fn read_bounded_tail(mut reader: impl AsyncReadExt + Unpin, max_bytes: usize) -> Vec<u8> {
-    if max_bytes == 0 {
-        return Vec::new();
-    }
-    let mut buf = [0u8; 8192];
-    let mut tail: Vec<u8> = Vec::with_capacity(max_bytes.min(65536));
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                tail.extend_from_slice(&buf[..n]);
-                if tail.len() > max_bytes * 2 {
-                    let excess = tail.len() - max_bytes;
-                    tail.drain(..excess);
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    if tail.len() > max_bytes {
-        let excess = tail.len() - max_bytes;
-        tail.drain(..excess);
-    }
-    tail
 }
 
 fn append_verifier_status(card: &mut BoardCard, report: &VerifierReport) {
@@ -321,7 +283,7 @@ pub async fn verify_card(
     }
 
     for command in commands {
-        let result = run_verification_command(&worktree, &command).await;
+        let result = run_verification_command(gcx.clone(), &worktree, &command).await;
         if !result.passed {
             concerns.push(format!("Verification command failed: {}", result.command));
         }
@@ -480,8 +442,12 @@ fn parse_verify_line(line: &str) -> Option<String> {
     None
 }
 
-async fn run_verification_command(worktree: &Path, command: &str) -> VerificationResult {
-    let mut runner = SystemVerificationCommandRunner;
+async fn run_verification_command(
+    gcx: Arc<GlobalContext>,
+    worktree: &Path,
+    command: &str,
+) -> VerificationResult {
+    let mut runner = SystemVerificationCommandRunner { gcx };
     run_verification_command_with_runner(worktree, command, &mut runner).await
 }
 
@@ -505,15 +471,26 @@ async fn run_verification_command_with_runner<R: VerificationCommandRunner>(
 }
 
 async fn run_verification_argv(
+    gcx: Arc<GlobalContext>,
     worktree: &Path,
     command: &str,
     cwd: Option<PathBuf>,
     argv: Vec<String>,
 ) -> VerificationResult {
-    run_verification_argv_impl(worktree, command, cwd, argv, VERIFY_TIMEOUT, DRAIN_TIMEOUT).await
+    run_verification_argv_impl(
+        gcx,
+        worktree,
+        command,
+        cwd,
+        argv,
+        VERIFY_TIMEOUT,
+        DRAIN_TIMEOUT,
+    )
+    .await
 }
 
 async fn run_verification_argv_impl(
+    gcx: Arc<GlobalContext>,
     worktree: &Path,
     command: &str,
     cwd: Option<PathBuf>,
@@ -521,7 +498,7 @@ async fn run_verification_argv_impl(
     timeout: Duration,
     drain_timeout: Duration,
 ) -> VerificationResult {
-    let Some(program) = argv.first() else {
+    if argv.is_empty() {
         return VerificationResult {
             command: command.to_string(),
             exit_code: None,
@@ -538,16 +515,22 @@ async fn run_verification_argv_impl(
             output_tail: reason,
         };
     }
-    let mut cmd = Command::new(program);
-    cmd.args(&argv[1..]);
-    cmd.current_dir(&effective_cwd);
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(true);
-    let mut command_wrap = wrap_verifier_command(cmd);
-    let mut child = match command_wrap.spawn() {
-        Ok(child) => child,
+    let request = match build_exec_request(
+        gcx.clone(),
+        CommandPolicyInput {
+            source: ExecSource::Verifier,
+            command: CommandKind::Argv(&argv),
+            cwd: Some(effective_cwd),
+            env: HashMap::new(),
+            chat_mode: None,
+        },
+    )
+    .await
+    {
+        Ok(request) => request
+            .with_timeout(timeout)
+            .with_output_drain_timeout(drain_timeout)
+            .with_transcript_limit(MAX_OUTPUT_CAPTURE_BYTES * 2),
         Err(error) => {
             return VerificationResult {
                 command: command.to_string(),
@@ -557,81 +540,52 @@ async fn run_verification_argv_impl(
             };
         }
     };
-    let stdout = child.stdout().take();
-    let stderr = child.stderr().take();
-    let stdout_task = tokio::spawn(async move {
-        match stdout {
-            Some(stdout) => read_bounded_tail(stdout, MAX_OUTPUT_CAPTURE_BYTES).await,
-            None => Vec::new(),
-        }
-    });
-    let stderr_task = tokio::spawn(async move {
-        match stderr {
-            Some(stderr) => read_bounded_tail(stderr, MAX_OUTPUT_CAPTURE_BYTES).await,
-            None => Vec::new(),
-        }
-    });
-    let status = match tokio::time::timeout(timeout, Box::into_pin(child.wait())).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(error)) => {
-            let _ = child.start_kill();
-            stdout_task.abort();
-            stderr_task.abort();
+    let result = match gcx.exec_registry.spawn(request).await {
+        Ok(result) => result,
+        Err(error) => {
             return VerificationResult {
                 command: command.to_string(),
                 exit_code: None,
                 passed: false,
-                output_tail: format!("failed to wait for command: {}", error),
-            };
-        }
-        Err(_) => {
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(5), Box::into_pin(child.wait())).await;
-            stdout_task.abort();
-            stderr_task.abort();
-            return VerificationResult {
-                command: command.to_string(),
-                exit_code: None,
-                passed: false,
-                output_tail: format!("command timed out after {} seconds", timeout.as_secs()),
+                output_tail: format!("failed to spawn command: {}", error),
             };
         }
     };
-    let stdout_abort = stdout_task.abort_handle();
-    let stderr_abort = stderr_task.abort_handle();
-    let drain_result = tokio::time::timeout(drain_timeout, async {
-        let stdout = stdout_task.await.unwrap_or_default();
-        let stderr = stderr_task.await.unwrap_or_default();
-        (stdout, stderr)
-    })
-    .await;
-    let (stdout_bytes, stderr_bytes, drain_suffix, drain_timed_out) = match drain_result {
-        Ok((stdout, stderr)) => (stdout, stderr, String::new(), false),
-        Err(_) => {
-            stdout_abort.abort();
-            stderr_abort.abort();
-            let _ = child.start_kill();
-            (
-                Vec::new(),
-                Vec::new(),
-                format!(
-                    "\noutput drain timed out after {} seconds; descendant process may have inherited stdout/stderr",
-                    drain_timeout.as_secs()
-                ),
-                true,
-            )
+    let read = gcx
+        .exec_registry
+        .read(&result.snapshot.meta.process_id, 0, None)
+        .await;
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    for chunk in read.chunks {
+        match chunk.stream {
+            ExecOutputStream::Stdout | ExecOutputStream::Combined => stdout.push_str(&chunk.text),
+            ExecOutputStream::Stderr => stderr.push_str(&chunk.text),
         }
+    }
+    let mut output = format!("{stdout}{stderr}");
+    let (exit_code, passed) = match &result.snapshot.status {
+        ExecStatus::Exited { exit_code } => (*exit_code, exit_code == &Some(0)),
+        ExecStatus::TimedOut => {
+            output.push_str(&format!(
+                "command timed out after {} seconds",
+                timeout.as_secs()
+            ));
+            (None, false)
+        }
+        ExecStatus::Failed { message } => {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(message);
+            (None, false)
+        }
+        ExecStatus::Killed | ExecStatus::Starting | ExecStatus::Running => (None, false),
     };
-    let output = format!(
-        "{}{}{}",
-        String::from_utf8_lossy(&stdout_bytes),
-        String::from_utf8_lossy(&stderr_bytes),
-        drain_suffix
-    );
     VerificationResult {
         command: command.to_string(),
-        exit_code: status.code(),
-        passed: status.success() && !drain_timed_out,
+        exit_code,
+        passed,
         output_tail: tail_chars(&output, MAX_OUTPUT_TAIL_CHARS),
     }
 }
@@ -1125,8 +1079,9 @@ mod tests {
     #[tokio::test]
     async fn verifier_rejects_shell_syntax() {
         let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
 
-        let result = run_verification_command(temp.path(), "cargo test | tee f").await;
+        let result = run_verification_command(gcx, temp.path(), "cargo test | tee f").await;
 
         assert!(!result.passed);
         assert!(result
@@ -1151,23 +1106,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn large_output_is_bounded() {
-        let (mut write_half, read_half) = tokio::io::duplex(65536);
-        let data = vec![b'x'; MAX_OUTPUT_CAPTURE_BYTES * 3];
-        let write_task = tokio::spawn(async move {
-            let _ = tokio::io::AsyncWriteExt::write_all(&mut write_half, &data).await;
-        });
-        let result = read_bounded_tail(read_half, MAX_OUTPUT_CAPTURE_BYTES).await;
-        let _ = write_task.await;
-        assert!(result.len() <= MAX_OUTPUT_CAPTURE_BYTES);
-    }
-
-    #[tokio::test]
     async fn cwd_outside_worktree_is_rejected() {
         let worktree = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
 
         let result = run_verification_argv_impl(
+            gcx,
             worktree.path(),
             "cargo check",
             Some(outside.path().to_path_buf()),
@@ -1185,10 +1130,12 @@ mod tests {
     #[tokio::test]
     async fn stdin_null_does_not_hang() {
         let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
 
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             run_verification_argv_impl(
+                gcx,
                 temp.path(),
                 "cat",
                 None,
@@ -1207,8 +1154,10 @@ mod tests {
     #[tokio::test]
     async fn timeout_kills_process_group() {
         let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
 
         let result = run_verification_argv_impl(
+            gcx,
             temp.path(),
             "sleep 30",
             None,
@@ -1227,12 +1176,14 @@ mod tests {
     #[tokio::test]
     async fn drain_times_out_when_descendant_holds_pipe() {
         let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
 
         // bash spawns a background sleep that inherits the stdout/stderr pipes and then exits;
         // without the drain timeout the verifier hangs waiting for EOF from the background sleep
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             run_verification_argv_impl(
+                gcx,
                 temp.path(),
                 "bash -c 'sleep 60 &'",
                 None,

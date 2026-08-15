@@ -150,18 +150,31 @@ fn shell_parts() -> (&'static str, &'static str) {
 }
 
 fn ensure_command_is_not_empty(request: &ExecSpawnRequest) -> Result<(), String> {
-    if request.command.trim().is_empty() {
-        return Err("Command is empty".to_string());
+    match request.argv.as_ref() {
+        Some(argv)
+            if argv
+                .first()
+                .is_some_and(|program| !program.trim().is_empty()) => {}
+        Some(_) => return Err("Command argv is empty".to_string()),
+        None if request.command.trim().is_empty() => return Err("Command is empty".to_string()),
+        None => {}
     }
     Ok(())
 }
 
 fn shell_command(request: &ExecSpawnRequest) -> Result<tokio::process::Command, String> {
     ensure_command_is_not_empty(request)?;
-    let (shell, shell_arg) = shell_parts();
-    let mut command = tokio::process::Command::new(shell);
+    let mut command = if let Some(argv) = request.argv.as_ref() {
+        let mut command = tokio::process::Command::new(&argv[0]);
+        command.args(&argv[1..]);
+        command
+    } else {
+        let (shell, shell_arg) = shell_parts();
+        let mut command = tokio::process::Command::new(shell);
+        command.arg(shell_arg).arg(&request.command);
+        command
+    };
     command.kill_on_drop(true);
-    command.arg(shell_arg).arg(&request.command);
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -174,10 +187,17 @@ fn shell_command(request: &ExecSpawnRequest) -> Result<tokio::process::Command, 
 
 fn pty_command(request: &ExecSpawnRequest) -> Result<CommandBuilder, String> {
     ensure_command_is_not_empty(request)?;
-    let (shell, shell_arg) = shell_parts();
-    let mut command = CommandBuilder::new(shell);
-    command.arg(shell_arg);
-    command.arg(&request.command);
+    let mut command = if let Some(argv) = request.argv.as_ref() {
+        let mut command = CommandBuilder::new(&argv[0]);
+        command.args(&argv[1..]);
+        command
+    } else {
+        let (shell, shell_arg) = shell_parts();
+        let mut command = CommandBuilder::new(shell);
+        command.arg(shell_arg);
+        command.arg(&request.command);
+        command
+    };
     if let Some(cwd) = request.cwd.as_ref() {
         command.cwd(cwd.as_os_str());
     }
@@ -486,6 +506,7 @@ async fn monitor_process(
     child: Arc<Mutex<RuntimeChild>>,
     mut control_rx: mpsc::Receiver<ExecProcessCommand>,
     timeout: Option<Duration>,
+    output_drain_timeout: Option<Duration>,
     abort_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     stdout_task: JoinHandle<()>,
     stderr_task: JoinHandle<()>,
@@ -592,13 +613,14 @@ async fn monitor_process(
             terminal_status
         }
         ExecStatus::Exited { .. } => {
-            if finish_pumps_with_timeout(stdout_task, stderr_task, EXIT_PUMP_DRAIN_TIMEOUT).await {
+            let drain_timeout = output_drain_timeout.unwrap_or(EXIT_PUMP_DRAIN_TIMEOUT);
+            if finish_pumps_with_timeout(stdout_task, stderr_task, drain_timeout).await {
                 terminal_status
             } else {
                 if let Err(error) = kill_and_reap(&child).await {
                     tracing::warn!("exec kill/reap after output drain timeout failed for {process_id}: {error}");
                 }
-                pump_drain_timeout_status(EXIT_PUMP_DRAIN_TIMEOUT)
+                pump_drain_timeout_status(drain_timeout)
             }
         }
         ExecStatus::Starting | ExecStatus::Running => terminal_status,
@@ -720,6 +742,7 @@ impl ExecRegistry {
             child,
             control_rx,
             request.timeout,
+            request.output_drain_timeout,
             request.abort_flag.clone(),
             stdout_task,
             stderr_task,
@@ -810,6 +833,7 @@ impl ExecRegistry {
             child,
             control_rx,
             request.timeout,
+            request.output_drain_timeout,
             request.abort_flag.clone(),
             stdout_task,
             stderr_task,
@@ -1248,6 +1272,39 @@ mod tests {
         .await;
 
         assert_eq!(stdout, "xterm-256color");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn argv_exec_preserves_spaces_and_quotes_without_shell() {
+        let registry = ExecRegistry::new();
+        let script = "printf '%s\\n' \"$#\" \"$1\" \"$2\" \"$3\"";
+        let result = registry
+            .spawn(ExecSpawnRequest::argv(
+                ExecMode::Foreground,
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    script.to_string(),
+                    "argv-test".to_string(),
+                    "space value".to_string(),
+                    "single'quote".to_string(),
+                    "double\"quote".to_string(),
+                ],
+            ))
+            .await
+            .unwrap();
+
+        let read = registry
+            .read(&result.snapshot.meta.process_id, 0, None)
+            .await;
+        let output = read
+            .chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<String>();
+
+        assert_eq!(output, "3\nspace value\nsingle'quote\ndouble\"quote\n");
     }
 
     #[tokio::test]

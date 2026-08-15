@@ -7,7 +7,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
 use hyper::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
 use tokio::signal;
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
@@ -232,6 +232,14 @@ struct EngineGlobalConfig {
     scheduler: SchedulerConfig,
     #[serde(default)]
     hooks: HooksConfig,
+    #[serde(default)]
+    terminal_security: TerminalSecurityConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct TerminalSecurityConfig {
+    #[serde(default)]
+    pub env_passthrough: Vec<String>,
 }
 
 impl Default for EngineGlobalConfig {
@@ -239,6 +247,7 @@ impl Default for EngineGlobalConfig {
         Self {
             scheduler: SchedulerConfig::default(),
             hooks: HooksConfig::default(),
+            terminal_security: TerminalSecurityConfig::default(),
         }
     }
 }
@@ -292,6 +301,7 @@ pub struct GlobalContext {
     pub agents: Arc<BackgroundAgentRegistry>,
     pub scheduler_config: SchedulerConfig,
     pub hooks_config: HooksConfig,
+    pub terminal_security_config: TerminalSecurityConfig,
 }
 
 pub type SharedGlobalContext = Arc<GlobalContext>; // TODO: remove this type alias, confusing
@@ -383,7 +393,7 @@ impl GlobalContext {
 async fn load_engine_global_config(
     config_dir: &PathBuf,
     cmdline: &CommandLine,
-) -> (SchedulerConfig, HooksConfig) {
+) -> (SchedulerConfig, HooksConfig, TerminalSecurityConfig) {
     let path = if cmdline.privacy_yaml.is_empty() {
         config_dir.join("privacy.yaml")
     } else {
@@ -410,7 +420,7 @@ async fn load_engine_global_config(
     let scheduler = config
         .scheduler
         .with_startup_overrides(cmdline.no_scheduler);
-    (scheduler, config.hooks)
+    (scheduler, config.hooks, config.terminal_security)
 }
 
 impl ShutdownAccess for GlobalContext {
@@ -687,7 +697,8 @@ pub async fn create_global_context(
         http_client_builder = http_client_builder.danger_accept_invalid_certs(true)
     }
     let http_client = http_client_builder.build().unwrap();
-    let (scheduler_config, hooks_config) = load_engine_global_config(&config_dir, &cmdline).await;
+    let (scheduler_config, hooks_config, terminal_security_config) =
+        load_engine_global_config(&config_dir, &cmdline).await;
 
     let mut workspace_dirs: Vec<PathBuf> = vec![];
     if !cmdline.workspace_folder.is_empty() {
@@ -764,6 +775,7 @@ pub async fn create_global_context(
         agents,
         scheduler_config,
         hooks_config,
+        terminal_security_config,
     };
     let gcx = Arc::new(cx);
     crate::files_in_workspace::watcher_init(gcx.clone()).await;
@@ -779,13 +791,17 @@ pub mod tests {
 
     #[test]
     fn test_engine_global_config_parses_trusted_projects() {
-        let yaml = "scheduler:\n  enabled: true\nhooks:\n  trusted_projects: [/home/me/repo]\n";
+        let yaml = "scheduler:\n  enabled: true\nhooks:\n  trusted_projects: [/home/me/repo]\nterminal_security:\n  env_passthrough: [HTTP_PROXY, CARGO_*]\n";
         let cfg: EngineGlobalConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
             cfg.hooks.trusted_projects,
             vec!["/home/me/repo".to_string()]
         );
         assert!(cfg.scheduler.enabled);
+        assert_eq!(
+            cfg.terminal_security.env_passthrough,
+            vec!["HTTP_PROXY".to_string(), "CARGO_*".to_string()]
+        );
     }
 
     #[test]
@@ -962,6 +978,7 @@ pub mod tests {
             agents,
             scheduler_config: SchedulerConfig::default(),
             hooks_config: HooksConfig::default(),
+            terminal_security_config: TerminalSecurityConfig::default(),
         };
         Arc::new(cx)
     }

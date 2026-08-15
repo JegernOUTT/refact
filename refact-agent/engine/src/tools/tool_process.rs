@@ -8,13 +8,14 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
 use crate::exec::ExecRegistry;
+use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::exec::{
     generate_short_description, sanitize_short_description, ExecMode, ExecOutputChunk,
     ExecOutputStream, ExecOwnerMeta, ExecProcessFilter, ExecProcessId, ExecProcessSnapshot,
-    ExecReadResult, ExecReadinessProbe, ExecServiceLookup, ExecSpawnRequest, ExecStatus,
+    ExecReadResult, ExecReadinessProbe, ExecServiceLookup, ExecStatus,
 };
 use crate::exec::types::{current_timestamp_ms, normalize_workspace_path};
 use crate::files_correction::{
@@ -253,15 +254,23 @@ impl Tool for ToolProcessStart {
             service_name: parsed.service_name.clone(),
             workspace,
         };
-        let mut request = ExecSpawnRequest::new(parsed.mode.clone(), parsed.command.clone())
-            .with_env_map(env_variables)
+        let mut request = build_exec_request(
+            gcx,
+            CommandPolicyInput {
+                source: ExecSource::ProcessTool,
+                command: CommandKind::Shell(&parsed.command),
+                cwd: parsed.workdir.clone(),
+                env: env_variables,
+                chat_mode: None,
+            },
+        )
+        .await?;
+        request.mode = parsed.mode.clone();
+        request = request
             .with_owner(owner)
             .with_transcript_limit(PROCESS_TRANSCRIPT_MAX_BYTES)
             .with_short_description(short_description)
             .with_tty(tty);
-        if let Some(cwd) = parsed.workdir.clone() {
-            request = request.with_cwd(cwd);
-        }
         if let Some(startup_wait) = parsed.startup_wait {
             request = request.with_startup_wait(startup_wait);
         }

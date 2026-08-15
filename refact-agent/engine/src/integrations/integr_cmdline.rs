@@ -18,10 +18,10 @@ use shell_escape::escape;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::custom_error::YamlError;
+use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
 use crate::exec::{
     generate_short_description, sanitize_short_description, ExecMode, ExecOutputStream,
-    ExecOwnerMeta, ExecProcessSnapshot, ExecRawOutput, ExecReadResult, ExecSpawnRequest,
-    ExecStatus,
+    ExecOwnerMeta, ExecProcessSnapshot, ExecRawOutput, ExecReadResult, ExecStatus,
 };
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::{
@@ -354,6 +354,7 @@ fn cmdline_short_description(name: &str, description: &str, command: &str) -> St
 }
 
 pub async fn execute_blocking_command(
+    gcx: Arc<GlobalContext>,
     command: &str,
     cfg: &CmdlineToolConfig,
     command_workdir: &str,
@@ -368,16 +369,22 @@ pub async fn execute_blocking_command(
 
     let timeout_secs = cfg.timeout.parse::<u64>().unwrap_or(10);
     let cwd = resolve_cmdline_workdir(command_workdir, &project_dirs);
-    let mut request = ExecSpawnRequest::foreground(command.to_string())
-        .with_timeout(Duration::from_secs(timeout_secs))
-        .with_env_map(env_variables.clone())
-        .with_owner(owner)
-        .with_transcript_limit(CMDLINE_TRANSCRIPT_MAX_BYTES)
-        .with_short_description(short_description)
-        .with_abort_flag(abort_flag);
-    if let Some(cwd) = cwd {
-        request = request.with_cwd(cwd);
-    }
+    let request = build_exec_request(
+        gcx,
+        CommandPolicyInput {
+            source: ExecSource::CmdlineIntegration,
+            command: CommandKind::Shell(command),
+            cwd,
+            env: env_variables.clone(),
+            chat_mode: None,
+        },
+    )
+    .await?
+    .with_timeout(Duration::from_secs(timeout_secs))
+    .with_owner(owner)
+    .with_transcript_limit(CMDLINE_TRANSCRIPT_MAX_BYTES)
+    .with_short_description(short_description)
+    .with_abort_flag(abort_flag);
     tracing::info!("command: {}", command);
 
     let started = tokio::time::Instant::now();
@@ -500,6 +507,7 @@ impl Tool for ToolCmdline {
         let short_description =
             cmdline_short_description(&self.name, &self.cfg.description, &command);
         let (tool_output, snapshot, duration) = execute_blocking_command(
+            gcx,
             &command,
             &self.cfg,
             &workdir,

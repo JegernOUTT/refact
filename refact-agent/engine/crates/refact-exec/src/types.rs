@@ -282,6 +282,7 @@ pub struct ExecAuditMeta {
 #[derive(Debug, Clone)]
 pub struct ExecSpawnRequest {
     pub command: String,
+    pub argv: Option<Vec<String>>,
     pub cwd: Option<PathBuf>,
     pub env: HashMap<String, String>,
     pub sandbox: Option<ExecSandboxSpec>,
@@ -292,6 +293,7 @@ pub struct ExecSpawnRequest {
     pub rows: u16,
     pub cols: u16,
     pub timeout: Option<Duration>,
+    pub output_drain_timeout: Option<Duration>,
     pub startup_wait: Option<Duration>,
     pub readiness: Option<ExecReadinessProbe>,
     pub owner: ExecOwnerMeta,
@@ -305,6 +307,7 @@ impl ExecSpawnRequest {
     pub fn new(mode: ExecMode, command: impl Into<String>) -> Self {
         Self {
             command: command.into(),
+            argv: None,
             cwd: None,
             env: HashMap::new(),
             sandbox: None,
@@ -317,6 +320,7 @@ impl ExecSpawnRequest {
             rows: 24,
             cols: 80,
             timeout: None,
+            output_drain_timeout: None,
             startup_wait: None,
             readiness: None,
             owner: ExecOwnerMeta::default(),
@@ -341,6 +345,15 @@ impl ExecSpawnRequest {
 
     pub fn interactive(command: impl Into<String>) -> Self {
         Self::new(ExecMode::Interactive, command)
+    }
+
+    pub fn argv(mode: ExecMode, argv: Vec<String>) -> Self {
+        Self::new(mode, argv.join(" ")).with_argv(argv)
+    }
+
+    pub fn with_argv(mut self, argv: Vec<String>) -> Self {
+        self.argv = Some(argv);
+        self
     }
 
     pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
@@ -386,6 +399,11 @@ impl ExecSpawnRequest {
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_output_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.output_drain_timeout = Some(timeout);
         self
     }
 
