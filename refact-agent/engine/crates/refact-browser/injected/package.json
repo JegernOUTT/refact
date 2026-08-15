@@ -1,0 +1,11 @@
+{
+  "name": "@refact/browser-injected",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/refactInjected.ts --bundle --format=cjs --platform=browser --target=es2019 --charset=utf8 --legal-comments=inline --log-level=warning"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
+  }
+}

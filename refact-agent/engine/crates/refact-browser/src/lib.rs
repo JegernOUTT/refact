@@ -1,3 +1,7 @@
+mod injected_source;
+
+pub use injected_source::{INJECTED_BUNDLE, wrapped_bootstrap};
+
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 use std::path::PathBuf;

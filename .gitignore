@@ -236,6 +236,7 @@ coverage
 
 # Dependency directories
 **/node_modules/
+refact-agent/engine/crates/refact-browser/injected/node_modules/
 **/jspm_packages/
 
 # Snowpack dependency directory (https://snowpack.dev/)
