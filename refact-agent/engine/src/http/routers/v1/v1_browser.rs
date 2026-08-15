@@ -2170,8 +2170,11 @@ mod tests {
             image::ImageFormat::Jpeg,
         )
         .unwrap();
-        let result = resize_screenshot(&buf, 800, "image/jpeg").unwrap();
+        let policy = refact_core::image_policy::ImagePolicy::from_metadata(Some(800), Some(800));
+        let (result, mime) =
+            refact_core::image_policy::resize_to_policy(&buf, "image/jpeg", &policy).unwrap();
         assert!(!result.is_empty());
+        assert_eq!(mime, "image/png");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

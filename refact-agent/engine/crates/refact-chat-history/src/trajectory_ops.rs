@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile};
+use refact_core::provider_types::ImageTokenMode;
 use refact_core::string_utils::redact_sensitive;
 
 use crate::compression_exemption::{exemption_for, CompressionExemption};
@@ -868,23 +869,57 @@ pub fn handoff_conversation_and_excluded(
 
 const APPROX_IMAGE_CONTENT_CHARS: usize = 4_000;
 
+fn approximate_image_tokens(content: &str, mode: ImageTokenMode) -> usize {
+    match mode {
+        ImageTokenMode::Tile => {
+            refact_core::chat_types::calculate_image_tokens_openai(content, "high")
+                .ok()
+                .and_then(|tokens| usize::try_from(tokens).ok())
+                .unwrap_or(APPROX_IMAGE_CONTENT_CHARS / 4)
+        }
+        ImageTokenMode::Detail => refact_core::chat_types::image_reader_from_b64string(content)
+            .ok()
+            .and_then(|reader| reader.into_dimensions().ok())
+            .map(|(width, height)| {
+                let pixels = u64::from(width) * u64::from(height);
+                pixels.div_ceil(750).min(usize::MAX as u64) as usize
+            })
+            .unwrap_or(APPROX_IMAGE_CONTENT_CHARS / 4),
+        ImageTokenMode::Provider => APPROX_IMAGE_CONTENT_CHARS / 4,
+    }
+}
+
 pub fn approx_token_count(messages: &[ChatMessage]) -> usize {
+    approx_token_count_for_image_mode(messages, ImageTokenMode::Provider)
+}
+
+pub fn approx_token_count_for_image_mode(
+    messages: &[ChatMessage],
+    image_token_mode: ImageTokenMode,
+) -> usize {
     messages
         .iter()
         .map(|m| {
-            let mut content_len = match &m.content {
-                ChatContent::SimpleText(s) => s.len(),
-                ChatContent::Multimodal(v) => v
-                    .iter()
-                    .map(|el| {
-                        if el.m_type == "text" {
-                            el.m_content.len()
-                        } else {
-                            APPROX_IMAGE_CONTENT_CHARS
-                        }
-                    })
-                    .sum(),
-                ChatContent::ContextFiles(v) => v.iter().map(|cf| cf.file_content.len()).sum(),
+            let (mut content_len, image_tokens) = match &m.content {
+                ChatContent::SimpleText(s) => (s.len(), 0),
+                ChatContent::Multimodal(v) => {
+                    v.iter()
+                        .fold((0usize, 0usize), |(text_chars, image_tokens), element| {
+                            if element.m_type == "text" {
+                                (text_chars + element.m_content.len(), image_tokens)
+                            } else {
+                                (
+                                    text_chars,
+                                    image_tokens
+                                        + approximate_image_tokens(
+                                            &element.m_content,
+                                            image_token_mode,
+                                        ),
+                                )
+                            }
+                        })
+                }
+                ChatContent::ContextFiles(v) => (v.iter().map(|cf| cf.file_content.len()).sum(), 0),
             };
             if let Some(tool_calls) = &m.tool_calls {
                 content_len += tool_calls
@@ -904,7 +939,7 @@ pub fn approx_token_count(messages: &[ChatMessage]) -> usize {
                     })
                     .sum::<usize>();
             }
-            content_len / 4 + 10
+            content_len / 4 + image_tokens + 10
         })
         .sum()
 }
@@ -1203,7 +1238,9 @@ pub fn compress_in_place(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refact_core::chat_types::{ChatToolCall, ChatToolFunction, ChatUsage};
+    use base64::Engine;
+    use image::ImageFormat;
+    use refact_core::chat_types::{ChatToolCall, ChatToolFunction, ChatUsage, MultimodalElement};
 
     fn make_user_msg(content: &str) -> ChatMessage {
         ChatMessage {
@@ -1217,6 +1254,22 @@ mod tests {
         ChatMessage {
             role: "assistant".to_string(),
             content: ChatContent::SimpleText(content.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn image_message(width: u32, height: u32) -> ChatMessage {
+        let image = image::DynamicImage::new_rgb8(width, height);
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+            .unwrap();
+        ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::Multimodal(vec![MultimodalElement {
+                m_type: "image/png".to_string(),
+                m_content: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }]),
             ..Default::default()
         }
     }
@@ -2534,6 +2587,42 @@ mod tests {
         let messages = vec![make_user_msg("hello world")];
         let count = approx_token_count(&messages);
         assert!(count > 0);
+    }
+
+    #[test]
+    fn image_token_count_uses_anthropic_detail_math() {
+        let messages = vec![image_message(1568, 1568)];
+        let image_tokens = (u64::from(1568u32) * u64::from(1568u32)).div_ceil(750);
+
+        assert_eq!(image_tokens, 3_279);
+        assert_eq!(
+            approx_token_count_for_image_mode(&messages, ImageTokenMode::Detail),
+            3_279 + 10
+        );
+    }
+
+    #[test]
+    fn image_token_count_provider_mode_keeps_flat_fallback() {
+        let messages = vec![image_message(1568, 1568)];
+
+        assert_eq!(
+            approx_token_count_for_image_mode(&messages, ImageTokenMode::Provider),
+            APPROX_IMAGE_CONTENT_CHARS / 4 + 10
+        );
+    }
+
+    #[test]
+    fn image_token_count_uses_openai_tile_math() {
+        let messages = vec![image_message(2048, 2048)];
+
+        assert_eq!(
+            approx_token_count_for_image_mode(&messages, ImageTokenMode::Tile),
+            2_805 + 10
+        );
+        assert_ne!(
+            approx_token_count_for_image_mode(&messages, ImageTokenMode::Tile),
+            approx_token_count_for_image_mode(&messages, ImageTokenMode::Provider)
+        );
     }
 
     #[test]

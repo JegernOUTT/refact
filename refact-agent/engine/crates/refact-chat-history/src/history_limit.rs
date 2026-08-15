@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile, SamplingParameters};
 use refact_core::custom_error::first_n_chars;
+use refact_core::provider_types::ImageTokenMode;
+
+const MAX_BROWSER_SCREENSHOTS_ON_WIRE: usize = 3;
+const SUPERSEDED_SCREENSHOT_PLACEHOLDER: &str = "[screenshot omitted, superseded]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextPressure {
@@ -41,7 +45,16 @@ pub fn compute_context_budget(
     messages: &[ChatMessage],
     effective_n_ctx: usize,
 ) -> ContextBudgetReport {
-    let used_tokens_estimate = crate::trajectory_ops::approx_token_count(messages);
+    compute_context_budget_for_image_mode(messages, effective_n_ctx, ImageTokenMode::Provider)
+}
+
+pub fn compute_context_budget_for_image_mode(
+    messages: &[ChatMessage],
+    effective_n_ctx: usize,
+    image_token_mode: ImageTokenMode,
+) -> ContextBudgetReport {
+    let used_tokens_estimate =
+        crate::trajectory_ops::approx_token_count_for_image_mode(messages, image_token_mode);
     let remaining_estimate = (effective_n_ctx as isize) - (used_tokens_estimate as isize);
     let pressure = pressure_for_used_tokens(used_tokens_estimate, effective_n_ctx);
     ContextBudgetReport {
@@ -187,6 +200,38 @@ pub fn relocate_tool_results_after_their_calls(messages: &mut Vec<ChatMessage>) 
         messages.push(message);
         if let Some(results) = results_by_owner.remove(&original_idx) {
             messages.extend(results);
+        }
+    }
+}
+
+fn supersede_old_browser_screenshots(messages: &mut [ChatMessage]) {
+    let browser_call_ids: HashSet<String> = messages
+        .iter()
+        .filter_map(|message| message.tool_calls.as_ref())
+        .flatten()
+        .filter(|call| {
+            crate::trajectory_ops::canonical_tool_name_for_preservation(&call.function.name)
+                == "chrome"
+        })
+        .map(|call| call.id.clone())
+        .collect();
+    let mut kept = 0usize;
+    for message in messages.iter_mut().rev() {
+        if !browser_call_ids.contains(&message.tool_call_id) {
+            continue;
+        }
+        let ChatContent::Multimodal(elements) = &mut message.content else {
+            continue;
+        };
+        for element in elements.iter_mut().rev() {
+            if !element.is_image() {
+                continue;
+            }
+            kept += 1;
+            if kept > MAX_BROWSER_SCREENSHOTS_ON_WIRE {
+                element.m_type = "text".to_string();
+                element.m_content = SUPERSEDED_SCREENSHOT_PLACEHOLDER.to_string();
+            }
         }
     }
 }
@@ -576,13 +621,14 @@ pub fn fix_and_limit_messages_history(
     replace_broken_tool_call_messages(&mut mutable_messages, sampling_parameters_to_patch, 16000);
     remove_invalid_tool_calls_and_tool_calls_results(&mut mutable_messages);
     relocate_tool_results_after_their_calls(&mut mutable_messages);
+    supersede_old_browser_screenshots(&mut mutable_messages);
     validate_chat_history_owned(mutable_messages)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refact_core::chat_types::{ChatToolCall, ChatToolFunction};
+    use refact_core::chat_types::{ChatToolCall, ChatToolFunction, MultimodalElement};
 
     fn make_context_file_msg(filename: &str, content: &str) -> ChatMessage {
         ChatMessage {
@@ -619,6 +665,24 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+            }]),
+            ..Default::default()
+        }
+    }
+
+    fn assistant_declaring_named_call(call_id: &str, name: &str) -> ChatMessage {
+        let mut message = assistant_declaring_call(call_id);
+        message.tool_calls.as_mut().unwrap()[0].function.name = name.to_string();
+        message
+    }
+
+    fn image_tool_result(call_id: &str, image: &str) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            tool_call_id: call_id.to_string(),
+            content: ChatContent::Multimodal(vec![MultimodalElement {
+                m_type: "image/png".to_string(),
+                m_content: image.to_string(),
             }]),
             ..Default::default()
         }
@@ -715,6 +779,74 @@ mod tests {
     }
 
     #[test]
+    fn wire_history_keeps_only_three_latest_browser_screenshots() {
+        let mut messages = vec![plain_user_msg("inspect")];
+        for idx in 0..5 {
+            let call_id = format!("chrome-{idx}");
+            messages.push(assistant_declaring_named_call(&call_id, "chrome"));
+            messages.push(image_tool_result(&call_id, &format!("image-{idx}")));
+        }
+        let stored = messages.clone();
+        let mut sampling = SamplingParameters::default();
+
+        let prepared = fix_and_limit_messages_history(&messages, &mut sampling).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&messages).unwrap(),
+            serde_json::to_value(&stored).unwrap()
+        );
+        let image_values: Vec<&str> = prepared
+            .iter()
+            .filter_map(|message| match &message.content {
+                ChatContent::Multimodal(elements) => elements.first(),
+                _ => None,
+            })
+            .map(|element| element.m_content.as_str())
+            .collect();
+        assert_eq!(
+            image_values,
+            vec![
+                SUPERSEDED_SCREENSHOT_PLACEHOLDER,
+                SUPERSEDED_SCREENSHOT_PLACEHOLDER,
+                "image-2",
+                "image-3",
+                "image-4",
+            ]
+        );
+    }
+
+    #[test]
+    fn wire_history_does_not_prune_non_browser_images() {
+        let mut messages = vec![plain_user_msg("inspect")];
+        for idx in 0..4 {
+            let call_id = format!("cat-{idx}");
+            messages.push(assistant_declaring_named_call(&call_id, "cat"));
+            messages.push(image_tool_result(&call_id, &format!("image-{idx}")));
+        }
+        let mut sampling = SamplingParameters::default();
+
+        let prepared = fix_and_limit_messages_history(&messages, &mut sampling).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&prepared).unwrap(),
+            serde_json::to_value(&messages).unwrap()
+        );
+    }
+
+    #[test]
+    fn wire_history_without_images_is_unchanged() {
+        let messages = vec![plain_user_msg("hello")];
+        let mut sampling = SamplingParameters::default();
+
+        let prepared = fix_and_limit_messages_history(&messages, &mut sampling).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&prepared).unwrap(),
+            serde_json::to_value(&messages).unwrap()
+        );
+    }
+
+    #[test]
     fn newer_same_range_attachment_supersedes_older_copy() {
         let older = make_context_file_msg("src/main.rs", "fn main() {}\nfn helper() {}\n");
         let newer = make_context_file_msg("src/main.rs", "fn main() {}\n");
@@ -732,16 +864,6 @@ mod tests {
             .content
             .content_text_only()
             .contains("fn main()"));
-    }
-
-    fn make_tool_msg(tool_call_id: &str, content: &str, failed: Option<bool>) -> ChatMessage {
-        ChatMessage {
-            role: "tool".to_string(),
-            tool_call_id: tool_call_id.to_string(),
-            content: ChatContent::SimpleText(content.to_string()),
-            tool_failed: failed,
-            ..Default::default()
-        }
     }
 
     fn make_user_msg_basic(content: &str) -> ChatMessage {

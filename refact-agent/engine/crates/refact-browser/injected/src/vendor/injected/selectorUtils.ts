@@ -109,4 +109,3 @@ export function elementMatchesText(cache: Map<Element | ShadowRoot, ElementText>
     return 'selfAndChildren';
   return 'self';
 }
-

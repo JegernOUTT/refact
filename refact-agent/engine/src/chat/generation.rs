@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use base64::Engine;
 use serde_json::json;
 use tokio::sync::{Mutex as AMutex};
 use tracing::{info, warn};
@@ -44,7 +45,6 @@ use crate::chat::diagnostics::{
     make_ui_only_error_message, make_ui_only_retry_status_message, safe_provider_error_diagnostic,
 };
 use crate::chat::history_limit::ContextPressure;
-use crate::chat::trajectory_ops::approx_token_count;
 use refact_core::llm_types::BaseModelRecord;
 use refact_core::provider_types::{ModelTypeDefaults, ProviderDefaults};
 
@@ -60,6 +60,125 @@ const RESPONSES_CONTEXT_CUTOFF_ERROR: &str =
     "context_length_exceeded: Responses stream ended before a terminal event at critical context pressure";
 
 const MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS: usize = 8;
+const IMAGE_OMISSION_PLACEHOLDER: &str = "[image omitted: provider size limit]";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageRecoveryStage {
+    Original,
+    Shrunk,
+    ImagesOmitted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageRecoveryAction {
+    None,
+    RetryShrunk { image_count: usize },
+    RetryWithoutImages { image_count: usize },
+}
+
+fn is_image_size_rejection(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    let is_413 = lower.contains("(413 ")
+        || lower.contains("status=413")
+        || lower.contains("status 413")
+        || lower.contains("http 413")
+        || lower.contains("413 payload too large")
+        || lower.contains("413 request entity too large");
+    let image_tail = lower
+        .find("image")
+        .map(|idx| &lower[idx..])
+        .unwrap_or_default();
+    let generic_image_rejection = image_tail.contains("too large")
+        || image_tail.contains("exceeds")
+        || image_tail.contains("dimension");
+    let anthropic_image_rejection =
+        lower.contains("invalid_request_error") && image_tail.contains("size");
+    is_413 || generic_image_rejection || anthropic_image_rejection
+}
+
+fn request_image_count(request: &LlmRequest) -> usize {
+    request
+        .messages
+        .iter()
+        .map(|message| match &message.content {
+            ChatContent::Multimodal(elements) => {
+                elements.iter().filter(|element| element.is_image()).count()
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+fn shrink_request_images(request: &mut LlmRequest) -> Result<usize, String> {
+    let mut messages = request.messages.clone();
+    let mut image_count = 0usize;
+    for message in &mut messages {
+        let ChatContent::Multimodal(elements) = &mut message.content else {
+            continue;
+        };
+        for element in elements.iter_mut().filter(|element| element.is_image()) {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&element.m_content)
+                .map_err(|error| format!("Image base64 decode failed: {error}"))?;
+            let (shrunk, mime) = refact_core::image_policy::shrink_ladder(&bytes, &element.m_type)?;
+            element.m_type = mime;
+            element.m_content = base64::engine::general_purpose::STANDARD.encode(shrunk);
+            image_count += 1;
+        }
+    }
+    request.messages = messages;
+    Ok(image_count)
+}
+
+fn omit_request_images(request: &mut LlmRequest) -> usize {
+    let mut image_count = 0usize;
+    for message in &mut request.messages {
+        let ChatContent::Multimodal(elements) = &mut message.content else {
+            continue;
+        };
+        for element in elements.iter_mut() {
+            if element.is_image() {
+                element.m_type = "text".to_string();
+                element.m_content = IMAGE_OMISSION_PLACEHOLDER.to_string();
+                image_count += 1;
+            }
+        }
+    }
+    image_count
+}
+
+fn image_omission_diagnostic(image_count: usize) -> String {
+    format!("[{image_count} image(s) omitted: could not be resized below provider limit]")
+}
+
+fn recover_request_after_image_rejection(
+    request: &mut LlmRequest,
+    stage: &mut ImageRecoveryStage,
+    error: &LlmStreamError,
+) -> ImageRecoveryAction {
+    if !is_image_size_rejection(&error.message) || request_image_count(request) == 0 {
+        return ImageRecoveryAction::None;
+    }
+    match stage {
+        ImageRecoveryStage::Original => match shrink_request_images(request) {
+            Ok(image_count) if image_count > 0 => {
+                *stage = ImageRecoveryStage::Shrunk;
+                ImageRecoveryAction::RetryShrunk { image_count }
+            }
+            _ => {
+                let image_count = omit_request_images(request);
+                *stage = ImageRecoveryStage::ImagesOmitted;
+                ImageRecoveryAction::RetryWithoutImages { image_count }
+            }
+        },
+        ImageRecoveryStage::Shrunk => {
+            let image_count = omit_request_images(request);
+            *stage = ImageRecoveryStage::ImagesOmitted;
+            ImageRecoveryAction::RetryWithoutImages { image_count }
+        }
+        ImageRecoveryStage::ImagesOmitted => ImageRecoveryAction::None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NormalizedStopReason {
@@ -122,10 +241,11 @@ fn responses_incomplete_stream_at_critical_pressure(
         && effective_n_ctx > 0
         && is_responses_incomplete_stream_error(error)
         && matches!(
-            crate::chat::summarization::estimated_provider_context_pressure_with_usage(
+            crate::chat::summarization::estimated_provider_context_pressure_with_usage_for_image_mode(
                 messages,
                 effective_n_ctx,
                 usage_stale,
+                model_rec.image_token_mode,
             ),
             ContextPressure::Critical
         )
@@ -254,8 +374,12 @@ fn maybe_inject_token_budget_instruction(
     session: &mut ChatSession,
     effective_n_ctx: usize,
     cadence: usize,
+    image_token_mode: refact_core::provider_types::ImageTokenMode,
 ) -> bool {
-    let used_tokens = approx_token_count(&session.messages);
+    let used_tokens = refact_chat_history::trajectory_ops::approx_token_count_for_image_mode(
+        &session.messages,
+        image_token_mode,
+    );
     let remaining = effective_n_ctx.saturating_sub(used_tokens);
     let last_has_tool_calls = session
         .messages
@@ -833,6 +957,7 @@ pub(crate) fn is_high_pressure_length_stop(
     messages: &[ChatMessage],
     effective_n_ctx: usize,
     usage_stale: bool,
+    image_token_mode: refact_core::provider_types::ImageTokenMode,
 ) -> bool {
     if message.role != "assistant"
         || message
@@ -846,10 +971,11 @@ pub(crate) fn is_high_pressure_length_stop(
     }
 
     matches!(
-        crate::chat::summarization::estimated_provider_context_pressure_with_usage(
+        crate::chat::summarization::estimated_provider_context_pressure_with_usage_for_image_mode(
             messages,
             effective_n_ctx,
             usage_stale,
+            image_token_mode,
         ),
         ContextPressure::High | ContextPressure::Critical
     )
@@ -870,6 +996,7 @@ async fn maybe_compact_after_high_pressure_length_stop(
     session_arc: &Arc<AMutex<ChatSession>>,
     thread: &ThreadParams,
     effective_n_ctx: Option<usize>,
+    image_token_mode: refact_core::provider_types::ImageTokenMode,
 ) -> bool {
     let Some(effective_n_ctx) = effective_n_ctx else {
         let mut session = session_arc.lock().await;
@@ -904,6 +1031,7 @@ async fn maybe_compact_after_high_pressure_length_stop(
             &session.messages,
             effective_n_ctx,
             session.provider_usage_stale,
+            image_token_mode,
         ) {
             return false;
         }
@@ -1013,6 +1141,7 @@ async fn maybe_recover_after_length_stop(
     session_arc: &Arc<AMutex<ChatSession>>,
     thread: &ThreadParams,
     effective_n_ctx: Option<usize>,
+    image_token_mode: refact_core::provider_types::ImageTokenMode,
 ) -> bool {
     let (kind, dead_end_message_id, attempts, trailing_budget_marker_id) = {
         let session = session_arc.lock().await;
@@ -1054,6 +1183,7 @@ async fn maybe_recover_after_length_stop(
         session_arc,
         thread,
         effective_n_ctx,
+        image_token_mode,
     )
     .await;
 
@@ -1108,19 +1238,22 @@ fn should_notify_task_agent_reasoning_token_stop(
     messages: &[ChatMessage],
     effective_n_ctx: Option<usize>,
     usage_stale: bool,
+    image_token_mode: refact_core::provider_types::ImageTokenMode,
 ) -> bool {
     if !is_reasoning_token_limit_stop(message) {
         return false;
     }
 
-    !effective_n_ctx
-        .is_some_and(|n_ctx| is_high_pressure_length_stop(message, messages, n_ctx, usage_stale))
+    !effective_n_ctx.is_some_and(|n_ctx| {
+        is_high_pressure_length_stop(message, messages, n_ctx, usage_stale, image_token_mode)
+    })
 }
 
 async fn handle_task_agent_reasoning_token_stop(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
     effective_n_ctx: Option<usize>,
+    image_token_mode: refact_core::provider_types::ImageTokenMode,
 ) -> bool {
     let (task_meta, finish_reason, usage, message_id, agent_chat_id) = {
         let mut session = session_arc.lock().await;
@@ -1138,6 +1271,7 @@ async fn handle_task_agent_reasoning_token_stop(
             &session.messages,
             effective_n_ctx,
             session.provider_usage_stale,
+            image_token_mode,
         ) {
             return false;
         }
@@ -1621,7 +1755,7 @@ pub fn start_generation(
                 Some(model_id.as_str())
             };
 
-            let effective_n_ctx = {
+            let (effective_n_ctx, image_token_mode) = {
                 let caps =
                     crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
                         .await;
@@ -1629,7 +1763,11 @@ pub fn start_generation(
                     Ok(caps) => crate::caps::resolve_chat_model(caps, &model_id).ok(),
                     Err(_) => None,
                 };
-                model_rec.map(|rec| {
+                let image_token_mode = model_rec
+                    .as_ref()
+                    .map(|rec| rec.base.image_token_mode)
+                    .unwrap_or_default();
+                let effective_n_ctx = model_rec.map(|rec| {
                     let model_n_ctx = if rec.base.n_ctx > 0 {
                         rec.base.n_ctx
                     } else {
@@ -1639,7 +1777,8 @@ pub fn start_generation(
                         Some(cap) if cap > 0 => cap.min(model_n_ctx),
                         _ => model_n_ctx,
                     }
-                })
+                });
+                (effective_n_ctx, image_token_mode)
             };
 
             if let Some(effective_n_ctx) = effective_n_ctx {
@@ -1648,6 +1787,7 @@ pub fn start_generation(
                     &mut session,
                     effective_n_ctx,
                     TOKEN_BUDGET_CADENCE,
+                    image_token_mode,
                 );
             }
 
@@ -1661,6 +1801,7 @@ pub fn start_generation(
                         app.clone(),
                         session_arc.clone(),
                         effective_n_ctx,
+                        image_token_mode,
                     )
                     .await
                     {
@@ -1671,6 +1812,7 @@ pub fn start_generation(
                         &session_arc,
                         &thread,
                         effective_n_ctx,
+                        image_token_mode,
                     )
                     .await
                     {
@@ -2053,6 +2195,7 @@ async fn run_streaming_generation(
         1
     };
     let mut attempt = 0;
+    let mut image_recovery_stage = ImageRecoveryStage::Original;
 
     let (result, pending_success_event) = loop {
         attempt += 1;
@@ -2444,6 +2587,36 @@ async fn run_streaming_generation(
                 }
             }
             Ok(_) => {}
+        }
+
+        if let Err(error) = &results {
+            match recover_request_after_image_rejection(
+                &mut llm_request,
+                &mut image_recovery_stage,
+                error,
+            ) {
+                ImageRecoveryAction::RetryShrunk { image_count } => {
+                    warn!(
+                        "Provider rejected image size; retrying with {} resized image(s)",
+                        image_count
+                    );
+                    session_arc.lock().await.draft_usage = None;
+                    continue;
+                }
+                ImageRecoveryAction::RetryWithoutImages { image_count } => {
+                    warn!(
+                        "Provider rejected resized image(s); retrying without {} image(s)",
+                        image_count
+                    );
+                    let mut session = session_arc.lock().await;
+                    session.draft_usage = None;
+                    session.add_message(make_ui_only_error_message(&image_omission_diagnostic(
+                        image_count,
+                    )));
+                    continue;
+                }
+                ImageRecoveryAction::None => {}
+            }
         }
 
         let results = results?;
@@ -2879,7 +3052,41 @@ fn maybe_downgrade_bogus_tool_calls_finish_reason(result: &mut ChoiceFinal, stag
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call_validation::{ChatToolCall, ChatToolFunction};
+    use crate::call_validation::{ChatToolCall, ChatToolFunction, MultimodalElement};
+
+    fn encoded_png_b64(width: u32, height: u32) -> String {
+        let image = image::DynamicImage::new_rgb8(width, height);
+        let mut bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn image_request(image_count: usize) -> LlmRequest {
+        LlmRequest::new(
+            "test/model".to_string(),
+            vec![ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::Multimodal(
+                    (0..image_count)
+                        .map(|_| MultimodalElement {
+                            m_type: "image/png".to_string(),
+                            m_content: encoded_png_b64(1024, 768),
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            }],
+        )
+    }
+
+    fn stream_error(message: &str) -> LlmStreamError {
+        LlmStreamError::from(message.to_string())
+    }
 
     fn make_user_msg(content: &str) -> ChatMessage {
         ChatMessage {
@@ -2887,6 +3094,101 @@ mod tests {
             content: ChatContent::SimpleText(content.to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn image_size_rejection_classifier_accepts_provider_shapes() {
+        for fixture in [
+            "LLM error (413 Payload Too Large): request rejected",
+            "OpenAI Codex WebSocket error status=413 code=request_too_large",
+            r#"LLM error (400 Bad Request): {"type":"invalid_request_error","message":"image size exceeds 5 MB"}"#,
+            r#"LLM error (400 Bad Request): {"error":{"message":"Image is too large for this model","type":"invalid_request_error"}}"#,
+            r#"{"error":{"message":"image dimensions exceed the supported maximum"}}"#,
+            "Invalid image: dimension must not exceed 8000 pixels",
+        ] {
+            assert!(is_image_size_rejection(fixture), "fixture: {fixture}");
+        }
+    }
+
+    #[test]
+    fn image_size_rejection_classifier_rejects_unrelated_errors() {
+        for fixture in [
+            "LLM error (429 Too Many Requests)",
+            "context_length_exceeded: input too long",
+            "invalid_request_error: unsupported image format",
+            "HTTP 500 internal server error",
+        ] {
+            assert!(!is_image_size_rejection(fixture), "fixture: {fixture}");
+        }
+    }
+
+    #[test]
+    fn image_recovery_shrinks_then_retries() {
+        let mut request = image_request(2);
+        let mut stage = ImageRecoveryStage::Original;
+
+        let action = recover_request_after_image_rejection(
+            &mut request,
+            &mut stage,
+            &stream_error("LLM error (413 Payload Too Large)"),
+        );
+
+        assert_eq!(action, ImageRecoveryAction::RetryShrunk { image_count: 2 });
+        assert_eq!(stage, ImageRecoveryStage::Shrunk);
+        assert_eq!(request_image_count(&request), 2);
+        for message in &request.messages {
+            if let ChatContent::Multimodal(elements) = &message.content {
+                assert!(elements
+                    .iter()
+                    .all(|element| element.m_type == "image/jpeg"));
+            }
+        }
+    }
+
+    #[test]
+    fn image_recovery_second_rejection_omits_images_with_diagnostic() {
+        let mut request = image_request(2);
+        let mut stage = ImageRecoveryStage::Original;
+        let rejection = stream_error("image exceeds provider size limit");
+        assert!(matches!(
+            recover_request_after_image_rejection(&mut request, &mut stage, &rejection),
+            ImageRecoveryAction::RetryShrunk { .. }
+        ));
+
+        let action = recover_request_after_image_rejection(&mut request, &mut stage, &rejection);
+
+        assert_eq!(
+            action,
+            ImageRecoveryAction::RetryWithoutImages { image_count: 2 }
+        );
+        assert_eq!(stage, ImageRecoveryStage::ImagesOmitted);
+        assert_eq!(request_image_count(&request), 0);
+        assert_eq!(
+            image_omission_diagnostic(2),
+            "[2 image(s) omitted: could not be resized below provider limit]"
+        );
+        let diagnostic = make_ui_only_error_message(&image_omission_diagnostic(2));
+        assert!(refact_chat_api::diagnostics::is_ui_only_message(
+            &diagnostic
+        ));
+    }
+
+    #[test]
+    fn image_recovery_is_noop_without_images() {
+        let mut request =
+            LlmRequest::new("test/model".to_string(), vec![make_user_msg("text only")]);
+        let original = serde_json::to_value(&request).unwrap();
+        let mut stage = ImageRecoveryStage::Original;
+
+        let action = recover_request_after_image_rejection(
+            &mut request,
+            &mut stage,
+            &stream_error("LLM error (413 Payload Too Large)"),
+        );
+
+        assert_eq!(action, ImageRecoveryAction::None);
+        assert_eq!(stage, ImageRecoveryStage::Original);
+        assert_eq!(serde_json::to_value(&request).unwrap(), original);
     }
 
     fn make_event_msg(content: &str) -> ChatMessage {
@@ -3370,6 +3672,7 @@ mod tests {
             &mut session,
             10_000,
             TOKEN_BUDGET_CADENCE,
+            refact_core::provider_types::ImageTokenMode::Provider,
         ));
         assert!(!session
             .messages
@@ -3392,6 +3695,7 @@ mod tests {
             &mut session,
             1_000,
             TOKEN_BUDGET_CADENCE,
+            refact_core::provider_types::ImageTokenMode::Provider,
         ));
         assert!(!session
             .messages
@@ -3464,7 +3768,11 @@ mod tests {
         let messages = vec![make_user_msg("continue"), message.clone()];
 
         assert!(is_high_pressure_length_stop(
-            &message, &messages, 100_000, false
+            &message,
+            &messages,
+            100_000,
+            false,
+            refact_core::provider_types::ImageTokenMode::Provider
         ));
     }
 
@@ -3474,7 +3782,11 @@ mod tests {
         let messages = vec![make_user_msg("continue"), message.clone()];
 
         assert!(!is_high_pressure_length_stop(
-            &message, &messages, 100_000, false
+            &message,
+            &messages,
+            100_000,
+            false,
+            refact_core::provider_types::ImageTokenMode::Provider
         ));
     }
 
@@ -3486,7 +3798,8 @@ mod tests {
         assert!(!maybe_inject_token_budget_instruction(
             &mut session,
             100_000,
-            1
+            1,
+            refact_core::provider_types::ImageTokenMode::Provider,
         ));
         assert_eq!(session.messages.len(), 2);
     }
@@ -3506,6 +3819,7 @@ mod tests {
                 &session_arc,
                 &thread,
                 Some(100_000),
+                refact_core::provider_types::ImageTokenMode::Provider,
             )
             .await
         );
@@ -3549,7 +3863,11 @@ mod tests {
         let messages = vec![make_user_msg("continue"), message.clone()];
 
         assert!(!is_high_pressure_length_stop(
-            &message, &messages, 100_000, false
+            &message,
+            &messages,
+            100_000,
+            false,
+            refact_core::provider_types::ImageTokenMode::Provider
         ));
     }
 
@@ -3560,7 +3878,11 @@ mod tests {
         let messages = vec![make_user_msg("continue"), message.clone()];
 
         assert!(!is_high_pressure_length_stop(
-            &message, &messages, 100_000, false
+            &message,
+            &messages,
+            100_000,
+            false,
+            refact_core::provider_types::ImageTokenMode::Provider
         ));
     }
 
@@ -3571,7 +3893,11 @@ mod tests {
         let messages = vec![make_user_msg("continue"), message.clone()];
 
         assert!(is_high_pressure_length_stop(
-            &message, &messages, 100_000, false
+            &message,
+            &messages,
+            100_000,
+            false,
+            refact_core::provider_types::ImageTokenMode::Provider
         ));
     }
 
@@ -4105,7 +4431,16 @@ mod tests {
         let thread = session.thread.clone();
         let session_arc = Arc::new(AMutex::new(session));
 
-        assert!(maybe_recover_after_length_stop(gcx, &session_arc, &thread, Some(100_000)).await);
+        assert!(
+            maybe_recover_after_length_stop(
+                gcx,
+                &session_arc,
+                &thread,
+                Some(100_000),
+                refact_core::provider_types::ImageTokenMode::Provider,
+            )
+            .await
+        );
 
         let session = session_arc.lock().await;
         assert_eq!(
@@ -4141,7 +4476,16 @@ mod tests {
         let thread = session.thread.clone();
         let session_arc = Arc::new(AMutex::new(session));
 
-        assert!(maybe_recover_after_length_stop(gcx, &session_arc, &thread, Some(100_000)).await);
+        assert!(
+            maybe_recover_after_length_stop(
+                gcx,
+                &session_arc,
+                &thread,
+                Some(100_000),
+                refact_core::provider_types::ImageTokenMode::Provider,
+            )
+            .await
+        );
 
         let session = session_arc.lock().await;
         assert!(!session
@@ -4168,7 +4512,16 @@ mod tests {
         let thread = session.thread.clone();
         let session_arc = Arc::new(AMutex::new(session));
 
-        assert!(maybe_recover_after_length_stop(gcx, &session_arc, &thread, Some(100_000)).await);
+        assert!(
+            maybe_recover_after_length_stop(
+                gcx,
+                &session_arc,
+                &thread,
+                Some(100_000),
+                refact_core::provider_types::ImageTokenMode::Provider,
+            )
+            .await
+        );
 
         let session = session_arc.lock().await;
         assert!(session
@@ -4196,7 +4549,16 @@ mod tests {
         let thread = session.thread.clone();
         let session_arc = Arc::new(AMutex::new(session));
 
-        assert!(!maybe_recover_after_length_stop(gcx, &session_arc, &thread, Some(100_000)).await);
+        assert!(
+            !maybe_recover_after_length_stop(
+                gcx,
+                &session_arc,
+                &thread,
+                Some(100_000),
+                refact_core::provider_types::ImageTokenMode::Provider,
+            )
+            .await
+        );
 
         let session = session_arc.lock().await;
         let last = session.messages.last().unwrap();
@@ -4220,7 +4582,16 @@ mod tests {
         let before_len = session.messages.len();
         let session_arc = Arc::new(AMutex::new(session));
 
-        assert!(!maybe_recover_after_length_stop(gcx, &session_arc, &thread, Some(100_000)).await);
+        assert!(
+            !maybe_recover_after_length_stop(
+                gcx,
+                &session_arc,
+                &thread,
+                Some(100_000),
+                refact_core::provider_types::ImageTokenMode::Provider,
+            )
+            .await
+        );
 
         let session = session_arc.lock().await;
         assert_eq!(session.messages.len(), before_len);

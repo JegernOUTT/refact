@@ -9,7 +9,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ChatUsage, DiffChunk};
 use crate::chat::diagnostics::{
     filter_ui_only_messages, is_ui_only_message, safe_provider_error_diagnostic,
 };
-use crate::chat::history_limit::{compute_context_budget, pressure_for_used_tokens, ContextPressure};
+use crate::chat::history_limit::{pressure_for_used_tokens, ContextPressure};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::types::{ChatEvent, ChatSession, CompressionPhase, CompressionReason, SessionState};
 use crate::global_context::GlobalContext;
@@ -1078,7 +1078,11 @@ pub(crate) fn estimated_context_pressure(
         .into_iter()
         .filter(|message| message.role != COMPRESSION_REPORT_ROLE)
         .collect();
-    let visible_pressure = compute_context_budget(&visible_messages, effective_n_ctx).pressure;
+    let visible_pressure = refact_chat_history::history_limit::compute_context_budget(
+        &visible_messages,
+        effective_n_ctx,
+    )
+    .pressure;
     let provider_pressure = recent_provider_usage_input_tokens(messages)
         .map(|used_tokens| pressure_for_used_tokens(used_tokens, effective_n_ctx))
         .unwrap_or(ContextPressure::Low);
@@ -1090,13 +1094,33 @@ pub(crate) fn estimated_provider_context_pressure_with_usage(
     effective_n_ctx: usize,
     usage_stale: bool,
 ) -> ContextPressure {
+    estimated_provider_context_pressure_with_usage_for_image_mode(
+        messages,
+        effective_n_ctx,
+        usage_stale,
+        refact_core::provider_types::ImageTokenMode::Provider,
+    )
+}
+
+pub(crate) fn estimated_provider_context_pressure_with_usage_for_image_mode(
+    messages: &[ChatMessage],
+    effective_n_ctx: usize,
+    usage_stale: bool,
+    image_token_mode: refact_core::provider_types::ImageTokenMode,
+) -> ContextPressure {
     let provider_messages =
         crate::chat::linearize::apply_summarization_linearize(messages.to_vec());
     let provider_messages: Vec<ChatMessage> = filter_ui_only_messages(provider_messages)
         .into_iter()
         .filter(|message| message.role != COMPRESSION_REPORT_ROLE)
         .collect();
-    let provider_pressure = compute_context_budget(&provider_messages, effective_n_ctx).pressure;
+    let provider_pressure =
+        refact_chat_history::history_limit::compute_context_budget_for_image_mode(
+            &provider_messages,
+            effective_n_ctx,
+            image_token_mode,
+        )
+        .pressure;
     if usage_stale {
         return provider_pressure;
     }

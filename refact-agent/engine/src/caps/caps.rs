@@ -10,7 +10,9 @@ use crate::caps::providers::{
     add_models_to_caps, post_process_provider, read_providers_d, resolve_provider_api_key,
     CapsProvider,
 };
-use refact_core::provider_types::{ModelTypeDefaults, ProviderDefaults, is_legacy_refact_model};
+use refact_core::provider_types::{
+    ImageTokenMode, ModelTypeDefaults, ProviderDefaults, is_legacy_refact_model,
+};
 use crate::caps::model_caps::{
     get_model_caps, model_caps_pricing_metadata, resolve_model_caps, ModelCapabilities,
 };
@@ -18,6 +20,17 @@ use refact_core::provider_types::AvailableModel;
 
 const PROVIDER_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 pub(crate) const MODEL_BASE_PROVIDER_HEADER: &str = "x-refact-internal-base-provider";
+
+fn resolve_image_token_mode(configured: ImageTokenMode, wire_format: WireFormat) -> ImageTokenMode {
+    if configured != ImageTokenMode::Provider {
+        return configured;
+    }
+    match wire_format {
+        WireFormat::AnthropicMessages => ImageTokenMode::Detail,
+        WireFormat::OpenaiChatCompletions | WireFormat::OpenaiResponses => ImageTokenMode::Tile,
+        WireFormat::OllamaNative => ImageTokenMode::Provider,
+    }
+}
 
 pub use refact_core::llm_types::{
     BaseModelRecord, EmbeddingModelRecord, HasBaseModelRecord, WireFormat, default_embedding_batch,
@@ -276,6 +289,8 @@ fn build_chat_model_record(
         );
     }
 
+    let image_token_mode = resolve_image_token_mode(model.image_token_mode, effective_wire_format);
+
     ChatModelRecord {
         base: BaseModelRecord {
             n_ctx,
@@ -306,7 +321,7 @@ fn build_chat_model_record(
             supports_cache_control: runtime_supports_cache_control && supports_cache_control,
             image_max_side_px: model.image_max_side_px,
             image_preferred_side_px: model.image_preferred_side_px,
-            image_token_mode: model.image_token_mode,
+            image_token_mode,
             removable: model.is_custom,
             user_configured: model.is_custom,
         },
@@ -1106,6 +1121,30 @@ mod tests {
     }
 
     #[test]
+    fn image_token_mode_uses_effective_provider_wire_format() {
+        assert_eq!(
+            resolve_image_token_mode(ImageTokenMode::Provider, WireFormat::AnthropicMessages),
+            ImageTokenMode::Detail
+        );
+        assert_eq!(
+            resolve_image_token_mode(ImageTokenMode::Provider, WireFormat::OpenaiChatCompletions,),
+            ImageTokenMode::Tile
+        );
+        assert_eq!(
+            resolve_image_token_mode(ImageTokenMode::Provider, WireFormat::OpenaiResponses),
+            ImageTokenMode::Tile
+        );
+        assert_eq!(
+            resolve_image_token_mode(ImageTokenMode::Provider, WireFormat::OllamaNative),
+            ImageTokenMode::Provider
+        );
+        assert_eq!(
+            resolve_image_token_mode(ImageTokenMode::Detail, WireFormat::OpenaiResponses),
+            ImageTokenMode::Detail
+        );
+    }
+
+    #[test]
     fn test_resolve_chat_model_with_explicit_model() {
         let caps = Arc::new(create_test_caps());
         let result = resolve_chat_model(caps, "test-provider/test-model");
@@ -1281,6 +1320,9 @@ mod tests {
             supports_parallel_tools: false,
             supports_strict_tools: false,
             supports_multimodality: false,
+            image_max_side_px: None,
+            image_preferred_side_px: None,
+            image_token_mode: ImageTokenMode::Provider,
             reasoning_effort_options: None,
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,
@@ -1337,6 +1379,9 @@ mod tests {
             supports_parallel_tools: false,
             supports_strict_tools: false,
             supports_multimodality: false,
+            image_max_side_px: None,
+            image_preferred_side_px: None,
+            image_token_mode: ImageTokenMode::Provider,
             reasoning_effort_options: None,
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,
@@ -1451,6 +1496,9 @@ mod tests {
             supports_parallel_tools: false,
             supports_strict_tools: false,
             supports_multimodality: false,
+            image_max_side_px: None,
+            image_preferred_side_px: None,
+            image_token_mode: ImageTokenMode::Provider,
             reasoning_effort_options: None,
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,
@@ -1531,6 +1579,9 @@ mod tests {
             supports_parallel_tools: false,
             supports_strict_tools: false,
             supports_multimodality: false,
+            image_max_side_px: None,
+            image_preferred_side_px: None,
+            image_token_mode: ImageTokenMode::Provider,
             reasoning_effort_options: None,
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,

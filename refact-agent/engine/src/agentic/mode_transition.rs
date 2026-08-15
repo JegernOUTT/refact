@@ -213,7 +213,7 @@ mod tests {
         let image_count = count_images_in_messages(&new_messages);
 
         assert!(message_symbols <= budget.messages_symbols);
-        assert_eq!(image_count, 1);
+        assert_eq!(image_count, 2);
     }
 
     #[tokio::test]
