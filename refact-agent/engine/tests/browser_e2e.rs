@@ -15,7 +15,7 @@ use hyper::body::Bytes;
 use refact_core::image_policy::ImagePolicy;
 use refact_lsp::integrations::browser_controller::execute_steps as execute_steps_with_policy;
 use refact_lsp::integrations::browser_models::{BrowserLocator, BrowserStep};
-use refact_lsp::refact_browser::{BrowserRuntime, UTILITY_WORLD_NAME};
+use refact_lsp::refact_browser::{BrowserRuntime, HandleError, UTILITY_WORLD_NAME};
 use serde::Deserialize;
 use serde_json::json;
 use tempfile::{tempdir, TempDir};
@@ -527,6 +527,58 @@ async fn strict_multi_click_errors() {
         !report.ok,
         "strict click must reject multiple matches: {report:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn handle_clicks_second_strict_match() {
+    let Some(case) = BrowserCase::start("strict-multi.html").await else {
+        return;
+    };
+    let locator = BrowserLocator {
+        strategy: refact_lsp::integrations::browser_models::LocatorStrategy::Css {
+            value: ".duplicate".to_string(),
+        },
+        nth: Some(1),
+        within: None,
+    };
+    let report = execute_steps(
+        &case.tab,
+        &[BrowserStep::Click { locator }, text_step("#result")],
+    );
+    assert!(report.ok, "nth handle click failed: {report:?}");
+    assert_eq!(returned_text(&report), "second");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn handle_is_invalidated_after_navigation() {
+    let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
+        return;
+    };
+    case.setup_world();
+    let handle = case
+        .runtime
+        .world_manager
+        .call_injected_handles(
+            &case.tab,
+            "resolveAll",
+            json!([{"by":"css","value":"#delayed"}]),
+        )
+        .unwrap();
+    let handle = handle.into_iter().next().unwrap();
+    case.navigate("strict-multi.html");
+    let error = case
+        .runtime
+        .world_manager
+        .call_function_on(
+            &case.tab,
+            &handle,
+            "function() { return this.tagName; }",
+            vec![],
+        )
+        .unwrap_err();
+    assert!(matches!(error, HandleError::Invalidated { .. }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

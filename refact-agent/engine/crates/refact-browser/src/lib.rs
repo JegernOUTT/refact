@@ -1,6 +1,8 @@
+mod handles;
 mod injected_source;
 mod world;
 
+pub use handles::{ElementHandle, HandleError, HandleRegistry};
 pub use injected_source::{INJECTED_BUNDLE, wrapped_bootstrap};
 pub use world::{
     BINDING_NAME, BindingCall, BindingCallback, INJECTED_INSTANCE_NAME, UTILITY_WORLD_NAME,

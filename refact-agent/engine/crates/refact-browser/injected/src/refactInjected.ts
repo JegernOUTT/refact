@@ -16,6 +16,16 @@
 
 type RefactBuiltins = Readonly<Record<string, unknown>>;
 
+type RefactLocator = Readonly<{
+  by: string;
+  value?: string;
+  role?: string;
+  name?: string;
+  exact?: boolean;
+  nth?: number;
+  within?: string;
+}>;
+
 const injectedInstanceName = '__refact_injected__';
 const bindingName = '__refact_binding';
 
@@ -43,6 +53,94 @@ export class RefactInjected {
 
   resolveSimple(cssSelector: string): Element | null {
     return this.global.document.querySelector(cssSelector);
+  }
+
+  resolveAll(locator: RefactLocator): Element[] {
+    const document = this.global.document;
+    const scope = locator.within ? document.querySelector(locator.within) : document;
+    if (!scope)
+      throw new Error('Scope selector not found');
+    let elements: Element[];
+    switch (locator.by) {
+      case 'css':
+        elements = Array.from(scope.querySelectorAll(locator.value ?? ''));
+        break;
+      case 'id': {
+        const element = scope.querySelector(`#${CSS.escape(locator.value ?? '')}`);
+        elements = element ? [element] : [];
+        break;
+      }
+      case 'name':
+        elements = Array.from(scope.querySelectorAll(`[name=${JSON.stringify(locator.value ?? '')}]`));
+        break;
+      case 'test_id':
+        elements = Array.from(scope.querySelectorAll(`[data-testid=${JSON.stringify(locator.value ?? '')}]`));
+        break;
+      case 'placeholder':
+        elements = Array.from(scope.querySelectorAll(`[placeholder=${JSON.stringify(locator.value ?? '')}]`));
+        break;
+      case 'autocomplete':
+        elements = Array.from(scope.querySelectorAll(`[autocomplete=${JSON.stringify(locator.value ?? '')}]`));
+        break;
+      case 'text': {
+        const target = locator.value ?? '';
+        elements = Array.from(scope.querySelectorAll('*')).filter(element => {
+          const text = (element as HTMLElement).innerText;
+          return locator.exact ? text?.trim() === target : !!text?.includes(target);
+        });
+        break;
+      }
+      case 'label': {
+        const target = locator.value ?? '';
+        elements = [];
+        for (const label of Array.from(scope.querySelectorAll('label'))) {
+          if (!(label as HTMLElement).innerText?.trim().includes(target))
+            continue;
+          const element = label.htmlFor
+            ? document.getElementById(label.htmlFor)
+            : label.querySelector('input,textarea,select');
+          if (element)
+            elements.push(element);
+        }
+        if (!elements.length)
+          elements = Array.from(scope.querySelectorAll('[aria-label]')).filter(element =>
+            element.getAttribute('aria-label')?.includes(target),
+          );
+        break;
+      }
+      case 'role': {
+        const role = locator.role ?? '';
+        const candidates = Array.from(scope.querySelectorAll(`[role=${JSON.stringify(role)}]`));
+        elements = locator.name
+          ? candidates.filter(element => {
+            const name = element.getAttribute('aria-label') || (element as HTMLElement).innerText || '';
+            return name.trim().includes(locator.name ?? '');
+          })
+          : candidates;
+        break;
+      }
+      case 'xpath': {
+        const result = document.evaluate(
+          locator.value ?? '',
+          scope,
+          null,
+          XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+          null,
+        );
+        elements = [];
+        for (let index = 0; index < result.snapshotLength; index++) {
+          const element = result.snapshotItem(index);
+          if (element instanceof Element)
+            elements.push(element);
+        }
+        break;
+      }
+      default:
+        throw new Error(`Unknown locator strategy: ${locator.by}`);
+    }
+    if (locator.nth !== undefined)
+      elements = elements.length > locator.nth ? [elements[locator.nth]] : [];
+    return elements;
   }
 
   dispatchBinding(name: string, payload: unknown): void {

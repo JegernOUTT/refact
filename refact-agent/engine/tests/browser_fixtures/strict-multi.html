@@ -5,8 +5,9 @@
   <title>Strict multiple matches</title>
 </head>
 <body>
-  <button class="duplicate">Same action</button>
-  <button class="duplicate">Same action</button>
-  <button class="duplicate">Same action</button>
+  <button class="duplicate" onclick="document.querySelector('#result').textContent = 'first'">Same action</button>
+  <button class="duplicate" onclick="document.querySelector('#result').textContent = 'second'">Same action</button>
+  <button class="duplicate" onclick="document.querySelector('#result').textContent = 'third'">Same action</button>
+  <output id="result"></output>
 </body>
 </html>

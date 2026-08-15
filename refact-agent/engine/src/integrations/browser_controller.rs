@@ -7,11 +7,12 @@ use headless_chrome::protocol::cdp::Page;
 use tokio::sync::Mutex as AMutex;
 
 use crate::integrations::browser_locators::{
-    self, generate_find_fragment_js, generate_resolve_js, js_string_literal, parse_element_info,
-    to_css_selector, INSPECT_ELEMENT_JS,
+    self, generate_find_fragment_js, js_string_literal, parse_element_info, to_css_selector,
+    INSPECT_ELEMENT_JS,
 };
 use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
+use refact_browser::{ElementHandle, WorldManager};
 use refact_core::image_policy::{ImageFormat, ImagePolicy};
 
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
@@ -91,32 +92,109 @@ fn eval_js_ok(tab: &Tab, js: &str) -> Result<serde_json::Value, String> {
     Ok(result)
 }
 
-fn resolve_element(tab: &Tab, locator: &BrowserLocator) -> Result<ElementInfo, String> {
-    let js = generate_resolve_js(locator);
-    let val = eval_js_value(tab, &js)?;
+struct ResolvedElement {
+    handle: ElementHandle,
+    info: ElementInfo,
+}
+
+impl std::ops::Deref for ResolvedElement {
+    type Target = ElementInfo;
+
+    fn deref(&self) -> &Self::Target {
+        &self.info
+    }
+}
+
+fn resolve_element(
+    tab: &Tab,
+    world: &WorldManager,
+    locator: &BrowserLocator,
+) -> Result<ResolvedElement, String> {
+    let locator = serde_json::to_value(locator)
+        .map_err(|error| format!("Failed to serialize browser locator: {error}"))?;
+    let mut handles = world
+        .call_injected_handles(tab, "resolveAll", serde_json::json!([locator]))
+        .map_err(|error| error.to_string())?;
+    if handles.is_empty() {
+        return Err("Element not found".to_string());
+    }
+    if handles.len() > 1 {
+        let count = handles.len();
+        for handle in &handles {
+            let _ = world.release_handle(tab, handle);
+        }
+        return Err(format!(
+            "Strict mode violation: locator resolved to {count} elements"
+        ));
+    }
+    let handle = handles.remove(0);
+    let inspect = format!(
+        "function() {{ {INSPECT_ELEMENT_JS} return JSON.stringify(__refact_inspect_element(this, 1)); }}"
+    );
+    let val = world
+        .call_function_on(tab, &handle, &inspect, Vec::new())
+        .map_err(|error| error.to_string())?;
     let json_str = match val.as_str() {
         Some(s) => s.to_string(),
         None => serde_json::to_string(&val)
             .map_err(|e| format!("Failed to serialize resolve result: {}", e))?,
     };
-    parse_element_info(&json_str)
+    let info = parse_element_info(&json_str)?;
+    Ok(ResolvedElement { handle, info })
 }
 
-fn resolve_interactable(tab: &Tab, locator: &BrowserLocator) -> Result<ElementInfo, String> {
-    let info = resolve_element(tab, locator)?;
-    if !info.visible {
+fn resolve_interactable(
+    tab: &Tab,
+    world: &WorldManager,
+    locator: &BrowserLocator,
+) -> Result<ResolvedElement, String> {
+    let resolved = resolve_element(tab, world, locator)?;
+    if !resolved.info.visible {
+        let _ = world.release_handle(tab, &resolved.handle);
         return Err("Element is not visible".to_string());
     }
-    if !info.enabled {
+    if !resolved.info.enabled {
+        let _ = world.release_handle(tab, &resolved.handle);
         return Err("Element is disabled".to_string());
     }
-    Ok(info)
+    Ok(resolved)
+}
+
+fn call_handle_json(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: &ElementHandle,
+    action_js: &str,
+) -> Result<serde_json::Value, String> {
+    let function = format!("function() {{ return ({action_js}).call(this); }}");
+    let value = world
+        .call_function_on(tab, handle, &function, Vec::new())
+        .map_err(|error| error.to_string())?;
+    let result = match value.as_str() {
+        Some(json) => serde_json::from_str(json)
+            .map_err(|error| format!("Failed to parse JS JSON result: {error}"))?,
+        None if value.is_object() || value.is_array() => value,
+        None => return Err(format!("Unexpected JS result type: {value:?}")),
+    };
+    if let Some(error) = result.get("error").and_then(|value| value.as_str()) {
+        return Err(error.to_string());
+    }
+    Ok(result)
 }
 
 pub fn execute_steps(
     tab: &Tab,
     steps: &[BrowserStep],
     image_policy: &ImagePolicy,
+) -> ExecutionReport {
+    execute_steps_with_world(tab, steps, image_policy, &WorldManager::default())
+}
+
+fn execute_steps_with_world(
+    tab: &Tab,
+    steps: &[BrowserStep],
+    image_policy: &ImagePolicy,
+    world: &WorldManager,
 ) -> ExecutionReport {
     let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
 
@@ -125,7 +203,8 @@ pub fn execute_steps(
     let mut pre_step_url: Option<String> = Some(tab.get_url());
 
     for (idx, step) in steps.iter().enumerate() {
-        let result = execute_single_step(tab, step, idx, pre_step_url.as_deref(), image_policy);
+        let result =
+            execute_single_step(tab, world, step, idx, pre_step_url.as_deref(), image_policy);
         let is_non_fatal = matches!(step, BrowserStep::ClickIfExists { .. });
         if !result.ok && !is_non_fatal {
             all_ok = false;
@@ -138,6 +217,8 @@ pub fn execute_steps(
         pre_step_url = Some(tab.get_url());
         results.push(result);
     }
+
+    let _ = world.release_all(tab);
 
     ExecutionReport {
         ok: all_ok,
@@ -163,11 +244,22 @@ pub fn execute_step(
     idx: usize,
     image_policy: &ImagePolicy,
 ) -> StepResult {
+    execute_step_with_world(tab, &WorldManager::default(), step, idx, image_policy)
+}
+
+fn execute_step_with_world(
+    tab: &Tab,
+    world: &WorldManager,
+    step: &BrowserStep,
+    idx: usize,
+    image_policy: &ImagePolicy,
+) -> StepResult {
     let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
-    let result = execute_single_step(tab, step, idx, None, image_policy);
+    let result = execute_single_step(tab, world, step, idx, None, image_policy);
     if result.ok && is_navigation_step(step) {
         let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
     }
+    let _ = world.release_all(tab);
     result
 }
 
@@ -205,6 +297,10 @@ pub async fn execute_request_with_runtime(
         let rt = runtime_arc.lock().await;
         rt.get_active_tab()
     };
+    let world = {
+        let rt = runtime_arc.lock().await;
+        rt.world_manager.clone()
+    };
     let mut results = Vec::new();
     let mut all_ok = true;
 
@@ -229,9 +325,9 @@ pub async fn execute_request_with_runtime(
                 current_tab = rt.get_active_tab();
             }
             match &current_tab {
-                Some(tab) => {
-                    tokio::task::block_in_place(|| execute_step(tab, step, idx, image_policy))
-                }
+                Some(tab) => tokio::task::block_in_place(|| {
+                    execute_step_with_world(tab, &world, step, idx, image_policy)
+                }),
                 None => StepResult::failure(
                     idx,
                     "No active tab",
@@ -408,9 +504,14 @@ pub fn execute_steps_with_runtime(
                     .with_data(serde_json::json!({"tabs": tab_list}))
             }
             other => match &current_tab {
-                Some(tab) => {
-                    execute_single_step(tab, other, idx, pre_step_url.as_deref(), image_policy)
-                }
+                Some(tab) => execute_single_step(
+                    tab,
+                    &runtime.world_manager,
+                    other,
+                    idx,
+                    pre_step_url.as_deref(),
+                    image_policy,
+                ),
                 None => StepResult::failure(
                     idx,
                     "No active tab",
@@ -458,6 +559,7 @@ fn is_navigation_step(step: &BrowserStep) -> bool {
 
 fn execute_single_step(
     tab: &Tab,
+    world: &WorldManager,
     step: &BrowserStep,
     idx: usize,
     pre_step_url: Option<&str>,
@@ -478,12 +580,14 @@ fn execute_single_step(
             "Use execute_steps_with_runtime() for tab management",
         ),
 
-        BrowserStep::Click { locator } => step_locator_action(tab, idx, locator, "click"),
-        BrowserStep::ClickIfExists { locator } => step_click_if_exists(tab, idx, locator),
-        BrowserStep::Hover { locator } => step_locator_action(tab, idx, locator, "hover"),
-        BrowserStep::Focus { locator } => step_locator_action(tab, idx, locator, "focus"),
-        BrowserStep::Blur { locator } => step_locator_action(tab, idx, locator, "blur"),
-        BrowserStep::ScrollTo { locator } => step_locator_action(tab, idx, locator, "scroll_to"),
+        BrowserStep::Click { locator } => step_locator_action(tab, world, idx, locator, "click"),
+        BrowserStep::ClickIfExists { locator } => step_click_if_exists(tab, world, idx, locator),
+        BrowserStep::Hover { locator } => step_locator_action(tab, world, idx, locator, "hover"),
+        BrowserStep::Focus { locator } => step_locator_action(tab, world, idx, locator, "focus"),
+        BrowserStep::Blur { locator } => step_locator_action(tab, world, idx, locator, "blur"),
+        BrowserStep::ScrollTo { locator } => {
+            step_locator_action(tab, world, idx, locator, "scroll_to")
+        }
         BrowserStep::PressKey { key, modifiers } => step_press_key(tab, idx, key, modifiers),
 
         BrowserStep::Fill {
@@ -491,13 +595,13 @@ fn execute_single_step(
             text,
             clear_first,
             verify,
-        } => step_fill(tab, idx, locator, text, *clear_first, *verify),
-        BrowserStep::Clear { locator, verify } => step_clear(tab, idx, locator, *verify),
+        } => step_fill(tab, world, idx, locator, text, *clear_first, *verify),
+        BrowserStep::Clear { locator, verify } => step_clear(tab, world, idx, locator, *verify),
         BrowserStep::SelectOption { locator, value } => {
-            step_select_option(tab, idx, locator, value)
+            step_select_option(tab, world, idx, locator, value)
         }
-        BrowserStep::Check { locator } => step_check_uncheck(tab, idx, locator, true),
-        BrowserStep::Uncheck { locator } => step_check_uncheck(tab, idx, locator, false),
+        BrowserStep::Check { locator } => step_check_uncheck(tab, world, idx, locator, true),
+        BrowserStep::Uncheck { locator } => step_check_uncheck(tab, world, idx, locator, false),
 
         BrowserStep::WaitForSelector {
             locator,
@@ -528,15 +632,15 @@ fn execute_single_step(
             step_wait_seconds(idx, clamp_wait_seconds(*seconds))
         }
 
-        BrowserStep::GetText { locator } => step_get_text(tab, idx, locator),
-        BrowserStep::GetHtml { locator } => step_get_html(tab, idx, locator),
+        BrowserStep::GetText { locator } => step_get_text(tab, world, idx, locator),
+        BrowserStep::GetHtml { locator } => step_get_html(tab, world, idx, locator),
         BrowserStep::GetAttribute { locator, attribute } => {
-            step_get_attribute(tab, idx, locator, attribute)
+            step_get_attribute(tab, world, idx, locator, attribute)
         }
         BrowserStep::ExtractLinks { locator, limit } => {
-            step_extract_links(tab, idx, locator.as_ref(), *limit)
+            step_extract_links(tab, world, idx, locator.as_ref(), *limit)
         }
-        BrowserStep::ExtractTable { locator } => step_extract_table(tab, idx, locator),
+        BrowserStep::ExtractTable { locator } => step_extract_table(tab, world, idx, locator),
         BrowserStep::DomSnapshot {
             selector,
             max_chars,
@@ -544,19 +648,21 @@ fn execute_single_step(
         BrowserStep::AccessibilitySnapshot => step_accessibility_snapshot(tab, idx),
         BrowserStep::Screenshot => step_screenshot(tab, idx, image_policy),
         BrowserStep::ScreenshotElement { locator } => {
-            step_screenshot_element(tab, idx, locator, image_policy)
+            step_screenshot_element(tab, world, idx, locator, image_policy)
         }
 
         BrowserStep::Eval { expression } => step_eval(tab, idx, expression),
         BrowserStep::Styles {
             locator,
             property_filter,
-        } => step_styles(tab, idx, locator, property_filter.as_deref()),
+        } => step_styles(tab, world, idx, locator, property_filter.as_deref()),
 
         BrowserStep::TabLog => step_tab_log(tab, idx),
 
         BrowserStep::DismissOverlays => step_dismiss_overlays(tab, idx),
-        BrowserStep::HighlightElement { locator } => step_highlight_element(tab, idx, locator),
+        BrowserStep::HighlightElement { locator } => {
+            step_highlight_element(tab, world, idx, locator)
+        }
     }
 }
 
@@ -582,11 +688,12 @@ fn step_nav_js(tab: &Tab, idx: usize, js: &str, success_msg: &str) -> StepResult
 
 fn step_locator_action(
     tab: &Tab,
+    world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
     action: &str,
 ) -> StepResult {
-    match resolve_interactable(tab, locator) {
+    match resolve_interactable(tab, world, locator) {
         Ok(info) => {
             let action_js = match action {
                 "click" => browser_locators::js_click_element().to_string(),
@@ -598,7 +705,7 @@ fn step_locator_action(
                     return StepResult::failure(idx, action, format!("Unknown action: {}", action))
                 }
             };
-            match eval_js_ok(tab, &action_js) {
+            match call_handle_json(tab, world, &info.handle, &action_js) {
                 Ok(_) => StepResult::success(
                     idx,
                     format!(
@@ -615,9 +722,19 @@ fn step_locator_action(
     }
 }
 
-fn step_click_if_exists(tab: &Tab, idx: usize, locator: &BrowserLocator) -> StepResult {
-    match resolve_element(tab, locator) {
-        Ok(info) if info.visible => match eval_js_ok(tab, browser_locators::js_click_element()) {
+fn step_click_if_exists(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+) -> StepResult {
+    match resolve_element(tab, world, locator) {
+        Ok(info) if info.visible => match call_handle_json(
+            tab,
+            world,
+            &info.handle,
+            browser_locators::js_click_element(),
+        ) {
             Ok(_) => StepResult::success(idx, format!("Clicked <{}> (found)", info.tag)),
             Err(e) => StepResult::success(
                 idx,
@@ -660,13 +777,14 @@ fn step_press_key(tab: &Tab, idx: usize, key: &str, modifiers: &[String]) -> Ste
 
 fn step_fill(
     tab: &Tab,
+    world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
     text: &str,
     clear_first: bool,
     verify: bool,
 ) -> StepResult {
-    let info = match resolve_interactable(tab, locator) {
+    let info = match resolve_interactable(tab, world, locator) {
         Ok(i) => i,
         Err(e) => return StepResult::failure(idx, "Fill: element resolution failed", e),
     };
@@ -692,7 +810,7 @@ fn step_fill(
 
     for strategy in &strategies {
         let fill_js = generate_fill_js(strategy, text, clear_first);
-        match eval_js_json(tab, &fill_js) {
+        match call_handle_json(tab, world, &info.handle, &fill_js) {
             Ok(result) => {
                 let ok = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                 if !ok {
@@ -706,7 +824,7 @@ fn step_fill(
                 }
 
                 if verify {
-                    match verify_field_value(tab, text, &info.field_kind) {
+                    match verify_field_value(tab, world, &info.handle, text, &info.field_kind) {
                         Ok(true) => {
                             let mut r = StepResult::success(
                                 idx,
@@ -753,13 +871,19 @@ fn step_fill(
         format!("Fill failed after {} strategies", retries),
         last_error,
     );
-    r.field_kind = Some(info.field_kind);
+    r.field_kind = Some(info.field_kind.clone());
     r.retries = retries;
     r
 }
 
-fn step_clear(tab: &Tab, idx: usize, locator: &BrowserLocator, verify: bool) -> StepResult {
-    let info = match resolve_interactable(tab, locator) {
+fn step_clear(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    verify: bool,
+) -> StepResult {
+    let info = match resolve_interactable(tab, world, locator) {
         Ok(i) => i,
         Err(e) => return StepResult::failure(idx, "Clear: element resolution failed", e),
     };
@@ -791,7 +915,7 @@ fn step_clear(tab: &Tab, idx: usize, locator: &BrowserLocator, verify: bool) -> 
         }
         FieldKind::Select => {
             let js = r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el || el.tagName !== 'SELECT') return JSON.stringify({error: 'Not a SELECT element'});
   var hadEmpty = false;
   el.selectedIndex = -1;
@@ -805,7 +929,7 @@ fn step_clear(tab: &Tab, idx: usize, locator: &BrowserLocator, verify: bool) -> 
   el.dispatchEvent(new Event('change', {bubbles: true}));
   return JSON.stringify({ok: true, value: el.value, had_empty_option: hadEmpty});
 })()"#;
-            return match eval_js_ok(tab, js) {
+            return match call_handle_json(tab, world, &info.handle, js) {
                 Ok(result) => {
                     let had_empty = result
                         .get("had_empty_option")
@@ -828,10 +952,10 @@ fn step_clear(tab: &Tab, idx: usize, locator: &BrowserLocator, verify: bool) -> 
     }
 
     let clear_js = generate_clear_js(&info.field_kind);
-    match eval_js_ok(tab, &clear_js) {
+    match call_handle_json(tab, world, &info.handle, &clear_js) {
         Ok(_) => {
             if verify {
-                match verify_field_value(tab, "", &info.field_kind) {
+                match verify_field_value(tab, world, &info.handle, "", &info.field_kind) {
                     Ok(true) => {
                         let mut r = StepResult::success(idx, format!("Cleared <{}>", info.tag));
                         r.verified = Some(true);
@@ -852,12 +976,18 @@ fn step_clear(tab: &Tab, idx: usize, locator: &BrowserLocator, verify: bool) -> 
     }
 }
 
-fn step_select_option(tab: &Tab, idx: usize, locator: &BrowserLocator, value: &str) -> StepResult {
-    match resolve_interactable(tab, locator) {
+fn step_select_option(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    value: &str,
+) -> StepResult {
+    match resolve_interactable(tab, world, locator) {
         Ok(info) => {
             let js = format!(
                 r#"(function() {{
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el || el.tagName !== 'SELECT') return JSON.stringify({{error: 'Not a SELECT element'}});
   var val = {value};
   var found = false;
@@ -874,7 +1004,7 @@ fn step_select_option(tab: &Tab, idx: usize, locator: &BrowserLocator, value: &s
 }})()"#,
                 value = js_string_literal(value),
             );
-            match eval_js_ok(tab, &js) {
+            match call_handle_json(tab, world, &info.handle, &js) {
                 Ok(_) => {
                     StepResult::success(idx, format!("Selected '{}' in <{}>", value, info.tag))
                 }
@@ -885,9 +1015,15 @@ fn step_select_option(tab: &Tab, idx: usize, locator: &BrowserLocator, value: &s
     }
 }
 
-fn step_check_uncheck(tab: &Tab, idx: usize, locator: &BrowserLocator, check: bool) -> StepResult {
+fn step_check_uncheck(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    check: bool,
+) -> StepResult {
     let action = if check { "check" } else { "uncheck" };
-    let info = match resolve_interactable(tab, locator) {
+    let info = match resolve_interactable(tab, world, locator) {
         Ok(i) => i,
         Err(e) => return StepResult::failure(idx, "Check/uncheck: resolution failed", e),
     };
@@ -903,13 +1039,13 @@ fn step_check_uncheck(tab: &Tab, idx: usize, locator: &BrowserLocator, check: bo
     let is_supported = matches!(info.field_kind, FieldKind::Checkbox | FieldKind::Radio);
     let is_aria = !is_supported && {
         let check_aria = r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({ok: false});
   var role = el.getAttribute('role');
   var supported = role === 'checkbox' || role === 'switch' || role === 'radio';
   return JSON.stringify({ok: supported});
 })()"#;
-        eval_js_ok(tab, check_aria)
+        call_handle_json(tab, world, &info.handle, check_aria)
             .ok()
             .and_then(|v| v.get("ok").and_then(|b| b.as_bool()))
             .unwrap_or(false)
@@ -928,7 +1064,7 @@ fn step_check_uncheck(tab: &Tab, idx: usize, locator: &BrowserLocator, check: bo
 
     let js = format!(
         r#"(function() {{
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   var want = {want};
   var role = el.getAttribute('role');
@@ -948,7 +1084,7 @@ fn step_check_uncheck(tab: &Tab, idx: usize, locator: &BrowserLocator, check: bo
 }})()"#,
         want = if check { "true" } else { "false" },
     );
-    match eval_js_ok(tab, &js) {
+    match call_handle_json(tab, world, &info.handle, &js) {
         Ok(_) => StepResult::success(idx, format!("{}ed <{}>", action, info.tag)),
         Err(e) => StepResult::failure(idx, format!("{} failed", action), e),
     }
@@ -1240,44 +1376,59 @@ fn step_wait_for_network_idle(tab: &Tab, idx: usize, timeout_ms: u64) -> StepRes
     }
 }
 
-fn step_get_text(tab: &Tab, idx: usize, locator: &BrowserLocator) -> StepResult {
-    match resolve_element(tab, locator) {
-        Ok(info) => match eval_js_ok(tab, browser_locators::js_get_text()) {
-            Ok(result) => {
-                let text = result.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                StepResult::success(idx, format!("Got text from <{}>", info.tag))
-                    .with_data(serde_json::json!({"text": text}))
+fn step_get_text(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+) -> StepResult {
+    match resolve_element(tab, world, locator) {
+        Ok(info) => {
+            match call_handle_json(tab, world, &info.handle, browser_locators::js_get_text()) {
+                Ok(result) => {
+                    let text = result.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    StepResult::success(idx, format!("Got text from <{}>", info.tag))
+                        .with_data(serde_json::json!({"text": text}))
+                }
+                Err(e) => StepResult::failure(idx, "Get text failed", e),
             }
-            Err(e) => StepResult::failure(idx, "Get text failed", e),
-        },
+        }
         Err(e) => StepResult::failure(idx, "Get text: resolution failed", e),
     }
 }
 
-fn step_get_html(tab: &Tab, idx: usize, locator: &BrowserLocator) -> StepResult {
-    match resolve_element(tab, locator) {
-        Ok(info) => match eval_js_ok(tab, browser_locators::js_get_html()) {
-            Ok(result) => {
-                let html = result.get("html").and_then(|v| v.as_str()).unwrap_or("");
-                StepResult::success(idx, format!("Got HTML from <{}>", info.tag))
-                    .with_data(serde_json::json!({"html": html}))
+fn step_get_html(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+) -> StepResult {
+    match resolve_element(tab, world, locator) {
+        Ok(info) => {
+            match call_handle_json(tab, world, &info.handle, browser_locators::js_get_html()) {
+                Ok(result) => {
+                    let html = result.get("html").and_then(|v| v.as_str()).unwrap_or("");
+                    StepResult::success(idx, format!("Got HTML from <{}>", info.tag))
+                        .with_data(serde_json::json!({"html": html}))
+                }
+                Err(e) => StepResult::failure(idx, "Get HTML failed", e),
             }
-            Err(e) => StepResult::failure(idx, "Get HTML failed", e),
-        },
+        }
         Err(e) => StepResult::failure(idx, "Get HTML: resolution failed", e),
     }
 }
 
 fn step_get_attribute(
     tab: &Tab,
+    world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
     attribute: &str,
 ) -> StepResult {
-    match resolve_element(tab, locator) {
+    match resolve_element(tab, world, locator) {
         Ok(info) => {
             let js = browser_locators::js_get_attribute(attribute);
-            match eval_js_ok(tab, &js) {
+            match call_handle_json(tab, world, &info.handle, &js) {
                 Ok(result) => {
                     let value = result
                         .get("value")
@@ -1298,28 +1449,41 @@ fn step_get_attribute(
 
 fn step_extract_links(
     tab: &Tab,
+    world: &WorldManager,
     idx: usize,
     locator: Option<&BrowserLocator>,
     limit: Option<usize>,
 ) -> StepResult {
-    if let Some(loc) = locator {
-        if let Err(e) = resolve_element(tab, loc) {
-            return StepResult::failure(idx, "Extract links: resolution failed", e);
-        }
-    } else {
-        let _ = tab.evaluate("window.__refact_resolved_el = null", false);
-    }
     let effective_limit = limit.unwrap_or(50).min(MAX_EXTRACT_LINKS);
     let js = browser_locators::js_extract_links(effective_limit);
-    match eval_js_ok(tab, &js) {
+    let result = match locator {
+        Some(locator) => match resolve_element(tab, world, locator) {
+            Ok(info) => call_handle_json(tab, world, &info.handle, &js),
+            Err(error) => {
+                return StepResult::failure(idx, "Extract links: resolution failed", error)
+            }
+        },
+        None => eval_js_ok(tab, &js),
+    };
+    match result {
         Ok(result) => StepResult::success(idx, "Extracted links".to_string()).with_data(result),
         Err(e) => StepResult::failure(idx, "Extract links failed", e),
     }
 }
 
-fn step_extract_table(tab: &Tab, idx: usize, locator: &BrowserLocator) -> StepResult {
-    match resolve_element(tab, locator) {
-        Ok(info) => match eval_js_ok(tab, browser_locators::js_extract_table()) {
+fn step_extract_table(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+) -> StepResult {
+    match resolve_element(tab, world, locator) {
+        Ok(info) => match call_handle_json(
+            tab,
+            world,
+            &info.handle,
+            browser_locators::js_extract_table(),
+        ) {
             Ok(result) => StepResult::success(idx, format!("Extracted table from <{}>", info.tag))
                 .with_data(result),
             Err(e) => StepResult::failure(idx, "Extract table failed", e),
@@ -1420,11 +1584,12 @@ fn step_screenshot(tab: &Tab, idx: usize, policy: &ImagePolicy) -> StepResult {
 
 fn step_screenshot_element(
     tab: &Tab,
+    world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
     policy: &ImagePolicy,
 ) -> StepResult {
-    let info = match resolve_element(tab, locator) {
+    let info = match resolve_element(tab, world, locator) {
         Ok(i) => i,
         Err(e) => return StepResult::failure(idx, "Screenshot element: resolution failed", e),
     };
@@ -1464,7 +1629,11 @@ fn step_screenshot_element(
 
 fn capture_options(
     policy: &ImagePolicy,
-) -> (Page::CaptureScreenshotFormatOption, &'static str, Option<u8>) {
+) -> (
+    Page::CaptureScreenshotFormatOption,
+    &'static str,
+    Option<u8>,
+) {
     match policy.format {
         ImageFormat::Jpeg => (
             Page::CaptureScreenshotFormatOption::Jpeg,
@@ -1491,11 +1660,12 @@ fn step_eval(tab: &Tab, idx: usize, expression: &str) -> StepResult {
 
 fn step_styles(
     tab: &Tab,
+    world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
     property_filter: Option<&str>,
 ) -> StepResult {
-    match resolve_element(tab, locator) {
+    match resolve_element(tab, world, locator) {
         Ok(info) => {
             let filter_js = match property_filter {
                 Some(f) if !f.is_empty() => format!(
@@ -1506,7 +1676,7 @@ fn step_styles(
             };
             let js = format!(
                 r#"(function() {{
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   var cs = window.getComputedStyle(el);
   var props = [];
@@ -1519,7 +1689,7 @@ fn step_styles(
 }})()"#,
                 filter = filter_js,
             );
-            match eval_js_ok(tab, &js) {
+            match call_handle_json(tab, world, &info.handle, &js) {
                 Ok(result) => StepResult::success(idx, format!("Got styles for <{}>", info.tag))
                     .with_data(result),
                 Err(e) => StepResult::failure(idx, "Styles failed", e),
@@ -1557,9 +1727,19 @@ fn step_dismiss_overlays(tab: &Tab, idx: usize) -> StepResult {
     }
 }
 
-fn step_highlight_element(tab: &Tab, idx: usize, locator: &BrowserLocator) -> StepResult {
-    match resolve_element(tab, locator) {
-        Ok(info) => match eval_js_ok(tab, browser_locators::js_highlight_element()) {
+fn step_highlight_element(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+) -> StepResult {
+    match resolve_element(tab, world, locator) {
+        Ok(info) => match call_handle_json(
+            tab,
+            world,
+            &info.handle,
+            browser_locators::js_highlight_element(),
+        ) {
             Ok(_) => StepResult::success(idx, format!("Highlighted <{}>", info.tag)),
             Err(e) => StepResult::failure(idx, "Highlight failed", e),
         },
@@ -1598,7 +1778,7 @@ fn generate_fill_js(strategy: &FillStrategy, text: &str, clear_first: bool) -> S
             let clear = if clear_first { "el.value = '';" } else { "" };
             format!(
                 r#"(function() {{
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   el.scrollIntoView({{block: 'center', behavior: 'instant'}});
   el.focus();
@@ -1620,7 +1800,7 @@ fn generate_fill_js(strategy: &FillStrategy, text: &str, clear_first: bool) -> S
             };
             format!(
                 r#"(function() {{
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   var proto = (el.tagName === 'TEXTAREA') ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   var desc = Object.getOwnPropertyDescriptor(proto, 'value');
@@ -1646,7 +1826,7 @@ fn generate_fill_js(strategy: &FillStrategy, text: &str, clear_first: bool) -> S
             };
             format!(
                 r#"(function() {{
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   if (!el.isContentEditable) return JSON.stringify({{error: 'Element is not contentEditable'}});
   el.scrollIntoView({{block: 'center', behavior: 'instant'}});
@@ -1668,7 +1848,7 @@ fn generate_fill_js(strategy: &FillStrategy, text: &str, clear_first: bool) -> S
             };
             format!(
                 r#"(function() {{
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   el.scrollIntoView({{block: 'center', behavior: 'instant'}});
   el.focus();
@@ -1690,7 +1870,7 @@ fn generate_fill_js(strategy: &FillStrategy, text: &str, clear_first: bool) -> S
             };
             format!(
                 r#"(function() {{
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   el.scrollIntoView({{block: 'center', behavior: 'instant'}});
   el.click();
@@ -1718,7 +1898,7 @@ fn generate_fill_js(strategy: &FillStrategy, text: &str, clear_first: bool) -> S
 fn generate_clear_js(field_kind: &FieldKind) -> String {
     match field_kind {
         FieldKind::ContentEditable => r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.focus();
   document.execCommand('selectAll', false, null);
@@ -1727,7 +1907,7 @@ fn generate_clear_js(field_kind: &FieldKind) -> String {
 })()"#
             .to_string(),
         _ => r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.focus();
   if (el.select) el.select();
@@ -1740,11 +1920,17 @@ fn generate_clear_js(field_kind: &FieldKind) -> String {
     }
 }
 
-fn verify_field_value(tab: &Tab, expected: &str, field_kind: &FieldKind) -> Result<bool, String> {
+fn verify_field_value(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: &ElementHandle,
+    expected: &str,
+    field_kind: &FieldKind,
+) -> Result<bool, String> {
     let js = match field_kind {
         FieldKind::ContentEditable => format!(
             r#"(function() {{
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   var actual = (el.innerText || el.textContent || '').trim();
   return JSON.stringify({{actual: actual}});
@@ -1753,7 +1939,7 @@ fn verify_field_value(tab: &Tab, expected: &str, field_kind: &FieldKind) -> Resu
         FieldKind::PasswordInput => {
             format!(
                 r#"(function() {{
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   return JSON.stringify({{actual_length: (el.value || '').length, expected_length: {len}}});
 }})()"#,
@@ -1762,17 +1948,14 @@ fn verify_field_value(tab: &Tab, expected: &str, field_kind: &FieldKind) -> Resu
         }
         _ => format!(
             r#"(function() {{
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   return JSON.stringify({{actual: el.value !== undefined ? String(el.value) : ''}});
 }})()"#,
         ),
     };
 
-    let result = eval_js_json(tab, &js)?;
-    if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
-        return Err(err.to_string());
-    }
+    let result = call_handle_json(tab, world, handle, &js)?;
 
     match field_kind {
         FieldKind::PasswordInput => {

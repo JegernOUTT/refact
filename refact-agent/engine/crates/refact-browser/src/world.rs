@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use headless_chrome::Tab;
 use headless_chrome::protocol::cdp::types::Event;
-use headless_chrome::protocol::cdp::{Page, Runtime};
+use headless_chrome::protocol::cdp::{DOM, Page, Runtime};
 use serde_json::Value;
 
-use crate::wrapped_bootstrap;
+use crate::{ElementHandle, HandleError, HandleRegistry, wrapped_bootstrap};
 
 pub const UTILITY_WORLD_NAME: &str = "__refact_utility__";
 pub const BINDING_NAME: &str = "__refact_binding";
@@ -39,6 +39,7 @@ struct WorldState {
 #[derive(Clone, Default)]
 pub struct WorldManager {
     state: Arc<Mutex<WorldState>>,
+    handles: HandleRegistry,
 }
 
 impl WorldManager {
@@ -114,6 +115,265 @@ impl WorldManager {
                 instance_name = INJECTED_INSTANCE_NAME,
             ),
         )
+    }
+
+    pub fn call_injected_handle(
+        &self,
+        tab: &Tab,
+        method: &str,
+        args: Value,
+    ) -> Result<ElementHandle, HandleError> {
+        if !args.is_array() {
+            return Err(HandleError::Resolution(
+                "Injected call arguments must be a JSON array".to_string(),
+            ));
+        }
+        let context_id = self
+            .ensure_utility_world(tab)
+            .map_err(HandleError::Resolution)?;
+        let frame_id = self
+            .frame_for_context(tab.get_target_id(), context_id)
+            .ok_or_else(|| {
+                HandleError::Resolution(
+                    "Browser utility world has no frame for its context".to_string(),
+                )
+            })?;
+        let method = serde_json::to_string(method).map_err(|error| {
+            HandleError::Resolution(format!("Failed to serialize injected method: {error}"))
+        })?;
+        let args = serde_json::to_string(&args).map_err(|error| {
+            HandleError::Resolution(format!("Failed to serialize injected arguments: {error}"))
+        })?;
+        let expression = format!(
+            "(() => {{ const instance = globalThis[{instance_name:?}]; if (!instance) throw new Error('RefactInjected is not installed'); const method = instance[{method}]; if (typeof method !== 'function') throw new Error('Unknown RefactInjected method'); return method.apply(instance, {args}); }})()",
+            instance_name = INJECTED_INSTANCE_NAME,
+        );
+        let result = tab
+            .call_method(runtime_evaluate_handle(expression, context_id))
+            .map_err(|error| {
+                HandleError::Protocol(format!("Failed to resolve browser element: {error}"))
+            })?;
+        if let Some(exception) = result.exception_details {
+            return Err(HandleError::Resolution(exception_message(&exception)));
+        }
+        let object_id = result.result.object_id.ok_or_else(|| {
+            HandleError::Resolution(
+                result
+                    .result
+                    .description
+                    .unwrap_or_else(|| "Element resolution returned no handle".to_string()),
+            )
+        })?;
+        self.register_handle(tab, object_id, context_id, frame_id)
+    }
+
+    pub fn call_injected_handles(
+        &self,
+        tab: &Tab,
+        method: &str,
+        args: Value,
+    ) -> Result<Vec<ElementHandle>, HandleError> {
+        if !args.is_array() {
+            return Err(HandleError::Resolution(
+                "Injected call arguments must be a JSON array".to_string(),
+            ));
+        }
+        let context_id = self
+            .ensure_utility_world(tab)
+            .map_err(HandleError::Resolution)?;
+        let frame_id = self
+            .frame_for_context(tab.get_target_id(), context_id)
+            .ok_or_else(|| {
+                HandleError::Resolution(
+                    "Browser utility world has no frame for its context".to_string(),
+                )
+            })?;
+        let method = serde_json::to_string(method).map_err(|error| {
+            HandleError::Resolution(format!("Failed to serialize injected method: {error}"))
+        })?;
+        let args = serde_json::to_string(&args).map_err(|error| {
+            HandleError::Resolution(format!("Failed to serialize injected arguments: {error}"))
+        })?;
+        let expression = format!(
+            "(() => {{ const instance = globalThis[{instance_name:?}]; if (!instance) throw new Error('RefactInjected is not installed'); const method = instance[{method}]; if (typeof method !== 'function') throw new Error('Unknown RefactInjected method'); return method.apply(instance, {args}); }})()",
+            instance_name = INJECTED_INSTANCE_NAME,
+        );
+        let result = tab
+            .call_method(runtime_evaluate_handle(expression, context_id))
+            .map_err(|error| {
+                HandleError::Protocol(format!("Failed to resolve browser elements: {error}"))
+            })?;
+        if let Some(exception) = result.exception_details {
+            return Err(HandleError::Resolution(exception_message(&exception)));
+        }
+        let array_object_id = result.result.object_id.ok_or_else(|| {
+            HandleError::Resolution("Element resolution returned no handle array".to_string())
+        })?;
+        let properties = tab
+            .call_method(Runtime::GetProperties {
+                object_id: array_object_id.clone(),
+                own_properties: Some(true),
+                accessor_properties_only: None,
+                generate_preview: None,
+                non_indexed_properties_only: Some(false),
+            })
+            .map_err(|error| {
+                HandleError::Protocol(format!(
+                    "Failed to inspect browser element handles: {error}"
+                ))
+            });
+        let _ = tab.call_method(Runtime::ReleaseObject {
+            object_id: array_object_id,
+        });
+        let mut properties = properties?.result;
+        properties.sort_by_key(|property| property.name.parse::<usize>().ok());
+        let mut handles = Vec::new();
+        for property in properties {
+            let Some(index) = property.name.parse::<usize>().ok() else {
+                continue;
+            };
+            let Some(object_id) = property.value.and_then(|value| value.object_id) else {
+                continue;
+            };
+            let handle = self.register_handle(tab, object_id, context_id, frame_id.clone())?;
+            handles.push((index, handle));
+        }
+        handles.sort_by_key(|(index, _)| *index);
+        Ok(handles.into_iter().map(|(_, handle)| handle).collect())
+    }
+
+    pub fn call_function_on(
+        &self,
+        tab: &Tab,
+        handle: &ElementHandle,
+        function_declaration: &str,
+        arguments: Vec<Value>,
+    ) -> Result<Value, HandleError> {
+        self.handles.validate(tab.get_target_id(), handle)?;
+        let arguments = arguments
+            .into_iter()
+            .map(|value| Runtime::CallArgument {
+                value: Some(value),
+                unserializable_value: None,
+                object_id: None,
+            })
+            .collect();
+        let result = tab
+            .call_method(Runtime::CallFunctionOn {
+                function_declaration: function_declaration.to_string(),
+                object_id: Some(handle.object_id.clone()),
+                arguments: Some(arguments),
+                silent: None,
+                return_by_value: Some(true),
+                generate_preview: None,
+                user_gesture: Some(true),
+                await_promise: Some(true),
+                execution_context_id: None,
+                object_group: None,
+                throw_on_side_effect: None,
+                unique_context_id: None,
+                serialization_options: None,
+            })
+            .map_err(|error| {
+                HandleError::Protocol(format!("Failed to call browser element handle: {error}"))
+            })?;
+        if let Some(exception) = result.exception_details {
+            return Err(HandleError::Protocol(exception_message(&exception)));
+        }
+        Ok(result.result.value.unwrap_or(Value::Null))
+    }
+
+    pub fn resolve_expression_handle(
+        &self,
+        tab: &Tab,
+        expression: &str,
+    ) -> Result<ElementHandle, HandleError> {
+        let context_id = self
+            .ensure_utility_world(tab)
+            .map_err(HandleError::Resolution)?;
+        let frame_id = self
+            .frame_for_context(tab.get_target_id(), context_id)
+            .ok_or_else(|| {
+                HandleError::Resolution(
+                    "Browser utility world has no frame for its context".to_string(),
+                )
+            })?;
+        let result = tab
+            .call_method(runtime_evaluate_handle(expression.to_string(), context_id))
+            .map_err(|error| {
+                HandleError::Protocol(format!("Failed to resolve browser element: {error}"))
+            })?;
+        if let Some(exception) = result.exception_details {
+            return Err(HandleError::Resolution(exception_message(&exception)));
+        }
+        let object_id = result.result.object_id.ok_or_else(|| {
+            HandleError::Resolution(
+                result
+                    .result
+                    .description
+                    .unwrap_or_else(|| "Element resolution returned no handle".to_string()),
+            )
+        })?;
+        self.register_handle(tab, object_id, context_id, frame_id)
+    }
+
+    pub fn release_handle(&self, tab: &Tab, handle: &ElementHandle) -> Result<(), HandleError> {
+        self.handles.validate(tab.get_target_id(), handle)?;
+        let result = tab.call_method(Runtime::ReleaseObject {
+            object_id: handle.object_id.clone(),
+        });
+        self.handles.dispose(tab.get_target_id(), handle);
+        result.map_err(|error| {
+            HandleError::Protocol(format!("Failed to release browser element handle: {error}"))
+        })?;
+        Ok(())
+    }
+
+    pub fn release_all(&self, tab: &Tab) -> Result<(), HandleError> {
+        let handles = self.handles.contexts_cleared(tab.get_target_id());
+        let mut first_error = None;
+        for handle in handles {
+            if let Err(error) = tab.call_method(Runtime::ReleaseObject {
+                object_id: handle.object_id,
+            }) {
+                first_error.get_or_insert_with(|| {
+                    HandleError::Protocol(format!(
+                        "Failed to release browser element handle: {error}"
+                    ))
+                });
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn register_handle(
+        &self,
+        tab: &Tab,
+        object_id: String,
+        context_id: Runtime::ExecutionContextId,
+        frame_id: Page::FrameId,
+    ) -> Result<ElementHandle, HandleError> {
+        let backend_node_id = tab
+            .call_method(DOM::DescribeNode {
+                node_id: None,
+                backend_node_id: None,
+                object_id: Some(object_id.clone()),
+                depth: Some(0),
+                pierce: None,
+            })
+            .ok()
+            .map(|response| response.node.backend_node_id);
+        let handle = ElementHandle {
+            object_id,
+            backend_node_id: backend_node_id.map(i64::from),
+            context_id: i64::from(context_id),
+            frame_id,
+        };
+        self.handles.register(tab.get_target_id(), handle.clone());
+        Ok(handle)
     }
 
     fn install_for_tab(&self, tab: &Tab) -> Result<(), String> {
@@ -295,6 +555,21 @@ impl WorldManager {
             .copied()
     }
 
+    fn frame_for_context(
+        &self,
+        target_id: &str,
+        context_id: Runtime::ExecutionContextId,
+    ) -> Option<Page::FrameId> {
+        self.state
+            .lock()
+            .unwrap()
+            .tabs
+            .get(target_id)?
+            .context_frames
+            .get(&context_id)
+            .cloned()
+    }
+
     fn is_initialized(&self, target_id: &str, context_id: Runtime::ExecutionContextId) -> bool {
         self.state
             .lock()
@@ -352,6 +627,9 @@ impl WorldManager {
     }
 
     fn context_destroyed(&self, target_id: &str, context_id: Runtime::ExecutionContextId) {
+        let _ = self
+            .handles
+            .context_destroyed(target_id, i64::from(context_id));
         let mut state = self.state.lock().unwrap();
         let Some(tab) = state.tabs.get_mut(target_id) else {
             return;
@@ -366,6 +644,7 @@ impl WorldManager {
     }
 
     fn frame_navigated(&self, target_id: &str, frame_id: &Page::FrameId) {
+        let _ = self.handles.frame_navigated(target_id, frame_id);
         let mut state = self.state.lock().unwrap();
         let Some(tab) = state.tabs.get_mut(target_id) else {
             return;
@@ -378,6 +657,7 @@ impl WorldManager {
     }
 
     fn contexts_cleared(&self, target_id: &str) {
+        let _ = self.handles.contexts_cleared(target_id);
         let mut state = self.state.lock().unwrap();
         let Some(tab) = state.tabs.get_mut(target_id) else {
             return;
@@ -420,6 +700,15 @@ fn runtime_evaluate(
         unique_context_id: None,
         serialization_options: None,
     }
+}
+
+fn runtime_evaluate_handle(
+    expression: String,
+    context_id: Runtime::ExecutionContextId,
+) -> Runtime::Evaluate {
+    let mut evaluate = runtime_evaluate(expression, context_id);
+    evaluate.return_by_value = Some(false);
+    evaluate
 }
 
 fn exception_message(exception: &Runtime::ExceptionDetails) -> String {

@@ -93,11 +93,9 @@ pub fn generate_resolve_js(locator: &BrowserLocator) -> String {
   {find_code}
   {nth_code}
   if (elements.length === 0) {{
-    return JSON.stringify({{error: 'Element not found', count: 0}});
+    throw new Error('Element not found');
   }}
-  var el = elements[0];
-  window.__refact_resolved_el = el;
-  return JSON.stringify(__refact_inspect_element(el, elements.length));
+  return elements[0];
 }})()"#,
     )
 }
@@ -120,6 +118,12 @@ pub fn generate_find_fragment_js(locator: &BrowserLocator) -> String {
         ),
         None => format!("var scope = document;\n  {find_code}\n  {nth_code}"),
     }
+}
+
+#[cfg(test)]
+fn resolution_transport_snapshot(locator: &BrowserLocator) -> String {
+    generate_resolve_js(locator)
+        .replace("  return elements[0];", "  var el = elements[0];\n  return el;")
 }
 
 fn generate_find_js(strategy: &LocatorStrategy) -> String {
@@ -316,7 +320,7 @@ pub fn detect_field_kind(tag: &str, input_type: Option<&str>, content_editable: 
 
 pub fn js_click_element() -> &'static str {
     r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.scrollIntoView({block: 'center', behavior: 'instant'});
   var rect = el.getBoundingClientRect();
@@ -340,7 +344,7 @@ pub fn js_click_element() -> &'static str {
 
 pub fn js_hover_element() -> &'static str {
     r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.scrollIntoView({block: 'center', behavior: 'instant'});
   el.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
@@ -351,7 +355,7 @@ pub fn js_hover_element() -> &'static str {
 
 pub fn js_focus_element() -> &'static str {
     r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.scrollIntoView({block: 'center', behavior: 'instant'});
   el.focus();
@@ -361,7 +365,7 @@ pub fn js_focus_element() -> &'static str {
 
 pub fn js_blur_element() -> &'static str {
     r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.blur();
   return JSON.stringify({ok: true});
@@ -370,7 +374,7 @@ pub fn js_blur_element() -> &'static str {
 
 pub fn js_scroll_to_element() -> &'static str {
     r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.scrollIntoView({block: 'center', behavior: 'smooth'});
   return JSON.stringify({ok: true});
@@ -379,7 +383,7 @@ pub fn js_scroll_to_element() -> &'static str {
 
 pub fn js_get_text() -> &'static str {
     r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   return JSON.stringify({ok: true, text: el.innerText || ''});
 })()"#
@@ -387,7 +391,7 @@ pub fn js_get_text() -> &'static str {
 
 pub fn js_get_html() -> &'static str {
     r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   var html = el.outerHTML;
   if (html.length > 5000) html = html.substring(0, 5000) + '... (truncated)';
@@ -398,7 +402,7 @@ pub fn js_get_html() -> &'static str {
 pub fn js_get_attribute(attribute: &str) -> String {
     format!(
         r#"(function() {{
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   var val = el.getAttribute({});
   return JSON.stringify({{ok: true, value: val}});
@@ -410,7 +414,7 @@ pub fn js_get_attribute(attribute: &str) -> String {
 pub fn js_extract_links(limit: usize) -> String {
     format!(
         r#"(function() {{
-  var scope = window.__refact_resolved_el || document;
+  var scope = this || document;
   var anchors = Array.from(scope.querySelectorAll('a[href]'));
   var links = anchors.slice(0, {limit}).map(function(a) {{
     return {{url: a.href, text: (a.innerText || '').trim().substring(0, 200)}};
@@ -422,7 +426,7 @@ pub fn js_extract_links(limit: usize) -> String {
 
 pub fn js_extract_table() -> &'static str {
     r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   var table = (el.tagName === 'TABLE') ? el : el.querySelector('table');
   if (!table) return JSON.stringify({error: 'No table found'});
@@ -438,7 +442,7 @@ pub fn js_extract_table() -> &'static str {
 
 pub fn js_highlight_element() -> &'static str {
     r#"(function() {
-  var el = window.__refact_resolved_el;
+  var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.style.outline = '3px solid #E7150D';
   el.style.outlineOffset = '2px';
@@ -787,8 +791,7 @@ mod tests {
         let js = generate_resolve_js(&loc);
         assert!(js.contains("querySelectorAll"));
         assert!(js.contains("#email"));
-        assert!(js.contains("__refact_resolved_el"));
-        assert!(js.contains("__refact_inspect_element"));
+        assert!(js.contains("return elements[0]"));
     }
 
     #[test]
@@ -868,6 +871,21 @@ mod tests {
         assert!(js.contains("querySelector"));
         assert!(js.contains("#form"));
         assert!(js.contains("Scope selector not found"));
+    }
+
+    #[test]
+    fn locator_generation_is_unchanged_before_handle_return() {
+        for locator in [
+            BrowserLocator::css("#email"),
+            BrowserLocator::label("Email Address"),
+            BrowserLocator::role("button", Some("Submit")),
+        ] {
+            let generated = generate_resolve_js(&locator);
+            let snapshot = resolution_transport_snapshot(&locator);
+            let prefix = generated.split("  return elements[0];").next().unwrap();
+            assert!(snapshot.starts_with(prefix));
+            assert!(generated.ends_with("})()"));
+        }
     }
 
     #[test]
@@ -990,7 +1008,7 @@ mod tests {
     #[test]
     fn test_js_click_element_valid_js() {
         let js = js_click_element();
-        assert!(js.contains("__refact_resolved_el"));
+        assert!(js.contains("var el = this"));
         assert!(js.contains("scrollIntoView"));
         assert!(js.contains("dispatchEvent"));
         assert!(js.contains("pointerdown"));
