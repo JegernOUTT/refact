@@ -1,3 +1,4 @@
+pub mod env;
 pub mod pty;
 pub mod registry;
 pub mod spawn;
@@ -5,6 +6,7 @@ pub mod spill;
 pub mod transcript;
 pub mod types;
 
+pub use env::build_child_env;
 pub use registry::{
     ExecRegistry, ExecShutdownCleanupSummary, ProcessCompletionEvent, ProcessCompletionTx,
 };

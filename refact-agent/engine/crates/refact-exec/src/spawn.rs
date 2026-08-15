@@ -15,10 +15,11 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 
+use crate::env::{apply_pty_child_env, apply_tokio_child_env};
 use crate::registry::{ExecProcessCommand, ExecProcessRuntime};
 use crate::types::{
     ExecMode, ExecOutputStream, ExecProcessId, ExecProcessMeta, ExecProcessSnapshot,
-    ExecReadinessProbe, ExecSpawnRequest, ExecStatus, EXEC_ENV_DEFAULTS,
+    ExecReadinessProbe, ExecSpawnRequest, ExecStatus,
 };
 use crate::ExecRegistry;
 
@@ -155,18 +156,6 @@ fn ensure_command_is_not_empty(request: &ExecSpawnRequest) -> Result<(), String>
     Ok(())
 }
 
-fn apply_exec_env_defaults_to_pty(command: &mut CommandBuilder) {
-    for (key, value) in EXEC_ENV_DEFAULTS {
-        command.env(key, value);
-    }
-}
-
-fn apply_exec_env_defaults(command: &mut tokio::process::Command) {
-    for (key, value) in EXEC_ENV_DEFAULTS {
-        command.env(key, value);
-    }
-}
-
 fn shell_command(request: &ExecSpawnRequest) -> Result<tokio::process::Command, String> {
     ensure_command_is_not_empty(request)?;
     let (shell, shell_arg) = shell_parts();
@@ -179,10 +168,7 @@ fn shell_command(request: &ExecSpawnRequest) -> Result<tokio::process::Command, 
     if let Some(cwd) = request.cwd.as_ref() {
         command.current_dir(cwd);
     }
-    apply_exec_env_defaults(&mut command);
-    for (key, value) in &request.env {
-        command.env(key, value);
-    }
+    apply_tokio_child_env(&mut command, &request.env_policy, &request.env);
     Ok(command)
 }
 
@@ -195,10 +181,7 @@ fn pty_command(request: &ExecSpawnRequest) -> Result<CommandBuilder, String> {
     if let Some(cwd) = request.cwd.as_ref() {
         command.cwd(cwd.as_os_str());
     }
-    apply_exec_env_defaults_to_pty(&mut command);
-    for (key, value) in &request.env {
-        command.env(key, value);
-    }
+    apply_pty_child_env(&mut command, &request.env_policy, &request.env);
     Ok(command)
 }
 
@@ -870,11 +853,40 @@ impl ExecRegistry {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::ffi::OsString;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
 
     use super::*;
+    #[cfg(unix)]
+    use crate::types::ExecEnvPolicy;
     use crate::types::{ExecProcessFilter, ExecStatusKind};
+
+    #[cfg(unix)]
+    struct ParentEnvGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    #[cfg(unix)]
+    impl ParentEnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ParentEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[cfg(windows)]
     fn shell_script(script: &str) -> String {
@@ -979,6 +991,26 @@ mod tests {
         read.chunks
             .iter()
             .filter(|chunk| chunk.stream == ExecOutputStream::Stdout)
+            .map(|chunk| chunk.text.as_str())
+            .collect::<String>()
+    }
+
+    #[cfg(unix)]
+    async fn spawn_and_read_all(request: ExecSpawnRequest) -> String {
+        let registry = ExecRegistry::new();
+        let result = registry.spawn(request).await.unwrap();
+        let snapshot = if result.snapshot.status.is_terminal() {
+            result.snapshot
+        } else {
+            registry
+                .wait(&result.snapshot.meta.process_id)
+                .await
+                .unwrap()
+        };
+        assert_eq!(snapshot.status, ExecStatus::Exited { exit_code: Some(0) });
+        let read = registry.read(&snapshot.meta.process_id, 0, None).await;
+        read.chunks
+            .iter()
             .map(|chunk| chunk.text.as_str())
             .collect::<String>()
     }
@@ -1235,6 +1267,92 @@ mod tests {
 
         assert_eq!(default_stdout, "1");
         assert_eq!(override_stdout, "");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scrubbed_pipe_and_pty_envs_exclude_parent_values_and_keep_request_defaults() {
+        let _secret = ParentEnvGuard::set("SECRET_TEST_API_KEY", "secret-value");
+        let _unrelated = ParentEnvGuard::set("TOTALLY_RANDOM_VAR", "random-value");
+        let expected_path = std::env::var("PATH").unwrap();
+        let expected_home = std::env::var("HOME").unwrap();
+
+        for tty in [false, true] {
+            let output = spawn_and_read_all(
+                ExecSpawnRequest::foreground("env")
+                    .with_tty(tty)
+                    .with_env("FOO", "bar"),
+            )
+            .await;
+
+            assert!(!output.contains("SECRET_TEST_API_KEY="), "{output}");
+            assert!(!output.contains("TOTALLY_RANDOM_VAR="), "{output}");
+            assert!(output.contains("FOO=bar"), "{output}");
+            assert!(output.contains("NO_COLOR=1"), "{output}");
+            assert!(output.contains("TERM=dumb"), "{output}");
+            assert!(output.contains("LANG=C.UTF-8"), "{output}");
+            assert!(output.contains("REFACT_EXEC=1"), "{output}");
+            assert!(
+                output.contains(&format!("PATH={expected_path}")),
+                "{output}"
+            );
+            assert!(
+                output.contains(&format!("HOME={expected_home}")),
+                "{output}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inherit_policy_exposes_parent_env() {
+        let _inherited = ParentEnvGuard::set("REFACT_TEST_INHERITED_VAR", "inherited-value");
+        let output = spawn_and_read_all(
+            ExecSpawnRequest::foreground("env").with_env_policy(ExecEnvPolicy::Inherit),
+        )
+        .await;
+
+        assert!(
+            output.contains("REFACT_TEST_INHERITED_VAR=inherited-value"),
+            "{output}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scrubbed_passthrough_glob_keeps_non_secrets_only() {
+        let _visible = ParentEnvGuard::set("REFACT_TEST_PASSTHROUGH_VISIBLE", "visible-value");
+        let _secret = ParentEnvGuard::set("REFACT_TEST_PASSTHROUGH_API_KEY", "secret-value");
+        let output = spawn_and_read_all(ExecSpawnRequest::foreground("env").with_env_policy(
+            ExecEnvPolicy::Scrubbed {
+                passthrough: vec!["REFACT_TEST_PASSTHROUGH_*".to_string()],
+            },
+        ))
+        .await;
+
+        assert!(
+            output.contains("REFACT_TEST_PASSTHROUGH_VISIBLE=visible-value"),
+            "{output}"
+        );
+        assert!(
+            !output.contains("REFACT_TEST_PASSTHROUGH_API_KEY="),
+            "{output}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn request_env_can_explicitly_supply_secret_name() {
+        let output = spawn_and_read_all(
+            ExecSpawnRequest::foreground("env")
+                .with_env("REFACT_TEST_REQUEST_API_KEY", "request-value"),
+        )
+        .await;
+
+        assert!(
+            output.contains("REFACT_TEST_REQUEST_API_KEY=request-value"),
+            "{output}"
+        );
     }
 
     #[tokio::test]

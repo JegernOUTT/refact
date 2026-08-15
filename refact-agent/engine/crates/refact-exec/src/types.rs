@@ -308,7 +308,9 @@ impl ExecSpawnRequest {
             cwd: None,
             env: HashMap::new(),
             sandbox: None,
-            env_policy: ExecEnvPolicy::Inherit,
+            env_policy: ExecEnvPolicy::Scrubbed {
+                passthrough: Vec::new(),
+            },
             audit: None,
             mode,
             tty: false,
@@ -744,7 +746,12 @@ mod tests {
         let request = ExecSpawnRequest::foreground("echo hello");
 
         assert_eq!(request.sandbox, None);
-        assert_eq!(request.env_policy, ExecEnvPolicy::Inherit);
+        assert_eq!(
+            request.env_policy,
+            ExecEnvPolicy::Scrubbed {
+                passthrough: Vec::new()
+            }
+        );
         assert_eq!(request.audit, None);
     }
 
