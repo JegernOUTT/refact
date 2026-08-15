@@ -1,0 +1,20 @@
+[package]
+name = "refact-sandbox"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "refact-sandbox-helper"
+path = "src/bin/refact-sandbox-helper.rs"
+test = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true

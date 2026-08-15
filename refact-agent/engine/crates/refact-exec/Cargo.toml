@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 refact-core = { path = "../refact-core" }
+refact-sandbox = { path = "../refact-sandbox" }
 dunce = "1.0.5"
 futures = "0.3"
 hex = "0.4.3"

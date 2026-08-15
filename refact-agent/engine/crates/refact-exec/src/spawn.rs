@@ -162,18 +162,48 @@ fn ensure_command_is_not_empty(request: &ExecSpawnRequest) -> Result<(), String>
     Ok(())
 }
 
-fn shell_command(request: &ExecSpawnRequest) -> Result<tokio::process::Command, String> {
+fn launch_parts(request: &ExecSpawnRequest) -> Result<(String, Vec<String>), String> {
     ensure_command_is_not_empty(request)?;
-    let mut command = if let Some(argv) = request.argv.as_ref() {
-        let mut command = tokio::process::Command::new(&argv[0]);
-        command.args(&argv[1..]);
-        command
+    let (program, args) = if let Some(argv) = request.argv.as_ref() {
+        (argv[0].clone(), argv[1..].to_vec())
     } else {
         let (shell, shell_arg) = shell_parts();
-        let mut command = tokio::process::Command::new(shell);
-        command.arg(shell_arg).arg(&request.command);
-        command
+        (
+            shell.to_string(),
+            vec![shell_arg.to_string(), request.command.clone()],
+        )
     };
+    let Some(spec) = request.sandbox.as_ref() else {
+        return Ok((program, args));
+    };
+    let cwd = match request.cwd.as_deref() {
+        Some(cwd) => cwd.to_path_buf(),
+        None => std::env::current_dir()
+            .map_err(|error| format!("sandbox: cannot resolve working directory: {error}"))?,
+    };
+    let spec = refact_sandbox::ExecSandboxSpec {
+        mode: match spec.mode {
+            crate::types::ExecSandboxMode::ReadOnly => refact_sandbox::SandboxMode::ReadOnly,
+            crate::types::ExecSandboxMode::WorkspaceWrite => {
+                refact_sandbox::SandboxMode::WorkspaceWrite
+            }
+            crate::types::ExecSandboxMode::FullAccess => refact_sandbox::SandboxMode::FullAccess,
+        },
+        ro_paths: spec.ro_paths.clone(),
+        rw_paths: spec.rw_paths.clone(),
+        allow_network: spec.allow_network,
+    }
+    .normalized(&cwd);
+    let (provider, _) = refact_sandbox::select_provider();
+    provider
+        .confine(&spec, &program, &args)
+        .map_err(|error| error.to_string())
+}
+
+fn shell_command(request: &ExecSpawnRequest) -> Result<tokio::process::Command, String> {
+    let (program, args) = launch_parts(request)?;
+    let mut command = tokio::process::Command::new(program);
+    command.args(args);
     command.kill_on_drop(true);
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
@@ -186,18 +216,9 @@ fn shell_command(request: &ExecSpawnRequest) -> Result<tokio::process::Command, 
 }
 
 fn pty_command(request: &ExecSpawnRequest) -> Result<CommandBuilder, String> {
-    ensure_command_is_not_empty(request)?;
-    let mut command = if let Some(argv) = request.argv.as_ref() {
-        let mut command = CommandBuilder::new(&argv[0]);
-        command.args(&argv[1..]);
-        command
-    } else {
-        let (shell, shell_arg) = shell_parts();
-        let mut command = CommandBuilder::new(shell);
-        command.arg(shell_arg);
-        command.arg(&request.command);
-        command
-    };
+    let (program, args) = launch_parts(request)?;
+    let mut command = CommandBuilder::new(program);
+    command.args(args);
     if let Some(cwd) = request.cwd.as_ref() {
         command.cwd(cwd.as_os_str());
     }
@@ -883,9 +904,10 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use refact_sandbox::Enforcement;
     #[cfg(unix)]
     use crate::types::ExecEnvPolicy;
-    use crate::types::{ExecProcessFilter, ExecStatusKind};
+    use crate::types::{ExecProcessFilter, ExecSandboxMode, ExecSandboxSpec, ExecStatusKind};
 
     #[cfg(unix)]
     struct ParentEnvGuard {
@@ -1017,6 +1039,15 @@ mod tests {
             .filter(|chunk| chunk.stream == ExecOutputStream::Stdout)
             .map(|chunk| chunk.text.as_str())
             .collect::<String>()
+    }
+
+    fn workspace_write_sandbox(cwd: &std::path::Path) -> ExecSandboxSpec {
+        ExecSandboxSpec {
+            mode: ExecSandboxMode::WorkspaceWrite,
+            ro_paths: Vec::new(),
+            rw_paths: vec![cwd.to_path_buf()],
+            allow_network: true,
+        }
     }
 
     #[cfg(unix)]
@@ -1305,6 +1336,49 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(output, "3\nspace value\nsingle'quote\ndouble\"quote\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandbox_wraps_pipe_and_pty_spawn_paths() {
+        if refact_sandbox::sandbox_status().enforcement == Enforcement::Unusable {
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let sandbox = workspace_write_sandbox(workspace.path());
+
+        for tty in [false, true] {
+            let output = spawn_and_read_all(
+                ExecSpawnRequest::foreground("printf sandboxed")
+                    .with_cwd(workspace.path())
+                    .with_sandbox(sandbox.clone())
+                    .with_tty(tty),
+            )
+            .await;
+
+            assert!(output.contains("sandboxed"), "{output:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_request_fails_closed_when_provider_is_unusable() {
+        if refact_sandbox::sandbox_status().enforcement != Enforcement::Unusable {
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let error = match ExecRegistry::new()
+            .spawn(
+                ExecSpawnRequest::foreground("echo must-not-run")
+                    .with_cwd(workspace.path())
+                    .with_sandbox(workspace_write_sandbox(workspace.path())),
+            )
+            .await
+        {
+            Ok(_) => panic!("unusable sandbox provider must fail closed"),
+            Err(error) => error,
+        };
+
+        assert!(error.starts_with("sandbox: noop:"), "{error}");
     }
 
     #[tokio::test]

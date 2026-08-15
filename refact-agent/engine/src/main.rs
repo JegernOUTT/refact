@@ -16,6 +16,13 @@ fn tokio_worker_stack_bytes() -> usize {
 }
 
 fn main() {
+    if let Some(result) = refact_sandbox::run_sandbox_exec_from_env() {
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(125);
+        }
+        unreachable!();
+    }
     let cmdline = refact_lsp::global_context::CommandLine::from_args();
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
