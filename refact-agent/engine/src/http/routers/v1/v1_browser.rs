@@ -4,6 +4,7 @@ use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use base64::Engine;
+use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
@@ -17,6 +18,34 @@ use crate::integrations::browser_runtime::{
 use crate::integrations::browser_types::{RecorderEvent, ConsoleEntry, NetworkEntry};
 use crate::integrations::browser_models::BrowserActionRequest;
 use crate::integrations::browser_controller;
+
+const FRAME_MAX_SIDE: u32 = 1280;
+
+async fn image_policy_for_chat(app: &AppState, chat_id: &str) -> ImagePolicy {
+    let model_id = {
+        let sessions = app.chat.sessions.read().await;
+        let Some(session) = sessions.get(chat_id).cloned() else {
+            return ImagePolicy::default();
+        };
+        drop(sessions);
+        let model = {
+            let guard = session.lock().await;
+            guard.thread.model.clone()
+        };
+        model
+    };
+    let Ok(caps) = crate::global_context::try_load_caps_quickly_if_not_present(
+        app.gcx.clone(),
+        0,
+    )
+    .await
+    else {
+        return ImagePolicy::default();
+    };
+    crate::caps::resolve_chat_model(caps, &model_id)
+        .map(|model| ImagePolicy::for_model(&model.base))
+        .unwrap_or_default()
+}
 
 fn json_response(status: StatusCode, body: serde_json::Value) -> Response<Body> {
     Response::builder()
@@ -295,6 +324,7 @@ pub async fn handle_browser_screenshot(
             format!("JSON problem: {}", e),
         )
     })?;
+    let image_policy = image_policy_for_chat(&app, &post.chat_id).await;
 
     let (_, runtime_arc) = find_runtime_by_chat_id(app.clone(), &post.chat_id)
         .await
@@ -356,50 +386,19 @@ pub async fn handle_browser_screenshot(
             )
         })?;
 
-    let resized_data = resize_screenshot(&raw_data, 800, mime)?;
+    let (resized_data, resized_mime) = resize_to_policy(&raw_data, mime, &image_policy)
+        .map_err(|error| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
     let b64 = base64::prelude::BASE64_STANDARD.encode(&resized_data);
 
     Ok(json_response(
         StatusCode::OK,
         serde_json::json!({
-            "mime": mime,
+            "mime": resized_mime,
             "data": b64,
             "url": url,
             "title": title
         }),
     ))
-}
-
-fn resize_screenshot(data: &[u8], max_dim: u32, mime: &str) -> Result<Vec<u8>, ScratchError> {
-    let format = if mime == "image/png" {
-        image::ImageFormat::Png
-    } else {
-        image::ImageFormat::Jpeg
-    };
-    let reader = image::ImageReader::with_format(std::io::Cursor::new(data), format);
-    let mut img = reader.decode().map_err(|e| {
-        ScratchError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Image decode failed: {}", e),
-        )
-    })?;
-
-    let scale = max_dim as f32 / std::cmp::max(img.width(), img.height()) as f32;
-    if scale < 1.0 {
-        let nw = (scale * img.width() as f32) as u32;
-        let nh = (scale * img.height() as f32) as u32;
-        img = img.resize(nw, nh, image::imageops::FilterType::Triangle);
-    }
-
-    let mut out = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut out), format)
-        .map_err(|e| {
-            ScratchError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Image encode failed: {}", e),
-            )
-        })?;
-    Ok(out)
 }
 
 pub async fn handle_browser_context(
@@ -1174,7 +1173,9 @@ pub async fn handle_browser_eval(
     let steps = vec![crate::integrations::browser_models::BrowserStep::Eval {
         expression: post.expression.clone(),
     }];
-    let report = tokio::task::block_in_place(|| browser_controller::execute_steps(&*tab, &steps));
+    let report = tokio::task::block_in_place(|| {
+        browser_controller::execute_steps(&tab, &steps, &ImagePolicy::default())
+    });
 
     // Push agent timeline entry
     {
@@ -1372,7 +1373,9 @@ pub async fn handle_browser_dom_snapshot(
             max_chars: post.max_chars,
         },
     ];
-    let report = tokio::task::block_in_place(|| browser_controller::execute_steps(&*tab, &steps));
+    let report = tokio::task::block_in_place(|| {
+        browser_controller::execute_steps(&tab, &steps, &ImagePolicy::default())
+    });
 
     // Push agent timeline entry
     {
@@ -1565,7 +1568,15 @@ pub async fn handle_browser_record_animation(
                 )
             })?;
 
-        let resized = resize_screenshot(&raw, 800, "image/jpeg")?;
+        let frame_policy = ImagePolicy {
+            max_side: FRAME_MAX_SIDE,
+            preferred_side: FRAME_MAX_SIDE,
+            format: ImageFormat::Jpeg,
+            quality: Some(60),
+            ..ImagePolicy::default()
+        };
+        let (resized, _) = resize_to_policy(&raw, "image/jpeg", &frame_policy)
+            .map_err(|error| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
         let b64 = base64::prelude::BASE64_STANDARD.encode(&resized);
         let timestamp = i as f64 * frame_interval.as_millis() as f64;
 
@@ -1726,7 +1737,12 @@ pub async fn handle_browser_action(
                 format!("No browser runtime for chat_id={}", post.chat_id),
             )
         })?;
-    let report = browser_controller::execute_request_with_runtime(runtime_arc, post.request)
+    let image_policy = image_policy_for_chat(&app, &post.chat_id).await;
+    let report = browser_controller::execute_request_with_runtime(
+        runtime_arc,
+        post.request,
+        &image_policy,
+    )
         .await
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
 
@@ -2054,8 +2070,15 @@ async fn browser_frame_emission_task(gcx: Arc<GlobalContext>, chat_id: String, r
             }
         }
 
-        let resized = match resize_screenshot(&raw_data, 800, "image/jpeg") {
-            Ok(r) => r,
+        let frame_policy = ImagePolicy {
+            max_side: FRAME_MAX_SIDE,
+            preferred_side: FRAME_MAX_SIDE,
+            format: ImageFormat::Jpeg,
+            quality: Some(60),
+            ..ImagePolicy::default()
+        };
+        let resized = match resize_to_policy(&raw_data, "image/jpeg", &frame_policy) {
+            Ok((resized, _)) => resized,
             Err(_) => continue,
         };
         let b64 = base64::prelude::BASE64_STANDARD.encode(&resized);

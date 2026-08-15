@@ -5,29 +5,37 @@ use rmcp::model::{
 };
 use rmcp::ErrorData as McpError;
 
-use crate::call_validation::{ChatContent, ChatMessage};
+use crate::call_validation::{ChatContent, ChatMessage, MultimodalElement};
 use crate::global_context::GlobalContext;
 use crate::subchat::run_subchat_once;
 
-fn content_to_text(c: &SamplingMessageContent) -> String {
+fn content_to_multimodal(c: &SamplingMessageContent) -> MultimodalElement {
     match c {
-        SamplingMessageContent::Text(t) => t.text.clone(),
-        SamplingMessageContent::Image(_) => "[image content not supported]".to_string(),
-        SamplingMessageContent::Audio(_) => "[audio content not supported]".to_string(),
+        SamplingMessageContent::Text(t) => MultimodalElement {
+            m_type: "text".to_string(),
+            m_content: t.text.clone(),
+        },
+        SamplingMessageContent::Image(image) => MultimodalElement {
+            m_type: image.mime_type.clone(),
+            m_content: image.data.clone(),
+        },
+        SamplingMessageContent::Audio(_) => MultimodalElement {
+            m_type: "text".to_string(),
+            m_content: "[audio content not supported]".to_string(),
+        },
         SamplingMessageContent::ToolResult(_) | SamplingMessageContent::ToolUse(_) => {
-            "[tool content not supported]".to_string()
+            MultimodalElement {
+                m_type: "text".to_string(),
+                m_content: "[tool content not supported]".to_string(),
+            }
         }
     }
 }
 
 fn sampling_message_to_chat_message(msg: &SamplingMessage) -> ChatMessage {
-    let text = match &msg.content {
-        SamplingContent::Single(c) => content_to_text(c),
-        SamplingContent::Multiple(cs) => cs
-            .iter()
-            .map(content_to_text)
-            .collect::<Vec<_>>()
-            .join("\n"),
+    let content = match &msg.content {
+        SamplingContent::Single(c) => vec![content_to_multimodal(c)],
+        SamplingContent::Multiple(cs) => cs.iter().map(content_to_multimodal).collect(),
     };
     let role = match msg.role {
         Role::User => "user",
@@ -35,7 +43,7 @@ fn sampling_message_to_chat_message(msg: &SamplingMessage) -> ChatMessage {
     };
     ChatMessage {
         role: role.to_string(),
-        content: ChatContent::SimpleText(text),
+        content: ChatContent::Multimodal(content),
         ..Default::default()
     }
 }

@@ -6,6 +6,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use refact_core::provider_types::ImageTokenMode;
 use refact_core::model_caps::{
     predefined_cloud_tokenizer_for_model, resolve_model_caps, ModelCapabilities,
 };
@@ -288,6 +289,9 @@ available:
                             supports_parallel_tools: true,
                             supports_strict_tools: false,
                             supports_multimodality: true,
+            image_max_side_px: None,
+            image_preferred_side_px: None,
+            image_token_mode: ImageTokenMode::default(),
                             reasoning_effort_options: None,
                             supports_thinking_budget: false,
                             supports_adaptive_thinking_budget: false,

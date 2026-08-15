@@ -38,8 +38,9 @@ pub struct MultimodalElement {
     pub m_content: String,
 }
 
-const MAX_IMAGE_BASE64_LEN: usize = 15 * 1024 * 1024;
-const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_IMAGE_BASE64_LEN: usize = 40 * 1024 * 1024;
+const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_IMAGE_PIXELS: u64 = 40_000_000;
 
 pub fn image_reader_from_b64string(b64: &str) -> Result<ImageReader<Cursor<Vec<u8>>>, String> {
     if b64.len() > MAX_IMAGE_BASE64_LEN {
@@ -51,10 +52,173 @@ pub fn image_reader_from_b64string(b64: &str) -> Result<ImageReader<Cursor<Vec<u
     if bytes.len() > MAX_IMAGE_BYTES {
         return Err(format!("image too large: {} bytes", bytes.len()));
     }
+    let (width, height) = probe_image_dimensions(&bytes)?;
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > MAX_IMAGE_PIXELS {
+        return Err(format!(
+            "image dimensions too large: {width}x{height} ({pixels} pixels, max {MAX_IMAGE_PIXELS})"
+        ));
+    }
     let cursor = Cursor::new(bytes);
     ImageReader::new(cursor)
         .with_guessed_format()
         .map_err(|e| e.to_string())
+}
+
+pub fn probe_image_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() >= 24 {
+        return dimensions(
+            u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
+            u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+        );
+    }
+    if (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) && bytes.len() >= 10 {
+        return dimensions(
+            u16::from_le_bytes(bytes[6..8].try_into().unwrap()).into(),
+            u16::from_le_bytes(bytes[8..10].try_into().unwrap()).into(),
+        );
+    }
+    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        return probe_webp_dimensions(bytes);
+    }
+    if bytes.starts_with(b"\xff\xd8") {
+        return probe_jpeg_dimensions(bytes);
+    }
+    Err("unsupported image header: expected PNG, JPEG, WebP, or GIF".to_string())
+}
+
+fn dimensions(width: u32, height: u32) -> Result<(u32, u32), String> {
+    if width == 0 || height == 0 {
+        Err("image dimensions must be non-zero".to_string())
+    } else {
+        Ok((width, height))
+    }
+}
+
+fn probe_webp_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
+    match bytes.get(12..16) {
+        Some(b"VP8X") if bytes.len() >= 30 => dimensions(
+            1 + u32::from_le_bytes([bytes[24], bytes[25], bytes[26], 0]),
+            1 + u32::from_le_bytes([bytes[27], bytes[28], bytes[29], 0]),
+        ),
+        Some(b"VP8 ") if bytes.len() >= 30 && bytes.get(23..26) == Some(b"\x9d\x01\x2a") => {
+            dimensions(
+                u16::from_le_bytes(bytes[26..28].try_into().unwrap()) as u32 & 0x3fff,
+                u16::from_le_bytes(bytes[28..30].try_into().unwrap()) as u32 & 0x3fff,
+            )
+        }
+        Some(b"VP8L") if bytes.len() >= 25 && bytes[20] == 0x2f => {
+            let width = 1 + u32::from(bytes[21]) + (u32::from(bytes[22] & 0x3f) << 8);
+            let height = 1
+                + u32::from(bytes[22] >> 6)
+                + (u32::from(bytes[23]) << 2)
+                + (u32::from(bytes[24] & 0x0f) << 10);
+            dimensions(width, height)
+        }
+        _ => Err("unsupported or truncated WebP header".to_string()),
+    }
+}
+
+fn probe_jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
+    let mut offset = 2;
+    while offset + 3 < bytes.len() {
+        while offset < bytes.len() && bytes[offset] == 0xff {
+            offset += 1;
+        }
+        if offset >= bytes.len() {
+            break;
+        }
+        let marker = bytes[offset];
+        offset += 1;
+        if marker == 0xd8 || marker == 0xd9 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        if offset + 2 > bytes.len() {
+            break;
+        }
+        let segment_len = usize::from(u16::from_be_bytes(
+            bytes[offset..offset + 2].try_into().unwrap(),
+        ));
+        if segment_len < 2 || offset + segment_len > bytes.len() {
+            break;
+        }
+        if matches!(
+            marker,
+            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf
+        ) && segment_len >= 7
+        {
+            return dimensions(
+                u16::from_be_bytes(bytes[offset + 5..offset + 7].try_into().unwrap()).into(),
+                u16::from_be_bytes(bytes[offset + 3..offset + 5].try_into().unwrap()).into(),
+            );
+        }
+        offset += segment_len;
+    }
+    Err("JPEG dimensions not found".to_string())
+}
+
+#[cfg(test)]
+mod image_header_tests {
+    use super::*;
+
+    fn png_header(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes
+    }
+
+    fn jpeg_header(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = vec![0xff, 0xd8, 0xff, 0xc0, 0, 17, 8];
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&[0; 10]);
+        bytes
+    }
+
+    fn webp_header(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = vec![0; 30];
+        bytes[0..4].copy_from_slice(b"RIFF");
+        bytes[8..12].copy_from_slice(b"WEBP");
+        bytes[12..16].copy_from_slice(b"VP8X");
+        let width = (width - 1).to_le_bytes();
+        let height = (height - 1).to_le_bytes();
+        bytes[24..27].copy_from_slice(&width[..3]);
+        bytes[27..30].copy_from_slice(&height[..3]);
+        bytes
+    }
+
+    fn gif_header(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = b"GIF89a".to_vec();
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn probes_supported_image_headers() {
+        assert_eq!(probe_image_dimensions(&png_header(4032, 3024)).unwrap(), (4032, 3024));
+        assert_eq!(probe_image_dimensions(&jpeg_header(4032, 3024)).unwrap(), (4032, 3024));
+        assert_eq!(probe_image_dimensions(&webp_header(4032, 3024)).unwrap(), (4032, 3024));
+        assert_eq!(probe_image_dimensions(&gif_header(4032, 3024)).unwrap(), (4032, 3024));
+    }
+
+    #[test]
+    fn pixel_guard_accepts_common_camera_dimensions() {
+        let bytes = png_header(4032, 3024);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert!(image_reader_from_b64string(&encoded).is_ok());
+    }
+
+    #[test]
+    fn pixel_guard_rejects_oversized_dimensions_before_decode() {
+        let bytes = png_header(9000, 9000);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let error = image_reader_from_b64string(&encoded).err().expect("expected pixel-guard rejection");
+        assert!(error.contains("81000000 pixels"));
+    }
 }
 
 fn calculate_image_tokens_by_dimensions_openai(mut width: u32, mut height: u32) -> i32 {

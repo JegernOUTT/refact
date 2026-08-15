@@ -6,6 +6,15 @@ use serde::{Deserialize, Serialize};
 use crate::llm_types::WireFormat;
 use crate::model_caps::ModelCapabilities;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageTokenMode {
+    Tile,
+    Detail,
+    #[default]
+    Provider,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelSource {
@@ -386,6 +395,12 @@ pub struct CustomModelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_multimodality: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_max_side_px: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_preferred_side_px: Option<u32>,
+    #[serde(default)]
+    pub image_token_mode: ImageTokenMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort_options: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_thinking_budget: Option<bool>,
@@ -439,6 +454,12 @@ pub struct AvailableModel {
     #[serde(default)]
     pub supports_strict_tools: bool,
     pub supports_multimodality: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_max_side_px: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_preferred_side_px: Option<u32>,
+    #[serde(default)]
+    pub image_token_mode: ImageTokenMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort_options: Option<Vec<String>>,
     #[serde(default)]
@@ -486,6 +507,9 @@ impl AvailableModel {
                 || caps.supports_video
                 || caps.supports_audio
                 || caps.supports_pdf,
+            image_max_side_px: None,
+            image_preferred_side_px: None,
+            image_token_mode: ImageTokenMode::Provider,
             reasoning_effort_options: caps.reasoning_effort_options.clone(),
             supports_thinking_budget: caps.supports_thinking_budget,
             supports_adaptive_thinking_budget: caps.supports_adaptive_thinking_budget,
@@ -517,6 +541,9 @@ impl AvailableModel {
             supports_parallel_tools: config.supports_parallel_tools.unwrap_or(false),
             supports_strict_tools: config.supports_strict_tools.unwrap_or(false),
             supports_multimodality: config.supports_multimodality.unwrap_or(false),
+            image_max_side_px: config.image_max_side_px,
+            image_preferred_side_px: config.image_preferred_side_px,
+            image_token_mode: config.image_token_mode,
             reasoning_effort_options: config.reasoning_effort_options.clone(),
             supports_thinking_budget: config.supports_thinking_budget.unwrap_or(false),
             supports_adaptive_thinking_budget: config
@@ -598,6 +625,9 @@ pub fn merge_custom_models(
                 || config.supports_parallel_tools.is_some()
                 || config.supports_strict_tools.is_some()
                 || config.supports_multimodality.is_some()
+                || config.image_max_side_px.is_some()
+                || config.image_preferred_side_px.is_some()
+                || config.image_token_mode != ImageTokenMode::Provider
                 || config.reasoning_effort_options.is_some()
                 || config.supports_thinking_budget.is_some()
                 || config.supports_adaptive_thinking_budget.is_some()
@@ -618,6 +648,15 @@ pub fn merge_custom_models(
             }
             if let Some(v) = config.supports_multimodality {
                 existing.supports_multimodality = v;
+            }
+            if config.image_max_side_px.is_some() {
+                existing.image_max_side_px = config.image_max_side_px;
+            }
+            if config.image_preferred_side_px.is_some() {
+                existing.image_preferred_side_px = config.image_preferred_side_px;
+            }
+            if config.image_token_mode != ImageTokenMode::Provider {
+                existing.image_token_mode = config.image_token_mode;
             }
             if config.reasoning_effort_options.is_some() {
                 existing.reasoning_effort_options = config.reasoning_effort_options.clone();

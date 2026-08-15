@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use refact_core::provider_types::ImageTokenMode;
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
 use crate::github_copilot_oauth::{resolve_api_base, OAuthTokens};
@@ -437,6 +438,9 @@ impl GitHubCopilotProvider {
             supports_parallel_tools: false,
             supports_strict_tools,
             supports_multimodality: Self::live_supports_vision(model),
+            image_max_side_px: None,
+            image_preferred_side_px: None,
+            image_token_mode: ImageTokenMode::default(),
             reasoning_effort_options: Self::live_reasoning_effort(model),
             supports_thinking_budget,
             supports_adaptive_thinking_budget,

@@ -36,10 +36,7 @@ use headless_chrome::protocol::cdp::types::Event;
 use serde::{Deserialize, Serialize};
 
 use base64::Engine;
-use std::io::Cursor;
-
-use image::imageops::FilterType;
-use image::{ImageFormat, ImageReader};
+use refact_core::image_policy::{resize_to_policy, ImagePolicy};
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 pub struct SettingsChrome {
@@ -81,6 +78,15 @@ pub struct ToolChrome {
 // DeviceType is now in browser_actions module
 
 const MAX_CACHED_LOG_LINES: usize = 1000;
+
+async fn image_policy_for_model(gcx: Arc<GlobalContext>, model_id: &str) -> ImagePolicy {
+    let Ok(caps) = crate::global_context::try_load_caps_quickly_if_not_present(gcx, 0).await else {
+        return ImagePolicy::default();
+    };
+    crate::caps::resolve_chat_model(caps, model_id)
+        .map(|model| ImagePolicy::for_model(&model.base))
+        .unwrap_or_default()
+}
 
 #[derive(Clone)]
 pub struct ChromeTab {
@@ -152,10 +158,15 @@ impl Tool for ToolChrome {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, chat_id) = {
+        let (gcx, chat_id, current_model) = {
             let ccx_lock = ccx.lock().await;
-            (ccx_lock.app.gcx.clone(), ccx_lock.chat_id.clone())
+            (
+                ccx_lock.app.gcx.clone(),
+                ccx_lock.chat_id.clone(),
+                ccx_lock.current_model.clone(),
+            )
         };
+        let image_policy = image_policy_for_model(gcx.clone(), &current_model).await;
 
         let session_hashmap_key = get_session_hashmap_key("chrome", &chat_id);
         let mut tool_log = match setup_chrome_session(
@@ -227,11 +238,17 @@ impl Tool for ToolChrome {
                 })?
             };
 
-            match browser_controller::execute_request_with_runtime(runtime_arc, request).await {
+            match browser_controller::execute_request_with_runtime(
+                runtime_arc,
+                request,
+                &image_policy,
+            )
+            .await
+            {
                 Ok(report) => {
-                    typed_content = Some(execution_report_to_multimodal(&report)?);
+                    typed_content = Some(execution_report_to_multimodal(&report, &image_policy)?);
                     let (execute_log, command_multimodal_els) =
-                        format_controller_report(&report, "");
+                        format_controller_report(&report, "", &image_policy);
                     tool_log.extend(execute_log);
                     multimodal_els.extend(command_multimodal_els);
                 }
@@ -274,6 +291,7 @@ impl Tool for ToolChrome {
                     command_session.clone(),
                     gcx.clone(),
                     &self.settings_chrome,
+                    &image_policy,
                 )
                 .await
                 {
@@ -696,11 +714,11 @@ async fn session_open_tab(
                         settings_chrome.window_height.parse::<u32>(),
                     ) {
                         (Ok(width), Ok(height)) => (width, height),
-                        _ => (800, 600),
+                        _ => (1440, 900),
                     };
                     let scale_factor = match settings_chrome.scale_factor.parse::<f64>() {
                         Ok(scale_factor) => scale_factor,
-                        _ => 0.0,
+                        _ => 2.0,
                     };
                     set_device_metrics_method(width, height, scale_factor, false)
                 }
@@ -710,11 +728,11 @@ async fn session_open_tab(
                         settings_chrome.mobile_window_height.parse::<u32>(),
                     ) {
                         (Ok(width), Ok(height)) => (width, height),
-                        _ => (400, 800),
+                        _ => (390, 844),
                     };
                     let scale_factor = match settings_chrome.mobile_scale_factor.parse::<f64>() {
                         Ok(scale_factor) => scale_factor,
-                        _ => 0.0,
+                        _ => 3.0,
                     };
                     set_device_metrics_method(width, height, scale_factor, true)
                 }
@@ -724,11 +742,11 @@ async fn session_open_tab(
                         settings_chrome.tablet_window_height.parse::<u32>(),
                     ) {
                         (Ok(width), Ok(height)) => (width, height),
-                        _ => (600, 800),
+                        _ => (834, 1112),
                     };
                     let scale_factor = match settings_chrome.tablet_scale_factor.parse::<f64>() {
                         Ok(scale_factor) => scale_factor,
-                        _ => 0.0,
+                        _ => 2.0,
                     };
                     set_device_metrics_method(width, height, scale_factor, true)
                 }
@@ -812,6 +830,7 @@ async fn execute_via_controller(
     action: &BrowserAction,
     chrome_session: Arc<AMutex<Box<dyn IntegrationSession>>>,
     gcx: Arc<GlobalContext>,
+    image_policy: &ImagePolicy,
 ) -> Result<(Vec<String>, Vec<MultimodalElement>), String> {
     let tab_id = browser_actions::get_tab_id(action)
         .ok_or("Action has no tab_id for controller execution")?;
@@ -873,7 +892,9 @@ async fn execute_via_controller(
     }
 
     let report =
-        tokio::task::block_in_place(|| browser_controller::execute_steps(&*headless_tab, &steps));
+        tokio::task::block_in_place(|| {
+            browser_controller::execute_steps(&headless_tab, &steps, image_policy)
+        });
 
     {
         let runtime_id = {
@@ -898,12 +919,13 @@ async fn execute_via_controller(
         }
     }
 
-    Ok(format_controller_report(&report, &tab_state))
+    Ok(format_controller_report(&report, &tab_state, image_policy))
 }
 
 fn format_controller_report(
     report: &ExecutionReport,
     tab_state: &str,
+    image_policy: &ImagePolicy,
 ) -> (Vec<String>, Vec<MultimodalElement>) {
     let mut log = Vec::new();
     let mut multimodal = Vec::new();
@@ -925,10 +947,10 @@ fn format_controller_report(
                 data.get("data").and_then(|v| v.as_str()),
             ) {
                 if mime.starts_with("image/") {
-                    match resize_screenshot_b64(b64_data) {
-                        Ok(resized) => {
+                    match resize_screenshot_b64(b64_data, mime, image_policy) {
+                        Ok((resized, resized_mime)) => {
                             if let Ok(el) =
-                                MultimodalElement::new("image/jpeg".to_string(), resized)
+                                MultimodalElement::new(resized_mime, resized)
                             {
                                 multimodal.push(el);
                             }
@@ -958,6 +980,7 @@ fn format_controller_report(
 
 fn execution_report_to_multimodal(
     report: &ExecutionReport,
+    image_policy: &ImagePolicy,
 ) -> Result<Vec<MultimodalElement>, String> {
     let mut content = Vec::new();
 
@@ -975,8 +998,9 @@ fn execution_report_to_multimodal(
                 data.get("data").and_then(|v| v.as_str()),
             ) {
                 if mime.starts_with("image/") {
-                    let resized = resize_screenshot_b64(b64_data)?;
-                    if let Ok(el) = MultimodalElement::new("image/jpeg".to_string(), resized) {
+                    let (resized, resized_mime) =
+                        resize_screenshot_b64(b64_data, mime, image_policy)?;
+                    if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
                         content.push(el);
                     }
                 }
@@ -1026,30 +1050,19 @@ fn strip_image_data_for_text(value: &mut serde_json::Value) {
     }
 }
 
-fn resize_screenshot_b64(b64_data: &str) -> Result<String, String> {
+fn resize_screenshot_b64(
+    b64_data: &str,
+    mime: &str,
+    image_policy: &ImagePolicy,
+) -> Result<(String, String), String> {
     let raw = base64::prelude::BASE64_STANDARD
         .decode(b64_data)
         .map_err(|e| format!("Base64 decode failed: {}", e))?;
-
-    let reader = ImageReader::with_format(Cursor::new(&raw), ImageFormat::Jpeg);
-    let mut image = reader
-        .decode()
-        .map_err(|e| format!("Image decode failed: {}", e))?;
-
-    let max_dim = 800.0f32;
-    let scale = max_dim / std::cmp::max(image.width(), image.height()) as f32;
-    if scale < 1.0 {
-        let nw = (scale * image.width() as f32) as u32;
-        let nh = (scale * image.height() as f32) as u32;
-        image = image.resize(nw, nh, FilterType::Lanczos3);
-    }
-
-    let mut out = Vec::new();
-    image
-        .write_to(&mut Cursor::new(&mut out), ImageFormat::Jpeg)
-        .map_err(|e| format!("Image encode failed: {}", e))?;
-
-    Ok(base64::prelude::BASE64_STANDARD.encode(out))
+    let (resized, resized_mime) = resize_to_policy(&raw, mime, image_policy)?;
+    Ok((
+        base64::prelude::BASE64_STANDARD.encode(resized),
+        resized_mime,
+    ))
 }
 
 fn format_step_data(data: &serde_json::Value, log: &mut Vec<String>) {
@@ -1135,9 +1148,10 @@ async fn chrome_command_exec(
     chrome_session: Arc<AMutex<Box<dyn IntegrationSession>>>,
     gcx: Arc<GlobalContext>,
     settings_chrome: &SettingsChrome,
+    image_policy: &ImagePolicy,
 ) -> Result<(Vec<String>, Vec<MultimodalElement>), String> {
     if browser_actions::to_browser_steps(action).is_some() {
-        return execute_via_controller(action, chrome_session, gcx).await;
+        return execute_via_controller(action, chrome_session, gcx, image_policy).await;
     }
 
     let mut tool_log = vec![];

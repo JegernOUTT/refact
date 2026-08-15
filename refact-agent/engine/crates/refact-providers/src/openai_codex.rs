@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tokio::sync::{Mutex as AMutex, MutexGuard};
 
+use refact_core::provider_types::ImageTokenMode;
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
 use crate::llm_http_retry::{
@@ -1473,6 +1474,9 @@ impl OpenAICodexProvider {
             supports_parallel_tools,
             supports_strict_tools: false,
             supports_multimodality: Self::live_model_supports_multimodality(model),
+            image_max_side_px: None,
+            image_preferred_side_px: None,
+            image_token_mode: ImageTokenMode::default(),
             reasoning_effort_options: Self::live_model_reasoning_levels(model),
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,

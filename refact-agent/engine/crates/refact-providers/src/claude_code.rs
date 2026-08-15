@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tokio::sync::{Mutex as AMutex, MutexGuard};
 
+use refact_core::provider_types::ImageTokenMode;
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
 use crate::claude_code_oauth::OAuthTokens;
@@ -822,6 +823,9 @@ fn claude_code_api_model_without_caps(model_id: &str, enabled: bool) -> Availabl
         supports_parallel_tools: true,
         supports_strict_tools: false,
         supports_multimodality: true,
+            image_max_side_px: None,
+            image_preferred_side_px: None,
+            image_token_mode: ImageTokenMode::default(),
         reasoning_effort_options: None,
         supports_thinking_budget: true,
         supports_adaptive_thinking_budget: false,

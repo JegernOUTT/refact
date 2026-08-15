@@ -12,6 +12,7 @@ use crate::integrations::browser_locators::{
 };
 use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
+use refact_core::image_policy::{ImageFormat, ImagePolicy};
 
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
 const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
@@ -41,9 +42,6 @@ fn clamp_wait_seconds(requested: f64) -> f64 {
 }
 
 const DEFAULT_POLL_INTERVAL_MS: u64 = 200;
-
-#[allow(dead_code)]
-const SCREENSHOT_MAX_DIM: u32 = 800;
 
 #[allow(dead_code)]
 pub fn resolve_tab(runtime: &BrowserRuntime, target: &TabTarget) -> Result<Arc<Tab>, String> {
@@ -115,7 +113,11 @@ fn resolve_interactable(tab: &Tab, locator: &BrowserLocator) -> Result<ElementIn
     Ok(info)
 }
 
-pub fn execute_steps(tab: &Tab, steps: &[BrowserStep]) -> ExecutionReport {
+pub fn execute_steps(
+    tab: &Tab,
+    steps: &[BrowserStep],
+    image_policy: &ImagePolicy,
+) -> ExecutionReport {
     let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
 
     let mut results = Vec::new();
@@ -123,7 +125,7 @@ pub fn execute_steps(tab: &Tab, steps: &[BrowserStep]) -> ExecutionReport {
     let mut pre_step_url: Option<String> = Some(tab.get_url());
 
     for (idx, step) in steps.iter().enumerate() {
-        let result = execute_single_step(tab, step, idx, pre_step_url.as_deref());
+        let result = execute_single_step(tab, step, idx, pre_step_url.as_deref(), image_policy);
         let is_non_fatal = matches!(step, BrowserStep::ClickIfExists { .. });
         if !result.ok && !is_non_fatal {
             all_ok = false;
@@ -155,9 +157,14 @@ pub fn is_tab_management_step(step: &BrowserStep) -> bool {
     )
 }
 
-pub fn execute_step(tab: &Tab, step: &BrowserStep, idx: usize) -> StepResult {
+pub fn execute_step(
+    tab: &Tab,
+    step: &BrowserStep,
+    idx: usize,
+    image_policy: &ImagePolicy,
+) -> StepResult {
     let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
-    let result = execute_single_step(tab, step, idx, None);
+    let result = execute_single_step(tab, step, idx, None, image_policy);
     if result.ok && is_navigation_step(step) {
         let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
     }
@@ -167,6 +174,7 @@ pub fn execute_step(tab: &Tab, step: &BrowserStep, idx: usize) -> StepResult {
 pub async fn execute_request_with_runtime(
     runtime_arc: Arc<AMutex<BrowserRuntime>>,
     request: BrowserActionRequest,
+    image_policy: &ImagePolicy,
 ) -> Result<ExecutionReport, String> {
     if request.session != SessionPolicy::SharedDefault {
         return Err(format!(
@@ -204,7 +212,7 @@ pub async fn execute_request_with_runtime(
         let mut result = if is_tab_management_step(step) {
             let step_report = tokio::task::block_in_place(|| {
                 let mut rt = runtime_arc.blocking_lock();
-                execute_steps_with_runtime(&mut rt, std::slice::from_ref(step))
+                execute_steps_with_runtime(&mut rt, std::slice::from_ref(step), image_policy)
             });
             {
                 let mut rt = runtime_arc.lock().await;
@@ -221,7 +229,9 @@ pub async fn execute_request_with_runtime(
                 current_tab = rt.get_active_tab();
             }
             match &current_tab {
-                Some(tab) => tokio::task::block_in_place(|| execute_step(tab, step, idx)),
+                Some(tab) => {
+                    tokio::task::block_in_place(|| execute_step(tab, step, idx, image_policy))
+                }
                 None => StepResult::failure(
                     idx,
                     "No active tab",
@@ -268,6 +278,7 @@ pub async fn execute_request_with_runtime(
 pub fn execute_steps_with_runtime(
     runtime: &mut BrowserRuntime,
     steps: &[BrowserStep],
+    image_policy: &ImagePolicy,
 ) -> ExecutionReport {
     let mut current_tab: Option<Arc<Tab>> = runtime.get_active_tab();
     if let Some(ref tab) = current_tab {
@@ -284,16 +295,16 @@ pub fn execute_steps_with_runtime(
                 Ok(new_tab) => {
                     let device_label = device.as_deref().unwrap_or("desktop");
                     let target_id = new_tab.get_target_id().to_string();
-                    let (w, h, mobile) = match device.as_deref() {
-                        Some("mobile") => (400, 800, true),
-                        Some("tablet") => (600, 800, true),
-                        _ => (800, 600, false),
+                    let (w, h, dpr, mobile) = match device.as_deref() {
+                        Some("mobile") => (390, 844, 3.0, true),
+                        Some("tablet") => (834, 1112, 2.0, true),
+                        _ => (1440, 900, 2.0, false),
                     };
                     let _ = new_tab.call_method(
                         headless_chrome::protocol::cdp::Emulation::SetDeviceMetricsOverride {
                             width: w,
                             height: h,
-                            device_scale_factor: 0.0,
+                            device_scale_factor: dpr,
                             mobile,
                             screen_width: None,
                             screen_height: None,
@@ -397,7 +408,9 @@ pub fn execute_steps_with_runtime(
                     .with_data(serde_json::json!({"tabs": tab_list}))
             }
             other => match &current_tab {
-                Some(tab) => execute_single_step(tab, other, idx, pre_step_url.as_deref()),
+                Some(tab) => {
+                    execute_single_step(tab, other, idx, pre_step_url.as_deref(), image_policy)
+                }
                 None => StepResult::failure(
                     idx,
                     "No active tab",
@@ -448,6 +461,7 @@ fn execute_single_step(
     step: &BrowserStep,
     idx: usize,
     pre_step_url: Option<&str>,
+    image_policy: &ImagePolicy,
 ) -> StepResult {
     match step {
         BrowserStep::Navigate { url } => step_navigate(tab, idx, url),
@@ -528,8 +542,10 @@ fn execute_single_step(
             max_chars,
         } => step_dom_snapshot(tab, idx, selector, *max_chars),
         BrowserStep::AccessibilitySnapshot => step_accessibility_snapshot(tab, idx),
-        BrowserStep::Screenshot => step_screenshot(tab, idx),
-        BrowserStep::ScreenshotElement { locator } => step_screenshot_element(tab, idx, locator),
+        BrowserStep::Screenshot => step_screenshot(tab, idx, image_policy),
+        BrowserStep::ScreenshotElement { locator } => {
+            step_screenshot_element(tab, idx, locator, image_policy)
+        }
 
         BrowserStep::Eval { expression } => step_eval(tab, idx, expression),
         BrowserStep::Styles {
@@ -1382,18 +1398,19 @@ fn step_accessibility_snapshot(tab: &Tab, idx: usize) -> StepResult {
     }
 }
 
-fn step_screenshot(tab: &Tab, idx: usize) -> StepResult {
+fn step_screenshot(tab: &Tab, idx: usize, policy: &ImagePolicy) -> StepResult {
+    let (format, mime, quality) = capture_options(policy);
     match tab.call_method(Page::CaptureScreenshot {
-        format: Some(Page::CaptureScreenshotFormatOption::Jpeg),
+        format: Some(format),
         clip: None,
-        quality: Some(75),
+        quality: quality.map(|q| q as u32),
         from_surface: Some(true),
         capture_beyond_viewport: Some(false),
         optimize_for_speed: None,
     }) {
         Ok(result) => StepResult::success(idx, "Screenshot captured".to_string()).with_data(
             serde_json::json!({
-                "mime": "image/jpeg",
+                "mime": mime,
                 "data": result.data,
             }),
         ),
@@ -1401,7 +1418,12 @@ fn step_screenshot(tab: &Tab, idx: usize) -> StepResult {
     }
 }
 
-fn step_screenshot_element(tab: &Tab, idx: usize, locator: &BrowserLocator) -> StepResult {
+fn step_screenshot_element(
+    tab: &Tab,
+    idx: usize,
+    locator: &BrowserLocator,
+    policy: &ImagePolicy,
+) -> StepResult {
     let info = match resolve_element(tab, locator) {
         Ok(i) => i,
         Err(e) => return StepResult::failure(idx, "Screenshot element: resolution failed", e),
@@ -1422,20 +1444,36 @@ fn step_screenshot_element(tab: &Tab, idx: usize, locator: &BrowserLocator) -> S
         scale: 1.0,
     };
 
+    let (format, mime, quality) = capture_options(policy);
     match tab.call_method(Page::CaptureScreenshot {
-        format: Some(Page::CaptureScreenshotFormatOption::Jpeg),
+        format: Some(format),
         clip: Some(clip),
-        quality: Some(75),
+        quality: quality.map(|q| q as u32),
         from_surface: Some(true),
         capture_beyond_viewport: Some(false),
         optimize_for_speed: None,
     }) {
         Ok(result) => StepResult::success(idx, format!("Element screenshot of <{}>", info.tag))
             .with_data(serde_json::json!({
-                "mime": "image/jpeg",
+                "mime": mime,
                 "data": result.data,
             })),
         Err(e) => StepResult::failure(idx, "Element screenshot failed", e.to_string()),
+    }
+}
+
+fn capture_options(
+    policy: &ImagePolicy,
+) -> (Page::CaptureScreenshotFormatOption, &'static str, Option<u8>) {
+    match policy.format {
+        ImageFormat::Jpeg => (
+            Page::CaptureScreenshotFormatOption::Jpeg,
+            "image/jpeg",
+            policy.quality,
+        ),
+        ImageFormat::Png | ImageFormat::Webp => {
+            (Page::CaptureScreenshotFormatOption::Png, "image/png", None)
+        }
     }
 }
 

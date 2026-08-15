@@ -28,15 +28,13 @@ use crate::tools::scope_utils::{
     resolve_existing_path_with_execution_scope,
 };
 
-use std::io::Cursor;
-use image::imageops::FilterType;
-use image::{ImageFormat, ImageReader};
+use refact_core::image_policy::{resize_to_policy, ImagePolicy};
 
 pub struct ToolCat {
     pub config_path: String,
 }
 
-const CAT_MAX_IMAGES_CNT: usize = 1;
+const CAT_MAX_IMAGES_CNT: usize = 10;
 const CAT_MAX_LINES: usize = 2000;
 const CAT_MAX_INPUT_PATHS: usize = 128;
 const CAT_MAX_EXPANDED_FILES: usize = 512;
@@ -297,7 +295,11 @@ fn get_file_type(path: &PathBuf) -> String {
     return "text".to_string();
 }
 
-async fn load_image(path: &String, f_type: &String) -> Result<MultimodalElement, String> {
+async fn load_image(
+    path: &String,
+    f_type: &String,
+    image_policy: &ImagePolicy,
+) -> Result<MultimodalElement, String> {
     let metadata = tokio::fs::metadata(path)
         .await
         .map_err(|error| format!("{} image metadata failed: {}", path, error))?;
@@ -310,28 +312,14 @@ async fn load_image(path: &String, f_type: &String) -> Result<MultimodalElement,
     let extension = path.split(".").last().unwrap().to_string();
     let mut f_type = f_type.clone();
 
-    let max_dimension = 800;
     let data = match f_type.as_str() {
         "image/png" | "image/jpeg" => {
-            let reader =
-                ImageReader::open(path).map_err(|_| format!("{} image read failed", path))?;
-            let mut image = reader
-                .decode()
-                .map_err(|_| format!("{} image decode failed", path))?;
-            let scale_factor =
-                max_dimension as f32 / std::cmp::max(image.width(), image.height()) as f32;
-            if scale_factor < 1.0 {
-                let (nwidth, nheight) = (
-                    scale_factor * image.width() as f32,
-                    scale_factor * image.height() as f32,
-                );
-                image = image.resize(nwidth as u32, nheight as u32, FilterType::Lanczos3);
-            }
-            let mut data = Vec::new();
-            image
-                .write_to(&mut Cursor::new(&mut data), ImageFormat::Png)
-                .map_err(|_| format!("{} image encode failed", path))?;
-            f_type = "image/png".to_string();
+            let bytes = tokio::fs::read(path)
+                .await
+                .map_err(|_| format!("{} image read failed", path))?;
+            let (data, resized_mime) = resize_to_policy(&bytes, &f_type, image_policy)
+                .map_err(|error| format!("{} {}", path, error.to_ascii_lowercase()))?;
+            f_type = resized_mime;
             Ok(data)
         }
         "image/svg" => {
@@ -350,7 +338,7 @@ async fn load_image(path: &String, f_type: &String) -> Result<MultimodalElement,
             };
 
             let mut pixmap_size = tree.size().to_int_size();
-            let scale_factor = max_dimension as f32
+            let scale_factor = image_policy.preferred_side.min(image_policy.max_side) as f32
                 / std::cmp::max(pixmap_size.width(), pixmap_size.height()) as f32;
             if scale_factor < 1.0 {
                 let (nwidth, nheight) = (
@@ -518,14 +506,26 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
     Vec<MultimodalElement>,
     Vec<String>,
 ) {
-    let (gcx, top_n, execution_scope, abort_flag) = {
+    let (gcx, top_n, execution_scope, abort_flag, current_model) = {
         let cgcx = ccx.lock().await;
         (
             cgcx.app.gcx.clone(),
             cgcx.top_n,
             cgcx.execution_scope.clone(),
             cgcx.abort_flag.clone(),
+            cgcx.current_model.clone(),
         )
+    };
+    let image_policy = match crate::global_context::try_load_caps_quickly_if_not_present(
+        gcx.clone(),
+        0,
+    )
+    .await
+    {
+        Ok(caps) => crate::caps::resolve_chat_model(caps, &current_model)
+            .map(|model| ImagePolicy::for_model(&model.base))
+            .unwrap_or_default(),
+        Err(_) => ImagePolicy::default(),
     };
     let aborted = || abort_flag.load(std::sync::atomic::Ordering::Relaxed);
     let mut not_found_messages = vec![];
@@ -825,11 +825,11 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
             image_counter += 1;
             if image_counter > CAT_MAX_IMAGES_CNT {
                 if image_counter == CAT_MAX_IMAGES_CNT + 1 {
-                    not_found_messages.push(format!("⚠️ showing 1 of {} images (limit: 1). 💡 Call cat() separately for each image", resolved_paths.iter().filter(|request| get_file_type(&PathBuf::from(&request.path)).starts_with("image/")).count()));
+                    not_found_messages.push(format!("⚠️ showing {} of {} images (limit: {}). 💡 Call cat() separately for remaining images", CAT_MAX_IMAGES_CNT, resolved_paths.iter().filter(|request| get_file_type(&PathBuf::from(&request.path)).starts_with("image/")).count(), CAT_MAX_IMAGES_CNT));
                 }
                 continue;
             }
-            match load_image(p, &f_type).await {
+            match load_image(p, &f_type, &image_policy).await {
                 Ok(mm) => {
                     multimodal.push(mm);
                 }

@@ -10,7 +10,7 @@ use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile, MultimodalE
 const MAX_FILE_SIZE: usize = 1024 * 1024;
 const MODE_TRANSITION_CONTEXT_BUDGET_PERCENT: usize = 30;
 const MODE_TRANSITION_FILES_BUDGET_PERCENT: usize = 70;
-const MODE_TRANSITION_MAX_IMAGES: usize = 1;
+const MODE_TRANSITION_MAX_IMAGES: usize = 8;
 const MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP: usize = 120_000;
 
 lazy_static! {

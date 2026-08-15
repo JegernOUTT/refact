@@ -304,6 +304,9 @@ fn build_chat_model_record(
                 .map(|r| r.caps.supports_web_search)
                 .unwrap_or(false),
             supports_cache_control: runtime_supports_cache_control && supports_cache_control,
+            image_max_side_px: model.image_max_side_px,
+            image_preferred_side_px: model.image_preferred_side_px,
+            image_token_mode: model.image_token_mode,
             removable: model.is_custom,
             user_configured: model.is_custom,
         },
