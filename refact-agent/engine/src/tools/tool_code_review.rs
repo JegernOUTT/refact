@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
@@ -7,10 +6,15 @@ use axum::http::StatusCode;
 use std::collections::HashMap;
 
 use crate::subchat::{run_subchat_once_with_parent, resolve_subchat_params, resolve_subchat_model};
+use crate::tools::code_review_scope::{
+    build_review_scope_with_max_files, validate_review_budget, ReviewScope,
+};
 use crate::tools::code_review_types::{ReviewReport, ReviewScopeSummary};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::tools::tool_helpers::{load_code_subagent_config, CodeSubagentConfig};
-use crate::tools::subagent_phases::{gather_files_phase, GatherFilesParams};
+use crate::tools::subagent_phases::{
+    gather_files_phase, resolve_gathered_file_path, GatherFilesParams, DEFAULT_MAX_FILES,
+};
 use crate::call_validation::{
     ChatMessage, ChatContent, ContextEnum, SubchatParameters, ContextFile, PostprocessSettings,
 };
@@ -22,12 +26,11 @@ use crate::global_context::{GlobalContext, try_load_caps_quickly_if_not_present}
 use crate::postprocessing::pp_context_files::postprocess_context_files;
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tokens::count_text_tokens_with_fallback;
+use crate::worktrees::scope::ExecutionScope;
 
 pub struct ToolCodeReview {
     pub config_path: String,
 }
-
-static TOKENS_EXTRA_BUDGET_PERCENT: f32 = 0.06;
 
 fn get_gather_files_params(
     config: &CodeSubagentConfig,
@@ -48,10 +51,9 @@ fn get_gather_files_params(
 async fn make_review_prompt(
     gcx: Arc<GlobalContext>,
     subchat_params: &SubchatParameters,
-    important_paths: &[PathBuf],
+    scope: &ReviewScope,
     previous_messages: &[ChatMessage],
     config: &CodeSubagentConfig,
-    focus: Option<&str>,
 ) -> Result<String, String> {
     let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
         .await
@@ -63,30 +65,15 @@ async fn make_review_prompt(
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))
         .map_err(|x| x.message)?;
 
-    let tokens_extra_budget =
-        (subchat_params.subchat_n_ctx as f32 * TOKENS_EXTRA_BUDGET_PERCENT) as usize;
-    let required_tokens = subchat_params.subchat_max_new_tokens
-        + subchat_params.subchat_tokens_for_rag
-        + tokens_extra_budget;
-
-    if required_tokens >= subchat_params.subchat_n_ctx {
-        return Err(format!(
-            "Bad subchat budget: max_new_tokens({}) + tokens_for_rag({}) + extra({}) = {} >= n_ctx({})",
-            subchat_params.subchat_max_new_tokens,
-            subchat_params.subchat_tokens_for_rag,
-            tokens_extra_budget,
-            required_tokens,
-            subchat_params.subchat_n_ctx
-        ));
-    }
+    validate_review_budget(subchat_params)?;
 
     let reviewer_prompt = config
         .reviewer_prompt
         .clone()
         .ok_or("reviewer_prompt not configured for code_review")?;
 
-    let mut tokens_budget: i64 = (subchat_params.subchat_n_ctx - required_tokens) as i64;
-    let final_message = match focus.map(str::trim).filter(|f| !f.is_empty()) {
+    let mut tokens_budget = scope.budgets.tokens_budget;
+    let final_message = match scope.focus.as_deref() {
         Some(focus) => format!("{reviewer_prompt}\n\n# Focus \u{2014} what to check\n{focus}"),
         None => reviewer_prompt.clone(),
     };
@@ -95,7 +82,7 @@ async fn make_review_prompt(
     let mut context = String::new();
     let mut context_files = vec![];
 
-    for p in important_paths.iter() {
+    for p in scope.files.iter() {
         match get_file_text_from_memory_or_disk(gcx.clone(), p).await {
             Ok(text) => {
                 let total_lines = text.lines().count();
@@ -176,11 +163,11 @@ async fn make_review_prompt(
 async fn run_review_pipeline(
     gcx: Arc<GlobalContext>,
     ccx: Arc<AMutex<AtCommandsContext>>,
-    important_paths: Vec<PathBuf>,
+    scope: ReviewScope,
+    subchat_params: SubchatParameters,
     external_messages: Vec<ChatMessage>,
     tool_call_id: String,
     config: &CodeSubagentConfig,
-    focus: Option<&str>,
     metering: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<ReviewReport, String> {
     let (subchat_tx, abort_flag, parent_depth, parent_task_meta, parent_worktree) = {
@@ -194,15 +181,12 @@ async fn run_review_pipeline(
         )
     };
 
-    let subchat_params = resolve_subchat_params(gcx.clone(), "code_review").await?;
-
     let prompt = make_review_prompt(
         gcx.clone(),
         &subchat_params,
-        &important_paths,
+        &scope,
         &external_messages,
         config,
-        focus,
     )
     .await?;
 
@@ -222,7 +206,8 @@ async fn run_review_pipeline(
     .await?;
     let review_response = validate_review_response(&result.messages)?;
 
-    let filenames: Vec<String> = important_paths
+    let filenames: Vec<String> = scope
+        .files
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
@@ -247,8 +232,8 @@ async fn run_review_pipeline(
     Ok(ReviewReport {
         scope: ReviewScopeSummary {
             files_reviewed: filenames,
-            focus: focus.map(str::to_string),
-            diff_base: None,
+            focus: scope.focus,
+            diff_base: scope.diff_base,
         },
         findings: vec![],
         checks_performed: vec![],
@@ -343,6 +328,22 @@ impl Tool for ToolCodeReview {
                     .collect()
             })
             .unwrap_or_default();
+        let execution_scope = ccx
+            .lock()
+            .await
+            .execution_scope_worktree()
+            .as_ref()
+            .map(ExecutionScope::from_worktree);
+        let mut requested_seed_files = Vec::new();
+        for seed_file in &seed_files {
+            if let Some(path) =
+                resolve_gathered_file_path(gcx.clone(), execution_scope.as_ref(), seed_file).await
+            {
+                if !requested_seed_files.contains(&path) {
+                    requested_seed_files.push(path);
+                }
+            }
+        }
 
         let config = load_code_subagent_config(gcx.clone(), "code_review", None).await?;
 
@@ -363,21 +364,31 @@ impl Tool for ToolCodeReview {
             &gather_params,
         )
         .await?;
+        let subchat_params = resolve_subchat_params(gcx.clone(), "code_review").await?;
+        let scope = build_review_scope_with_max_files(
+            gcx.clone(),
+            important_paths,
+            requested_seed_files,
+            what_to_check,
+            &subchat_params,
+            config.max_files.unwrap_or(DEFAULT_MAX_FILES),
+        )
+        .await;
 
         tracing::info!(
             "code_review: phase 2 - performing review on {} files",
-            important_paths.len()
+            scope.files.len()
         );
 
         let mut metering = serde_json::Map::new();
         let report = run_review_pipeline(
             gcx,
             ccx.clone(),
-            important_paths,
+            scope,
+            subchat_params,
             external_messages,
             tool_call_id.clone(),
             &config,
-            what_to_check.as_deref(),
             &mut metering,
         )
         .await?;

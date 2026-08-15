@@ -130,7 +130,7 @@ pub fn resolve_gathered_file_path_with_scope(
     }
 }
 
-async fn resolve_gathered_file_path(
+pub(crate) async fn resolve_gathered_file_path(
     gcx: Arc<GlobalContext>,
     execution_scope: Option<&ExecutionScope>,
     file_str: &str,
