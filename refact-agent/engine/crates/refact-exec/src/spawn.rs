@@ -39,6 +39,7 @@ pub struct ExecSpawnResult {
 
 struct PtyRuntimeProcess {
     child: Box<dyn portable_pty::Child + Send>,
+    process_id: Option<u32>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
 }
@@ -58,19 +59,7 @@ impl RuntimeChild {
             RuntimeChild::Tokio(child) => child
                 .start_kill()
                 .map_err(|error| format!("failed to kill process: {error}")),
-            RuntimeChild::Pty(process) => {
-                #[cfg(unix)]
-                {
-                    if let Ok(mut writer) = process.writer.try_lock() {
-                        let _ = writer.write_all(&[3]);
-                        let _ = writer.flush();
-                    }
-                }
-                process
-                    .child
-                    .kill()
-                    .map_err(|error| format!("failed to kill process: {error}"))
-            }
+            RuntimeChild::Pty(process) => start_kill_pty(process),
         }
     }
 
@@ -96,6 +85,58 @@ impl RuntimeChild {
                 .map(|status| status.map(|status| Some(status.exit_code() as i32)))
                 .map_err(|error| format!("failed to check process status: {error}")),
         }
+    }
+}
+
+#[cfg(unix)]
+fn start_kill_pty(process: &mut PtyRuntimeProcess) -> Result<(), String> {
+    if let Ok(mut writer) = process.writer.try_lock() {
+        let _ = writer.write_all(&[3]);
+        let _ = writer.flush();
+    }
+    let mut errors = Vec::new();
+    match process.process_id {
+        Some(process_id) => {
+            for signal in [libc::SIGTERM, libc::SIGKILL] {
+                if let Err(error) = signal_pty_process_group(process_id, signal) {
+                    errors.push(error);
+                }
+            }
+        }
+        None => errors.push("PTY child has no process id".to_string()),
+    }
+    if let Err(error) = process.child.kill() {
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            errors.push(format!("failed to kill PTY child: {error}"));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+#[cfg(not(unix))]
+fn start_kill_pty(process: &mut PtyRuntimeProcess) -> Result<(), String> {
+    process
+        .child
+        .kill()
+        .map_err(|error| format!("failed to kill process: {error}"))
+}
+
+#[cfg(unix)]
+fn signal_pty_process_group(process_id: u32, signal: libc::c_int) -> Result<(), String> {
+    if unsafe { libc::kill(-(process_id as i32), signal) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to signal PTY process group {process_id} with signal {signal}: {error}"
+        ))
     }
 }
 
@@ -742,9 +783,11 @@ impl ExecRegistry {
         let startup_wait = request.startup_wait;
         let (pty_handle, child) =
             crate::pty::spawn_pty(command, crate::pty::pty_size(request.rows, request.cols))?;
+        let child_process_id = child.process_id();
         let stdin_writer = Arc::new(Mutex::new(pty_handle.writer));
         let child = Arc::new(Mutex::new(RuntimeChild::Pty(PtyRuntimeProcess {
             child,
+            process_id: child_process_id,
             writer: stdin_writer.clone(),
             master: pty_handle.master,
         })));
@@ -883,6 +926,43 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    fn processes_with_env_marker(marker: &str) -> Vec<u32> {
+        let expected = format!("{marker}=1").into_bytes();
+        let mut process_ids = Vec::new();
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            let Some(process_id) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
+                continue;
+            };
+            if environ
+                .split(|byte| *byte == 0)
+                .any(|variable| variable == expected)
+            {
+                process_ids.push(process_id);
+            }
+        }
+        process_ids
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn wait_for_marked_processes(marker: &str, minimum: usize) -> Vec<u32> {
+        for _ in 0..100 {
+            let process_ids = processes_with_env_marker(marker);
+            if process_ids.len() >= minimum {
+                return process_ids;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        processes_with_env_marker(marker)
+    }
+
     async fn spawn_and_read_stdout(request: ExecSpawnRequest) -> String {
         let registry = ExecRegistry::new();
         let result = registry.spawn(request).await.unwrap();
@@ -983,6 +1063,42 @@ mod tests {
         registry.resize(&process_id, 40, 120).await.unwrap();
 
         registry.kill(&process_id).await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn tty_kill_terminates_background_descendants() {
+        let registry = ExecRegistry::new();
+        let marker = format!("REFACT_TEST_MARKER_{}", uuid::Uuid::new_v4().simple());
+        let result = registry
+            .spawn(
+                ExecSpawnRequest::background("bash -c 'sleep 300 & sleep 300 & wait'")
+                    .with_tty(true)
+                    .with_env(&marker, "1"),
+            )
+            .await
+            .unwrap();
+        let process_id = result.snapshot.meta.process_id;
+        let spawned_processes = wait_for_marked_processes(&marker, 3).await;
+        let kill_result = registry.kill(&process_id).await;
+        assert!(
+            spawned_processes.len() >= 3,
+            "expected PTY leader and background descendants, found {spawned_processes:?}"
+        );
+        let snapshot = kill_result.unwrap();
+        assert_eq!(snapshot.status, ExecStatus::Killed);
+
+        for _ in 0..40 {
+            if processes_with_env_marker(&marker).is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let survivors = processes_with_env_marker(&marker);
+        assert!(
+            survivors.is_empty(),
+            "PTY descendants survived registry kill: {survivors:?}"
+        );
     }
 
     fn env_test_request(mode: ExecMode, command: &str) -> ExecSpawnRequest {
