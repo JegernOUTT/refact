@@ -10,10 +10,12 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use headless_chrome::Tab;
+use headless_chrome::protocol::cdp::{Page, Runtime};
 use hyper::body::Bytes;
-use refact_lsp::integrations::browser_controller::execute_steps;
+use refact_core::image_policy::ImagePolicy;
+use refact_lsp::integrations::browser_controller::execute_steps as execute_steps_with_policy;
 use refact_lsp::integrations::browser_models::{BrowserLocator, BrowserStep};
-use refact_lsp::refact_browser::BrowserRuntime;
+use refact_lsp::refact_browser::{BrowserRuntime, UTILITY_WORLD_NAME};
 use serde::Deserialize;
 use serde_json::json;
 use tempfile::{tempdir, TempDir};
@@ -33,7 +35,15 @@ const FIXTURE_PAGES: &[&str] = &[
     "contenteditable.html",
     "hover-menu.html",
     "strict-multi.html",
+    "hostile-globals.html",
 ];
+
+fn execute_steps(
+    tab: &Tab,
+    steps: &[BrowserStep],
+) -> refact_lsp::integrations::browser_models::ExecutionReport {
+    execute_steps_with_policy(tab, steps, &ImagePolicy::default())
+}
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/browser_fixtures")
@@ -260,6 +270,17 @@ impl BrowserCase {
         );
         assert!(report.ok, "navigation failed: {report:?}");
     }
+
+    fn setup_world(&mut self) {
+        refact_lsp::refact_browser::setup_recording_for_tab(&mut self.runtime, &self.tab).unwrap();
+    }
+
+    fn call_version(&self) -> serde_json::Value {
+        self.runtime
+            .world_manager
+            .call_injected(&self.tab, "version", json!([]))
+            .unwrap()
+    }
 }
 
 fn text_step(selector: &str) -> BrowserStep {
@@ -308,6 +329,95 @@ async fn fixture_server_serves_every_page_in_browser() {
         case.navigate(page);
         assert!(case.tab.get_url().ends_with(page));
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn world_utility_survives_hostile_globals() {
+    let Some(mut case) = BrowserCase::start("hostile-globals.html").await else {
+        return;
+    };
+    case.setup_world();
+    assert_eq!(case.call_version(), "playwright-1.63.0-next-refact-1");
+    let main_world = case
+        .tab
+        .evaluate(
+            "[Array.from(), JSON.stringify({}), document.elementFromPoint(0, 0)].join('|')",
+            false,
+        )
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(main_world, "hostile-array|hostile-json|hostile-element");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn world_utility_reinjects_after_navigation() {
+    let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
+        return;
+    };
+    case.setup_world();
+    assert_eq!(case.call_version(), "playwright-1.63.0-next-refact-1");
+    case.navigate("hostile-globals.html");
+    assert_eq!(case.call_version(), "playwright-1.63.0-next-refact-1");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn world_stealth_stays_in_main_world() {
+    let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
+        return;
+    };
+    case.setup_world();
+    assert_eq!(
+        case.tab
+            .evaluate(
+                "globalThis.__refact_stealth_installed === true && navigator.webdriver === undefined",
+                false,
+            )
+            .unwrap()
+            .value,
+        Some(json!(true))
+    );
+    let frame_id = case
+        .tab
+        .call_method(Page::GetFrameTree(None))
+        .unwrap()
+        .frame_tree
+        .frame
+        .id;
+    let context_id = case
+        .tab
+        .call_method(Page::CreateIsolatedWorld {
+            frame_id,
+            world_name: Some(UTILITY_WORLD_NAME.to_string()),
+            grant_univeral_access: Some(true),
+        })
+        .unwrap()
+        .execution_context_id;
+    let isolated = case
+        .tab
+        .call_method(Runtime::Evaluate {
+            expression: "globalThis.__refact_stealth_installed".to_string(),
+            object_group: None,
+            include_command_line_api: None,
+            silent: None,
+            context_id: Some(context_id),
+            return_by_value: Some(true),
+            generate_preview: None,
+            user_gesture: None,
+            await_promise: None,
+            throw_on_side_effect: None,
+            timeout: None,
+            disable_breaks: None,
+            repl_mode: None,
+            allow_unsafe_eval_blocked_by_csp: None,
+            unique_context_id: None,
+            serialization_options: None,
+        })
+        .unwrap();
+    assert_eq!(isolated.result.value, None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

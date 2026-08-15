@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Hostile globals</title>
+</head>
+<body>
+  <p>Hostile globals fixture</p>
+  <script>
+    Array.from = () => 'hostile-array';
+    JSON.stringify = () => 'hostile-json';
+    document.elementFromPoint = () => 'hostile-element';
+    window.__refact_resolved_el = 'hostile-element';
+  </script>
+</body>
+</html>

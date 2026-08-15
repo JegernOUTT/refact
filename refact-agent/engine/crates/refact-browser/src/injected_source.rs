@@ -24,7 +24,13 @@ const __refact_builtins = {{
 const module = {{ exports: {{}} }};
 const exports = module.exports;
 {}
-return new module.exports.RefactInjected(__refact_global, __refact_builtins);
+if (!__refact_global.__refact_injected__) {{
+  __refact_global.__refact_injected__ = module.exports.bootstrapRefactInjected()(
+    __refact_global,
+    __refact_builtins
+  );
+}}
+return __refact_global.__refact_injected__;
 }})()"#,
         INJECTED_BUNDLE
     )
@@ -44,7 +50,7 @@ mod tests {
     fn injected_bundle_exports_commonjs_module() {
         assert!(INJECTED_BUNDLE.contains("module.exports"));
         assert!(INJECTED_BUNDLE.contains("RefactInjected"));
-        assert!(!INJECTED_BUNDLE.contains("Object.defineProperty"));
+        assert!(INJECTED_BUNDLE.contains("bootstrapRefactInjected"));
     }
 
     #[test]
@@ -84,7 +90,9 @@ mod tests {
     fn bootstrap_evaluates_bundle_in_commonjs_wrapper() {
         let source = wrapped_bootstrap();
         assert!(source.contains("const module = { exports: {} };"));
-        assert!(source.contains("new module.exports.RefactInjected"));
+        assert!(source.contains("module.exports.bootstrapRefactInjected()"));
+        assert!(source.contains("__refact_injected__"));
+        assert!(source.contains("__refact_binding"));
         assert!(source.ends_with("})()"));
     }
 

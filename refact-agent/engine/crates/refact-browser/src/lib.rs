@@ -1,6 +1,11 @@
 mod injected_source;
+mod world;
 
 pub use injected_source::{INJECTED_BUNDLE, wrapped_bootstrap};
+pub use world::{
+    BINDING_NAME, BindingCall, BindingCallback, INJECTED_INSTANCE_NAME, UTILITY_WORLD_NAME,
+    WorldManager,
+};
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
@@ -58,6 +63,15 @@ const STEALTH_SCRIPT: &str = r#"(function() {
         };
     } catch(e) {}
 })();"#;
+
+fn stealth_init_script() -> Page::AddScriptToEvaluateOnNewDocument {
+    Page::AddScriptToEvaluateOnNewDocument {
+        source: STEALTH_SCRIPT.to_string(),
+        world_name: None,
+        include_command_line_api: None,
+        run_immediately: None,
+    }
+}
 
 pub fn build_recorder_script(mask_passwords: bool) -> String {
     RECORDER_SCRIPT_TEMPLATE.replace(
@@ -327,6 +341,7 @@ pub struct BrowserRuntime {
     pub runtime_id: String,
     pub attached_chat_id: Option<String>,
     pub browser: Browser,
+    pub world_manager: WorldManager,
     pub active_tab_target_id: Option<String>,
     pub recording_tab_target_id: Option<String>,
     pub profile_dir: PathBuf,
@@ -397,6 +412,7 @@ impl BrowserRuntime {
             runtime_id,
             attached_chat_id: None,
             browser,
+            world_manager: WorldManager::default(),
             active_tab_target_id: None,
             recording_tab_target_id: None,
             profile_dir,
@@ -430,6 +446,7 @@ impl BrowserRuntime {
             runtime_id,
             attached_chat_id: None,
             browser,
+            world_manager: WorldManager::default(),
             active_tab_target_id: None,
             recording_tab_target_id: None,
             profile_dir: PathBuf::new(),
@@ -580,12 +597,7 @@ pub fn inject_recorder_into_tab(
         warn!("Failed to expose __refact_event binding (non-fatal): {}", e);
     }
 
-    if let Err(e) = tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
-        source: STEALTH_SCRIPT.to_string(),
-        world_name: None,
-        include_command_line_api: None,
-        run_immediately: None,
-    }) {
+    if let Err(e) = tab.call_method(stealth_init_script()) {
         warn!("Failed to add stealth script (non-fatal): {}", e);
     }
 
@@ -783,6 +795,7 @@ pub fn setup_recording_for_tab(
     runtime: &mut BrowserRuntime,
     tab: &headless_chrome::Tab,
 ) -> Result<(), String> {
+    runtime.world_manager.ensure_utility_world(tab)?;
     inject_recorder_into_tab(
         tab,
         runtime.buffers.mask_passwords,
@@ -864,6 +877,15 @@ mod tests {
     fn test_build_recorder_script_mask_false() {
         let script = build_recorder_script(false);
         assert!(script.contains("var MASK_PASSWORDS = false;"));
+    }
+
+    #[test]
+    fn test_stealth_and_injected_bundle_use_separate_worlds() {
+        assert_eq!(stealth_init_script().world_name, None);
+        assert_eq!(
+            world::utility_init_script().world_name.as_deref(),
+            Some(UTILITY_WORLD_NAME)
+        );
     }
 
     #[test]

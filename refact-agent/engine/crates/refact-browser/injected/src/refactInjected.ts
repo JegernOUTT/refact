@@ -16,6 +16,14 @@
 
 type RefactBuiltins = Readonly<Record<string, unknown>>;
 
+const injectedInstanceName = '__refact_injected__';
+const bindingName = '__refact_binding';
+
+type RefactGlobal = typeof globalThis & {
+  [injectedInstanceName]?: RefactInjected;
+  [bindingName]?: (payload: string) => void;
+};
+
 export class RefactInjected {
   private readonly global: typeof globalThis;
   private readonly builtinSnapshot: RefactBuiltins;
@@ -36,4 +44,26 @@ export class RefactInjected {
   resolveSimple(cssSelector: string): Element | null {
     return this.global.document.querySelector(cssSelector);
   }
+
+  dispatchBinding(name: string, payload: unknown): void {
+    const global = this.global as RefactGlobal;
+    const binding = global[bindingName];
+    const stringify = this.builtinSnapshot.jsonStringify as (value: unknown) => string;
+    if (!binding)
+      throw new Error(`${bindingName} is not installed`);
+    binding(stringify({ name, payload }));
+  }
+}
+
+export function bootstrapRefactInjected(
+  global: typeof globalThis,
+  builtins: RefactBuiltins,
+): RefactInjected {
+  const refactGlobal = global as RefactGlobal;
+  const existing = refactGlobal[injectedInstanceName];
+  if (existing)
+    return existing;
+  const injected = new RefactInjected(global, builtins);
+  refactGlobal[injectedInstanceName] = injected;
+  return injected;
 }
