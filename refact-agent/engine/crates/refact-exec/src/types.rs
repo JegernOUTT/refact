@@ -252,11 +252,41 @@ pub struct ExecReadinessProbe {
     pub wait_port: Option<u16>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecSandboxMode {
+    ReadOnly,
+    WorkspaceWrite,
+    FullAccess,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecSandboxSpec {
+    pub mode: ExecSandboxMode,
+    pub ro_paths: Vec<PathBuf>,
+    pub rw_paths: Vec<PathBuf>,
+    pub allow_network: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecEnvPolicy {
+    Inherit,
+    Scrubbed { passthrough: Vec<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecAuditMeta {
+    pub source: String,
+    pub justification: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecSpawnRequest {
     pub command: String,
     pub cwd: Option<PathBuf>,
     pub env: HashMap<String, String>,
+    pub sandbox: Option<ExecSandboxSpec>,
+    pub env_policy: ExecEnvPolicy,
+    pub audit: Option<ExecAuditMeta>,
     pub mode: ExecMode,
     pub tty: bool,
     pub rows: u16,
@@ -277,6 +307,9 @@ impl ExecSpawnRequest {
             command: command.into(),
             cwd: None,
             env: HashMap::new(),
+            sandbox: None,
+            env_policy: ExecEnvPolicy::Inherit,
+            audit: None,
             mode,
             tty: false,
             rows: 24,
@@ -320,6 +353,21 @@ impl ExecSpawnRequest {
 
     pub fn with_env_map(mut self, env: HashMap<String, String>) -> Self {
         self.env = env;
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: ExecSandboxSpec) -> Self {
+        self.sandbox = Some(sandbox);
+        self
+    }
+
+    pub fn with_env_policy(mut self, env_policy: ExecEnvPolicy) -> Self {
+        self.env_policy = env_policy;
+        self
+    }
+
+    pub fn with_audit(mut self, audit: ExecAuditMeta) -> Self {
+        self.audit = Some(audit);
         self
     }
 
@@ -690,6 +738,41 @@ pub struct ExecWriteStdinResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_spawn_request_confinement_metadata_defaults() {
+        let request = ExecSpawnRequest::foreground("echo hello");
+
+        assert_eq!(request.sandbox, None);
+        assert_eq!(request.env_policy, ExecEnvPolicy::Inherit);
+        assert_eq!(request.audit, None);
+    }
+
+    #[test]
+    fn test_spawn_request_confinement_metadata_builders() {
+        let sandbox = ExecSandboxSpec {
+            mode: ExecSandboxMode::WorkspaceWrite,
+            ro_paths: vec![PathBuf::from("/readonly")],
+            rw_paths: vec![PathBuf::from("/workspace")],
+            allow_network: false,
+        };
+        let env_policy = ExecEnvPolicy::Scrubbed {
+            passthrough: vec!["PATH".to_string(), "HOME".to_string()],
+        };
+        let audit = ExecAuditMeta {
+            source: "tool.shell".to_string(),
+            justification: Some("run project tests".to_string()),
+        };
+
+        let request = ExecSpawnRequest::foreground("cargo test")
+            .with_sandbox(sandbox.clone())
+            .with_env_policy(env_policy.clone())
+            .with_audit(audit.clone());
+
+        assert_eq!(request.sandbox, Some(sandbox));
+        assert_eq!(request.env_policy, env_policy);
+        assert_eq!(request.audit, Some(audit));
+    }
 
     #[test]
     fn test_process_id_prefix() {
