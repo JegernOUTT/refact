@@ -1,4 +1,5 @@
 pub mod code_review_candidates;
+pub mod code_review_evidence;
 pub mod code_review_scope;
 pub mod code_review_types;
 pub mod scope_utils;

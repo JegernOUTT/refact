@@ -10,6 +10,7 @@ use crate::tools::subagent_phases::DEFAULT_MAX_FILES;
 
 const DEFAULT_MAX_CANDIDATES: usize = 30;
 const TOKENS_EXTRA_BUDGET_PERCENT: f32 = 0.06;
+const MAX_DIFF_PATCH_BYTES: usize = 512 * 1024;
 
 /// Limits applied across code review stages.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +28,7 @@ pub struct ReviewScope {
     pub focus: Option<String>,
     pub diff_base: Option<String>,
     pub changed_files: Vec<PathBuf>,
+    pub diff_patch: Option<String>,
     pub budgets: ReviewBudgets,
 }
 
@@ -116,15 +118,20 @@ async fn detect_diff_base(root: &Path) -> Option<String> {
     git_output(root, &["rev-parse", "HEAD"]).await
 }
 
-async fn git_context(gcx: &GlobalContext, files: &[PathBuf]) -> (Option<String>, Vec<PathBuf>) {
+async fn git_context(
+    gcx: &GlobalContext,
+    files: &[PathBuf],
+) -> (Option<String>, Vec<PathBuf>, Option<String>) {
     let Some(root) = repo_root_for_scope(gcx, files) else {
-        return (None, Vec::new());
+        return (None, Vec::new(), None);
     };
     let Some(diff_base) = detect_diff_base(&root).await else {
-        return (None, Vec::new());
+        return (None, Vec::new(), None);
     };
-    let Ok(diff) = refact_worktrees::git::diff_for_path(&root, Some(&diff_base), None, 0) else {
-        return (None, Vec::new());
+    let Ok(diff) =
+        refact_worktrees::git::diff_for_path(&root, Some(&diff_base), None, MAX_DIFF_PATCH_BYTES)
+    else {
+        return (None, Vec::new(), None);
     };
     let mut seen = HashSet::new();
     let changed_files = diff
@@ -133,7 +140,8 @@ async fn git_context(gcx: &GlobalContext, files: &[PathBuf]) -> (Option<String>,
         .map(|file| root.join(file.path))
         .filter(|path| seen.insert(path.clone()))
         .collect();
-    (Some(diff_base), changed_files)
+    let patch = (!diff.patch.trim().is_empty()).then_some(diff.patch);
+    (Some(diff_base), changed_files, patch)
 }
 
 /// Build the immutable input shared by the code review pipeline.
@@ -171,7 +179,7 @@ pub(crate) async fn build_review_scope_with_max_files(
     max_files: usize,
 ) -> ReviewScope {
     let files = merge_files(gathered, seed.clone(), max_files);
-    let (diff_base, changed_files) = git_context(gcx.as_ref(), &files).await;
+    let (diff_base, changed_files, diff_patch) = git_context(gcx.as_ref(), &files).await;
     ReviewScope {
         files,
         seed_files: seed,
@@ -180,6 +188,7 @@ pub(crate) async fn build_review_scope_with_max_files(
             .filter(|value| !value.is_empty()),
         diff_base,
         changed_files,
+        diff_patch,
         budgets: ReviewBudgets {
             max_files,
             tokens_budget: review_tokens_budget(subchat_params),
@@ -285,6 +294,10 @@ mod tests {
 
         assert!(scope.diff_base.is_some());
         assert_eq!(scope.changed_files, vec![temp.path().join("changed.rs")]);
+        assert!(scope
+            .diff_patch
+            .as_deref()
+            .is_some_and(|patch| patch.contains("changed.rs")));
     }
 
     #[tokio::test]
@@ -304,6 +317,7 @@ mod tests {
 
         assert_eq!(scope.diff_base, None);
         assert!(scope.changed_files.is_empty());
+        assert_eq!(scope.diff_patch, None);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use crate::subchat::{run_subchat_once_with_parent, resolve_subchat_params, resolve_subchat_model};
 use crate::tools::code_review_candidates::{parse_candidates_with_reasons, ParsedCandidates};
+use crate::tools::code_review_evidence::collect_evidence;
 use crate::tools::code_review_scope::{
     build_review_scope_with_max_files, validate_review_budget, ReviewScope,
 };
@@ -250,7 +251,7 @@ async fn run_review_pipeline(
                 CANDIDATE_RETRY_PROMPT.to_string(),
             ));
             match run_subchat_once_with_parent(
-                gcx,
+                gcx.clone(),
                 "code_review",
                 retry_messages,
                 tool_call_id,
@@ -294,14 +295,42 @@ async fn run_review_pipeline(
     let max_candidates = scope.budgets.max_candidates;
     let scope_summary = ReviewScopeSummary {
         files_reviewed: filenames,
-        focus: scope.focus,
-        diff_base: scope.diff_base,
+        focus: scope.focus.clone(),
+        diff_base: scope.diff_base.clone(),
     };
 
-    Ok(match parsed {
+    let output = match parsed {
         Some(parsed) => candidate_stage_output(scope_summary, parsed, max_candidates),
         None => fallback_candidate_stage_output(scope_summary, fallback_text),
-    })
+    };
+    Ok(apply_evidence_stage(gcx, &scope, output).await)
+}
+
+async fn apply_evidence_stage(
+    gcx: Arc<GlobalContext>,
+    scope: &ReviewScope,
+    mut output: CandidateStageOutput,
+) -> CandidateStageOutput {
+    let rejections = collect_evidence(gcx, &scope, &mut output.report.findings).await;
+    if !rejections.is_empty() {
+        let rejected_indices = rejections
+            .iter()
+            .map(|rejection| rejection.index)
+            .collect::<std::collections::HashSet<_>>();
+        output.rationales = output
+            .rationales
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, rationale)| {
+                (!rejected_indices.contains(&(index + 1))).then_some(rationale)
+            })
+            .collect();
+    }
+    output
+        .report
+        .checks_performed
+        .extend(rejections.iter().map(|rejection| rejection.check_name()));
+    output
 }
 
 fn candidate_stage_output(
@@ -557,6 +586,7 @@ impl Tool for ToolCodeReview {
 mod tests {
     use super::*;
     use crate::tools::code_review_candidates::parse_candidates_with_reasons;
+    use crate::tools::code_review_scope::ReviewBudgets;
 
     fn scope_summary() -> ReviewScopeSummary {
         ReviewScopeSummary {
@@ -658,5 +688,49 @@ mod tests {
         assert_eq!(config.schema_version, 3);
         assert!(reviewer.contains("Optimize for recall"));
         assert!(reviewer.contains("exactly one fenced json block"));
+    }
+
+    #[tokio::test]
+    async fn tool_code_review_evidence_stage_records_structural_rejections() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("src/lib.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "fn present() {}\n").unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let parsed = parse_candidates_with_reasons(&format!(
+            r#"```json
+{{"summary":"Candidates.","candidates":[{{"file":"{}","line1":9,"line2":9,"category":"correctness","severity":"high","confidence":0.8,"claim":"The range is fabricated.","rationale":"Private rationale."}}]}}
+```"#,
+            file.to_string_lossy()
+        ))
+        .unwrap();
+        let scope = ReviewScope {
+            files: vec![file],
+            seed_files: vec![],
+            focus: None,
+            diff_base: None,
+            changed_files: vec![],
+            diff_patch: None,
+            budgets: ReviewBudgets {
+                max_files: 1,
+                tokens_budget: 10_000,
+                max_candidates: 30,
+            },
+        };
+
+        let output = apply_evidence_stage(
+            gcx,
+            &scope,
+            candidate_stage_output(scope_summary(), parsed, 30),
+        )
+        .await;
+
+        assert!(output.report.findings.is_empty());
+        assert!(output.rationales.is_empty());
+        assert_eq!(
+            output.report.checks_performed,
+            vec!["evidence_reject:1:range_out_of_bounds"]
+        );
     }
 }
