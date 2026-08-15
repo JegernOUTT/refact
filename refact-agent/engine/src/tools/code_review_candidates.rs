@@ -102,12 +102,7 @@ fn normalize_category(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
     matches!(
         normalized.as_str(),
-        "correctness"
-            | "consistency"
-            | "security"
-            | "tests"
-            | "maintainability"
-            | "performance"
+        "correctness" | "consistency" | "security" | "tests" | "maintainability" | "performance"
     )
     .then_some(normalized)
 }
@@ -122,10 +117,7 @@ fn normalize_severity(value: &str) -> Option<ReviewSeverity> {
     }
 }
 
-fn validate_candidate(
-    index: usize,
-    value: serde_json::Value,
-) -> Result<CandidateFinding, String> {
+fn validate_candidate(index: usize, value: serde_json::Value) -> Result<CandidateFinding, String> {
     let raw: RawCandidateFinding = serde_json::from_value(value)
         .map_err(|error| format!("candidate {}: {error}", index + 1))?;
     let file = raw.file.trim().to_string();
@@ -291,7 +283,9 @@ mod tests {
 
     #[test]
     fn tool_code_review_parse_candidates_normalizes_and_clamps_values() {
-        let input = candidate_json(",\"category\":\" SECURITY \",\"severity\":\" CRITICAL \",\"confidence\":4.2");
+        let input = candidate_json(
+            ",\"category\":\" SECURITY \",\"severity\":\" CRITICAL \",\"confidence\":4.2",
+        );
         let (_, candidates) = parse_candidates(&response(&input)).unwrap();
 
         assert_eq!(candidates[0].category, "security");

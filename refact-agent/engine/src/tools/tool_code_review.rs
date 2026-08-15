@@ -6,14 +6,16 @@ use axum::http::StatusCode;
 use std::collections::HashMap;
 
 use crate::subchat::{run_subchat_once_with_parent, resolve_subchat_params, resolve_subchat_model};
+use crate::tools::code_review_candidates::{parse_candidates_with_reasons, ParsedCandidates};
 use crate::tools::code_review_scope::{
     build_review_scope_with_max_files, validate_review_budget, ReviewScope,
 };
-use crate::tools::code_review_types::{ReviewReport, ReviewScopeSummary};
+use crate::tools::code_review_types::{ReviewFinding, ReviewReport, ReviewScopeSummary, ReviewSeverity};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::tools::tool_helpers::{load_code_subagent_config, CodeSubagentConfig};
 use crate::tools::subagent_phases::{
-    gather_files_phase, resolve_gathered_file_path, GatherFilesParams, DEFAULT_MAX_FILES,
+    gather_files_phase, get_last_assistant_content, resolve_gathered_file_path, GatherFilesParams,
+    DEFAULT_MAX_FILES,
 };
 use crate::call_validation::{
     ChatMessage, ChatContent, ContextEnum, SubchatParameters, ContextFile, PostprocessSettings,
@@ -30,6 +32,28 @@ use crate::worktrees::scope::ExecutionScope;
 
 pub struct ToolCodeReview {
     pub config_path: String,
+}
+
+const CANDIDATE_RETRY_PROMPT: &str = r#"Your response did not end with a valid candidate envelope. Return the review again and end with exactly one fenced json block matching this schema:
+
+```json
+{"summary":"<2-4 sentences>","candidates":[{"file":"<path as given>","line1":1,"line2":10,"category":"correctness|consistency|security|tests|maintainability|performance","severity":"low|medium|high|critical","confidence":0.0,"claim":"<one falsifiable sentence>","rationale":"<short why>"}]}
+```
+
+Use an empty candidates array when no issue is plausible. Do not put another fenced json block before or after the envelope."#;
+
+#[derive(Debug)]
+struct CandidateStageOutput {
+    report: ReviewReport,
+    rationales: Vec<String>,
+}
+
+impl CandidateStageOutput {
+    fn into_report(self) -> ReviewReport {
+        let Self { report, rationales } = self;
+        drop(rationales);
+        report
+    }
 }
 
 fn get_gather_files_params(
@@ -73,10 +97,14 @@ async fn make_review_prompt(
         .ok_or("reviewer_prompt not configured for code_review")?;
 
     let mut tokens_budget = scope.budgets.tokens_budget;
-    let final_message = match scope.focus.as_deref() {
+    let mut final_message = match scope.focus.as_deref() {
         Some(focus) => format!("{reviewer_prompt}\n\n# Focus \u{2014} what to check\n{focus}"),
         None => reviewer_prompt.clone(),
     };
+    final_message.push_str(&format!(
+        "\n\n# Candidate limit\nReturn at most {} candidates.",
+        scope.budgets.max_candidates
+    ));
     tokens_budget -= count_text_tokens_with_fallback(tokenizer.clone(), &final_message) as i64;
 
     let mut context = String::new();
@@ -169,7 +197,7 @@ async fn run_review_pipeline(
     tool_call_id: String,
     config: &CodeSubagentConfig,
     metering: &mut serde_json::Map<String, serde_json::Value>,
-) -> Result<ReviewReport, String> {
+) -> Result<CandidateStageOutput, String> {
     let (subchat_tx, abort_flag, parent_depth, parent_task_meta, parent_worktree) = {
         let ccx_lock = ccx.lock().await;
         (
@@ -197,14 +225,65 @@ async fn run_review_pipeline(
         "code_review",
         history,
         tool_call_id.clone(),
-        subchat_tx,
-        abort_flag,
+        subchat_tx.clone(),
+        abort_flag.clone(),
         parent_depth,
-        parent_task_meta,
-        parent_worktree,
+        parent_task_meta.clone(),
+        parent_worktree.clone(),
     )
     .await?;
-    let review_response = validate_review_response(&result.messages)?;
+    let review_text = get_last_assistant_content(&result.messages);
+
+    let (parsed, fallback_text) = match parse_candidates_with_reasons(&review_text) {
+        Ok(parsed) => {
+            *metering = result.metering;
+            (Some(parsed), review_text)
+        }
+        Err(first_error) => {
+            tracing::info!(
+                "code_review: candidate response malformed ({first_error}), requesting retry"
+            );
+            *metering = result.metering;
+            let mut retry_messages = result.messages;
+            retry_messages.push(ChatMessage::new(
+                "user".to_string(),
+                CANDIDATE_RETRY_PROMPT.to_string(),
+            ));
+            match run_subchat_once_with_parent(
+                gcx,
+                "code_review",
+                retry_messages,
+                tool_call_id,
+                subchat_tx,
+                abort_flag,
+                parent_depth,
+                parent_task_meta,
+                parent_worktree,
+            )
+            .await
+            {
+                Ok(retry_result) => {
+                    let retry_text = get_last_assistant_content(&retry_result.messages);
+                    *metering = retry_result.metering;
+                    match parse_candidates_with_reasons(&retry_text) {
+                        Ok(parsed) => (Some(parsed), retry_text),
+                        Err(second_error) => {
+                            tracing::warn!(
+                                "code_review: candidate response malformed after retry: {second_error}"
+                            );
+                            (None, retry_text)
+                        }
+                    }
+                }
+                Err(retry_error) => {
+                    tracing::warn!(
+                        "code_review: candidate format retry failed, using legacy response: {retry_error}"
+                    );
+                    (None, review_text)
+                }
+            }
+        }
+    };
 
     let filenames: Vec<String> = scope
         .files
@@ -212,59 +291,105 @@ async fn run_review_pipeline(
         .map(|p| p.to_string_lossy().to_string())
         .collect();
 
-    let files_section = format!(
-        "# Files Reviewed ({})\n{}\n\n",
-        filenames.len(),
-        filenames
-            .iter()
-            .map(|f| format!("- {}", f))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
+    let max_candidates = scope.budgets.max_candidates;
+    let scope_summary = ReviewScopeSummary {
+        files_reviewed: filenames,
+        focus: scope.focus,
+        diff_base: scope.diff_base,
+    };
 
-    let review_content = format!(
-        "{}# Code Review\n{}",
-        files_section,
-        review_response.content.to_text_with_image_placeholders()
-    );
-    *metering = result.metering;
-
-    Ok(ReviewReport {
-        scope: ReviewScopeSummary {
-            files_reviewed: filenames,
-            focus: scope.focus,
-            diff_base: scope.diff_base,
-        },
-        findings: vec![],
-        checks_performed: vec![],
-        summary: review_content,
+    Ok(match parsed {
+        Some(parsed) => candidate_stage_output(scope_summary, parsed, max_candidates),
+        None => fallback_candidate_stage_output(scope_summary, fallback_text),
     })
 }
 
-fn render_review_markdown(report: &ReviewReport) -> String {
-    report.summary.clone()
+fn candidate_stage_output(
+    scope: ReviewScopeSummary,
+    mut parsed: ParsedCandidates,
+    max_candidates: usize,
+) -> CandidateStageOutput {
+    parsed.candidates.truncate(max_candidates);
+    let mut rationales = Vec::with_capacity(parsed.candidates.len());
+    let findings = parsed
+        .candidates
+        .into_iter()
+        .map(|candidate| {
+            let (finding, rationale) = candidate.into_review_parts();
+            rationales.push(rationale);
+            finding
+        })
+        .collect();
+
+    CandidateStageOutput {
+        report: ReviewReport {
+            scope,
+            findings,
+            checks_performed: vec![],
+            summary: parsed.summary,
+        },
+        rationales,
+    }
 }
 
-fn validate_review_response(messages: &[ChatMessage]) -> Result<ChatMessage, String> {
-    let last = messages.last().ok_or("No response from code review")?;
-    if last.role != "assistant" {
-        return Err(format!(
-            "code review subagent did not produce a final answer (last message role: {})",
-            last.role
+fn fallback_candidate_stage_output(
+    scope: ReviewScopeSummary,
+    reviewer_text: String,
+) -> CandidateStageOutput {
+    CandidateStageOutput {
+        report: ReviewReport {
+            scope,
+            findings: vec![],
+            checks_performed: vec!["candidates_parse_failed".to_string()],
+            summary: reviewer_text,
+        },
+        rationales: vec![],
+    }
+}
+
+fn markdown_cell(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('|', "\\|")
+}
+
+fn severity_label(severity: &ReviewSeverity) -> &'static str {
+    match severity {
+        ReviewSeverity::Low => "low",
+        ReviewSeverity::Medium => "medium",
+        ReviewSeverity::High => "high",
+        ReviewSeverity::Critical => "critical",
+    }
+}
+
+fn finding_location(finding: &ReviewFinding) -> String {
+    if finding.line1 == finding.line2 {
+        format!("{}:{}", finding.file, finding.line1)
+    } else {
+        format!("{}:{}-{}", finding.file, finding.line1, finding.line2)
+    }
+}
+
+fn render_review_markdown(report: &ReviewReport) -> String {
+    if report.findings.is_empty() {
+        return report.summary.clone();
+    }
+
+    let mut output = report.summary.trim_end().to_string();
+    output.push_str(
+        "\n\n### Candidate findings\n\n| Location | Severity | Claim |\n| --- | --- | --- |\n",
+    );
+    for finding in &report.findings {
+        output.push_str(&format!(
+            "| {} | {} | {} |\n",
+            markdown_cell(&finding_location(finding)),
+            severity_label(&finding.severity),
+            markdown_cell(&finding.claim),
         ));
     }
-    let text = last.content.content_text_only();
-    if text.trim().is_empty() {
-        let hint = last
-            .finish_reason
-            .as_deref()
-            .map(|reason| format!(" (finish_reason: {reason})"))
-            .unwrap_or_default();
-        return Err(format!(
-            "code review subagent returned an empty review{hint}"
-        ));
-    }
-    Ok(last.clone())
+    output
 }
 
 #[async_trait]
@@ -381,7 +506,7 @@ impl Tool for ToolCodeReview {
         );
 
         let mut metering = serde_json::Map::new();
-        let report = run_review_pipeline(
+        let stage_output = run_review_pipeline(
             gcx,
             ccx.clone(),
             scope,
@@ -392,6 +517,7 @@ impl Tool for ToolCodeReview {
             &mut metering,
         )
         .await?;
+        let report = stage_output.into_report();
         let final_message = render_review_markdown(&report);
 
         let guardrails_prompt = config
@@ -430,47 +556,14 @@ impl Tool for ToolCodeReview {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::code_review_candidates::parse_candidates_with_reasons;
 
-    #[test]
-    fn validate_review_response_rejects_empty_history() {
-        assert!(validate_review_response(&[]).is_err());
-    }
-
-    #[test]
-    fn validate_review_response_rejects_non_assistant_tail() {
-        let prompt_only = vec![ChatMessage::new(
-            "user".to_string(),
-            "review this".to_string(),
-        )];
-        let error = validate_review_response(&prompt_only).unwrap_err();
-        assert!(error.contains("last message role: user"));
-    }
-
-    #[test]
-    fn validate_review_response_rejects_empty_assistant_reply_with_finish_reason_hint() {
-        let empty_reply = vec![ChatMessage {
-            role: "assistant".to_string(),
-            content: ChatContent::SimpleText("   ".to_string()),
-            finish_reason: Some("length".to_string()),
-            ..Default::default()
-        }];
-        let error = validate_review_response(&empty_reply).unwrap_err();
-        assert!(error.contains("empty review"));
-        assert!(error.contains("finish_reason: length"));
-    }
-
-    #[test]
-    fn validate_review_response_accepts_fresh_assistant_reply() {
-        let messages = vec![
-            ChatMessage::new("user".to_string(), "review this".to_string()),
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::SimpleText("Looks good".to_string()),
-                ..Default::default()
-            },
-        ];
-        let reply = validate_review_response(&messages).unwrap();
-        assert_eq!(reply.content.content_text_only(), "Looks good");
+    fn scope_summary() -> ReviewScopeSummary {
+        ReviewScopeSummary {
+            files_reviewed: vec!["src/lib.rs".to_string()],
+            focus: None,
+            diff_base: None,
+        }
     }
 
     #[test]
@@ -489,5 +582,81 @@ mod tests {
         };
 
         assert_eq!(render_review_markdown(&report), raw_reviewer_text);
+    }
+
+    #[test]
+    fn tool_code_review_parse_failure_falls_back_to_legacy_report_with_marker() {
+        let reviewer_text = "Legacy prose review".to_string();
+        let output = fallback_candidate_stage_output(scope_summary(), reviewer_text.clone());
+
+        assert_eq!(output.report.summary, reviewer_text);
+        assert!(output.report.findings.is_empty());
+        assert_eq!(
+            output.report.checks_performed,
+            vec!["candidates_parse_failed"]
+        );
+        assert!(output.rationales.is_empty());
+    }
+
+    #[test]
+    fn tool_code_review_candidate_output_quarantines_rationales() {
+        let parsed = parse_candidates_with_reasons(
+            r#"```json
+{"summary":"One plausible issue.","candidates":[{"file":"src/lib.rs","line1":4,"line2":4,"category":"correctness","severity":"high","confidence":0.8,"claim":"The branch drops errors.","rationale":"The error arm returns success."}]}
+```"#,
+        )
+        .unwrap();
+        let output = candidate_stage_output(scope_summary(), parsed, 30);
+        let serialized = serde_json::to_string(&output.report).unwrap();
+
+        assert_eq!(output.rationales, vec!["The error arm returns success."]);
+        assert_eq!(output.report.findings.len(), 1);
+        assert!(!serialized.contains("rationale"));
+        assert!(!serialized.contains("error arm returns success"));
+    }
+
+    #[test]
+    fn tool_code_review_render_markdown_adds_compact_findings_table() {
+        let report = ReviewReport {
+            scope: scope_summary(),
+            findings: vec![ReviewFinding {
+                id: String::new(),
+                category: "correctness".to_string(),
+                severity: ReviewSeverity::High,
+                confidence: 0.8,
+                verification_status:
+                    crate::tools::code_review_types::VerificationStatus::Unverified,
+                file: "src/lib.rs".to_string(),
+                line1: 4,
+                line2: 6,
+                claim: "The branch | drops errors.".to_string(),
+                evidence: vec![],
+                impact: None,
+                remediation: None,
+                checks_performed: vec![],
+            }],
+            checks_performed: vec![],
+            summary: "One plausible issue.".to_string(),
+        };
+
+        let markdown = render_review_markdown(&report);
+
+        assert!(markdown.contains("### Candidate findings"));
+        assert!(markdown.contains("| src/lib.rs:4-6 | high | The branch \\| drops errors. |"));
+    }
+
+    #[test]
+    fn tool_code_review_default_prompt_yaml_keeps_reviewer_config_key() {
+        let config: crate::yaml_configs::customization_types::SubagentConfig =
+            serde_yaml::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/crates/refact-yaml-configs/src/defaults/subagents/code_review.yaml"
+            )))
+            .unwrap();
+        let reviewer = config.prompts.reviewer.unwrap();
+
+        assert_eq!(config.schema_version, 3);
+        assert!(reviewer.contains("Optimize for recall"));
+        assert!(reviewer.contains("exactly one fenced json block"));
     }
 }
