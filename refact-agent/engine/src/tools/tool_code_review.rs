@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use std::collections::HashMap;
 
 use crate::subchat::{run_subchat_once_with_parent, resolve_subchat_params, resolve_subchat_model};
+use crate::tools::code_review_types::{ReviewReport, ReviewScopeSummary};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::tools::tool_helpers::{load_code_subagent_config, CodeSubagentConfig};
 use crate::tools::subagent_phases::{gather_files_phase, GatherFilesParams};
@@ -172,7 +173,7 @@ async fn make_review_prompt(
     }
 }
 
-async fn execute_code_review(
+async fn run_review_pipeline(
     gcx: Arc<GlobalContext>,
     ccx: Arc<AMutex<AtCommandsContext>>,
     important_paths: Vec<PathBuf>,
@@ -180,7 +181,8 @@ async fn execute_code_review(
     tool_call_id: String,
     config: &CodeSubagentConfig,
     focus: Option<&str>,
-) -> Result<(String, serde_json::Map<String, serde_json::Value>), String> {
+    metering: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<ReviewReport, String> {
     let (subchat_tx, abort_flag, parent_depth, parent_task_meta, parent_worktree) = {
         let ccx_lock = ccx.lock().await;
         (
@@ -240,9 +242,22 @@ async fn execute_code_review(
         files_section,
         review_response.content.to_text_with_image_placeholders()
     );
-    let metering = result.metering;
+    *metering = result.metering;
 
-    Ok((review_content, metering))
+    Ok(ReviewReport {
+        scope: ReviewScopeSummary {
+            files_reviewed: filenames,
+            focus: focus.map(str::to_string),
+            diff_base: None,
+        },
+        findings: vec![],
+        checks_performed: vec![],
+        summary: review_content,
+    })
+}
+
+fn render_review_markdown(report: &ReviewReport) -> String {
+    report.summary.clone()
 }
 
 fn validate_review_response(messages: &[ChatMessage]) -> Result<ChatMessage, String> {
@@ -354,7 +369,8 @@ impl Tool for ToolCodeReview {
             important_paths.len()
         );
 
-        let (final_message, metering) = execute_code_review(
+        let mut metering = serde_json::Map::new();
+        let report = run_review_pipeline(
             gcx,
             ccx.clone(),
             important_paths,
@@ -362,8 +378,10 @@ impl Tool for ToolCodeReview {
             tool_call_id.clone(),
             &config,
             what_to_check.as_deref(),
+            &mut metering,
         )
         .await?;
+        let final_message = render_review_markdown(&report);
 
         let guardrails_prompt = config
             .guardrails_prompt
@@ -442,5 +460,23 @@ mod tests {
         ];
         let reply = validate_review_response(&messages).unwrap();
         assert_eq!(reply.content.content_text_only(), "Looks good");
+    }
+
+    #[test]
+    fn render_review_markdown_preserves_passthrough_summary() {
+        let raw_reviewer_text =
+            "# Files Reviewed (1)\n- src/lib.rs\n\n# Code Review\n## High\nFinding body\n";
+        let report = ReviewReport {
+            scope: ReviewScopeSummary {
+                files_reviewed: vec!["src/lib.rs".to_string()],
+                focus: None,
+                diff_base: None,
+            },
+            findings: vec![],
+            checks_performed: vec![],
+            summary: raw_reviewer_text.to_string(),
+        };
+
+        assert_eq!(render_review_markdown(&report), raw_reviewer_text);
     }
 }
