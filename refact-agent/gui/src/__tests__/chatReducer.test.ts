@@ -204,10 +204,10 @@ describe("Chat Thread Reducer - Core Functionality", () => {
   });
 
   describe("Image Attachment", () => {
-    test("should_add_image_up_to_limit", () => {
+    test("should_keep_50_images_and_show_an_error_for_the_51st", () => {
       let state = initialState;
 
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 50; i++) {
         state = chatReducer(
           state,
           addThreadImage({
@@ -221,21 +221,22 @@ describe("Chat Thread Reducer - Core Functionality", () => {
         );
       }
 
-      expect(state.threads[chatId]?.attached_images).toHaveLength(5);
+      expect(state.threads[chatId]?.attached_images).toHaveLength(50);
 
       state = chatReducer(
         state,
         addThreadImage({
           id: chatId,
           image: {
-            name: "image5.png",
-            content: "data:image/png;base64,5",
+            name: "image50.png",
+            content: "data:image/png;base64,50",
             type: "image/png",
           },
         }),
       );
 
-      expect(state.threads[chatId]?.attached_images).toHaveLength(5);
+      expect(state.threads[chatId]?.attached_images).toHaveLength(50);
+      expect(state.threads[chatId]?.error).toBe("Attachment limit reached (50)");
     });
 
     test("should_remove_image_by_index", () => {

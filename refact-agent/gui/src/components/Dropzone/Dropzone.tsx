@@ -6,6 +6,12 @@ import { useAttachedImages } from "../../hooks/useAttachedImages";
 import { useAttachedFiles } from "../ChatForm/useCheckBoxes";
 import { TruncateLeft } from "../Text";
 import { Button, Icon, IconButton, Tooltip } from "../ui";
+import {
+  attachmentFileError,
+  isSupportedImageFile,
+  isSupportedTextFile,
+  MAX_ATTACHMENT_FILE_SIZE,
+} from "../../utils/attachmentFiles";
 import styles from "./Dropzone.module.css";
 
 export const FileUploadContext = createContext<{
@@ -26,12 +32,20 @@ export const DropzoneProvider: React.FC<
 
   const onDrop = useCallback(
     (acceptedFiles: File[], fileRejections: FileRejection[]): void => {
-      const imageFiles = acceptedFiles.filter(
-        (f) => f.type === "image/jpeg" || f.type === "image/png",
-      );
-      const textFiles = acceptedFiles.filter(
-        (f) => f.type !== "image/jpeg" && f.type !== "image/png",
-      );
+      const imageFiles: File[] = [];
+      const textFiles: File[] = [];
+      const rejectedFileMessages: string[] = [];
+
+      for (const file of acceptedFiles) {
+        const validationError = attachmentFileError(file);
+        if (validationError) {
+          rejectedFileMessages.push(validationError);
+        } else if (isSupportedImageFile(file)) {
+          imageFiles.push(file);
+        } else if (isSupportedTextFile(file)) {
+          textFiles.push(file);
+        }
+      }
 
       if (imageFiles.length > 0) {
         if (!isMultimodalitySupportedForCurrentModel) {
@@ -46,13 +60,18 @@ export const DropzoneProvider: React.FC<
       }
 
       if (fileRejections.length) {
-        const rejectedFileMessage = fileRejections.map((file) => {
-          const err = file.errors.reduce<string>((acc, cur) => {
-            return acc + `${cur.code} ${cur.message}\n`;
-          }, "");
-          return `could not attach ${file.file.name}: ${err}`;
-        });
-        setError(rejectedFileMessage.join("\n"));
+        rejectedFileMessages.push(
+          ...fileRejections.map((file) => {
+            const err = file.errors.reduce<string>((acc, cur) => {
+              return acc + `${cur.code} ${cur.message}\n`;
+            }, "");
+            return `could not attach ${file.file.name}: ${err}`;
+          }),
+        );
+      }
+
+      if (rejectedFileMessages.length > 0) {
+        setError(rejectedFileMessages.join("\n"));
       }
     },
     [
@@ -68,6 +87,7 @@ export const DropzoneProvider: React.FC<
     noClick: true,
     noKeyboard: true,
     onDrop,
+    maxSize: MAX_ATTACHMENT_FILE_SIZE,
   });
 
   const rootProps = dropzone.getRootProps();

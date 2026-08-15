@@ -468,11 +468,77 @@ describe("ChatForm", () => {
 
     const prevented = pasteFile(textarea, imageFile);
 
-    expect(prevented).toBe(true);
+    expect(prevented).toBe(false);
     expect(
       app.store.getState().chat.threads[
         app.store.getState().chat.current_thread_id
       ]?.attached_images,
+    ).toHaveLength(0);
+  });
+
+  test("pasting WebP and GIF images uses the image attachment path", async () => {
+    const { ...app } = render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+    const textarea = app.container.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+    if (!textarea) return;
+    await screen.findByRole("button", { name: "Attach images" });
+
+    expect(
+      pasteFile(
+        textarea,
+        new File(["webp"], "diagram.webp", { type: "image/webp" }),
+      ),
+    ).toBe(false);
+    expect(
+      pasteFile(
+        textarea,
+        new File(["gif"], "animation.gif", { type: "image/gif" }),
+      ),
+    ).toBe(false);
+
+    await waitFor(() => {
+      expect(
+        app.store.getState().chat.threads[
+          app.store.getState().chat.current_thread_id
+        ]?.attached_images.map((image) => image.type),
+      ).toEqual(["image/webp", "image/gif"]);
+    });
+  });
+
+  test("pasting an unknown binary reports an error and does not attach text", async () => {
+    const { ...app } = render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+    const textarea = app.container.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+    if (!textarea) return;
+
+    expect(
+      pasteFile(
+        textarea,
+        new File([new Uint8Array([0, 1])], "payload.bin", {
+          type: "application/octet-stream",
+        }),
+      ),
+    ).toBe(false);
+
+    await waitFor(() => {
+      expect(app.store.getState().error.message).toBe(
+        "Could not attach payload.bin: unsupported file type",
+      );
+    });
+    expect(
+      app.store.getState().chat.threads[
+        app.store.getState().chat.current_thread_id
+      ]?.attached_text_files,
     ).toHaveLength(0);
   });
 

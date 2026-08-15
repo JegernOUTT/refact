@@ -16,10 +16,17 @@ import "katex/dist/katex.min.css";
 import type { PluggableList } from "unified";
 import { useLinksFromLsp } from "../../hooks";
 import { maskIncompleteSpecialCodeFences } from "./renderUtils";
+import { DialogImage } from "../DialogImage";
 
 const REMARK_PLUGINS: PluggableList = [remarkBreaks, remarkMath, remarkGfm];
 const REHYPE_PLUGINS: PluggableList = [rehypeKatex];
-const SAFE_URL_PREFIXES = ["refact://", "http://", "https://", "mailto:"];
+const SAFE_URL_PREFIXES = [
+  "refact://",
+  "http://",
+  "https://",
+  "mailto:",
+  "data:image/",
+];
 
 function transformMarkdownUrl(url: string): string {
   const lowerUrl = url.toLowerCase();
@@ -117,6 +124,10 @@ const _Markdown: React.FC<MarkdownProps> = ({
             {...props}
           />
         );
+      },
+      img({ ref: _ref, node: _node, src, alt }) {
+        if (!src) return alt ? <span>{alt}</span> : null;
+        return <DialogImage src={src} alt={alt ?? ""} size="auto" />;
       },
       p({ color: _color, ref: _ref, node: _node, ...props }) {
         if (canHaveInteractiveElements) {

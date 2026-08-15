@@ -2,52 +2,11 @@ import React, { useCallback, useEffect, useMemo } from "react";
 
 import { Flex, Text } from "@radix-ui/themes";
 import styles from "./ChatForm.module.css";
-
-const TEXT_FILE_EXTENSIONS = new Set([
-  ".txt",
-  ".md",
-  ".json",
-  ".yaml",
-  ".yml",
-  ".toml",
-  ".xml",
-  ".csv",
-  ".js",
-  ".ts",
-  ".tsx",
-  ".jsx",
-  ".py",
-  ".rs",
-  ".go",
-  ".java",
-  ".kt",
-  ".c",
-  ".cpp",
-  ".h",
-  ".hpp",
-  ".cs",
-  ".rb",
-  ".php",
-  ".swift",
-  ".sh",
-  ".bash",
-  ".zsh",
-  ".html",
-  ".css",
-  ".scss",
-  ".sass",
-  ".less",
-  ".sql",
-  ".graphql",
-  ".env",
-  ".gitignore",
-  ".dockerignore",
-]);
-
-function isTextFile(filename: string): boolean {
-  const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
-  return TEXT_FILE_EXTENSIONS.has(ext);
-}
+import {
+  attachmentFileError,
+  isSupportedImageFile,
+  isSupportedTextFile,
+} from "../../utils/attachmentFiles";
 
 function isEditableElement(element: Element | null): boolean {
   if (!element) return false;
@@ -142,14 +101,17 @@ import { addCheckboxValuesToInput } from "./utils";
 import { stripUnfilledPlaceholders } from "../ComboBox/argumentPlaceholders";
 import { useCommandCompletionAndPreviewFiles } from "./useCommandCompletionAndPreviewFiles";
 import { useAppSelector, useAppDispatch } from "../../hooks";
-import { getErrorMessage } from "../../features/Errors/errorsSlice";
+import {
+  clearError,
+  getErrorMessage,
+} from "../../features/Errors/errorsSlice";
 import { useAttachedFiles, useCheckboxes } from "./useCheckBoxes";
 import { useInputValue } from "./useInputValue";
 import {
   clearInformation,
   getInformationMessage,
 } from "../../features/Errors/informationSlice";
-import { InformationCallout } from "../Callout/Callout";
+import { ErrorCallout, InformationCallout } from "../Callout/Callout";
 import { ToolConfirmation } from "./ToolConfirmation";
 import { selectThreadConfirmationById } from "../../features/Chat/Thread";
 import { AttachImagesButton } from "../Dropzone";
@@ -169,6 +131,7 @@ import {
   DEFAULT_MODE,
   selectIsBuddyChat,
   useThreadId,
+  clearChatError,
 } from "../../features/Chat/Thread";
 import { useReportErrorMutation } from "../../services/refact/buddy";
 
@@ -304,6 +267,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const {
     processAndInsertImages,
     processAndInsertTextFiles,
+    setError,
     textFiles,
     resetAllTextFiles,
   } = useAttachedImages();
@@ -312,23 +276,30 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       const imageFiles: File[] = [];
       const textFilesList: File[] = [];
       const items = event.clipboardData.items;
+      let handledFile = false;
 
       for (const item of items) {
         if (item.kind === "file") {
           const file = item.getAsFile();
           if (file) {
-            if (file.type === "image/jpeg" || file.type === "image/png") {
+            handledFile = true;
+            const validationError = attachmentFileError(file);
+            if (validationError) {
+              setError(validationError);
+            } else if (isSupportedImageFile(file)) {
               if (isMultimodalitySupportedForCurrentModel) {
                 imageFiles.push(file);
+              } else {
+                setError("Current model does not support images");
               }
-            } else if (file.type.startsWith("text/") || isTextFile(file.name)) {
+            } else if (isSupportedTextFile(file)) {
               textFilesList.push(file);
             }
           }
         }
       }
 
-      if (imageFiles.length > 0 || textFilesList.length > 0) {
+      if (handledFile) {
         event.preventDefault();
         if (imageFiles.length > 0) {
           processAndInsertImages(imageFiles);
@@ -342,8 +313,18 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       processAndInsertImages,
       processAndInsertTextFiles,
       isMultimodalitySupportedForCurrentModel,
+      setError,
     ],
   );
+
+  const visibleError = chatError ?? globalError;
+  const clearVisibleError = useCallback(() => {
+    if (chatError) {
+      dispatch(clearChatError({ id: chatId }));
+    } else {
+      dispatch(clearError());
+    }
+  }, [chatError, chatId, dispatch]);
 
   const {
     checkboxes,
@@ -673,6 +654,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       onBlur={handleComposerBlur}
       onFocusCapture={handleComposerFocusCapture}
     >
+      {visibleError && (
+        <ErrorCallout mt="2" mb="2" timeout={3000} onClick={clearVisibleError}>
+          {visibleError}
+        </ErrorCallout>
+      )}
       {!globalError && !chatError && information && (
         <InformationCallout
           mt="2"

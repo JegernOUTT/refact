@@ -47,6 +47,21 @@ function snapshotWithLink(chatId: string): ChatEventEnvelope {
 }
 
 describe("Markdown internal links", () => {
+  it("renders markdown images through the image viewer", async () => {
+    const { user } = render(
+      <Markdown>![Architecture](https://example.com/architecture.png)</Markdown>,
+    );
+
+    const trigger = screen.getByRole("button", {
+      name: "Open image: Architecture",
+    });
+    expect(trigger).toBeInTheDocument();
+    await user.click(trigger);
+    expect(
+      screen.getByRole("application", { name: "Image pan and zoom" }),
+    ).toBeInTheDocument();
+  });
+
   it("clicking a refact chat link calls the internal link handler", async () => {
     const onInternalLink = vi.fn(() => true);
     const { user } = render(

@@ -12,6 +12,7 @@ import {
 } from "./types";
 import { v4 as uuidv4 } from "uuid";
 import { getLastThreadParams } from "../../../utils/threadStorage";
+import { MAX_ATTACHED_IMAGES } from "../../../utils/attachmentFiles";
 import {
   setToolUse,
   setThreadMode,
@@ -1364,8 +1365,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
 
   builder.addCase(addThreadImage, (state, action) => {
     const rt = getRuntime(state, action.payload.id);
-    if (rt && rt.attached_images.length < 5) {
+    if (rt && rt.attached_images.length < MAX_ATTACHED_IMAGES) {
       rt.attached_images.push(action.payload.image);
+    } else if (rt) {
+      rt.error = `Attachment limit reached (${MAX_ATTACHED_IMAGES})`;
     }
   });
 
