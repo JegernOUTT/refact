@@ -732,6 +732,7 @@ pub async fn load_caps(
     _cmdline: crate::global_context::CommandLine,
     gcx: Arc<GlobalContext>,
 ) -> Result<Arc<CodeAssistantCaps>, String> {
+    crate::providers::oauth_refresh::refresh_expiring_claude_code_tokens(&gcx).await;
     let (config_dir, cmdline_api_key, experimental) = {
         (
             gcx.config_dir.clone(),

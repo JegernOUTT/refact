@@ -291,6 +291,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
     try {
       await oauthLogout({ providerName }).unwrap();
       resetOAuthState();
+      invalidateProviderAndCaps();
     } catch (e) {
       setError(getErrorMessage(e, "Failed to logout"));
     } finally {

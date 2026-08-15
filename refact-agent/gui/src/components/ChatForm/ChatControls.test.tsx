@@ -3,7 +3,12 @@ import { http, HttpResponse } from "msw";
 
 import { STUB_CAPS_RESPONSE } from "../../__fixtures__/caps";
 import type { CapsResponse } from "../../services/refact";
-import { createDefaultChatState, render, screen } from "../../utils/test-utils";
+import {
+  createDefaultChatState,
+  render,
+  screen,
+  waitFor,
+} from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { CapsSelect } from "./ChatControls";
 
@@ -136,7 +141,40 @@ describe("CapsSelect", () => {
     expect(thread?.currentMaximumContextTokens).toBe(128000);
   });
 
-  test.skip("TODO disabled models from the caps pipeline cannot be selected", () => {
-    expect(true).toBe(true);
+  test("caps refresh preserves an unavailable selected model and its sampling parameters", async () => {
+    const chat = chatState("claude_code/claude-sonnet-4-6");
+    const runtime = chat.threads[chat.current_thread_id];
+    runtime.thread.temperature = 0.7;
+    runtime.thread.frequency_penalty = 0.3;
+    runtime.thread.max_tokens = 4096;
+    runtime.thread.reasoning_effort = "high";
+    runtime.thread.thinking_budget = 12000;
+
+    const { store, user } = render(<CapsSelect />, {
+      preloadedState: { chat, config },
+    });
+
+    const trigger = await screen.findByRole("button", { name: "chat model" });
+    expect(trigger).toHaveTextContent("claude_code/claude-sonnet-4-6");
+    await waitFor(() => {
+      const thread =
+        store.getState().chat.threads[store.getState().chat.current_thread_id]
+          ?.thread;
+      expect(thread).toMatchObject({
+        model: "claude_code/claude-sonnet-4-6",
+        temperature: 0.7,
+        frequency_penalty: 0.3,
+        max_tokens: 4096,
+        reasoning_effort: "high",
+        thinking_budget: 12000,
+      });
+    });
+
+    await user.click(trigger);
+    expect(
+      await screen.findByRole("option", {
+        name: "claude_code/claude-sonnet-4-6",
+      }),
+    ).toBeDisabled();
   });
 });

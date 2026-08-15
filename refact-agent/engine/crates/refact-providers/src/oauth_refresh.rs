@@ -51,6 +51,15 @@ pub fn is_invalid_refresh_token(provider_name: &str, refresh_token: &str) -> boo
         .unwrap_or(false)
 }
 
+pub fn clear_invalid_refresh_token(provider_name: &str, refresh_token: &str) {
+    if refresh_token.is_empty() {
+        return;
+    }
+    if let Ok(mut tokens) = INVALID_REFRESH_TOKENS.lock() {
+        tokens.remove(&refresh_token_key(provider_name, refresh_token));
+    }
+}
+
 fn refresh_token_key(provider_name: &str, refresh_token: &str) -> String {
     format!("{provider_name}:{refresh_token}")
 }

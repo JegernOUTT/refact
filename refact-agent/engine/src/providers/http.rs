@@ -3417,6 +3417,24 @@ async fn save_provider_oauth_tokens(
 
     reload_provider_from_disk(gcx.clone(), provider_name, config_dir).await?;
 
+    let refresh_token =
+        match base_provider {
+            "claude_code" => serde_yaml::from_value::<
+                crate::providers::claude_code_oauth::OAuthTokens,
+            >(tokens_value.clone())
+            .ok()
+            .map(|tokens| tokens.refresh_token),
+            "openai_codex" => serde_yaml::from_value::<
+                crate::providers::openai_codex_oauth::OAuthTokens,
+            >(tokens_value.clone())
+            .ok()
+            .map(|tokens| tokens.refresh_token),
+            _ => None,
+        };
+    if let Some(refresh_token) = refresh_token {
+        crate::providers::oauth_refresh::clear_invalid_refresh_token(provider_name, &refresh_token);
+    }
+
     invalidate_caps(gcx.clone()).await;
     Ok(())
 }
@@ -4233,6 +4251,14 @@ extra_headers:
             expires_at: i64::MAX,
             ..Default::default()
         };
+        crate::providers::oauth_refresh::mark_invalid_refresh_token(
+            "openai_codex_2",
+            "alias-refresh",
+        );
+        assert!(crate::providers::oauth_refresh::is_invalid_refresh_token(
+            "openai_codex_2",
+            "alias-refresh"
+        ));
 
         save_provider_oauth_tokens(
             &gcx,
@@ -4243,6 +4269,10 @@ extra_headers:
         )
         .await
         .unwrap();
+        assert!(!crate::providers::oauth_refresh::is_invalid_refresh_token(
+            "openai_codex_2",
+            "alias-refresh"
+        ));
 
         assert!(provider_file_exists(&config_dir, "openai_codex_2"));
         assert!(!provider_file_exists(&config_dir, "openai_codex"));
@@ -4269,6 +4299,52 @@ extra_headers:
                 "Work Codex".to_string()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn claude_code_oauth_save_clears_invalid_refresh_suppression() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let config_dir = gcx.config_dir.clone();
+        let providers_dir = config_dir.join("providers.d");
+        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
+        tokio::fs::write(
+            providers_dir.join("claude_code_2.yaml"),
+            "base_provider: claude_code\ndisplay_name: Work Claude\noauth_tokens:\n  access_token: old\n",
+        )
+        .await
+        .unwrap();
+        let tokens = crate::providers::claude_code_oauth::OAuthTokens {
+            access_token: "alias-access".to_string(),
+            refresh_token: "alias-refresh".to_string(),
+            expires_at: i64::MAX,
+        };
+        crate::providers::oauth_refresh::mark_invalid_refresh_token(
+            "claude_code_2",
+            "alias-refresh",
+        );
+        assert!(crate::providers::oauth_refresh::is_invalid_refresh_token(
+            "claude_code_2",
+            "alias-refresh"
+        ));
+
+        save_provider_oauth_tokens(
+            &gcx,
+            &config_dir,
+            "claude_code_2",
+            "claude_code",
+            &serde_yaml::to_value(&tokens).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!crate::providers::oauth_refresh::is_invalid_refresh_token(
+            "claude_code_2",
+            "alias-refresh"
+        ));
+        let saved = provider_config_json(&config_dir, "claude_code_2").await;
+        assert_eq!(saved["base_provider"], "claude_code");
+        assert_eq!(saved["display_name"], "Work Claude");
+        assert_eq!(saved["oauth_tokens"]["access_token"], "alias-access");
     }
 
     #[tokio::test]

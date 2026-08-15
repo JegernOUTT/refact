@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 import {
   selectModelById,
   selectThreadModeById,
@@ -22,7 +22,6 @@ export const PAID_AGENT_LIST = [
 export const UNLIMITED_PRO_MODELS_LIST = ["gpt-4o-mini"];
 
 export function useCapsForToolUse() {
-  const [wasAdjusted, setWasAdjusted] = useState(false);
   const caps = useGetCapsQuery();
   const modesQuery = useGetChatModesQuery(undefined);
   const chatId = useThreadId();
@@ -114,25 +113,6 @@ export function useCapsForToolUse() {
       };
     });
   }, [usableModels]);
-
-  useEffect(() => {
-    if (usableModelsForPlan.length > 0) {
-      const models: string[] = usableModelsForPlan.map(
-        (elem) => elem.textValue,
-      );
-      const toChange =
-        models.find((elem) => currentModel === elem) ?? models[0];
-
-      if (toChange && toChange !== currentModel) {
-        setCapModel(toChange);
-      }
-    }
-  }, [setCapModel, currentModel, usableModels, usableModelsForPlan]);
-
-  useEffect(() => {
-    if (!caps.isSuccess || wasAdjusted) return;
-    setWasAdjusted(true);
-  }, [caps.isSuccess, wasAdjusted]);
 
   return {
     usableModels,

@@ -155,48 +155,6 @@ impl ClaudeCodeProvider {
         self.oauth_tokens = source.oauth_tokens.clone();
         true
     }
-
-    pub async fn refresh_access_token_and_persist(
-        &mut self,
-        http_client: &reqwest::Client,
-        config_dir: &std::path::Path,
-        instance_id: &str,
-    ) -> Result<Option<String>, String> {
-        if self.oauth_tokens.refresh_token.is_empty() {
-            return Ok(None);
-        }
-
-        let refreshed = match crate::claude_code_oauth::refresh_access_token(
-            http_client,
-            &self.oauth_tokens.refresh_token,
-        )
-        .await
-        {
-            Ok(refreshed) => refreshed,
-            Err(error) if crate::oauth_refresh::is_permanent_refresh_error(&error) => {
-                crate::oauth_refresh::mark_invalid_refresh_token(
-                    instance_id,
-                    &self.oauth_tokens.refresh_token,
-                );
-                self.oauth_tokens = OAuthTokens::default();
-                self.save_oauth_tokens_config(config_dir, instance_id)
-                    .await?;
-                return Err(format!(
-                    "Claude Code OAuth refresh token is invalid. Please log in again in Claude Code provider settings: {}",
-                    error
-                ));
-            }
-            Err(error) => {
-                return Err(format!("Claude Code OAuth refresh failed: {}", error));
-            }
-        };
-
-        let access_token = refreshed.access_token.clone();
-        self.oauth_tokens = refreshed;
-        self.save_oauth_tokens_config(config_dir, instance_id)
-            .await?;
-        Ok((!access_token.is_empty()).then_some(access_token))
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -623,7 +581,8 @@ available:
 
     fn provider_settings_as_json(&self) -> serde_json::Value {
         let auth_status = self.diagnose_auth_status();
-        let oauth_connected = !self.oauth_tokens.access_token.is_empty();
+        let oauth_connected =
+            !self.oauth_tokens.access_token.is_empty() && !self.oauth_tokens.is_expired();
 
         json!({
             "enabled": self.enabled,
@@ -1242,5 +1201,24 @@ mod tests {
         assert!(provider.has_credentials());
         assert_eq!(provider.resolve_auth().unwrap(), "valid");
         assert_eq!(provider.diagnose_auth_status(), "OK (OAuth login)");
+    }
+
+    #[test]
+    fn claude_code_expired_provider_is_not_reported_as_connected() {
+        let provider = ClaudeCodeProvider {
+            oauth_tokens: OAuthTokens {
+                access_token: "expired".to_string(),
+                refresh_token: "refresh".to_string(),
+                expires_at: 1,
+            },
+            ..Default::default()
+        };
+
+        let settings = provider.provider_settings_as_json();
+        assert_eq!(settings["oauth_connected"], false);
+        assert_eq!(
+            settings["auth_status"],
+            "OAuth token expired — needs refresh"
+        );
     }
 }

@@ -210,26 +210,22 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
     [groupedModels],
   );
 
-  const modelSelectorOptions = useMemo<ModelOption[]>(
-    () =>
-      groupedModels.flatMap((group) =>
-        group.models.map((model) => ({
-          value: model.value,
-          displayName: model.value,
-          group: group.provider,
-          disabled: model.disabled || isInteractionDisabled,
-          badges: modelBadges(model),
-          pricing: model.pricing
-            ? formatPricingDetailed(model.pricing)
-            : undefined,
-          contextWindow: model.nCtx
-            ? formatContextWindow(model.nCtx)
-            : undefined,
-          capabilities: <CapabilityIcons capabilities={model.capabilities} />,
-        })),
-      ),
-    [groupedModels, isInteractionDisabled],
-  );
+  const modelSelectorOptions = useMemo<ModelOption[]>(() => {
+    return groupedModels.flatMap((group) =>
+      group.models.map((model) => ({
+        value: model.value,
+        displayName: model.value,
+        group: group.provider,
+        disabled: model.disabled || isInteractionDisabled,
+        badges: modelBadges(model),
+        pricing: model.pricing
+          ? formatPricingDetailed(model.pricing)
+          : undefined,
+        contextWindow: model.nCtx ? formatContextWindow(model.nCtx) : undefined,
+        capabilities: <CapabilityIcons capabilities={model.capabilities} />,
+      })),
+    );
+  }, [groupedModels, isInteractionDisabled]);
 
   const selectedModelDetail = useMemo(() => {
     if (!caps.currentModel) return null;

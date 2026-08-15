@@ -144,12 +144,18 @@ function ModelSelectorList({
   const selectedRef = React.useRef<HTMLButtonElement>(null);
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
   const normalizedQuery = normalize(query);
+  const modelsWithSelection = React.useMemo(() => {
+    if (value && !models.some((model) => model.value === value)) {
+      return [{ value, displayName: value, disabled: true }, ...models];
+    }
+    return models;
+  }, [models, value]);
   const filteredModels = React.useMemo(() => {
     if (!normalizedQuery) {
-      return models;
+      return modelsWithSelection;
     }
 
-    return models.filter((model) => {
+    return modelsWithSelection.filter((model) => {
       const haystack = [
         model.displayName,
         model.value,
@@ -164,7 +170,7 @@ function ModelSelectorList({
 
       return haystack.includes(normalizedQuery);
     });
-  }, [models, normalizedQuery]);
+  }, [modelsWithSelection, normalizedQuery]);
   const renderedGroups = React.useMemo(
     () => buildGroups(filteredModels, groups),
     [filteredModels, groups],

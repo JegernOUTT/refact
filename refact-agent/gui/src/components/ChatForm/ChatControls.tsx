@@ -104,7 +104,7 @@ export const CapsSelect: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
     <Flex gap="2" align="center" wrap="wrap">
       <Skeleton loading={caps.loading}>
         <Box>
-          {allDisabled ? (
+          {allDisabled && !(caps.data && caps.currentModel) ? (
             <Text size="1" color="gray">
               No models available
             </Text>
