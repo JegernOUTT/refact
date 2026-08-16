@@ -1,24 +1,30 @@
-# This config file determines if Refact is allowed to read, index or send a file to remote servers.
+# This config determines which files Refact may read or index and which destinations may receive them.
 #
 # If this file or a project privacy file has a syntax error, Refact keeps the last valid policy and reports the error.
 # On first-load failure, Refact uses an empty policy and still reports the error.
 #
 # Uses glob patterns: https://en.wikipedia.org/wiki/Glob_(programming)
 #
-# The first matching zone applies.
+# blocked patterns are always denied. Otherwise zones are ordered and the first matching zone applies.
+# Destinations are provider ids, MCP server names, subagent model providers, and completion providers.
 
 privacy_rules:
+  # Legacy lists remain supported and migrate into zones at load time.
   blocked:
-    - "secrets.yaml"                  # That's not just an example, it's a real file at ~/.config/refact/secrets.yaml, the model shouldn't look at your passwords 
-    - "*/secret_project1/*"           # Don't forget leading */ if you are matching directory names
+    - "secrets.yaml"                  # This is the real ~/.config/refact/secrets.yaml; models must not read its passwords.
+    - "*/secret_project1/*"           # Include leading */ when matching directory names.
     - "*/secret_project2/*.txt"
     - "*.pem"
 
-  only_send_to_servers_I_control:       # You can set up which providers you control in ~/.config/refact/providers.d/*.yaml, otherwise you control none
+  only_send_to_servers_I_control:       # Configure controlled providers in ~/.config/refact/providers.d/*.yaml.
     - "secret_passwords.txt"
 
-  # Zones replace the legacy lists above. Project `.refact/privacy.yaml` files may add
-  # patterns but can only remove destinations or make shell handling stricter.
+  # Zones are the current per-destination policy. Project `.refact/privacy.yaml` files may add
+  # patterns, but can only remove destinations or make shell handling stricter.
+  # send_to: [] denies every destination. send_to: ["*"] allows all current and future destinations.
+  # on_shell_read is withhold, ask, or deny when syscall observation sees a guarded read.
+  # If observation is unavailable, commands stay fail-open and heuristic attribution can miss indirect reads.
+  # Completion has its own destination column; a completion provider must be present in the cursor file's zone.
   # zones:
   #   - name: secrets
   #     patterns:
@@ -33,7 +39,11 @@ privacy_rules:
   #     send_to:
   #       - "*"
   #     on_shell_read: withhold
-
+  #
+  # Subagent reports declassify by default. Set false to preserve the union of subchat records
+  # so the parent model's destination check independently authorizes the returned report.
+  # subagents:
+  #   report_declassifies: true
 
 # See unit tests in privacy.rs for more examples.
 

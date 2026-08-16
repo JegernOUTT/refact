@@ -43,6 +43,7 @@ src/
 │   ├── Pages/        # Navigation stack
 │   ├── PatchesAndDiffsTracker/
 │   ├── Providers/    # LLM provider config + OAuth
+│   ├── Privacy/      # Zone grid, destination inspector, shield, and privacy result cards
 │   ├── Statistics/   # Usage charts
 │   ├── Tasks/        # Task management
 │   ├── ThreadHistory/# Thread history view
@@ -137,7 +138,7 @@ Whitelist: `["tour", "userSurvey"]` (NOT chat/history — those are ephemeral)
 
 Always use selectors. Never access `state.chat.threads[id]` directly in components.
 
-Hidden-role selector convention:
+Hidden-role and privacy selector convention:
 
 - `selectVisibleMessages(state, threadId)` excludes `event`, `goal`, and `plan`; use this for normal transcript rendering.
 - `selectEventLog(state, threadId)` returns normalized `EventMessage[]` for EventLog surfaces and excludes `plan_delta`, `goal_delta`, and `goal_pursuit` events.
@@ -147,8 +148,10 @@ Hidden-role selector convention:
 - `selectPlanHistory(state, threadId)` returns the current base plan followed by plan-delta events for history UI.
 - `selectGoalById(state, threadId)` / `selectGoal(state)` read `thread.goal`, the `GoalSnapshot` projection supplied by `Snapshot.goal` and runtime updates.
 - `selectGoalStatusById`, `selectGoalProgressById`, and related helpers must read the projection, not scan hidden `goal` messages in components.
+- `selectPrivacyFilesById(state, threadId)` returns the deduplicated `extra.privacy.files` records for chat privacy surfaces.
+- `selectPrivacyStepContextById(state, threadId, toolCallId)` returns the blocked step and clean-branch boundary for a privacy tool result.
 
-If a new component needs hidden-role data, add or reuse a selector first instead of filtering `thread.messages` inside the component.
+If a new component needs hidden-role or chat privacy data, add or reuse a selector first instead of filtering `thread.messages` inside the component.
 
 ### RTK Query APIs
 
@@ -169,10 +172,13 @@ All generate hooks (`useGetCapsQuery`, etc.). Dynamic base URL from Redux state.
 | chatModesApi, customizationApi  | Agent modes/customization                                              |
 | knowledgeApi, knowledgeGraphApi | Knowledge/memory                                                       |
 | ragStatusApi                    | `/v1/rag-status`                                                       |
+| privacyApi                      | `/v1/privacy/policy`, `/v1/privacy/status`, `/v1/privacy/inspect`      |
 
 `RagStatus` includes `codegraph: { counts: { nodes, edges, files, fts_docs }, queued, state, error } | null`, `codegraph_alive`, and `codegraph_error`; CodeGraph states are `turned_off`, `indexing`, `working`, and `error`. Keep `services/refact/types.ts`, `features/Knowledge/knowledgeSlice.ts`, and `components/ConnectionStatus/RagStatusIndicators.tsx` in sync with the backend shape.
 
 Chat uses **Commands API** + **SSE subscription**, not RTK Query.
+
+Privacy policy, status, destination inspection, and policy saves belong to `privacyApi`. The `privacySlice` stores only ephemeral `selectedZoneName`; do not copy server policy/status data into Redux or scan chat messages inside Privacy components.
 
 ## Key Hooks
 
@@ -491,6 +497,7 @@ Chat can proceed when ALL true: `snapshot_received && !streaming && !waiting_for
 - **Tour/Onboarding**: Welcome screen, guided tour bubbles.
 - **FIM Debug**: Fill-in-Middle debug panel with search context and symbol list.
 - **CodeGraph status**: Toolbar mini indicators surface CodeGraph, VecDB, and legacy AST compatibility state from `/v1/rag-status`; CodeGraph settings are host-provided feature flags and status lives in the Knowledge slice.
+- **Privacy**: Settings owns the zone × destination policy grid and observation status; chat owns the model shield, destination inspector, blocked-send card, and local-only withheld-output reveal; FileTree shows each resolved zone and persists exact-path moves through the complete policy.
 - **Docker**: Container list, start/stop/kill/remove, env vars, smart links.
 - **Compression Hints**: 🗜️ icon when context approaches limit. `compression_strength: "absent" | "weak" | "strong"`.
 - **Queued Messages**: Send while streaming. Priority queue bypasses tool wait.

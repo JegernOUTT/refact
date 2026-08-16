@@ -916,6 +916,18 @@ SQLite + vec0 extension for memory-plane semantic search. File splitters handle 
 
 GitHub, GitLab, Bitbucket, Chrome (headless), PostgreSQL, MySQL, Docker, PDB, shell, cmdline_* (one-off), service_* (long-running), MCP (stdio + SSE). Config: `.refact/integrations/*.yaml`. Trait: `integr_tools()`, `integr_schema()`, `integr_settings_apply()`.
 
+## Per-destination privacy
+
+Privacy policy classifies paths into ordered zones and decides which destinations may receive each zone. Legacy `blocked` patterns form a deny zone before the configured list; otherwise the first matching zone applies, and an omitted `normal` zone is supplied as an allow-all catch-all. Each zone has `patterns`, `send_to`, and `on_shell_read`; an empty `send_to` denies every destination, while `"*"` allows every current and future destination. Destination kinds are `provider`, `mcp`, `subagent_model`, and `completion`. Model destinations use the provider-qualified model id prefix before `/`; MCP destinations use the configured server name.
+
+The LLM egress boundary is compiler-sealed. `LlmWireAdapter::build_http` accepts only `&Cleared<LlmRequest>`, whose constructor is private to `refact-privacy`. Each attempt in `run_llm_stream` obtains that token through `clear()` for the resolved destination. A new provider or wire path must call `clear()` (normally through the destination helper) or it will not compile. MCP and subagent boundaries perform their own destination checks, and adapter output must not serialize privacy metadata.
+
+File provenance is stored on chat messages as `extra.privacy = { "files": [{ "path", "zone", "attribution" }] }`. The three attribution values are `declared` for paths known by a file-reading tool, `observed` for syscall-observed reads, and `heuristic` for best-effort command parsing when observation is unavailable. Summary and compression paths union and preserve these records so later destination checks still see source provenance.
+
+Shell, process, and stdio MCP observation is fail-open. When syscall observation is unavailable, the operation continues, `extra.privacy_observation` records degraded/incomplete status, a tree-sitter Bash pass attributes existing literal paths as `heuristic`, and Buddy creates at most one process-lifetime warning. Heuristic attribution is diagnostic rather than an enforcement wall: it can miss expansions, substitutions, scripts, indirect reads, and unknown commands. For successfully observed shell and process results, `on_shell_read` selects `withhold`, `ask`, or `deny`; withheld output remains local in `extra.privacy_shell`. Within one live chat session, writes from an operation that read a guarded zone inherit the strictest read zone, and later observed reads consult that derived map. Restored trajectories start with a fresh derived map.
+
+Code completion is a distinct `completion` destination. Both completion endpoints resolve the completion model, classify the cursor file, and return HTTP 422 before cache or network use when the provider id is absent from that zone's `send_to`. Legacy controlled-server classification does not grant completion access.
+
 ### Standardized exec env
 
 All foreground, background, service, and PTY exec spawns apply `EXEC_ENV_DEFAULTS` before request env overrides. Request-provided env values win. Defaults:
