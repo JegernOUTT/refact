@@ -1,0 +1,7 @@
+{
+  "id": "clean_refactor_rename",
+  "kind": "clean",
+  "scenario": "pure_refactor_rename",
+  "description": "Welcome a renamed frog jump helper with every caller and test updated.",
+  "seeded_defects": []
+}

@@ -1,0 +1,15 @@
+{
+  "id": "path_traversal",
+  "kind": "seeded",
+  "scenario": "unsafe_file_path",
+  "description": "Welcome files must remain inside the frog sanctuary.",
+  "seeded_defects": [
+    {
+      "file": "nest.py",
+      "line_range": { "start": 4, "end": 6 },
+      "category": "security",
+      "severity": "critical",
+      "description": "An untrusted frog name can escape root with parent path components."
+    }
+  ]
+}

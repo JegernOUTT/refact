@@ -1,0 +1,15 @@
+{
+  "id": "off_by_one_loop",
+  "kind": "seeded",
+  "scenario": "off_by_one_loop_bound",
+  "description": "Welcome every frog without stepping beyond the lily list.",
+  "seeded_defects": [
+    {
+      "file": "pond.py",
+      "line_range": { "start": 6, "end": 6 },
+      "category": "correctness",
+      "severity": "high",
+      "description": "The inclusive upper bound indexes one element past the end of names."
+    }
+  ]
+}

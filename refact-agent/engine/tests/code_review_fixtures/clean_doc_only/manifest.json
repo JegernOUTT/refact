@@ -1,0 +1,7 @@
+{
+  "id": "clean_doc_only",
+  "kind": "clean",
+  "scenario": "comment_doc_only_change",
+  "description": "Welcome documentation changed without altering frog behavior.",
+  "seeded_defects": []
+}

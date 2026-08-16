@@ -1,0 +1,15 @@
+{
+  "id": "inconsistent_api",
+  "kind": "seeded",
+  "scenario": "inconsistent_sibling_api_usage",
+  "description": "Welcome callers must use the keyword-only excitement API consistently.",
+  "seeded_defects": [
+    {
+      "file": "pond.py",
+      "line_range": { "start": 4, "end": 5 },
+      "category": "consistency",
+      "severity": "high",
+      "description": "This caller passes a keyword-only argument positionally unlike its sibling."
+    }
+  ]
+}

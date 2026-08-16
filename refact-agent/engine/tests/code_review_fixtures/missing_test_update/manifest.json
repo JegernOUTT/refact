@@ -1,0 +1,15 @@
+{
+  "id": "missing_test_update",
+  "kind": "seeded",
+  "scenario": "changed_code_missing_test_update",
+  "description": "Welcome punctuation changed and the frog test must move with it.",
+  "seeded_defects": [
+    {
+      "file": "test_formatter.py",
+      "line_range": { "start": 4, "end": 5 },
+      "category": "tests",
+      "severity": "high",
+      "description": "The test still asserts the old welcome format and fails against the changed formatter."
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "duplicate_cross_file",
+  "kind": "duplicate_bait",
+  "scenario": "same_defect_visible_from_two_files",
+  "description": "Welcome registration exposes the same empty-name defect at its parser and caller.",
+  "seeded_defects": [
+    {
+      "file": "parser.py",
+      "line_range": { "start": 1, "end": 2 },
+      "category": "correctness",
+      "severity": "medium",
+      "description": "Whitespace-only names are accepted as empty frog names."
+    }
+  ]
+}

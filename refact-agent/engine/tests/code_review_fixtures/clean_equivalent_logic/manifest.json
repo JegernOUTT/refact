@@ -1,0 +1,7 @@
+{
+  "id": "clean_equivalent_logic",
+  "kind": "clean",
+  "scenario": "equivalent_logic_reshuffle",
+  "description": "Welcome eligibility was reshuffled to an equivalent any expression.",
+  "seeded_defects": []
+}

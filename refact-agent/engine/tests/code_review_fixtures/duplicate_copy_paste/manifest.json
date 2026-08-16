@@ -1,0 +1,22 @@
+{
+  "id": "duplicate_copy_paste",
+  "kind": "duplicate_bait",
+  "scenario": "near_identical_copy_paste_blocks",
+  "description": "Welcome batches contain near-identical copied frog loops with the same bound defect.",
+  "seeded_defects": [
+    {
+      "file": "north_pond.py",
+      "line_range": { "start": 2, "end": 4 },
+      "category": "correctness",
+      "severity": "high",
+      "description": "The north loop indexes one frog beyond the list."
+    },
+    {
+      "file": "south_pond.py",
+      "line_range": { "start": 2, "end": 4 },
+      "category": "correctness",
+      "severity": "high",
+      "description": "The copied south loop indexes one frog beyond the list."
+    }
+  ]
+}
