@@ -31,6 +31,18 @@ pub fn merge_records(message: &mut ChatMessage, records: impl IntoIterator<Item 
     }
 }
 
+pub fn merge_message_records<'a>(
+    message: &mut ChatMessage,
+    sources: impl IntoIterator<Item = &'a ChatMessage>,
+) {
+    let records = sources
+        .into_iter()
+        .filter_map(|source| source.extra.get("privacy"))
+        .filter_map(|value| serde_json::from_value::<PrivacyRecord>(value.clone()).ok())
+        .flat_map(|privacy| privacy.files);
+    merge_records(message, records);
+}
+
 pub fn declared_file_record(gcx: &Arc<GlobalContext>, path: &Path) -> Result<FileRecord, String> {
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
     let compiled = policy.compile().map_err(|error| error.to_string())?;
@@ -115,5 +127,30 @@ mod tests {
             serde_json::from_value(message.extra["privacy"].clone()).unwrap();
         assert_eq!(privacy.files.len(), 2);
         assert_eq!(privacy.files[1], second);
+    }
+
+    #[test]
+    fn merge_message_records_unions_source_records() {
+        let first = FileRecord {
+            path: "a.rs".to_string(),
+            zone: "normal".to_string(),
+            attribution: Attribution::Declared,
+        };
+        let second = FileRecord {
+            path: ".env".to_string(),
+            zone: "secrets".to_string(),
+            attribution: Attribution::Observed,
+        };
+        let mut source_a = ChatMessage::default();
+        let mut source_b = ChatMessage::default();
+        merge_records(&mut source_a, [first.clone(), second.clone()]);
+        merge_records(&mut source_b, [second.clone()]);
+        let mut target = ChatMessage::default();
+
+        merge_message_records(&mut target, [&source_a, &source_b]);
+
+        let privacy: PrivacyRecord =
+            serde_json::from_value(target.extra["privacy"].clone()).unwrap();
+        assert_eq!(privacy.files, vec![first, second]);
     }
 }

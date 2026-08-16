@@ -1909,6 +1909,22 @@ fn compression_metadata_usize(metadata: Option<&Value>, field: &str) -> usize {
         .unwrap_or(0)
 }
 
+fn merge_summarized_source_records(summary: &mut ChatMessage, source_messages: &[ChatMessage]) {
+    let summarized_source_ids: HashSet<String> = compression_metadata_string_array(
+        summary.extra.get("compression"),
+        "summarized_source_message_ids",
+    )
+    .into_iter()
+    .collect();
+    summary.extra.remove("privacy");
+    crate::privacy::records::merge_message_records(
+        summary,
+        source_messages
+            .iter()
+            .filter(|message| summarized_source_ids.contains(&message.message_id)),
+    );
+}
+
 fn preserved_source_messages_from_summary(
     summary: &ChatMessage,
     source_messages: &[ChatMessage],
@@ -1959,7 +1975,7 @@ fn make_segment_summary_message(
         }),
     );
 
-    ChatMessage {
+    let mut message = ChatMessage {
         message_id: Uuid::new_v4().to_string(),
         role: "assistant".to_string(),
         content: ChatContent::SimpleText(summary),
@@ -1970,7 +1986,9 @@ fn make_segment_summary_message(
         )),
         extra,
         ..Default::default()
-    }
+    };
+    merge_summarized_source_records(&mut message, source_messages);
+    message
 }
 
 fn refresh_segment_summary_metadata(
@@ -2029,6 +2047,7 @@ fn refresh_segment_summary_metadata(
     summary.summarized_token_estimate = Some(crate::chat::trajectory_ops::approx_token_count(
         source_messages,
     ));
+    merge_summarized_source_records(&mut summary, source_messages);
     summary
 }
 
@@ -3597,6 +3616,26 @@ mod tests {
     fn with_message_id(mut message: ChatMessage, message_id: &str) -> ChatMessage {
         message.message_id = message_id.to_string();
         message
+    }
+
+    fn with_privacy_records(
+        mut message: ChatMessage,
+        records: impl IntoIterator<Item = refact_privacy::FileRecord>,
+    ) -> ChatMessage {
+        crate::privacy::records::merge_records(&mut message, records);
+        message
+    }
+
+    fn privacy_file_record(
+        path: &str,
+        zone: &str,
+        attribution: refact_privacy::Attribution,
+    ) -> refact_privacy::FileRecord {
+        refact_privacy::FileRecord {
+            path: path.to_string(),
+            zone: zone.to_string(),
+            attribution,
+        }
     }
 
     fn diff_message(text: &str) -> ChatMessage {
@@ -6267,6 +6306,98 @@ mod tests {
         assert_eq!(compression["preserved_source_message_ids"], json!([]));
         assert_eq!(compression["summary_model"], json!("test-model"));
         assert_eq!(messages[3].content.content_text_only(), "summary");
+    }
+
+    #[test]
+    fn static_summary_unions_privacy_records_from_three_summarized_sources() {
+        let normal = privacy_file_record(
+            "src/lib.rs",
+            "normal",
+            refact_privacy::Attribution::Declared,
+        );
+        let secrets = privacy_file_record(".env", "secrets", refact_privacy::Attribution::Observed);
+        let guarded = privacy_file_record(
+            "config/private.yaml",
+            "guarded",
+            refact_privacy::Attribution::Heuristic,
+        );
+        let mut messages = vec![
+            user("a"),
+            with_message_id(
+                with_privacy_records(assistant("first source"), [normal.clone()]),
+                "source-1",
+            ),
+            with_message_id(
+                with_privacy_records(tool("second source"), [secrets.clone()]),
+                "source-2",
+            ),
+            with_message_id(
+                with_privacy_records(assistant("third source"), [normal.clone(), guarded.clone()]),
+                "source-3",
+            ),
+            user("b"),
+        ];
+
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "summary",
+            "test-model",
+        ));
+
+        let summary = messages
+            .iter()
+            .find(|message| is_segment_summary(message))
+            .unwrap();
+        let privacy: refact_privacy::PrivacyRecord =
+            serde_json::from_value(summary.extra["privacy"].clone()).unwrap();
+        assert_eq!(privacy.files, vec![normal, secrets, guarded]);
+        assert_eq!(
+            summary.extra["compression"]["summarized_source_message_ids"],
+            json!(["source-1", "source-2", "source-3"])
+        );
+    }
+
+    #[test]
+    fn static_summary_excludes_privacy_records_from_preserved_sources() {
+        let preserved =
+            privacy_file_record(".env", "secrets", refact_privacy::Attribution::Declared);
+        let summarized = privacy_file_record(
+            "src/lib.rs",
+            "normal",
+            refact_privacy::Attribution::Observed,
+        );
+        let source = vec![
+            with_message_id(
+                with_privacy_records(
+                    context_files(vec![context_file_named(".env", "preserved")]),
+                    [preserved],
+                ),
+                "preserved-source",
+            ),
+            with_message_id(
+                with_privacy_records(assistant("summarized source"), [summarized.clone()]),
+                "summarized-source",
+            ),
+        ];
+        let raw = structured_summary_json(
+            "Summary",
+            json!([{
+                "source_message_id": "preserved-source",
+                "file_name": ".env",
+                "reason": "needed verbatim"
+            }]),
+            json!([]),
+        );
+
+        let summary = make_segment_summary_message(raw, &source, "test-model");
+
+        let privacy: refact_privacy::PrivacyRecord =
+            serde_json::from_value(summary.extra["privacy"].clone()).unwrap();
+        assert_eq!(privacy.files, vec![summarized]);
+        assert_eq!(
+            summary.extra["compression"]["preserved_source_message_ids"],
+            json!(["preserved-source"])
+        );
     }
 
     #[test]

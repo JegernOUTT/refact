@@ -697,22 +697,45 @@ mod tests {
             .collect()
     }
 
+    fn secrets_record() -> refact_privacy::FileRecord {
+        refact_privacy::FileRecord {
+            path: ".env".to_string(),
+            zone: "secrets".to_string(),
+            attribution: refact_privacy::Attribution::Observed,
+        }
+    }
+
+    fn assert_secrets_record(message: &ChatMessage) {
+        let privacy: refact_privacy::PrivacyRecord =
+            serde_json::from_value(message.extra["privacy"].clone()).unwrap();
+        assert_eq!(privacy.files, vec![secrets_record()]);
+    }
+
     #[test]
     fn deterministic_full_sweep_truncates_tools_drops_context_and_is_idempotent() {
         let big = "tool output line ".repeat(400);
+        let mut tool = tool_message("call_1", &big);
+        crate::privacy::records::attach_record(&mut tool, secrets_record());
         let messages = vec![
             user_message("start"),
             assistant_tool_call_message("call_1", "cat"),
-            tool_message("call_1", &big),
+            tool,
             context_file_message("call_2", "/repo/big.rs", &"x".repeat(5000)),
             user_message("continue"),
         ];
 
         let swept = deterministic_full_sweep(&messages).expect("sweep must free space");
-        assert!(swept.iter().any(|m| m.role == "tool"
-            && m.content
-                .content_text_only()
-                .starts_with("Tool result compressed:")));
+        let truncated = swept
+            .iter()
+            .find(|message| {
+                message.role == "tool"
+                    && message
+                        .content
+                        .content_text_only()
+                        .starts_with("Tool result compressed:")
+            })
+            .expect("tool result should be truncated");
+        assert_secrets_record(truncated);
         assert!(!swept.iter().any(|m| m.role == "context_file"));
         assert!(swept.iter().any(|m| m.role == "compression_report"));
 
@@ -1423,6 +1446,45 @@ mod tests {
             .content_text_only();
         assert!(tool_text.contains("Bearer [REDACTED]"));
         assert!(!tool_text.contains(secret));
+    }
+
+    #[test]
+    fn summarization_records_survive_ctx_apply_tool_truncation() {
+        let mut tool = tool_message("old_call", &"tool output ".repeat(100));
+        crate::privacy::records::attach_record(&mut tool, secrets_record());
+        let messages = vec![
+            user_message("old user"),
+            assistant_tool_call_message("old_call", "shell"),
+            tool,
+        ];
+        let drop_context_files = HashSet::new();
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::from(["old_call".to_string()]);
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::from([("old_call".to_string(), "shell".to_string())]);
+        let mut request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+        request.preserve_last_turns = Some(0);
+
+        let (after, stats, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+        assert_eq!(stats.tool_truncated, 1);
+        let truncated = after
+            .iter()
+            .find(|message| message.role == "tool")
+            .expect("tool result should survive");
+        assert!(truncated
+            .content
+            .content_text_only()
+            .starts_with("Tool result compressed:"));
+        assert_secrets_record(truncated);
     }
 
     #[test]
