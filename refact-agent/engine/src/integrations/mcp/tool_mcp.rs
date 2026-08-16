@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use async_trait::async_trait;
 use refact_tool_api::coerce_args_to_schema;
+use refact_privacy::{FileRecord, PrivacyAudited, records_from_messages};
 
 /// Maximum bytes of text content returned from a single MCP tool call.
 /// Prevents runaway context window growth from excessively large tool responses.
@@ -17,10 +19,73 @@ use crate::scratchpads::multimodality::MultimodalElement;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::integrations::integr_abstract::{IntegrationCommon, IntegrationConfirmation};
+use crate::privacy::destinations::clear_for_mcp;
 use super::session_mcp::{
     McpRunningService, MCPConnectionStatus, add_log_entry, mcp_session_wait_startup,
     redact_sensitive_json,
 };
+
+struct McpCallAudit {
+    records: Vec<FileRecord>,
+}
+
+impl PrivacyAudited for McpCallAudit {
+    fn privacy_records(&self) -> Vec<FileRecord> {
+        self.records.clone()
+    }
+}
+
+fn collect_serialized_argument_paths(value: &serde_json::Value, paths: &mut Vec<PathBuf>) {
+    match value {
+        serde_json::Value::String(value) if !value.is_empty() => {
+            let path = PathBuf::from(value);
+            if path.exists() {
+                paths.push(path);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_serialized_argument_paths(value, paths);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_serialized_argument_paths(value, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn call_param_records(
+    gcx: &Arc<crate::global_context::GlobalContext>,
+    call_params: &CallToolRequestParams,
+) -> Result<Vec<FileRecord>, String> {
+    let serialized = serde_json::to_value(call_params).map_err(|error| error.to_string())?;
+    let mut paths = Vec::new();
+    if let Some(arguments) = serialized.get("arguments") {
+        collect_serialized_argument_paths(arguments, &mut paths);
+    }
+    crate::privacy::records::declared_file_records(gcx, paths)
+}
+
+fn dispatch_cleared_mcp_call<T>(
+    gcx: &Arc<crate::global_context::GlobalContext>,
+    server_name: &str,
+    call_params: CallToolRequestParams,
+    producing_messages: &[ChatMessage],
+    dispatch: impl FnOnce(CallToolRequestParams) -> T,
+) -> Result<T, String> {
+    let mut records = records_from_messages(producing_messages);
+    for record in call_param_records(gcx, &call_params)? {
+        if !records.contains(&record) {
+            records.push(record);
+        }
+    }
+    clear_for_mcp(gcx, McpCallAudit { records }, server_name)
+        .map_err(|refusal| refusal.model_facing().to_string())?;
+    Ok(dispatch(call_params))
+}
 
 /// Truncates `text` so that the running `total_bytes` counter does not exceed `limit`.
 /// Appends a truncation notice when cutting. Returns the (possibly truncated) text.
@@ -70,9 +135,13 @@ impl Tool for ToolMCP {
         args: &HashMap<String, serde_json::Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let session_key = format!("{}", self.config_path);
-        let (gcx, current_model) = {
+        let (gcx, current_model, producing_messages) = {
             let cgcx = ccx.lock().await;
-            (cgcx.global_context.clone(), cgcx.current_model.clone())
+            (
+                cgcx.global_context.clone(),
+                cgcx.current_model.clone(),
+                cgcx.messages.clone(),
+            )
         };
         let (session_maybe, caps_maybe) = {
             let integration_sessions = gcx.integration_sessions.clone();
@@ -187,6 +256,24 @@ impl Tool for ToolMCP {
         )
         .await;
 
+        let call_params = {
+            let mut p = CallToolRequestParams::new(self.mcp_tool.name.clone());
+            if let serde_json::Value::Object(mut map) = json_args {
+                let input_schema =
+                    serde_json::Value::Object(self.mcp_tool.input_schema.as_ref().clone());
+                coerce_args_to_schema(&mut map, &input_schema);
+                p = p.with_arguments(map);
+            }
+            p
+        };
+        let server_name = super::mcp_interactions::server_name_from_config_path(&self.config_path);
+        let call_params = dispatch_cleared_mcp_call(
+            &gcx,
+            &server_name,
+            call_params,
+            &producing_messages,
+            |call_params| call_params,
+        )?;
         let peer = {
             let mcp_client_locked = self.mcp_client.lock().await;
             match &*mcp_client_locked {
@@ -207,16 +294,6 @@ impl Tool for ToolMCP {
         };
 
         let call_start = session_metrics.lock().await.record_call_start();
-        let call_params = {
-            let mut p = CallToolRequestParams::new(self.mcp_tool.name.clone());
-            if let serde_json::Value::Object(mut map) = json_args {
-                let input_schema =
-                    serde_json::Value::Object(self.mcp_tool.input_schema.as_ref().clone());
-                coerce_args_to_schema(&mut map, &input_schema);
-                p = p.with_arguments(map);
-            }
-            p
-        };
         let observed_reads_before = observation
             .as_ref()
             .and_then(observed_reads)
@@ -528,8 +605,9 @@ fn attach_observation_unavailable(message: &mut ChatMessage, reason: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refact_privacy::{PrivacyPolicy, Zone};
+    use refact_privacy::{Attribution, PrivacyPolicy, PrivacyRecord, Zone};
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn make_tool_mcp(schema: serde_json::Value) -> ToolMCP {
         let mcp_tool: McpTool = serde_json::from_value(json!({
@@ -547,6 +625,114 @@ mod tests {
             request_timeout: 30,
             auto_approve: false,
         }
+    }
+
+    fn call_params(arguments: serde_json::Value) -> CallToolRequestParams {
+        let mut params = CallToolRequestParams::new("test_tool");
+        params.arguments = arguments.as_object().cloned();
+        params
+    }
+
+    fn set_policy(gcx: &Arc<crate::global_context::GlobalContext>, zones: Vec<Zone>) {
+        *gcx.privacy_policy_load.write().unwrap() = refact_privacy::PolicyLoad {
+            policy: Arc::new(PrivacyPolicy {
+                blocked: Vec::new(),
+                zones,
+                ..Default::default()
+            }),
+            error: None,
+            source_paths: Vec::new(),
+        };
+    }
+
+    #[tokio::test]
+    async fn mcp_gate_refuses_guarded_argument_before_dispatch() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let secret = gcx.cache_dir.join("guarded.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        set_policy(
+            &gcx,
+            vec![
+                Zone {
+                    name: "secrets".to_string(),
+                    patterns: vec![secret.to_string_lossy().to_string()],
+                    send_to: vec!["trusted".to_string()],
+                    ..Default::default()
+                },
+                Zone {
+                    name: "normal".to_string(),
+                    patterns: vec!["*".to_string()],
+                    send_to: vec!["*".to_string()],
+                    ..Default::default()
+                },
+            ],
+        );
+        let dispatched = AtomicUsize::new(0);
+
+        let error = dispatch_cleared_mcp_call(
+            &gcx,
+            "untrusted",
+            call_params(json!({"path": secret})),
+            &[],
+            |params| {
+                dispatched.fetch_add(1, Ordering::Relaxed);
+                params
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry.");
+        assert_eq!(dispatched.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn mcp_gate_unions_producing_message_records() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_policy(
+            &gcx,
+            vec![
+                Zone {
+                    name: "secrets".to_string(),
+                    patterns: vec![".env".to_string()],
+                    send_to: Vec::new(),
+                    ..Default::default()
+                },
+                Zone {
+                    name: "normal".to_string(),
+                    patterns: vec!["*".to_string()],
+                    send_to: vec!["*".to_string()],
+                    ..Default::default()
+                },
+            ],
+        );
+        let mut producing_message = ChatMessage::default();
+        producing_message.extra.insert(
+            "privacy".to_string(),
+            serde_json::to_value(PrivacyRecord {
+                files: vec![FileRecord {
+                    path: ".env".to_string(),
+                    zone: "secrets".to_string(),
+                    attribution: Attribution::Declared,
+                }],
+            })
+            .unwrap(),
+        );
+        let dispatched = AtomicUsize::new(0);
+
+        let error = dispatch_cleared_mcp_call(
+            &gcx,
+            "server",
+            call_params(json!({"query": "hello"})),
+            &[producing_message],
+            |params| {
+                dispatched.fetch_add(1, Ordering::Relaxed);
+                params
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry.");
+        assert_eq!(dispatched.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

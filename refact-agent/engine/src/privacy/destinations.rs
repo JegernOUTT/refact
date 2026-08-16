@@ -32,6 +32,20 @@ pub(crate) fn clear_for_model<T: PrivacyAudited>(
     refact_privacy::clear(value, &Destination::from_model_record(model_rec), &policy)
 }
 
+pub(crate) fn clear_for_mcp<T: PrivacyAudited>(
+    gcx: &SharedGlobalContext,
+    value: T,
+    server_name: &str,
+) -> Result<Cleared<T>, refact_privacy::Refusal> {
+    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+    let destination = Destination {
+        id: DestinationId(server_name.to_string()),
+        kind: DestinationKind::Mcp,
+        display_name: server_name.to_string(),
+    };
+    refact_privacy::clear(value, &destination, &policy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
