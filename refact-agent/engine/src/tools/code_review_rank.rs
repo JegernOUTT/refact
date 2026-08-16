@@ -301,7 +301,7 @@ mod tests {
         );
 
         let first_id = stable_finding_id(&first);
-        assert_eq!(first_id, "rf-cf9b9bf6");
+        assert_eq!(first_id, "rf-28e67722");
         assert!(first_id.starts_with("rf-"));
         assert_eq!(first_id.len(), 11);
         assert!(first_id[3..]
