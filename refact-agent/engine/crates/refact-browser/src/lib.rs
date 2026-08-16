@@ -1,9 +1,18 @@
 mod handles;
 mod injected_source;
+mod keyboard;
+mod us_keyboard_layout;
 mod world;
 
 pub use handles::{ElementHandle, HandleError, HandleRegistry};
 pub use injected_source::{INJECTED_BUNDLE, wrapped_bootstrap};
+pub use keyboard::{
+    CdpKeyboardDispatcher, KeyEventPayload, KeyEventType, Keyboard, KeyboardDispatch,
+    KeyboardDispatcher, KeyboardModifier, modifier_bitmask,
+};
+pub use us_keyboard_layout::{
+    KEYPAD_LOCATION, KeyDefinition, KeyDescription, ShiftedKeyDefinition, US_KEYBOARD_LAYOUT,
+};
 pub use world::{
     BINDING_NAME, BindingCall, BindingCallback, INJECTED_INSTANCE_NAME, UTILITY_WORLD_NAME,
     WorldManager,

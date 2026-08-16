@@ -18,7 +18,9 @@ use refact_lsp::chat::browser_context::maybe_insert_browser_context;
 use refact_lsp::integrations::browser_controller::execute_steps;
 use refact_lsp::integrations::browser_controller::execute_steps as execute_steps_with_policy;
 use refact_lsp::integrations::browser_models::{BrowserLocator, BrowserStep};
-use refact_lsp::refact_browser::{BrowserRuntime, HandleError, UTILITY_WORLD_NAME};
+use refact_lsp::refact_browser::{
+    BrowserRuntime, CdpKeyboardDispatcher, HandleError, Keyboard, UTILITY_WORLD_NAME,
+};
 use serde::Deserialize;
 use serde_json::json;
 use structopt::StructOpt;
@@ -547,6 +549,48 @@ async fn fill_controlled_input_react() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn keyboard_types_unicode_into_controlled_input() {
+    let Some(case) = BrowserCase::start("controlled-input.html").await else {
+        return;
+    };
+    case.tab
+        .evaluate("document.querySelector('#controlled').focus()", false)
+        .unwrap();
+    let mut keyboard = Keyboard::new(CdpKeyboardDispatcher::new(&case.tab));
+    keyboard.type_text("hello é🙂", None).unwrap();
+    let value = case
+        .tab
+        .evaluate("document.querySelector('#state').textContent", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(value, "hello é🙂");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn keyboard_shortcut_selects_and_deletes_controlled_input() {
+    let Some(case) = BrowserCase::start("controlled-input.html").await else {
+        return;
+    };
+    case.tab
+        .evaluate("document.querySelector('#controlled').focus()", false)
+        .unwrap();
+    let mut keyboard = Keyboard::new(CdpKeyboardDispatcher::new(&case.tab));
+    keyboard.insert_text("remove me").unwrap();
+    keyboard.press("Control+A", None).unwrap();
+    keyboard.press("Delete", None).unwrap();
+    let value = case
+        .tab
+        .evaluate("document.querySelector('#state').textContent", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(value, "");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn hover_reveals_css_menu() {
     let Some(case) = BrowserCase::start("hover-menu.html").await else {
         return;
@@ -679,6 +723,26 @@ async fn contenteditable_fill_updates_output() {
     );
     assert!(report.ok, "contenteditable fill failed: {report:?}");
     assert_eq!(returned_text(&report), "editable text");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn keyboard_types_unicode_into_contenteditable() {
+    let Some(case) = BrowserCase::start("contenteditable.html").await else {
+        return;
+    };
+    case.tab
+        .evaluate("document.querySelector('#editor').focus()", false)
+        .unwrap();
+    let mut keyboard = Keyboard::new(CdpKeyboardDispatcher::new(&case.tab));
+    keyboard.press_sequentially("editable é🙂", None).unwrap();
+    let value = case
+        .tab
+        .evaluate("document.querySelector('#result').textContent", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(value, "editable é🙂");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

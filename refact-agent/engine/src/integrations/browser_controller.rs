@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use headless_chrome::Tab;
-use headless_chrome::browser::tab::ModifierKey;
 use headless_chrome::protocol::cdp::Page;
 use tokio::sync::Mutex as AMutex;
 
@@ -12,7 +11,7 @@ use crate::integrations::browser_locators::{
 };
 use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
-use refact_browser::{ElementHandle, WorldManager};
+use refact_browser::{CdpKeyboardDispatcher, ElementHandle, Keyboard, WorldManager};
 use refact_core::image_policy::{ImageFormat, ImagePolicy};
 
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
@@ -746,23 +745,25 @@ fn step_click_if_exists(
 }
 
 fn step_press_key(tab: &Tab, idx: usize, key: &str, modifiers: &[String]) -> StepResult {
-    let modifier_keys: Option<Vec<ModifierKey>> = if modifiers.is_empty() {
-        None
-    } else {
-        Some(
-            modifiers
-                .iter()
-                .map(|m| match m.as_str() {
-                    "Alt" => ModifierKey::Alt,
-                    "Ctrl" => ModifierKey::Ctrl,
-                    "Meta" => ModifierKey::Meta,
-                    "Shift" => ModifierKey::Shift,
-                    _ => ModifierKey::Shift,
-                })
-                .collect(),
-        )
-    };
-    match tab.press_key_with_modifiers(key, modifier_keys.as_deref()) {
+    let mut tokens = Vec::with_capacity(modifiers.len() + 1);
+    for modifier in modifiers {
+        match modifier.as_str() {
+            "Alt" | "Meta" | "Shift" => tokens.push(modifier.as_str()),
+            "Ctrl" | "Control" => tokens.push("Control"),
+            _ => {
+                return StepResult::failure(
+                    idx,
+                    format!("Press key {key}"),
+                    format!("Unknown key: \"{modifier}\""),
+                )
+            }
+        }
+    }
+    tokens.push(key);
+    let chord = tokens.join("+");
+    let dispatcher = CdpKeyboardDispatcher::new(tab);
+    let mut keyboard = Keyboard::new(dispatcher);
+    match keyboard.press(&chord, None) {
         Ok(_) => {
             let mod_str = if modifiers.is_empty() {
                 String::new()
