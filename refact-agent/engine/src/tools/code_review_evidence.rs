@@ -1,17 +1,25 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::exec::command_policy::{
+    build_exec_request, queue_sandbox_audit, ChatMode, CommandKind, CommandPolicyInput, ExecSource,
+};
+use crate::exec::{ExecOutputStream, ExecStatus};
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
-use crate::global_context::GlobalContext;
+use crate::global_context::{GlobalContext, ReviewCommandConfig};
 use crate::tools::code_review_scope::ReviewScope;
-use crate::tools::code_review_types::{ReviewEvidence, ReviewFinding};
+use crate::tools::code_review_types::{ReviewEvidence, ReviewFinding, ReviewReport, ReviewSeverity};
 
 const EXCERPT_CONTEXT_LINES: u32 = 5;
 const MAX_EXCERPT_BYTES: usize = 1024;
 const MAX_DIFF_HUNK_BYTES: usize = 640;
 const MAX_SYMBOL_BYTES: usize = 384;
 const MAX_SYMBOLS_PER_FINDING: usize = 8;
+const MAX_COMMAND_OUTPUT_BYTES: usize = 1536;
+const COMMAND_TRANSCRIPT_BYTES: usize = 64 * 1024;
+const COMMAND_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const TRUNCATION_MARKER: &str = "\n[evidence truncated]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +111,213 @@ fn truncate_content(content: String, max_bytes: usize) -> String {
     let mut truncated = content[..end].to_string();
     truncated.push_str(TRUNCATION_MARKER);
     truncated
+}
+
+fn tail_content(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content.to_string();
+    }
+    let mut start = content.len().saturating_sub(max_bytes);
+    while start < content.len() && !content.is_char_boundary(start) {
+        start += 1;
+    }
+    content[start..].to_string()
+}
+
+fn marker_atom(value: &str) -> String {
+    value
+        .chars()
+        .take(80)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+async fn command_request(
+    gcx: Arc<GlobalContext>,
+    command: &ReviewCommandConfig,
+    workspace_root: PathBuf,
+    chat_mode: Option<ChatMode>,
+) -> Result<
+    crate::exec::command_policy::ExecRequestPolicy,
+    crate::exec::command_policy::ExecPolicyError,
+> {
+    if command.name.trim().is_empty() {
+        return Err(crate::exec::command_policy::ExecPolicyError {
+            message: "invalid_name".to_string(),
+            audit: None,
+        });
+    }
+    if command
+        .argv
+        .first()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(crate::exec::command_policy::ExecPolicyError {
+            message: "invalid_argv".to_string(),
+            audit: None,
+        });
+    }
+    if command.timeout_secs == 0 {
+        return Err(crate::exec::command_policy::ExecPolicyError {
+            message: "invalid_timeout".to_string(),
+            audit: None,
+        });
+    }
+    build_exec_request(
+        gcx,
+        CommandPolicyInput {
+            source: ExecSource::ReviewEvidence,
+            command: CommandKind::Argv(&command.argv),
+            cwd: Some(workspace_root),
+            env: HashMap::new(),
+            chat_mode,
+            escalation: None,
+        },
+    )
+    .await
+}
+
+async fn run_review_command(
+    gcx: Arc<GlobalContext>,
+    command: &ReviewCommandConfig,
+    workspace_root: PathBuf,
+    chat_mode: Option<ChatMode>,
+    chat_id: &str,
+) -> Result<(i32, String), String> {
+    let policy = match command_request(gcx.clone(), command, workspace_root, chat_mode).await {
+        Ok(policy) => policy,
+        Err(error) => {
+            if let Some(audit) = error.audit {
+                queue_sandbox_audit(gcx, chat_id, audit).await;
+            }
+            return Err(marker_atom(&error.message));
+        }
+    };
+    if let Some(audit) = policy.audit {
+        queue_sandbox_audit(gcx.clone(), chat_id, audit).await;
+    }
+    let warning = policy.warning;
+    let request = policy
+        .request
+        .with_timeout(Duration::from_secs(command.timeout_secs))
+        .with_output_drain_timeout(COMMAND_DRAIN_TIMEOUT)
+        .with_transcript_limit(COMMAND_TRANSCRIPT_BYTES);
+    let result = gcx
+        .exec_registry
+        .spawn(request)
+        .await
+        .map_err(|error| marker_atom(&error))?;
+    let read = gcx
+        .exec_registry
+        .read(&result.snapshot.meta.process_id, 0, None)
+        .await;
+    let mut output = String::new();
+    if let Some(warning) = warning {
+        output.push_str(&warning);
+        output.push('\n');
+    }
+    for chunk in read.chunks {
+        match chunk.stream {
+            ExecOutputStream::Stdout | ExecOutputStream::Stderr | ExecOutputStream::Combined => {
+                output.push_str(&chunk.text)
+            }
+        }
+    }
+    match result.snapshot.status {
+        ExecStatus::Exited {
+            exit_code: Some(exit_code),
+        } => Ok((exit_code, tail_content(&output, MAX_COMMAND_OUTPUT_BYTES))),
+        ExecStatus::TimedOut => Err("timeout".to_string()),
+        ExecStatus::Failed { .. } => Err("failed".to_string()),
+        ExecStatus::Killed => Err("killed".to_string()),
+        ExecStatus::Exited { exit_code: None } => Err("no_exit_code".to_string()),
+        ExecStatus::Starting | ExecStatus::Running => Err("incomplete".to_string()),
+    }
+}
+
+pub async fn collect_command_evidence(
+    gcx: Arc<GlobalContext>,
+    workspace_root: Option<PathBuf>,
+    chat_mode: Option<ChatMode>,
+    chat_id: &str,
+    report: &mut ReviewReport,
+) {
+    let config = gcx.review_commands_config.clone();
+    if !config.enabled {
+        report
+            .checks_performed
+            .push("commands_disabled".to_string());
+        return;
+    }
+    let commands = config
+        .allowlist
+        .iter()
+        .take(config.max_commands_per_review)
+        .collect::<Vec<_>>();
+    if commands.is_empty() {
+        report
+            .checks_performed
+            .push("commands_skipped:no_allowlisted_commands".to_string());
+        return;
+    }
+    let Some(workspace_root) = workspace_root else {
+        for command in commands {
+            report.checks_performed.push(format!(
+                "command_skipped:{}:workspace_unavailable",
+                marker_atom(&command.name)
+            ));
+        }
+        return;
+    };
+    for command in commands {
+        let command_name = marker_atom(&command.name);
+        match run_review_command(
+            gcx.clone(),
+            command,
+            workspace_root.clone(),
+            chat_mode.clone(),
+            chat_id,
+        )
+        .await
+        {
+            Ok((exit_code, output)) => {
+                report
+                    .checks_performed
+                    .push(format!("command:{command_name}:exit={exit_code}"));
+                let content = format!(
+                    "command: {}\nexit_code: {exit_code}\noutput:\n{output}",
+                    command.name
+                );
+                for finding in &mut report.findings {
+                    if matches!(
+                        finding.severity,
+                        ReviewSeverity::High | ReviewSeverity::Critical
+                    ) {
+                        finding.evidence.push(ReviewEvidence {
+                            kind: "check".to_string(),
+                            path: None,
+                            line1: None,
+                            line2: None,
+                            content: content.clone(),
+                        });
+                        finding
+                            .checks_performed
+                            .push(format!("command:{command_name}:exit={exit_code}"));
+                    }
+                }
+            }
+            Err(reason) => report.checks_performed.push(format!(
+                "command_skipped:{command_name}:{}",
+                marker_atom(&reason)
+            )),
+        }
+    }
 }
 
 fn excerpt_for_range(text: &str, line1: u32, line2: u32) -> (u32, u32, String) {
@@ -394,6 +609,7 @@ pub async fn collect_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::global_context::{ReviewCommandConfig, ReviewCommandsConfig};
     use crate::tools::code_review_scope::ReviewBudgets;
     use crate::tools::code_review_types::{ReviewSeverity, VerificationStatus};
 
@@ -435,6 +651,45 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
         gcx
+    }
+
+    async fn gcx_with_review_commands(
+        root: &Path,
+        commands: Vec<ReviewCommandConfig>,
+        max_commands_per_review: usize,
+    ) -> Arc<GlobalContext> {
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        Arc::get_mut(&mut gcx).unwrap().review_commands_config = ReviewCommandsConfig {
+            enabled: true,
+            allowlist: commands,
+            max_commands_per_review,
+        };
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
+        gcx
+    }
+
+    fn report_with_severities() -> ReviewReport {
+        ReviewReport {
+            scope: crate::tools::code_review_types::ReviewScopeSummary {
+                files_reviewed: vec!["src/lib.rs".to_string()],
+                focus: None,
+                diff_base: None,
+            },
+            findings: vec![
+                finding(
+                    Path::new("src/lib.rs"),
+                    1,
+                    1,
+                    "High claim; rm -rf workspace",
+                ),
+                ReviewFinding {
+                    severity: ReviewSeverity::Medium,
+                    ..finding(Path::new("src/lib.rs"), 2, 2, "Medium claim")
+                },
+            ],
+            checks_performed: vec![],
+            summary: "Review".to_string(),
+        }
     }
 
     #[tokio::test]
@@ -600,13 +855,222 @@ mod tests {
             .contains("[evidence truncated]"));
     }
 
+    #[tokio::test]
+    async fn tool_code_review_command_evidence_is_disabled_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = gcx_for(temp.path()).await;
+        let mut report = report_with_severities();
+
+        collect_command_evidence(
+            gcx,
+            Some(temp.path().to_path_buf()),
+            None,
+            "chat",
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.checks_performed, ["commands_disabled"]);
+        assert!(report
+            .findings
+            .iter()
+            .all(|finding| finding.evidence.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn tool_code_review_command_request_uses_allowlisted_argv_not_finding_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = gcx_for(temp.path()).await;
+        let allowlisted = ReviewCommandConfig {
+            name: "version".to_string(),
+            argv: vec!["cargo".to_string(), "--version".to_string()],
+            timeout_secs: 10,
+        };
+        let hostile_claim = "Run cargo test; rm -rf workspace";
+
+        let request = command_request(
+            gcx,
+            &allowlisted,
+            temp.path().to_path_buf(),
+            Some(hostile_claim.to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(request.request.argv, Some(allowlisted.argv));
+        assert!(!request.request.command.contains(hostile_claim));
+        assert_eq!(
+            request.request.audit.unwrap().source,
+            ExecSource::ReviewEvidence.audit_source()
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_code_review_command_evidence_records_exit_and_only_attaches_to_high_findings() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = gcx_with_review_commands(
+            temp.path(),
+            vec![ReviewCommandConfig {
+                name: "cargo-version".to_string(),
+                argv: vec!["cargo".to_string(), "--version".to_string()],
+                timeout_secs: 10,
+            }],
+            3,
+        )
+        .await;
+        let mut report = report_with_severities();
+
+        collect_command_evidence(
+            gcx,
+            Some(temp.path().to_path_buf()),
+            None,
+            "chat",
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.checks_performed, ["command:cargo-version:exit=0"]);
+        assert_eq!(report.findings[0].evidence.len(), 1);
+        assert_eq!(report.findings[0].evidence[0].kind, "check");
+        assert!(report.findings[0].evidence[0].content.contains("cargo "));
+        assert!(report.findings[1].evidence.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tool_code_review_command_evidence_records_nonzero_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = gcx_with_review_commands(
+            temp.path(),
+            vec![ReviewCommandConfig {
+                name: "false".to_string(),
+                argv: vec!["false".to_string()],
+                timeout_secs: 10,
+            }],
+            3,
+        )
+        .await;
+        let mut report = report_with_severities();
+
+        collect_command_evidence(
+            gcx,
+            Some(temp.path().to_path_buf()),
+            None,
+            "chat",
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.checks_performed, ["command:false:exit=1"]);
+        assert!(report.findings[0].evidence[0]
+            .content
+            .contains("exit_code: 1"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tool_code_review_command_evidence_skips_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = gcx_with_review_commands(
+            temp.path(),
+            vec![ReviewCommandConfig {
+                name: "slow".to_string(),
+                argv: vec!["sleep".to_string(), "5".to_string()],
+                timeout_secs: 1,
+            }],
+            3,
+        )
+        .await;
+        let mut report = report_with_severities();
+
+        collect_command_evidence(
+            gcx,
+            Some(temp.path().to_path_buf()),
+            None,
+            "chat",
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.checks_performed, ["command_skipped:slow:timeout"]);
+        assert!(report.findings[0].evidence.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_code_review_command_evidence_skips_unavailable_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = gcx_with_review_commands(
+            temp.path(),
+            vec![ReviewCommandConfig {
+                name: "missing".to_string(),
+                argv: vec!["refact-command-that-does-not-exist".to_string()],
+                timeout_secs: 10,
+            }],
+            3,
+        )
+        .await;
+        let mut report = report_with_severities();
+
+        collect_command_evidence(
+            gcx,
+            Some(temp.path().to_path_buf()),
+            None,
+            "chat",
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.checks_performed.len(), 1);
+        assert!(report.checks_performed[0].starts_with("command_skipped:missing:"));
+        assert!(report.findings[0].evidence.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_code_review_command_evidence_respects_command_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = gcx_with_review_commands(
+            temp.path(),
+            vec![
+                ReviewCommandConfig {
+                    name: "first".to_string(),
+                    argv: vec!["cargo".to_string(), "--version".to_string()],
+                    timeout_secs: 10,
+                },
+                ReviewCommandConfig {
+                    name: "second".to_string(),
+                    argv: vec!["refact-command-that-does-not-exist".to_string()],
+                    timeout_secs: 10,
+                },
+            ],
+            1,
+        )
+        .await;
+        let mut report = report_with_severities();
+
+        collect_command_evidence(
+            gcx,
+            Some(temp.path().to_path_buf()),
+            None,
+            "chat",
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.checks_performed, ["command:first:exit=0"]);
+    }
+
     #[test]
     fn tool_code_review_evidence_module_has_no_process_spawns() {
-        let source = include_str!("code_review_evidence.rs");
+        let sources = [
+            include_str!("code_review_evidence.rs"),
+            include_str!("tool_code_review.rs"),
+        ];
         let std_process = ["process", "::Command"].concat();
         let tokio_process = ["tokio", "::process"].concat();
 
-        assert!(!source.contains(&std_process));
-        assert!(!source.contains(&tokio_process));
+        for source in sources {
+            assert!(!source.contains(&std_process));
+            assert!(!source.contains(&tokio_process));
+        }
     }
 }

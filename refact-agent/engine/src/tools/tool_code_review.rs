@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::subchat::{run_subchat_once_with_parent, resolve_subchat_params, resolve_subchat_model};
 use crate::tools::code_review_candidates::{parse_candidates_with_reasons, ParsedCandidates};
-use crate::tools::code_review_evidence::collect_evidence;
+use crate::tools::code_review_evidence::{collect_command_evidence, collect_evidence};
 use crate::tools::code_review_rank::finalize_review_report;
 use crate::tools::code_review_scope::{
     build_review_scope_with_max_files, validate_review_budget, ReviewScope,
@@ -32,6 +32,7 @@ use crate::postprocessing::pp_context_files::postprocess_context_files;
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tokens::count_text_tokens_with_fallback;
 use crate::worktrees::scope::ExecutionScope;
+use crate::exec::command_policy::chat_mode_for_exec;
 
 pub struct ToolCodeReview {
     pub config_path: String,
@@ -307,6 +308,31 @@ async fn run_review_pipeline(
     };
     let output = apply_evidence_stage(gcx.clone(), &scope, output).await;
     let mut report = output.into_report();
+    let (chat_id, worktree_root) = {
+        let ccx_lock = ccx.lock().await;
+        (
+            ccx_lock.chat_id.clone(),
+            ccx_lock
+                .execution_scope_worktree()
+                .map(|worktree| worktree.root),
+        )
+    };
+    let workspace_root = match worktree_root {
+        Some(root) => Some(root),
+        None => crate::files_correction::get_project_dirs(gcx.clone())
+            .await
+            .into_iter()
+            .next(),
+    };
+    let chat_mode = chat_mode_for_exec(gcx.clone(), &chat_id).await;
+    collect_command_evidence(
+        gcx.clone(),
+        workspace_root,
+        chat_mode,
+        &chat_id,
+        &mut report,
+    )
+    .await;
     verify_review_report(gcx, ccx, tool_call_id, &mut report, metering).await;
     finalize_review_report(&mut report);
     Ok(CandidateStageOutput {

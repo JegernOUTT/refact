@@ -129,6 +129,12 @@ pub async fn build_exec_request(
     input: CommandPolicyInput<'_>,
 ) -> Result<ExecRequestPolicy, ExecPolicyError> {
     let command = match input.command {
+        CommandKind::Shell(_) if input.source == ExecSource::ReviewEvidence => {
+            return Err(policy_input_error(
+                "Review evidence commands require argv",
+                input.source,
+            ));
+        }
         CommandKind::Shell(command) => {
             if command.trim().is_empty() {
                 return Err(policy_input_error("Command is empty", input.source));
@@ -447,11 +453,12 @@ mod tests {
         ];
 
         for (source, expected) in sources {
+            let argv = vec!["printf".to_string(), "ok".to_string()];
             let request = build_exec_request(
                 gcx.clone(),
                 CommandPolicyInput {
                     source,
-                    command: CommandKind::Shell("printf ok"),
+                    command: CommandKind::Argv(&argv),
                     cwd: None,
                     env: HashMap::new(),
                     chat_mode: None,
@@ -494,6 +501,28 @@ mod tests {
 
         assert_eq!(request.request.argv, Some(argv));
         assert_eq!(request.request.cwd, Some(cwd));
+    }
+
+    #[tokio::test]
+    async fn review_evidence_policy_rejects_shell_strings() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+
+        let error = build_exec_request(
+            gcx,
+            CommandPolicyInput {
+                source: ExecSource::ReviewEvidence,
+                command: CommandKind::Shell("cargo test; rm -rf workspace"),
+                cwd: None,
+                env: HashMap::new(),
+                chat_mode: None,
+                escalation: None,
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+
+        assert_eq!(error.message, "Review evidence commands require argv");
     }
 
     #[test]

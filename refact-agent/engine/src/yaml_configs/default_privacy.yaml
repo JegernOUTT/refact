@@ -50,3 +50,8 @@ scheduler:
 hooks:
   trusted_projects: []
   # - /absolute/path/to/a/repo/you/trust
+
+review_commands:
+  enabled: false
+  allowlist: []
+  max_commands_per_review: 3

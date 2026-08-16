@@ -14,6 +14,10 @@
 
 The policy selects read-only confinement for read-only chat modes and workspace-write confinement for other ordinary commands. Workspace-write grants the configured workspace roots, the working directory, and the platform temporary directory. Full access is available only through an approved escalation.
 
+## Review evidence commands
+
+`review_commands.enabled` defaults to `false`. When enabled, code review runs up to `review_commands.max_commands_per_review` entries from `review_commands.allowlist`; each entry provides a display `name`, literal `argv`, and `timeout_secs`. Review findings and model output cannot supply or alter command arguments. Commands run in the active workspace through the centralized `review_evidence` execution source, inherit `terminal_security` environment and sandbox policy, and degrade to a recorded skip when execution is unavailable. Keep this feature opt-in until the sandbox rollout has passed its deployment gates; only then should deployments consider enabling it by default.
+
 ## Command confirmation
 
 Confirmation and denial globs retain full raw-command matching and additionally inspect parsed POSIX command segments. Segment parsing recognizes `;`, `&&`, `||`, `|`, `&`, newlines, command substitutions, subshells, and nested `sh`, `bash`, `zsh`, or `dash` `-c`/`-lc` commands to a depth of four. A glob can match the rejoined segment or the segment executable basename. Windows shell input and parse failures use raw-command matching only.
