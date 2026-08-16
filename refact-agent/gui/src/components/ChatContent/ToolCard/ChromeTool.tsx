@@ -10,6 +10,7 @@ import { ToolCall } from "../../../services/refact/types";
 import type {
   ActionabilityDiagnostics,
   BrowserActionResponse,
+  BrowserAssertionResult,
   BrowserAriaSnapshot,
   BrowserAriaSnapshotNode,
   BrowserExecutionStep,
@@ -191,6 +192,35 @@ function parseActionabilityDiagnostics(
         ? value.intercepting_element
         : undefined,
   };
+}
+
+function parseAssertionResult(value: unknown): BrowserAssertionResult | null {
+  if (
+    !isRecord(value) ||
+    typeof value.matcher !== "string" ||
+    typeof value.passed !== "boolean" ||
+    typeof value.soft !== "boolean" ||
+    typeof value.attempts !== "number" ||
+    typeof value.elapsed_ms !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    matcher: value.matcher,
+    passed: value.passed,
+    soft: value.soft,
+    expected: value.expected,
+    received: value.received,
+    diff: typeof value.diff === "string" ? value.diff : undefined,
+    attempts: value.attempts,
+    elapsed_ms: value.elapsed_ms,
+  };
+}
+
+function renderAssertionValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  return JSON.stringify(value, null, 2) ?? "null";
 }
 
 function summarizeStep(step: BrowserExecutionStep): string {
@@ -463,6 +493,14 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     });
   }, [typedResult]);
 
+  const typedAssertions = useMemo(() => {
+    if (!typedResult) return [];
+    return typedResult.steps.flatMap((step) => {
+      const assertion = parseAssertionResult(step.assertion);
+      return assertion ? [{ step, assertion }] : [];
+    });
+  }, [typedResult]);
+
   const typedDialogsBlock = useMemo(() => {
     if (!typedResult?.dialogs?.length) return null;
     return typedResult.dialogs
@@ -722,6 +760,60 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
           <AriaSnapshotView yaml={snapshot.yaml} nodes={snapshot.nodes} />
         </Box>
       ))}
+
+      {typedAssertions.length > 0 && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Assertions</Box>
+          <Box className={styles.assertionList}>
+            {typedAssertions.map(({ step, assertion }) => (
+              <Box
+                className={styles.assertion}
+                data-status={assertion.passed ? "success" : "error"}
+                key={step.step_index}
+              >
+                <Flex align="baseline" gap="2" wrap="wrap">
+                  <Box className={styles.assertionStatus}>
+                    {assertion.passed ? "Passed" : "Failed"}
+                  </Box>
+                  <Box className={styles.assertionName}>
+                    {prettifyActionName(assertion.matcher)}
+                  </Box>
+                  {assertion.soft && (
+                    <Box className={styles.assertionMeta}>Soft</Box>
+                  )}
+                  <Box className={styles.assertionMeta}>
+                    {assertion.attempts} attempt
+                    {assertion.attempts === 1 ? "" : "s"} ·{" "}
+                    {assertion.elapsed_ms}ms
+                  </Box>
+                </Flex>
+                <Box className={styles.assertionValues}>
+                  <Box>
+                    <Box className={styles.assertionValueLabel}>Expected</Box>
+                    <ShikiCodeBlock showLineNumbers={false}>
+                      {renderAssertionValue(assertion.expected)}
+                    </ShikiCodeBlock>
+                  </Box>
+                  <Box>
+                    <Box className={styles.assertionValueLabel}>Received</Box>
+                    <ShikiCodeBlock showLineNumbers={false}>
+                      {renderAssertionValue(assertion.received)}
+                    </ShikiCodeBlock>
+                  </Box>
+                </Box>
+                {assertion.diff && (
+                  <Box>
+                    <Box className={styles.assertionValueLabel}>Diff</Box>
+                    <ShikiCodeBlock showLineNumbers={false}>
+                      {assertion.diff}
+                    </ShikiCodeBlock>
+                  </Box>
+                )}
+              </Box>
+            ))}
+          </Box>
+        </Box>
+      )}
 
       {typedActionability.length > 0 && (
         <Box className={styles.section}>

@@ -4061,6 +4061,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tracing",
  "tungstenite 0.28.0",

@@ -1,4 +1,5 @@
 mod actionability;
+pub mod assertions;
 pub mod context_state;
 pub mod dialogs;
 pub mod files;
@@ -20,11 +21,11 @@ mod us_keyboard_layout;
 mod world;
 
 pub use actionability::{
-    ACTION_RETRY_BACKOFF_MS, LOCATOR_RETRY_BACKOFF_MS, MAX_CALL_LOG_ENTRIES, ActionKind,
-    ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine, ActionabilityError,
-    ActionabilityExecutionMode, ActionabilitySuccess, ActionabilityTimeouts, CallLog, Clock,
-    Deadline, LocatorOutcome, RequiredStates, SystemClock, TimeoutError, TimeoutKind,
-    required_states,
+    ACTION_RETRY_BACKOFF_MS, EXPECT_RETRY_BACKOFF_MS, LOCATOR_RETRY_BACKOFF_MS,
+    MAX_CALL_LOG_ENTRIES, ActionKind, ActionabilityDiagnostic, ActionabilityDriver,
+    ActionabilityEngine, ActionabilityError, ActionabilityExecutionMode, ActionabilitySuccess,
+    ActionabilityTimeouts, CallLog, Clock, Deadline, ExpectPollResult, LocatorOutcome,
+    RequiredStates, SystemClock, TimeoutError, TimeoutKind, required_states,
 };
 pub use dialogs::{DialogDecision, DialogManager, DialogResponse};
 pub use context_state::{ContextState, MediaState, ViewportState};

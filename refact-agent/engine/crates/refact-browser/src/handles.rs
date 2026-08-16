@@ -129,6 +129,19 @@ impl WorldManager {
             self.call_function_on(tab, handle, GET_ACCESSIBLE_DESCRIPTION_FUNCTION, Vec::new())?;
         parse_accessible_text(value, "description")
     }
+
+    pub fn expectation_values(
+        &self,
+        tab: &Tab,
+        handle: &ElementHandle,
+    ) -> Result<Value, HandleError> {
+        self.call_function_on(
+            tab,
+            handle,
+            "function() { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.expectationValues(this); }",
+            Vec::new(),
+        )
+    }
 }
 
 fn parse_accessible_text(value: Value, kind: &str) -> Result<String, HandleError> {

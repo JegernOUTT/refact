@@ -21,9 +21,10 @@ use refact_lsp::integrations::browser_controller::execute_steps as execute_steps
 use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
-    AccessibilitySnapshotOptions, BrowserActionRequest, BrowserLoadState, BrowserLocator,
-    BrowserCookie, BrowserCookieSameSite, BrowserStep, BrowserStorageItem, BrowserStorageKind,
-    FillStrategy, LocatorHandlerAction, RouteHandler, SessionPolicy, TabTarget, UrlPattern,
+    AccessibilitySnapshotOptions, BrowserActionRequest, BrowserCookie, BrowserCookieSameSite,
+    BrowserExpectedText, BrowserExpectation, BrowserLoadState, BrowserLocator, BrowserStep,
+    BrowserStorageItem, BrowserStorageKind, FillStrategy, LocatorHandlerAction, LocatorRegex,
+    RouteHandler, SessionPolicy, TabTarget, UrlPattern,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -826,6 +827,114 @@ async fn click_delayed_button_without_wait_seconds() {
         ],
     );
     assert!(report.ok, "click should auto-wait: {report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
+    let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
+        return;
+    };
+    case.setup_world();
+    case.tab
+        .evaluate(
+            "document.body.insertAdjacentHTML('beforeend', '<p id=assertion-text>Alpha   Beta 42</p><ul><li class=assertion-item>One</li><li class=assertion-item>Two</li><li class=assertion-item>Three</li></ul>')",
+            false,
+        )
+        .unwrap();
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("#delayed")),
+                matcher: BrowserExpectation::ToBeVisible,
+                timeout_ms: Some(2_000),
+                soft: false,
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("#assertion-text")),
+                matcher: BrowserExpectation::ToContainText {
+                    expected: BrowserExpectedText::Text("beta 42".to_string()),
+                    ignore_case: true,
+                },
+                timeout_ms: None,
+                soft: false,
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("#assertion-text")),
+                matcher: BrowserExpectation::ToHaveText {
+                    expected: BrowserExpectedText::Regex(LocatorRegex {
+                        source: r"Alpha\s+Beta\s+\d+".to_string(),
+                        flags: String::new(),
+                    }),
+                    ignore_case: false,
+                },
+                timeout_ms: None,
+                soft: false,
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css(".assertion-item")),
+                matcher: BrowserExpectation::ToHaveCount { expected: 3 },
+                timeout_ms: None,
+                soft: false,
+            },
+            BrowserStep::Navigate {
+                url: case.server.url("snapshot.html"),
+            },
+            BrowserStep::Expect {
+                locator: None,
+                matcher: BrowserExpectation::ToHaveUrl {
+                    expected: BrowserExpectedText::Regex(LocatorRegex {
+                        source: r"/snapshot\.html$".to_string(),
+                        flags: String::new(),
+                    }),
+                    ignore_case: false,
+                },
+                timeout_ms: None,
+                soft: false,
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::role("navigation", Some("Primary"))),
+                matcher: BrowserExpectation::ToMatchAriaSnapshot {
+                    expected: "- navigation:\n  - link\n  - button \"Save\"".to_string(),
+                },
+                timeout_ms: None,
+                soft: false,
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("h1")),
+                matcher: BrowserExpectation::ToHaveText {
+                    expected: BrowserExpectedText::Text("Missing heading".to_string()),
+                    ignore_case: false,
+                },
+                timeout_ms: Some(50),
+                soft: true,
+            },
+            BrowserStep::Expect {
+                locator: None,
+                matcher: BrowserExpectation::ToHaveTitle {
+                    expected: BrowserExpectedText::Text("ARIA snapshot fixture".to_string()),
+                    ignore_case: false,
+                },
+                timeout_ms: None,
+                soft: false,
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(
+        report.ok,
+        "soft assertion should not fail the batch: {report:?}"
+    );
+    assert_eq!(report.steps.len(), 9);
+    assert!(report.steps[0].retries > 0);
+    let failed = report.steps[7].assertion.as_ref().unwrap();
+    assert!(!failed.passed);
+    assert!(failed.soft);
+    assert_eq!(failed.expected, json!("Missing heading"));
+    assert_eq!(failed.received, json!("Snapshot page"));
+    assert!(report.steps[8].ok, "batch did not continue: {report:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

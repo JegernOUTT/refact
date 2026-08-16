@@ -324,6 +324,17 @@ export type ActionabilityDiagnostics = {
   intercepting_element?: string;
 };
 
+export type BrowserAssertionResult = {
+  matcher: string;
+  passed: boolean;
+  soft: boolean;
+  expected: unknown;
+  received: unknown;
+  diff?: string | null;
+  attempts: number;
+  elapsed_ms: number;
+};
+
 export type BrowserExecutionStep = {
   step_index: number;
   ok: boolean;
@@ -335,6 +346,7 @@ export type BrowserExecutionStep = {
   verified?: boolean | null;
   retries: number;
   actionability?: ActionabilityDiagnostics;
+  assertion?: BrowserAssertionResult;
 };
 
 export type BrowserTabOpener = {

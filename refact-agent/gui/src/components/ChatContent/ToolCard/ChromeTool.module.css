@@ -33,6 +33,56 @@
   gap: var(--rf-space-2);
 }
 
+.assertionList {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.assertion {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  padding-inline-start: var(--rf-space-2);
+  border-inline-start: var(--rf-hairline) solid var(--rf-color-success);
+}
+
+.assertion[data-status="error"] {
+  border-inline-start-color: var(--rf-color-danger);
+}
+
+.assertionStatus {
+  color: var(--rf-color-success);
+}
+
+.assertion[data-status="error"] .assertionStatus {
+  color: var(--rf-color-danger);
+}
+
+.assertionName {
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
+}
+
+.assertionMeta,
+.assertionValueLabel {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.assertionValues {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--rf-space-2);
+}
+
+@container (max-width: 360px) {
+  .assertionValues {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .handlerRow {
   min-width: 0;
   overflow-wrap: anywhere;

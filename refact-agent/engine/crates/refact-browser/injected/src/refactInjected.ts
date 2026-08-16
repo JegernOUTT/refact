@@ -521,13 +521,39 @@ export class RefactInjected {
 
   getAccessibleName(element: Element, includeHidden = false): string {
     this.ensureConnected(element);
-    // Matching normalization, case folding, substring, and regex semantics belong to locator consumers.
     return getElementAccessibleName(element, includeHidden).text;
   }
 
   getAccessibleDescription(element: Element): string {
     this.ensureConnected(element);
     return getElementAccessibleDescription(element, false).text;
+  }
+
+  expectationValues(element: Element): Record<string, unknown> {
+    this.ensureConnected(element);
+    const htmlElement = element as HTMLElement;
+    const input = element as HTMLInputElement;
+    const select = element as HTMLSelectElement;
+    const rect = element.getBoundingClientRect();
+    const view = this.global;
+    return {
+      attached: element.isConnected,
+      visible: isElementVisible(element),
+      enabled: !getAriaDisabled(element),
+      editable: !getReadonly(element) && (element.matches('input, textarea, select') || htmlElement.isContentEditable),
+      checked: input.checked === true,
+      focused: element === this.global.document.activeElement,
+      empty: element.children.length === 0 && !normalizeWhiteSpace((element.textContent ?? '')).length && !('value' in input && input.value),
+      inViewport: rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < view.innerHeight && rect.left < view.innerWidth,
+      text: htmlElement.innerText ?? element.textContent ?? '',
+      value: 'value' in input ? input.value : null,
+      values: select.multiple ? Array.from(select.selectedOptions).map(option => option.value) : null,
+      class: element.classList.toString(),
+      id: element.id,
+      role: getAriaRole(element) ?? '',
+      accessibleName: getElementAccessibleName(element, false).text,
+      accessibleDescription: getElementAccessibleDescription(element, false).text,
+    };
   }
 
   ariaSnapshot(element: Element | null, options: AriaTreeOptions): Record<string, unknown> {

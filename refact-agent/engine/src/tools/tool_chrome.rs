@@ -87,6 +87,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Canonical batch: {\"steps\":[{\"action\":\"accessibility_snapshot\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]} Pass this object as `request`; e5/e7 stand for handles minted by the latest snapshot.\n",
     "Core: navigate, reload, go_back, go_forward, open_tab, close_tab, switch_tab, list_tabs, click, click_if_exists, hover, focus, blur, scroll_to, press_key. open_tab accepts optional device/url; close_tab accepts an optional tab and otherwise closes active. Closing active selects the preceding tab in adoption order, the next tab when closing the first, or leaves no active tab.\n",
     "Forms: fill, clear, select_option, check, uncheck.\n",
+    "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch.\n",
     "Waiting: wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. ",
     "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, or `wait_for_selector` for genuine synchronization.\n",
     "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, styles, tab_log.\n",
@@ -235,6 +236,36 @@ fn browser_step_schema_with_actions(
     properties.insert(
         "timeout_ms".to_string(),
         serde_json::json!({"type": "integer", "minimum": 0}),
+    );
+    properties.insert(
+        "matcher".to_string(),
+        serde_json::json!({
+            "type": "object",
+            "description": "Expectation matcher. Use type plus expected/name/ignore_case as required. Text expectations accept a string or {source,flags} regex.",
+            "required": ["type"],
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": [
+                        "to_be_attached", "to_be_visible", "to_be_hidden", "to_be_enabled",
+                        "to_be_disabled", "to_be_editable", "to_be_checked", "to_be_focused",
+                        "to_be_empty", "to_be_in_viewport", "to_have_text", "to_contain_text",
+                        "to_have_value", "to_have_values", "to_have_attribute", "to_have_class",
+                        "to_contain_class", "to_have_count", "to_have_css", "to_have_id",
+                        "to_have_js_property", "to_have_role", "to_have_accessible_name",
+                        "to_have_accessible_description", "to_have_url", "to_have_title",
+                        "to_match_aria_snapshot"
+                    ]
+                },
+                "expected": {},
+                "name": {"type": "string"},
+                "ignore_case": {"type": "boolean"}
+            }
+        }),
+    );
+    properties.insert(
+        "soft".to_string(),
+        serde_json::json!({"type": "boolean", "description": "Record assertion failure and continue the batch"}),
     );
     properties.insert(
         "limit".to_string(),

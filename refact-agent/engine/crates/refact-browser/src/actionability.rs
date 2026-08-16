@@ -7,6 +7,7 @@ use refact_integrations::browser_models::ActionabilityDiagnostics;
 
 pub const LOCATOR_RETRY_BACKOFF_MS: &[u64] = &[0, 20, 50, 100, 100, 500, 500];
 pub const ACTION_RETRY_BACKOFF_MS: &[u64] = &[0, 20, 100, 100, 500, 500];
+pub const EXPECT_RETRY_BACKOFF_MS: &[u64] = &[0, 20, 50, 100, 100, 500];
 const FORM_ACTION_RETRY_BACKOFF_MS: &[u64] = &[100];
 const FORM_LOCATOR_RETRY_BACKOFF_MS: &[u64] = &[0, 100];
 pub const MAX_CALL_LOG_ENTRIES: usize = 50;
@@ -621,6 +622,59 @@ impl<C: Clock> ActionabilityEngine<C> {
         )
     }
 
+    pub fn poll_expect<T>(
+        &self,
+        timeout: Duration,
+        mut check: impl FnMut() -> Result<(bool, T), String>,
+    ) -> ExpectPollResult<T> {
+        let started_at = self.clock.now();
+        let deadline = Deadline::new(&self.clock, timeout);
+        let mut attempt = 0_usize;
+        let mut last_received = None;
+
+        loop {
+            let delay = backoff_delay(EXPECT_RETRY_BACKOFF_MS, attempt);
+            if deadline.expired(&self.clock) {
+                return ExpectPollResult::TimedOut {
+                    received: last_received,
+                    attempts: attempt as u32,
+                    elapsed: self.clock.now().saturating_sub(started_at),
+                };
+            }
+            let remaining = deadline.remaining(&self.clock);
+            let actual = delay.min(remaining);
+            if !actual.is_zero() {
+                self.clock.sleep(actual);
+            }
+            if delay > remaining || deadline.expired(&self.clock) {
+                return ExpectPollResult::TimedOut {
+                    received: last_received,
+                    attempts: attempt as u32,
+                    elapsed: self.clock.now().saturating_sub(started_at),
+                };
+            }
+            match check() {
+                Ok((true, received)) => {
+                    return ExpectPollResult::Matched {
+                        received,
+                        attempts: (attempt + 1) as u32,
+                        elapsed: self.clock.now().saturating_sub(started_at),
+                    };
+                }
+                Ok((false, received)) => last_received = Some(received),
+                Err(error) => {
+                    return ExpectPollResult::Failed {
+                        error,
+                        received: last_received,
+                        attempts: (attempt + 1) as u32,
+                        elapsed: self.clock.now().saturating_sub(started_at),
+                    };
+                }
+            }
+            attempt += 1;
+        }
+    }
+
     fn execute_with_timeout_and_backoff<D: ActionabilityDriver>(
         &self,
         locator: &str,
@@ -937,6 +991,26 @@ enum ActionLoopResult<T> {
     TimedOut,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExpectPollResult<T> {
+    Matched {
+        received: T,
+        attempts: u32,
+        elapsed: Duration,
+    },
+    TimedOut {
+        received: Option<T>,
+        attempts: u32,
+        elapsed: Duration,
+    },
+    Failed {
+        error: String,
+        received: Option<T>,
+        attempts: u32,
+        elapsed: Duration,
+    },
+}
+
 fn backoff_delay(schedule: &[u64], attempt: usize) -> Duration {
     Duration::from_millis(schedule[attempt.min(schedule.len() - 1)])
 }
@@ -1177,6 +1251,59 @@ mod tests {
 
         assert_eq!(locator, vec![0, 20, 50, 100, 100, 500, 500, 500, 500]);
         assert_eq!(action, vec![0, 20, 100, 100, 500, 500, 500, 500]);
+        let expect = (0..9)
+            .map(|attempt| backoff_delay(EXPECT_RETRY_BACKOFF_MS, attempt).as_millis())
+            .collect::<Vec<_>>();
+        assert_eq!(expect, vec![0, 20, 50, 100, 100, 500, 500, 500, 500]);
+    }
+
+    #[test]
+    fn expect_poll_retries_immediately_then_uses_deadline_bounded_backoff() {
+        let clock = MockClock::default();
+        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
+        let calls = Cell::new(0);
+        let result = engine.poll_expect(Duration::from_millis(200), || {
+            let call = calls.get() + 1;
+            calls.set(call);
+            Ok((call == 4, call))
+        });
+
+        assert_eq!(
+            result,
+            ExpectPollResult::Matched {
+                received: 4,
+                attempts: 4,
+                elapsed: Duration::from_millis(170),
+            }
+        );
+        assert_eq!(
+            *clock.sleeps.borrow(),
+            vec![
+                Duration::from_millis(20),
+                Duration::from_millis(50),
+                Duration::from_millis(100),
+            ]
+        );
+    }
+
+    #[test]
+    fn expect_poll_timeout_keeps_last_received_value() {
+        let clock = MockClock::default();
+        let engine = ActionabilityEngine::new(clock, ActionabilityTimeouts::default());
+        let mut received = 0;
+        let result = engine.poll_expect(Duration::from_millis(25), || {
+            received += 1;
+            Ok((false, received))
+        });
+
+        assert_eq!(
+            result,
+            ExpectPollResult::TimedOut {
+                received: Some(2),
+                attempts: 2,
+                elapsed: Duration::from_millis(25),
+            }
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-// @refact-injected-hash bf6dd0587abce2d850b382a0355492cf7eeeb9a3c082f030e1597fb8c261f490
+// @refact-injected-hash c31bd7e81b70a08e26cf7dd435e3fa1aaaad1ce2223527f2767cde9624594992
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -5320,6 +5320,33 @@ var RefactInjected = class {
   getAccessibleDescription(element) {
     this.ensureConnected(element);
     return getElementAccessibleDescription(element, false).text;
+  }
+  expectationValues(element) {
+    var _a, _b, _c, _d;
+    this.ensureConnected(element);
+    const htmlElement = element;
+    const input = element;
+    const select = element;
+    const rect = element.getBoundingClientRect();
+    const view = this.global;
+    return {
+      attached: element.isConnected,
+      visible: isElementVisible(element),
+      enabled: !getAriaDisabled(element),
+      editable: !getReadonly(element) && (element.matches("input, textarea, select") || htmlElement.isContentEditable),
+      checked: input.checked === true,
+      focused: element === this.global.document.activeElement,
+      empty: element.children.length === 0 && !normalizeWhiteSpace((_a = element.textContent) != null ? _a : "").length && !("value" in input && input.value),
+      inViewport: rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < view.innerHeight && rect.left < view.innerWidth,
+      text: (_c = (_b = htmlElement.innerText) != null ? _b : element.textContent) != null ? _c : "",
+      value: "value" in input ? input.value : null,
+      values: select.multiple ? Array.from(select.selectedOptions).map((option) => option.value) : null,
+      class: element.classList.toString(),
+      id: element.id,
+      role: (_d = getAriaRole(element)) != null ? _d : "",
+      accessibleName: getElementAccessibleName(element, false).text,
+      accessibleDescription: getElementAccessibleDescription(element, false).text
+    };
   }
   ariaSnapshot(element, options) {
     var _a;

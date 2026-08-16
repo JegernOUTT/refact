@@ -481,4 +481,99 @@ describe("ChromeTool", () => {
       "not-checked",
     );
   });
+
+  test("renders assertion pass failure values and ARIA diff", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-assertions",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: {
+            steps: [
+              {
+                action: "expect",
+                matcher: { type: "to_have_title", expected: "Dashboard" },
+              },
+              {
+                action: "expect",
+                locator: { by: "role", role: "navigation" },
+                matcher: {
+                  type: "to_match_aria_snapshot",
+                  expected: '- navigation "Primary"',
+                },
+                soft: true,
+              },
+            ],
+          },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-assertions",
+      content: JSON.stringify({
+        ok: true,
+        steps: [
+          {
+            step_index: 0,
+            ok: true,
+            summary: "Assertion passed: to_have_title",
+            retries: 1,
+            assertion: {
+              matcher: "to_have_title",
+              passed: true,
+              soft: false,
+              expected: "Dashboard",
+              received: "Dashboard",
+              attempts: 2,
+              elapsed_ms: 20,
+            },
+          },
+          {
+            step_index: 1,
+            ok: false,
+            summary: "Soft assertion failed: to_match_aria_snapshot",
+            error: "Expected snapshot did not match",
+            retries: 3,
+            assertion: {
+              matcher: "to_match_aria_snapshot",
+              passed: false,
+              soft: true,
+              expected: '- navigation "Primary"',
+              received: '- navigation "Secondary"',
+              diff: '--- expected\n+++ received\n- navigation "Primary"\n+ navigation "Secondary"',
+              attempts: 4,
+              elapsed_ms: 170,
+            },
+          },
+        ],
+      }),
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+
+    expect(screen.getByText("Assertions")).toBeInTheDocument();
+    expect(
+      screen.getByText("Passed").parentElement?.parentElement,
+    ).toHaveAttribute("data-status", "success");
+    expect(
+      screen.getByText("Failed").parentElement?.parentElement,
+    ).toHaveAttribute("data-status", "error");
+    expect(screen.getByText("Soft")).toBeInTheDocument();
+    expect(screen.getAllByText("Expected")).toHaveLength(2);
+    expect(screen.getAllByText("Received")).toHaveLength(2);
+    expect(screen.getByText("Diff")).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes('+ navigation "Secondary"')),
+    ).toBeInTheDocument();
+  });
 });
