@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -12,7 +12,11 @@ use crate::integrations::browser_locators::{
 };
 use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
-use refact_browser::{CdpKeyboardDispatcher, ElementHandle, Keyboard, WorldManager};
+use refact_browser::{
+    CdpKeyboardDispatcher, ElementHandle, Keyboard, LocatorHandler, LocatorHandlerLease,
+    LocatorHandlerOperation, LocatorHandlerProbe, LocatorHandlerRegistry, WorldManager,
+    DEFAULT_DISMISS_OVERLAYS_HANDLER,
+};
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
@@ -201,12 +205,22 @@ fn execute_steps_with_world(
     let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
 
     let mut results = Vec::new();
+    let handlers = Arc::new(Mutex::new(LocatorHandlerRegistry::default()));
+    let mut locator_handlers = Vec::new();
     let mut all_ok = true;
     let mut pre_step_url: Option<String> = Some(tab.get_url());
 
     for (idx, step) in steps.iter().enumerate() {
-        let result =
-            execute_single_step(tab, world, step, idx, pre_step_url.as_deref(), image_policy);
+        let result = execute_single_step(
+            tab,
+            world,
+            step,
+            idx,
+            pre_step_url.as_deref(),
+            image_policy,
+            Some(&handlers),
+            &mut locator_handlers,
+        );
         let is_non_fatal = matches!(step, BrowserStep::ClickIfExists { .. });
         if !result.ok && !is_non_fatal {
             all_ok = false;
@@ -230,6 +244,7 @@ fn execute_steps_with_world(
         stabilized: false,
         console: vec![],
         page_errors: vec![],
+        locator_handlers,
         dialogs: vec![],
         screenshot: None,
     }
@@ -263,7 +278,17 @@ fn execute_step_with_world(
     image_policy: &ImagePolicy,
 ) -> StepResult {
     let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
-    let result = execute_single_step(tab, world, step, idx, None, image_policy);
+    let handlers = Arc::new(Mutex::new(LocatorHandlerRegistry::default()));
+    let result = execute_single_step(
+        tab,
+        world,
+        step,
+        idx,
+        None,
+        image_policy,
+        Some(&handlers),
+        &mut Vec::new(),
+    );
     if result.ok && is_navigation_step(step) {
         let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
     }
@@ -313,7 +338,12 @@ pub async fn execute_request_with_runtime(
         let rt = runtime_arc.lock().await;
         rt.world_manager.clone()
     };
+    let handlers = {
+        let rt = runtime_arc.lock().await;
+        rt.locator_handlers.clone()
+    };
     let mut results = Vec::new();
+    let mut locator_handlers = Vec::new();
     let mut all_ok = true;
 
     for (idx, step) in request.steps.iter().enumerate() {
@@ -341,7 +371,16 @@ pub async fn execute_request_with_runtime(
             }
             match &current_tab {
                 Some(tab) => tokio::task::block_in_place(|| {
-                    execute_step_with_world(tab, &world, step, idx, image_policy)
+                    execute_single_step(
+                        tab,
+                        &world,
+                        step,
+                        idx,
+                        None,
+                        image_policy,
+                        Some(&handlers),
+                        &mut locator_handlers,
+                    )
                 }),
                 None => StepResult::failure(
                     idx,
@@ -419,6 +458,7 @@ pub async fn execute_request_with_runtime(
         stabilized,
         console,
         page_errors,
+        locator_handlers,
         dialogs,
         screenshot,
     })
@@ -435,6 +475,8 @@ pub fn execute_steps_with_runtime(
     }
 
     let mut results = Vec::new();
+    let handlers = runtime.locator_handlers.clone();
+    let mut locator_handlers = Vec::new();
     let mut all_ok = true;
     let mut pre_step_url: Option<String> = current_tab.as_ref().map(|t| t.get_url());
 
@@ -578,6 +620,8 @@ pub fn execute_steps_with_runtime(
                     idx,
                     pre_step_url.as_deref(),
                     image_policy,
+                    Some(&handlers),
+                    &mut locator_handlers,
                 ),
                 None => StepResult::failure(
                     idx,
@@ -615,6 +659,7 @@ pub fn execute_steps_with_runtime(
         stabilized: false,
         console: vec![],
         page_errors: vec![],
+        locator_handlers,
         dialogs,
         screenshot: None,
     }
@@ -630,6 +675,309 @@ fn is_navigation_step(step: &BrowserStep) -> bool {
     )
 }
 
+fn needs_locator_handler_checkpoint(step: &BrowserStep) -> bool {
+    matches!(
+        step,
+        BrowserStep::Click { .. }
+            | BrowserStep::ClickIfExists { .. }
+            | BrowserStep::Hover { .. }
+            | BrowserStep::Focus { .. }
+            | BrowserStep::Blur { .. }
+            | BrowserStep::ScrollTo { .. }
+            | BrowserStep::Fill { .. }
+            | BrowserStep::Clear { .. }
+            | BrowserStep::SelectOption { .. }
+            | BrowserStep::Check { .. }
+            | BrowserStep::Uncheck { .. }
+            | BrowserStep::WaitForSelector { .. }
+            | BrowserStep::WaitForText { .. }
+            | BrowserStep::WaitForElementHidden { .. }
+            | BrowserStep::WaitForElementStable { .. }
+            | BrowserStep::GetText { .. }
+            | BrowserStep::GetHtml { .. }
+            | BrowserStep::GetAttribute { .. }
+            | BrowserStep::ScreenshotElement { .. }
+            | BrowserStep::Styles { .. }
+            | BrowserStep::HighlightElement { .. }
+    )
+}
+
+fn perform_action_prechecks(
+    tab: &Tab,
+    world: &WorldManager,
+    handlers: &Arc<Mutex<LocatorHandlerRegistry>>,
+    firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+    deadline: Instant,
+) -> Result<(), String> {
+    wait_for_pending_navigation(tab, deadline)?;
+    perform_locator_handlers_checkpoint(tab, world, handlers, firings, image_policy, deadline)?;
+    wait_for_pending_navigation(tab, deadline)
+}
+
+fn wait_for_pending_navigation(tab: &Tab, deadline: Instant) -> Result<(), String> {
+    loop {
+        let loading = eval_js_value(tab, "document.readyState === 'loading'")
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        if !loading {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("Timed out waiting for navigation before action".to_string());
+        }
+        std::thread::sleep(
+            Duration::from_millis(DEFAULT_POLL_INTERVAL_MS)
+                .min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
+fn perform_locator_handlers_checkpoint(
+    tab: &Tab,
+    world: &WorldManager,
+    handlers: &Arc<Mutex<LocatorHandlerRegistry>>,
+    firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+    deadline: Instant,
+) -> Result<(), String> {
+    let handler_names = {
+        let registry = handlers
+            .lock()
+            .map_err(|error| format!("Failed to lock locator handlers: {error}"))?;
+        if registry.is_running() {
+            return Ok(());
+        }
+        registry
+            .handlers()
+            .iter()
+            .map(|handler| handler.name.clone())
+            .collect::<Vec<_>>()
+    };
+
+    for name in handler_names {
+        if Instant::now() >= deadline {
+            return Err("Timed out while running locator handlers".to_string());
+        }
+        let handler = {
+            handlers
+                .lock()
+                .map_err(|error| format!("Failed to lock locator handlers: {error}"))?
+                .get(&name)
+        };
+        let Some(handler) = handler else {
+            continue;
+        };
+        match probe_locator_handler(tab, world, &handler)? {
+            LocatorHandlerProbe::Hidden | LocatorHandlerProbe::MultipleMatches { .. } => continue,
+            LocatorHandlerProbe::Visible => {}
+        }
+        let lease = {
+            handlers
+                .lock()
+                .map_err(|error| format!("Failed to lock locator handlers: {error}"))?
+                .begin(&name)
+        };
+        let Some(lease) = lease else {
+            continue;
+        };
+        let result = execute_locator_handler(
+            tab,
+            world,
+            handlers,
+            firings,
+            image_policy,
+            deadline,
+            &lease,
+        );
+        let (ok, outcome) = match &result {
+            Ok(outcome) => (true, outcome.clone()),
+            Err(error) => (false, error.clone()),
+        };
+        let firing = handlers
+            .lock()
+            .map_err(|error| format!("Failed to lock locator handlers: {error}"))?
+            .finish(lease, ok, outcome);
+        firings.push(firing);
+        result?;
+    }
+    Ok(())
+}
+
+fn probe_locator_handler(
+    tab: &Tab,
+    world: &WorldManager,
+    handler: &LocatorHandler,
+) -> Result<LocatorHandlerProbe, String> {
+    if matches!(handler.operation, LocatorHandlerOperation::DismissOverlays) {
+        return eval_js_ok(tab, browser_locators::js_dismiss_overlays_probe()).map(|result| {
+            if result
+                .get("dismissable")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0)
+                == 0
+            {
+                LocatorHandlerProbe::Hidden
+            } else {
+                LocatorHandlerProbe::Visible
+            }
+        });
+    }
+    let locator = serde_json::to_value(&handler.locator)
+        .map_err(|error| format!("Failed to serialize locator handler: {error}"))?;
+    let handles = world
+        .call_injected_handles(tab, "resolveAll", serde_json::json!([locator]))
+        .map_err(|error| error.to_string())?;
+    if handles.is_empty() {
+        return Ok(LocatorHandlerProbe::Hidden);
+    }
+    if handles.len() > 1 {
+        let count = handles.len();
+        for handle in &handles {
+            let _ = world.release_handle(tab, handle);
+        }
+        return Ok(LocatorHandlerProbe::MultipleMatches { count });
+    }
+    let handle = &handles[0];
+    let inspect = format!(
+        "function() {{ {INSPECT_ELEMENT_JS} return JSON.stringify(__refact_inspect_element(this, 1)); }}"
+    );
+    let value = world
+        .call_function_on(tab, handle, &inspect, Vec::new())
+        .map_err(|error| error.to_string());
+    let _ = world.release_handle(tab, handle);
+    let value = value?;
+    let json = value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string());
+    let info = parse_element_info(&json)?;
+    Ok(if info.visible {
+        LocatorHandlerProbe::Visible
+    } else {
+        LocatorHandlerProbe::Hidden
+    })
+}
+
+fn execute_locator_handler(
+    tab: &Tab,
+    world: &WorldManager,
+    handlers: &Arc<Mutex<LocatorHandlerRegistry>>,
+    firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+    deadline: Instant,
+    lease: &LocatorHandlerLease,
+) -> Result<String, String> {
+    let outcome = match &lease.handler.operation {
+        LocatorHandlerOperation::DismissOverlays => dismiss_overlays(tab),
+        LocatorHandlerOperation::Action(LocatorHandlerAction::Click) => {
+            let resolved = resolve_element(tab, world, &lease.handler.locator)?;
+            call_handle_json(
+                tab,
+                world,
+                &resolved.handle,
+                "function() { this.click(); return JSON.stringify({ok: true}); }",
+            )?;
+            Ok(format!("Clicked <{}>", resolved.tag))
+        }
+        LocatorHandlerOperation::Action(LocatorHandlerAction::Steps { steps }) => {
+            let mut summaries = Vec::new();
+            for step in steps {
+                if Instant::now() >= deadline {
+                    return Err("Timed out while running locator handler steps".to_string());
+                }
+                let bounded_step = bound_handler_step(step, deadline);
+                let result = execute_single_step(
+                    tab,
+                    world,
+                    &bounded_step,
+                    0,
+                    None,
+                    image_policy,
+                    Some(handlers),
+                    firings,
+                );
+                if !result.ok {
+                    return Err(result.error.unwrap_or(result.summary));
+                }
+                summaries.push(result.summary);
+            }
+            Ok(summaries.join("; "))
+        }
+    }?;
+
+    if !lease.handler.no_wait_after {
+        wait_for_handler_hidden(tab, world, &lease.handler, deadline)?;
+    }
+    Ok(outcome)
+}
+
+fn bound_handler_step(step: &BrowserStep, deadline: Instant) -> BrowserStep {
+    let remaining_ms = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    match step {
+        BrowserStep::WaitForSelector { locator, .. } => BrowserStep::WaitForSelector {
+            locator: locator.clone(),
+            timeout_ms: Some(remaining_ms),
+        },
+        BrowserStep::WaitForNavigation { .. } => BrowserStep::WaitForNavigation {
+            timeout_ms: Some(remaining_ms),
+        },
+        BrowserStep::WaitForUrl { contains, .. } => BrowserStep::WaitForUrl {
+            contains: contains.clone(),
+            timeout_ms: Some(remaining_ms),
+        },
+        BrowserStep::WaitForText { text, .. } => BrowserStep::WaitForText {
+            text: text.clone(),
+            timeout_ms: Some(remaining_ms),
+        },
+        BrowserStep::WaitForNetworkIdle { .. } => BrowserStep::WaitForNetworkIdle {
+            timeout_ms: Some(remaining_ms),
+        },
+        BrowserStep::WaitForElementHidden { locator, .. } => BrowserStep::WaitForElementHidden {
+            locator: locator.clone(),
+            timeout_ms: Some(remaining_ms),
+        },
+        BrowserStep::WaitForElementStable { locator, .. } => BrowserStep::WaitForElementStable {
+            locator: locator.clone(),
+            timeout_ms: Some(remaining_ms),
+        },
+        BrowserStep::WaitSeconds { seconds } => BrowserStep::WaitSeconds {
+            seconds: seconds.min(remaining_ms as f64 / 1_000.0),
+        },
+        _ => step.clone(),
+    }
+}
+
+fn wait_for_handler_hidden(
+    tab: &Tab,
+    world: &WorldManager,
+    handler: &LocatorHandler,
+    deadline: Instant,
+) -> Result<(), String> {
+    loop {
+        if matches!(
+            probe_locator_handler(tab, world, handler)?,
+            LocatorHandlerProbe::Hidden
+        ) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Timed out waiting for locator handler '{}' to become hidden",
+                handler.name
+            ));
+        }
+        std::thread::sleep(
+            Duration::from_millis(DEFAULT_POLL_INTERVAL_MS)
+                .min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
 fn execute_single_step(
     tab: &Tab,
     world: &WorldManager,
@@ -637,7 +985,23 @@ fn execute_single_step(
     idx: usize,
     pre_step_url: Option<&str>,
     image_policy: &ImagePolicy,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
 ) -> StepResult {
+    if needs_locator_handler_checkpoint(step) {
+        if let Some(handlers) = handlers {
+            if let Err(error) = perform_action_prechecks(
+                tab,
+                world,
+                handlers,
+                locator_handler_firings,
+                image_policy,
+                Instant::now() + Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS),
+            ) {
+                return StepResult::failure(idx, "Locator handler checkpoint failed", error);
+            }
+        }
+    }
     match step {
         BrowserStep::Navigate { url } => step_navigate(tab, idx, url),
         BrowserStep::Reload => step_nav_js(tab, idx, "location.reload()", "Reloaded page"),
@@ -733,7 +1097,28 @@ fn execute_single_step(
 
         BrowserStep::TabLog => step_tab_log(tab, idx),
 
-        BrowserStep::DismissOverlays => step_dismiss_overlays(tab, idx),
+        BrowserStep::AddLocatorHandler {
+            name,
+            locator,
+            handler,
+            times,
+            no_wait_after,
+        } => step_add_locator_handler(
+            idx,
+            handlers,
+            name,
+            locator,
+            handler,
+            *times,
+            *no_wait_after,
+        ),
+        BrowserStep::RemoveLocatorHandler { name } => {
+            step_remove_locator_handler(idx, handlers, name)
+        }
+
+        BrowserStep::DismissOverlays => {
+            step_dismiss_overlays(tab, idx, handlers, locator_handler_firings, image_policy)
+        }
         BrowserStep::HighlightElement { locator } => {
             step_highlight_element(tab, world, idx, locator)
         }
@@ -769,8 +1154,21 @@ fn step_locator_action(
 ) -> StepResult {
     match resolve_interactable(tab, world, locator) {
         Ok(info) => {
+            if action == "click" {
+                return match call_handle_json(
+                    tab,
+                    world,
+                    &info.handle,
+                    "function() { this.click(); return JSON.stringify({ok: true}); }",
+                ) {
+                    Ok(_) => StepResult::success(
+                        idx,
+                        format!("click on <{}> ({})", info.tag, describe_locator(locator)),
+                    ),
+                    Err(error) => StepResult::failure(idx, "click failed", error),
+                };
+            }
             let action_js = match action {
-                "click" => browser_locators::js_click_element().to_string(),
                 "hover" => browser_locators::js_hover_element().to_string(),
                 "focus" => browser_locators::js_focus_element().to_string(),
                 "blur" => browser_locators::js_blur_element().to_string(),
@@ -934,17 +1332,11 @@ fn step_select_option(
     value: &str,
 ) -> StepResult {
     match resolve_element(tab, world, locator) {
-        Ok(info) => match refact_browser::forms::select_option(
-            tab,
-            world,
-            &info.handle,
-            value,
-        ) {
-            Ok(outcome) => StepResult::success(
-                idx,
-                format!("Selected '{}' in <{}>", value, info.tag),
-            )
-            .with_data(serde_json::json!({"selected": outcome.selected})),
+        Ok(info) => match refact_browser::forms::select_option(tab, world, &info.handle, value) {
+            Ok(outcome) => {
+                StepResult::success(idx, format!("Selected '{}' in <{}>", value, info.tag))
+                    .with_data(serde_json::json!({"selected": outcome.selected}))
+            }
             Err(error) => StepResult::failure(idx, "Select option failed", error.message),
         },
         Err(e) => StepResult::failure(idx, "Select: element resolution failed", e),
@@ -964,12 +1356,13 @@ fn step_check_uncheck(
         Err(e) => return StepResult::failure(idx, "Check/uncheck: resolution failed", e),
     };
     match refact_browser::forms::set_checked(tab, world, &info.handle, check) {
-        Ok(outcome) => StepResult::success(idx, format!("{}ed <{}>", action, info.tag))
-            .with_data(serde_json::json!({
+        Ok(outcome) => StepResult::success(idx, format!("{}ed <{}>", action, info.tag)).with_data(
+            serde_json::json!({
                 "checked": outcome.checked,
                 "changed": outcome.changed,
                 "verified": outcome.verified,
-            })),
+            }),
+        ),
         Err(error) => StepResult::failure(idx, format!("{} failed", action), error.message),
     }
 }
@@ -1731,16 +2124,158 @@ fn step_tab_log(tab: &Tab, idx: usize) -> StepResult {
     }
 }
 
-fn step_dismiss_overlays(tab: &Tab, idx: usize) -> StepResult {
+fn step_add_locator_handler(
+    idx: usize,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    name: &str,
+    locator: &BrowserLocator,
+    action: &LocatorHandlerAction,
+    times: Option<u32>,
+    no_wait_after: bool,
+) -> StepResult {
+    let Some(handlers) = handlers else {
+        return StepResult::failure(idx, "Add locator handler", "Handler registry unavailable");
+    };
+    let handler = match LocatorHandler::registered(
+        name.to_string(),
+        locator.clone(),
+        action.clone(),
+        times,
+        no_wait_after,
+    ) {
+        Ok(Some(handler)) => handler,
+        Ok(None) => {
+            return StepResult::success(idx, format!("Locator handler '{name}' not registered"));
+        }
+        Err(error) => return StepResult::failure(idx, "Add locator handler", error),
+    };
+    match handlers.lock() {
+        Ok(mut registry) => {
+            registry.register(handler);
+            StepResult::success(idx, format!("Registered locator handler '{name}'"))
+        }
+        Err(error) => StepResult::failure(
+            idx,
+            "Add locator handler",
+            format!("Failed to lock locator handlers: {error}"),
+        ),
+    }
+}
+
+fn step_remove_locator_handler(
+    idx: usize,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    name: &str,
+) -> StepResult {
+    let Some(handlers) = handlers else {
+        return StepResult::failure(
+            idx,
+            "Remove locator handler",
+            "Handler registry unavailable",
+        );
+    };
+    match handlers.lock() {
+        Ok(mut registry) => {
+            let removed = registry.unregister(name);
+            StepResult::success(
+                idx,
+                if removed {
+                    format!("Removed locator handler '{name}'")
+                } else {
+                    format!("Locator handler '{name}' was not registered")
+                },
+            )
+        }
+        Err(error) => StepResult::failure(
+            idx,
+            "Remove locator handler",
+            format!("Failed to lock locator handlers: {error}"),
+        ),
+    }
+}
+
+fn dismiss_overlays(tab: &Tab) -> Result<String, String> {
     match eval_js_ok(tab, browser_locators::js_dismiss_overlays()) {
         Ok(result) => {
             let count = result
                 .get("dismissed")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            StepResult::success(idx, format!("Dismissed {} overlay(s)", count))
+            Ok(format!("Dismissed {count} overlay(s)"))
         }
-        Err(e) => StepResult::failure(idx, "Dismiss overlays failed", e),
+        Err(error) => Err(error),
+    }
+}
+
+fn step_dismiss_overlays(
+    tab: &Tab,
+    idx: usize,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+) -> StepResult {
+    let Some(handlers) = handlers else {
+        return match dismiss_overlays(tab) {
+            Ok(outcome) => StepResult::success(idx, outcome),
+            Err(error) => StepResult::failure(idx, "Dismiss overlays failed", error),
+        };
+    };
+    let existing = match handlers.lock() {
+        Ok(registry) => registry.get(DEFAULT_DISMISS_OVERLAYS_HANDLER),
+        Err(error) => {
+            return StepResult::failure(
+                idx,
+                "Dismiss overlays failed",
+                format!("Failed to lock locator handlers: {error}"),
+            )
+        }
+    };
+    let handler = existing.unwrap_or_else(LocatorHandler::dismiss_overlays);
+    let lease = {
+        let mut registry = match handlers.lock() {
+            Ok(registry) => registry,
+            Err(error) => {
+                return StepResult::failure(
+                    idx,
+                    "Dismiss overlays failed",
+                    format!("Failed to lock locator handlers: {error}"),
+                )
+            }
+        };
+        if registry.get(DEFAULT_DISMISS_OVERLAYS_HANDLER).is_none() {
+            registry.register(handler);
+        }
+        registry.begin(DEFAULT_DISMISS_OVERLAYS_HANDLER)
+    };
+    let Some(lease) = lease else {
+        return StepResult::failure(idx, "Dismiss overlays failed", "Handler is already running");
+    };
+    let result = execute_locator_handler(
+        tab,
+        &WorldManager::default(),
+        handlers,
+        firings,
+        image_policy,
+        Instant::now() + Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS),
+        &lease,
+    );
+    let (ok, outcome) = match &result {
+        Ok(outcome) => (true, outcome.clone()),
+        Err(error) => (false, error.clone()),
+    };
+    match handlers.lock() {
+        Ok(mut registry) => firings.push(registry.finish(lease, ok, outcome)),
+        Err(error) => {
+            return StepResult::failure(
+                idx,
+                "Dismiss overlays failed",
+                format!("Failed to lock locator handlers: {error}"),
+            )
+        }
+    }
+    match result {
+        Ok(outcome) => StepResult::success(idx, outcome),
+        Err(error) => StepResult::failure(idx, "Dismiss overlays failed", error),
     }
 }
 
@@ -1912,5 +2447,4 @@ mod tests {
 
         assert!(stabilized);
     }
-
 }

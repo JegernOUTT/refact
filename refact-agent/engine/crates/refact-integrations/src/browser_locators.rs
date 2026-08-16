@@ -122,8 +122,10 @@ pub fn generate_find_fragment_js(locator: &BrowserLocator) -> String {
 
 #[cfg(test)]
 fn resolution_transport_snapshot(locator: &BrowserLocator) -> String {
-    generate_resolve_js(locator)
-        .replace("  return elements[0];", "  var el = elements[0];\n  return el;")
+    generate_resolve_js(locator).replace(
+        "  return elements[0];",
+        "  var el = elements[0];\n  return el;",
+    )
 }
 
 fn generate_find_js(strategy: &LocatorStrategy) -> String {
@@ -437,6 +439,45 @@ pub fn js_dismiss_overlays() -> &'static str {
     }
   });
   return JSON.stringify({ok: true, dismissed: dismissed});
+})()"#
+}
+
+pub fn js_dismiss_overlays_probe() -> &'static str {
+    r#"(function() {
+  var dismissable = 0;
+  var selectors = [
+    '[id*="cookie"] button[id*="accept"]',
+    '[id*="cookie"] button[id*="agree"]',
+    '[class*="cookie"] button[class*="accept"]',
+    '[id*="consent"] button[id*="accept"]',
+    '[class*="consent"] button[class*="accept"]',
+    '[id*="gdpr"] button',
+    'button[id*="accept-all"]',
+    'button[class*="accept-all"]',
+    '#onetrust-accept-btn-handler',
+    '.cc-btn.cc-dismiss',
+    '[data-testid*="cookie"] button',
+    '[data-testid*="accept"]',
+    'dialog[open] button[aria-label="Close"]',
+    'dialog[open] button[aria-label="Dismiss"]',
+    '[role="dialog"] button[aria-label="Close"]',
+    '[role="dialog"] button[aria-label="Dismiss"]',
+  ];
+  selectors.forEach(function(sel) {
+    try {
+      var btn = document.querySelector(sel);
+      if (btn && btn.offsetWidth > 0 && btn.offsetHeight > 0) dismissable++;
+    } catch(e) {}
+  });
+  var overlays = document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]');
+  overlays.forEach(function(el) {
+    var rect = el.getBoundingClientRect();
+    if (rect.width > window.innerWidth * 0.5 && rect.height > window.innerHeight * 0.3) {
+      var z = parseInt(window.getComputedStyle(el).zIndex) || 0;
+      if (z > 1000) dismissable++;
+    }
+  });
+  return JSON.stringify({ok: true, dismissable: dismissable});
 })()"#
 }
 
@@ -967,6 +1008,22 @@ mod tests {
         assert!(js.contains("cookie"));
         assert!(js.contains("consent"));
         assert!(js.contains("dismissed"));
+    }
+
+    #[test]
+    fn dismiss_overlays_probe_keeps_the_battle_tested_selectors() {
+        let probe = js_dismiss_overlays_probe();
+
+        for selector in [
+            "#onetrust-accept-btn-handler",
+            ".cc-btn.cc-dismiss",
+            "button[id*=\"accept-all\"]",
+            "dialog[open] button[aria-label=\"Close\"]",
+            "[role=\"dialog\"] button[aria-label=\"Dismiss\"]",
+            "[style*=\"position: fixed\"]",
+        ] {
+            assert!(probe.contains(selector), "missing selector {selector}");
+        }
     }
 
     #[test]

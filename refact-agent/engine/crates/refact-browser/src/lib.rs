@@ -6,6 +6,7 @@ mod handles;
 mod hit_target;
 mod injected_source;
 mod keyboard;
+mod locator_handlers;
 mod locator_gen;
 mod locators;
 mod mouse;
@@ -38,6 +39,10 @@ pub use injected_source::{INJECTED_BUNDLE, wrapped_bootstrap};
 pub use keyboard::{
     CdpKeyboardDispatcher, KeyEventPayload, KeyEventType, Keyboard, KeyboardDispatch,
     KeyboardDispatcher, KeyboardModifier, modifier_bitmask,
+};
+pub use locator_handlers::{
+    DEFAULT_DISMISS_OVERLAYS_HANDLER, LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation,
+    LocatorHandlerProbe, LocatorHandlerRegistry, MAX_LOCATOR_HANDLER_STEPS,
 };
 pub use locator_gen::LocatorGenerationOptions;
 pub use locators::{DEFAULT_TEST_ID_ATTRIBUTE, test_id_locator};
@@ -418,6 +423,7 @@ pub struct BrowserRuntime {
     pub frame_emitter_active: bool,
     pub headless: bool,
     pub chrome_path: Option<PathBuf>,
+    pub locator_handlers: Arc<std::sync::Mutex<LocatorHandlerRegistry>>,
 }
 
 impl std::ops::Deref for BrowserRuntime {
@@ -490,6 +496,7 @@ impl BrowserRuntime {
             frame_emitter_active: false,
             headless,
             chrome_path,
+            locator_handlers: Arc::new(std::sync::Mutex::new(LocatorHandlerRegistry::default())),
         })
     }
 
@@ -525,6 +532,7 @@ impl BrowserRuntime {
             frame_emitter_active: false,
             headless: false,
             chrome_path: None,
+            locator_handlers: Arc::new(std::sync::Mutex::new(LocatorHandlerRegistry::default())),
         })
     }
 

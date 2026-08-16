@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Cookie banner handler</title>
+    <style>
+      #cookie-banner {
+        position: fixed;
+        inset: 0;
+        z-index: 2001;
+        background: white;
+      }
+    </style>
+  </head>
+  <body>
+    <button id="target" onclick="this.textContent='clicked'">target</button>
+    <div id="cookie-banner">
+      <button id="accept-all" onclick="this.parentElement.remove()">Accept all</button>
+    </div>
+  </body>
+</html>

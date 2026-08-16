@@ -20,6 +20,7 @@ use refact_lsp::integrations::browser_controller::execute_steps as execute_steps
 use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_models::{
     BrowserActionRequest, BrowserLocator, BrowserStep, FillStrategy, SessionPolicy, TabTarget,
+    LocatorHandlerAction,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -60,6 +61,8 @@ const FIXTURE_PAGES: &[&str] = &[
     "hostile-globals.html",
     "hit-target.html",
     "selectors.html",
+    "cookie-banner.html",
+    "interstitial.html",
     "generator.html",
 ];
 
@@ -1363,6 +1366,137 @@ async fn fetch_after_click_renders_slow_echo() {
     );
     assert!(report.ok, "fetch result did not render: {report:?}");
     assert_eq!(returned_text(&report), "echo ok after 400ms");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn locator_handler_clears_cookie_banner_before_click_and_records_firing() {
+    let Some(case) = BrowserCase::start("cookie-banner.html").await else {
+        return;
+    };
+    let tab = case.tab.clone();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let report = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::RemoveLocatorHandler {
+                    name: "dismiss_overlays".to_string(),
+                },
+                BrowserStep::AddLocatorHandler {
+                    name: "cookie-banner".to_string(),
+                    locator: BrowserLocator::css("#accept-all"),
+                    handler: LocatorHandlerAction::Click,
+                    times: Some(1),
+                    no_wait_after: false,
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#target"),
+                },
+            ],
+        },
+        &ImagePolicy::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.ok, "handler-assisted click failed: {report:?}");
+    let text = tab
+        .evaluate("document.querySelector('#target').textContent", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(text, "clicked");
+    assert!(report
+        .locator_handlers
+        .iter()
+        .any(|firing| firing.name == "cookie-banner" && firing.ok));
+    drop(runtime);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn locator_handler_clears_interstitial_that_appears_between_actions() {
+    let Some(case) = BrowserCase::start("interstitial.html").await else {
+        return;
+    };
+    let tab = case.tab.clone();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let report = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::RemoveLocatorHandler {
+                    name: "dismiss_overlays".to_string(),
+                },
+                BrowserStep::AddLocatorHandler {
+                    name: "interstitial".to_string(),
+                    locator: BrowserLocator::css("#close"),
+                    handler: LocatorHandlerAction::Click,
+                    times: Some(1),
+                    no_wait_after: false,
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#show"),
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#target"),
+                },
+            ],
+        },
+        &ImagePolicy::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.ok, "interstitial handler failed: {report:?}");
+    let text = tab
+        .evaluate("document.querySelector('#target').textContent", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(text, "clicked");
+    assert!(report
+        .locator_handlers
+        .iter()
+        .any(|firing| firing.name == "interstitial" && firing.ok));
+    drop(runtime);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn legacy_dismiss_overlays_step_still_clears_cookie_banner() {
+    let Some(case) = BrowserCase::start("cookie-banner.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::DismissOverlays,
+            BrowserStep::Click {
+                locator: BrowserLocator::css("#target"),
+            },
+        ],
+    );
+
+    assert!(report.ok, "legacy dismiss step failed: {report:?}");
+    let text = case
+        .tab
+        .evaluate("document.querySelector('#target').textContent", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(text, "clicked");
+    assert!(report
+        .locator_handlers
+        .iter()
+        .any(|firing| firing.name == "dismiss_overlays" && firing.ok));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

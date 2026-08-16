@@ -209,6 +209,7 @@ pub enum ActionabilityDiagnostic {
     OutsideViewport,
     Detached,
     InterceptsPointerEvents { description: String },
+    PrecheckFailed { description: String },
 }
 
 impl ActionabilityDiagnostic {
@@ -227,6 +228,7 @@ impl ActionabilityDiagnostic {
             Self::InterceptsPointerEvents { description } => {
                 format!("{description} intercepts pointer events")
             }
+            Self::PrecheckFailed { description } => description.clone(),
         }
     }
 }
@@ -244,6 +246,14 @@ pub trait ActionabilityDriver {
     fn resolve(&mut self) -> LocatorOutcome;
     fn element_state(&mut self) -> Result<ElementState, ActionabilityDiagnostic>;
     fn perform(&mut self) -> Result<Self::Output, ActionabilityDiagnostic>;
+
+    fn wait_for_navigation(&mut self) -> Result<(), ActionabilityDiagnostic> {
+        Ok(())
+    }
+
+    fn locator_handlers_checkpoint(&mut self) -> Result<(), ActionabilityDiagnostic> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -364,6 +374,7 @@ impl<C: Clock> ActionabilityEngine<C> {
         let mut call_log = CallLog::default();
         let mut last_diagnostic = ActionabilityDiagnostic::NotFound;
         let mut locator_attempt = 0;
+        self.perform_action_prechecks(driver, &mut call_log)?;
         call_log.push(format!("waiting for {locator}"));
 
         loop {
@@ -406,6 +417,38 @@ impl<C: Clock> ActionabilityEngine<C> {
                 }
             }
         }
+    }
+
+    fn perform_action_prechecks<D: ActionabilityDriver>(
+        &self,
+        driver: &mut D,
+        call_log: &mut CallLog,
+    ) -> Result<(), ActionabilityError> {
+        call_log.push("checking pending navigation before locator handlers");
+        if let Err(diagnostic) = driver.wait_for_navigation() {
+            call_log.push(diagnostic.log_line());
+            return Err(ActionabilityError::Failed {
+                diagnostic,
+                call_log: call_log.clone(),
+            });
+        }
+        call_log.push("checking locator handlers");
+        if let Err(diagnostic) = driver.locator_handlers_checkpoint() {
+            call_log.push(diagnostic.log_line());
+            return Err(ActionabilityError::Failed {
+                diagnostic,
+                call_log: call_log.clone(),
+            });
+        }
+        call_log.push("checking pending navigation after locator handlers");
+        if let Err(diagnostic) = driver.wait_for_navigation() {
+            call_log.push(diagnostic.log_line());
+            return Err(ActionabilityError::Failed {
+                diagnostic,
+                call_log: call_log.clone(),
+            });
+        }
+        Ok(())
     }
 
     fn run_action<D: ActionabilityDriver>(
@@ -584,6 +627,7 @@ mod tests {
         resolve_calls: usize,
         state_calls: usize,
         action_calls: usize,
+        precheck_calls: Vec<&'static str>,
     }
 
     impl MockDriver {
@@ -597,6 +641,7 @@ mod tests {
                 resolve_calls: 0,
                 state_calls: 0,
                 action_calls: 0,
+                precheck_calls: Vec::new(),
             }
         }
     }
@@ -619,6 +664,16 @@ mod tests {
         fn perform(&mut self) -> Result<Self::Output, ActionabilityDiagnostic> {
             self.action_calls += 1;
             self.actions.pop_front().unwrap_or(Ok("done"))
+        }
+
+        fn wait_for_navigation(&mut self) -> Result<(), ActionabilityDiagnostic> {
+            self.precheck_calls.push("navigation");
+            Ok(())
+        }
+
+        fn locator_handlers_checkpoint(&mut self) -> Result<(), ActionabilityDiagnostic> {
+            self.precheck_calls.push("handlers");
+            Ok(())
         }
     }
 
@@ -846,6 +901,9 @@ mod tests {
         assert_eq!(
             success.call_log.entries,
             vec![
+                "checking pending navigation before locator handlers",
+                "checking locator handlers",
+                "checking pending navigation after locator handlers",
                 "waiting for button",
                 "locator resolved to <button>Save</button>",
                 "attempting click action",
@@ -858,6 +916,31 @@ mod tests {
                 "waiting 20ms",
                 "waiting for element to be visible, enabled and stable",
                 "element is visible, enabled and stable",
+            ]
+        );
+    }
+
+    #[test]
+    fn prechecks_run_navigation_handler_navigation_before_locator_resolution() {
+        let clock = MockClock::default();
+        let engine = ActionabilityEngine::new(clock, ActionabilityTimeouts::default());
+        let mut driver = MockDriver::new();
+
+        let success = engine
+            .execute_logged("button", ActionKind::Click, &mut driver)
+            .unwrap();
+
+        assert_eq!(
+            driver.precheck_calls,
+            vec!["navigation", "handlers", "navigation"]
+        );
+        assert_eq!(
+            &success.call_log.entries[..4],
+            [
+                "checking pending navigation before locator handlers",
+                "checking locator handlers",
+                "checking pending navigation after locator handlers",
+                "waiting for button",
             ]
         );
     }

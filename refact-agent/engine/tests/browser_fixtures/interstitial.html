@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Delayed interstitial handler</title>
+  </head>
+  <body>
+    <button id="show" onclick="document.querySelector('#interstitial').hidden=false">show</button>
+    <button id="target" onclick="this.textContent='clicked'">target</button>
+    <div id="interstitial" role="dialog" hidden>
+      <button id="close" aria-label="Close" onclick="this.parentElement.remove()">Close</button>
+    </div>
+  </body>
+</html>

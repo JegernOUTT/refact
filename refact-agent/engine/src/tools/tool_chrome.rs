@@ -414,7 +414,11 @@ impl Tool for ToolChrome {
              {{\"action\": \"open_tab\", \"device\": \"desktop\"}}, \
              {{\"action\": \"navigate\", \"url\": \"https://example.com\"}}, \
              {{\"action\": \"screenshot\"}}. \
-             Locators use a `by` field (css/id/name/text/label/role/xpath/placeholder/alt_text/title/autocomplete/test_id) and a `value` field. \
+             `add_locator_handler` requires `name`, `locator`, and `handler`; handler is \
+             {{\"type\":\"click\"}} or {{\"type\":\"steps\",\"steps\":[...]}} and accepts optional `times` and `no_wait_after`. \
+             `remove_locator_handler` requires `name`. \
+             Locators use a `by` field (css/id/name/text/label/role/xpath/placeholder/alt_text/title/autocomplete/test_id) and a `value` field \
+             (except role locators which use `role` and optional `name` instead of `value`). \
              Text-like locators accept `exact` or a JavaScript `regex` object with `source` and optional `flags`; regex ignores exact. \
              Role locators use `role` with accessible-name/description and ARIA-state filters. Test-id locators accept a custom `attribute` and default to `data-testid`.",
             supported_commands.join("\n"));
@@ -469,7 +473,7 @@ impl Tool for ToolChrome {
                                                 "wait_for_network_idle", "wait_for_element_hidden", "wait_for_element_stable", "wait_seconds",
                                                 "get_text", "get_html", "get_attribute", "extract_links", "extract_table",
                                                 "dom_snapshot", "accessibility_snapshot", "screenshot", "screenshot_element",
-                                                "eval", "styles", "tab_log", "handle_dialog", "dismiss_overlays", "highlight_element"
+                                                "eval", "styles", "tab_log", "add_locator_handler", "remove_locator_handler", "handle_dialog", "dismiss_overlays", "highlight_element"
                                             ]
                                         },
                                         "url": {"type": "string", "description": "URL for navigate action"},

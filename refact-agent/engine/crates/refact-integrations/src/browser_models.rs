@@ -579,6 +579,18 @@ pub enum BrowserStep {
 
     TabLog,
 
+    AddLocatorHandler {
+        name: String,
+        locator: BrowserLocator,
+        handler: LocatorHandlerAction,
+        #[serde(default)]
+        times: Option<u32>,
+        #[serde(default)]
+        no_wait_after: bool,
+    },
+    RemoveLocatorHandler {
+        name: String,
+    },
     HandleDialog {
         accept: bool,
         #[serde(default)]
@@ -589,6 +601,13 @@ pub enum BrowserStep {
     HighlightElement {
         locator: BrowserLocator,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LocatorHandlerAction {
+    Click,
+    Steps { steps: Vec<BrowserStep> },
 }
 
 fn default_true() -> bool {
@@ -727,9 +746,18 @@ pub struct ExecutionReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub page_errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locator_handlers: Vec<LocatorHandlerFiring>,
     pub dialogs: Vec<DialogInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<BrowserScreenshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocatorHandlerFiring {
+    pub name: String,
+    pub action: String,
+    pub outcome: String,
+    pub ok: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1171,6 +1199,41 @@ mod tests {
     }
 
     #[test]
+    fn test_locator_handler_steps_serde() {
+        let json_str = r##"{
+            "action": "add_locator_handler",
+            "name": "cookie",
+            "locator": {"by": "css", "value": "#accept"},
+            "handler": {"type": "click"},
+            "times": 2,
+            "no_wait_after": true
+        }"##;
+        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
+        match step {
+            BrowserStep::AddLocatorHandler {
+                name,
+                handler,
+                times,
+                no_wait_after,
+                ..
+            } => {
+                assert_eq!(name, "cookie");
+                assert!(matches!(handler, LocatorHandlerAction::Click));
+                assert_eq!(times, Some(2));
+                assert!(no_wait_after);
+            }
+            _ => panic!("expected add_locator_handler"),
+        }
+
+        let remove: BrowserStep =
+            serde_json::from_str(r#"{"action":"remove_locator_handler","name":"cookie"}"#).unwrap();
+        assert!(matches!(
+            remove,
+            BrowserStep::RemoveLocatorHandler { name } if name == "cookie"
+        ));
+    }
+
+    #[test]
     fn test_step_wait_seconds_serde() {
         let json_str = r#"{"action": "wait_seconds", "seconds": 2.5}"#;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
@@ -1278,6 +1341,7 @@ mod tests {
             stabilized: true,
             console: vec![],
             page_errors: vec![],
+            locator_handlers: vec![],
             dialogs: vec![DialogInfo {
                 dialog_type: DialogType::Prompt,
                 message: "Enter password=[REDACTED]".to_string(),
