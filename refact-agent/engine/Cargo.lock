@@ -4685,6 +4685,7 @@ dependencies = [
  "md5",
  "serde",
  "serde_json",
+ "shell-words",
  "tracing",
 ]
 

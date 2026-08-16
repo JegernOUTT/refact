@@ -2,6 +2,10 @@ use glob::Pattern;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::command_classify::{
+    executable_basename, extract_command_segments, segment_command, CommandSegments,
+};
+
 pub fn command_should_be_confirmed_by_user(
     command: &String,
     commands_need_confirmation_rules: &Vec<String>,
@@ -21,6 +25,13 @@ pub fn command_should_be_confirmed_by_user(
     (false, "".to_string())
 }
 
+pub fn command_should_be_confirmed_by_user_segment_aware(
+    command: &String,
+    commands_need_confirmation_rules: &Vec<String>,
+) -> (bool, String) {
+    command_matches_rules_segment_aware(command, commands_need_confirmation_rules)
+}
+
 pub fn command_should_be_denied(
     command: &String,
     commands_deny_rules: &Vec<String>,
@@ -38,6 +49,39 @@ pub fn command_should_be_denied(
         return (true, rule.clone());
     }
     (false, "".to_string())
+}
+
+pub fn command_should_be_denied_segment_aware(
+    command: &String,
+    commands_deny_rules: &Vec<String>,
+) -> (bool, String) {
+    command_matches_rules_segment_aware(command, commands_deny_rules)
+}
+
+fn command_matches_rules_segment_aware(command: &String, rules: &Vec<String>) -> (bool, String) {
+    let segments = extract_command_segments(command);
+    if let Some(rule) = rules.iter().find(|glob| {
+        let pattern = match Pattern::new(glob) {
+            Ok(pattern) => pattern,
+            Err(error) => {
+                tracing::warn!("Invalid glob pattern '{}': {}", glob, error);
+                return false;
+            }
+        };
+        command_matches_pattern(command, &segments, &pattern)
+    }) {
+        return (true, rule.clone());
+    }
+    (false, String::new())
+}
+
+fn command_matches_pattern(command: &str, segments: &CommandSegments, pattern: &Pattern) -> bool {
+    pattern.matches(command)
+        || (segments.parse_ok
+            && segments.segments.iter().any(|segment| {
+                pattern.matches(&segment_command(segment))
+                    || executable_basename(segment).is_some_and(|name| pattern.matches(name))
+            }))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -377,6 +421,46 @@ mod tests {
         let (denied, _) =
             command_should_be_denied(&"some command".to_string(), &vec!["[invalid".to_string()]);
         assert!(!denied);
+    }
+
+    #[test]
+    fn test_segment_aware_matching_catches_shell_evasions() {
+        let rules = vec!["sudo*".to_string()];
+        for command in [
+            "bash -c 'sudo rm -rf /'",
+            "echo hi && sudo id",
+            "true; sudo id",
+            "$(sudo id)",
+            "`sudo id`",
+            "sh -c \"bash -c 'sudo id'\"",
+        ] {
+            let (matched, rule) =
+                command_should_be_denied_segment_aware(&command.to_string(), &rules);
+            assert!(matched, "{command:?}");
+            assert_eq!(rule, "sudo*");
+        }
+    }
+
+    #[test]
+    fn test_segment_aware_matching_uses_executable_basename_only() {
+        let exact_rules = vec!["sudo".to_string()];
+        assert!(
+            command_should_be_denied_segment_aware(&"/usr/bin/sudo id".to_string(), &exact_rules).0
+        );
+        for command in ["echo sudo", "cat sudoku.txt"] {
+            assert!(!command_should_be_denied_segment_aware(&command.to_string(), &exact_rules).0);
+        }
+        let prefix_rules = vec!["sudo*".to_string()];
+        for command in ["echo sudo", "cat sudoku.txt"] {
+            assert!(!command_should_be_denied_segment_aware(&command.to_string(), &prefix_rules).0);
+        }
+    }
+
+    #[test]
+    fn test_segment_parse_failure_preserves_raw_glob_fallback() {
+        let command = "echo 'unterminated sudo".to_string();
+        assert!(command_should_be_denied_segment_aware(&command, &vec!["*sudo".to_string()]).0);
+        assert!(!command_should_be_denied_segment_aware(&command, &vec!["sudo*".to_string()]).0);
     }
 
     #[test]

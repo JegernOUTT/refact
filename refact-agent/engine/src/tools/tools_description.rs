@@ -10,9 +10,11 @@ use crate::custom_error::MapErrToString;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 
 pub use refact_tool_api::{
-    command_should_be_confirmed_by_user, command_should_be_denied, is_strict_compatible,
-    json_schema_from_params, make_openai_tool_value, MatchConfirmDeny, MatchConfirmDenyResult,
-    ToolConfig, ToolDesc, ToolGroupCategory, ToolSource, ToolSourceType,
+    command_should_be_confirmed_by_user, command_should_be_confirmed_by_user_segment_aware,
+    command_should_be_denied, command_should_be_denied_segment_aware, extract_command_segments,
+    is_strict_compatible, json_schema_from_params, make_openai_tool_value, structural_flags,
+    MatchConfirmDeny, MatchConfirmDenyResult, ToolConfig, ToolDesc, ToolGroupCategory, ToolSource,
+    ToolSourceType,
 };
 
 pub struct ToolGroup {
@@ -51,7 +53,7 @@ pub trait Tool: Send + Sync {
                     rules
                 );
                 let (is_denied, deny_rule) =
-                    command_should_be_denied(&command_to_match, &rules.deny);
+                    command_should_be_denied_segment_aware(&command_to_match, &rules.deny);
                 if is_denied {
                     return Ok(MatchConfirmDeny {
                         result: MatchConfirmDenyResult::DENY,
@@ -60,7 +62,10 @@ pub trait Tool: Send + Sync {
                     });
                 }
                 let (needs_confirmation, confirmation_rule) =
-                    command_should_be_confirmed_by_user(&command_to_match, &rules.ask_user);
+                    command_should_be_confirmed_by_user_segment_aware(
+                        &command_to_match,
+                        &rules.ask_user,
+                    );
                 if needs_confirmation {
                     return Ok(MatchConfirmDeny {
                         result: MatchConfirmDenyResult::CONFIRMATION,
@@ -70,6 +75,16 @@ pub trait Tool: Send + Sync {
                 }
             } else {
                 tracing::error!("No confirmation info available for {:?}", command_to_match);
+            }
+            if let Some(flag) = structural_flags(&extract_command_segments(&command_to_match))
+                .into_iter()
+                .next()
+            {
+                return Ok(MatchConfirmDeny {
+                    result: MatchConfirmDenyResult::CONFIRMATION,
+                    command: command_to_match.clone(),
+                    rule: flag.to_string(),
+                });
             }
         }
         Ok(MatchConfirmDeny {
