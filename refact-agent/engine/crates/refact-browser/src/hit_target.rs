@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use headless_chrome::Tab;
-use headless_chrome::protocol::cdp::{DOM, Page, Runtime};
+use headless_chrome::protocol::cdp::{DOM, Runtime};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{ActionKind, ElementHandle, HandleError, WorldManager};
+use crate::{ActionKind, ElementHandle, FrameTree, HandleError, WorldManager};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HitTargetPoint {
@@ -47,6 +47,7 @@ pub enum FramePointTranslation {
 pub enum HitTargetError {
     Protocol(String),
     InvalidResult(String),
+    UnsupportedFrameTransform { frame_id: String, reason: String },
     UnknownToken(InterceptorToken),
 }
 
@@ -54,6 +55,10 @@ impl Display for HitTargetError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Protocol(message) | Self::InvalidResult(message) => formatter.write_str(message),
+            Self::UnsupportedFrameTransform { frame_id, reason } => write!(
+                formatter,
+                "Cannot translate pointer coordinates into frame {frame_id}: {reason}"
+            ),
             Self::UnknownToken(token) => {
                 write!(formatter, "Unknown hit-target interceptor {}", token.0)
             }
@@ -86,30 +91,25 @@ pub trait FrameHitTargetDriver {
 
 pub struct CdpFrameHitTargetDriver<'a> {
     tab: &'a Tab,
-    frame_tree: Page::FrameTree,
+    worlds: &'a WorldManager,
+    frame_tree: FrameTree,
     owner_objects: HashMap<String, String>,
 }
 
 impl<'a> CdpFrameHitTargetDriver<'a> {
-    pub fn new(tab: &'a Tab, worlds: &WorldManager) -> Result<Self, HitTargetError> {
+    pub fn new(tab: &'a Tab, worlds: &'a WorldManager) -> Result<Self, HitTargetError> {
         worlds
             .ensure_utility_world(tab)
             .map_err(HitTargetError::Protocol)?;
-        let frame_tree = tab
-            .call_method(Page::GetFrameTree(None))
-            .map_err(|error| {
-                HitTargetError::Protocol(format!("Failed to read browser frame tree: {error}"))
-            })?
-            .frame_tree;
+        let frame_tree = worlds.frame_tree(tab.get_target_id()).ok_or_else(|| {
+            HitTargetError::Protocol("Browser frame tree is unavailable".to_string())
+        })?;
         Ok(Self {
             tab,
+            worlds,
             frame_tree,
             owner_objects: HashMap::new(),
         })
-    }
-
-    fn frame(&self, frame_id: &str) -> Option<&Page::Frame> {
-        find_frame(&self.frame_tree, frame_id)
     }
 
     fn resolve_owner_object(
@@ -120,33 +120,27 @@ impl<'a> CdpFrameHitTargetDriver<'a> {
             return Ok(object_id.clone());
         }
         let parent_frame_id = self
+            .frame_tree
             .frame(child_frame_id)
             .and_then(|frame| frame.parent_id.clone())
             .ok_or_else(|| FramePointTranslationGeometry::Unsupported {
                 reason: format!("frame {child_frame_id} has no parent"),
             })?;
         let context_id = self
-            .tab
-            .call_method(Page::CreateIsolatedWorld {
-                frame_id: parent_frame_id,
-                world_name: Some(crate::UTILITY_WORLD_NAME.to_string()),
-                grant_univeral_access: Some(true),
-            })
+            .worlds
+            .ensure_utility_world_for_frame(self.tab, &parent_frame_id)
             .map_err(|error| FramePointTranslationGeometry::Unsupported {
                 reason: format!(
                     "cannot access parent utility world for frame {child_frame_id}: {error}"
                 ),
-            })?
-            .execution_context_id;
+            })?;
         let owner = self
             .tab
             .call_method(DOM::GetFrameOwner {
                 frame_id: child_frame_id.to_string(),
             })
             .map_err(|error| FramePointTranslationGeometry::Unsupported {
-                reason: format!(
-                    "out-of-process iframe owner for {child_frame_id} is unsupported until T-27: {error}"
-                ),
+                reason: format!("cannot resolve iframe owner for {child_frame_id}: {error}"),
             })?;
         let object = self
             .tab
@@ -174,7 +168,8 @@ impl<'a> CdpFrameHitTargetDriver<'a> {
 
 impl FrameHitTargetDriver for CdpFrameHitTargetDriver<'_> {
     fn parent_frame(&mut self, frame_id: &str) -> Result<Option<String>, HitTargetError> {
-        self.frame(frame_id)
+        self.frame_tree
+            .frame(frame_id)
             .map(|frame| frame.parent_id.clone())
             .ok_or_else(|| HitTargetError::Protocol(format!("Unknown browser frame {frame_id}")))
     }
@@ -331,6 +326,7 @@ impl HitTargetController {
         handle: &ElementHandle,
         point: HitTargetPoint,
     ) -> Result<HitTargetResult, HitTargetError> {
+        let point = translated_handle_point(tab, worlds, handle, point)?;
         let value = worlds.call_function_on(
             tab,
             handle,
@@ -354,6 +350,9 @@ impl HitTargetController {
         let Some(action) = interceptor_action(action_kind) else {
             return Ok(self.insert_entry(handle.clone(), None, Some(HitTargetResult::Skipped)));
         };
+        let point = point
+            .map(|point| translated_handle_point(tab, worlds, handle, point))
+            .transpose()?;
         let value = worlds.call_function_on(
             tab,
             handle,
@@ -438,6 +437,23 @@ impl HitTargetController {
     }
 }
 
+fn translated_handle_point(
+    tab: &Tab,
+    worlds: &WorldManager,
+    handle: &ElementHandle,
+    point: HitTargetPoint,
+) -> Result<HitTargetPoint, HitTargetError> {
+    match translate_point_to_frame_cdp(tab, worlds, &handle.frame_id, point)? {
+        FramePointTranslation::Supported(point) => Ok(point),
+        FramePointTranslation::Unsupported { reason } => {
+            Err(HitTargetError::UnsupportedFrameTransform {
+                frame_id: handle.frame_id.clone(),
+                reason,
+            })
+        }
+    }
+}
+
 pub fn install_interceptor(
     controller: &HitTargetController,
     tab: &Tab,
@@ -518,17 +534,6 @@ pub fn translate_point_to_frame_cdp(
 ) -> Result<FramePointTranslation, HitTargetError> {
     let mut driver = CdpFrameHitTargetDriver::new(tab, worlds)?;
     translate_point_to_frame(&mut driver, target_frame_id, main_frame_point)
-}
-
-fn find_frame<'a>(frame_tree: &'a Page::FrameTree, frame_id: &str) -> Option<&'a Page::Frame> {
-    if frame_tree.frame.id == frame_id {
-        return Some(&frame_tree.frame);
-    }
-    frame_tree
-        .child_frames
-        .as_ref()?
-        .iter()
-        .find_map(|child| find_frame(child, frame_id))
 }
 
 fn interceptor_action(action_kind: ActionKind) -> Option<&'static str> {
@@ -650,6 +655,18 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_frame_transform_is_typed_and_clear() {
+        let error = HitTargetError::UnsupportedFrameTransform {
+            frame_id: "child".to_string(),
+            reason: "iframe owner is transformed".to_string(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Cannot translate pointer coordinates into frame child: iframe owner is transformed"
+        );
+    }
+
+    #[test]
     fn frame_translation_checks_each_owner_and_accumulates_offsets() {
         let mut driver = RecordingFrameDriver::default();
         driver
@@ -693,22 +710,26 @@ mod tests {
     }
 
     #[test]
-    fn oopif_and_transformed_owners_are_unsupported() {
-        let mut oopif = RecordingFrameDriver::default();
-        oopif
+    fn unavailable_geometry_and_transformed_owners_are_unsupported() {
+        let mut unavailable = RecordingFrameDriver::default();
+        unavailable
             .parents
             .insert("child".to_string(), "main".to_string());
-        oopif.geometry.insert(
+        unavailable.geometry.insert(
             "child".to_string(),
             FramePointTranslationGeometry::Unsupported {
-                reason: "out-of-process iframe until T-27".to_string(),
+                reason: "iframe owner geometry is unavailable".to_string(),
             },
         );
         assert_eq!(
-            translate_point_to_frame(&mut oopif, "child", HitTargetPoint { x: 10.0, y: 20.0 })
-                .unwrap(),
+            translate_point_to_frame(
+                &mut unavailable,
+                "child",
+                HitTargetPoint { x: 10.0, y: 20.0 }
+            )
+            .unwrap(),
             FramePointTranslation::Unsupported {
-                reason: "out-of-process iframe until T-27".to_string()
+                reason: "iframe owner geometry is unavailable".to_string()
             }
         );
 

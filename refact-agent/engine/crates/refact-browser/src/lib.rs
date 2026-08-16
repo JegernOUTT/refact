@@ -1,5 +1,6 @@
 mod actionability;
 pub mod forms;
+mod frames;
 mod handles;
 mod hit_target;
 mod injected_source;
@@ -18,6 +19,10 @@ pub use actionability::{
 };
 pub use handles::{
     CheckedState, ElementHandle, ElementState, ElementStateName, HandleError, HandleRegistry,
+};
+pub use frames::{
+    FrameExecutionContext, FrameHandle, FrameId, FrameInvalidation, FrameLocatorError,
+    FrameSessionId, FrameTree,
 };
 pub use hit_target::{
     CdpFrameHitTargetDriver, FrameHitTargetDriver, FrameOwnerGeometry, FramePointTranslation,

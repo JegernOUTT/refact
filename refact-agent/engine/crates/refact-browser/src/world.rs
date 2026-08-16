@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use headless_chrome::Tab;
 use headless_chrome::protocol::cdp::types::Event;
-use headless_chrome::protocol::cdp::{DOM, Page, Runtime};
+use headless_chrome::protocol::cdp::{DOM, Page, Runtime, Target};
 use serde_json::Value;
 
-use crate::{ElementHandle, HandleError, HandleRegistry, RefRegistry, wrapped_bootstrap};
+use crate::{ElementHandle, FrameTree, HandleError, HandleRegistry, RefRegistry, wrapped_bootstrap};
 
 pub const UTILITY_WORLD_NAME: &str = "__refact_utility__";
 pub const BINDING_NAME: &str = "__refact_binding";
@@ -24,6 +24,7 @@ pub struct BindingCall {
 #[derive(Default)]
 struct TabWorldState {
     installed: bool,
+    frames: FrameTree,
     frame_contexts: HashMap<Page::FrameId, Runtime::ExecutionContextId>,
     context_frames: HashMap<Runtime::ExecutionContextId, Page::FrameId>,
     utility_contexts: HashSet<Runtime::ExecutionContextId>,
@@ -61,6 +62,7 @@ impl WorldManager {
             .map_err(|error| format!("Failed to read browser frame tree: {error}"))?
             .frame_tree;
         let main_frame_id = frame_tree.frame.id.clone();
+        self.record_frame_tree(tab.get_target_id(), &frame_tree);
         let mut frame_ids = Vec::new();
         collect_frame_ids(&frame_tree, &mut frame_ids);
         for frame_id in frame_ids {
@@ -87,6 +89,32 @@ impl WorldManager {
             .ok_or_else(|| "Browser utility world has no main-frame context".to_string())
     }
 
+    pub fn ensure_utility_world_for_frame(
+        &self,
+        tab: &Tab,
+        frame_id: &str,
+    ) -> Result<Runtime::ExecutionContextId, String> {
+        self.install_for_tab(tab)?;
+        if let Some(context_id) = self.context_for_frame(tab.get_target_id(), &frame_id.to_string())
+        {
+            self.ensure_bootstrap(tab, context_id)?;
+            return Ok(context_id);
+        }
+        let context_id = tab
+            .call_method(Page::CreateIsolatedWorld {
+                frame_id: frame_id.to_string(),
+                world_name: Some(UTILITY_WORLD_NAME.to_string()),
+                grant_univeral_access: Some(true),
+            })
+            .map_err(|error| {
+                format!("Failed to create browser utility world for frame {frame_id}: {error}")
+            })?
+            .execution_context_id;
+        self.record_context(tab.get_target_id(), frame_id.to_string(), context_id);
+        self.ensure_bootstrap(tab, context_id)?;
+        Ok(context_id)
+    }
+
     pub fn eval_in_utility(&self, tab: &Tab, expression: &str) -> Result<Value, String> {
         let context_id = self.ensure_utility_world(tab)?;
         let result = tab
@@ -95,6 +123,27 @@ impl WorldManager {
         if let Some(exception) = result.exception_details {
             return Err(format!(
                 "Browser utility-world evaluation failed: {}",
+                exception_message(&exception)
+            ));
+        }
+        Ok(result.result.value.unwrap_or(Value::Null))
+    }
+
+    pub fn eval_in_utility_frame(
+        &self,
+        tab: &Tab,
+        frame_id: &str,
+        expression: &str,
+    ) -> Result<Value, String> {
+        let context_id = self.ensure_utility_world_for_frame(tab, frame_id)?;
+        let result = tab
+            .call_method(runtime_evaluate(expression.to_string(), context_id))
+            .map_err(|error| {
+                format!("Failed to evaluate in browser utility world for frame {frame_id}: {error}")
+            })?;
+        if let Some(exception) = result.exception_details {
+            return Err(format!(
+                "Browser utility-world evaluation failed in frame {frame_id}: {}",
                 exception_message(&exception)
             ));
         }
@@ -189,6 +238,35 @@ impl WorldManager {
                     "Browser utility world has no frame for its context".to_string(),
                 )
             })?;
+        self.call_injected_handles_in_context(tab, method, args, context_id, frame_id)
+    }
+
+    pub fn call_injected_handles_in_frame(
+        &self,
+        tab: &Tab,
+        frame_id: &str,
+        method: &str,
+        args: Value,
+    ) -> Result<Vec<ElementHandle>, HandleError> {
+        let context_id = self
+            .ensure_utility_world_for_frame(tab, frame_id)
+            .map_err(HandleError::Resolution)?;
+        self.call_injected_handles_in_context(tab, method, args, context_id, frame_id.to_string())
+    }
+
+    fn call_injected_handles_in_context(
+        &self,
+        tab: &Tab,
+        method: &str,
+        args: Value,
+        context_id: Runtime::ExecutionContextId,
+        frame_id: Page::FrameId,
+    ) -> Result<Vec<ElementHandle>, HandleError> {
+        if !args.is_array() {
+            return Err(HandleError::Resolution(
+                "Injected call arguments must be a JSON array".to_string(),
+            ));
+        }
         let method = serde_json::to_string(method).map_err(|error| {
             HandleError::Resolution(format!("Failed to serialize injected method: {error}"))
         })?;
@@ -241,6 +319,25 @@ impl WorldManager {
         }
         handles.sort_by_key(|(index, _)| *index);
         Ok(handles.into_iter().map(|(_, handle)| handle).collect())
+    }
+
+    pub fn content_frame_for_handle(
+        &self,
+        tab: &Tab,
+        handle: &ElementHandle,
+    ) -> Result<Option<Page::FrameId>, HandleError> {
+        self.handles.validate(tab.get_target_id(), handle)?;
+        tab.call_method(DOM::DescribeNode {
+            node_id: None,
+            backend_node_id: None,
+            object_id: Some(handle.object_id.clone()),
+            depth: Some(0),
+            pierce: None,
+        })
+        .map(|response| response.node.frame_id)
+        .map_err(|error| {
+            HandleError::Protocol(format!("Failed to resolve iframe content frame: {error}"))
+        })
     }
 
     pub fn call_function_on(
@@ -390,6 +487,10 @@ impl WorldManager {
         }))
         .map_err(|error| format!("Failed to add browser utility-world event listener: {error}"))?;
 
+        tab.call_method(oopif_auto_attach()).map_err(|error| {
+            format!("Failed to enable recursive browser target auto-attach: {error}")
+        })?;
+
         tab.expose_function(BINDING_NAME, Arc::new(|_| {}))
             .map_err(|error| format!("Failed to register browser binding callback: {error}"))?;
         tab.call_method(Runtime::RemoveBinding {
@@ -477,6 +578,14 @@ impl WorldManager {
                 self.context_destroyed(target_id, event.params.execution_context_id)
             }
             Event::RuntimeExecutionContextsCleared(_) => self.contexts_cleared(target_id),
+            Event::PageFrameAttached(event) => self.frame_attached(
+                target_id,
+                &event.params.frame_id,
+                &event.params.parent_frame_id,
+            ),
+            Event::PageFrameDetached(event) => {
+                self.frame_detached(target_id, &event.params.frame_id)
+            }
             Event::PageFrameNavigated(event) => self.frame_navigated(
                 target_id,
                 &event.params.frame.id,
@@ -488,6 +597,16 @@ impl WorldManager {
                     event.params.execution_context_id,
                     &event.params.payload,
                 ),
+            Event::AttachedToTarget(event) if event.params.target_info.Type == "iframe" => self
+                .frame_process_swapped(
+                    target_id,
+                    &event.params.target_info.target_id,
+                    event.params.target_info.parent_frame_id.as_ref(),
+                    &event.params.session_id,
+                ),
+            Event::DetachedFromTarget(event) => {
+                self.frame_session_detached(target_id, &event.params.session_id)
+            }
             _ => {}
         }
     }
@@ -558,6 +677,15 @@ impl WorldManager {
             .copied()
     }
 
+    pub fn frame_tree(&self, target_id: &str) -> Option<FrameTree> {
+        self.state
+            .lock()
+            .unwrap()
+            .tabs
+            .get(target_id)
+            .map(|tab| tab.frames.clone())
+    }
+
     fn frame_for_context(
         &self,
         target_id: &str,
@@ -625,8 +753,13 @@ impl WorldManager {
             tab.utility_contexts.remove(&previous_context);
             tab.initialized_contexts.remove(&previous_context);
         }
-        tab.context_frames.insert(context_id, frame_id);
+        tab.context_frames.insert(context_id, frame_id.clone());
         tab.utility_contexts.insert(context_id);
+        if tab.frames.frame(&frame_id).is_none() {
+            tab.frames.attach(frame_id.clone(), None);
+        }
+        tab.frames
+            .set_utility_context(&frame_id, None, i64::from(context_id));
     }
 
     fn context_destroyed(&self, target_id: &str, context_id: Runtime::ExecutionContextId) {
@@ -637,6 +770,7 @@ impl WorldManager {
         let Some(tab) = state.tabs.get_mut(target_id) else {
             return;
         };
+        tab.frames.destroy_context(None, i64::from(context_id));
         tab.utility_contexts.remove(&context_id);
         tab.initialized_contexts.remove(&context_id);
         if let Some(frame_id) = tab.context_frames.remove(&context_id) {
@@ -647,7 +781,6 @@ impl WorldManager {
     }
 
     fn frame_navigated(&self, target_id: &str, frame_id: &Page::FrameId, top_level: bool) {
-        let _ = self.handles.frame_navigated(target_id, frame_id);
         if top_level {
             self.refs.top_level_navigation(target_id);
         }
@@ -655,10 +788,11 @@ impl WorldManager {
         let Some(tab) = state.tabs.get_mut(target_id) else {
             return;
         };
-        if let Some(context_id) = tab.frame_contexts.remove(frame_id) {
-            tab.context_frames.remove(&context_id);
-            tab.utility_contexts.remove(&context_id);
-            tab.initialized_contexts.remove(&context_id);
+        let invalidation = tab.frames.navigate(frame_id);
+        Self::remove_invalidated_contexts(tab, &invalidation);
+        drop(state);
+        for frame_id in invalidation.frame_ids {
+            let _ = self.handles.frame_navigated(target_id, &frame_id);
         }
     }
 
@@ -668,10 +802,104 @@ impl WorldManager {
         let Some(tab) = state.tabs.get_mut(target_id) else {
             return;
         };
+        tab.frames.clear_contexts();
         tab.frame_contexts.clear();
         tab.context_frames.clear();
         tab.utility_contexts.clear();
         tab.initialized_contexts.clear();
+    }
+
+    fn record_frame_tree(&self, target_id: &str, frame_tree: &Page::FrameTree) {
+        self.state
+            .lock()
+            .unwrap()
+            .tabs
+            .entry(target_id.to_string())
+            .or_default()
+            .frames
+            .record_cdp_tree(frame_tree);
+    }
+
+    fn frame_attached(&self, target_id: &str, frame_id: &str, parent_frame_id: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .tabs
+            .entry(target_id.to_string())
+            .or_default()
+            .frames
+            .attach(frame_id.to_string(), Some(parent_frame_id.to_string()));
+    }
+
+    fn frame_detached(&self, target_id: &str, frame_id: &str) {
+        let mut state = self.state.lock().unwrap();
+        let invalidation = state
+            .tabs
+            .get_mut(target_id)
+            .map(|tab| {
+                let invalidation = tab.frames.detach(frame_id);
+                Self::remove_invalidated_contexts(tab, &invalidation);
+                invalidation
+            })
+            .unwrap_or_default();
+        drop(state);
+        for frame_id in invalidation.frame_ids {
+            let _ = self.handles.frame_navigated(target_id, &frame_id);
+        }
+    }
+
+    fn frame_process_swapped(
+        &self,
+        target_id: &str,
+        frame_id: &str,
+        parent_frame_id: Option<&String>,
+        session_id: &str,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        let tab = state.tabs.entry(target_id.to_string()).or_default();
+        let invalidation = tab.frames.process_swap(
+            frame_id.to_string(),
+            parent_frame_id.cloned(),
+            session_id.to_string(),
+        );
+        Self::remove_invalidated_contexts(tab, &invalidation);
+        drop(state);
+        for frame_id in invalidation.frame_ids {
+            let _ = self.handles.frame_navigated(target_id, &frame_id);
+        }
+    }
+
+    fn frame_session_detached(&self, target_id: &str, session_id: &str) {
+        let mut state = self.state.lock().unwrap();
+        let invalidation = state
+            .tabs
+            .get_mut(target_id)
+            .map(|tab| {
+                let invalidation = tab.frames.detach_session(session_id);
+                Self::remove_invalidated_contexts(tab, &invalidation);
+                invalidation
+            })
+            .unwrap_or_default();
+        drop(state);
+        for frame_id in invalidation.frame_ids {
+            let _ = self.handles.frame_navigated(target_id, &frame_id);
+        }
+    }
+
+    fn remove_invalidated_contexts(
+        tab: &mut TabWorldState,
+        invalidation: &crate::FrameInvalidation,
+    ) {
+        for context in &invalidation.contexts {
+            let context_id = context.context_id as Runtime::ExecutionContextId;
+            tab.utility_contexts.remove(&context_id);
+            tab.initialized_contexts.remove(&context_id);
+            if let Some(frame_id) = tab.context_frames.remove(&context_id) {
+                if tab.frame_contexts.get(&frame_id) == Some(&context_id) {
+                    tab.frame_contexts.remove(&frame_id);
+                }
+            }
+        }
     }
 }
 
@@ -732,6 +960,15 @@ pub(crate) fn utility_init_script() -> Page::AddScriptToEvaluateOnNewDocument {
         world_name: Some(UTILITY_WORLD_NAME.to_string()),
         include_command_line_api: None,
         run_immediately: Some(true),
+    }
+}
+
+pub(crate) fn oopif_auto_attach() -> Target::SetAutoAttach {
+    Target::SetAutoAttach {
+        auto_attach: true,
+        wait_for_debugger_on_start: false,
+        flatten: Some(true),
+        filter: None,
     }
 }
 
@@ -814,6 +1051,13 @@ mod tests {
     #[test]
     fn binding_name_is_stable() {
         assert_eq!(BINDING_NAME, "__refact_binding");
+    }
+
+    #[test]
+    fn oopif_auto_attach_is_recursive_and_flattened() {
+        let attach = oopif_auto_attach();
+        assert!(attach.auto_attach);
+        assert_eq!(attach.flatten, Some(true));
     }
 
     #[test]
