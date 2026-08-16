@@ -6,6 +6,7 @@ import {
   FieldStack,
   FieldText,
 } from "../../../components/ui";
+import { Checkbox } from "../../../components/Checkbox";
 
 import type { ProviderListItem } from "../../../services/refact";
 import {
@@ -13,6 +14,11 @@ import {
   providersApi,
   useUpdateProviderMutation,
 } from "../../../services/refact";
+import {
+  type PrivacyPolicy,
+  useGetPrivacyPolicyQuery,
+  useUpdatePrivacyPolicyMutation,
+} from "../../../services/refact/privacy";
 import { useAppDispatch } from "../../../hooks";
 import {
   nextInstanceId,
@@ -44,7 +50,40 @@ function getErrorMessage(error: unknown) {
     if (typeof record.error === "string") return record.error;
     if (typeof record.message === "string") return record.message;
   }
-  return "Failed to create provider instance.";
+  return "Failed to create the provider or save its privacy zones.";
+}
+
+function applyProviderTrust(
+  policy: PrivacyPolicy,
+  providerId: string,
+  selectedZoneNames: string[],
+  knownDestinationIds: string[],
+): PrivacyPolicy {
+  const selected = new Set(selectedZoneNames);
+
+  return {
+    ...policy,
+    zones: policy.zones.map((zone) => {
+      const allowed = selected.has(zone.name);
+      if (zone.send_to.includes("*")) {
+        return allowed
+          ? zone
+          : {
+              ...zone,
+              send_to: Array.from(
+                new Set(knownDestinationIds.filter((id) => id !== providerId)),
+              ),
+            };
+      }
+
+      return {
+        ...zone,
+        send_to: allowed
+          ? Array.from(new Set([...zone.send_to, providerId]))
+          : zone.send_to.filter((id) => id !== providerId),
+      };
+    }),
+  };
 }
 
 export const AddProviderInstanceModal: React.FC<
@@ -58,6 +97,12 @@ export const AddProviderInstanceModal: React.FC<
 }) => {
   const dispatch = useAppDispatch();
   const [updateProvider, { isLoading }] = useUpdateProviderMutation();
+  const privacyPolicyQuery = useGetPrivacyPolicyQuery(undefined, {
+    skip: !isOpen,
+  });
+  const [updatePrivacyPolicy, privacyUpdateState] =
+    useUpdatePrivacyPolicyMutation();
+  const isSaving = isLoading || privacyUpdateState.isLoading;
   const providerNames = useMemo(
     () => configuredProviders.map((provider) => provider.name),
     [configuredProviders],
@@ -82,6 +127,7 @@ export const AddProviderInstanceModal: React.FC<
   const [idTouched, setIdTouched] = useState(false);
   const [displayNameTouched, setDisplayNameTouched] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [selectedZoneNames, setSelectedZoneNames] = useState<string[]>([]);
 
   useEffect(() => {
     if (!isOpen || !defaultBaseProvider) return;
@@ -94,6 +140,15 @@ export const AddProviderInstanceModal: React.FC<
     setLocalError(null);
   }, [defaultBaseProvider, isOpen, providerNames]);
 
+  useEffect(() => {
+    if (!isOpen || !privacyPolicyQuery.data) return;
+    setSelectedZoneNames(
+      privacyPolicyQuery.data.policy.zones
+        .filter((zone) => zone.name === "normal")
+        .map((zone) => zone.name),
+    );
+  }, [isOpen, privacyPolicyQuery.data]);
+
   const idValidation = useMemo(
     () => validateProviderInstanceId(instanceId, providerNames),
     [instanceId, providerNames],
@@ -105,7 +160,19 @@ export const AddProviderInstanceModal: React.FC<
     Boolean(baseProvider) &&
     !idValidation &&
     !displayNameValidation &&
-    !isLoading;
+    !isSaving &&
+    Boolean(privacyPolicyQuery.data) &&
+    !privacyPolicyQuery.isLoading &&
+    !privacyPolicyQuery.isError;
+
+  const handleZoneChange = useCallback((zoneName: string, checked: boolean) => {
+    setSelectedZoneNames((current) =>
+      checked
+        ? Array.from(new Set([...current, zoneName]))
+        : current.filter((name) => name !== zoneName),
+    );
+    setLocalError(null);
+  }, []);
 
   const handleBaseProviderChange = useCallback(
     (nextBaseProvider: string) => {
@@ -154,6 +221,10 @@ export const AddProviderInstanceModal: React.FC<
       setLocalError(validation ?? "Select a base provider.");
       return;
     }
+    if (!privacyPolicyQuery.data) {
+      setLocalError("Privacy zones are unavailable.");
+      return;
+    }
 
     try {
       const settings: CreateProviderInstanceRequest = {
@@ -165,6 +236,19 @@ export const AddProviderInstanceModal: React.FC<
         providerName: trimmedInstanceId,
         settings,
       }).unwrap();
+      await updatePrivacyPolicy(
+        applyProviderTrust(
+          privacyPolicyQuery.data.policy,
+          trimmedInstanceId,
+          selectedZoneNames,
+          [
+            ...privacyPolicyQuery.data.destinations.map(
+              (destination) => destination.id,
+            ),
+            ...configuredProviders.map((provider) => provider.name),
+          ],
+        ),
+      ).unwrap();
       dispatch(
         providersApi.util.invalidateTags([
           { type: "PROVIDERS", id: "LIST" },
@@ -189,21 +273,25 @@ export const AddProviderInstanceModal: React.FC<
     }
   }, [
     baseProvider,
+    configuredProviders,
     dispatch,
     displayName,
     instanceId,
     onCreated,
     onOpenChange,
+    privacyPolicyQuery.data,
     providerNames,
+    selectedZoneNames,
+    updatePrivacyPolicy,
     updateProvider,
   ]);
 
   const handleOpenChange = useCallback(
     (open: boolean) => {
-      if (!open && isLoading) return;
+      if (!open && isSaving) return;
       onOpenChange(open);
     },
-    [isLoading, onOpenChange],
+    [isSaving, onOpenChange],
   );
 
   return (
@@ -211,7 +299,7 @@ export const AddProviderInstanceModal: React.FC<
       <Dialog.Content maxWidth="min(420px, calc(100vw - 2 * var(--rf-space-3)))">
         <Dialog.Title>Add provider instance</Dialog.Title>
         <Dialog.Description>
-          Create a blank provider configuration using an existing base provider.
+          Create a blank provider configuration and decide what it may see.
         </Dialog.Description>
 
         <div className={styles.formStack}>
@@ -227,7 +315,7 @@ export const AddProviderInstanceModal: React.FC<
                     label: option.label,
                   }))}
                   onChange={handleBaseProviderChange}
-                  disabled={isLoading}
+                  disabled={isSaving}
                 />
               }
             />
@@ -247,7 +335,7 @@ export const AddProviderInstanceModal: React.FC<
                 id="provider-instance-id"
                 value={instanceId}
                 onChange={handleInstanceIdChange}
-                disabled={isLoading || baseOptions.length === 0}
+                disabled={isSaving || baseOptions.length === 0}
                 placeholder="openai_2"
               />
             }
@@ -262,11 +350,41 @@ export const AddProviderInstanceModal: React.FC<
                 id="provider-display-name"
                 value={displayName}
                 onChange={handleDisplayNameChange}
-                disabled={isLoading || baseOptions.length === 0}
+                disabled={isSaving || baseOptions.length === 0}
                 placeholder="OpenAI 2"
               />
             }
           />
+
+          <fieldset className={styles.trustFieldset}>
+            <legend>What may this provider see?</legend>
+            <div className={styles.helperText}>
+              Normal files are selected by default. Choose any additional
+              privacy zones you trust this provider to receive.
+            </div>
+            {privacyPolicyQuery.isLoading ? (
+              <div className={styles.helperText}>Loading privacy zones...</div>
+            ) : privacyPolicyQuery.isError || !privacyPolicyQuery.data ? (
+              <div className={styles.errorText}>
+                Privacy zones are unavailable.
+              </div>
+            ) : (
+              <div className={styles.zoneList}>
+                {privacyPolicyQuery.data.policy.zones.map((zone) => (
+                  <Checkbox
+                    key={zone.name}
+                    checked={selectedZoneNames.includes(zone.name)}
+                    disabled={isSaving}
+                    onCheckedChange={(checked) =>
+                      handleZoneChange(zone.name, checked === true)
+                    }
+                  >
+                    {zone.name}
+                  </Checkbox>
+                ))}
+              </div>
+            )}
+          </fieldset>
 
           {localError ? (
             <div className={styles.errorText}>{localError}</div>
@@ -275,7 +393,7 @@ export const AddProviderInstanceModal: React.FC<
 
         <div className={styles.dialogActions}>
           <Dialog.Close asChild>
-            <Button variant="soft" disabled={isLoading}>
+            <Button variant="soft" disabled={isSaving}>
               Cancel
             </Button>
           </Dialog.Close>
@@ -284,7 +402,7 @@ export const AddProviderInstanceModal: React.FC<
             onClick={() => void handleSubmit()}
             disabled={!canSubmit}
           >
-            {isLoading ? "Creating..." : "Create instance"}
+            {isSaving ? "Creating..." : "Create instance"}
           </Button>
         </div>
       </Dialog.Content>

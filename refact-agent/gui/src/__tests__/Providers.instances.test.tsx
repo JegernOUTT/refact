@@ -19,6 +19,10 @@ import {
   providersApi,
   type ProviderListItem,
 } from "../services/refact";
+import type {
+  PrivacyPolicy,
+  PrivacyPolicyResponse,
+} from "../services/refact/privacy";
 
 const aliasProvider: ProviderListItem = {
   name: "openai_work",
@@ -60,6 +64,39 @@ const preloadedState = {
     themeProps: {},
     host: "vscode" as const,
   },
+};
+
+const privacyPolicy: PrivacyPolicy = {
+  blocked: [],
+  zones: [
+    {
+      name: "secrets",
+      patterns: [".env*"],
+      send_to: ["trusted"],
+      on_shell_read: "withhold",
+    },
+    {
+      name: "normal",
+      patterns: ["*"],
+      send_to: ["*"],
+      on_shell_read: "withhold",
+    },
+  ],
+  subagents: { report_declassifies: false },
+};
+
+const privacyResponse: PrivacyPolicyResponse = {
+  policy: privacyPolicy,
+  destinations: [
+    {
+      id: "trusted",
+      kind: "provider",
+      display_name: "Trusted",
+    },
+  ],
+  match_counts: { secrets: 1, normal: 10 },
+  error: null,
+  source_paths: [],
 };
 
 describe("Providers provider instances", () => {
@@ -349,13 +386,22 @@ describe("Providers provider instances", () => {
     }
   });
 
-  test("AddProviderInstanceModal submits identity fields", async () => {
+  test("AddProviderInstanceModal saves selected privacy zones", async () => {
     let requestBody: unknown;
+    let savedPolicy: PrivacyPolicy | null = null;
 
     server.use(
+      http.get("*/v1/privacy/policy", () => HttpResponse.json(privacyResponse)),
       http.post("*/v1/providers/openai_2", async ({ request }) => {
         requestBody = await request.json();
         return HttpResponse.json({ success: true });
+      }),
+      http.post("*/v1/privacy/policy", async ({ request }) => {
+        savedPolicy = (await request.json()) as PrivacyPolicy;
+        return HttpResponse.json({
+          ...privacyResponse,
+          policy: savedPolicy,
+        } satisfies PrivacyPolicyResponse);
       }),
     );
 
@@ -376,6 +422,15 @@ describe("Providers provider instances", () => {
     expect(
       screen.queryByText("OpenAI (Responses API)"),
     ).not.toBeInTheDocument();
+    expect(screen.getByText("What may this provider see?")).toBeInTheDocument();
+    const secretsZone = await screen.findByRole("checkbox", {
+      name: "secrets",
+    });
+    const normalZone = screen.getByRole("checkbox", { name: "normal" });
+    expect(secretsZone).not.toBeChecked();
+    expect(normalZone).toBeChecked();
+
+    await user.click(secretsZone);
 
     await user.click(screen.getByRole("button", { name: "Create instance" }));
 
@@ -386,6 +441,18 @@ describe("Providers provider instances", () => {
         enabled: false,
       });
     });
+    await waitFor(() => {
+      expect(savedPolicy).toEqual({
+        ...privacyPolicy,
+        zones: [
+          {
+            ...privacyPolicy.zones[0],
+            send_to: ["trusted", "openai_2"],
+          },
+          privacyPolicy.zones[1],
+        ],
+      });
+    });
     expect(onOpenChange).toHaveBeenCalledWith(false);
     expect(onCreated).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -394,6 +461,71 @@ describe("Providers provider instances", () => {
         display_name: "OpenAI 2",
       }),
     );
+
+    store.dispatch(providersApi.util.resetApiState());
+  });
+
+  test("AddProviderInstanceModal defaults to normal and excludes the new provider from other zones", async () => {
+    let savedPolicy: PrivacyPolicy | null = null;
+    const wildcardPolicy: PrivacyPolicy = {
+      ...privacyPolicy,
+      zones: [
+        { ...privacyPolicy.zones[0], send_to: ["*"] },
+        privacyPolicy.zones[1],
+      ],
+    };
+    const wildcardResponse: PrivacyPolicyResponse = {
+      ...privacyResponse,
+      policy: wildcardPolicy,
+    };
+
+    server.use(
+      http.get("*/v1/privacy/policy", () =>
+        HttpResponse.json(wildcardResponse),
+      ),
+      http.post("*/v1/providers/openai_2", () =>
+        HttpResponse.json({ success: true }),
+      ),
+      http.post("*/v1/privacy/policy", async ({ request }) => {
+        savedPolicy = (await request.json()) as PrivacyPolicy;
+        return HttpResponse.json({
+          ...wildcardResponse,
+          policy: savedPolicy,
+        } satisfies PrivacyPolicyResponse);
+      }),
+    );
+
+    const { user, store } = render(
+      <AddProviderInstanceModal
+        isOpen
+        configuredProviders={[openAiProvider]}
+        initialBaseProvider="openai"
+        onOpenChange={vi.fn()}
+        onCreated={vi.fn()}
+      />,
+      { preloadedState },
+    );
+
+    const secretsZone = await screen.findByRole("checkbox", {
+      name: "secrets",
+    });
+    expect(secretsZone).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "normal" })).toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "Create instance" }));
+
+    await waitFor(() => {
+      expect(savedPolicy).toEqual({
+        ...wildcardPolicy,
+        zones: [
+          {
+            ...wildcardPolicy.zones[0],
+            send_to: ["trusted", "openai"],
+          },
+          wildcardPolicy.zones[1],
+        ],
+      });
+    });
 
     store.dispatch(providersApi.util.resetApiState());
   });

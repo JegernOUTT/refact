@@ -18,6 +18,28 @@
   line-height: var(--rf-line);
 }
 
+.trustFieldset {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+}
+
+.trustFieldset legend {
+  margin-bottom: var(--rf-space-1);
+  color: var(--rf-color-fg);
+  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.zoneList {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
 .dialogActions {
   display: flex;
   min-width: 0;
