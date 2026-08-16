@@ -627,6 +627,7 @@ mod tests {
             "delegate_with_editing",
             "code_review",
             "code_review_gather_files",
+            "code_review_verifier",
             "strategic_planning",
             "strategic_planning_gather_files",
             "deep_research",

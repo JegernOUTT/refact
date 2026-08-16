@@ -891,10 +891,9 @@ async fn execute_via_controller(
         }
     }
 
-    let report =
-        tokio::task::block_in_place(|| {
-            browser_controller::execute_steps(&headless_tab, &steps, image_policy)
-        });
+    let report = tokio::task::block_in_place(|| {
+        browser_controller::execute_steps(&headless_tab, &steps, image_policy)
+    });
 
     {
         let runtime_id = {
@@ -949,9 +948,7 @@ fn format_controller_report(
                 if mime.starts_with("image/") {
                     match resize_screenshot_b64(b64_data, mime, image_policy) {
                         Ok((resized, resized_mime)) => {
-                            if let Ok(el) =
-                                MultimodalElement::new(resized_mime, resized)
-                            {
+                            if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
                                 multimodal.push(el);
                             }
                         }

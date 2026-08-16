@@ -516,17 +516,13 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
             cgcx.current_model.clone(),
         )
     };
-    let image_policy = match crate::global_context::try_load_caps_quickly_if_not_present(
-        gcx.clone(),
-        0,
-    )
-    .await
-    {
-        Ok(caps) => crate::caps::resolve_chat_model(caps, &current_model)
-            .map(|model| ImagePolicy::for_model(&model.base))
-            .unwrap_or_default(),
-        Err(_) => ImagePolicy::default(),
-    };
+    let image_policy =
+        match crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
+            Ok(caps) => crate::caps::resolve_chat_model(caps, &current_model)
+                .map(|model| ImagePolicy::for_model(&model.base))
+                .unwrap_or_default(),
+            Err(_) => ImagePolicy::default(),
+        };
     let aborted = || abort_flag.load(std::sync::atomic::Ordering::Relaxed);
     let mut not_found_messages = vec![];
     let mut scope_notices = vec![];

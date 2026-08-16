@@ -2062,39 +2062,60 @@ pub(crate) fn git_risk_response(
     intel: &refact_git_intel::GitIntel,
     assembly: &GitRiskAssembly,
 ) -> GitRiskResponse {
-    let hotspots = assembly.files.iter().map(|file| GitHotspotResponse {
-        path: file.meta.file_path.clone(),
-        churn: file.meta.commit_count_total,
-        risk: file.churn_risk,
-        churn_risk: file.churn_risk,
-        churn_percentile: file.meta.churn_percentile,
-        temporal_score: file.temporal_score,
-        change_entropy: file.meta.change_entropy,
-        change_entropy_pct: file.meta.change_entropy_pct,
-        bus_factor: file.meta.bus_factor as usize,
-        ownership_risk: intel.ownership_risk(&file.meta.file_path),
-        knowledge_loss: intel.knowledge_loss(&file.meta.file_path),
-    }).collect();
-    let ownership = assembly.files.iter().map(|file| {
-        let owners = intel.ownership(&file.meta.file_path);
-        GitOwnershipResponse {
+    let hotspots = assembly
+        .files
+        .iter()
+        .map(|file| GitHotspotResponse {
             path: file.meta.file_path.clone(),
-            top_owner: owners.first().map(|owner| owner.author.clone()).unwrap_or_default(),
-            top_owner_share: owners.first().map(|owner| owner.share).unwrap_or(0.0),
+            churn: file.meta.commit_count_total,
+            risk: file.churn_risk,
+            churn_risk: file.churn_risk,
+            churn_percentile: file.meta.churn_percentile,
+            temporal_score: file.temporal_score,
+            change_entropy: file.meta.change_entropy,
+            change_entropy_pct: file.meta.change_entropy_pct,
             bus_factor: file.meta.bus_factor as usize,
-            owner_count: owners.len(),
             ownership_risk: intel.ownership_risk(&file.meta.file_path),
             knowledge_loss: intel.knowledge_loss(&file.meta.file_path),
-            owners: owners.into_iter().map(|owner| GitOwnerResponse {
-                author: owner.author,
-                commits: owner.commits,
-                share: owner.share,
-            }).collect(),
-        }
-    }).collect();
-    let co_change = intel.co_change_pairs(2).into_iter().take(10).map(|((a, b), count)| {
-        GitCoChangeResponse { path_a: a, path_b: b, count }
-    }).collect();
+        })
+        .collect();
+    let ownership = assembly
+        .files
+        .iter()
+        .map(|file| {
+            let owners = intel.ownership(&file.meta.file_path);
+            GitOwnershipResponse {
+                path: file.meta.file_path.clone(),
+                top_owner: owners
+                    .first()
+                    .map(|owner| owner.author.clone())
+                    .unwrap_or_default(),
+                top_owner_share: owners.first().map(|owner| owner.share).unwrap_or(0.0),
+                bus_factor: file.meta.bus_factor as usize,
+                owner_count: owners.len(),
+                ownership_risk: intel.ownership_risk(&file.meta.file_path),
+                knowledge_loss: intel.knowledge_loss(&file.meta.file_path),
+                owners: owners
+                    .into_iter()
+                    .map(|owner| GitOwnerResponse {
+                        author: owner.author,
+                        commits: owner.commits,
+                        share: owner.share,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    let co_change = intel
+        .co_change_pairs(2)
+        .into_iter()
+        .take(10)
+        .map(|((a, b), count)| GitCoChangeResponse {
+            path_a: a,
+            path_b: b,
+            count,
+        })
+        .collect();
     let coupling = refact_git_intel::coupling::build_coupling_graph(intel, 8).edges;
     let hotspot_paths: Vec<String> = assembly
         .files
@@ -2102,18 +2123,25 @@ pub(crate) fn git_risk_response(
         .map(|file| file.meta.file_path.clone())
         .collect();
     let reviewers = refact_git_intel::coupling::reviewer_suggestions(intel, &hotspot_paths, 5)
-        .into_iter().map(|(author, score)| GitReviewerResponse { author, score }).collect();
-    let findings = assembly.files.iter().flat_map(|file| file.findings.iter().map(|finding| {
-        GitFindingResponse {
-            path: file.meta.file_path.clone(),
-            biomarker: finding.biomarker.clone(),
-            category: finding.category.clone(),
-            dimension: finding.dimension,
-            severity: finding.severity,
-            line: finding.line,
-            detail: finding.detail.clone(),
-        }
-    })).take(20).collect();
+        .into_iter()
+        .map(|(author, score)| GitReviewerResponse { author, score })
+        .collect();
+    let findings = assembly
+        .files
+        .iter()
+        .flat_map(|file| {
+            file.findings.iter().map(|finding| GitFindingResponse {
+                path: file.meta.file_path.clone(),
+                biomarker: finding.biomarker.clone(),
+                category: finding.category.clone(),
+                dimension: finding.dimension,
+                severity: finding.severity,
+                line: finding.line,
+                detail: finding.detail.clone(),
+            })
+        })
+        .take(20)
+        .collect();
     GitRiskResponse {
         commits_analyzed: intel.commits_analyzed,
         agent_authored_pct: intel.agent_authored_pct() * 100.0,
@@ -2167,22 +2195,39 @@ impl Tool for ToolCodegraphOverview {
         let mut communities = cached.communities.clone();
         communities.sort_by(|a, b| b.members.len().cmp(&a.members.len()));
         let community_count = communities.len();
-        let communities = communities.into_iter().take(8).map(|community| OverviewCommunity {
-            label: community.label,
-            member_count: community.members.len(),
-            cohesion: community.cohesion,
-        }).collect();
-        let execution_flows = service.execution_flows(5).await.unwrap_or_default().into_iter()
+        let communities = communities
+            .into_iter()
+            .take(8)
+            .map(|community| OverviewCommunity {
+                label: community.label,
+                member_count: community.members.len(),
+                cohesion: community.cohesion,
+            })
+            .collect();
+        let execution_flows = service
+            .execution_flows(5)
+            .await
+            .unwrap_or_default()
+            .into_iter()
             .map(|flow| OverviewExecutionFlow {
-                entry: flow.entry, reaches: flow.reached, depth: flow.depth,
-            }).collect();
+                entry: flow.entry,
+                reaches: flow.reached,
+                depth: flow.depth,
+            })
+            .collect();
         let mut dead = cached.dead_code.clone();
         dead.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
         let dead_code_count = dead.len();
-        let dead_code = dead.into_iter().take(15).map(|symbol| OverviewDeadSymbol {
-            name: symbol.name, path: symbol.path, reason: symbol.reason,
-            confidence: symbol.confidence,
-        }).collect();
+        let dead_code = dead
+            .into_iter()
+            .take(15)
+            .map(|symbol| OverviewDeadSymbol {
+                name: symbol.name,
+                path: symbol.path,
+                reason: symbol.reason,
+                confidence: symbol.confidence,
+            })
+            .collect();
         let all_files = service.all_files_with_text().await.unwrap_or_default();
         let centrality = cached.analytics.file_centrality.truncated(100);
         let pr: HashMap<String, f64> = centrality.top_pagerank.iter().cloned().collect();
@@ -2197,7 +2242,9 @@ impl Tool for ToolCodegraphOverview {
             .collect();
         let stems = refact_codewiki::entry_points::default_conventional_stems();
         let entry_points = refact_codewiki::entry_points::rank_entry_points(&candidates, &stems)
-            .into_iter().take(10).collect();
+            .into_iter()
+            .take(10)
+            .collect();
         let mut api_files: Vec<String> = all_files
             .iter()
             .filter(|(p, t)| {
@@ -2216,27 +2263,44 @@ impl Tool for ToolCodegraphOverview {
         let data = OverviewToolResponse {
             overview: OverviewResponse {
                 counts: CodeIntelCounts {
-                    nodes: overview.node_count as i64, edges: overview.edge_count as i64,
+                    nodes: overview.node_count as i64,
+                    edges: overview.edge_count as i64,
                     files: all_files.len() as i64,
                 },
                 index_state,
                 scc_count: overview.scc_count,
                 largest_scc: overview.largest_scc,
                 component_count: overview.component_count,
-                top_pagerank: overview.top_pagerank.into_iter().map(|entry| ScoreEntry {
-                    symbol: entry.symbol, path: entry.path, score: entry.score,
-                }).collect(),
-                top_betweenness: overview.top_betweenness.into_iter()
-                    .filter(|entry| entry.score > 0.0).map(|entry| ScoreEntry {
-                        symbol: entry.symbol, path: entry.path, score: entry.score,
-                    }).collect(),
+                top_pagerank: overview
+                    .top_pagerank
+                    .into_iter()
+                    .map(|entry| ScoreEntry {
+                        symbol: entry.symbol,
+                        path: entry.path,
+                        score: entry.score,
+                    })
+                    .collect(),
+                top_betweenness: overview
+                    .top_betweenness
+                    .into_iter()
+                    .filter(|entry| entry.score > 0.0)
+                    .map(|entry| ScoreEntry {
+                        symbol: entry.symbol,
+                        path: entry.path,
+                        score: entry.score,
+                    })
+                    .collect(),
                 file_centrality: FileCentralityResponse {
-                    top_pagerank: centrality.top_pagerank.into_iter().map(|(path, score)| {
-                        FileScoreEntry { path, score }
-                    }).collect(),
-                    top_betweenness: centrality.top_betweenness.into_iter().map(|(path, score)| {
-                        FileScoreEntry { path, score }
-                    }).collect(),
+                    top_pagerank: centrality
+                        .top_pagerank
+                        .into_iter()
+                        .map(|(path, score)| FileScoreEntry { path, score })
+                        .collect(),
+                    top_betweenness: centrality
+                        .top_betweenness
+                        .into_iter()
+                        .map(|(path, score)| FileScoreEntry { path, score })
+                        .collect(),
                 },
                 community_count,
                 dead_code_count,
@@ -2249,10 +2313,17 @@ impl Tool for ToolCodegraphOverview {
             entry_points,
             api_contract_files: api_files,
         };
-        let summary = format!("Code graph: {} nodes, {} edges, {} components",
-            data.overview.counts.nodes, data.overview.counts.edges, data.overview.component_count);
-        Ok((false, tool_message(tool_call_id,
-            ToolJson::new("codegraph_overview", summary, data).to_text())))
+        let summary = format!(
+            "Code graph: {} nodes, {} edges, {} components",
+            data.overview.counts.nodes, data.overview.counts.edges, data.overview.component_count
+        );
+        Ok((
+            false,
+            tool_message(
+                tool_call_id,
+                ToolJson::new("codegraph_overview", summary, data).to_text(),
+            ),
+        ))
     }
 
     fn tool_description(&self) -> ToolDesc {
@@ -2606,9 +2677,19 @@ impl Tool for ToolDeadCode {
         );
         Ok((
             false,
-            tool_message(tool_call_id, ToolJson::new("dead_code", summary, DeadCodeToolResponse {
-                report, shown, total_candidates,
-            }).to_text()),
+            tool_message(
+                tool_call_id,
+                ToolJson::new(
+                    "dead_code",
+                    summary,
+                    DeadCodeToolResponse {
+                        report,
+                        shown,
+                        total_candidates,
+                    },
+                )
+                .to_text(),
+            ),
         ))
     }
 
@@ -2735,10 +2816,15 @@ impl Tool for ToolCodeHealth {
             let data = HealthToolResponse {
                 response: HealthResponse {
                     index_state: PrBlastIndexState {
-                        queued: 0, cross_file_edges: 0, cross_file_ready: false,
+                        queued: 0,
+                        cross_file_edges: 0,
+                        cross_file_ready: false,
                     },
                     aggregate: HealthAggregateResponse {
-                        file_count: 1, function_count: 0, avg_score: 0.0, grade: analysis.grade,
+                        file_count: 1,
+                        function_count: 0,
+                        avg_score: 0.0,
+                        grade: analysis.grade,
                         max_complexity: analysis.max_complexity,
                         avg_maintainability: analysis.avg_maintainability,
                         avg_maintainability_index: analysis.maintainability_index,
@@ -2750,26 +2836,39 @@ impl Tool for ToolCodeHealth {
                     files: Vec::new(),
                 },
                 file_category: refact_codewiki::well_known::file_category(
-                    &file_path, &analysis.lang, false,
+                    &file_path,
+                    &analysis.lang,
+                    false,
                 )
                 .to_string(),
                 file_role: refact_codewiki::well_known::well_known_role(&file_path)
                     .map(|role| role.to_string()),
-                call_graph: Vec::new(), coverage: None, warm_cache: analysis.cache_hit,
+                call_graph: Vec::new(),
+                coverage: None,
+                warm_cache: analysis.cache_hit,
             };
             return Ok((
                 false,
-                tool_message(tool_call_id, ToolJson::new("code_health", format!(
-                    "No functions analyzed in `{requested_file_path}` (lang: {})", analysis.lang
-                ), data).to_text()),
+                tool_message(
+                    tool_call_id,
+                    ToolJson::new(
+                        "code_health",
+                        format!(
+                            "No functions analyzed in `{requested_file_path}` (lang: {})",
+                            analysis.lang
+                        ),
+                        data,
+                    )
+                    .to_text(),
+                ),
             ));
         }
 
         let file_category =
             refact_codewiki::well_known::file_category(&file_path, &analysis.lang, false)
                 .to_string();
-        let file_role = refact_codewiki::well_known::well_known_role(&file_path)
-            .map(|role| role.to_string());
+        let file_role =
+            refact_codewiki::well_known::well_known_role(&file_path).map(|role| role.to_string());
         let mut call_graph = Vec::new();
         if let Some(service) = service.as_ref() {
             if let Ok(cached) = service.cached_graph_analytics().await {
@@ -2810,9 +2909,14 @@ impl Tool for ToolCodeHealth {
                         &graph,
                     );
                     if !calls.is_empty() {
-                        call_graph = calls.iter().take(12).map(|call| CallGraphEdge {
-                            caller: call.caller.clone(), callee: call.callee.clone(),
-                        }).collect();
+                        call_graph = calls
+                            .iter()
+                            .take(12)
+                            .map(|call| CallGraphEdge {
+                                caller: call.caller.clone(),
+                                callee: call.callee.clone(),
+                            })
+                            .collect();
                     }
                 }
             }
@@ -2827,44 +2931,70 @@ impl Tool for ToolCodeHealth {
                 let (line_pct, branch_pct, below_50) =
                     refact_codehealth::coverage_biomarkers::coverage_summary(&single);
                 coverage_summary = Some(CoverageSummary {
-                    label: single.format.clone(), line_pct, branch_pct, files_below_50: below_50,
+                    label: single.format.clone(),
+                    line_pct,
+                    branch_pct,
+                    files_below_50: below_50,
                 });
             }
         }
         let index_state = match service.as_ref() {
-            Some(service) => service.index_readiness().await.ok().map(|r| pr_blast_index_state(&r)),
+            Some(service) => service
+                .index_readiness()
+                .await
+                .ok()
+                .map(|r| pr_blast_index_state(&r)),
             None => None,
-        }.unwrap_or(PrBlastIndexState {
-            queued: 0, cross_file_edges: 0, cross_file_ready: false,
+        }
+        .unwrap_or(PrBlastIndexState {
+            queued: 0,
+            cross_file_edges: 0,
+            cross_file_ready: false,
         });
-        let functions = analysis.functions.iter().take(30).map(|function| HealthFunctionResponse {
-            name: function.name.clone(), line1: function.line1,
-            complexity: function.complexity, nesting: function.nesting, loc: function.loc,
-            maintainability: function.maintainability,
-            maintainability_index: function.maintainability_index,
-        }).collect();
+        let functions = analysis
+            .functions
+            .iter()
+            .take(30)
+            .map(|function| HealthFunctionResponse {
+                name: function.name.clone(),
+                line1: function.line1,
+                complexity: function.complexity,
+                nesting: function.nesting,
+                loc: function.loc,
+                maintainability: function.maintainability,
+                maintainability_index: function.maintainability_index,
+            })
+            .collect();
         let file = HealthFileResponse {
-            path: file_path.clone(), lang: analysis.lang.clone(), score: analysis.defect_score,
-            grade: analysis.grade, complexity: analysis.max_complexity,
+            path: file_path.clone(),
+            lang: analysis.lang.clone(),
+            score: analysis.defect_score,
+            grade: analysis.grade,
+            complexity: analysis.max_complexity,
             maintainability: analysis.avg_maintainability,
             maintainability_index: analysis.maintainability_index,
             maintainability_signal: analysis.maintainability_score,
             max_complexity: analysis.max_complexity,
             avg_maintainability: analysis.avg_maintainability,
             function_count: analysis.function_count,
-            duplication_pct: analysis.duplication_pct, dry_violation: analysis.dry_violation,
+            duplication_pct: analysis.duplication_pct,
+            dry_violation: analysis.dry_violation,
             defect_score: analysis.defect_score,
             maintainability_score: analysis.maintainability_score,
             performance_score: analysis.performance_score,
             biomarker_count: analysis.biomarker_count,
             refactoring_count: analysis.refactoring_count,
-            functions, findings: analysis.findings.clone(),
-            health_impact: analysis.health_impact.clone(), cache_hit: analysis.cache_hit,
+            functions,
+            findings: analysis.findings.clone(),
+            health_impact: analysis.health_impact.clone(),
+            cache_hit: analysis.cache_hit,
             refactorings: analysis.refactorings.clone(),
         };
         let aggregate = HealthAggregateResponse {
-            file_count: 1, function_count: analysis.function_count,
-            avg_score: analysis.defect_score, grade: analysis.grade,
+            file_count: 1,
+            function_count: analysis.function_count,
+            avg_score: analysis.defect_score,
+            grade: analysis.grade,
             max_complexity: analysis.max_complexity,
             avg_maintainability: analysis.avg_maintainability,
             avg_maintainability_index: analysis.maintainability_index,
@@ -2873,15 +3003,29 @@ impl Tool for ToolCodeHealth {
             biomarker_count: analysis.biomarker_count,
             refactoring_count: analysis.refactoring_count,
         };
-        let summary = format!("Code health for `{requested_file_path}`: MI {:.1}, max complexity {}",
-            analysis.maintainability_index, analysis.max_complexity);
+        let summary = format!(
+            "Code health for `{requested_file_path}`: MI {:.1}, max complexity {}",
+            analysis.maintainability_index, analysis.max_complexity
+        );
         let data = HealthToolResponse {
-            response: HealthResponse { index_state, aggregate, files: vec![file] },
-            file_category, file_role,
-            call_graph, coverage: coverage_summary, warm_cache: analysis.cache_hit,
+            response: HealthResponse {
+                index_state,
+                aggregate,
+                files: vec![file],
+            },
+            file_category,
+            file_role,
+            call_graph,
+            coverage: coverage_summary,
+            warm_cache: analysis.cache_hit,
         };
-        Ok((false, tool_message(tool_call_id,
-            ToolJson::new("code_health", summary, data).to_text())))
+        Ok((
+            false,
+            tool_message(
+                tool_call_id,
+                ToolJson::new("code_health", summary, data).to_text(),
+            ),
+        ))
     }
 
     fn tool_description(&self) -> ToolDesc {
@@ -2938,24 +3082,36 @@ impl Tool for ToolGitRisk {
         let gcx = ccx.lock().await.app.gcx.clone();
         let intel = cached_mine_history_async(&roots.git_root, 1000).await?;
         if intel.hotspots(1).is_empty() {
-            let data = git_risk_response(&intel, &GitRiskAssembly {
-                files: Vec::new(), recent_commit_risks: Vec::new(),
-            });
+            let data = git_risk_response(
+                &intel,
+                &GitRiskAssembly {
+                    files: Vec::new(),
+                    recent_commit_risks: Vec::new(),
+                },
+            );
             return Ok((
                 false,
-                tool_message(tool_call_id,
-                    ToolJson::new("git_risk", "No git history found", data).to_text()),
+                tool_message(
+                    tool_call_id,
+                    ToolJson::new("git_risk", "No git history found", data).to_text(),
+                ),
             ));
         }
         let service = gcx.codegraph.lock().await.clone();
         let assembly =
             build_git_risk_assembly(&intel, &roots.indexed_root, service.as_ref(), 15, None).await;
         let response = git_risk_response(&intel, &assembly);
-        let summary = format!("Git risk over {} commits: {} hotspots",
-            intel.commits_analyzed, response.hotspots.len());
+        let summary = format!(
+            "Git risk over {} commits: {} hotspots",
+            intel.commits_analyzed,
+            response.hotspots.len()
+        );
         Ok((
             false,
-            tool_message(tool_call_id, ToolJson::new("git_risk", summary, response).to_text()),
+            tool_message(
+                tool_call_id,
+                ToolJson::new("git_risk", summary, response).to_text(),
+            ),
         ))
     }
 
@@ -3521,18 +3677,24 @@ fn code_why_response(
         return None;
     }
 
-    let decisions = matched.iter().map(|scored| {
-        let d = &scored.item.decision;
-        CodeWhyDecisionEntry {
-            kind: d.source_kind.clone(),
-            confidence: scored.confidence,
-            corroboration: d.corroboration_count as usize,
-            source_kind: d.source_kind.clone(),
-            source_ref: scored.item.source_ref.clone(),
-            summary: d.statement.clone(),
-            provenance_tags: vec![provenance_tag(d.provenance, scored.verification).to_string()],
-        }
-    }).collect();
+    let decisions =
+        matched
+            .iter()
+            .map(|scored| {
+                let d = &scored.item.decision;
+                CodeWhyDecisionEntry {
+                    kind: d.source_kind.clone(),
+                    confidence: scored.confidence,
+                    corroboration: d.corroboration_count as usize,
+                    source_kind: d.source_kind.clone(),
+                    source_ref: scored.item.source_ref.clone(),
+                    summary: d.statement.clone(),
+                    provenance_tags: vec![
+                        provenance_tag(d.provenance, scored.verification).to_string()
+                    ],
+                }
+            })
+            .collect();
     let all_decisions: Vec<CodeWhyDecision> = all_scored
         .iter()
         .map(|scored| scored.item.clone())
@@ -3554,8 +3716,11 @@ fn code_why_response(
         }
     }
     Some(CodeWhyResponse {
-        query: query.to_string(), source_count: sources.len(), commits_analyzed,
-        decisions, related,
+        query: query.to_string(),
+        source_count: sources.len(),
+        commits_analyzed,
+        decisions,
+        related,
     })
 }
 
@@ -3576,21 +3741,37 @@ impl Tool for ToolCodeWhy {
         let sources = assemble_code_why_sources(gcx, &roots.git_root, &intel).await;
         let Some(response) = code_why_response(&query, &sources, intel.commits_analyzed) else {
             let response = CodeWhyResponse {
-                query: query.clone(), source_count: sources.len(),
+                query: query.clone(),
+                source_count: sources.len(),
                 commits_analyzed: intel.commits_analyzed,
-                decisions: Vec::new(), related: Vec::new(),
+                decisions: Vec::new(),
+                related: Vec::new(),
             };
             return Ok((
                 false,
-                tool_message(tool_call_id, ToolJson::new("code_why", format!(
-                    "No matching decision records found for `{query}`"
-                ), response).to_text()),
+                tool_message(
+                    tool_call_id,
+                    ToolJson::new(
+                        "code_why",
+                        format!("No matching decision records found for `{query}`"),
+                        response,
+                    )
+                    .to_text(),
+                ),
             ));
         };
-        let summary = format!("{} decisions matching `{query}` from {} sources",
-            response.decisions.len(), response.source_count);
-        Ok((false, tool_message(tool_call_id,
-            ToolJson::new("code_why", summary, response).to_text())))
+        let summary = format!(
+            "{} decisions matching `{query}` from {} sources",
+            response.decisions.len(),
+            response.source_count
+        );
+        Ok((
+            false,
+            tool_message(
+                tool_call_id,
+                ToolJson::new("code_why", summary, response).to_text(),
+            ),
+        ))
     }
 
     fn tool_description(&self) -> ToolDesc {
@@ -3635,16 +3816,22 @@ impl Tool for ToolCodeDuplication {
         if analysis.clones.is_empty() {
             let data = DuplicationResponse {
                 aggregate: DuplicationAggregateResponse {
-                    file_count: analysis.files, clone_pair_count: 0,
+                    file_count: analysis.files,
+                    clone_pair_count: 0,
                     duplication_pct: analysis.duplication_pct,
                     duplication_percent: analysis.duplication_pct * 100.0,
                 },
-                clones: Vec::new(), dry_violations: Vec::new(), test_smells: Vec::new(),
+                clones: Vec::new(),
+                dry_violations: Vec::new(),
+                test_smells: Vec::new(),
             };
             return Ok((
                 false,
-                tool_message(tool_call_id, ToolJson::new("code_duplication",
-                    "No cross-file clones detected", data).to_text()),
+                tool_message(
+                    tool_call_id,
+                    ToolJson::new("code_duplication", "No cross-file clones detected", data)
+                        .to_text(),
+                ),
             ));
         }
         let dup_pct = analysis.duplication_pct * 100.0;
@@ -3698,8 +3885,13 @@ impl Tool for ToolCodeDuplication {
             };
             for f in refact_codehealth::dry::dry_violation(&dry_input) {
                 dry_lines.push(DuplicationFindingResponse {
-                    path: path.clone(), biomarker: f.biomarker, category: f.category,
-                    dimension: f.dimension, severity: f.severity, line: f.line, detail: f.detail,
+                    path: path.clone(),
+                    biomarker: f.biomarker,
+                    category: f.category,
+                    dimension: f.dimension,
+                    severity: f.severity,
+                    line: f.line,
+                    detail: f.detail,
                 });
             }
             if refact_git_intel::paths::is_test_path(path) {
@@ -3725,9 +3917,13 @@ impl Tool for ToolCodeDuplication {
                     };
                     for f in refact_codehealth::test_smells::test_smell_biomarkers(&ts_input) {
                         smell_lines.push(DuplicationFindingResponse {
-                            path: path.clone(), biomarker: f.biomarker, category: f.category,
-                            dimension: f.dimension, severity: f.severity,
-                            line: f.line, detail: f.detail,
+                            path: path.clone(),
+                            biomarker: f.biomarker,
+                            category: f.category,
+                            dimension: f.dimension,
+                            severity: f.severity,
+                            line: f.line,
+                            detail: f.detail,
                         });
                     }
                 }
@@ -3735,26 +3931,47 @@ impl Tool for ToolCodeDuplication {
         }
         dry_lines.truncate(15);
         smell_lines.truncate(15);
-        let clones = analysis.clones.iter().take(15).map(|clone| DuplicationCloneResponse {
-            path_a: clone.file_a.clone(), path_b: clone.file_b.clone(),
-            line_a: clone.line_a, line_b: clone.line_b,
-            a_start_line: clone.a_start_line, a_end_line: clone.a_end_line,
-            b_start_line: clone.b_start_line, b_end_line: clone.b_end_line,
-            lines: clone.a_end_line.saturating_sub(clone.a_start_line) + 1,
-            token_len: clone.token_len,
-            co_change: co_change(&clone.file_a, &clone.file_b),
-        }).collect();
+        let clones = analysis
+            .clones
+            .iter()
+            .take(15)
+            .map(|clone| DuplicationCloneResponse {
+                path_a: clone.file_a.clone(),
+                path_b: clone.file_b.clone(),
+                line_a: clone.line_a,
+                line_b: clone.line_b,
+                a_start_line: clone.a_start_line,
+                a_end_line: clone.a_end_line,
+                b_start_line: clone.b_start_line,
+                b_end_line: clone.b_end_line,
+                lines: clone.a_end_line.saturating_sub(clone.a_start_line) + 1,
+                token_len: clone.token_len,
+                co_change: co_change(&clone.file_a, &clone.file_b),
+            })
+            .collect();
         let data = DuplicationResponse {
             aggregate: DuplicationAggregateResponse {
-                file_count: analysis.files, clone_pair_count: analysis.clones.len(),
-                duplication_pct: analysis.duplication_pct, duplication_percent: dup_pct,
+                file_count: analysis.files,
+                clone_pair_count: analysis.clones.len(),
+                duplication_pct: analysis.duplication_pct,
+                duplication_percent: dup_pct,
             },
-            clones, dry_violations: dry_lines, test_smells: smell_lines,
+            clones,
+            dry_violations: dry_lines,
+            test_smells: smell_lines,
         };
-        let summary = format!("Cross-file duplication: {:.1}% of tokens, {} clone pairs",
-            dup_pct, analysis.clones.len());
-        Ok((false, tool_message(tool_call_id,
-            ToolJson::new("code_duplication", summary, data).to_text())))
+        let summary = format!(
+            "Cross-file duplication: {:.1}% of tokens, {} clone pairs",
+            dup_pct,
+            analysis.clones.len()
+        );
+        Ok((
+            false,
+            tool_message(
+                tool_call_id,
+                ToolJson::new("code_duplication", summary, data).to_text(),
+            ),
+        ))
     }
 
     fn tool_description(&self) -> ToolDesc {
@@ -3811,14 +4028,26 @@ impl Tool for ToolSecurityScan {
         let findings = service.security_scan(&file_path, lang, &text).await?;
         if findings.is_empty() {
             let data = SecurityScanResponse {
-                path: requested_file_path.clone(), lang: lang.to_string(), finding_count: 0,
-                counts: BTreeMap::new(), findings: Vec::new(), omitted: 0,
+                path: requested_file_path.clone(),
+                lang: lang.to_string(),
+                finding_count: 0,
+                counts: BTreeMap::new(),
+                findings: Vec::new(),
+                omitted: 0,
             };
             return Ok((
                 false,
-                tool_message(tool_call_id, ToolJson::new("security_scan", format!(
+                tool_message(
+                    tool_call_id,
+                    ToolJson::new(
+                        "security_scan",
+                        format!(
                     "Security scan for `{requested_file_path}` found no findings (lang: {lang})"
-                ), data).to_text()),
+                ),
+                        data,
+                    )
+                    .to_text(),
+                ),
             ));
         }
 
@@ -3828,14 +4057,27 @@ impl Tool for ToolSecurityScan {
         }
         let finding_count = findings.len();
         let omitted = finding_count.saturating_sub(50);
-        let counts = counts.into_iter().map(|(key, value)| (key.to_string(), value)).collect();
+        let counts = counts
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect();
         let data = SecurityScanResponse {
-            path: requested_file_path.clone(), lang: lang.to_string(), finding_count, counts,
-            findings: findings.into_iter().take(50).collect(), omitted,
+            path: requested_file_path.clone(),
+            lang: lang.to_string(),
+            finding_count,
+            counts,
+            findings: findings.into_iter().take(50).collect(),
+            omitted,
         };
-        let summary = format!("Security scan for `{requested_file_path}` found {finding_count} findings");
-        Ok((false, tool_message(tool_call_id,
-            ToolJson::new("security_scan", summary, data).to_text())))
+        let summary =
+            format!("Security scan for `{requested_file_path}` found {finding_count} findings");
+        Ok((
+            false,
+            tool_message(
+                tool_call_id,
+                ToolJson::new("security_scan", summary, data).to_text(),
+            ),
+        ))
     }
 
     fn tool_description(&self) -> ToolDesc {
@@ -3936,8 +4178,13 @@ impl Tool for ToolPrBlast {
         let summary = format!(
             "PR blast radius for {changed_count} changed files: {impacted_count} impacted files"
         );
-        Ok((false, tool_message(tool_call_id,
-            ToolJson::new("pr_blast", summary, data).to_text())))
+        Ok((
+            false,
+            tool_message(
+                tool_call_id,
+                ToolJson::new("pr_blast", summary, data).to_text(),
+            ),
+        ))
     }
 
     fn tool_description(&self) -> ToolDesc {
@@ -3984,7 +4231,6 @@ fn severity_label(severity: refact_codegraph::security_scan::Severity) -> &'stat
         refact_codegraph::security_scan::Severity::Critical => "Critical",
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodeMapNode {
@@ -4648,8 +4894,6 @@ fn choose_code_map_pages(
     pages
 }
 
-
-
 fn render_code_map_claude_md(
     rendered_pages: &[CodeMapRenderedPage],
     index_state: Option<&PrBlastIndexState>,
@@ -4682,10 +4926,19 @@ fn assemble_code_map_response(
     if files_text.is_empty() {
         let warning = index_state.as_ref().and_then(pr_blast_partial_warning);
         return CodeMapResponse {
-            files_count: 0, page_count: 0, link_count: 0, query: args.query.clone(),
-            partial: index_state.as_ref().is_some_and(|state| !state.cross_file_ready),
-            index_state, warning, top_files: Vec::new(), backlink_hubs: Vec::new(),
-            pages: Vec::new(), markdown: None,
+            files_count: 0,
+            page_count: 0,
+            link_count: 0,
+            query: args.query.clone(),
+            partial: index_state
+                .as_ref()
+                .is_some_and(|state| !state.cross_file_ready),
+            index_state,
+            warning,
+            top_files: Vec::new(),
+            backlink_hubs: Vec::new(),
+            pages: Vec::new(),
+            markdown: None,
         };
     }
     let nodes = code_map_nodes_from_records(node_records);
@@ -4701,42 +4954,76 @@ fn assemble_code_map_response(
             CodeMapRenderedPage { page, content }
         })
         .collect::<Vec<_>>();
-    let link_count = rendered_pages.iter()
-        .map(|page| code_map_links_for_page(&page.page.page, &nodes, &edges).len()).sum();
-    let top_files = rendered_pages.iter()
+    let link_count = rendered_pages
+        .iter()
+        .map(|page| code_map_links_for_page(&page.page.page, &nodes, &edges).len())
+        .sum();
+    let top_files = rendered_pages
+        .iter()
         .filter(|rendered| rendered.page.page.kind == refact_codewiki::PageKind::File)
-        .take(12).map(|rendered| CodeMapFileScore {
-            path: rendered.page.page.paths.first().cloned()
+        .take(12)
+        .map(|rendered| CodeMapFileScore {
+            path: rendered
+                .page
+                .page
+                .paths
+                .first()
+                .cloned()
                 .unwrap_or_else(|| rendered.page.page.id.clone()),
             score: rendered.page.page.score,
-        }).collect();
-    let backlink_hubs = code_map_backlink_hubs(&rendered_pages, &nodes, &edges).into_iter()
-        .filter(|(_, count)| *count > 0).take(12)
-        .map(|(path, count)| CodeMapBacklinkHub { path, count }).collect();
-    let pages = rendered_pages.iter().map(|rendered| {
-        let page = &rendered.page.page;
-        CodeMapPage {
-            title: page_title(page), kind: page_kind_label(page.kind).to_string(),
-            score: page.score, paths: page.paths.clone(), signals: page_signal_labels(page, &input),
-            symbols: symbol_kind_counts(page, &nodes).into_iter().collect(),
-            visibility: symbol_visibility_counts(page, &nodes).into_iter().collect(),
-            links: code_map_links_for_page(page, &nodes, &edges).into_iter().map(|link| {
-                CodeMapPageLink { target_path: link.target_path, labels: link.labels,
-                    count: link.count }
-            }).collect(),
-            content: rendered.content.clone(),
-        }
-    }).collect::<Vec<_>>();
+        })
+        .collect();
+    let backlink_hubs = code_map_backlink_hubs(&rendered_pages, &nodes, &edges)
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .take(12)
+        .map(|(path, count)| CodeMapBacklinkHub { path, count })
+        .collect();
+    let pages = rendered_pages
+        .iter()
+        .map(|rendered| {
+            let page = &rendered.page.page;
+            CodeMapPage {
+                title: page_title(page),
+                kind: page_kind_label(page.kind).to_string(),
+                score: page.score,
+                paths: page.paths.clone(),
+                signals: page_signal_labels(page, &input),
+                symbols: symbol_kind_counts(page, &nodes).into_iter().collect(),
+                visibility: symbol_visibility_counts(page, &nodes).into_iter().collect(),
+                links: code_map_links_for_page(page, &nodes, &edges)
+                    .into_iter()
+                    .map(|link| CodeMapPageLink {
+                        target_path: link.target_path,
+                        labels: link.labels,
+                        count: link.count,
+                    })
+                    .collect(),
+                content: rendered.content.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
     let markdown = matches!(args.format, CodeMapFormat::ClaudeMd).then(|| {
         trim_to_token_allowance(
-            render_code_map_claude_md(&rendered_pages, index_state.as_ref()), args.budget_tokens)
+            render_code_map_claude_md(&rendered_pages, index_state.as_ref()),
+            args.budget_tokens,
+        )
     });
     let warning = index_state.as_ref().and_then(pr_blast_partial_warning);
     CodeMapResponse {
-        files_count: files_text.len(), page_count: pages.len(), link_count,
+        files_count: files_text.len(),
+        page_count: pages.len(),
+        link_count,
         query: args.query.clone(),
-        partial: index_state.as_ref().is_some_and(|state| !state.cross_file_ready),
-        index_state, warning, top_files, backlink_hubs, pages, markdown,
+        partial: index_state
+            .as_ref()
+            .is_some_and(|state| !state.cross_file_ready),
+        index_state,
+        warning,
+        top_files,
+        backlink_hubs,
+        pages,
+        markdown,
     }
 }
 
@@ -4782,11 +5069,18 @@ impl Tool for ToolCodeMap {
         let summary = if data.files_count == 0 {
             "Code graph has no indexed files (index empty/building)".to_string()
         } else {
-            format!("Code map: {} indexed files, {} pages, {} cross-file links",
-                data.files_count, data.page_count, data.link_count)
+            format!(
+                "Code map: {} indexed files, {} pages, {} cross-file links",
+                data.files_count, data.page_count, data.link_count
+            )
         };
-        Ok((false, tool_message(tool_call_id,
-            ToolJson::new("code_map", summary, data).to_text())))
+        Ok((
+            false,
+            tool_message(
+                tool_call_id,
+                ToolJson::new("code_map", summary, data).to_text(),
+            ),
+        ))
     }
 
     fn tool_description(&self) -> ToolDesc {
@@ -5120,10 +5414,16 @@ mod tests {
             &code_map_markdown_args(2_000),
         );
 
-        assert!(output.pages.iter().any(|page| page.links.iter().any(|link| {
-            link.target_path == "src/b.rs" && link.labels.contains(&"calls".to_string())
-        })));
-        assert!(output.backlink_hubs.iter().any(|hub| hub.path == "src/b.rs"));
+        assert!(output
+            .pages
+            .iter()
+            .any(|page| page.links.iter().any(|link| {
+                link.target_path == "src/b.rs" && link.labels.contains(&"calls".to_string())
+            })));
+        assert!(output
+            .backlink_hubs
+            .iter()
+            .any(|hub| hub.path == "src/b.rs"));
     }
 
     #[test]
@@ -5134,8 +5434,14 @@ mod tests {
         let output = code_map_output_fixture(args);
 
         assert_eq!(output.query.as_deref(), Some("payments"));
-        assert!(output.pages.iter().any(|page| page.paths.contains(&"payments/api.rs".into())));
-        assert!(!output.pages.iter().any(|page| page.paths.contains(&"auth/login.rs".into())));
+        assert!(output
+            .pages
+            .iter()
+            .any(|page| page.paths.contains(&"payments/api.rs".into())));
+        assert!(!output
+            .pages
+            .iter()
+            .any(|page| page.paths.contains(&"auth/login.rs".into())));
     }
 
     #[test]
@@ -5271,7 +5577,10 @@ mod tests {
 
         let decision = output.decisions.first().unwrap();
         assert_eq!(decision.summary, statement);
-        assert!(decision.provenance_tags.iter().any(|tag| tag.contains("verbatim")));
+        assert!(decision
+            .provenance_tags
+            .iter()
+            .any(|tag| tag.contains("verbatim")));
         assert_eq!(decision.corroboration, 2);
         assert_eq!(decision.source_ref, "docs/adr/001-codegraph.md");
     }
@@ -5944,8 +6253,14 @@ def orphan():
 
         let response = git_risk_response(&intel, &assembly);
 
-        assert!(response.hotspots.iter().any(|hotspot| hotspot.path == "src/a.rs"));
-        assert!(response.findings.iter().any(|finding| finding.path == "src/a.rs"));
+        assert!(response
+            .hotspots
+            .iter()
+            .any(|hotspot| hotspot.path == "src/a.rs"));
+        assert!(response
+            .findings
+            .iter()
+            .any(|finding| finding.path == "src/a.rs"));
         assert!(!response.recent_commit_risks.is_empty());
     }
 

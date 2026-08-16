@@ -12,6 +12,7 @@ use crate::tools::code_review_scope::{
     build_review_scope_with_max_files, validate_review_budget, ReviewScope,
 };
 use crate::tools::code_review_types::{ReviewFinding, ReviewReport, ReviewScopeSummary, ReviewSeverity};
+use crate::tools::code_review_verify::{verification_status_label, verify_review_report};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::tools::tool_helpers::{load_code_subagent_config, CodeSubagentConfig};
 use crate::tools::subagent_phases::{
@@ -254,7 +255,7 @@ async fn run_review_pipeline(
                 gcx.clone(),
                 "code_review",
                 retry_messages,
-                tool_call_id,
+                tool_call_id.clone(),
                 subchat_tx,
                 abort_flag,
                 parent_depth,
@@ -303,7 +304,13 @@ async fn run_review_pipeline(
         Some(parsed) => candidate_stage_output(scope_summary, parsed, max_candidates),
         None => fallback_candidate_stage_output(scope_summary, fallback_text),
     };
-    Ok(apply_evidence_stage(gcx, &scope, output).await)
+    let output = apply_evidence_stage(gcx.clone(), &scope, output).await;
+    let mut report = output.into_report();
+    verify_review_report(gcx, ccx, tool_call_id, &mut report, metering).await;
+    Ok(CandidateStageOutput {
+        report,
+        rationales: vec![],
+    })
 }
 
 async fn apply_evidence_stage(
@@ -402,19 +409,29 @@ fn finding_location(finding: &ReviewFinding) -> String {
 }
 
 fn render_review_markdown(report: &ReviewReport) -> String {
+    let mut output = report.summary.trim_end().to_string();
+    if let Some(rejected) = report.checks_performed.iter().find_map(|check| {
+        check
+            .strip_prefix("verifier_rejected:")
+            .and_then(|count| count.parse::<usize>().ok())
+    }) {
+        output.push_str(&format!(
+            "\n\nVerification rejected {rejected} candidate finding(s)."
+        ));
+    }
     if report.findings.is_empty() {
-        return report.summary.clone();
+        return output;
     }
 
-    let mut output = report.summary.trim_end().to_string();
     output.push_str(
-        "\n\n### Candidate findings\n\n| Location | Severity | Claim |\n| --- | --- | --- |\n",
+        "\n\n### Candidate findings\n\n| Location | Severity | Verification | Claim |\n| --- | --- | --- | --- |\n",
     );
     for finding in &report.findings {
         output.push_str(&format!(
-            "| {} | {} | {} |\n",
+            "| {} | {} | {} | {} |\n",
             markdown_cell(&finding_location(finding)),
             severity_label(&finding.severity),
+            verification_status_label(&finding.verification_status),
             markdown_cell(&finding.claim),
         ));
     }
@@ -672,7 +689,23 @@ mod tests {
         let markdown = render_review_markdown(&report);
 
         assert!(markdown.contains("### Candidate findings"));
-        assert!(markdown.contains("| src/lib.rs:4-6 | high | The branch \\| drops errors. |"));
+        assert!(markdown
+            .contains("| src/lib.rs:4-6 | high | unverified | The branch \\| drops errors. |"));
+    }
+
+    #[test]
+    fn tool_code_review_render_markdown_counts_rejected_candidates() {
+        let report = ReviewReport {
+            scope: scope_summary(),
+            findings: vec![],
+            checks_performed: vec!["verifier_rejected:2".to_string()],
+            summary: "No surviving findings.".to_string(),
+        };
+
+        assert_eq!(
+            render_review_markdown(&report),
+            "No surviving findings.\n\nVerification rejected 2 candidate finding(s)."
+        );
     }
 
     #[test]
@@ -688,6 +721,54 @@ mod tests {
         assert_eq!(config.schema_version, 3);
         assert!(reviewer.contains("Optimize for recall"));
         assert!(reviewer.contains("exactly one fenced json block"));
+    }
+
+    #[test]
+    fn tool_code_review_verifier_prompt_is_blind_to_reviewer_rationale() {
+        let canary = "PRIVATE_REVIEWER_RATIONALE_CANARY";
+        let parsed = parse_candidates_with_reasons(&format!(
+            r#"```json
+{{"summary":"One plausible issue.","candidates":[{{"file":"src/lib.rs","line1":4,"line2":4,"category":"correctness","severity":"high","confidence":0.8,"claim":"The branch drops errors.","rationale":"{canary}"}}]}}
+```"#,
+        ))
+        .unwrap();
+        let mut output = candidate_stage_output(scope_summary(), parsed, 30);
+        output.report.findings[0]
+            .evidence
+            .push(crate::tools::code_review_types::ReviewEvidence {
+                kind: "excerpt".to_string(),
+                path: Some("src/lib.rs".to_string()),
+                line1: Some(4),
+                line2: Some(4),
+                content: "4: return Ok(())".to_string(),
+            });
+        let report = output.into_report();
+        let batches = crate::tools::code_review_verify::build_verifier_batches(&report.findings);
+
+        assert_eq!(batches.len(), 1);
+        assert!(!batches[0].prompt.contains(canary));
+        assert!(!batches[0].prompt.contains("rationale"));
+        assert!(!batches[0].prompt.contains("confidence"));
+        assert!(batches[0].prompt.contains("4: return Ok(())"));
+    }
+
+    #[test]
+    fn tool_code_review_verifier_yaml_loads_with_expected_contract() {
+        let config: crate::yaml_configs::customization_types::SubagentConfig =
+            serde_yaml::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/crates/refact-yaml-configs/src/defaults/subagents/code_review_verifier.yaml"
+            )))
+            .unwrap();
+        let prompt = config.messages.system_prompt.unwrap();
+
+        assert_eq!(config.schema_version, 4);
+        assert_eq!(config.id, "code_review_verifier");
+        assert_eq!(config.subchat.n_ctx, Some(64_000));
+        assert_eq!(config.subchat.max_new_tokens, Some(4_000));
+        assert!(prompt.contains("skeptical fact-checker"));
+        assert!(prompt.contains("needs_human_validation"));
+        assert!(config.tools.is_empty());
     }
 
     #[tokio::test]

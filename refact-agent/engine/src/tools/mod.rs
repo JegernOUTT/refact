@@ -2,6 +2,7 @@ pub mod code_review_candidates;
 pub mod code_review_evidence;
 pub mod code_review_scope;
 pub mod code_review_types;
+mod code_review_verify;
 pub mod scope_utils;
 pub mod tools_description;
 pub mod tools_list;
