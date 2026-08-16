@@ -72,6 +72,10 @@ vi.mock("./GeneralSettingsSection", () => ({
   GeneralSettingsSection: () => <div data-testid="general-section" />,
 }));
 
+vi.mock("../Privacy", () => ({
+  PrivacySettingsSection: () => <div data-testid="privacy-section" />,
+}));
+
 function createTestStore(extraPages: Page[] = []) {
   return configureStore({
     reducer: {
@@ -136,6 +140,11 @@ describe("SettingsHub — section routing by page name", () => {
     expect(screen.getByTestId("general-section")).toBeInTheDocument();
   });
 
+  it("shows Privacy section for privacy settings page", () => {
+    renderHub({ name: "privacy settings" });
+    expect(screen.getByTestId("privacy-section")).toBeInTheDocument();
+  });
+
   it("shows Marketplace section for marketplace hub page", () => {
     renderHub({ name: "marketplace hub" });
     const section = screen.getByTestId("marketplace-section");
@@ -165,6 +174,17 @@ describe("SettingsHub — left nav dispatches change(), not push()", () => {
     const pages = store.getState().pages;
     expect(pages.length).toBe(initialLength);
     expect(pages[pages.length - 1].name).toBe("default models");
+  });
+
+  it("switches to privacy section via change (stack length unchanged)", () => {
+    const { store } = renderHub({ name: "general settings" });
+    const initialLength = store.getState().pages.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
+
+    const pages = store.getState().pages;
+    expect(pages.length).toBe(initialLength);
+    expect(pages[pages.length - 1].name).toBe("privacy settings");
   });
 
   it("switches to marketplace section via change (stack length unchanged)", () => {

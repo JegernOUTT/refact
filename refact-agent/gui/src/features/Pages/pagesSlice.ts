@@ -107,6 +107,10 @@ export interface GeneralSettingsPage {
   name: "general settings";
 }
 
+export interface PrivacySettingsPage {
+  name: "privacy settings";
+}
+
 export interface BuddyPage {
   name: "buddy";
   draftId?: string;
@@ -146,7 +150,8 @@ export type Page =
   | SubagentsMarketplacePage
   | MarketplaceHubPage
   | BuddyPage
-  | GeneralSettingsPage;
+  | GeneralSettingsPage
+  | PrivacySettingsPage;
 
 export function isIntegrationSetupPage(
   page: Page,

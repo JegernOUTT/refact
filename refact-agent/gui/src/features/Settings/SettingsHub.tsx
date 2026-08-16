@@ -15,6 +15,7 @@ import { Integrations } from "../Integrations";
 import { SchedulerPanel } from "../Scheduler";
 import { Extensions } from "../Extensions";
 import { MarketplaceHub } from "../MarketplaceHub";
+import { PrivacySettingsSection } from "../Privacy";
 import { GeneralSettingsSection } from "./GeneralSettingsSection";
 
 import styles from "./SettingsHub.module.css";
@@ -44,6 +45,8 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
     switch (activeSection) {
       case "general":
         return <GeneralSettingsSection />;
+      case "privacy":
+        return <PrivacySettingsSection />;
       case "providers":
         return (
           <Providers

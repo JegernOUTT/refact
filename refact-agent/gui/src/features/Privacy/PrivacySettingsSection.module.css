@@ -1,0 +1,76 @@
+.capabilityBanner {
+  padding: var(--rf-panel-pad);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-2);
+}
+
+.patternEditor {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  justify-items: start;
+  gap: var(--rf-space-3);
+}
+
+.gridScroll {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.zoneGrid {
+  width: 100%;
+  min-width: max-content;
+  border-spacing: 0;
+  border-collapse: separate;
+  color: var(--rf-color-fg);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.zoneGrid th,
+.zoneGrid td {
+  padding: var(--rf-space-2);
+  border-right: var(--rf-hairline) solid var(--rf-border);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.zoneGrid th:first-child,
+.zoneGrid td:first-child {
+  border-left: var(--rf-hairline) solid var(--rf-border);
+}
+
+.zoneGrid thead th {
+  border-top: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-surface-2);
+}
+
+.zoneGrid thead th:first-child {
+  border-start-start-radius: var(--rf-radius-card);
+}
+
+.zoneGrid thead th:last-child {
+  border-start-end-radius: var(--rf-radius-card);
+}
+
+.zoneGrid tbody tr:last-child th:first-child {
+  border-end-start-radius: var(--rf-radius-card);
+}
+
+.zoneGrid tbody tr:last-child td:last-child {
+  border-end-end-radius: var(--rf-radius-card);
+}
+
+.zoneGrid tbody th {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.destinationHeading {
+  display: grid;
+  justify-items: start;
+  gap: var(--rf-space-1);
+}

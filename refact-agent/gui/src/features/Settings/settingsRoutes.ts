@@ -5,6 +5,8 @@ export function settingsSectionToPage(section: SettingsSectionId): Page {
   switch (section) {
     case "general":
       return { name: "general settings" };
+    case "privacy":
+      return { name: "privacy settings" };
     case "providers":
       return { name: "providers page" };
     case "models":
@@ -26,6 +28,8 @@ export function settingsPageToSection(page: Page): SettingsSectionId | null {
   switch (page.name) {
     case "general settings":
       return "general";
+    case "privacy settings":
+      return "privacy";
     case "providers page":
       return "providers";
     case "default models":
