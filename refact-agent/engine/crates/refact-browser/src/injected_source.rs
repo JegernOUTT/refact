@@ -90,6 +90,29 @@ mod tests {
     }
 
     #[test]
+    fn injected_bundle_contains_playwright_role_computation() {
+        for marker in [
+            "getImplicitRole(element)",
+            "computeRole(element)",
+            "getImplicitAriaRole",
+            "getAriaRole",
+            "kImplicitRoleByTagName",
+            "kPresentationInheritanceParents",
+            "hasPresentationConflictResolution",
+        ] {
+            assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
+        }
+    }
+
+    #[test]
+    fn role_utility_notice_names_source_and_commit() {
+        let notice = include_str!("../injected/NOTICE.md");
+        assert!(notice.contains("src/vendor/injected/roleUtils.ts"));
+        assert!(notice.contains("packages/injected/src/roleUtils.ts"));
+        assert!(notice.contains("d5a185a894ab3ab17ff77a44e116a1339c6bdaed"));
+    }
+
+    #[test]
     fn injected_bundle_has_source_hash_header() {
         let hash = INJECTED_BUNDLE
             .lines()

@@ -39,6 +39,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "overlay.html",
     "moving-target.html",
     "states.html",
+    "roles.html",
     "controlled-input.html",
     "iframe-form.html",
     "shadow-dom.html",
@@ -777,6 +778,47 @@ async fn element_states_match_playwright_predicates() {
     assert!(states[9].visible);
     assert!(!states[10].visible);
     assert_eq!(states[11].editable, Some(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn computed_roles_match_playwright_html_aam() {
+    let Some(mut case) = BrowserCase::start("roles.html").await else {
+        return;
+    };
+    case.setup_world();
+    let handles = case
+        .runtime
+        .world_manager
+        .call_injected_handles(
+            &case.tab,
+            "resolveAll",
+            json!([{"by":"css","value":"[data-computed-role]"}]),
+        )
+        .unwrap();
+    assert_eq!(handles.len(), 30);
+    for handle in handles {
+        let actual = case
+            .runtime
+            .world_manager
+            .call_function_on(
+                &case.tab,
+                &handle,
+                "function() { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return { id: this.id, expectedComputed: this.dataset.computedRole, expectedImplicit: this.dataset.implicitRole || this.dataset.computedRole, computed: instance.computeRole(this), implicit: instance.getImplicitRole(this) }; }",
+                Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            actual["computed"], actual["expectedComputed"],
+            "computed role mismatch for {}",
+            actual["id"]
+        );
+        assert_eq!(
+            actual["implicit"], actual["expectedImplicit"],
+            "implicit role mismatch for {}",
+            actual["id"]
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

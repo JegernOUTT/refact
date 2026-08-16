@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ARIA roles</title>
+</head>
+<body>
+  <button id="button" data-computed-role="button">Button</button>
+  <a id="link" href="#target" data-computed-role="link">Link</a>
+  <a id="anchor" data-computed-role="generic">Anchor</a>
+  <input id="file" type="file" data-computed-role="button">
+  <input id="checkbox" type="checkbox" data-computed-role="checkbox">
+  <svg id="svg" data-computed-role="img"><title>Image</title></svg>
+  <section id="section" data-computed-role="generic">Section</section>
+  <section id="named-section" aria-label="Named section" data-computed-role="region">Named section</section>
+  <form id="form" data-computed-role="generic"></form>
+  <form id="named-form" aria-label="Named form" data-computed-role="form"></form>
+  <nav id="nav" data-computed-role="navigation">Navigation</nav>
+  <ul id="list" data-computed-role="list">
+    <li id="list-item" data-computed-role="listitem">Item</li>
+  </ul>
+  <button id="focusable-none" role="none" data-computed-role="button">Focusable none</button>
+  <ul id="global-none" role="none" aria-live="polite" data-computed-role="list">Global ARIA restores list</ul>
+  <div id="first-valid-role" role="invalid checkbox button" data-computed-role="checkbox" data-implicit-role="generic">Explicit checkbox</div>
+  <button id="invalid-role" role="invalid" data-computed-role="button">Implicit button</button>
+  <header id="header" data-computed-role="banner">Header</header>
+  <footer id="footer" data-computed-role="contentinfo">Footer</footer>
+  <main>
+    <header id="nested-header" data-computed-role="generic">Nested header</header>
+    <footer id="nested-footer" data-computed-role="generic">Nested footer</footer>
+  </main>
+  <table>
+    <thead>
+      <tr><th id="column-header" data-computed-role="columnheader">Name</th><th>Value</th></tr>
+    </thead>
+    <tbody>
+      <tr><th id="row-header" data-computed-role="rowheader">Row</th><td>Data</td></tr>
+    </tbody>
+  </table>
+  <table><tr><th id="lone-header" data-computed-role="generic">Lone</th></tr></table>
+  <ul id="presentation-list" role="presentation" data-computed-role="presentation" data-implicit-role="list">
+    <li id="presentation-list-item" data-computed-role="presentation" data-implicit-role="presentation">Inherited item</li>
+  </ul>
+  <table id="presentation-table" role="none" data-computed-role="none" data-implicit-role="table">
+    <tbody id="presentation-tbody" data-computed-role="none" data-implicit-role="none">
+      <tr id="presentation-row" data-computed-role="none" data-implicit-role="none">
+        <td id="presentation-cell" data-computed-role="none" data-implicit-role="none">Inherited cell</td>
+      </tr>
+    </tbody>
+  </table>
+</body>
+</html>

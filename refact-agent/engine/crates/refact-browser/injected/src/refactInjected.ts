@@ -22,6 +22,7 @@ import {
   isElementVisible,
 } from './vendor/injected/domUtils';
 import type { RefactBuiltins } from './vendor/injected/utilityScript';
+import { getAriaRole, getImplicitAriaRole } from './vendor/injected/roleUtils';
 
 type ElementStateName = 'visible' | 'enabled' | 'editable' | 'checked' | 'unchecked' | 'mixed' | 'stable';
 
@@ -275,6 +276,16 @@ export class RefactInjected {
     if (!binding)
       throw new Error(`${bindingName} is not installed`);
     binding(stringify({ name, payload }));
+  }
+
+  getImplicitRole(element: Element): string {
+    this.ensureConnected(element);
+    return getImplicitAriaRole(element) ?? 'generic';
+  }
+
+  computeRole(element: Element): string {
+    this.ensureConnected(element);
+    return getAriaRole(element) ?? 'generic';
   }
 }
 
