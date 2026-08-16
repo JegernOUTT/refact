@@ -15,7 +15,7 @@
   <body>
     <button id="target" onclick="this.textContent='clicked'">target</button>
     <div id="cookie-banner">
-      <button id="accept-all" onclick="this.parentElement.remove()">Accept all</button>
+      <button id="accept-all" onclick="globalThis.handlerClickTrusted=event.isTrusted;this.parentElement.remove()">Accept all</button>
     </div>
   </body>
 </html>

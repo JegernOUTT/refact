@@ -769,6 +769,13 @@ async fn fill_controlled_input_react() {
     );
     assert_eq!(report.steps[0].verified, Some(true));
     assert_eq!(report.steps[0].retries, 0);
+    let diagnostics = report.steps[0]
+        .actionability
+        .as_ref()
+        .expect("controlled fill should include actionability diagnostics");
+    assert_eq!(diagnostics.visible, Some(true));
+    assert_eq!(diagnostics.enabled, Some(true));
+    assert_eq!(diagnostics.editable, Some(true));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -793,6 +800,31 @@ async fn fill_falls_back_when_cdp_input_is_rejected() {
     );
     assert_eq!(report.steps[0].verified, Some(true));
     assert!(report.steps[0].retries > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn disabled_fill_reports_enabled_actionability_state() {
+    let Some(case) = BrowserCase::start("form-actions.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::Fill {
+            locator: BrowserLocator::css("#disabled"),
+            text: "blocked".to_string(),
+            clear_first: true,
+            verify: true,
+        }],
+    );
+
+    assert!(!report.ok, "disabled fill should fail: {report:?}");
+    let diagnostics = report.steps[0]
+        .actionability
+        .as_ref()
+        .expect("disabled fill should include actionability diagnostics");
+    assert!(diagnostics.timed_out);
+    assert_eq!(diagnostics.enabled, Some(false));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1589,6 +1621,12 @@ async fn locator_handler_clears_cookie_banner_before_click_and_records_firing() 
         .locator_handlers
         .iter()
         .any(|firing| firing.name == "cookie-banner" && firing.ok));
+    let trusted_click = tab
+        .evaluate("globalThis.handlerClickTrusted", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(trusted_click, json!(true));
     drop(runtime);
 }
 

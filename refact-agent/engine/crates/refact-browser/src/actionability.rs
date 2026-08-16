@@ -7,8 +7,17 @@ use refact_integrations::browser_models::ActionabilityDiagnostics;
 
 pub const LOCATOR_RETRY_BACKOFF_MS: &[u64] = &[0, 20, 50, 100, 100, 500, 500];
 pub const ACTION_RETRY_BACKOFF_MS: &[u64] = &[0, 20, 100, 100, 500, 500];
+const FORM_ACTION_RETRY_BACKOFF_MS: &[u64] = &[100];
+const FORM_LOCATOR_RETRY_BACKOFF_MS: &[u64] = &[0, 100];
 pub const MAX_CALL_LOG_ENTRIES: usize = 50;
 const CALL_LOG_TRUNCATED_SUFFIX: &str = " (call log truncated to the last 50 entries)";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ActionabilityExecutionMode {
+    #[default]
+    Standard,
+    SkipLocatorHandlers,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionKind {
@@ -509,7 +518,39 @@ impl<C: Clock> ActionabilityEngine<C> {
         action: ActionKind,
         driver: &mut D,
     ) -> Result<ActionabilitySuccess<D::Output>, ActionabilityError> {
-        self.execute_for(locator, action, TimeoutKind::Action, driver)
+        self.execute_logged_in_mode(
+            locator,
+            action,
+            ActionabilityExecutionMode::Standard,
+            driver,
+        )
+    }
+
+    pub fn execute_logged_in_mode<D: ActionabilityDriver>(
+        &self,
+        locator: &str,
+        action: ActionKind,
+        mode: ActionabilityExecutionMode,
+        driver: &mut D,
+    ) -> Result<ActionabilitySuccess<D::Output>, ActionabilityError> {
+        self.execute_for_in_mode(locator, action, TimeoutKind::Action, mode, driver)
+    }
+
+    pub(crate) fn execute_form_logged<D: ActionabilityDriver>(
+        &self,
+        locator: &str,
+        action: ActionKind,
+        driver: &mut D,
+    ) -> Result<ActionabilitySuccess<D::Output>, ActionabilityError> {
+        self.execute_with_timeout_and_backoff(
+            locator,
+            action,
+            self.timeouts.get(TimeoutKind::Action),
+            ActionabilityExecutionMode::SkipLocatorHandlers,
+            FORM_LOCATOR_RETRY_BACKOFF_MS,
+            FORM_ACTION_RETRY_BACKOFF_MS,
+            driver,
+        )
     }
 
     pub fn execute_for<D: ActionabilityDriver>(
@@ -519,7 +560,30 @@ impl<C: Clock> ActionabilityEngine<C> {
         timeout_kind: TimeoutKind,
         driver: &mut D,
     ) -> Result<ActionabilitySuccess<D::Output>, ActionabilityError> {
-        self.execute_with_timeout(locator, action, self.timeouts.get(timeout_kind), driver)
+        self.execute_for_in_mode(
+            locator,
+            action,
+            timeout_kind,
+            ActionabilityExecutionMode::Standard,
+            driver,
+        )
+    }
+
+    pub fn execute_for_in_mode<D: ActionabilityDriver>(
+        &self,
+        locator: &str,
+        action: ActionKind,
+        timeout_kind: TimeoutKind,
+        mode: ActionabilityExecutionMode,
+        driver: &mut D,
+    ) -> Result<ActionabilitySuccess<D::Output>, ActionabilityError> {
+        self.execute_with_timeout_in_mode(
+            locator,
+            action,
+            self.timeouts.get(timeout_kind),
+            mode,
+            driver,
+        )
     }
 
     pub fn execute_with_timeout<D: ActionabilityDriver>(
@@ -529,7 +593,44 @@ impl<C: Clock> ActionabilityEngine<C> {
         timeout: Duration,
         driver: &mut D,
     ) -> Result<ActionabilitySuccess<D::Output>, ActionabilityError> {
-        let deadline = Deadline::new(&self.clock, timeout);
+        self.execute_with_timeout_in_mode(
+            locator,
+            action,
+            timeout,
+            ActionabilityExecutionMode::Standard,
+            driver,
+        )
+    }
+
+    pub fn execute_with_timeout_in_mode<D: ActionabilityDriver>(
+        &self,
+        locator: &str,
+        action: ActionKind,
+        timeout: Duration,
+        mode: ActionabilityExecutionMode,
+        driver: &mut D,
+    ) -> Result<ActionabilitySuccess<D::Output>, ActionabilityError> {
+        self.execute_with_timeout_and_backoff(
+            locator,
+            action,
+            timeout,
+            mode,
+            LOCATOR_RETRY_BACKOFF_MS,
+            ACTION_RETRY_BACKOFF_MS,
+            driver,
+        )
+    }
+
+    fn execute_with_timeout_and_backoff<D: ActionabilityDriver>(
+        &self,
+        locator: &str,
+        action: ActionKind,
+        timeout: Duration,
+        mode: ActionabilityExecutionMode,
+        locator_retry_backoff_ms: &[u64],
+        action_retry_backoff_ms: &[u64],
+        driver: &mut D,
+    ) -> Result<ActionabilitySuccess<D::Output>, ActionabilityError> {
         let started_at = self.clock.now();
         let mut call_log = CallLog::default();
         let mut last_diagnostic = ActionabilityDiagnostic::NotFound;
@@ -538,7 +639,7 @@ impl<C: Clock> ActionabilityEngine<C> {
         let mut attached = None;
         let mut last_state = None;
         let mut receives_events = None;
-        if let Err(error) = self.perform_action_prechecks(driver, &mut call_log) {
+        if let Err(error) = self.perform_action_prechecks(mode, driver, &mut call_log) {
             return Err(self.enrich_error(
                 error,
                 started_at,
@@ -548,10 +649,11 @@ impl<C: Clock> ActionabilityEngine<C> {
                 receives_events,
             ));
         }
+        let deadline = Deadline::new(&self.clock, timeout);
         call_log.push(format!("waiting for {locator}"));
 
         loop {
-            let delay = backoff_delay(LOCATOR_RETRY_BACKOFF_MS, locator_attempt);
+            let delay = backoff_delay(locator_retry_backoff_ms, locator_attempt);
             if !self.wait(delay, deadline, &mut call_log) {
                 return Err(timeout_error(
                     timeout,
@@ -610,6 +712,7 @@ impl<C: Clock> ActionabilityEngine<C> {
                         &mut attempts,
                         &mut last_state,
                         &mut receives_events,
+                        action_retry_backoff_ms,
                         driver,
                     ) {
                         ActionLoopResult::Done(output) => {
@@ -644,6 +747,7 @@ impl<C: Clock> ActionabilityEngine<C> {
 
     fn perform_action_prechecks<D: ActionabilityDriver>(
         &self,
+        mode: ActionabilityExecutionMode,
         driver: &mut D,
         call_log: &mut CallLog,
     ) -> Result<(), ActionabilityError> {
@@ -660,18 +764,25 @@ impl<C: Clock> ActionabilityEngine<C> {
                 receives_events: None,
             });
         }
-        call_log.push("checking locator handlers");
-        if let Err(diagnostic) = driver.locator_handlers_checkpoint() {
-            call_log.push(diagnostic.log_line());
-            return Err(ActionabilityError::Failed {
-                diagnostic,
-                call_log: call_log.clone(),
-                elapsed: Duration::ZERO,
-                attempts: 0,
-                attached: None,
-                state: None,
-                receives_events: None,
-            });
+        match mode {
+            ActionabilityExecutionMode::Standard => {
+                call_log.push("checking locator handlers");
+                if let Err(diagnostic) = driver.locator_handlers_checkpoint() {
+                    call_log.push(diagnostic.log_line());
+                    return Err(ActionabilityError::Failed {
+                        diagnostic,
+                        call_log: call_log.clone(),
+                        elapsed: Duration::ZERO,
+                        attempts: 0,
+                        attached: None,
+                        state: None,
+                        receives_events: None,
+                    });
+                }
+            }
+            ActionabilityExecutionMode::SkipLocatorHandlers => {
+                call_log.push("skipping locator handlers");
+            }
         }
         call_log.push("checking pending navigation after locator handlers");
         if let Err(diagnostic) = driver.wait_for_navigation() {
@@ -732,6 +843,7 @@ impl<C: Clock> ActionabilityEngine<C> {
         attempts: &mut u32,
         last_state: &mut Option<ElementState>,
         receives_events: &mut Option<bool>,
+        action_retry_backoff_ms: &[u64],
         driver: &mut D,
     ) -> ActionLoopResult<D::Output> {
         let required = required_states(action);
@@ -746,7 +858,7 @@ impl<C: Clock> ActionabilityEngine<C> {
                 call_log.push(format!("attempting {} action", action.name()));
             } else {
                 call_log.push(format!("retrying {} action", action.name()));
-                let delay = backoff_delay(ACTION_RETRY_BACKOFF_MS, (retry - 1) as usize);
+                let delay = backoff_delay(action_retry_backoff_ms, (retry - 1) as usize);
                 if !self.wait(delay, deadline, call_log) {
                     return ActionLoopResult::TimedOut;
                 }
@@ -928,6 +1040,8 @@ mod tests {
         locator_outcomes: VecDeque<LocatorOutcome>,
         states: VecDeque<Result<ElementState, ActionabilityDiagnostic>>,
         actions: VecDeque<Result<&'static str, ActionabilityDiagnostic>>,
+        precheck_clock: Option<MockClock>,
+        precheck_advance: Duration,
         resolve_calls: usize,
         state_calls: usize,
         action_calls: usize,
@@ -942,6 +1056,8 @@ mod tests {
                 }]),
                 states: VecDeque::new(),
                 actions: VecDeque::from([Ok("done")]),
+                precheck_clock: None,
+                precheck_advance: Duration::ZERO,
                 resolve_calls: 0,
                 state_calls: 0,
                 action_calls: 0,
@@ -977,6 +1093,11 @@ mod tests {
 
         fn locator_handlers_checkpoint(&mut self) -> Result<(), ActionabilityDiagnostic> {
             self.precheck_calls.push("handlers");
+            if let Some(clock) = &self.precheck_clock {
+                clock
+                    .now
+                    .set(clock.now.get().saturating_add(self.precheck_advance));
+            }
             Ok(())
         }
     }
@@ -1056,6 +1177,19 @@ mod tests {
 
         assert_eq!(locator, vec![0, 20, 50, 100, 100, 500, 500, 500, 500]);
         assert_eq!(action, vec![0, 20, 100, 100, 500, 500, 500, 500]);
+    }
+
+    #[test]
+    fn form_retry_backoff_preserves_the_existing_hundred_millisecond_poll() {
+        let locator = (0..4)
+            .map(|attempt| backoff_delay(FORM_LOCATOR_RETRY_BACKOFF_MS, attempt).as_millis())
+            .collect::<Vec<_>>();
+        let action = (0..4)
+            .map(|attempt| backoff_delay(FORM_ACTION_RETRY_BACKOFF_MS, attempt).as_millis())
+            .collect::<Vec<_>>();
+
+        assert_eq!(locator, vec![0, 100, 100, 100]);
+        assert_eq!(action, vec![100, 100, 100, 100]);
     }
 
     #[test]
@@ -1251,6 +1385,55 @@ mod tests {
                 "waiting for button",
             ]
         );
+    }
+
+    #[test]
+    fn skip_locator_handlers_mode_preserves_navigation_without_nested_checkpoint() {
+        let clock = MockClock::default();
+        let engine = ActionabilityEngine::new(clock, ActionabilityTimeouts::default());
+        let mut driver = MockDriver::new();
+
+        let success = engine
+            .execute_logged_in_mode(
+                "button",
+                ActionKind::Click,
+                ActionabilityExecutionMode::SkipLocatorHandlers,
+                &mut driver,
+            )
+            .unwrap();
+
+        assert_eq!(driver.precheck_calls, vec!["navigation", "navigation"]);
+        assert_eq!(
+            &success.call_log.entries[..4],
+            [
+                "checking pending navigation before locator handlers",
+                "skipping locator handlers",
+                "checking pending navigation after locator handlers",
+                "waiting for button",
+            ]
+        );
+    }
+
+    #[test]
+    fn completed_handler_checkpoint_does_not_consume_the_action_retry_budget() {
+        let clock = MockClock::default();
+        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
+        let mut driver = MockDriver::new();
+        driver.precheck_clock = Some(clock.clone());
+        driver.precheck_advance = Duration::from_millis(30);
+
+        let success = engine
+            .execute_with_timeout(
+                "button",
+                ActionKind::Click,
+                Duration::from_millis(25),
+                &mut driver,
+            )
+            .unwrap();
+
+        assert_eq!(success.output, "done");
+        assert_eq!(success.elapsed, Duration::from_millis(30));
+        assert_eq!(driver.action_calls, 1);
     }
 
     #[test]

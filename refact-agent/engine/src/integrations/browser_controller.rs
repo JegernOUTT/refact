@@ -14,8 +14,8 @@ use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
 use refact_browser::{
     ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
-    ActionabilityTimeouts, CdpKeyboardDispatcher, CdpMouseDispatcher, ElementHandle,
-    HitTargetController, HitTargetPoint, HitTargetResult, Keyboard, LocatorHandler,
+    ActionabilityExecutionMode, ActionabilityTimeouts, CdpKeyboardDispatcher, CdpMouseDispatcher,
+    ElementHandle, HitTargetController, HitTargetPoint, HitTargetResult, Keyboard, LocatorHandler,
     LocatorHandlerLease, LocatorHandlerOperation, LocatorHandlerProbe, LocatorHandlerRegistry,
     LocatorOutcome, Mouse, MouseButton, NetworkLoadState, NetworkMonitorHandle, Ref,
     ScrollStrategy, SnapshotMode, SnapshotOptions, SystemClock, UrlMatcher, WorldManager,
@@ -1573,14 +1573,28 @@ fn execute_locator_handler(
     let outcome = match &lease.handler.operation {
         LocatorHandlerOperation::DismissOverlays => dismiss_overlays(tab),
         LocatorHandlerOperation::Action(LocatorHandlerAction::Click) => {
-            let resolved = resolve_element(tab, world, &lease.handler.locator)?;
-            call_handle_json(
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("Timed out while running locator handler click".to_string());
+            }
+            let result = step_actionable_action_in_mode(
                 tab,
                 world,
-                &resolved.handle,
-                "function() { this.click(); return JSON.stringify({ok: true}); }",
-            )?;
-            Ok(format!("Clicked <{}>", resolved.tag))
+                0,
+                &lease.handler.locator,
+                "click",
+                ActionKind::Click,
+                Some(handlers),
+                firings,
+                image_policy,
+                ActionabilityExecutionMode::SkipLocatorHandlers,
+                remaining,
+            );
+            if result.ok {
+                Ok(result.summary)
+            } else {
+                Err(result.error.unwrap_or(result.summary))
+            }
         }
         LocatorHandlerOperation::Action(LocatorHandlerAction::Steps { steps }) => {
             let mut summaries = Vec::new();
@@ -2014,6 +2028,34 @@ fn step_actionable_action(
     locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
     image_policy: &ImagePolicy,
 ) -> StepResult {
+    step_actionable_action_in_mode(
+        tab,
+        world,
+        idx,
+        locator,
+        action,
+        action_kind,
+        handlers,
+        locator_handler_firings,
+        image_policy,
+        ActionabilityExecutionMode::Standard,
+        ActionabilityTimeouts::default().action,
+    )
+}
+
+fn step_actionable_action_in_mode(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    action: &str,
+    action_kind: ActionKind,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+    mode: ActionabilityExecutionMode,
+    timeout: Duration,
+) -> StepResult {
     let engine = ActionabilityEngine::new(SystemClock::default(), ActionabilityTimeouts::default());
     let mut driver = BrowserActionDriver::new(
         tab,
@@ -2024,7 +2066,13 @@ fn step_actionable_action(
         locator_handler_firings,
         image_policy,
     );
-    match engine.execute_logged(&describe_locator(locator), action_kind, &mut driver) {
+    match engine.execute_with_timeout_in_mode(
+        &describe_locator(locator),
+        action_kind,
+        timeout,
+        mode,
+        &mut driver,
+    ) {
         Ok(success) => {
             let mut result = StepResult::success(
                 idx,
@@ -2154,6 +2202,7 @@ fn step_fill(
             result.fill_strategy = Some(outcome.strategy);
             result.verified = outcome.verified;
             result.retries = outcome.retries;
+            result.actionability = outcome.actionability;
             result
         }
         Err(error) => {
@@ -2164,6 +2213,7 @@ fn step_fill(
             );
             result.field_kind = Some(info.field_kind.clone());
             result.retries = error.retries;
+            result.actionability = error.actionability;
             result
         }
     }
@@ -2187,12 +2237,14 @@ fn step_clear(
             result.fill_strategy = outcome.strategy;
             result.verified = outcome.verified;
             result.retries = outcome.retries;
+            result.actionability = outcome.actionability;
             result
         }
         Err(error) => {
             let mut result = StepResult::failure(idx, "Clear failed", error.message);
             result.field_kind = Some(info.field_kind.clone());
             result.retries = error.retries;
+            result.actionability = error.actionability;
             result
         }
     }
@@ -2208,10 +2260,18 @@ fn step_select_option(
     match resolve_element(tab, world, locator) {
         Ok(info) => match refact_browser::forms::select_option(tab, world, &info.handle, value) {
             Ok(outcome) => {
-                StepResult::success(idx, format!("Selected '{}' in <{}>", value, info.tag))
-                    .with_data(serde_json::json!({"selected": outcome.selected}))
+                let mut result =
+                    StepResult::success(idx, format!("Selected '{}' in <{}>", value, info.tag))
+                        .with_data(serde_json::json!({"selected": outcome.selected}));
+                result.actionability = outcome.actionability;
+                result
             }
-            Err(error) => StepResult::failure(idx, "Select option failed", error.message),
+            Err(error) => {
+                let mut result = StepResult::failure(idx, "Select option failed", error.message);
+                result.retries = error.retries;
+                result.actionability = error.actionability;
+                result
+            }
         },
         Err(e) => StepResult::failure(idx, "Select: element resolution failed", e),
     }
@@ -2230,14 +2290,22 @@ fn step_check_uncheck(
         Err(e) => return StepResult::failure(idx, "Check/uncheck: resolution failed", e),
     };
     match refact_browser::forms::set_checked(tab, world, &info.handle, check) {
-        Ok(outcome) => StepResult::success(idx, format!("{}ed <{}>", action, info.tag)).with_data(
-            serde_json::json!({
-                "checked": outcome.checked,
-                "changed": outcome.changed,
-                "verified": outcome.verified,
-            }),
-        ),
-        Err(error) => StepResult::failure(idx, format!("{} failed", action), error.message),
+        Ok(outcome) => {
+            let mut result = StepResult::success(idx, format!("{}ed <{}>", action, info.tag))
+                .with_data(serde_json::json!({
+                    "checked": outcome.checked,
+                    "changed": outcome.changed,
+                    "verified": outcome.verified,
+                }));
+            result.actionability = outcome.actionability;
+            result
+        }
+        Err(error) => {
+            let mut result = StepResult::failure(idx, format!("{} failed", action), error.message);
+            result.retries = error.retries;
+            result.actionability = error.actionability;
+            result
+        }
     }
 }
 

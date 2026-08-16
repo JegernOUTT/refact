@@ -1,23 +1,22 @@
-use std::thread;
-use std::time::{Duration, Instant};
-
 use headless_chrome::Tab;
-use refact_integrations::browser_models::{ElementInfo, FieldKind, FillStrategy};
+use refact_integrations::browser_models::{
+    ActionabilityDiagnostics, ElementInfo, FieldKind, FillStrategy,
+};
 use serde_json::Value;
 
 use crate::{
-    CdpKeyboardDispatcher, CdpMouseDispatcher, ElementHandle, Keyboard, Mouse, MouseButton,
-    WorldManager,
+    ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
+    ActionabilityTimeouts, CdpKeyboardDispatcher, CdpMouseDispatcher, ElementHandle,
+    HitTargetController, HitTargetPoint, HitTargetResult, Keyboard, LocatorOutcome, Mouse,
+    MouseButton, SystemClock, WorldManager,
 };
-
-const FORM_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
-const FORM_ACTION_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FillOutcome {
     pub strategy: FillStrategy,
     pub verified: Option<bool>,
     pub retries: u32,
+    pub actionability: Option<ActionabilityDiagnostics>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -25,11 +24,13 @@ pub struct ClearOutcome {
     pub strategy: Option<FillStrategy>,
     pub verified: Option<bool>,
     pub retries: u32,
+    pub actionability: Option<ActionabilityDiagnostics>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectOptionOutcome {
     pub selected: Vec<String>,
+    pub actionability: Option<ActionabilityDiagnostics>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -37,12 +38,14 @@ pub struct CheckedOutcome {
     pub checked: bool,
     pub changed: bool,
     pub verified: bool,
+    pub actionability: Option<ActionabilityDiagnostics>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FormError {
     pub message: String,
     pub retries: u32,
+    pub actionability: Option<ActionabilityDiagnostics>,
 }
 
 impl FormError {
@@ -50,6 +53,7 @@ impl FormError {
         Self {
             message: message.into(),
             retries: 0,
+            actionability: None,
         }
     }
 
@@ -57,7 +61,130 @@ impl FormError {
         Self {
             message: message.into(),
             retries,
+            actionability: None,
         }
+    }
+
+    fn with_actionability(mut self, actionability: Option<ActionabilityDiagnostics>) -> Self {
+        self.actionability = actionability;
+        self
+    }
+}
+
+struct FormActionabilityDriver<'a> {
+    tab: &'a Tab,
+    world: &'a WorldManager,
+    handle: &'a ElementHandle,
+    action: ActionKind,
+    perform_action: bool,
+}
+
+impl ActionabilityDriver for FormActionabilityDriver<'_> {
+    type Output = ();
+
+    fn resolve(&mut self) -> LocatorOutcome {
+        LocatorOutcome::Found {
+            preview: "<resolved form element>".to_string(),
+        }
+    }
+
+    fn element_state(&mut self) -> Result<crate::ElementState, ActionabilityDiagnostic> {
+        self.world
+            .element_states(self.tab, self.handle)
+            .map_err(|error| match error {
+                crate::HandleError::Invalidated { .. } => ActionabilityDiagnostic::Detached,
+                _ => ActionabilityDiagnostic::PrecheckFailed {
+                    description: error.to_string(),
+                },
+            })
+    }
+
+    fn perform(&mut self) -> Result<Self::Output, ActionabilityDiagnostic> {
+        if !self.perform_action {
+            return Ok(());
+        }
+        trusted_click(self.tab, self.world, self.handle, self.action)
+    }
+}
+
+fn run_actionability(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: &ElementHandle,
+    action: ActionKind,
+    perform_action: bool,
+) -> Result<ActionabilityDiagnostics, FormError> {
+    let engine = ActionabilityEngine::new(SystemClock::default(), ActionabilityTimeouts::default());
+    let mut driver = FormActionabilityDriver {
+        tab,
+        world,
+        handle,
+        action,
+        perform_action,
+    };
+    match engine.execute_form_logged("resolved form element", action, &mut driver) {
+        Ok(success) => Ok(success.diagnostics(action)),
+        Err(error) => {
+            let diagnostics = error.diagnostics(action);
+            Err(FormError::after_retries(
+                error.to_string(),
+                diagnostics.attempts.unwrap_or_default(),
+            )
+            .with_actionability(Some(diagnostics)))
+        }
+    }
+}
+
+fn trusted_click(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: &ElementHandle,
+    action: ActionKind,
+) -> Result<(), ActionabilityDiagnostic> {
+    let dispatcher = CdpMouseDispatcher::new(tab);
+    let point = dispatcher.clickable_point(handle).map_err(|error| {
+        ActionabilityDiagnostic::PrecheckFailed {
+            description: error.to_string(),
+        }
+    })?;
+    let hit_target = HitTargetController::default();
+    let hit_target_point = HitTargetPoint {
+        x: point.x,
+        y: point.y,
+    };
+    match hit_target.expect_hit_target(tab, world, handle, hit_target_point) {
+        Ok(HitTargetResult::Done | HitTargetResult::Skipped) => {}
+        Ok(HitTargetResult::Intercepted { description }) => {
+            return Err(ActionabilityDiagnostic::InterceptsPointerEvents { description });
+        }
+        Ok(HitTargetResult::NotConnected) => return Err(ActionabilityDiagnostic::Detached),
+        Err(error) => {
+            return Err(ActionabilityDiagnostic::PrecheckFailed {
+                description: error.to_string(),
+            });
+        }
+    }
+    let token = hit_target
+        .install_interceptor(tab, world, handle, action, Some(hit_target_point))
+        .map_err(|error| ActionabilityDiagnostic::PrecheckFailed {
+            description: error.to_string(),
+        })?;
+    let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
+    let mut mouse = Mouse::new(dispatcher, &keyboard);
+    let action_result = mouse.click(point.x, point.y, MouseButton::Left);
+    let hit_result = hit_target.take_result(tab, world, token);
+    action_result.map_err(|error| ActionabilityDiagnostic::PrecheckFailed {
+        description: error.to_string(),
+    })?;
+    match hit_result {
+        Ok(HitTargetResult::Done | HitTargetResult::Skipped) => Ok(()),
+        Ok(HitTargetResult::Intercepted { description }) => {
+            Err(ActionabilityDiagnostic::InterceptsPointerEvents { description })
+        }
+        Ok(HitTargetResult::NotConnected) => Err(ActionabilityDiagnostic::Detached),
+        Err(error) => Err(ActionabilityDiagnostic::PrecheckFailed {
+            description: error.to_string(),
+        }),
     }
 }
 
@@ -115,7 +242,7 @@ pub fn fill(
             info.field_kind
         )));
     }
-    wait_for_actionability(tab, world, handle, true).map_err(FormError::new)?;
+    let actionability = run_actionability(tab, world, handle, ActionKind::Fill, false)?;
     let mut executor = CdpFillExecutor { tab, world, handle };
     run_fill(
         &mut executor,
@@ -125,6 +252,11 @@ pub fn fill(
         clear_first,
         verify,
     )
+    .map(|mut outcome| {
+        outcome.actionability = Some(actionability.clone());
+        outcome
+    })
+    .map_err(|error| error.with_actionability(Some(actionability)))
 }
 
 pub fn clear(
@@ -153,7 +285,8 @@ pub fn clear(
             )));
         }
         FieldKind::Select => {
-            wait_for_actionability(tab, world, handle, false).map_err(FormError::new)?;
+            let actionability =
+                run_actionability(tab, world, handle, ActionKind::SelectOption, false)?;
             let result = call_json(
                 tab,
                 world,
@@ -183,14 +316,16 @@ pub fn clear(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             if verify && !had_empty {
-                return Err(FormError::new(
-                    "No option with empty value/text exists to select",
-                ));
+                return Err(
+                    FormError::new("No option with empty value/text exists to select")
+                        .with_actionability(Some(actionability)),
+                );
             }
             return Ok(ClearOutcome {
                 strategy: None,
                 verified: verify.then_some(true),
                 retries: 0,
+                actionability: Some(actionability),
             });
         }
         _ => {}
@@ -200,6 +335,7 @@ pub fn clear(
         strategy: Some(outcome.strategy),
         verified: outcome.verified,
         retries: outcome.retries,
+        actionability: outcome.actionability,
     })
 }
 
@@ -209,7 +345,7 @@ pub fn select_option(
     handle: &ElementHandle,
     value: &str,
 ) -> Result<SelectOptionOutcome, FormError> {
-    wait_for_actionability(tab, world, handle, false).map_err(FormError::new)?;
+    let actionability = run_actionability(tab, world, handle, ActionKind::SelectOption, false)?;
     let result = call_json(
         tab,
         world,
@@ -238,9 +374,11 @@ pub fn select_option(
 }"#,
         vec![Value::String(value.to_string())],
     )
-    .map_err(FormError::new)?;
+    .map_err(|error| FormError::new(error).with_actionability(Some(actionability.clone())))?;
     if let Some(code) = result.get("error_code").and_then(Value::as_str) {
-        return Err(FormError::new(select_option_diagnostic(code)));
+        return Err(
+            FormError::new(select_option_diagnostic(code)).with_actionability(Some(actionability))
+        );
     }
     let selected = result
         .get("selected")
@@ -250,7 +388,10 @@ pub fn select_option(
         .filter_map(Value::as_str)
         .map(str::to_string)
         .collect();
-    Ok(SelectOptionOutcome { selected })
+    Ok(SelectOptionOutcome {
+        selected,
+        actionability: Some(actionability),
+    })
 }
 
 pub fn set_checked(
@@ -259,37 +400,21 @@ pub fn set_checked(
     handle: &ElementHandle,
     check: bool,
 ) -> Result<CheckedOutcome, FormError> {
-    wait_for_actionability(tab, world, handle, false).map_err(FormError::new)?;
     let before = checked_state(tab, world, handle).map_err(FormError::new)?;
     check_transition(before.supported, before.radio, before.checked, check)?;
-    if !needs_checked_click(before.checked, check) {
-        return Ok(checked_outcome(before.checked, check));
+    let needs_click = needs_checked_click(before.checked, check);
+    let action = if check {
+        ActionKind::Check
+    } else {
+        ActionKind::Uncheck
+    };
+    let actionability = run_actionability(tab, world, handle, action, needs_click)?;
+    if !needs_click {
+        return Ok(checked_outcome(before.checked, check, Some(actionability)));
     }
-    call_json(
-        tab,
-        world,
-        handle,
-        r#"function() {
-  const injected = globalThis.__refact_injected__;
-  const el = this.tagName === 'LABEL' && this.control ? this.control : this;
-  if (!el) throw new Error('Element is not attached');
-  el.scrollIntoView({ block: 'center', behavior: 'instant' });
-  return true;
-}"#,
-        Vec::new(),
-    )
-    .map_err(FormError::new)?;
-    let dispatcher = CdpMouseDispatcher::new(tab);
-    let point = dispatcher
-        .clickable_point(handle)
-        .map_err(|error| FormError::new(error.to_string()))?;
-    let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
-    let mut mouse = Mouse::new(dispatcher, &keyboard);
-    mouse
-        .click(point.x, point.y, MouseButton::Left)
-        .map_err(|error| FormError::new(error.to_string()))?;
-    let after = checked_state(tab, world, handle).map_err(FormError::new)?;
-    verify_checked_transition(before.checked, after.checked, check)
+    let after = checked_state(tab, world, handle)
+        .map_err(|error| FormError::new(error).with_actionability(Some(actionability.clone())))?;
+    verify_checked_transition(before.checked, after.checked, check, Some(actionability))
 }
 
 trait FillExecutor {
@@ -322,6 +447,7 @@ fn run_fill<E: FillExecutor>(
                                 strategy: strategy.clone(),
                                 verified: Some(true),
                                 retries,
+                                actionability: None,
                             });
                         }
                         Ok(false) => {
@@ -336,6 +462,7 @@ fn run_fill<E: FillExecutor>(
                         strategy: strategy.clone(),
                         verified: None,
                         retries,
+                        actionability: None,
                     });
                 }
             }
@@ -545,55 +672,6 @@ fn call_json(
     Ok(value)
 }
 
-fn wait_for_actionability(
-    tab: &Tab,
-    world: &WorldManager,
-    handle: &ElementHandle,
-    editable: bool,
-) -> Result<(), String> {
-    let deadline = Instant::now() + FORM_ACTION_TIMEOUT;
-    loop {
-        let last;
-        match call_json(
-            tab,
-            world,
-            handle,
-            r#"function(requireEditable) {
-  const injected = globalThis.__refact_injected__;
-  const el = this.tagName === 'LABEL' && this.control ? this.control : this;
-  if (!el || !el.isConnected) return { connected: false };
-  const rect = el.getBoundingClientRect();
-  const style = el.ownerDocument.defaultView.getComputedStyle(el);
-  const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-  const disabledByFieldset = !!el.closest('fieldset[disabled]');
-  const enabled = !el.disabled && el.getAttribute('aria-disabled') !== 'true' && !disabledByFieldset;
-  const isEditable = !requireEditable || (!el.readOnly && el.getAttribute('aria-readonly') !== 'true' && (el.matches('input, textarea') || el.isContentEditable));
-  return { connected: true, visible, enabled, editable: !requireEditable || isEditable };
-}"#,
-            vec![Value::Bool(editable)],
-        ) {
-            Ok(state) => {
-                if state.get("connected").and_then(Value::as_bool) != Some(true) {
-                    last = "Element is not attached".to_string();
-                } else if state.get("visible").and_then(Value::as_bool) != Some(true) {
-                    last = "Element is not visible".to_string();
-                } else if state.get("enabled").and_then(Value::as_bool) != Some(true) {
-                    last = "Element is disabled".to_string();
-                } else if state.get("editable").and_then(Value::as_bool) != Some(true) {
-                    last = "Element is not editable".to_string();
-                } else {
-                    return Ok(());
-                }
-            }
-            Err(error) => last = error,
-        }
-        if Instant::now() >= deadline {
-            return Err(last);
-        }
-        thread::sleep(FORM_ACTION_POLL);
-    }
-}
-
 #[derive(Clone, Copy)]
 struct CheckedState {
     supported: bool,
@@ -669,11 +747,16 @@ fn needs_checked_click(current: bool, wanted: bool) -> bool {
     current != wanted
 }
 
-fn checked_outcome(before: bool, after: bool) -> CheckedOutcome {
+fn checked_outcome(
+    before: bool,
+    after: bool,
+    actionability: Option<ActionabilityDiagnostics>,
+) -> CheckedOutcome {
     CheckedOutcome {
         checked: after,
         changed: before != after,
         verified: true,
+        actionability,
     }
 }
 
@@ -681,13 +764,15 @@ fn verify_checked_transition(
     before: bool,
     after: bool,
     wanted: bool,
+    actionability: Option<ActionabilityDiagnostics>,
 ) -> Result<CheckedOutcome, FormError> {
     if after != wanted {
-        return Err(FormError::new(
-            "Clicking the checkbox did not change its state",
-        ));
+        return Err(
+            FormError::new("Clicking the checkbox did not change its state")
+                .with_actionability(actionability),
+        );
     }
-    Ok(checked_outcome(before, after))
+    Ok(checked_outcome(before, after, actionability))
 }
 
 fn select_option_diagnostic(code: &str) -> String {
@@ -803,6 +888,42 @@ mod tests {
     }
 
     #[test]
+    fn form_actions_use_the_required_shared_actionability_rows() {
+        assert_eq!(
+            crate::required_states(ActionKind::Fill),
+            crate::RequiredStates {
+                visible: true,
+                stable: false,
+                receives_events: false,
+                enabled: true,
+                editable: true,
+            }
+        );
+        assert_eq!(
+            crate::required_states(ActionKind::SelectOption),
+            crate::RequiredStates {
+                visible: true,
+                stable: false,
+                receives_events: false,
+                enabled: true,
+                editable: false,
+            }
+        );
+        for action in [ActionKind::Check, ActionKind::Uncheck] {
+            assert_eq!(
+                crate::required_states(action),
+                crate::RequiredStates {
+                    visible: true,
+                    stable: true,
+                    receives_events: true,
+                    enabled: true,
+                    editable: false,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn radio_uncheck_is_rejected() {
         let error = ensure_check_allowed(true, true, false).unwrap_err();
         assert_eq!(
@@ -817,23 +938,25 @@ mod tests {
         assert!(check_transition(true, false, true, true).is_ok());
         assert!(!needs_checked_click(true, true));
         assert_eq!(
-            checked_outcome(true, true),
+            checked_outcome(true, true, None),
             CheckedOutcome {
                 checked: true,
                 changed: false,
                 verified: true,
+                actionability: None,
             }
         );
         assert_eq!(
-            verify_checked_transition(false, true, true).unwrap(),
+            verify_checked_transition(false, true, true, None).unwrap(),
             CheckedOutcome {
                 checked: true,
                 changed: true,
                 verified: true,
+                actionability: None,
             }
         );
         assert_eq!(
-            verify_checked_transition(false, false, true)
+            verify_checked_transition(false, false, true, None)
                 .unwrap_err()
                 .message,
             "Clicking the checkbox did not change its state"
