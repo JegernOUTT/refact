@@ -2159,9 +2159,6 @@ async fn generated_locators_follow_preferences_and_round_trip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn get_by_locators_match_playwright_semantics() {
-    use refact_lsp::integrations::browser_models::LocatorStrategy;
-
-async fn get_by_locators_match_playwright_semantics() {
     let Some(mut case) = BrowserCase::start("getby.html").await else {
         return;
     };
@@ -2206,15 +2203,6 @@ async fn get_by_locators_match_playwright_semantics() {
     let custom = refact_lsp::refact_browser::test_id_locator("custom-card", "data-qa");
     assert_eq!(resolve(serde_json::to_value(custom).unwrap()).len(), 1);
 
-    let regex = LocatorStrategy::Text {
-        value: "does not matter".to_string(),
-        exact: true,
-        regex: Some(refact_lsp::integrations::browser_models::LocatorRegex {
-            source: "unique\\s+text".to_string(),
-            flags: "i".to_string(),
-        }),
-    };
-    assert_eq!(resolve(serde_json::to_value(BrowserLocator { strategy: regex, nth: None, within: None }).unwrap()).len(), 1);
     let regex: BrowserLocator = serde_json::from_value(json!({
         "by": "text",
         "value": "does not matter",
