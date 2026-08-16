@@ -616,6 +616,7 @@ mod tests {
             &derived_zones,
             &mut copy_message,
         )
+        .await
         .unwrap();
 
         gcx.documents_state.workspace_files.lock().unwrap().clear();
@@ -638,6 +639,7 @@ mod tests {
             &derived_zones,
             &mut read_message,
         )
+        .await
         .unwrap();
 
         assert_eq!(read_message.extra["privacy"]["files"][0]["zone"], "secrets");
@@ -659,6 +661,7 @@ mod tests {
             &new_derived_privacy_zones(),
             &mut other_session_message,
         )
+        .await
         .unwrap();
 
         assert_eq!(
