@@ -24,6 +24,9 @@ pub enum AriaMixedState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LocatorStrategy {
+    Ref {
+        value: String,
+    },
     Css {
         value: String,
     },
@@ -90,6 +93,9 @@ pub enum LocatorStrategy {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "snake_case")]
 enum LocatorWire {
+    Ref {
+        value: String,
+    },
     Css {
         value: String,
     },
@@ -190,6 +196,9 @@ impl Serialize for LocatorStrategy {
         S: Serializer,
     {
         let wire = match self {
+            Self::Ref { value } => LocatorWire::Ref {
+                value: value.clone(),
+            },
             Self::Css { value } => LocatorWire::Css {
                 value: value.clone(),
             },
@@ -302,6 +311,7 @@ impl<'de> Deserialize<'de> for LocatorStrategy {
     {
         let wire = LocatorWire::deserialize(deserializer)?;
         Ok(match wire {
+            LocatorWire::Ref { value } => Self::Ref { value },
             LocatorWire::Css { value } => Self::Css { value },
             LocatorWire::Id { value } => Self::Id { value },
             LocatorWire::Name { value } => Self::Name { value },
@@ -440,6 +450,22 @@ pub struct BrowserLocator {
 }
 
 impl BrowserLocator {
+    pub fn reference(reference: &str) -> Self {
+        Self {
+            strategy: LocatorStrategy::Ref {
+                value: reference.to_string(),
+            },
+            nth: None,
+            within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
+        }
+    }
+
     pub fn css(selector: &str) -> Self {
         Self {
             strategy: LocatorStrategy::Css {
@@ -588,6 +614,35 @@ pub enum TabTarget {
 impl Default for TabTarget {
     fn default() -> Self {
         TabTarget::Active
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessibilitySnapshotMode {
+    #[default]
+    Ai,
+    Default,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AccessibilitySnapshotOptions {
+    #[serde(default)]
+    pub mode: AccessibilitySnapshotMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refs: Option<bool>,
+    #[serde(default)]
+    pub boxes: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<BrowserLocator>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chars: Option<usize>,
+}
+
+impl AccessibilitySnapshotOptions {
+    pub fn refs_enabled(&self) -> bool {
+        self.refs
+            .unwrap_or(matches!(self.mode, AccessibilitySnapshotMode::Ai))
     }
 }
 
@@ -748,7 +803,10 @@ pub enum BrowserStep {
         #[serde(default)]
         max_chars: Option<usize>,
     },
-    AccessibilitySnapshot,
+    AccessibilitySnapshot {
+        #[serde(flatten)]
+        options: AccessibilitySnapshotOptions,
+    },
     Screenshot,
     ScreenshotElement {
         locator: BrowserLocator,
@@ -1112,6 +1170,19 @@ mod tests {
         assert_eq!(json["value"], "#btn");
         let parsed: BrowserLocator = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, loc);
+    }
+
+    #[test]
+    fn ref_locator_round_trips() {
+        for reference in ["e12", "f2e7"] {
+            let locator = BrowserLocator::reference(reference);
+            let value = serde_json::to_value(&locator).unwrap();
+            assert_eq!(value, serde_json::json!({"by": "ref", "value": reference}));
+            assert_eq!(
+                serde_json::from_value::<BrowserLocator>(value).unwrap(),
+                locator
+            );
+        }
     }
 
     #[test]
@@ -1525,6 +1596,33 @@ mod tests {
         let json_str = r#"{"action": "screenshot"}"#;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
         assert!(matches!(step, BrowserStep::Screenshot));
+    }
+
+    #[test]
+    fn accessibility_snapshot_options_default_to_ai_refs_and_round_trip() {
+        let step: BrowserStep =
+            serde_json::from_str(r#"{"action":"accessibility_snapshot"}"#).unwrap();
+        match step {
+            BrowserStep::AccessibilitySnapshot { options } => {
+                assert_eq!(options.mode, AccessibilitySnapshotMode::Ai);
+                assert!(options.refs_enabled());
+                assert!(!options.boxes);
+                assert!(options.root.is_none());
+                assert!(options.max_chars.is_none());
+            }
+            _ => panic!("Expected AccessibilitySnapshot"),
+        }
+
+        let value = serde_json::json!({
+            "action": "accessibility_snapshot",
+            "mode": "default",
+            "refs": true,
+            "boxes": true,
+            "root": {"by": "css", "value": "main"},
+            "max_chars": 4096
+        });
+        let step: BrowserStep = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(step).unwrap(), value);
     }
 
     #[test]

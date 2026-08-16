@@ -11,6 +11,7 @@ pub fn to_css_selector(locator: &BrowserLocator) -> Option<String> {
         return None;
     }
     let base = match &locator.strategy {
+        LocatorStrategy::Ref { .. } => return None,
         LocatorStrategy::Css { value } => value.clone(),
         LocatorStrategy::Id { value } => format!("#{}", css_escape_ident(value)),
         LocatorStrategy::Name { value } => format!("[name={}]", css_escape_attr_value(value)),
@@ -178,6 +179,10 @@ fn resolution_transport_snapshot(locator: &BrowserLocator) -> String {
 
 fn generate_find_js(strategy: &LocatorStrategy) -> String {
     match strategy {
+        LocatorStrategy::Ref { value } => format!(
+            "var element = globalThis.__refact_injected__.resolveAriaRef({});\nvar elements = element ? [element] : [];",
+            js_string_literal(value)
+        ),
         LocatorStrategy::Css { value } => {
             format!(
                 "var elements = Array.from(scope.querySelectorAll({}));",

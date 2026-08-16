@@ -274,6 +274,7 @@ pub enum LocatorOutcome {
     Found { preview: String },
     NotFound,
     MultipleMatches { count: usize },
+    Error { description: String },
 }
 
 pub trait ActionabilityDriver {
@@ -566,6 +567,19 @@ impl<C: Clock> ActionabilityEngine<C> {
             locator_attempt += 1;
 
             match driver.resolve() {
+                LocatorOutcome::Error { description } => {
+                    let diagnostic = ActionabilityDiagnostic::PrecheckFailed { description };
+                    call_log.push(diagnostic.log_line());
+                    return Err(ActionabilityError::Failed {
+                        diagnostic,
+                        call_log,
+                        elapsed: self.clock.now().saturating_sub(started_at),
+                        attempts,
+                        attached,
+                        state: last_state,
+                        receives_events,
+                    });
+                }
                 LocatorOutcome::NotFound => {
                     attached = Some(false);
                     last_diagnostic = ActionabilityDiagnostic::NotFound;
@@ -1253,6 +1267,27 @@ mod tests {
                 diagnostic: ActionabilityDiagnostic::MultipleMatches { count: 3 },
                 ..
             })
+        ));
+        assert_eq!(driver.resolve_calls, 1);
+        assert!(clock.sleeps.borrow().is_empty());
+    }
+
+    #[test]
+    fn terminal_locator_resolution_error_is_not_retried() {
+        let clock = MockClock::default();
+        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
+        let mut driver = MockDriver::new();
+        driver.locator_outcomes = VecDeque::from([LocatorOutcome::Error {
+            description: "ref e5 is stale; take a fresh AI snapshot".to_string(),
+        }]);
+
+        let result = engine.execute("ref=e5", ActionKind::Click, &mut driver);
+        assert!(matches!(
+            result,
+            Err(ActionabilityError::Failed {
+                diagnostic: ActionabilityDiagnostic::PrecheckFailed { description },
+                ..
+            }) if description.contains("ref e5 is stale")
         ));
         assert_eq!(driver.resolve_calls, 1);
         assert!(clock.sleeps.borrow().is_empty());

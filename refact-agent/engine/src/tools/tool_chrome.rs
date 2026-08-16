@@ -82,11 +82,11 @@ const MAX_CACHED_LOG_LINES: usize = 1000;
 fn browser_locator_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": "Composable element locator. Add locator to query a nested locator under every outer match; filter supports has, has_not, has_text, has_not_text, and visible; and intersects while or unions in DOM order. first and last select endpoints. nth is zero-based and accepts -1 for the last match; Playwright CSS :nth-match is one-based. within remains a legacy CSS scope; prefer locator.",
+        "description": "Ref-first element address or composable fallback locator. Use by=ref with a value from the latest accessibility_snapshot whenever available. Add locator to query a nested locator under every outer match; filter supports has, has_not, has_text, has_not_text, and visible; and intersects while or unions in DOM order. first and last select endpoints. nth is zero-based and accepts -1 for the last match; Playwright CSS :nth-match is one-based. within remains a legacy CSS scope; prefer locator.",
         "required": ["by"],
         "properties": {
-            "by": {"type": "string", "enum": ["css", "id", "name", "text", "label", "role", "xpath", "placeholder", "alt_text", "title", "autocomplete", "test_id"]},
-            "value": {"type": "string", "description": "Selector value for all strategies except role"},
+            "by": {"type": "string", "enum": ["ref", "css", "id", "name", "text", "label", "role", "xpath", "placeholder", "alt_text", "title", "autocomplete", "test_id"]},
+            "value": {"type": "string", "description": "Snapshot ref such as e12 or f2e7, or selector value for non-role strategies"},
             "nth": {"type": "integer", "description": "Zero-based match index; -1 selects the last match. CSS :nth-match is one-based."},
             "within": {"type": "string", "description": "Deprecated CSS scope kept for compatibility; use locator for chaining"},
             "locator": {"type": "object", "description": "Relative locator evaluated under each outer match"},
@@ -424,25 +424,16 @@ impl Tool for ToolChrome {
              `add_locator_handler` requires `name`, `locator`, and `handler`; handler is \
              {{\"type\":\"click\"}} or {{\"type\":\"steps\",\"steps\":[...]}} and accepts optional `times` and `no_wait_after`. \
              `remove_locator_handler` requires `name`. \
-             Locators use a `by` field (css/id/name/text/label/role/xpath/placeholder/alt_text/title/autocomplete/test_id) and a `value` field \
+             Take an `accessibility_snapshot` and prefer its refs in later steps from the same batch. \
+             Locators use a `by` field (ref/css/id/name/text/label/role/xpath/placeholder/alt_text/title/autocomplete/test_id) and a `value` field \
              (except role locators which use `role` and optional `name` instead of `value`). \
              Text-like locators accept `exact` or a JavaScript `regex` object with `source` and optional `flags`; regex ignores exact. \
              Role locators use `role` with accessible-name/description and ARIA-state filters. Test-id locators accept a custom `attribute` and default to `data-testid`.",
             supported_commands.join("\n"));
-        ToolDesc {
-            name: "chrome".to_string(),
-            display_name: "Chrome".to_string(),
-            source: ToolSource {
-                source_type: ToolSourceType::Builtin,
-                config_path: self.config_path.clone(),
-            },
-            experimental: false,
-            allow_parallel: false,
-            description,
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "commands": {
+        let mut input_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "commands": {
                         "type": "string",
                         "description": "Compatibility-only legacy newline-separated browser commands. Prefer `request`.",
                         "deprecated": true
@@ -508,7 +499,7 @@ impl Tool for ToolChrome {
                                         "limit": {"type": "integer", "description": "Max results for extract_links"},
                                         "clear_first": {"type": "boolean", "description": "Clear field before filling (default true)"},
                                         "verify": {"type": "boolean", "description": "Verify fill result (default true)"},
-                                        "max_chars": {"type": "integer", "description": "Max characters for dom_snapshot"},
+                                        "max_chars": {"type": "integer", "description": "Max characters for dom_snapshot or accessibility_snapshot"},
                                         "property_filter": {"type": "string", "description": "CSS property filter for styles action"}
                                     }
                                 }
@@ -516,8 +507,36 @@ impl Tool for ToolChrome {
                         },
                         "required": ["steps"]
                     }
-                }
-            }),
+            }
+        });
+        let step_properties = input_schema
+            .pointer_mut("/properties/request/properties/steps/items/properties")
+            .and_then(Value::as_object_mut)
+            .expect("chrome step properties are present");
+        step_properties.insert(
+            "mode".to_string(),
+            serde_json::json!({"type": "string", "enum": ["ai", "default"], "description": "ARIA snapshot mode; defaults to ai"}),
+        );
+        step_properties.insert(
+            "refs".to_string(),
+            serde_json::json!({"type": "boolean", "description": "Mint refs in accessibility_snapshot; defaults to true in ai mode"}),
+        );
+        step_properties.insert(
+            "boxes".to_string(),
+            serde_json::json!({"type": "boolean", "description": "Include element boxes in accessibility_snapshot; defaults to false"}),
+        );
+        step_properties.insert("root".to_string(), browser_locator_schema());
+        ToolDesc {
+            name: "chrome".to_string(),
+            display_name: "Chrome".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: self.config_path.clone(),
+            },
+            experimental: false,
+            allow_parallel: false,
+            description,
+            input_schema,
             output_schema: None,
             annotations: None,
         }

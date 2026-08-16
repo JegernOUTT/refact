@@ -20,8 +20,8 @@ use refact_lsp::integrations::browser_controller::execute_steps as execute_steps
 use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
-    BrowserActionRequest, BrowserLoadState, BrowserLocator, BrowserStep, FillStrategy,
-    LocatorHandlerAction, SessionPolicy, TabTarget, UrlPattern,
+    AccessibilitySnapshotOptions, BrowserActionRequest, BrowserLoadState, BrowserLocator,
+    BrowserStep, FillStrategy, LocatorHandlerAction, SessionPolicy, TabTarget, UrlPattern,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -2353,6 +2353,156 @@ async fn aria_refs_reuse_invalidate_and_resolve_latest_snapshot_elements() {
             .resolve_ref(&case.tab, &search_ref),
         Err(refact_lsp::refact_browser::RefError::GenerationMismatch { .. })
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn production_snapshot_and_ref_actions_share_one_batch() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    case.tab
+        .evaluate(
+            "document.querySelector('button').addEventListener('click', () => document.body.dataset.saved = 'yes')",
+            false,
+        )
+        .unwrap();
+    let snapshot = case
+        .runtime
+        .world_manager
+        .aria_snapshot(
+            &case.tab,
+            None,
+            refact_lsp::refact_browser::SnapshotOptions {
+                mode: refact_lsp::refact_browser::SnapshotMode::Ai,
+                refs: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let reference = |name: &str| {
+        snapshot
+            .nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some(name))
+            .and_then(|node| node.reference.clone())
+            .unwrap()
+    };
+    let save_ref = reference("Save");
+    let search_ref = reference("Search");
+
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::AccessibilitySnapshot {
+                options: AccessibilitySnapshotOptions::default(),
+            },
+            BrowserStep::Click {
+                locator: BrowserLocator::reference(&save_ref),
+            },
+            BrowserStep::Fill {
+                locator: BrowserLocator::reference(&search_ref),
+                text: "ref batch".to_string(),
+                clear_first: true,
+                verify: true,
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(report.ok, "ref batch failed: {report:?}");
+    assert_eq!(report.steps.len(), 3);
+    let snapshot_data = report.steps[0].data.as_ref().unwrap();
+    assert!(snapshot_data["yaml"].as_str().unwrap().contains("[ref=e"));
+    assert_eq!(
+        case.tab
+            .evaluate("document.body.dataset.saved", false)
+            .unwrap()
+            .value
+            .unwrap(),
+        json!("yes")
+    );
+    assert_eq!(
+        case.tab
+            .evaluate("document.querySelector('[aria-label=Search]').value", false)
+            .unwrap()
+            .value
+            .unwrap(),
+        json!("ref batch")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn production_ref_errors_distinguish_stale_and_navigation_generations() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    let options = AccessibilitySnapshotOptions::default();
+    let first = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::AccessibilitySnapshot {
+            options: options.clone(),
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+    let save_ref = first.steps[0].data.as_ref().unwrap()["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "Save")
+        .and_then(|node| node["ref"].as_str())
+        .unwrap()
+        .to_string();
+    case.tab
+        .evaluate(
+            "document.querySelector('button').setAttribute('aria-label', 'Save changed')",
+            false,
+        )
+        .unwrap();
+    let stale = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::AccessibilitySnapshot { options },
+            BrowserStep::Click {
+                locator: BrowserLocator::reference(&save_ref),
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(!stale.ok);
+    assert!(stale.steps[1].error.as_deref().unwrap().contains("stale"));
+    assert!(stale.steps[1].error.as_deref().unwrap().contains(&save_ref));
+
+    let current_ref = stale.steps[0].data.as_ref().unwrap()["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "Save changed")
+        .and_then(|node| node["ref"].as_str())
+        .unwrap()
+        .to_string();
+    case.navigate("delayed-button.html");
+    let navigated = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::Click {
+            locator: BrowserLocator::reference(&current_ref),
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(!navigated.ok);
+    assert!(navigated.steps[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("earlier document generation"));
+    assert!(navigated.steps[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains(&current_ref));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -18,8 +18,9 @@ use refact_browser::{
     ActionabilityTimeouts, CdpKeyboardDispatcher, CdpMouseDispatcher, ElementHandle,
     HitTargetController, HitTargetPoint, HitTargetResult, Keyboard, LocatorHandler,
     LocatorHandlerLease, LocatorHandlerOperation, LocatorHandlerProbe, LocatorHandlerRegistry,
-    LocatorOutcome, Mouse, MouseButton, NetworkLoadState, NetworkMonitorHandle, SystemClock,
-    ScrollStrategy, UrlMatcher, WorldManager, DEFAULT_DISMISS_OVERLAYS_HANDLER,
+    LocatorOutcome, Mouse, MouseButton, NetworkLoadState, NetworkMonitorHandle, Ref,
+    ScrollStrategy, SnapshotMode, SnapshotOptions, SystemClock, UrlMatcher, WorldManager,
+    DEFAULT_DISMISS_OVERLAYS_HANDLER,
 };
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 
@@ -32,9 +33,8 @@ const MIN_WAIT_SECONDS: f64 = 0.0;
 
 const MAX_DOM_SNAPSHOT_CHARS: usize = 100_000;
 const MAX_EXTRACT_LINKS: usize = 500;
-const ACCESSIBILITY_MAX_NODES: usize = 1_000;
-const ACCESSIBILITY_MAX_DEPTH: u32 = 6;
-const ACCESSIBILITY_MAX_CHILDREN: u32 = 20;
+const DEFAULT_ARIA_SNAPSHOT_CHARS: usize = 20_000;
+const MAX_ARIA_SNAPSHOT_CHARS: usize = 100_000;
 
 fn clamp_timeout_ms(requested: Option<u64>) -> u64 {
     requested
@@ -183,7 +183,9 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
                 LocatorOutcome::Found { preview }
             }
             Err(error) => {
-                if let Some(count) = strict_mode_count(&error) {
+                if matches!(self.locator.strategy, LocatorStrategy::Ref { .. }) {
+                    LocatorOutcome::Error { description: error }
+                } else if let Some(count) = strict_mode_count(&error) {
                     LocatorOutcome::MultipleMatches { count }
                 } else {
                     LocatorOutcome::NotFound
@@ -345,11 +347,34 @@ fn resolve_element(
     world: &WorldManager,
     locator: &BrowserLocator,
 ) -> Result<ResolvedElement, String> {
-    let locator_value = serde_json::to_value(locator)
-        .map_err(|error| format!("Failed to serialize browser locator: {error}"))?;
-    let mut handles = world
-        .call_injected_handles(tab, "resolveAll", serde_json::json!([locator_value]))
-        .map_err(|error| error.to_string())?;
+    let mut handles = match &locator.strategy {
+        LocatorStrategy::Ref { value } => {
+            if locator.nth.is_some()
+                || locator.within.is_some()
+                || locator.locator.is_some()
+                || locator.filter.is_some()
+                || locator.and.is_some()
+                || locator.or.is_some()
+                || locator.first.is_some()
+                || locator.last.is_some()
+            {
+                return Err("Ref locators cannot be composed or filtered".to_string());
+            }
+            let reference = value
+                .parse::<Ref>()
+                .map_err(|error| format!("Invalid browser ref {value}: {error}"))?;
+            vec![world
+                .resolve_ref(tab, &reference)
+                .map_err(|error| error.to_string())?]
+        }
+        _ => {
+            let locator_value = serde_json::to_value(locator)
+                .map_err(|error| format!("Failed to serialize browser locator: {error}"))?;
+            world
+                .call_injected_handles(tab, "resolveAll", serde_json::json!([locator_value]))
+                .map_err(|error| error.to_string())?
+        }
+    };
     if handles.is_empty() {
         return Err("Element not found".to_string());
     }
@@ -1767,7 +1792,9 @@ fn execute_single_step(
             selector,
             max_chars,
         } => step_dom_snapshot(tab, idx, selector, *max_chars),
-        BrowserStep::AccessibilitySnapshot => step_accessibility_snapshot(tab, idx),
+        BrowserStep::AccessibilitySnapshot { options } => {
+            step_accessibility_snapshot(tab, world, idx, options)
+        }
         BrowserStep::Screenshot => step_screenshot(tab, idx, image_policy),
         BrowserStep::ScreenshotElement { locator } => {
             step_screenshot_element(tab, world, idx, locator, image_policy)
@@ -2666,43 +2693,74 @@ fn step_dom_snapshot(
     }
 }
 
-fn step_accessibility_snapshot(tab: &Tab, idx: usize) -> StepResult {
-    let js = format!(
-        r#"(function() {{
-  var MAX_NODES = {max_nodes};
-  var MAX_DEPTH = {max_depth};
-  var MAX_CHILDREN = {max_children};
-  var nodeCount = 0;
-  var truncated = false;
-  function walk(el, depth) {{
-    if (depth > MAX_DEPTH) return null;
-    if (nodeCount >= MAX_NODES) {{ truncated = true; return null; }}
-    nodeCount++;
-    var role = el.getAttribute('role') || el.tagName.toLowerCase();
-    var name = el.getAttribute('aria-label') || el.getAttribute('title') || '';
-    if (!name && el.innerText) name = el.innerText.substring(0, 80);
-    var children = [];
-    for (var i = 0; i < el.children.length && children.length < MAX_CHILDREN; i++) {{
-      if (nodeCount >= MAX_NODES) {{ truncated = true; break; }}
-      var c = walk(el.children[i], depth + 1);
-      if (c) children.push(c);
-    }}
-    return {{role: role, name: name.trim(), children: children}};
-  }}
-  if (!document.body) return JSON.stringify({{ok: false, error: 'document.body is null'}});
-  var tree = walk(document.body, 0);
-  return JSON.stringify({{ok: true, tree: tree, node_count: nodeCount, truncated: truncated, max_nodes: MAX_NODES}});
-}})()"#,
-        max_nodes = ACCESSIBILITY_MAX_NODES,
-        max_depth = ACCESSIBILITY_MAX_DEPTH,
-        max_children = ACCESSIBILITY_MAX_CHILDREN,
-    );
-    match eval_js_ok(tab, &js) {
-        Ok(result) => {
-            StepResult::success(idx, "Accessibility snapshot".to_string()).with_data(result)
-        }
-        Err(e) => StepResult::failure(idx, "Accessibility snapshot failed", e),
+fn step_accessibility_snapshot(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    options: &AccessibilitySnapshotOptions,
+) -> StepResult {
+    let root = match options.root.as_ref() {
+        Some(locator) => match resolve_element(tab, world, locator) {
+            Ok(resolved) => Some(resolved.handle),
+            Err(error) => {
+                return StepResult::failure(
+                    idx,
+                    "Accessibility snapshot root resolution failed",
+                    error,
+                )
+            }
+        },
+        None => None,
+    };
+    let snapshot_options = SnapshotOptions {
+        mode: match options.mode {
+            AccessibilitySnapshotMode::Ai => SnapshotMode::Ai,
+            AccessibilitySnapshotMode::Default => SnapshotMode::Default,
+        },
+        refs: options.refs_enabled(),
+        boxes: options.boxes,
+        ..Default::default()
+    };
+    let snapshot = world.aria_snapshot(tab, root.clone(), snapshot_options);
+    if let Some(root) = root {
+        let _ = world.release_handle(tab, &root);
     }
+    match snapshot {
+        Ok(mut snapshot) => {
+            let limit = options
+                .max_chars
+                .unwrap_or(DEFAULT_ARIA_SNAPSHOT_CHARS)
+                .min(MAX_ARIA_SNAPSHOT_CHARS);
+            snapshot.yaml = truncate_chars(snapshot.yaml, limit);
+            StepResult::success(idx, "Accessibility snapshot").with_data(
+                serde_json::to_value(snapshot)
+                    .unwrap_or_else(|error| serde_json::json!({"error": error.to_string()})),
+            )
+        }
+        Err(error) => StepResult::failure(idx, "Accessibility snapshot failed", error.to_string()),
+    }
+}
+
+fn truncate_chars(value: String, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value;
+    }
+    const SUFFIX: &str = "\n# ... (truncated)";
+    let suffix_chars = SUFFIX.chars().count();
+    if max_chars <= suffix_chars {
+        return value.chars().take(max_chars).collect();
+    }
+    let prefix = value
+        .chars()
+        .take(max_chars - suffix_chars)
+        .collect::<String>();
+    let mut truncated = prefix
+        .rsplit_once('\n')
+        .map(|(complete, _)| complete.to_string())
+        .unwrap_or(prefix);
+    truncated.push_str(SUFFIX);
+    truncated
 }
 
 pub fn capture_viewport_screenshot(
@@ -3074,6 +3132,7 @@ fn step_highlight_element(
 
 pub fn describe_locator(locator: &BrowserLocator) -> String {
     let mut description = match &locator.strategy {
+        LocatorStrategy::Ref { value } => format!("ref={}", value),
         LocatorStrategy::Css { value } => format!("css={}", value),
         LocatorStrategy::Id { value } => format!("id={}", value),
         LocatorStrategy::Name { value } => format!("name={}", value),
@@ -3136,6 +3195,21 @@ mod tests {
     fn test_describe_locator_css() {
         let loc = BrowserLocator::css("#btn");
         assert_eq!(describe_locator(&loc), "css=#btn");
+    }
+
+    #[test]
+    fn test_describe_locator_ref() {
+        let locator = BrowserLocator::reference("f2e7");
+        assert_eq!(describe_locator(&locator), "ref=f2e7");
+    }
+
+    #[test]
+    fn aria_snapshot_truncation_preserves_complete_yaml_lines() {
+        let value = "- button \"Save\"\n- textbox \"Search\"\n- link \"Guide\"".to_string();
+        let truncated = truncate_chars(value, 40);
+        assert!(truncated.ends_with("# ... (truncated)"));
+        assert!(!truncated.contains("- textbox \"Sear"));
+        assert!(truncated.chars().count() <= 40);
     }
 
     #[test]
