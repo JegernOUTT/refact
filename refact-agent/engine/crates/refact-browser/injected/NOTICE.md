@@ -6,13 +6,13 @@ This directory contains source adapted from [Microsoft Playwright](https://githu
 
 | Local file | Upstream file | Commit | Local modifications |
 |---|---|---|---|
-<<<<<<< HEAD
 | `src/vendor/injected/domUtils.ts` | `packages/injected/src/domUtils.ts`, `packages/injected/src/roleUtils.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Includes only the disabled, readonly, and checked helpers required by element-state predicates; full role computation remains omitted. |
 | `src/vendor/injected/hitTarget.ts` | `packages/injected/src/injectedScript.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Extracts the composed-root hit test, DOM preview, and capture-phase event interceptor into a standalone module backed by the Refact builtins snapshot. |
-=======
-| `src/vendor/injected/domUtils.ts` | `packages/injected/src/domUtils.ts`, `packages/injected/src/roleUtils.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Adds the disabled, readonly, and checked helpers required by element-state predicates. |
 | `src/vendor/injected/roleUtils.ts` | `packages/injected/src/roleUtils.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports; `getImplicitAriaRole` is exported for the injected role API. |
->>>>>>> main
+| `src/vendor/injected/selectorEvaluator.ts` | `packages/injected/src/selectorEvaluator.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports. |
+| `src/vendor/injected/layoutSelectorUtils.ts` | `packages/injected/src/layoutSelectorUtils.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | None. |
+| `src/vendor/injected/xpathSelectorEngine.ts` | `packages/injected/src/xpathSelectorEngine.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | None. |
+| `src/vendor/injected/selectorEngine.ts` | `packages/injected/src/selectorEngine.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | None. |
 | `src/vendor/injected/selectorUtils.ts` | `packages/injected/src/selectorUtils.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports; the role-dependent label helper is omitted until the role implementation is vendored. |
 | `src/vendor/injected/utilityScript.ts` | `packages/injected/src/utilityScript.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports. |
 | `src/vendor/injected/bindingsController.ts` | `packages/injected/src/bindingsController.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports. |

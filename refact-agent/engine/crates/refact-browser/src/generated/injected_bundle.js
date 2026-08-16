@@ -1,4 +1,4 @@
-// @refact-injected-hash dc1d3e4f02ac6061b0e903bf0a8760f8a44ae343ed961bfa6b442ca50fbb5eb8
+// @refact-injected-hash e270e5c0c1bd86c8c465ee37a08ab74f82c48a3b7ff9a3315c7dfc956af1d19a
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -202,6 +202,15 @@ var cacheStyleAfter;
 var cacheStyleVisibility;
 
 // src/vendor/isomorphic/stringUtils.ts
+var normalizedWhitespaceCache;
+function normalizeWhiteSpace(text) {
+  let result = normalizedWhitespaceCache == null ? void 0 : normalizedWhitespaceCache.get(text);
+  if (result === void 0) {
+    result = text.replace(/[\u200b\u00ad]/g, "").trim().replace(/\s+/g, " ");
+    normalizedWhitespaceCache == null ? void 0 : normalizedWhitespaceCache.set(text, result);
+  }
+  return result;
+}
 function trimString(input, cap, suffix = "") {
   if (input.length <= cap)
     return input;
@@ -2240,6 +2249,951 @@ function joinCompositeString(parts, separator, collectElements) {
   return { text: parts.map((part) => part.text).join(separator), elements };
 }
 
+// src/vendor/isomorphic/cssParser.ts
+var InvalidSelectorError = class extends Error {
+};
+function parseCSS(selector, customNames) {
+  let tokens;
+  try {
+    tokens = tokenize(selector);
+    if (!(tokens[tokens.length - 1] instanceof EOFToken))
+      tokens.push(new EOFToken());
+  } catch (e) {
+    const newMessage = e.message + ` while parsing css selector "${selector}". Did you mean to CSS.escape it?`;
+    const index = (e.stack || "").indexOf(e.message);
+    if (index !== -1)
+      e.stack = e.stack.substring(0, index) + newMessage + e.stack.substring(index + e.message.length);
+    e.message = newMessage;
+    throw e;
+  }
+  const unsupportedToken = tokens.find((token) => {
+    return token instanceof AtKeywordToken || token instanceof BadStringToken || token instanceof BadURLToken || token instanceof ColumnToken || token instanceof CDOToken || token instanceof CDCToken || token instanceof SemicolonToken || // TODO: Consider using these for something, e.g. to escape complex strings.
+    // For example :xpath{ (//div/bar[@attr="foo"])[2]/baz }
+    // Or this way :xpath( {complex-xpath-goes-here("hello")} )
+    token instanceof OpenCurlyToken || token instanceof CloseCurlyToken || // TODO: Consider treating these as strings?
+    token instanceof URLToken || token instanceof PercentageToken;
+  });
+  if (unsupportedToken)
+    throw new InvalidSelectorError(`Unsupported token "${unsupportedToken.toSource()}" while parsing css selector "${selector}". Did you mean to CSS.escape it?`);
+  let pos = 0;
+  const names = /* @__PURE__ */ new Set();
+  function unexpected() {
+    return new InvalidSelectorError(`Unexpected token "${tokens[pos].toSource()}" while parsing css selector "${selector}". Did you mean to CSS.escape it?`);
+  }
+  function skipWhitespace() {
+    while (tokens[pos] instanceof WhitespaceToken)
+      pos++;
+  }
+  function isIdent(p = pos) {
+    return tokens[p] instanceof IdentToken;
+  }
+  function isString(p = pos) {
+    return tokens[p] instanceof StringToken;
+  }
+  function isNumber(p = pos) {
+    return tokens[p] instanceof NumberToken;
+  }
+  function isComma(p = pos) {
+    return tokens[p] instanceof CommaToken;
+  }
+  function isOpenParen(p = pos) {
+    return tokens[p] instanceof OpenParenToken;
+  }
+  function isCloseParen(p = pos) {
+    return tokens[p] instanceof CloseParenToken;
+  }
+  function isFunction(p = pos) {
+    return tokens[p] instanceof FunctionToken;
+  }
+  function isStar(p = pos) {
+    return tokens[p] instanceof DelimToken && tokens[p].value === "*";
+  }
+  function isEOF(p = pos) {
+    return tokens[p] instanceof EOFToken;
+  }
+  function isClauseCombinator(p = pos) {
+    return tokens[p] instanceof DelimToken && [">", "+", "~"].includes(tokens[p].value);
+  }
+  function isSelectorClauseEnd(p = pos) {
+    return isComma(p) || isCloseParen(p) || isEOF(p) || isClauseCombinator(p) || tokens[p] instanceof WhitespaceToken;
+  }
+  function consumeFunctionArguments() {
+    const result2 = [consumeArgument()];
+    while (true) {
+      skipWhitespace();
+      if (!isComma())
+        break;
+      pos++;
+      result2.push(consumeArgument());
+    }
+    return result2;
+  }
+  function consumeArgument() {
+    skipWhitespace();
+    if (isNumber())
+      return tokens[pos++].value;
+    if (isString())
+      return tokens[pos++].value;
+    return consumeComplexSelector();
+  }
+  function consumeComplexSelector() {
+    const result2 = { simples: [] };
+    skipWhitespace();
+    if (isClauseCombinator()) {
+      result2.simples.push({ selector: { functions: [{ name: "scope", args: [] }] }, combinator: "" });
+    } else {
+      result2.simples.push({ selector: consumeSimpleSelector(), combinator: "" });
+    }
+    while (true) {
+      skipWhitespace();
+      if (isClauseCombinator()) {
+        result2.simples[result2.simples.length - 1].combinator = tokens[pos++].value;
+        skipWhitespace();
+      } else if (isSelectorClauseEnd()) {
+        break;
+      }
+      result2.simples.push({ combinator: "", selector: consumeSimpleSelector() });
+    }
+    return result2;
+  }
+  function consumeSimpleSelector() {
+    let rawCSSString = "";
+    const functions = [];
+    while (!isSelectorClauseEnd()) {
+      if (isIdent() || isStar()) {
+        rawCSSString += tokens[pos++].toSource();
+      } else if (tokens[pos] instanceof HashToken) {
+        rawCSSString += tokens[pos++].toSource();
+      } else if (tokens[pos] instanceof DelimToken && tokens[pos].value === ".") {
+        pos++;
+        if (isIdent())
+          rawCSSString += "." + tokens[pos++].toSource();
+        else
+          throw unexpected();
+      } else if (tokens[pos] instanceof ColonToken) {
+        pos++;
+        if (isIdent()) {
+          if (!customNames.has(tokens[pos].value.toLowerCase())) {
+            rawCSSString += ":" + tokens[pos++].toSource();
+          } else {
+            const name = tokens[pos++].value.toLowerCase();
+            functions.push({ name, args: [] });
+            names.add(name);
+          }
+        } else if (isFunction()) {
+          const name = tokens[pos++].value.toLowerCase();
+          if (!customNames.has(name)) {
+            rawCSSString += `:${name}(${consumeBuiltinFunctionArguments()})`;
+          } else {
+            functions.push({ name, args: consumeFunctionArguments() });
+            names.add(name);
+          }
+          skipWhitespace();
+          if (!isCloseParen())
+            throw unexpected();
+          pos++;
+        } else {
+          throw unexpected();
+        }
+      } else if (tokens[pos] instanceof OpenSquareToken) {
+        rawCSSString += "[";
+        pos++;
+        while (!(tokens[pos] instanceof CloseSquareToken) && !isEOF())
+          rawCSSString += tokens[pos++].toSource();
+        if (!(tokens[pos] instanceof CloseSquareToken))
+          throw unexpected();
+        rawCSSString += "]";
+        pos++;
+      } else {
+        throw unexpected();
+      }
+    }
+    if (!rawCSSString && !functions.length)
+      throw unexpected();
+    return { css: rawCSSString || void 0, functions };
+  }
+  function consumeBuiltinFunctionArguments() {
+    let s = "";
+    let balance = 1;
+    while (!isEOF()) {
+      if (isOpenParen() || isFunction())
+        balance++;
+      if (isCloseParen())
+        balance--;
+      if (!balance)
+        break;
+      s += tokens[pos++].toSource();
+    }
+    return s;
+  }
+  const result = consumeFunctionArguments();
+  if (!isEOF())
+    throw unexpected();
+  if (result.some((arg) => typeof arg !== "object" || !("simples" in arg)))
+    throw new InvalidSelectorError(`Error while parsing css selector "${selector}". Did you mean to CSS.escape it?`);
+  return { selector: result, names: Array.from(names) };
+}
+
+// src/vendor/isomorphic/selectorParser.ts
+var kNestedSelectorNames = /* @__PURE__ */ new Set(["internal:has", "internal:has-not", "internal:and", "internal:or", "internal:chain", "left-of", "right-of", "above", "below", "near"]);
+var kNestedSelectorNamesWithDistance = /* @__PURE__ */ new Set(["left-of", "right-of", "above", "below", "near"]);
+var customCSSNames = /* @__PURE__ */ new Set(["not", "is", "where", "has", "scope", "light", "visible", "text", "text-matches", "text-is", "has-text", "above", "below", "right-of", "left-of", "near", "nth-match"]);
+function parseSelector(selector) {
+  const parsedStrings = parseSelectorString(selector);
+  const parts = [];
+  for (const part of parsedStrings.parts) {
+    if (part.name === "css" || part.name === "css:light") {
+      if (part.name === "css:light")
+        part.body = ":light(" + part.body + ")";
+      const parsedCSS = parseCSS(part.body, customCSSNames);
+      parts.push({
+        name: "css",
+        body: parsedCSS.selector,
+        source: part.body
+      });
+      continue;
+    }
+    if (kNestedSelectorNames.has(part.name)) {
+      let innerSelector;
+      let distance;
+      try {
+        const unescaped = JSON.parse("[" + part.body + "]");
+        if (!Array.isArray(unescaped) || unescaped.length < 1 || unescaped.length > 2 || typeof unescaped[0] !== "string")
+          throw new InvalidSelectorError(`Malformed selector: ${part.name}=` + part.body);
+        innerSelector = unescaped[0];
+        if (unescaped.length === 2) {
+          if (typeof unescaped[1] !== "number" || !kNestedSelectorNamesWithDistance.has(part.name))
+            throw new InvalidSelectorError(`Malformed selector: ${part.name}=` + part.body);
+          distance = unescaped[1];
+        }
+      } catch (e) {
+        throw new InvalidSelectorError(`Malformed selector: ${part.name}=` + part.body);
+      }
+      const nested = { name: part.name, source: part.body, body: { parsed: parseSelector(innerSelector), distance } };
+      const lastFrame = [...nested.body.parsed.parts].reverse().find((part2) => part2.name === "internal:control" && part2.body === "enter-frame");
+      const lastFrameIndex = lastFrame ? nested.body.parsed.parts.indexOf(lastFrame) : -1;
+      if (lastFrameIndex !== -1 && selectorPartsEqual(nested.body.parsed.parts.slice(0, lastFrameIndex + 1), parts.slice(0, lastFrameIndex + 1)))
+        nested.body.parsed.parts.splice(0, lastFrameIndex + 1);
+      parts.push(nested);
+      continue;
+    }
+    parts.push({ ...part, source: part.body });
+  }
+  if (kNestedSelectorNames.has(parts[0].name))
+    throw new InvalidSelectorError(`"${parts[0].name}" selector cannot be first`);
+  return {
+    capture: parsedStrings.capture,
+    parts
+  };
+}
+function selectorPartsEqual(list1, list2) {
+  return stringifySelector({ parts: list1 }) === stringifySelector({ parts: list2 });
+}
+function stringifySelector(selector, forceEngineName) {
+  if (typeof selector === "string")
+    return selector;
+  return selector.parts.map((p, i) => {
+    let includeEngine = true;
+    if (!forceEngineName && i !== selector.capture) {
+      if (p.name === "css")
+        includeEngine = false;
+      else if (p.name === "xpath" && (p.source.startsWith("//") || p.source.startsWith("..")))
+        includeEngine = false;
+    }
+    const prefix = includeEngine ? p.name + "=" : "";
+    return `${i === selector.capture ? "*" : ""}${prefix}${p.source}`;
+  }).join(" >> ");
+}
+function parseSelectorString(selector) {
+  let index = 0;
+  let quote;
+  let start = 0;
+  const result = { parts: [] };
+  const append = () => {
+    const part = selector.substring(start, index).trim();
+    const eqIndex = part.indexOf("=");
+    let name;
+    let body;
+    if (eqIndex !== -1 && part.substring(0, eqIndex).trim().match(/^[a-zA-Z_0-9-+:*]+$/)) {
+      name = part.substring(0, eqIndex).trim();
+      body = part.substring(eqIndex + 1);
+    } else if (part.length > 1 && part[0] === '"' && part[part.length - 1] === '"') {
+      name = "text";
+      body = part;
+    } else if (part.length > 1 && part[0] === "'" && part[part.length - 1] === "'") {
+      name = "text";
+      body = part;
+    } else if (/^\(*\/\//.test(part) || part.startsWith("..")) {
+      name = "xpath";
+      body = part;
+    } else {
+      name = "css";
+      body = part;
+    }
+    let capture = false;
+    if (name[0] === "*") {
+      capture = true;
+      name = name.substring(1);
+    }
+    result.parts.push({ name, body });
+    if (capture) {
+      if (result.capture !== void 0)
+        throw new InvalidSelectorError(`Only one of the selectors can capture using * modifier`);
+      result.capture = result.parts.length - 1;
+    }
+  };
+  if (!selector.includes(">>")) {
+    index = selector.length;
+    append();
+    return result;
+  }
+  const shouldIgnoreTextSelectorQuote = () => {
+    const prefix = selector.substring(start, index);
+    const match = prefix.match(/^\s*text\s*=(.*)$/);
+    return !!match && !!match[1];
+  };
+  while (index < selector.length) {
+    const c = selector[index];
+    if (c === "\\" && index + 1 < selector.length) {
+      index += 2;
+    } else if (c === quote) {
+      quote = void 0;
+      index++;
+    } else if (!quote && (c === '"' || c === "'" || c === "`") && !shouldIgnoreTextSelectorQuote()) {
+      quote = c;
+      index++;
+    } else if (!quote && c === ">" && selector[index + 1] === ">") {
+      append();
+      index += 2;
+      start = index;
+    } else {
+      index++;
+    }
+  }
+  append();
+  return result;
+}
+
+// src/vendor/injected/layoutSelectorUtils.ts
+function boxRightOf(box1, box2, maxDistance) {
+  const distance = box1.left - box2.right;
+  if (distance < 0 || maxDistance !== void 0 && distance > maxDistance)
+    return;
+  return distance + Math.max(box2.bottom - box1.bottom, 0) + Math.max(box1.top - box2.top, 0);
+}
+function boxLeftOf(box1, box2, maxDistance) {
+  const distance = box2.left - box1.right;
+  if (distance < 0 || maxDistance !== void 0 && distance > maxDistance)
+    return;
+  return distance + Math.max(box2.bottom - box1.bottom, 0) + Math.max(box1.top - box2.top, 0);
+}
+function boxAbove(box1, box2, maxDistance) {
+  const distance = box2.top - box1.bottom;
+  if (distance < 0 || maxDistance !== void 0 && distance > maxDistance)
+    return;
+  return distance + Math.max(box1.left - box2.left, 0) + Math.max(box2.right - box1.right, 0);
+}
+function boxBelow(box1, box2, maxDistance) {
+  const distance = box1.top - box2.bottom;
+  if (distance < 0 || maxDistance !== void 0 && distance > maxDistance)
+    return;
+  return distance + Math.max(box1.left - box2.left, 0) + Math.max(box2.right - box1.right, 0);
+}
+function boxNear(box1, box2, maxDistance) {
+  const kThreshold = maxDistance === void 0 ? 50 : maxDistance;
+  let score = 0;
+  if (box1.left - box2.right >= 0)
+    score += box1.left - box2.right;
+  if (box2.left - box1.right >= 0)
+    score += box2.left - box1.right;
+  if (box2.top - box1.bottom >= 0)
+    score += box2.top - box1.bottom;
+  if (box1.top - box2.bottom >= 0)
+    score += box1.top - box2.bottom;
+  return score > kThreshold ? void 0 : score;
+}
+var kLayoutSelectorNames = ["left-of", "right-of", "above", "below", "near"];
+function layoutSelectorScore(name, element, inner, maxDistance) {
+  const box = element.getBoundingClientRect();
+  const scorer = { "left-of": boxLeftOf, "right-of": boxRightOf, "above": boxAbove, "below": boxBelow, "near": boxNear }[name];
+  let bestScore;
+  for (const e of inner) {
+    if (e === element)
+      continue;
+    const score = scorer(box, e.getBoundingClientRect(), maxDistance);
+    if (score === void 0)
+      continue;
+    if (bestScore === void 0 || score < bestScore)
+      bestScore = score;
+  }
+  return bestScore;
+}
+
+// src/vendor/injected/selectorUtils.ts
+function shouldSkipForTextMatching(element) {
+  const document = element.ownerDocument;
+  return element.nodeName === "SCRIPT" || element.nodeName === "NOSCRIPT" || element.nodeName === "STYLE" || document.head && document.head.contains(element);
+}
+function elementText(cache, root) {
+  let value = cache.get(root);
+  if (value === void 0) {
+    value = { full: "", normalized: "", immediate: [] };
+    if (!shouldSkipForTextMatching(root)) {
+      let currentImmediate = "";
+      if (root instanceof HTMLInputElement && (root.type === "submit" || root.type === "button" || root.type === "reset")) {
+        value = { full: root.value, normalized: normalizeWhiteSpace(root.value), immediate: [root.value] };
+      } else {
+        for (let child = root.firstChild; child; child = child.nextSibling) {
+          if (child.nodeType === Node.TEXT_NODE) {
+            value.full += child.nodeValue || "";
+            currentImmediate += child.nodeValue || "";
+          } else if (child.nodeType === Node.COMMENT_NODE) {
+            continue;
+          } else {
+            if (currentImmediate)
+              value.immediate.push(currentImmediate);
+            currentImmediate = "";
+            if (child.nodeType === Node.ELEMENT_NODE)
+              value.full += elementText(cache, child).full;
+          }
+        }
+        if (currentImmediate)
+          value.immediate.push(currentImmediate);
+        if (root.shadowRoot)
+          value.full += elementText(cache, root.shadowRoot).full;
+        if (value.full)
+          value.normalized = normalizeWhiteSpace(value.full);
+      }
+    }
+    cache.set(root, value);
+  }
+  return value;
+}
+function elementMatchesText(cache, element, matcher) {
+  if (shouldSkipForTextMatching(element))
+    return "none";
+  if (!matcher(elementText(cache, element)))
+    return "none";
+  for (let child = element.firstChild; child; child = child.nextSibling) {
+    if (child.nodeType === Node.ELEMENT_NODE && matcher(elementText(cache, child)))
+      return "selfAndChildren";
+  }
+  if (element.shadowRoot && matcher(elementText(cache, element.shadowRoot)))
+    return "selfAndChildren";
+  return "self";
+}
+
+// src/vendor/injected/selectorEvaluator.ts
+var SelectorEvaluatorImpl = class {
+  constructor() {
+    this._retainCacheCounter = 0;
+    this._cacheText = /* @__PURE__ */ new Map();
+    this._cacheQueryCSS = /* @__PURE__ */ new Map();
+    this._cacheMatches = /* @__PURE__ */ new Map();
+    this._cacheQuery = /* @__PURE__ */ new Map();
+    this._cacheMatchesSimple = /* @__PURE__ */ new Map();
+    this._cacheMatchesParents = /* @__PURE__ */ new Map();
+    this._cacheCallMatches = /* @__PURE__ */ new Map();
+    this._cacheCallQuery = /* @__PURE__ */ new Map();
+    this._cacheQuerySimple = /* @__PURE__ */ new Map();
+    this._engines = /* @__PURE__ */ new Map();
+    this._engines.set("not", notEngine);
+    this._engines.set("is", isEngine);
+    this._engines.set("where", isEngine);
+    this._engines.set("has", hasEngine);
+    this._engines.set("scope", scopeEngine);
+    this._engines.set("light", lightEngine);
+    this._engines.set("visible", visibleEngine);
+    this._engines.set("text", textEngine);
+    this._engines.set("text-is", textIsEngine);
+    this._engines.set("text-matches", textMatchesEngine);
+    this._engines.set("has-text", hasTextEngine);
+    this._engines.set("right-of", createLayoutEngine("right-of"));
+    this._engines.set("left-of", createLayoutEngine("left-of"));
+    this._engines.set("above", createLayoutEngine("above"));
+    this._engines.set("below", createLayoutEngine("below"));
+    this._engines.set("near", createLayoutEngine("near"));
+    this._engines.set("nth-match", nthMatchEngine);
+    const allNames = [...this._engines.keys()];
+    allNames.sort();
+    const parserNames = [...customCSSNames];
+    parserNames.sort();
+    if (allNames.join("|") !== parserNames.join("|"))
+      throw new Error(`Please keep customCSSNames in sync with evaluator engines: ${allNames.join("|")} vs ${parserNames.join("|")}`);
+  }
+  begin() {
+    ++this._retainCacheCounter;
+  }
+  end() {
+    --this._retainCacheCounter;
+    if (!this._retainCacheCounter) {
+      this._cacheQueryCSS.clear();
+      this._cacheMatches.clear();
+      this._cacheQuery.clear();
+      this._cacheMatchesSimple.clear();
+      this._cacheMatchesParents.clear();
+      this._cacheCallMatches.clear();
+      this._cacheCallQuery.clear();
+      this._cacheQuerySimple.clear();
+      this._cacheText.clear();
+    }
+  }
+  _cached(cache, main, rest, cb) {
+    if (!cache.has(main))
+      cache.set(main, []);
+    const entries = cache.get(main);
+    const entry = entries.find((e) => rest.every((value, index) => e.rest[index] === value));
+    if (entry)
+      return entry.result;
+    const result = cb();
+    entries.push({ rest, result });
+    return result;
+  }
+  _checkSelector(s) {
+    const wellFormed = typeof s === "object" && s && (Array.isArray(s) || "simples" in s && s.simples.length);
+    if (!wellFormed)
+      throw new Error(`Malformed selector "${s}"`);
+    return s;
+  }
+  matches(element, s, context) {
+    const selector = this._checkSelector(s);
+    this.begin();
+    try {
+      return this._cached(this._cacheMatches, element, [selector, context.scope, context.pierceShadow, context.originalScope], () => {
+        if (Array.isArray(selector))
+          return this._matchesEngine(isEngine, element, selector, context);
+        if (this._hasScopeClause(selector))
+          context = this._expandContextForScopeMatching(context);
+        if (!this._matchesSimple(element, selector.simples[selector.simples.length - 1].selector, context))
+          return false;
+        return this._matchesParents(element, selector, selector.simples.length - 2, context);
+      });
+    } finally {
+      this.end();
+    }
+  }
+  query(context, s) {
+    const selector = this._checkSelector(s);
+    this.begin();
+    try {
+      return this._cached(this._cacheQuery, selector, [context.scope, context.pierceShadow, context.originalScope], () => {
+        if (Array.isArray(selector))
+          return this._queryEngine(isEngine, context, selector);
+        if (this._hasScopeClause(selector))
+          context = this._expandContextForScopeMatching(context);
+        const previousScoreMap = this._scoreMap;
+        this._scoreMap = /* @__PURE__ */ new Map();
+        let elements = this._querySimple(context, selector.simples[selector.simples.length - 1].selector);
+        elements = elements.filter((element) => this._matchesParents(element, selector, selector.simples.length - 2, context));
+        if (this._scoreMap.size) {
+          elements.sort((a, b) => {
+            const aScore = this._scoreMap.get(a);
+            const bScore = this._scoreMap.get(b);
+            if (aScore === bScore)
+              return 0;
+            if (aScore === void 0)
+              return 1;
+            if (bScore === void 0)
+              return -1;
+            return aScore - bScore;
+          });
+        }
+        this._scoreMap = previousScoreMap;
+        return elements;
+      });
+    } finally {
+      this.end();
+    }
+  }
+  _markScore(element, score) {
+    if (this._scoreMap)
+      this._scoreMap.set(element, score);
+  }
+  _hasScopeClause(selector) {
+    return selector.simples.some((simple) => simple.selector.functions.some((f) => f.name === "scope"));
+  }
+  _expandContextForScopeMatching(context) {
+    if (context.scope.nodeType !== 1)
+      return context;
+    const scope = parentElementOrShadowHost(context.scope);
+    if (!scope)
+      return context;
+    return { ...context, scope, originalScope: context.originalScope || context.scope };
+  }
+  _matchesSimple(element, simple, context) {
+    return this._cached(this._cacheMatchesSimple, element, [simple, context.scope, context.pierceShadow, context.originalScope], () => {
+      if (element === context.scope)
+        return false;
+      if (simple.css && !this._matchesCSS(element, simple.css))
+        return false;
+      for (const func of simple.functions) {
+        if (!this._matchesEngine(this._getEngine(func.name), element, func.args, context))
+          return false;
+      }
+      return true;
+    });
+  }
+  _querySimple(context, simple) {
+    if (!simple.functions.length)
+      return this._queryCSS(context, simple.css || "*");
+    return this._cached(this._cacheQuerySimple, simple, [context.scope, context.pierceShadow, context.originalScope], () => {
+      let css = simple.css;
+      const funcs = simple.functions;
+      if (css === "*" && funcs.length)
+        css = void 0;
+      let elements;
+      let firstIndex = -1;
+      if (css !== void 0) {
+        elements = this._queryCSS(context, css);
+      } else {
+        firstIndex = funcs.findIndex((func) => this._getEngine(func.name).query !== void 0);
+        if (firstIndex === -1)
+          firstIndex = 0;
+        elements = this._queryEngine(this._getEngine(funcs[firstIndex].name), context, funcs[firstIndex].args);
+      }
+      for (let i = 0; i < funcs.length; i++) {
+        if (i === firstIndex)
+          continue;
+        const engine = this._getEngine(funcs[i].name);
+        if (engine.matches !== void 0)
+          elements = elements.filter((e) => this._matchesEngine(engine, e, funcs[i].args, context));
+      }
+      for (let i = 0; i < funcs.length; i++) {
+        if (i === firstIndex)
+          continue;
+        const engine = this._getEngine(funcs[i].name);
+        if (engine.matches === void 0)
+          elements = elements.filter((e) => this._matchesEngine(engine, e, funcs[i].args, context));
+      }
+      return elements;
+    });
+  }
+  _matchesParents(element, complex, index, context) {
+    if (index < 0)
+      return true;
+    return this._cached(this._cacheMatchesParents, element, [complex, index, context.scope, context.pierceShadow, context.originalScope], () => {
+      const { selector: simple, combinator } = complex.simples[index];
+      if (combinator === ">") {
+        const parent = parentElementOrShadowHostInContext(element, context);
+        if (!parent || !this._matchesSimple(parent, simple, context))
+          return false;
+        return this._matchesParents(parent, complex, index - 1, context);
+      }
+      if (combinator === "+") {
+        const previousSibling = previousSiblingInContext(element, context);
+        if (!previousSibling || !this._matchesSimple(previousSibling, simple, context))
+          return false;
+        return this._matchesParents(previousSibling, complex, index - 1, context);
+      }
+      if (combinator === "") {
+        let parent = parentElementOrShadowHostInContext(element, context);
+        while (parent) {
+          if (this._matchesSimple(parent, simple, context)) {
+            if (this._matchesParents(parent, complex, index - 1, context))
+              return true;
+            if (complex.simples[index - 1].combinator === "")
+              break;
+          }
+          parent = parentElementOrShadowHostInContext(parent, context);
+        }
+        return false;
+      }
+      if (combinator === "~") {
+        let previousSibling = previousSiblingInContext(element, context);
+        while (previousSibling) {
+          if (this._matchesSimple(previousSibling, simple, context)) {
+            if (this._matchesParents(previousSibling, complex, index - 1, context))
+              return true;
+            if (complex.simples[index - 1].combinator === "~")
+              break;
+          }
+          previousSibling = previousSiblingInContext(previousSibling, context);
+        }
+        return false;
+      }
+      if (combinator === ">=") {
+        let parent = element;
+        while (parent) {
+          if (this._matchesSimple(parent, simple, context)) {
+            if (this._matchesParents(parent, complex, index - 1, context))
+              return true;
+            if (complex.simples[index - 1].combinator === "")
+              break;
+          }
+          parent = parentElementOrShadowHostInContext(parent, context);
+        }
+        return false;
+      }
+      throw new Error(`Unsupported combinator "${combinator}"`);
+    });
+  }
+  _matchesEngine(engine, element, args, context) {
+    if (engine.matches)
+      return this._callMatches(engine, element, args, context);
+    if (engine.query)
+      return this._callQuery(engine, args, context).includes(element);
+    throw new Error(`Selector engine should implement "matches" or "query"`);
+  }
+  _queryEngine(engine, context, args) {
+    if (engine.query)
+      return this._callQuery(engine, args, context);
+    if (engine.matches)
+      return this._queryCSS(context, "*").filter((element) => this._callMatches(engine, element, args, context));
+    throw new Error(`Selector engine should implement "matches" or "query"`);
+  }
+  _callMatches(engine, element, args, context) {
+    return this._cached(this._cacheCallMatches, element, [engine, context.scope, context.pierceShadow, context.originalScope, ...args], () => {
+      return engine.matches(element, args, context, this);
+    });
+  }
+  _callQuery(engine, args, context) {
+    return this._cached(this._cacheCallQuery, engine, [context.scope, context.pierceShadow, context.originalScope, ...args], () => {
+      return engine.query(context, args, this);
+    });
+  }
+  _matchesCSS(element, css) {
+    return element.matches(css);
+  }
+  _queryCSS(context, css) {
+    return this._cached(this._cacheQueryCSS, css, [context.scope, context.pierceShadow, context.originalScope], () => {
+      let result = [];
+      function query(root) {
+        result = result.concat([...root.querySelectorAll(css)]);
+        if (!context.pierceShadow)
+          return;
+        if (root.shadowRoot)
+          query(root.shadowRoot);
+        for (const element of root.querySelectorAll("*")) {
+          if (element.shadowRoot)
+            query(element.shadowRoot);
+        }
+      }
+      query(context.scope);
+      return result;
+    });
+  }
+  _getEngine(name) {
+    const engine = this._engines.get(name);
+    if (!engine)
+      throw new Error(`Unknown selector engine "${name}"`);
+    return engine;
+  }
+};
+var isEngine = {
+  matches(element, args, context, evaluator) {
+    if (args.length === 0)
+      throw new Error(`"is" engine expects non-empty selector list`);
+    return args.some((selector) => evaluator.matches(element, selector, context));
+  },
+  query(context, args, evaluator) {
+    if (args.length === 0)
+      throw new Error(`"is" engine expects non-empty selector list`);
+    let elements = [];
+    for (const arg of args)
+      elements = elements.concat(evaluator.query(context, arg));
+    return args.length === 1 ? elements : sortInDOMOrder(elements);
+  }
+};
+var hasEngine = {
+  matches(element, args, context, evaluator) {
+    if (args.length === 0)
+      throw new Error(`"has" engine expects non-empty selector list`);
+    return evaluator.query({ ...context, scope: element }, args).length > 0;
+  }
+  // TODO: we can implement efficient "query" by matching "args" and returning
+  // all parents/descendants, just have to be careful with the ":scope" matching.
+};
+var scopeEngine = {
+  matches(element, args, context, evaluator) {
+    if (args.length !== 0)
+      throw new Error(`"scope" engine expects no arguments`);
+    const actualScope = context.originalScope || context.scope;
+    if (actualScope.nodeType === 9)
+      return element === actualScope.documentElement;
+    return element === actualScope;
+  },
+  query(context, args, evaluator) {
+    if (args.length !== 0)
+      throw new Error(`"scope" engine expects no arguments`);
+    const actualScope = context.originalScope || context.scope;
+    if (actualScope.nodeType === 9) {
+      const root = actualScope.documentElement;
+      return root ? [root] : [];
+    }
+    if (actualScope.nodeType === 1)
+      return [actualScope];
+    return [];
+  }
+};
+var notEngine = {
+  matches(element, args, context, evaluator) {
+    if (args.length === 0)
+      throw new Error(`"not" engine expects non-empty selector list`);
+    return !evaluator.matches(element, args, context);
+  }
+};
+var lightEngine = {
+  query(context, args, evaluator) {
+    return evaluator.query({ ...context, pierceShadow: false }, args);
+  },
+  matches(element, args, context, evaluator) {
+    return evaluator.matches(element, args, { ...context, pierceShadow: false });
+  }
+};
+var visibleEngine = {
+  matches(element, args, context, evaluator) {
+    if (args.length)
+      throw new Error(`"visible" engine expects no arguments`);
+    return isElementVisible(element);
+  }
+};
+var textEngine = {
+  matches(element, args, context, evaluator) {
+    if (args.length !== 1 || typeof args[0] !== "string")
+      throw new Error(`"text" engine expects a single string`);
+    const text = normalizeWhiteSpace(args[0]).toLowerCase();
+    const matcher = (elementText2) => elementText2.normalized.toLowerCase().includes(text);
+    return elementMatchesText(evaluator._cacheText, element, matcher) === "self";
+  }
+};
+var textIsEngine = {
+  matches(element, args, context, evaluator) {
+    if (args.length !== 1 || typeof args[0] !== "string")
+      throw new Error(`"text-is" engine expects a single string`);
+    const text = normalizeWhiteSpace(args[0]);
+    const matcher = (elementText2) => {
+      if (!text && !elementText2.immediate.length)
+        return true;
+      return elementText2.immediate.some((s) => normalizeWhiteSpace(s) === text);
+    };
+    return elementMatchesText(evaluator._cacheText, element, matcher) !== "none";
+  }
+};
+var textMatchesEngine = {
+  matches(element, args, context, evaluator) {
+    if (args.length === 0 || typeof args[0] !== "string" || args.length > 2 || args.length === 2 && typeof args[1] !== "string")
+      throw new Error(`"text-matches" engine expects a regexp body and optional regexp flags`);
+    const re = new RegExp(args[0], args.length === 2 ? args[1] : void 0);
+    const matcher = (elementText2) => re.test(elementText2.full);
+    return elementMatchesText(evaluator._cacheText, element, matcher) === "self";
+  }
+};
+var hasTextEngine = {
+  matches(element, args, context, evaluator) {
+    if (args.length !== 1 || typeof args[0] !== "string")
+      throw new Error(`"has-text" engine expects a single string`);
+    if (shouldSkipForTextMatching(element))
+      return false;
+    const text = normalizeWhiteSpace(args[0]).toLowerCase();
+    const matcher = (elementText2) => elementText2.normalized.toLowerCase().includes(text);
+    return matcher(elementText(evaluator._cacheText, element));
+  }
+};
+function createLayoutEngine(name) {
+  return {
+    matches(element, args, context, evaluator) {
+      const maxDistance = args.length && typeof args[args.length - 1] === "number" ? args[args.length - 1] : void 0;
+      const queryArgs = maxDistance === void 0 ? args : args.slice(0, args.length - 1);
+      if (args.length < 1 + (maxDistance === void 0 ? 0 : 1))
+        throw new Error(`"${name}" engine expects a selector list and optional maximum distance in pixels`);
+      const inner = evaluator.query(context, queryArgs);
+      const score = layoutSelectorScore(name, element, inner, maxDistance);
+      if (score === void 0)
+        return false;
+      evaluator._markScore(element, score);
+      return true;
+    }
+  };
+}
+var nthMatchEngine = {
+  query(context, args, evaluator) {
+    let index = args[args.length - 1];
+    if (args.length < 2)
+      throw new Error(`"nth-match" engine expects non-empty selector list and an index argument`);
+    if (typeof index !== "number" || index < 1)
+      throw new Error(`"nth-match" engine expects a one-based index as the last argument`);
+    const elements = isEngine.query(context, args.slice(0, args.length - 1), evaluator);
+    index--;
+    return index < elements.length ? [elements[index]] : [];
+  }
+};
+function parentElementOrShadowHostInContext(element, context) {
+  if (element === context.scope)
+    return;
+  if (!context.pierceShadow)
+    return element.parentElement || void 0;
+  return parentElementOrShadowHost(element);
+}
+function previousSiblingInContext(element, context) {
+  if (element === context.scope)
+    return;
+  return element.previousElementSibling || void 0;
+}
+function sortInDOMOrder(elements) {
+  const elementToEntry = /* @__PURE__ */ new Map();
+  const roots = [];
+  const result = [];
+  function append(element) {
+    let entry = elementToEntry.get(element);
+    if (entry)
+      return entry;
+    const parent = parentElementOrShadowHost(element);
+    if (parent) {
+      const parentEntry = append(parent);
+      parentEntry.children.push(element);
+    } else {
+      roots.push(element);
+    }
+    entry = { children: [], taken: false };
+    elementToEntry.set(element, entry);
+    return entry;
+  }
+  for (const e of elements)
+    append(e).taken = true;
+  function visit(element) {
+    const entry = elementToEntry.get(element);
+    if (entry.taken)
+      result.push(element);
+    if (entry.children.length > 1) {
+      const set = new Set(entry.children);
+      entry.children = [];
+      let child = element.firstElementChild;
+      while (child && entry.children.length < set.size) {
+        if (set.has(child))
+          entry.children.push(child);
+        child = child.nextElementSibling;
+      }
+      child = element.shadowRoot ? element.shadowRoot.firstElementChild : null;
+      while (child && entry.children.length < set.size) {
+        if (set.has(child))
+          entry.children.push(child);
+        child = child.nextElementSibling;
+      }
+    }
+    entry.children.forEach(visit);
+  }
+  roots.forEach(visit);
+  return result;
+}
+
+// src/vendor/injected/xpathSelectorEngine.ts
+var XPathEngine = {
+  queryAll(root, selector) {
+    if (selector.startsWith("/") && root.nodeType !== Node.DOCUMENT_NODE)
+      selector = "." + selector;
+    const result = [];
+    const document = root.ownerDocument || root;
+    if (!document)
+      return result;
+    const it = document.evaluate(selector, root, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE);
+    for (let node = it.iterateNext(); node; node = it.iterateNext()) {
+      if (node.nodeType === Node.ELEMENT_NODE)
+        result.push(node);
+    }
+    return result;
+  }
+};
+
 // src/refactInjected.ts
 var injectedInstanceName = "__refact_injected__";
 var bindingName = "__refact_binding";
@@ -2489,3 +3443,78 @@ function bootstrapRefactInjected(global, builtins) {
   refactGlobal[injectedInstanceName] = injected;
   return injected;
 }
+var selectorEvaluator = new SelectorEvaluatorImpl();
+var selectorEngines = /* @__PURE__ */ new Map([
+  ["css", {
+    queryAll(root, selector) {
+      return selectorEvaluator.query({ scope: root, pierceShadow: true }, selector);
+    }
+  }],
+  ["xpath", XPathEngine]
+]);
+function querySelectorPart(part, root) {
+  const engine = selectorEngines.get(part.name);
+  if (!engine)
+    throw new Error(`Unknown selector engine "${part.name}"`);
+  return engine.queryAll(root, part.body);
+}
+function queryLayoutSelector(elements, part, originalRoot) {
+  const body = part.body;
+  const inner = queryParsedSelector(body.parsed, originalRoot);
+  const matches = [];
+  for (const element of elements) {
+    const score = layoutSelectorScore(part.name, element, inner, body.distance);
+    if (score !== void 0)
+      matches.push({ element, score });
+  }
+  matches.sort((left, right) => left.score - right.score);
+  return new Set(matches.map((match) => match.element));
+}
+function queryParsedSelector(selector, root) {
+  if (selector.capture !== void 0) {
+    const captured = { parts: selector.parts.slice(0, selector.capture + 1) };
+    if (selector.capture < selector.parts.length - 1) {
+      const parsed = { parts: selector.parts.slice(selector.capture + 1) };
+      captured.parts.push({
+        name: "internal:has",
+        body: { parsed },
+        source: stringifySelector(parsed)
+      });
+    }
+    return queryParsedSelector(captured, root);
+  }
+  selectorEvaluator.begin();
+  try {
+    let roots = /* @__PURE__ */ new Set([root]);
+    for (const part of selector.parts) {
+      if (part.name === "internal:has") {
+        roots = new Set([...roots].filter(
+          (element) => queryParsedSelector(part.body.parsed, element).length > 0
+        ));
+      } else if (part.name === "internal:and") {
+        const andElements = queryParsedSelector(part.body.parsed, root);
+        roots = new Set(andElements.filter((element) => roots.has(element)));
+      } else if (part.name === "internal:or") {
+        const orElements = queryParsedSelector(part.body.parsed, root);
+        roots = new Set(sortInDOMOrder(/* @__PURE__ */ new Set([...roots, ...orElements])));
+      } else if (kLayoutSelectorNames.includes(part.name)) {
+        roots = queryLayoutSelector(roots, part, root);
+      } else {
+        const next = /* @__PURE__ */ new Set();
+        for (const queryRoot of roots) {
+          for (const element of querySelectorPart(part, queryRoot))
+            next.add(element);
+        }
+        roots = next;
+      }
+    }
+    return [...roots];
+  } finally {
+    selectorEvaluator.end();
+  }
+}
+Object.defineProperty(RefactInjected.prototype, "querySelectorAll", {
+  value(selectorChain, scope) {
+    return queryParsedSelector(parseSelector(selectorChain), scope != null ? scope : globalThis.document);
+  }
+});

@@ -150,6 +150,48 @@ mod tests {
     }
 
     #[test]
+    fn injected_bundle_registers_every_custom_css_pseudo_class() {
+        for name in [
+            "not",
+            "is",
+            "where",
+            "has",
+            "scope",
+            "light",
+            "visible",
+            "text",
+            "text-is",
+            "text-matches",
+            "has-text",
+            "right-of",
+            "left-of",
+            "above",
+            "below",
+            "near",
+            "nth-match",
+        ] {
+            let registration = format!("this._engines.set(\"{name}\"");
+            assert!(INJECTED_BUNDLE.contains(&registration), "missing {name}");
+        }
+    }
+
+    #[test]
+    fn injected_bundle_contains_selector_chain_and_xpath_execution() {
+        for marker in [
+            "querySelectorAll",
+            "parseSelector(selectorChain)",
+            "selector.parts",
+            "XPathEngine",
+            "document.evaluate",
+            "pierceShadow: true",
+            "pierceShadow: false",
+            "index--",
+        ] {
+            assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
+        }
+    }
+
+    #[test]
     fn role_utility_notice_names_source_and_commit() {
         let notice = include_str!("../injected/NOTICE.md");
         assert!(notice.contains("src/vendor/injected/roleUtils.ts"));

@@ -30,7 +30,6 @@ import {
 import type { RefactBuiltins } from './vendor/injected/utilityScript';
 import { getAriaRole, getImplicitAriaRole } from './vendor/injected/roleUtils';
 import { getElementAccessibleDescription, getElementAccessibleName } from './vendor/injected/roleUtils';
-
 type ElementStateName = 'visible' | 'enabled' | 'editable' | 'checked' | 'unchecked' | 'mixed' | 'stable';
 
 type ElementStates = Readonly<{
@@ -338,3 +337,101 @@ export function bootstrapRefactInjected(
   refactGlobal[injectedInstanceName] = injected;
   return injected;
 }
+
+import { SelectorEvaluatorImpl, sortInDOMOrder } from './vendor/injected/selectorEvaluator';
+import { kLayoutSelectorNames, layoutSelectorScore } from './vendor/injected/layoutSelectorUtils';
+import { XPathEngine } from './vendor/injected/xpathSelectorEngine';
+import type { SelectorEngine, SelectorRoot } from './vendor/injected/selectorEngine';
+import {
+  parseSelector,
+  stringifySelector,
+  type NestedSelectorBody,
+  type ParsedSelector,
+  type ParsedSelectorPart,
+} from './vendor/isomorphic/selectorParser';
+
+type SelectorQueryScope = Document | Element | ShadowRoot;
+
+const selectorEvaluator = new SelectorEvaluatorImpl();
+const selectorEngines = new Map<string, SelectorEngine>([
+  ['css', {
+    queryAll(root: SelectorRoot, selector: unknown): Element[] {
+      return selectorEvaluator.query({ scope: root as Document | Element, pierceShadow: true }, selector);
+    },
+  }],
+  ['xpath', XPathEngine],
+]);
+
+function querySelectorPart(part: ParsedSelectorPart, root: SelectorRoot): Element[] {
+  const engine = selectorEngines.get(part.name);
+  if (!engine)
+    throw new Error(`Unknown selector engine "${part.name}"`);
+  return engine.queryAll(root, part.body);
+}
+
+function queryLayoutSelector(
+  elements: Set<Element>,
+  part: ParsedSelectorPart,
+  originalRoot: SelectorQueryScope,
+): Set<Element> {
+  const body = part.body as NestedSelectorBody;
+  const inner = queryParsedSelector(body.parsed, originalRoot);
+  const matches: { element: Element; score: number }[] = [];
+  for (const element of elements) {
+    const score = layoutSelectorScore(part.name as typeof kLayoutSelectorNames[number], element, inner, body.distance);
+    if (score !== undefined)
+      matches.push({ element, score });
+  }
+  matches.sort((left, right) => left.score - right.score);
+  return new Set(matches.map(match => match.element));
+}
+
+function queryParsedSelector(selector: ParsedSelector, root: SelectorQueryScope): Element[] {
+  if (selector.capture !== undefined) {
+    const captured: ParsedSelector = { parts: selector.parts.slice(0, selector.capture + 1) };
+    if (selector.capture < selector.parts.length - 1) {
+      const parsed: ParsedSelector = { parts: selector.parts.slice(selector.capture + 1) };
+      captured.parts.push({
+        name: 'internal:has',
+        body: { parsed },
+        source: stringifySelector(parsed),
+      });
+    }
+    return queryParsedSelector(captured, root);
+  }
+  selectorEvaluator.begin();
+  try {
+    let roots = new Set<Element>([root as Element]);
+    for (const part of selector.parts) {
+      if (part.name === 'internal:has') {
+        roots = new Set([...roots].filter(element =>
+          queryParsedSelector((part.body as NestedSelectorBody).parsed, element).length > 0,
+        ));
+      } else if (part.name === 'internal:and') {
+        const andElements = queryParsedSelector((part.body as NestedSelectorBody).parsed, root);
+        roots = new Set(andElements.filter(element => roots.has(element)));
+      } else if (part.name === 'internal:or') {
+        const orElements = queryParsedSelector((part.body as NestedSelectorBody).parsed, root);
+        roots = new Set(sortInDOMOrder(new Set([...roots, ...orElements])));
+      } else if (kLayoutSelectorNames.includes(part.name as typeof kLayoutSelectorNames[number])) {
+        roots = queryLayoutSelector(roots, part, root);
+      } else {
+        const next = new Set<Element>();
+        for (const queryRoot of roots) {
+          for (const element of querySelectorPart(part, queryRoot))
+            next.add(element);
+        }
+        roots = next;
+      }
+    }
+    return [...roots];
+  } finally {
+    selectorEvaluator.end();
+  }
+}
+
+Object.defineProperty(RefactInjected.prototype, 'querySelectorAll', {
+  value(selectorChain: string, scope?: SelectorQueryScope): Element[] {
+    return queryParsedSelector(parseSelector(selectorChain), scope ?? globalThis.document);
+  },
+});

@@ -57,6 +57,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "strict-multi.html",
     "hostile-globals.html",
     "hit-target.html",
+    "selectors.html",
 ];
 
 fn execute_steps(
@@ -1405,4 +1406,153 @@ async fn element_states_absorb_detachment_between_animation_frames() {
         )
         .unwrap();
     assert_eq!(states["stable"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn selector_evaluator_matches_text_visibility_and_global_nth() {
+    let Some(mut case) = BrowserCase::start("selectors.html").await else {
+        return;
+    };
+    case.setup_world();
+    let selectors = [
+        "css=:text(\"Needle text\")",
+        "css=article:has-text(\"ancestor needle\")",
+        "css=:nth-match(.global-button, 2)",
+        "css=button:visible",
+        "css=body >> css=#second",
+    ];
+    let expected = [
+        vec!["text-leaf"],
+        vec!["has-text-parent"],
+        vec!["second"],
+        vec![
+            "first",
+            "second",
+            "visible",
+            "above",
+            "near",
+            "anchor",
+            "below",
+            "far",
+            "shadow-button",
+        ],
+        vec!["second"],
+    ];
+    for (selector, expected_ids) in selectors.into_iter().zip(expected) {
+        let handles = case
+            .runtime
+            .world_manager
+            .call_injected_handles(&case.tab, "querySelectorAll", json!([selector]))
+            .unwrap();
+        let ids = handles
+            .iter()
+            .map(|handle| {
+                case.runtime
+                    .world_manager
+                    .call_function_on(&case.tab, handle, "function() { return this.id; }", vec![])
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected_ids, "selector {selector}");
+    }
+    let native_nth_child_count = case
+        .tab
+        .evaluate(
+            "document.querySelectorAll('.global-button:nth-child(2)').length",
+            false,
+        )
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(native_nth_child_count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn selector_evaluator_preserves_shadow_and_xpath_boundaries() {
+    let Some(mut case) = BrowserCase::start("selectors.html").await else {
+        return;
+    };
+    case.setup_world();
+    let queries = [
+        ("css=#shadow-button", vec!["shadow-button"]),
+        ("css=:light(#shadow-button)", vec![]),
+    ];
+    for (selector, expected_ids) in queries {
+        let handles = case
+            .runtime
+            .world_manager
+            .call_injected_handles(&case.tab, "querySelectorAll", json!([selector]))
+            .unwrap();
+        let ids = handles
+            .iter()
+            .map(|handle| {
+                case.runtime
+                    .world_manager
+                    .call_function_on(&case.tab, handle, "function() { return this.id; }", vec![])
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected_ids, "selector {selector}");
+    }
+    let xpath = case
+        .runtime
+        .world_manager
+        .call_injected_handles(&case.tab, "querySelectorAll", json!(["//button"]))
+        .unwrap();
+    assert_eq!(xpath.len(), 9);
+    let ids = xpath
+        .iter()
+        .map(|handle| {
+            case.runtime
+                .world_manager
+                .call_function_on(&case.tab, handle, "function() { return this.id; }", vec![])
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert!(!ids.iter().any(|id| id == "shadow-button"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn selector_evaluator_matches_and_sorts_layout_relations() {
+    let Some(mut case) = BrowserCase::start("selectors.html").await else {
+        return;
+    };
+    case.setup_world();
+    let selectors = [
+        ("css=#layout button:above(#anchor)", vec!["above"]),
+        ("css=#layout button:below(#anchor)", vec!["below", "far"]),
+        ("css=#layout button:near(#anchor)", vec!["near"]),
+    ];
+    for (selector, expected_ids) in selectors {
+        let handles = case
+            .runtime
+            .world_manager
+            .call_injected_handles(&case.tab, "querySelectorAll", json!([selector]))
+            .unwrap();
+        let ids = handles
+            .iter()
+            .map(|handle| {
+                case.runtime
+                    .world_manager
+                    .call_function_on(&case.tab, handle, "function() { return this.id; }", vec![])
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected_ids, "selector {selector}");
+    }
 }

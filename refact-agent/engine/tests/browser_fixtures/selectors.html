@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Selector evaluator fixture</title>
+    <style>
+      #layout {
+        position: relative;
+        width: 420px;
+        height: 360px;
+      }
+      #layout button {
+        position: absolute;
+        width: 80px;
+        height: 30px;
+      }
+      #above {
+        left: 160px;
+        top: 20px;
+      }
+      #near {
+        left: 245px;
+        top: 145px;
+      }
+      #anchor {
+        left: 160px;
+        top: 150px;
+      }
+      #below {
+        left: 160px;
+        top: 280px;
+      }
+      #far {
+        left: 20px;
+        top: 280px;
+      }
+    </style>
+  </head>
+  <body>
+    <section id="text-container">Container <span id="text-leaf">Needle text</span></section>
+    <article id="has-text-parent"><span>Ancestor needle</span></article>
+    <div><button class="global-button" id="first">First</button></div>
+    <div><button class="global-button" id="second">Second</button></div>
+    <button id="visible">Visible</button>
+    <button id="hidden" style="display: none">Hidden</button>
+    <div id="shadow-host"></div>
+    <div id="layout">
+      <button id="above">Above</button>
+      <button id="near">Near</button>
+      <button id="anchor">Anchor</button>
+      <button id="below">Below</button>
+      <button id="far">Far</button>
+    </div>
+    <script>
+      const root = document.querySelector('#shadow-host').attachShadow({ mode: 'open' });
+      root.innerHTML = '<button id="shadow-button">Shadow</button>';
+    </script>
+  </body>
+</html>
