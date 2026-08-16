@@ -7,8 +7,8 @@ mod handles;
 mod hit_target;
 mod injected_source;
 mod keyboard;
-mod locator_handlers;
 mod locator_gen;
+mod locator_handlers;
 mod locators;
 mod mouse;
 mod network;
@@ -18,10 +18,10 @@ mod us_keyboard_layout;
 mod world;
 
 pub use actionability::{
-    ACTION_RETRY_BACKOFF_MS, LOCATOR_RETRY_BACKOFF_MS, ActionKind, ActionabilityDiagnostic,
-    ActionabilityDriver, ActionabilityEngine, ActionabilityError, ActionabilitySuccess,
-    ActionabilityTimeouts, CallLog, Clock, Deadline, LocatorOutcome, RequiredStates, SystemClock,
-    TimeoutError, TimeoutKind, required_states,
+    ACTION_RETRY_BACKOFF_MS, LOCATOR_RETRY_BACKOFF_MS, MAX_CALL_LOG_ENTRIES, ActionKind,
+    ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine, ActionabilityError,
+    ActionabilitySuccess, ActionabilityTimeouts, CallLog, Clock, Deadline, LocatorOutcome,
+    RequiredStates, SystemClock, TimeoutError, TimeoutKind, required_states,
 };
 pub use dialogs::{DialogDecision, DialogManager, DialogResponse};
 pub use handles::{

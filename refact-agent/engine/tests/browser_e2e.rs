@@ -660,11 +660,18 @@ async fn click_delayed_button_without_wait_seconds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn click_obscured_waits_for_overlay() {
-    let Some(case) = BrowserCase::start("overlay.html").await else {
+    let Some(mut case) = BrowserCase::start("overlay.html").await else {
         return;
     };
-    let report = execute_fixture_steps(
-        &case.tab,
+    case.setup_world();
+    case.tab
+        .evaluate(
+            "const overlay = document.createElement('div'); overlay.id = 'overlay'; overlay.textContent = 'blocking overlay'; overlay.style.cssText = 'position:fixed;inset:0;z-index:10'; document.body.append(overlay); setTimeout(() => overlay.remove(), 2500)",
+            false,
+        )
+        .unwrap();
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
         &[
             BrowserStep::Click {
                 locator: BrowserLocator::css("#target"),
@@ -674,11 +681,57 @@ async fn click_obscured_waits_for_overlay() {
                 timeout_ms: Some(2_000),
             },
         ],
+        &ImagePolicy::browser_capture(),
     );
     assert!(
         report.ok,
         "click should wait for overlay removal: {report:?}"
     );
+    let diagnostics = report.steps[0]
+        .actionability
+        .as_ref()
+        .expect("retried click should include actionability diagnostics");
+    assert!(diagnostics.attempts.unwrap_or_default() > 0);
+    assert_eq!(diagnostics.receives_events, Some(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn click_permanently_obscured_reports_intercepting_element() {
+    let Some(mut case) = BrowserCase::start("overlay.html").await else {
+        return;
+    };
+    case.setup_world();
+    case.tab
+        .evaluate(
+            "const overlay = document.createElement('div'); overlay.id = 'permanent-overlay'; overlay.textContent = 'blocking overlay'; overlay.style.cssText = 'position:fixed;inset:0;z-index:10'; document.body.append(overlay)",
+            false,
+        )
+        .unwrap();
+
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::Click {
+            locator: BrowserLocator::css("#target"),
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(!report.ok, "obscured click should time out: {report:?}");
+    let diagnostics = report.steps[0]
+        .actionability
+        .as_ref()
+        .expect("failed click should include actionability diagnostics");
+    assert!(diagnostics.timed_out);
+    assert_eq!(diagnostics.receives_events, Some(false));
+    assert!(diagnostics
+        .intercepting_element
+        .as_deref()
+        .is_some_and(|preview| preview.contains("permanent-overlay")));
+    assert!(diagnostics
+        .call_log
+        .last()
+        .is_some_and(|entry| entry.contains("intercepts pointer events")));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1385,6 +1438,37 @@ async fn moving_target_waits_until_stable() {
     );
     assert!(report.ok, "stable wait and click failed: {report:?}");
     assert_eq!(returned_text(&report), "moving clicked");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn moving_target_click_reports_successful_retries() {
+    let Some(mut case) = BrowserCase::start("moving-target.html").await else {
+        return;
+    };
+    case.setup_world();
+    case.tab
+        .evaluate(
+            "const moving = document.querySelector('#moving'); moving.style.animation = 'none'; void moving.offsetWidth; moving.style.animation = 'travel 1.5s linear forwards'",
+            false,
+        )
+        .unwrap();
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::Click {
+            locator: BrowserLocator::css("#moving"),
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(report.ok, "moving click should settle: {report:?}");
+    let diagnostics = report.steps[0]
+        .actionability
+        .as_ref()
+        .expect("retried click should include actionability diagnostics");
+    assert!(diagnostics.attempts.unwrap_or_default() > 0);
+    assert_eq!(diagnostics.stable, Some(true));
+    assert_eq!(diagnostics.receives_events, Some(true));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

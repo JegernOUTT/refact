@@ -3,9 +3,12 @@ use std::fmt::{Display, Formatter};
 use std::time::{Duration, Instant};
 
 use crate::ElementState;
+use refact_integrations::browser_models::ActionabilityDiagnostics;
 
 pub const LOCATOR_RETRY_BACKOFF_MS: &[u64] = &[0, 20, 50, 100, 100, 500, 500];
 pub const ACTION_RETRY_BACKOFF_MS: &[u64] = &[0, 20, 100, 100, 500, 500];
+pub const MAX_CALL_LOG_ENTRIES: usize = 50;
+const CALL_LOG_TRUNCATED_SUFFIX: &str = " (call log truncated to the last 50 entries)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionKind {
@@ -190,12 +193,45 @@ impl Deadline {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CallLog {
     pub entries: Vec<String>,
+    truncated: bool,
 }
 
 impl CallLog {
     pub fn push(&mut self, message: impl Into<String>) {
-        self.entries.push(message.into());
+        let message = mask_diagnostic_text(&message.into());
+        if self.truncated {
+            let last = self.entries.last_mut().unwrap();
+            if let Some(unmarked) = last.strip_suffix(CALL_LOG_TRUNCATED_SUFFIX) {
+                last.truncate(unmarked.len());
+            }
+        }
+        if self.entries.len() == MAX_CALL_LOG_ENTRIES {
+            self.entries.remove(0);
+            self.truncated = true;
+        }
+        self.entries.push(message);
+        if self.truncated {
+            self.entries
+                .last_mut()
+                .unwrap()
+                .push_str(CALL_LOG_TRUNCATED_SUFFIX);
+        }
     }
+}
+
+fn mask_diagnostic_text(message: &str) -> String {
+    let message = refact_core::string_utils::redact_sensitive(message);
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("type=\"password\"")
+        && !lower.contains("type='password'")
+        && !lower.contains("type=password")
+    {
+        return message;
+    }
+    regex::Regex::new(r#"(?i)\bvalue\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)"#)
+        .unwrap()
+        .replace_all(&message, "value=\"[REDACTED]\"")
+        .into_owned()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -261,6 +297,11 @@ pub struct TimeoutError {
     pub timeout: Duration,
     pub diagnostic: ActionabilityDiagnostic,
     pub call_log: CallLog,
+    pub elapsed: Duration,
+    pub attempts: u32,
+    pub attached: Option<bool>,
+    pub state: Option<ElementState>,
+    pub receives_events: Option<bool>,
 }
 
 impl Display for TimeoutError {
@@ -288,6 +329,11 @@ pub enum ActionabilityError {
     Failed {
         diagnostic: ActionabilityDiagnostic,
         call_log: CallLog,
+        elapsed: Duration,
+        attempts: u32,
+        attached: Option<bool>,
+        state: Option<ElementState>,
+        receives_events: Option<bool>,
     },
 }
 
@@ -298,6 +344,7 @@ impl Display for ActionabilityError {
             Self::Failed {
                 diagnostic,
                 call_log,
+                ..
             } => {
                 writeln!(formatter, "{}", diagnostic.log_line())?;
                 if !call_log.entries.is_empty() {
@@ -318,6 +365,117 @@ impl Error for ActionabilityError {}
 pub struct ActionabilitySuccess<T> {
     pub output: T,
     pub call_log: CallLog,
+    pub elapsed: Duration,
+    pub attempts: u32,
+    pub attached: Option<bool>,
+    pub state: Option<ElementState>,
+    pub receives_events: Option<bool>,
+}
+
+impl<T> ActionabilitySuccess<T> {
+    pub fn diagnostics(&self, action: ActionKind) -> ActionabilityDiagnostics {
+        diagnostics_from_parts(
+            action,
+            &self.call_log,
+            false,
+            self.elapsed,
+            self.attempts,
+            self.attached,
+            self.state.as_ref(),
+            self.receives_events,
+            None,
+        )
+    }
+}
+
+impl ActionabilityError {
+    pub fn diagnostics(&self, action: ActionKind) -> ActionabilityDiagnostics {
+        match self {
+            Self::Timeout(error) => diagnostics_from_parts(
+                action,
+                &error.call_log,
+                true,
+                error.elapsed,
+                error.attempts,
+                error.attached,
+                error.state.as_ref(),
+                error.receives_events,
+                Some(&error.diagnostic),
+            ),
+            Self::Failed {
+                diagnostic,
+                call_log,
+                elapsed,
+                attempts,
+                attached,
+                state,
+                receives_events,
+            } => diagnostics_from_parts(
+                action,
+                call_log,
+                false,
+                *elapsed,
+                *attempts,
+                *attached,
+                state.as_ref(),
+                *receives_events,
+                Some(diagnostic),
+            ),
+        }
+    }
+}
+
+fn diagnostics_from_parts(
+    action: ActionKind,
+    call_log: &CallLog,
+    timed_out: bool,
+    elapsed: Duration,
+    attempts: u32,
+    attached: Option<bool>,
+    state: Option<&ElementState>,
+    receives_events: Option<bool>,
+    diagnostic: Option<&ActionabilityDiagnostic>,
+) -> ActionabilityDiagnostics {
+    let required = required_states(action);
+    let intercepting_element = diagnostic.and_then(|diagnostic| match diagnostic {
+        ActionabilityDiagnostic::InterceptsPointerEvents { description } => {
+            Some(mask_diagnostic_text(description))
+        }
+        _ => None,
+    });
+    ActionabilityDiagnostics {
+        call_log: call_log.entries.clone(),
+        timed_out,
+        elapsed_ms: Some(elapsed.as_millis().min(u128::from(u64::MAX)) as u64),
+        attempts: Some(attempts),
+        attached,
+        visible: if required.visible {
+            state.map(|state| state.visible)
+        } else {
+            None
+        },
+        stable: if required.stable {
+            state.map(|state| state.stable)
+        } else {
+            None
+        },
+        enabled: if required.enabled {
+            state.map(|state| state.enabled)
+        } else {
+            None
+        },
+        editable: if required.editable {
+            state.and_then(|state| state.editable)
+        } else {
+            None
+        },
+        receives_events: if required.receives_events {
+            receives_events
+        } else {
+            None
+        },
+        intercepting_element,
+    }
 }
 
 pub struct ActionabilityEngine<C> {
@@ -371,47 +529,98 @@ impl<C: Clock> ActionabilityEngine<C> {
         driver: &mut D,
     ) -> Result<ActionabilitySuccess<D::Output>, ActionabilityError> {
         let deadline = Deadline::new(&self.clock, timeout);
+        let started_at = self.clock.now();
         let mut call_log = CallLog::default();
         let mut last_diagnostic = ActionabilityDiagnostic::NotFound;
         let mut locator_attempt = 0;
-        self.perform_action_prechecks(driver, &mut call_log)?;
+        let mut attempts = 0;
+        let mut attached = None;
+        let mut last_state = None;
+        let mut receives_events = None;
+        if let Err(error) = self.perform_action_prechecks(driver, &mut call_log) {
+            return Err(self.enrich_error(
+                error,
+                started_at,
+                attempts,
+                attached,
+                last_state,
+                receives_events,
+            ));
+        }
         call_log.push(format!("waiting for {locator}"));
 
         loop {
             let delay = backoff_delay(LOCATOR_RETRY_BACKOFF_MS, locator_attempt);
             if !self.wait(delay, deadline, &mut call_log) {
-                return Err(timeout_error(timeout, last_diagnostic, call_log));
+                return Err(timeout_error(
+                    timeout,
+                    last_diagnostic,
+                    call_log,
+                    self.clock.now().saturating_sub(started_at),
+                    attempts,
+                    attached,
+                    last_state,
+                    receives_events,
+                ));
             }
             locator_attempt += 1;
 
             match driver.resolve() {
                 LocatorOutcome::NotFound => {
+                    attached = Some(false);
                     last_diagnostic = ActionabilityDiagnostic::NotFound;
                     call_log.push(last_diagnostic.log_line());
                 }
                 LocatorOutcome::MultipleMatches { count } => {
+                    attached = Some(true);
                     let diagnostic = ActionabilityDiagnostic::MultipleMatches { count };
                     call_log.push(diagnostic.log_line());
                     return Err(ActionabilityError::Failed {
                         diagnostic,
                         call_log,
+                        elapsed: self.clock.now().saturating_sub(started_at),
+                        attempts,
+                        attached,
+                        state: last_state,
+                        receives_events,
                     });
                 }
                 LocatorOutcome::Found { preview } => {
+                    attached = Some(true);
                     call_log.push(format!("locator resolved to {preview}"));
                     match self.run_action(
                         action,
                         deadline,
                         &mut call_log,
                         &mut last_diagnostic,
+                        &mut attempts,
+                        &mut last_state,
+                        &mut receives_events,
                         driver,
                     ) {
                         ActionLoopResult::Done(output) => {
-                            return Ok(ActionabilitySuccess { output, call_log });
+                            return Ok(ActionabilitySuccess {
+                                output,
+                                call_log,
+                                elapsed: self.clock.now().saturating_sub(started_at),
+                                attempts,
+                                attached,
+                                state: last_state,
+                                receives_events,
+                            });
                         }
                         ActionLoopResult::RetryLocator => {}
                         ActionLoopResult::TimedOut => {
-                            return Err(timeout_error(timeout, last_diagnostic, call_log));
+                            return Err(timeout_error(
+                                timeout,
+                                last_diagnostic,
+                                call_log,
+                                self.clock.now().saturating_sub(started_at),
+                                attempts,
+                                attached,
+                                last_state,
+                                receives_events,
+                            ));
                         }
                     }
                 }
@@ -430,6 +639,11 @@ impl<C: Clock> ActionabilityEngine<C> {
             return Err(ActionabilityError::Failed {
                 diagnostic,
                 call_log: call_log.clone(),
+                elapsed: Duration::ZERO,
+                attempts: 0,
+                attached: None,
+                state: None,
+                receives_events: None,
             });
         }
         call_log.push("checking locator handlers");
@@ -438,6 +652,11 @@ impl<C: Clock> ActionabilityEngine<C> {
             return Err(ActionabilityError::Failed {
                 diagnostic,
                 call_log: call_log.clone(),
+                elapsed: Duration::ZERO,
+                attempts: 0,
+                attached: None,
+                state: None,
+                receives_events: None,
             });
         }
         call_log.push("checking pending navigation after locator handlers");
@@ -446,9 +665,48 @@ impl<C: Clock> ActionabilityEngine<C> {
             return Err(ActionabilityError::Failed {
                 diagnostic,
                 call_log: call_log.clone(),
+                elapsed: Duration::ZERO,
+                attempts: 0,
+                attached: None,
+                state: None,
+                receives_events: None,
             });
         }
         Ok(())
+    }
+
+    fn enrich_error(
+        &self,
+        error: ActionabilityError,
+        started_at: Duration,
+        attempts: u32,
+        attached: Option<bool>,
+        state: Option<ElementState>,
+        receives_events: Option<bool>,
+    ) -> ActionabilityError {
+        match error {
+            ActionabilityError::Timeout(mut timeout) => {
+                timeout.elapsed = self.clock.now().saturating_sub(started_at);
+                timeout.attempts = attempts;
+                timeout.attached = attached;
+                timeout.state = state;
+                timeout.receives_events = receives_events;
+                ActionabilityError::Timeout(timeout)
+            }
+            ActionabilityError::Failed {
+                diagnostic,
+                call_log,
+                ..
+            } => ActionabilityError::Failed {
+                diagnostic,
+                call_log,
+                elapsed: self.clock.now().saturating_sub(started_at),
+                attempts,
+                attached,
+                state,
+                receives_events,
+            },
+        }
     }
 
     fn run_action<D: ActionabilityDriver>(
@@ -457,11 +715,14 @@ impl<C: Clock> ActionabilityEngine<C> {
         deadline: Deadline,
         call_log: &mut CallLog,
         last_diagnostic: &mut ActionabilityDiagnostic,
+        attempts: &mut u32,
+        last_state: &mut Option<ElementState>,
+        receives_events: &mut Option<bool>,
         driver: &mut D,
     ) -> ActionLoopResult<D::Output> {
         let required = required_states(action);
         let state_description = state_description(required);
-        let mut retry = 0;
+        let mut retry = 0_u32;
 
         loop {
             if deadline.expired(&self.clock) {
@@ -471,16 +732,18 @@ impl<C: Clock> ActionabilityEngine<C> {
                 call_log.push(format!("attempting {} action", action.name()));
             } else {
                 call_log.push(format!("retrying {} action", action.name()));
-                let delay = backoff_delay(ACTION_RETRY_BACKOFF_MS, retry - 1);
+                let delay = backoff_delay(ACTION_RETRY_BACKOFF_MS, (retry - 1) as usize);
                 if !self.wait(delay, deadline, call_log) {
                     return ActionLoopResult::TimedOut;
                 }
             }
+            *attempts = retry;
 
             if let Some(description) = &state_description {
                 call_log.push(format!("waiting for element to be {description}"));
                 match driver.element_state() {
                     Ok(state) => {
+                        *last_state = Some(state.clone());
                         if let Some(diagnostic) = missing_state(required, &state) {
                             call_log.push(diagnostic.log_line());
                             *last_diagnostic = diagnostic;
@@ -502,8 +765,21 @@ impl<C: Clock> ActionabilityEngine<C> {
             }
 
             match driver.perform() {
-                Ok(output) => return ActionLoopResult::Done(output),
+                Ok(output) => {
+                    if required.receives_events {
+                        *receives_events = Some(true);
+                    }
+                    return ActionLoopResult::Done(output);
+                }
                 Err(diagnostic) => {
+                    if required.receives_events
+                        && matches!(
+                            diagnostic,
+                            ActionabilityDiagnostic::InterceptsPointerEvents { .. }
+                        )
+                    {
+                        *receives_events = Some(false);
+                    }
                     call_log.push(diagnostic.log_line());
                     *last_diagnostic = diagnostic.clone();
                     if diagnostic == ActionabilityDiagnostic::Detached {
@@ -584,12 +860,26 @@ fn missing_state(
 fn timeout_error(
     timeout: Duration,
     diagnostic: ActionabilityDiagnostic,
-    call_log: CallLog,
+    mut call_log: CallLog,
+    elapsed: Duration,
+    attempts: u32,
+    attached: Option<bool>,
+    state: Option<ElementState>,
+    receives_events: Option<bool>,
 ) -> ActionabilityError {
+    let reason = diagnostic.log_line();
+    if call_log.entries.last().map(String::as_str) != Some(reason.as_str()) {
+        call_log.push(reason);
+    }
     ActionabilityError::Timeout(TimeoutError {
         timeout,
         diagnostic,
         call_log,
+        elapsed,
+        attempts,
+        attached,
+        state,
+        receives_events,
     })
 }
 
@@ -880,6 +1170,10 @@ mod tests {
             .call_log
             .entries
             .contains(&"element is not enabled".to_string()));
+        assert_eq!(
+            error.call_log.entries.last().map(String::as_str),
+            Some("element is not enabled")
+        );
         assert!(error.to_string().contains("Timeout 250ms exceeded."));
         assert!(error.to_string().contains("Call log:"));
     }
@@ -1004,6 +1298,84 @@ mod tests {
             Ok("done")
         );
         assert_eq!(driver.action_calls, 2);
+    }
+
+    #[test]
+    fn success_after_two_retries_reports_attempts_and_end_state() {
+        let clock = MockClock::default();
+        let engine = ActionabilityEngine::new(clock, ActionabilityTimeouts::default());
+        let mut driver = MockDriver::new();
+        let mut bad = good_state();
+        bad.stable = false;
+        driver.states = VecDeque::from([Ok(bad.clone()), Ok(bad), Ok(good_state())]);
+
+        let success = engine
+            .execute_logged("button", ActionKind::Click, &mut driver)
+            .unwrap();
+
+        assert_eq!(success.attempts, 2);
+        assert_eq!(success.attached, Some(true));
+        assert_eq!(success.state, Some(good_state()));
+        assert_eq!(success.receives_events, Some(true));
+        let diagnostics = success.diagnostics(ActionKind::Click);
+        assert_eq!(diagnostics.attempts, Some(2));
+        assert_eq!(diagnostics.stable, Some(true));
+        assert_eq!(diagnostics.receives_events, Some(true));
+    }
+
+    #[test]
+    fn call_log_caps_entries_and_marks_the_final_reason() {
+        let mut log = CallLog::default();
+        for index in 0..60 {
+            log.push(format!("entry {index}"));
+        }
+
+        assert_eq!(log.entries.len(), MAX_CALL_LOG_ENTRIES);
+        assert_eq!(log.entries.first().unwrap(), "entry 10");
+        assert_eq!(
+            log.entries.last().unwrap(),
+            "entry 59 (call log truncated to the last 50 entries)"
+        );
+    }
+
+    #[test]
+    fn call_log_masks_password_text_and_element_previews() {
+        let mut log = CallLog::default();
+        log.push("locator resolved to <input type=\"password\" value=\"hunter2\">");
+
+        assert_eq!(
+            log.entries,
+            vec!["locator resolved to <input type=\"password\" value=\"[REDACTED]\">"]
+        );
+    }
+
+    #[test]
+    fn hit_target_failure_reports_masked_intercepting_element() {
+        let mut call_log = CallLog::default();
+        let diagnostic = ActionabilityDiagnostic::InterceptsPointerEvents {
+            description: "<input type=\"password\" value=\"hunter2\">".to_string(),
+        };
+        call_log.push(diagnostic.log_line());
+        let error = ActionabilityError::Failed {
+            diagnostic,
+            call_log,
+            elapsed: Duration::from_millis(10),
+            attempts: 1,
+            attached: Some(true),
+            state: Some(good_state()),
+            receives_events: Some(false),
+        };
+
+        let diagnostics = error.diagnostics(ActionKind::Click);
+        assert_eq!(diagnostics.receives_events, Some(false));
+        assert_eq!(
+            diagnostics.intercepting_element.as_deref(),
+            Some("<input type=\"password\" value=\"[REDACTED]\">")
+        );
+        assert_eq!(
+            diagnostics.call_log.last().map(String::as_str),
+            Some("<input type=\"password\" value=\"[REDACTED]\"> intercepts pointer events")
+        );
     }
 
     #[test]

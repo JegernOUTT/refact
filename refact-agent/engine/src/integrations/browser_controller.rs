@@ -14,9 +14,12 @@ use crate::integrations::browser_locators::{
 use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
 use refact_browser::{
-    CdpKeyboardDispatcher, ElementHandle, Keyboard, LocatorHandler, LocatorHandlerLease,
-    LocatorHandlerOperation, LocatorHandlerProbe, LocatorHandlerRegistry, NetworkLoadState,
-    NetworkMonitorHandle, UrlMatcher, WorldManager, DEFAULT_DISMISS_OVERLAYS_HANDLER,
+    ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
+    ActionabilityTimeouts, CdpKeyboardDispatcher, CdpMouseDispatcher, ElementHandle,
+    HitTargetController, HitTargetPoint, HitTargetResult, Keyboard, LocatorHandler,
+    LocatorHandlerLease, LocatorHandlerOperation, LocatorHandlerProbe, LocatorHandlerRegistry,
+    LocatorOutcome, Mouse, MouseButton, NetworkLoadState, NetworkMonitorHandle, SystemClock,
+    ScrollStrategy, UrlMatcher, WorldManager, DEFAULT_DISMISS_OVERLAYS_HANDLER,
 };
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 
@@ -112,6 +115,229 @@ impl std::ops::Deref for ResolvedElement {
     fn deref(&self) -> &Self::Target {
         &self.info
     }
+}
+
+struct BrowserActionDriver<'a> {
+    tab: &'a Tab,
+    world: &'a WorldManager,
+    locator: &'a BrowserLocator,
+    action: ActionKind,
+    handlers: Option<&'a Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &'a mut Vec<LocatorHandlerFiring>,
+    image_policy: &'a ImagePolicy,
+    precheck_deadline: Instant,
+    resolved: Option<ResolvedElement>,
+}
+
+impl<'a> BrowserActionDriver<'a> {
+    fn new(
+        tab: &'a Tab,
+        world: &'a WorldManager,
+        locator: &'a BrowserLocator,
+        action: ActionKind,
+        handlers: Option<&'a Arc<Mutex<LocatorHandlerRegistry>>>,
+        locator_handler_firings: &'a mut Vec<LocatorHandlerFiring>,
+        image_policy: &'a ImagePolicy,
+    ) -> Self {
+        Self {
+            tab,
+            world,
+            locator,
+            action,
+            handlers,
+            locator_handler_firings,
+            image_policy,
+            precheck_deadline: Instant::now() + Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS),
+            resolved: None,
+        }
+    }
+
+    fn release_resolved(&mut self) {
+        if let Some(resolved) = self.resolved.take() {
+            let _ = self.world.release_handle(self.tab, &resolved.handle);
+        }
+    }
+
+    fn resolved(&self) -> Result<&ResolvedElement, ActionabilityDiagnostic> {
+        self.resolved
+            .as_ref()
+            .ok_or(ActionabilityDiagnostic::Detached)
+    }
+}
+
+impl Drop for BrowserActionDriver<'_> {
+    fn drop(&mut self) {
+        self.release_resolved();
+    }
+}
+
+impl ActionabilityDriver for BrowserActionDriver<'_> {
+    type Output = String;
+
+    fn resolve(&mut self) -> LocatorOutcome {
+        self.release_resolved();
+        match resolve_element(self.tab, self.world, self.locator) {
+            Ok(resolved) => {
+                let preview = element_preview(self.tab, self.world, &resolved.handle);
+                self.resolved = Some(resolved);
+                LocatorOutcome::Found { preview }
+            }
+            Err(error) => {
+                if let Some(count) = strict_mode_count(&error) {
+                    LocatorOutcome::MultipleMatches { count }
+                } else {
+                    LocatorOutcome::NotFound
+                }
+            }
+        }
+    }
+
+    fn element_state(&mut self) -> Result<refact_browser::ElementState, ActionabilityDiagnostic> {
+        let resolved = self.resolved()?;
+        self.world
+            .element_states(self.tab, &resolved.handle)
+            .map_err(|error| match error {
+                refact_browser::HandleError::Invalidated { .. } => {
+                    ActionabilityDiagnostic::Detached
+                }
+                _ => ActionabilityDiagnostic::PrecheckFailed {
+                    description: error.to_string(),
+                },
+            })
+    }
+
+    fn perform(&mut self) -> Result<Self::Output, ActionabilityDiagnostic> {
+        let resolved = self.resolved()?;
+        let dispatcher = CdpMouseDispatcher::new(self.tab);
+        if self.action == ActionKind::Focus {
+            return call_handle_json(
+                self.tab,
+                self.world,
+                &resolved.handle,
+                &browser_locators::js_focus_element(),
+            )
+            .map(|_| resolved.info.tag.clone())
+            .map_err(|description| ActionabilityDiagnostic::PrecheckFailed { description });
+        }
+        if self.action == ActionKind::ScrollIntoViewIfNeeded {
+            return dispatcher
+                .scroll_into_view(&resolved.handle, ScrollStrategy::Protocol)
+                .map(|_| resolved.info.tag.clone())
+                .map_err(|error| ActionabilityDiagnostic::PrecheckFailed {
+                    description: error.to_string(),
+                });
+        }
+        let point = dispatcher
+            .clickable_point(&resolved.handle)
+            .map_err(|error| match error {
+                refact_browser::MouseError::OutsideViewport => {
+                    ActionabilityDiagnostic::OutsideViewport
+                }
+                _ => ActionabilityDiagnostic::PrecheckFailed {
+                    description: error.to_string(),
+                },
+            })?;
+        let hit_target = HitTargetController::default();
+        let hit_target_point = HitTargetPoint {
+            x: point.x,
+            y: point.y,
+        };
+        match hit_target.expect_hit_target(self.tab, self.world, &resolved.handle, hit_target_point)
+        {
+            Ok(HitTargetResult::Done) => {}
+            Ok(HitTargetResult::Intercepted { description }) => {
+                return Err(intercepts_pointer_events(description));
+            }
+            Ok(HitTargetResult::NotConnected) => {
+                return Err(ActionabilityDiagnostic::Detached);
+            }
+            Ok(HitTargetResult::Skipped) => {}
+            Err(error) => {
+                return Err(ActionabilityDiagnostic::PrecheckFailed {
+                    description: error.to_string(),
+                });
+            }
+        }
+        let token = hit_target
+            .install_interceptor(
+                self.tab,
+                self.world,
+                &resolved.handle,
+                self.action,
+                Some(hit_target_point),
+            )
+            .map_err(|error| ActionabilityDiagnostic::PrecheckFailed {
+                description: error.to_string(),
+            })?;
+        let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(self.tab));
+        let mut mouse = Mouse::new(dispatcher, &keyboard);
+        let action_result = match self.action {
+            ActionKind::Click => mouse.click(point.x, point.y, MouseButton::Left),
+            ActionKind::Hover => mouse.hover(point.x, point.y),
+            _ => unreachable!(),
+        };
+        let hit_result = hit_target.take_result(self.tab, self.world, token);
+        action_result.map_err(|error| ActionabilityDiagnostic::PrecheckFailed {
+            description: error.to_string(),
+        })?;
+        match hit_result {
+            Ok(HitTargetResult::Done | HitTargetResult::Skipped) => Ok(resolved.info.tag.clone()),
+            Ok(HitTargetResult::Intercepted { description }) => {
+                Err(intercepts_pointer_events(description))
+            }
+            Ok(HitTargetResult::NotConnected) => Err(ActionabilityDiagnostic::Detached),
+            Err(error) => Err(ActionabilityDiagnostic::PrecheckFailed {
+                description: error.to_string(),
+            }),
+        }
+    }
+
+    fn wait_for_navigation(&mut self) -> Result<(), ActionabilityDiagnostic> {
+        wait_for_pending_navigation(self.tab, self.precheck_deadline)
+            .map_err(|description| ActionabilityDiagnostic::PrecheckFailed { description })
+    }
+
+    fn locator_handlers_checkpoint(&mut self) -> Result<(), ActionabilityDiagnostic> {
+        let Some(handlers) = self.handlers else {
+            return Ok(());
+        };
+        perform_locator_handlers_checkpoint(
+            self.tab,
+            self.world,
+            handlers,
+            self.locator_handler_firings,
+            self.image_policy,
+            self.precheck_deadline,
+        )
+        .map_err(|description| ActionabilityDiagnostic::PrecheckFailed { description })
+    }
+}
+
+fn intercepts_pointer_events(description: String) -> ActionabilityDiagnostic {
+    ActionabilityDiagnostic::InterceptsPointerEvents {
+        description: description
+            .strip_suffix(" intercepts pointer events")
+            .unwrap_or(&description)
+            .to_string(),
+    }
+}
+
+fn element_preview(tab: &Tab, world: &WorldManager, handle: &ElementHandle) -> String {
+    world
+        .call_function_on(
+            tab,
+            handle,
+            "function() { return this.outerHTML.substring(0, 500); }",
+            Vec::new(),
+        )
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "<element>".to_string())
+}
+
+fn strict_mode_count(error: &str) -> Option<usize> {
+    let (_, suffix) = error.split_once(" resolved to ")?;
+    suffix.split_whitespace().next()?.parse().ok()
 }
 
 fn resolve_element(
@@ -477,14 +703,19 @@ pub async fn execute_request_with_runtime(
                             .complete(tab, Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS));
                         let _ = tab.set_file_chooser_dialog_interception(false, None);
                         match completed {
-                            Ok(upload) => StepResult::success(
-                                idx,
-                                format!(
-                                    "Selected {} file(s) from file chooser",
-                                    upload.paths.len()
-                                ),
-                            )
-                            .with_data(serde_json::to_value(upload).unwrap_or_default()),
+                            Ok(upload) => {
+                                let mut completed = StepResult::success(
+                                    idx,
+                                    format!(
+                                        "Selected {} file(s) from file chooser",
+                                        upload.paths.len()
+                                    ),
+                                )
+                                .with_data(serde_json::to_value(upload).unwrap_or_default());
+                                completed.retries = result.retries;
+                                completed.actionability = result.actionability;
+                                completed
+                            }
                             Err(error) => StepResult::failure(idx, "File chooser failed", error),
                         }
                     }),
@@ -858,14 +1089,19 @@ pub fn execute_steps_with_runtime(
                                 .complete(tab, Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS));
                             let _ = tab.set_file_chooser_dialog_interception(false, None);
                             result = match completed {
-                                Ok(upload) => StepResult::success(
-                                    idx,
-                                    format!(
-                                        "Selected {} file(s) from file chooser",
-                                        upload.paths.len()
-                                    ),
-                                )
-                                .with_data(serde_json::to_value(upload).unwrap_or_default()),
+                                Ok(upload) => {
+                                    let mut completed = StepResult::success(
+                                        idx,
+                                        format!(
+                                            "Selected {} file(s) from file chooser",
+                                            upload.paths.len()
+                                        ),
+                                    )
+                                    .with_data(serde_json::to_value(upload).unwrap_or_default());
+                                    completed.retries = result.retries;
+                                    completed.actionability = result.actionability;
+                                    completed
+                                }
                                 Err(error) => {
                                     StepResult::failure(idx, "File chooser failed", error)
                                 }
@@ -1369,7 +1605,7 @@ fn execute_single_step(
     handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
     locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
 ) -> StepResult {
-    if needs_locator_handler_checkpoint(step) {
+    if needs_locator_handler_checkpoint(step) && !uses_actionability_engine(step) {
         if let Some(handlers) = handlers {
             if let Err(error) = perform_action_prechecks(
                 tab,
@@ -1399,14 +1635,65 @@ fn execute_single_step(
             "Use execute_steps_with_runtime() for runtime management",
         ),
 
-        BrowserStep::Click { locator } => step_locator_action(tab, world, idx, locator, "click"),
-        BrowserStep::ClickIfExists { locator } => step_click_if_exists(tab, world, idx, locator),
-        BrowserStep::Hover { locator } => step_locator_action(tab, world, idx, locator, "hover"),
-        BrowserStep::Focus { locator } => step_locator_action(tab, world, idx, locator, "focus"),
-        BrowserStep::Blur { locator } => step_locator_action(tab, world, idx, locator, "blur"),
-        BrowserStep::ScrollTo { locator } => {
-            step_locator_action(tab, world, idx, locator, "scroll_to")
-        }
+        BrowserStep::Click { locator } => step_locator_action(
+            tab,
+            world,
+            idx,
+            locator,
+            "click",
+            handlers,
+            locator_handler_firings,
+            image_policy,
+        ),
+        BrowserStep::ClickIfExists { locator } => step_click_if_exists(
+            tab,
+            world,
+            idx,
+            locator,
+            handlers,
+            locator_handler_firings,
+            image_policy,
+        ),
+        BrowserStep::Hover { locator } => step_locator_action(
+            tab,
+            world,
+            idx,
+            locator,
+            "hover",
+            handlers,
+            locator_handler_firings,
+            image_policy,
+        ),
+        BrowserStep::Focus { locator } => step_locator_action(
+            tab,
+            world,
+            idx,
+            locator,
+            "focus",
+            handlers,
+            locator_handler_firings,
+            image_policy,
+        ),
+        BrowserStep::Blur { locator } => step_locator_action(
+            tab,
+            world,
+            idx,
+            locator,
+            "blur",
+            handlers,
+            locator_handler_firings,
+            image_policy,
+        ),
+        BrowserStep::ScrollTo { locator } => step_locator_action(
+            tab,
+            world,
+            idx,
+            locator,
+            "scroll_to",
+            handlers,
+            locator_handler_firings,
+            image_policy,
+        ),
         BrowserStep::PressKey { key, modifiers } => step_press_key(tab, idx, key, modifiers),
 
         BrowserStep::Fill {
@@ -1522,6 +1809,17 @@ fn execute_single_step(
     }
 }
 
+fn uses_actionability_engine(step: &BrowserStep) -> bool {
+    matches!(
+        step,
+        BrowserStep::Click { .. }
+            | BrowserStep::ClickIfExists { .. }
+            | BrowserStep::Hover { .. }
+            | BrowserStep::Focus { .. }
+            | BrowserStep::ScrollTo { .. }
+    )
+}
+
 fn step_set_input_files(
     tab: &Tab,
     world: &WorldManager,
@@ -1569,25 +1867,32 @@ fn step_locator_action(
     idx: usize,
     locator: &BrowserLocator,
     action: &str,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
 ) -> StepResult {
+    if let Some(action_kind) = match action {
+        "click" => Some(ActionKind::Click),
+        "hover" => Some(ActionKind::Hover),
+        "focus" => Some(ActionKind::Focus),
+        "scroll_to" => Some(ActionKind::ScrollIntoViewIfNeeded),
+        _ => None,
+    } {
+        return step_actionable_action(
+            tab,
+            world,
+            idx,
+            locator,
+            action,
+            action_kind,
+            handlers,
+            locator_handler_firings,
+            image_policy,
+        );
+    }
     match resolve_interactable(tab, world, locator) {
         Ok(info) => {
-            if action == "click" {
-                return match call_handle_json(
-                    tab,
-                    world,
-                    &info.handle,
-                    "function() { this.click(); return JSON.stringify({ok: true}); }",
-                ) {
-                    Ok(_) => StepResult::success(
-                        idx,
-                        format!("click on <{}> ({})", info.tag, describe_locator(locator)),
-                    ),
-                    Err(error) => StepResult::failure(idx, "click failed", error),
-                };
-            }
             let action_js = match action {
-                "hover" => browser_locators::js_hover_element().to_string(),
                 "focus" => browser_locators::js_focus_element().to_string(),
                 "blur" => browser_locators::js_blur_element().to_string(),
                 "scroll_to" => browser_locators::js_scroll_to_element().to_string(),
@@ -1612,25 +1917,90 @@ fn step_locator_action(
     }
 }
 
+fn step_actionable_action(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    action: &str,
+    action_kind: ActionKind,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+) -> StepResult {
+    let engine = ActionabilityEngine::new(SystemClock::default(), ActionabilityTimeouts::default());
+    let mut driver = BrowserActionDriver::new(
+        tab,
+        world,
+        locator,
+        action_kind,
+        handlers,
+        locator_handler_firings,
+        image_policy,
+    );
+    match engine.execute_logged(&describe_locator(locator), action_kind, &mut driver) {
+        Ok(success) => {
+            let mut result = StepResult::success(
+                idx,
+                format!(
+                    "{action} on <{}> ({})",
+                    success.output,
+                    describe_locator(locator)
+                ),
+            );
+            result.retries = success.attempts;
+            if success.attempts > 0 {
+                result.actionability = Some(success.diagnostics(action_kind));
+            }
+            result
+        }
+        Err(error) => {
+            let diagnostics = error.diagnostics(action_kind);
+            let mut result =
+                StepResult::failure(idx, format!("{action} failed"), error.to_string());
+            result.retries = diagnostics.attempts.unwrap_or_default();
+            result.actionability = Some(diagnostics);
+            result
+        }
+    }
+}
+
 fn step_click_if_exists(
     tab: &Tab,
     world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
 ) -> StepResult {
     match resolve_element(tab, world, locator) {
-        Ok(info) if info.visible => match call_handle_json(
-            tab,
-            world,
-            &info.handle,
-            browser_locators::js_click_element(),
-        ) {
-            Ok(_) => StepResult::success(idx, format!("Clicked <{}> (found)", info.tag)),
-            Err(e) => StepResult::success(
+        Ok(info) if info.visible => {
+            let _ = world.release_handle(tab, &info.handle);
+            let result = step_actionable_action(
+                tab,
+                world,
                 idx,
-                format!("Click on <{}> failed (non-fatal): {}", info.tag, e),
-            ),
-        },
+                locator,
+                "click",
+                ActionKind::Click,
+                handlers,
+                locator_handler_firings,
+                image_policy,
+            );
+            if result.ok {
+                result
+            } else {
+                StepResult {
+                    ok: true,
+                    summary: format!(
+                        "Click failed (non-fatal): {}",
+                        result.error.as_deref().unwrap_or(&result.summary)
+                    ),
+                    ..result
+                }
+            }
+        }
         _ => StepResult::success(idx, "Element not found or not visible, skipped".to_string()),
     }
 }
@@ -2751,6 +3121,16 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intercepting_preview_excludes_failure_suffix() {
+        assert_eq!(
+            intercepts_pointer_events("<div class=overlay> intercepts pointer events".to_string()),
+            ActionabilityDiagnostic::InterceptsPointerEvents {
+                description: "<div class=overlay>".to_string(),
+            }
+        );
+    }
 
     #[test]
     fn test_describe_locator_css() {

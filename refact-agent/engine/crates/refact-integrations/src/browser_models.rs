@@ -874,6 +874,30 @@ pub enum FillStrategy {
     ClickAndType,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionabilityDiagnostics {
+    pub call_log: Vec<String>,
+    pub timed_out: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attached: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub editable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receives_events: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intercepting_element: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepResult {
     pub step_index: usize,
@@ -891,6 +915,8 @@ pub struct StepResult {
     pub verified: Option<bool>,
     #[serde(default)]
     pub retries: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actionability: Option<ActionabilityDiagnostics>,
 }
 
 impl StepResult {
@@ -905,6 +931,7 @@ impl StepResult {
             fill_strategy: None,
             verified: None,
             retries: 0,
+            actionability: None,
         }
     }
 
@@ -923,6 +950,7 @@ impl StepResult {
             fill_strategy: None,
             verified: None,
             retries: 0,
+            actionability: None,
         }
     }
 
@@ -1617,6 +1645,55 @@ mod tests {
         let r =
             StepResult::success(0, "Extracted").with_data(serde_json::json!(["link1", "link2"]));
         assert!(r.data.is_some());
+    }
+
+    #[test]
+    fn step_result_actionability_round_trips_all_none_states() {
+        let mut result = StepResult::failure(2, "Click failed", "Timed out");
+        result.actionability = Some(ActionabilityDiagnostics {
+            call_log: vec![
+                "waiting for css=#submit".to_string(),
+                "element is not stable".to_string(),
+            ],
+            timed_out: true,
+            elapsed_ms: Some(5_000),
+            attempts: Some(3),
+            attached: None,
+            visible: None,
+            stable: None,
+            enabled: None,
+            editable: None,
+            receives_events: None,
+            intercepting_element: None,
+        });
+
+        let json = serde_json::to_value(&result).unwrap();
+        let actionability = json["actionability"].as_object().unwrap();
+        assert_eq!(actionability["call_log"].as_array().unwrap().len(), 2);
+        assert_eq!(actionability["timed_out"], true);
+        assert_eq!(actionability["elapsed_ms"], 5_000);
+        assert_eq!(actionability["attempts"], 3);
+        for omitted in [
+            "attached",
+            "visible",
+            "stable",
+            "enabled",
+            "editable",
+            "receives_events",
+            "intercepting_element",
+        ] {
+            assert!(!actionability.contains_key(omitted), "{omitted}");
+        }
+
+        let parsed: StepResult = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.actionability, result.actionability);
+    }
+
+    #[test]
+    fn step_result_without_actionability_keeps_the_legacy_wire_shape() {
+        let json = serde_json::to_value(StepResult::success(0, "Clicked")).unwrap();
+
+        assert!(json.get("actionability").is_none());
     }
 
     #[test]
