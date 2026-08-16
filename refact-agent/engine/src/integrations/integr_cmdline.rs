@@ -377,9 +377,12 @@ pub async fn execute_blocking_command(
             cwd,
             env: env_variables.clone(),
             chat_mode: None,
+            escalation: None,
         },
     )
-    .await?
+    .await
+    .map_err(|error| error.message)?
+    .request
     .with_timeout(Duration::from_secs(timeout_secs))
     .with_owner(owner)
     .with_transcript_limit(CMDLINE_TRANSCRIPT_MAX_BYTES)

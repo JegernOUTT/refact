@@ -8,7 +8,10 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
 use crate::exec::ExecRegistry;
-use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
+use crate::exec::command_policy::{
+    build_exec_request, chat_mode_for_exec, escalation_from_args, queue_sandbox_audit, CommandKind,
+    CommandPolicyInput, ExecEscalation, ExecSource,
+};
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
@@ -180,6 +183,7 @@ struct ProcessStartArgs {
     description: String,
     tty: Option<bool>,
     scope_warnings: Vec<String>,
+    escalation: Option<ExecEscalation>,
 }
 
 struct ShellServiceAliasArgs {
@@ -249,22 +253,39 @@ impl Tool for ToolProcessStart {
         let short_description = sanitize_short_description(&parsed.description);
         let tty = parsed.tty.unwrap_or(false);
         let owner = ExecOwnerMeta {
-            chat_id: Some(chat_id),
+            chat_id: Some(chat_id.clone()),
             tool_call_id: Some(tool_call_id.clone()),
             service_name: parsed.service_name.clone(),
             workspace,
         };
-        let mut request = build_exec_request(
-            gcx,
+        let chat_mode = chat_mode_for_exec(gcx.clone(), &chat_id).await;
+        let policy = match build_exec_request(
+            gcx.clone(),
             CommandPolicyInput {
                 source: ExecSource::ProcessTool,
                 command: CommandKind::Shell(&parsed.command),
                 cwd: parsed.workdir.clone(),
                 env: env_variables,
-                chat_mode: None,
+                chat_mode,
+                escalation: parsed.escalation.clone(),
             },
         )
-        .await?;
+        .await
+        {
+            Ok(policy) => policy,
+            Err(error) => {
+                if let Some(audit) = error.audit {
+                    queue_sandbox_audit(gcx, &chat_id, audit).await;
+                }
+                return Err(error.message);
+            }
+        };
+        if let Some(audit) = policy.audit.clone() {
+            queue_sandbox_audit(gcx, &chat_id, audit).await;
+        }
+        let sandbox_active = policy.request.sandbox.is_some();
+        let sandbox_warning = policy.warning;
+        let mut request = policy.request;
         request.mode = parsed.mode.clone();
         request = request
             .with_owner(owner)
@@ -282,6 +303,9 @@ impl Tool for ToolProcessStart {
             .read(&result.snapshot.meta.process_id, 0, None)
             .await;
         let mut content = format_process_snapshot("Process started", &result.snapshot);
+        if let Some(warning) = sandbox_warning {
+            content = format!("{warning}\n{content}");
+        }
         if !parsed.scope_warnings.is_empty() {
             content.push_str(&format!("\n{}\n", parsed.scope_warnings.join("\n")));
         }
@@ -290,6 +314,7 @@ impl Tool for ToolProcessStart {
             ProcessStreamSelection::All,
             &OutputFilter::no_limits(),
         ));
+        append_sandbox_denial_hint(&mut content, sandbox_active);
         Ok(tool_result(
             tool_call_id,
             content,
@@ -926,6 +951,16 @@ fn process_start_input_schema() -> Value {
         "default": false,
         "description": TTY_DESCRIPTION,
     });
+    schema["properties"]["escalate"] = json!({
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string", "enum": ["workspace_write", "full_access"]},
+            "justification": {"type": "string"}
+        },
+        "required": ["mode", "justification"],
+        "additionalProperties": false,
+        "description": "Request a per-call sandbox escalation. Always requires user approval and must explain why the wider access is needed."
+    });
     schema
 }
 
@@ -955,6 +990,20 @@ fn tool_result(
         message.extra = extra;
     }
     (false, vec![ContextEnum::ChatMessage(message)])
+}
+
+fn append_sandbox_denial_hint(content: &mut String, sandbox_active: bool) {
+    if !sandbox_active {
+        return;
+    }
+    let lower = content.to_ascii_lowercase();
+    if lower.contains("permission denied")
+        || lower.contains("operation not permitted")
+        || lower.contains("eacces")
+        || lower.contains("eperm")
+    {
+        content.push_str("Sandbox denied this operation. Retry with escalate:{mode, justification} if wider access is necessary.\n");
+    }
 }
 
 fn parse_required_string(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {
@@ -1057,6 +1106,7 @@ async fn parse_start_args(
     let wait_port = parse_optional_u16(args, "startup_wait_port")?;
     let wait_keyword = parse_optional_string(args, "startup_wait_keyword")?;
     let tty = parse_optional_bool(args, "tty")?;
+    let escalation = escalation_from_args(args)?;
     let readiness = if wait_port.is_some() || wait_keyword.is_some() {
         Some(ExecReadinessProbe {
             wait_keyword,
@@ -1075,6 +1125,7 @@ async fn parse_start_args(
         description,
         tty,
         scope_warnings,
+        escalation,
     })
 }
 
@@ -1106,7 +1157,7 @@ async fn resolve_process_workdir(
         }
         let mut warnings = scoped_path_warnings(&scoped, scope);
         warnings.push(format!(
-            "⚠️ Worktree scope: process cwd/workdir is enforced as '{}', but command text is not OS-sandboxed",
+            "⚠️ Worktree scope: process cwd/workdir is enforced as '{}'; OS confinement follows the terminal security mode",
             scoped.path.display()
         ));
         return Ok((Some(scoped.path), warnings));
@@ -1784,6 +1835,10 @@ mod tests {
         assert_eq!(
             start_desc.input_schema["properties"]["tty"]["description"],
             TTY_DESCRIPTION
+        );
+        assert_eq!(
+            start_desc.input_schema["properties"]["escalate"]["properties"]["mode"]["enum"],
+            json!(["workspace_write", "full_access"])
         );
         assert!(start_desc.description.contains("merges stdout and stderr"));
         assert!(required_names(

@@ -14,6 +14,7 @@ use crate::call_validation::{
 };
 use crate::chat::tools::{execute_tools, ExecuteToolsOptions};
 use crate::chat::types::ThreadParams;
+use crate::exec::command_policy::escalation_from_args;
 use crate::indexing_utils::wait_for_indexing_if_needed;
 use crate::tools::tools_description::{
     set_tool_config, MatchConfirmDenyResult, ToolConfig, ToolDesc, ToolGroupCategory, ToolSource,
@@ -244,6 +245,36 @@ pub async fn handle_v1_tools_check_if_confirmation_needed(
         let desc = tool.tool_description();
         refact_tool_api::coerce_hashmap_to_schema(&mut args, &desc.input_schema);
 
+        if matches!(tool_call.function.name.as_str(), "shell" | "process_start") {
+            match escalation_from_args(&args) {
+                Ok(Some(escalation)) => {
+                    result_messages.push(PauseReason {
+                        reason_type: PauseReasonType::Confirmation,
+                        command: tool_call.function.name.clone(),
+                        rule: format!(
+                            "Sandbox escalation to {} requested: {}",
+                            escalation.mode_name(),
+                            escalation.justification
+                        ),
+                        tool_call_id: tool_call.id.clone(),
+                        integr_config_path: tool.has_config_path(),
+                    });
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    result_messages.push(PauseReason {
+                        reason_type: PauseReasonType::Denial,
+                        command: tool_call.function.name.clone(),
+                        rule: error,
+                        tool_call_id: tool_call.id.clone(),
+                        integr_config_path: tool.has_config_path(),
+                    });
+                    continue;
+                }
+            }
+        }
+
         let should_confirm = match tool.match_against_confirm_deny(ccx.clone(), &args).await {
             Ok(should_confirm) => should_confirm,
             Err(e) => {
@@ -360,4 +391,48 @@ pub async fn handle_v1_tools_execute(
         .header("Content-Type", "application/json")
         .body(Body::from(response_json))
         .unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::State;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn confirmation_endpoint_pauses_for_escalated_shell() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let body = serde_json::to_vec(&json!({
+            "tool_calls": [{
+                "id": "tc-escalate",
+                "type": "function",
+                "function": {
+                    "name": "shell",
+                    "arguments": json!({
+                        "command": "printf ok",
+                        "description": "Print ok",
+                        "escalate": {
+                            "mode": "full_access",
+                            "justification": "write the requested system path"
+                        }
+                    }).to_string()
+                }
+            }]
+        }))
+        .unwrap();
+
+        let response = handle_v1_tools_check_if_confirmation_needed(State(app), body.into())
+            .await
+            .unwrap();
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(payload["pause"], true);
+        assert_eq!(payload["pause_reasons"][0]["type"], "confirmation");
+        assert!(payload["pause_reasons"][0]["rule"]
+            .as_str()
+            .unwrap()
+            .contains("write the requested system path"));
+    }
 }

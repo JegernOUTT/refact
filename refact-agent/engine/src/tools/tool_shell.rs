@@ -13,7 +13,10 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::exec::types::normalize_workspace_path;
-use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
+use crate::exec::command_policy::{
+    build_exec_request, chat_mode_for_exec, escalation_from_args, queue_sandbox_audit, CommandKind,
+    CommandPolicyInput, ExecEscalation, ExecSource,
+};
 use crate::exec::{
     sanitize_short_description, ExecOutputChunk, ExecOutputStream, ExecOwnerMeta,
     ExecProcessSnapshot, ExecRawOutput, ExecReadResult, ExecStatus,
@@ -128,6 +131,7 @@ struct ParsedShellArgs {
     tty: Option<bool>,
     run_in_background: bool,
     scope_warnings: Vec<String>,
+    escalation: Option<ExecEscalation>,
 }
 
 #[async_trait]
@@ -179,7 +183,7 @@ impl Tool for ToolShell {
         let short_description =
             sanitize_short_description(parsed.description.as_deref().unwrap_or_default());
         let owner = ExecOwnerMeta {
-            chat_id: Some(chat_id),
+            chat_id: Some(chat_id.clone()),
             tool_call_id: Some(tool_call_id.clone()),
             service_name: None,
             workspace,
@@ -202,17 +206,34 @@ impl Tool for ToolShell {
                 ))),
             )
         };
-        let mut request = build_exec_request(
-            gcx,
+        let chat_mode = chat_mode_for_exec(gcx.clone(), &chat_id).await;
+        let policy = match build_exec_request(
+            gcx.clone(),
             CommandPolicyInput {
                 source: ExecSource::ShellTool,
                 command: CommandKind::Shell(&parsed.command),
                 cwd,
                 env: env_variables,
-                chat_mode: None,
+                chat_mode,
+                escalation: parsed.escalation.clone(),
             },
         )
-        .await?;
+        .await
+        {
+            Ok(policy) => policy,
+            Err(error) => {
+                if let Some(audit) = error.audit {
+                    queue_sandbox_audit(gcx, &chat_id, audit).await;
+                }
+                return Err(error.message);
+            }
+        };
+        if let Some(audit) = policy.audit.clone() {
+            queue_sandbox_audit(gcx, &chat_id, audit).await;
+        }
+        let sandbox_active = policy.request.sandbox.is_some();
+        let sandbox_warning = policy.warning;
+        let mut request = policy.request;
         request.mode = if parsed.run_in_background {
             crate::exec::ExecMode::Background
         } else {
@@ -251,6 +272,9 @@ impl Tool for ToolShell {
             .await;
         if parsed.run_in_background {
             let mut out = background_started_output(&result.snapshot);
+            if let Some(warning) = sandbox_warning.as_ref() {
+                out = format!("{warning}\n{out}");
+            }
             if !parsed.scope_warnings.is_empty() {
                 out = format!("{}\n{}", parsed.scope_warnings.join("\n"), out);
             }
@@ -275,6 +299,9 @@ impl Tool for ToolShell {
 
         let mut out =
             crate::integrations::integr_cmdline::format_output(&filtered_stdout, &filtered_stderr);
+        if let Some(warning) = sandbox_warning.as_ref() {
+            out = format!("{warning}\n{out}");
+        }
         if !parsed.scope_warnings.is_empty() {
             out = format!("{}\n{}", parsed.scope_warnings.join("\n"), out);
         }
@@ -298,6 +325,7 @@ impl Tool for ToolShell {
             }
         }
         append_status_line(&mut out, &result.snapshot.status, duration, timeout);
+        append_sandbox_denial_hint(&mut out, sandbox_active);
 
         let msg = vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
@@ -327,7 +355,7 @@ impl Tool for ToolShell {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. Set run_in_background=true for long-running commands you will inspect later with process_read or process_wait. Set tty=true only when a command needs PTY behavior: it enables interactive stdin and reduces pipe buffering, but merges stdout and stderr into one combined stream. The timeout parameter only applies to foreground commands (run_in_background=false); supplying timeout with run_in_background=true is an error — use process_wait or process_kill instead. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths with visible warnings; the shell command text itself is not OS-sandboxed. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
+            description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. Set run_in_background=true for long-running commands you will inspect later with process_read or process_wait. Set tty=true only when a command needs PTY behavior: it enables interactive stdin and reduces pipe buffering, but merges stdout and stderr into one combined stream. The timeout parameter only applies to foreground commands (run_in_background=false); supplying timeout with run_in_background=true is an error — use process_wait or process_kill instead. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths; OS confinement follows the terminal security mode. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
             input_schema: shell_input_schema(),
             output_schema: None,
             annotations: None,
@@ -386,6 +414,16 @@ fn shell_input_schema() -> Value {
         "type": "boolean",
         "default": false,
         "description": RUN_IN_BACKGROUND_DESCRIPTION,
+    });
+    schema["properties"]["escalate"] = json!({
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string", "enum": ["workspace_write", "full_access"]},
+            "justification": {"type": "string"}
+        },
+        "required": ["mode", "justification"],
+        "additionalProperties": false,
+        "description": "Request a per-call sandbox escalation. Always requires user approval and must explain why the wider access is needed."
     });
     schema
 }
@@ -539,6 +577,20 @@ fn append_status_line(
             duration.as_secs_f64(),
             exec_status_label(status)
         )),
+    }
+}
+
+fn append_sandbox_denial_hint(out: &mut String, sandbox_active: bool) {
+    if !sandbox_active {
+        return;
+    }
+    let lower = out.to_ascii_lowercase();
+    if lower.contains("permission denied")
+        || lower.contains("operation not permitted")
+        || lower.contains("eacces")
+        || lower.contains("eperm")
+    {
+        out.push_str("Sandbox denied this operation. Retry with escalate:{mode, justification} if wider access is necessary.\n");
     }
 }
 
@@ -702,6 +754,7 @@ async fn parse_args_with_filter(
             .ok_or_else(|| format!("argument `run_in_background` is not a boolean: {value:?}"))?,
         None => false,
     };
+    let escalation = escalation_from_args(args)?;
 
     if run_in_background && timeout.is_some() {
         return Err(
@@ -719,6 +772,7 @@ async fn parse_args_with_filter(
         tty,
         run_in_background,
         scope_warnings,
+        escalation,
     })
 }
 
@@ -803,7 +857,7 @@ async fn resolve_shell_workdir(
         }
         let mut warnings = scoped_path_warnings(&scoped, scope);
         warnings.push(format!(
-            "⚠️ Worktree scope: shell cwd/workdir is enforced as '{}', but shell command text is not OS-sandboxed",
+            "⚠️ Worktree scope: shell cwd/workdir is enforced as '{}'; OS confinement follows the terminal security mode",
             scoped.path.display()
         ));
         return Ok((Some(scoped.path), warnings));
@@ -1064,6 +1118,19 @@ mod tests {
         );
         assert!(desc.description.contains("merges stdout and stderr"));
         assert!(desc.description.contains("run_in_background=true"));
+        assert_eq!(
+            desc.input_schema["properties"]["escalate"]["properties"]["mode"]["enum"],
+            json!(["workspace_write", "full_access"])
+        );
+    }
+
+    #[test]
+    fn sandbox_denial_result_suggests_escalation() {
+        let mut output = "sh: cannot create /root/file: Permission denied\n".to_string();
+
+        append_sandbox_denial_hint(&mut output, true);
+
+        assert!(output.contains("Retry with escalate"));
     }
 
     #[tokio::test]

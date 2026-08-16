@@ -523,11 +523,13 @@ async fn run_verification_argv_impl(
             cwd: Some(effective_cwd),
             env: HashMap::new(),
             chat_mode: None,
+            escalation: None,
         },
     )
     .await
     {
-        Ok(request) => request
+        Ok(policy) => policy
+            .request
             .with_timeout(timeout)
             .with_output_drain_timeout(drain_timeout)
             .with_transcript_limit(MAX_OUTPUT_CAPTURE_BYTES * 2),
@@ -536,7 +538,7 @@ async fn run_verification_argv_impl(
                 command: command.to_string(),
                 exit_code: None,
                 passed: false,
-                output_tail: format!("failed to spawn command: {}", error),
+                output_tail: format!("failed to spawn command: {}", error.message),
             };
         }
     };

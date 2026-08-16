@@ -236,8 +236,21 @@ struct EngineGlobalConfig {
     terminal_security: TerminalSecurityConfig,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalSecurityMode {
+    Off,
+    Audit,
+    #[default]
+    ApprovalOnly,
+    SandboxPreferred,
+    SandboxRequired,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct TerminalSecurityConfig {
+    #[serde(default)]
+    pub mode: TerminalSecurityMode,
     #[serde(default)]
     pub env_passthrough: Vec<String>,
 }
@@ -793,7 +806,7 @@ pub mod tests {
 
     #[test]
     fn test_engine_global_config_parses_trusted_projects() {
-        let yaml = "scheduler:\n  enabled: true\nhooks:\n  trusted_projects: [/home/me/repo]\nterminal_security:\n  env_passthrough: [HTTP_PROXY, CARGO_*]\n";
+        let yaml = "scheduler:\n  enabled: true\nhooks:\n  trusted_projects: [/home/me/repo]\nterminal_security:\n  mode: sandbox_preferred\n  env_passthrough: [HTTP_PROXY, CARGO_*]\n";
         let cfg: EngineGlobalConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
             cfg.hooks.trusted_projects,
@@ -803,6 +816,20 @@ pub mod tests {
         assert_eq!(
             cfg.terminal_security.env_passthrough,
             vec!["HTTP_PROXY".to_string(), "CARGO_*".to_string()]
+        );
+        assert_eq!(
+            cfg.terminal_security.mode,
+            TerminalSecurityMode::SandboxPreferred
+        );
+    }
+
+    #[test]
+    fn terminal_security_defaults_to_approval_only() {
+        let cfg: EngineGlobalConfig = serde_yaml::from_str("{}").unwrap();
+
+        assert_eq!(
+            cfg.terminal_security.mode,
+            TerminalSecurityMode::ApprovalOnly
         );
     }
 
