@@ -17,6 +17,8 @@ use tokio::task::JoinHandle;
 
 use crate::env::{apply_pty_child_env, apply_tokio_child_env};
 use crate::observe::ObservationStatus;
+#[cfg(target_os = "linux")]
+use crate::observe::{Handle as ObservationHandle, Setup};
 use crate::registry::{ExecProcessCommand, ExecProcessRuntime};
 use crate::types::{
     ExecMode, ExecOutputStream, ExecProcessId, ExecProcessMeta, ExecProcessSnapshot,
@@ -41,10 +43,10 @@ pub struct ExecSpawnResult {
 }
 
 impl ExecSpawnResult {
-    fn new(snapshot: ExecProcessSnapshot, observe: bool) -> Self {
+    fn new(snapshot: ExecProcessSnapshot, observation: ObservationStatus) -> Self {
         Self {
             snapshot,
-            observation: crate::observe::status(observe),
+            observation,
         }
     }
 }
@@ -439,9 +441,33 @@ async fn kill_and_reap(child: &Arc<Mutex<RuntimeChild>>) -> Result<(), String> {
     kill_reap_result(kill_result, wait_result)
 }
 
+#[cfg(target_os = "linux")]
+async fn kill_and_reap_observed(
+    child: &Arc<Mutex<RuntimeChild>>,
+    observation: &Option<ObservationHandle>,
+) -> Result<(), String> {
+    let Some(observation) = observation else {
+        return kill_and_reap(child).await;
+    };
+    let kill_result = {
+        let mut child = child.lock().await;
+        child.start_kill()
+    };
+    let wait_result = tokio::time::timeout(KILL_REAP_TIMEOUT, observation.wait_exit()).await;
+    kill_reap_result(kill_result, wait_result)
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn kill_and_reap_observed(
+    child: &Arc<Mutex<RuntimeChild>>,
+    _observation: &Option<()>,
+) -> Result<(), String> {
+    kill_and_reap(child).await
+}
+
 async fn wait_child_by_polling(child: &Arc<Mutex<RuntimeChild>>) -> Result<Option<i32>, String> {
     loop {
-        match try_wait_child(child).await? {
+        match child.lock().await.try_wait_exit_code()? {
             Some(exit_code) => return Ok(exit_code),
             None => tokio::time::sleep(ABORT_POLL_INTERVAL).await,
         }
@@ -490,7 +516,15 @@ async fn kill_unregistered_child(mut child: Box<dyn TokioChildWrapper>) {
     let _ = tokio::time::timeout(KILL_REAP_TIMEOUT, Box::into_pin(child.wait())).await;
 }
 
-async fn wait_child(child: &Arc<Mutex<RuntimeChild>>) -> Result<Option<i32>, String> {
+async fn wait_child(
+    child: &Arc<Mutex<RuntimeChild>>,
+    #[cfg(target_os = "linux")] observation: &Option<ObservationHandle>,
+    #[cfg(not(target_os = "linux"))] _observation: &Option<()>,
+) -> Result<Option<i32>, String> {
+    #[cfg(target_os = "linux")]
+    if let Some(observation) = observation {
+        return observation.wait_exit().await;
+    }
     let is_pty = {
         let child = child.lock().await;
         child.is_pty()
@@ -511,21 +545,37 @@ async fn wait_child(child: &Arc<Mutex<RuntimeChild>>) -> Result<Option<i32>, Str
     Ok(status.code())
 }
 
-async fn try_wait_child(child: &Arc<Mutex<RuntimeChild>>) -> Result<Option<Option<i32>>, String> {
+async fn try_wait_child(
+    child: &Arc<Mutex<RuntimeChild>>,
+    #[cfg(target_os = "linux")] observation: &Option<ObservationHandle>,
+    #[cfg(not(target_os = "linux"))] _observation: &Option<()>,
+) -> Result<Option<Option<i32>>, String> {
+    #[cfg(target_os = "linux")]
+    if let Some(observation) = observation {
+        return observation.try_exit().transpose();
+    }
     let mut child = child.lock().await;
     child.try_wait_exit_code()
 }
 
-async fn status_or_killed(child: &Arc<Mutex<RuntimeChild>>) -> ExecStatus {
-    match try_wait_child(child).await {
+async fn status_or_killed(
+    child: &Arc<Mutex<RuntimeChild>>,
+    #[cfg(target_os = "linux")] observation: &Option<ObservationHandle>,
+    #[cfg(not(target_os = "linux"))] observation: &Option<()>,
+) -> ExecStatus {
+    match try_wait_child(child, observation).await {
         Ok(Some(exit_code)) => ExecStatus::Exited { exit_code },
         Ok(None) => ExecStatus::Killed,
         Err(message) => ExecStatus::Failed { message },
     }
 }
 
-async fn status_or_timed_out(child: &Arc<Mutex<RuntimeChild>>) -> ExecStatus {
-    match try_wait_child(child).await {
+async fn status_or_timed_out(
+    child: &Arc<Mutex<RuntimeChild>>,
+    #[cfg(target_os = "linux")] observation: &Option<ObservationHandle>,
+    #[cfg(not(target_os = "linux"))] observation: &Option<()>,
+) -> ExecStatus {
+    match try_wait_child(child, observation).await {
         Ok(Some(exit_code)) => ExecStatus::Exited { exit_code },
         Ok(None) => ExecStatus::TimedOut,
         Err(message) => ExecStatus::Failed { message },
@@ -540,6 +590,8 @@ async fn monitor_process(
     timeout: Option<Duration>,
     output_drain_timeout: Option<Duration>,
     abort_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(target_os = "linux")] observation: Option<ObservationHandle>,
+    #[cfg(not(target_os = "linux"))] observation: Option<()>,
     stdout_task: JoinHandle<()>,
     stderr_task: JoinHandle<()>,
 ) {
@@ -560,7 +612,7 @@ async fn monitor_process(
         match timeout {
             Some(timeout) => {
                 tokio::select! {
-                    result = wait_child(&child) => {
+                    result = wait_child(&child, &observation) => {
                         break (
                             match result {
                                 Ok(exit_code) => ExecStatus::Exited { exit_code },
@@ -570,15 +622,15 @@ async fn monitor_process(
                         );
                     }
                     _ = tokio::time::sleep(timeout) => {
-                        break (status_or_timed_out(&child).await, None);
+                        break (status_or_timed_out(&child, &observation).await, None);
                     }
                     _ = abort_wait => {
-                        break (status_or_killed(&child).await, None);
+                        break (status_or_killed(&child, &observation).await, None);
                     }
                     command = control_rx.recv() => {
                         match command {
                             Some(ExecProcessCommand::Kill { response }) => {
-                                let status = status_or_killed(&child).await;
+                                let status = status_or_killed(&child, &observation).await;
                                 break (status, Some(response));
                             }
                             Some(ExecProcessCommand::Finish { status, response }) => {
@@ -590,7 +642,7 @@ async fn monitor_process(
                                 continue;
                             }
                             None => {
-                                let status = status_or_killed(&child).await;
+                                let status = status_or_killed(&child, &observation).await;
                                 break (status, None);
                             }
                         }
@@ -599,7 +651,7 @@ async fn monitor_process(
             }
             None => {
                 tokio::select! {
-                    result = wait_child(&child) => {
+                    result = wait_child(&child, &observation) => {
                         break (
                             match result {
                                 Ok(exit_code) => ExecStatus::Exited { exit_code },
@@ -609,12 +661,12 @@ async fn monitor_process(
                         );
                     }
                     _ = abort_wait => {
-                        break (status_or_killed(&child).await, None);
+                        break (status_or_killed(&child, &observation).await, None);
                     }
                     command = control_rx.recv() => {
                         match command {
                             Some(ExecProcessCommand::Kill { response }) => {
-                                let status = status_or_killed(&child).await;
+                                let status = status_or_killed(&child, &observation).await;
                                 break (status, Some(response));
                             }
                             Some(ExecProcessCommand::Finish { status, response }) => {
@@ -626,7 +678,7 @@ async fn monitor_process(
                                 continue;
                             }
                             None => {
-                                let status = status_or_killed(&child).await;
+                                let status = status_or_killed(&child, &observation).await;
                                 break (status, None);
                             }
                         }
@@ -638,7 +690,7 @@ async fn monitor_process(
 
     let terminal_status = match terminal_status {
         ExecStatus::Failed { .. } | ExecStatus::TimedOut | ExecStatus::Killed => {
-            if let Err(error) = kill_and_reap(&child).await {
+            if let Err(error) = kill_and_reap_observed(&child, &observation).await {
                 tracing::warn!("exec kill/reap failed for {process_id}: {error}");
             }
             finish_pumps_with_timeout(stdout_task, stderr_task, KILL_PUMP_DRAIN_TIMEOUT).await;
@@ -649,7 +701,7 @@ async fn monitor_process(
             if finish_pumps_with_timeout(stdout_task, stderr_task, drain_timeout).await {
                 terminal_status
             } else {
-                if let Err(error) = kill_and_reap(&child).await {
+                if let Err(error) = kill_and_reap_observed(&child, &observation).await {
                     tracing::warn!("exec kill/reap after output drain timeout failed for {process_id}: {error}");
                 }
                 pump_drain_timeout_status(drain_timeout)
@@ -710,7 +762,18 @@ impl ExecRegistry {
             return self.spawn_pty(request).await;
         }
 
-        let mut command = wrap_command(shell_command(&request)?);
+        let mut command = shell_command(&request)?;
+        #[cfg(target_os = "linux")]
+        let observation_setup = if request.observe {
+            if request.sandbox.is_some() && refact_sandbox::sandbox_status().provider == "bwrap" {
+                Setup::unavailable("bwrap observation is unavailable")
+            } else {
+                Setup::prepare(&mut command)
+            }
+        } else {
+            Setup::disabled()
+        };
+        let mut command = wrap_command(command);
         let (meta, process_id) = build_process_meta(&request)?;
         let startup_wait = request.startup_wait;
         let mut child = match command.spawn() {
@@ -731,6 +794,12 @@ impl ExecRegistry {
                 return Err("failed to capture stderr".to_string());
             }
         };
+        #[cfg(target_os = "linux")]
+        let observation = observation_setup.start(child.id());
+        #[cfg(target_os = "linux")]
+        let observation_handle = observation.handle();
+        #[cfg(not(target_os = "linux"))]
+        let observation_handle = None;
         let child = Arc::new(Mutex::new(RuntimeChild::Tokio(child)));
         let (control_tx, control_rx) = mpsc::channel(8);
         let terminal = Arc::new(Notify::new());
@@ -747,7 +816,7 @@ impl ExecRegistry {
             )
             .await
         {
-            if let Err(cleanup_error) = kill_and_reap(&child).await {
+            if let Err(cleanup_error) = kill_and_reap_observed(&child, &observation_handle).await {
                 return Err(format!(
                     "{message}; additionally failed to cleanup spawned child: {cleanup_error}"
                 ));
@@ -776,16 +845,25 @@ impl ExecRegistry {
             request.timeout,
             request.output_drain_timeout,
             request.abort_flag.clone(),
+            observation_handle,
             stdout_task,
             stderr_task,
         ));
         let snapshot = self.mark_started(&process_id).await?;
         if matches!(request.mode, ExecMode::Foreground) {
+            #[cfg(target_os = "linux")]
+            let observation = observation.finish(true).await;
+            #[cfg(not(target_os = "linux"))]
+            let observation = crate::observe::status(request.observe);
             return Ok(ExecSpawnResult::new(
                 self.wait(&process_id).await?,
-                request.observe,
+                observation,
             ));
         }
+        #[cfg(target_os = "linux")]
+        let observation = observation.finish(false).await;
+        #[cfg(not(target_os = "linux"))]
+        let observation = crate::observe::status(request.observe);
         if let Some(readiness) = request.readiness.as_ref() {
             let startup_wait = startup_wait.unwrap_or(Duration::from_secs(10));
             if let Err(message) =
@@ -800,20 +878,20 @@ impl ExecRegistry {
                     )
                     .await
                 {
-                    return Ok(ExecSpawnResult::new(snapshot, request.observe));
+                    return Ok(ExecSpawnResult::new(snapshot, observation));
                 }
                 let snapshot = self
                     .mark_failed(&process_id, message)
                     .await
                     .unwrap_or_else(|_| snapshot.clone());
-                return Ok(ExecSpawnResult::new(snapshot, request.observe));
+                return Ok(ExecSpawnResult::new(snapshot, observation));
             }
         } else if let Some(startup_wait) = startup_wait {
             tokio::time::sleep(startup_wait).await;
         }
         Ok(ExecSpawnResult::new(
             self.get(&process_id).await.unwrap_or(snapshot),
-            request.observe,
+            observation,
         ))
     }
 
@@ -869,6 +947,7 @@ impl ExecRegistry {
             request.timeout,
             request.output_drain_timeout,
             request.abort_flag.clone(),
+            None,
             stdout_task,
             stderr_task,
         ));
@@ -876,7 +955,7 @@ impl ExecRegistry {
         if matches!(request.mode, ExecMode::Foreground) {
             return Ok(ExecSpawnResult::new(
                 self.wait(&process_id).await?,
-                request.observe,
+                crate::observe::unsupported_status(request.observe),
             ));
         }
         if let Some(readiness) = request.readiness.as_ref() {
@@ -893,20 +972,26 @@ impl ExecRegistry {
                     )
                     .await
                 {
-                    return Ok(ExecSpawnResult::new(snapshot, request.observe));
+                    return Ok(ExecSpawnResult::new(
+                        snapshot,
+                        crate::observe::unsupported_status(request.observe),
+                    ));
                 }
                 let snapshot = self
                     .mark_failed(&process_id, message)
                     .await
                     .unwrap_or_else(|_| snapshot.clone());
-                return Ok(ExecSpawnResult::new(snapshot, request.observe));
+                return Ok(ExecSpawnResult::new(
+                    snapshot,
+                    crate::observe::unsupported_status(request.observe),
+                ));
             }
         } else if let Some(startup_wait) = startup_wait {
             tokio::time::sleep(startup_wait).await;
         }
         Ok(ExecSpawnResult::new(
             self.get(&process_id).await.unwrap_or(snapshot),
-            request.observe,
+            crate::observe::unsupported_status(request.observe),
         ))
     }
 }
@@ -1287,7 +1372,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observe_request_reports_unavailable_for_pipe_and_pty() {
+    async fn observe_request_uses_platform_backend_for_pipe_and_fallback_for_pty() {
         let command = if cfg!(windows) {
             "[Console]::Out.Write('observed')"
         } else {
@@ -1304,10 +1389,14 @@ mod tests {
                 .await
                 .unwrap();
 
-            let ObservationStatus::Unavailable(reason) = result.observation else {
-                panic!("unsupported observer returned observed access");
-            };
-            assert_eq!(reason, "backend unavailable");
+            if cfg!(target_os = "linux") && !tty {
+                assert!(matches!(result.observation, ObservationStatus::Observed(_)));
+            } else {
+                let ObservationStatus::Unavailable(reason) = result.observation else {
+                    panic!("unsupported observer returned observed access");
+                };
+                assert_eq!(reason, "backend unavailable");
+            }
         }
     }
 

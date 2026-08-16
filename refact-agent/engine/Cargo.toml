@@ -251,7 +251,6 @@ refact-context-api = { path = "crates/refact-context-api", features = ["http-cli
 refact-runtime-api = { path = "crates/refact-runtime-api" }
 refact-exec = { path = "crates/refact-exec" }
 refact-sandbox = { path = "crates/refact-sandbox" }
-refact-privacy = { path = "crates/refact-privacy" }
 refact-agents-core = { path = "crates/refact-agents-core" }
 refact-self-update = { path = "crates/refact-self-update" }
 refact-tui = { path = "crates/refact-tui" }
