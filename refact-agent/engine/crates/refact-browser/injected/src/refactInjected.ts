@@ -30,6 +30,13 @@ import {
 import type { RefactBuiltins } from './vendor/injected/utilityScript';
 import { getAriaRole, getImplicitAriaRole } from './vendor/injected/roleUtils';
 import { getElementAccessibleDescription, getElementAccessibleName } from './vendor/injected/roleUtils';
+import {
+  generateAriaTree,
+  renderAriaTreeAsJSON,
+  type AriaTreeOptions,
+} from './vendor/injected/ariaSnapshot';
+import { renderAriaSnapshotAsYaml } from './vendor/isomorphic/ariaSnapshotRenderer';
+
 type ElementStateName = 'visible' | 'enabled' | 'editable' | 'checked' | 'unchecked' | 'mixed' | 'stable';
 
 type ElementStates = Readonly<{
@@ -322,6 +329,27 @@ export class RefactInjected {
   getAccessibleDescription(element: Element): string {
     this.ensureConnected(element);
     return getElementAccessibleDescription(element, false).text;
+  }
+
+  ariaSnapshot(element: Element | null, options: AriaTreeOptions): Record<string, unknown> {
+    const root = element ?? this.global.document.body ?? this.global.document.documentElement;
+    this.ensureConnected(root);
+    const tree = generateAriaTree(root, options);
+    const { json } = renderAriaTreeAsJSON(tree, options);
+    const nodes: Record<string, unknown>[] = [];
+    if (options.boxes) {
+      const visit = (node: (typeof json)[number] | string) => {
+        if (typeof node === 'string')
+          return;
+        if (node.box)
+          nodes.push({ role: node.role, name: node.name, ref: node.ref, box: node.box });
+        for (const child of node.children ?? [])
+          visit(child);
+      };
+      for (const node of json)
+        visit(node);
+    }
+    return { yaml: renderAriaSnapshotAsYaml(json), nodes };
   }
 }
 

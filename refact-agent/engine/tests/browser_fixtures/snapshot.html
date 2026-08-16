@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ARIA snapshot fixture</title>
+  <style>
+    #pseudo::before { content: "Before "; }
+    #pseudo::after { content: " After"; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <nav aria-label="Primary">
+    <div><a href="/guide">Guide</a></div>
+    <button type="button">Save</button>
+  </nav>
+  <main>
+    <h1>Snapshot page</h1>
+    <section>
+      <h2>Controls</h2>
+      <input aria-label="Search" placeholder="Find docs">
+      <label><input type="checkbox" checked> Subscribe</label>
+    </section>
+    <p id="pseudo">Center</p>
+    <p class="hidden">Hidden snapshot text</p>
+    <div id="shadow-host"></div>
+    <div role="group" aria-label="Owned group" aria-owns="owned-button"></div>
+    <button id="owned-button">Owned action</button>
+  </main>
+  <script>
+    const shadow = document.querySelector('#shadow-host').attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<button>Shadow action</button>';
+  </script>
+</body>
+</html>

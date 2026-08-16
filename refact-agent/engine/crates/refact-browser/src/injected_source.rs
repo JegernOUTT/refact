@@ -271,4 +271,12 @@ mod tests {
         .unwrap();
         assert_eq!(rebuilt, INJECTED_BUNDLE);
     }
+
+    #[test]
+    fn injected_bundle_contains_aria_snapshot_and_distiller() {
+        assert!(INJECTED_BUNDLE.contains("generateAriaTree"));
+        assert!(INJECTED_BUNDLE.contains("distillAriaSnapshot"));
+        assert!(INJECTED_BUNDLE.contains("renderAriaSnapshotAsYaml"));
+        assert!(INJECTED_BUNDLE.contains("ariaSnapshot(element"));
+    }
 }

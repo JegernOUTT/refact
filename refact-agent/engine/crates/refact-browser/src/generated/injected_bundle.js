@@ -1,4 +1,4 @@
-// @refact-injected-hash e270e5c0c1bd86c8c465ee37a08ab74f82c48a3b7ff9a3315c7dfc956af1d19a
+// @refact-injected-hash 9282c0ae5d7f8c38fa048f305f72cbc1f3e8dc5e329eef525726315c2b9a3a3b
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -200,6 +200,22 @@ var cacheStyle;
 var cacheStyleBefore;
 var cacheStyleAfter;
 var cacheStyleVisibility;
+var cachesCounter = 0;
+function beginDOMCaches() {
+  ++cachesCounter;
+  cacheStyle != null ? cacheStyle : cacheStyle = /* @__PURE__ */ new Map();
+  cacheStyleBefore != null ? cacheStyleBefore : cacheStyleBefore = /* @__PURE__ */ new Map();
+  cacheStyleAfter != null ? cacheStyleAfter : cacheStyleAfter = /* @__PURE__ */ new Map();
+  cacheStyleVisibility != null ? cacheStyleVisibility : cacheStyleVisibility = /* @__PURE__ */ new Map();
+}
+function endDOMCaches() {
+  if (!--cachesCounter) {
+    cacheStyle = void 0;
+    cacheStyleBefore = void 0;
+    cacheStyleAfter = void 0;
+    cacheStyleVisibility = void 0;
+  }
+}
 
 // src/vendor/isomorphic/stringUtils.ts
 var normalizedWhitespaceCache;
@@ -221,6 +237,36 @@ function trimString(input, cap, suffix = "") {
 }
 function trimStringWithEllipsis(input, cap) {
   return trimString(input, cap, "…");
+}
+function truncateDataUrl(url) {
+  if (!url.startsWith("data:"))
+    return url;
+  const comma = url.indexOf(",");
+  if (comma === -1)
+    return url;
+  return url.slice(0, comma + 1) + "…";
+}
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function longestCommonSubstring(s1, s2) {
+  const n = s1.length;
+  const m = s2.length;
+  let maxLen = 0;
+  let endingIndex = 0;
+  const dp = Array(n + 1).fill(null).map(() => Array(m + 1).fill(0));
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      if (s1[i - 1] === s2[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+        if (dp[i][j] > maxLen) {
+          maxLen = dp[i][j];
+          endingIndex = i;
+        }
+      }
+    }
+  }
+  return s1.slice(endingIndex - maxLen, endingIndex);
 }
 var ansiRegex = new RegExp("([\\u001B\\u009B][[\\]()#?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?\\u0007)|(?:(?:\\d{0,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~])))", "g");
 
@@ -1909,6 +1955,30 @@ function getElementAccessibleDescription(element, includeHidden) {
   }
   return accessibleDescription;
 }
+var kAriaInvalidRoles = [
+  "application",
+  "checkbox",
+  "columnheader",
+  "combobox",
+  "gridcell",
+  "listbox",
+  "radiogroup",
+  "rowheader",
+  "searchbox",
+  "slider",
+  "spinbutton",
+  "switch",
+  "textbox",
+  "tree"
+];
+function getAriaInvalid(element) {
+  const ariaInvalid = element.getAttribute("aria-invalid");
+  if (!ariaInvalid || ariaInvalid.trim() === "" || ariaInvalid.toLocaleLowerCase() === "false")
+    return "false";
+  if (ariaInvalid === "true" || ariaInvalid === "grammar" || ariaInvalid === "spelling")
+    return ariaInvalid;
+  return "true";
+}
 function insideTargetElement(options) {
   return options.embeddedInTargetElement === "self" || options.embeddedInTargetElement === "descendant";
 }
@@ -2187,6 +2257,77 @@ function innerAccumulatedElementText(element, options) {
   tokens.push(getCSSContent(element, "::after") || "");
   return { text: tokens.join(""), elements };
 }
+var kAriaSelectedRoles = ["gridcell", "option", "row", "tab", "rowheader", "columnheader", "treeitem"];
+function getAriaSelected(element) {
+  if (elementSafeTagName(element) === "OPTION")
+    return element.selected;
+  if (kAriaSelectedRoles.includes(getAriaRole(element) || ""))
+    return getAriaBoolean(element.getAttribute("aria-selected")) === true;
+  return false;
+}
+var kAriaCheckedRoles = ["checkbox", "menuitemcheckbox", "option", "radio", "switch", "menuitemradio", "treeitem"];
+function getAriaChecked(element) {
+  const result = getChecked(element, true);
+  return result === "error" ? false : result;
+}
+function getChecked(element, allowMixed) {
+  const tagName = elementSafeTagName(element);
+  if (allowMixed && tagName === "INPUT" && element.indeterminate)
+    return "mixed";
+  if (tagName === "INPUT" && ["checkbox", "radio"].includes(element.type))
+    return element.checked;
+  if (kAriaCheckedRoles.includes(getAriaRole(element) || "")) {
+    const checked = element.getAttribute("aria-checked");
+    if (checked === "true")
+      return true;
+    if (allowMixed && checked === "mixed")
+      return "mixed";
+    return false;
+  }
+  return "error";
+}
+var kAriaPressedRoles = ["button"];
+function getAriaPressed(element) {
+  if (kAriaPressedRoles.includes(getAriaRole(element) || "")) {
+    const pressed = element.getAttribute("aria-pressed");
+    if (pressed === "true")
+      return true;
+    if (pressed === "mixed")
+      return "mixed";
+  }
+  return false;
+}
+var kAriaExpandedRoles = ["application", "button", "checkbox", "combobox", "gridcell", "link", "listbox", "menuitem", "row", "rowheader", "tab", "treeitem", "columnheader", "menuitemcheckbox", "menuitemradio", "rowheader", "switch"];
+function getAriaExpanded(element) {
+  if (elementSafeTagName(element) === "DETAILS")
+    return element.open;
+  if (kAriaExpandedRoles.includes(getAriaRole(element) || "")) {
+    const expanded = element.getAttribute("aria-expanded");
+    if (expanded === null)
+      return void 0;
+    if (expanded === "true")
+      return true;
+    return false;
+  }
+  return void 0;
+}
+var kAriaLevelRoles = ["heading", "listitem", "row", "treeitem"];
+function getAriaLevel(element) {
+  const native = { "H1": 1, "H2": 2, "H3": 3, "H4": 4, "H5": 5, "H6": 6 }[elementSafeTagName(element)];
+  if (native)
+    return native;
+  if (kAriaLevelRoles.includes(getAriaRole(element) || "")) {
+    const attr = element.getAttribute("aria-level");
+    const value = attr === null ? Number.NaN : Number(attr);
+    if (Number.isInteger(value) && value >= 1)
+      return value;
+  }
+  return 0;
+}
+var kAriaDisabledRoles = ["application", "button", "composite", "gridcell", "group", "input", "link", "menuitem", "scrollbar", "separator", "tab", "checkbox", "columnheader", "combobox", "grid", "listbox", "menu", "menubar", "menuitemcheckbox", "menuitemradio", "option", "radio", "radiogroup", "row", "rowheader", "searchbox", "select", "slider", "spinbutton", "switch", "tablist", "textbox", "toolbar", "tree", "treegrid", "treeitem"];
+function getAriaDisabled2(element) {
+  return isNativelyDisabled2(element) || hasExplicitAriaDisabled(element);
+}
 function isNativelyDisabled2(element) {
   const isNativeFormControl = ["BUTTON", "INPUT", "SELECT", "TEXTAREA", "OPTION", "OPTGROUP"].includes(elementSafeTagName(element));
   return isNativeFormControl && (element.hasAttribute("disabled") || belongsToDisabledOptGroup2(element) || belongsToDisabledFieldSet2(element));
@@ -2201,6 +2342,27 @@ function belongsToDisabledFieldSet2(element) {
   const legendElement = fieldSetElement.querySelector(":scope > LEGEND");
   return !legendElement || !legendElement.contains(element);
 }
+function hasExplicitAriaDisabled(element) {
+  if (!kAriaDisabledRoles.includes(getAriaRole(element) || ""))
+    return false;
+  return hasAriaDisabledInChain2(element);
+}
+function hasAriaDisabledInChain2(element) {
+  let result = cacheAriaDisabled == null ? void 0 : cacheAriaDisabled.get(element);
+  if (result === void 0) {
+    const attribute = (element.getAttribute("aria-disabled") || "").toLowerCase();
+    if (attribute === "true") {
+      result = true;
+    } else if (attribute === "false") {
+      result = false;
+    } else {
+      const parent = parentElementOrShadowHost(element);
+      result = parent ? hasAriaDisabledInChain2(parent) : false;
+    }
+    cacheAriaDisabled == null ? void 0 : cacheAriaDisabled.set(element, result);
+  }
+  return result;
+}
 function getAccessibleNameFromAssociatedLabels(labels, options) {
   return joinCompositeString([...labels].map((label) => getTextAlternativeInternal(label, {
     ...options,
@@ -2211,15 +2373,87 @@ function getAccessibleNameFromAssociatedLabels(labels, options) {
     embeddedInTargetElement: void 0
   })).filter((accessibleName) => !!accessibleName.text), " ", options.collectElements);
 }
+function receivesPointerEvents(element) {
+  const cache = cachePointerEvents;
+  let e = element;
+  let result;
+  const parents = [];
+  for (; e; e = parentElementOrShadowHost(e)) {
+    const cached = cache.get(e);
+    if (cached !== void 0) {
+      result = cached;
+      break;
+    }
+    parents.push(e);
+    const style = getElementComputedStyle(e);
+    if (!style) {
+      result = true;
+      break;
+    }
+    const value = style.pointerEvents;
+    if (value) {
+      result = value !== "none";
+      break;
+    }
+  }
+  if (result === void 0)
+    result = true;
+  for (const parent of parents)
+    cache.set(parent, result);
+  return result;
+}
 var cacheAccessibleName;
 var cacheAccessibleNameHidden;
+var cacheAccessibleNameText;
+var cacheAccessibleNameTextHidden;
 var cacheAccessibleDescription;
 var cacheAccessibleDescriptionHidden;
+var cacheAccessibleErrorMessage;
 var cacheIsHidden;
 var cachePseudoContent;
 var cachePseudoContentBefore;
 var cachePseudoContentAfter;
+var cachePointerEvents;
 var cacheAriaRole;
+var cacheAriaDisabled;
+var cachesCounter2 = 0;
+function beginAriaCaches() {
+  beginDOMCaches();
+  ++cachesCounter2;
+  cacheAriaRole != null ? cacheAriaRole : cacheAriaRole = /* @__PURE__ */ new Map();
+  cacheAriaDisabled != null ? cacheAriaDisabled : cacheAriaDisabled = /* @__PURE__ */ new Map();
+  cacheAccessibleName != null ? cacheAccessibleName : cacheAccessibleName = /* @__PURE__ */ new Map();
+  cacheAccessibleNameHidden != null ? cacheAccessibleNameHidden : cacheAccessibleNameHidden = /* @__PURE__ */ new Map();
+  cacheAccessibleNameText != null ? cacheAccessibleNameText : cacheAccessibleNameText = /* @__PURE__ */ new Map();
+  cacheAccessibleNameTextHidden != null ? cacheAccessibleNameTextHidden : cacheAccessibleNameTextHidden = /* @__PURE__ */ new Map();
+  cacheAccessibleDescription != null ? cacheAccessibleDescription : cacheAccessibleDescription = /* @__PURE__ */ new Map();
+  cacheAccessibleDescriptionHidden != null ? cacheAccessibleDescriptionHidden : cacheAccessibleDescriptionHidden = /* @__PURE__ */ new Map();
+  cacheAccessibleErrorMessage != null ? cacheAccessibleErrorMessage : cacheAccessibleErrorMessage = /* @__PURE__ */ new Map();
+  cacheIsHidden != null ? cacheIsHidden : cacheIsHidden = /* @__PURE__ */ new Map();
+  cachePseudoContent != null ? cachePseudoContent : cachePseudoContent = /* @__PURE__ */ new Map();
+  cachePseudoContentBefore != null ? cachePseudoContentBefore : cachePseudoContentBefore = /* @__PURE__ */ new Map();
+  cachePseudoContentAfter != null ? cachePseudoContentAfter : cachePseudoContentAfter = /* @__PURE__ */ new Map();
+  cachePointerEvents != null ? cachePointerEvents : cachePointerEvents = /* @__PURE__ */ new Map();
+}
+function endAriaCaches() {
+  if (!--cachesCounter2) {
+    cacheAccessibleName = void 0;
+    cacheAccessibleNameHidden = void 0;
+    cacheAccessibleNameText = void 0;
+    cacheAccessibleNameTextHidden = void 0;
+    cacheAccessibleDescription = void 0;
+    cacheAccessibleDescriptionHidden = void 0;
+    cacheAccessibleErrorMessage = void 0;
+    cacheIsHidden = void 0;
+    cachePseudoContent = void 0;
+    cachePseudoContentBefore = void 0;
+    cachePseudoContentAfter = void 0;
+    cachePointerEvents = void 0;
+    cacheAriaRole = void 0;
+    cacheAriaDisabled = void 0;
+  }
+  endDOMCaches();
+}
 var inputTypeToRole = {
   "button": "button",
   "checkbox": "checkbox",
@@ -2247,6 +2481,657 @@ function joinCompositeString(parts, separator, collectElements) {
     }
   }
   return { text: parts.map((part) => part.text).join(separator), elements };
+}
+
+// src/vendor/isomorphic/ariaSnapshot.ts
+function hasPointerCursor(ariaNode) {
+  return ariaNode.box.cursor === "pointer";
+}
+
+// src/vendor/isomorphic/yaml.ts
+function yamlEscapeKeyIfNeeded(str) {
+  if (!yamlStringNeedsQuotes(str))
+    return str;
+  return `'` + str.replace(/'/g, `''`) + `'`;
+}
+function yamlEscapeValueIfNeeded(str) {
+  if (!yamlStringNeedsQuotes(str))
+    return str;
+  return '"' + str.replace(/[\\"\x00-\x1f\x7f-\x9f]/g, (c) => {
+    switch (c) {
+      case "\\":
+        return "\\\\";
+      case '"':
+        return '\\"';
+      case "\b":
+        return "\\b";
+      case "\f":
+        return "\\f";
+      case "\n":
+        return "\\n";
+      case "\r":
+        return "\\r";
+      case "	":
+        return "\\t";
+      default:
+        const code = c.charCodeAt(0);
+        return "\\x" + code.toString(16).padStart(2, "0");
+    }
+  }) + '"';
+}
+function yamlStringNeedsQuotes(str) {
+  if (str.length === 0)
+    return true;
+  if (/^\s|\s$/.test(str))
+    return true;
+  if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(str))
+    return true;
+  if (/^-/.test(str))
+    return true;
+  if (/[\n:](\s|$)/.test(str))
+    return true;
+  if (/\s#/.test(str))
+    return true;
+  if (/[\n\r]/.test(str))
+    return true;
+  if (/^[&*\],?!>|@"'#%]/.test(str))
+    return true;
+  if (/[{}`]/.test(str))
+    return true;
+  if (/^\[/.test(str))
+    return true;
+  if (!isNaN(Number(str)) || ["y", "n", "yes", "no", "true", "false", "on", "off", "null"].includes(str.toLowerCase()))
+    return true;
+  return false;
+}
+
+// src/vendor/isomorphic/ariaSnapshotRenderer.ts
+function renderAriaSnapshotAsYaml(snapshot, options = {}) {
+  const lines = [];
+  const includeText = options.convertStringsToRegex ? textContributesInfo : () => true;
+  const renderString = options.convertStringsToRegex ? convertToBestGuessRegex : (str) => str;
+  const visitText = (text, depth) => {
+    const escaped = yamlEscapeValueIfNeeded(renderString(text));
+    if (escaped)
+      lines.push(indent(depth) + "- text: " + escaped);
+  };
+  const createKey = (node) => {
+    let key = node.role;
+    if (node.name && node.name.length <= 900) {
+      const name = renderString(node.name);
+      if (name) {
+        const stringifiedName = name.startsWith("/") && name.endsWith("/") ? name : JSON.stringify(name);
+        key += " " + stringifiedName;
+      }
+    }
+    if (node.checked === "mixed")
+      key += ` [checked=mixed]`;
+    if (node.checked === true)
+      key += ` [checked]`;
+    if (node.disabled)
+      key += ` [disabled]`;
+    if (node.expanded)
+      key += ` [expanded]`;
+    if (node.active)
+      key += ` [active]`;
+    if (node.invalid === "grammar" || node.invalid === "spelling")
+      key += ` [invalid=${node.invalid}]`;
+    if (node.invalid === true)
+      key += ` [invalid]`;
+    if (node.level)
+      key += ` [level=${node.level}]`;
+    if (node.pressed === "mixed")
+      key += ` [pressed=mixed]`;
+    if (node.pressed === true)
+      key += ` [pressed]`;
+    if (node.selected === true)
+      key += ` [selected]`;
+    if (node.ref) {
+      key += ` [ref=${node.ref}]`;
+      if (node.cursor === "pointer")
+        key += " [cursor=pointer]";
+    }
+    if (node.box)
+      key += ` [box=${node.box.x},${node.box.y},${node.box.width},${node.box.height}]`;
+    return key;
+  };
+  const visit = (node, depth) => {
+    var _a, _b;
+    if (node.role === "text") {
+      visitText(node.text || "", depth);
+      return;
+    }
+    (_a = options.lineToNode) == null ? void 0 : _a.set(lines.length, node);
+    const escapedKey = indent(depth) + "- " + yamlEscapeKeyIfNeeded(createKey(node));
+    const props = [];
+    if (node.url !== void 0)
+      props.push(["url", node.url]);
+    if (node.placeholder !== void 0)
+      props.push(["placeholder", node.placeholder]);
+    if (node.text === void 0 && !props.length && !((_b = node.children) == null ? void 0 : _b.length)) {
+      lines.push(escapedKey);
+    } else if (node.text !== void 0 && !props.length) {
+      if (includeText(node, node.text))
+        lines.push(escapedKey + ": " + yamlEscapeValueIfNeeded(renderString(node.text)));
+      else
+        lines.push(escapedKey);
+    } else {
+      lines.push(escapedKey + ":");
+      for (const [name, value] of props)
+        lines.push(indent(depth + 1) + "- /" + name + ": " + yamlEscapeValueIfNeeded(value));
+      if (node.text !== void 0) {
+        visitText(includeText(node, node.text) ? node.text : "", depth + 1);
+      } else {
+        for (const child of node.children || []) {
+          if (typeof child === "string")
+            visitText(includeText(node, child) ? child : "", depth + 1);
+          else
+            visit(child, depth + 1);
+        }
+      }
+    }
+  };
+  for (const node of snapshot)
+    visit(node, 0);
+  return lines.join("\n");
+}
+function indent(depth) {
+  return "  ".repeat(depth);
+}
+function convertToBestGuessRegex(text) {
+  const dynamicContent = [
+    // 550e8400-e29b-41d4-a716-446655440000
+    { regex: /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/, replacement: "[0-9a-fA-F-]+" },
+    // 2mb
+    { regex: /\b[\d,.]+[bkmBKM]+\b/, replacement: "[\\d,.]+[bkmBKM]+" },
+    // 2ms, 20s
+    { regex: /\b\d+[hmsp]+\b/, replacement: "\\d+[hmsp]+" },
+    { regex: /\b[\d,.]+[hmsp]+\b/, replacement: "[\\d,.]+[hmsp]+" },
+    // Do not replace single digits with regex by default.
+    // 2+ digits: [Issue 22, 22.3, 2.33, 2,333]
+    { regex: /\b\d+,\d+\b/, replacement: "\\d+,\\d+" },
+    { regex: /\b\d+\.\d{2,}\b/, replacement: "\\d+\\.\\d+" },
+    { regex: /\b\d{2,}\.\d+\b/, replacement: "\\d+\\.\\d+" },
+    { regex: /\b\d{2,}\b/, replacement: "\\d+" }
+  ];
+  let pattern = "";
+  let lastIndex = 0;
+  const combinedRegex = new RegExp(dynamicContent.map((r) => "(" + r.regex.source + ")").join("|"), "g");
+  text.replace(combinedRegex, (match, ...args) => {
+    const offset = args[args.length - 2];
+    const groups = args.slice(0, -2);
+    pattern += escapeRegExp(text.slice(lastIndex, offset));
+    for (let i = 0; i < groups.length; i++) {
+      if (groups[i]) {
+        const { replacement } = dynamicContent[i];
+        pattern += replacement;
+        break;
+      }
+    }
+    lastIndex = offset + match.length;
+    return match;
+  });
+  if (!pattern)
+    return text;
+  pattern += escapeRegExp(text.slice(lastIndex));
+  return String(new RegExp(pattern));
+}
+function textContributesInfo(node, text) {
+  if (!text.length)
+    return false;
+  if (!node.name)
+    return true;
+  const substr = text.length <= 200 && node.name.length <= 200 ? longestCommonSubstring(text, node.name) : "";
+  let filtered = text;
+  while (substr && filtered.includes(substr))
+    filtered = filtered.replace(substr, "");
+  return filtered.trim().length / text.length > 0.1;
+}
+
+// src/vendor/injected/ariaSnapshotDistiller.ts
+function distillAriaSnapshot(snapshot, options) {
+  runPlugins(snapshot, options.mode === "ai" ? aiPlugins : normalizePlugins, options);
+}
+function runPlugins(snapshot, plugins, options) {
+  var _a, _b;
+  const ctx = { snapshot, depth: -1, maxDepth: options.depth, ancestors: [], pendingContentRefs: /* @__PURE__ */ new Set() };
+  const traverse = (node, depth) => {
+    const children = [];
+    const visitChild = (child) => {
+      var _a2, _b2;
+      if (typeof child === "string") {
+        children.push(child);
+        return;
+      }
+      ctx.depth = depth + 1;
+      for (const plugin of plugins) {
+        const result = (_a2 = plugin.enter) == null ? void 0 : _a2.call(plugin, child, ctx);
+        if (result === "remove")
+          return;
+        if (result === "unwrap") {
+          child.children.forEach(visitChild);
+          return;
+        }
+      }
+      traverse(child, depth + 1);
+      ctx.depth = depth + 1;
+      for (const plugin of plugins) {
+        const result = (_b2 = plugin.exit) == null ? void 0 : _b2.call(plugin, child, ctx);
+        if (result === "remove")
+          return;
+        if (result === "unwrap") {
+          children.push(...child.children);
+          return;
+        }
+      }
+      children.push(child);
+    };
+    ctx.ancestors.push(node);
+    node.children.forEach(visitChild);
+    ctx.ancestors.pop();
+    node.children = children;
+  };
+  for (const plugin of plugins)
+    (_a = plugin.enter) == null ? void 0 : _a.call(plugin, snapshot.root, ctx);
+  traverse(snapshot.root, -1);
+  ctx.depth = -1;
+  for (const plugin of plugins)
+    (_b = plugin.exit) == null ? void 0 : _b.call(plugin, snapshot.root, ctx);
+}
+function isLeafGeneric(node) {
+  return node.role === "generic" && node.children.every((child) => typeof child === "string");
+}
+function isClickTargetRoot(node, ctx) {
+  return !!node.ref && hasPointerCursor(node) && !ctx.ancestors.some((ancestor) => !!ancestor.ref && hasPointerCursor(ancestor));
+}
+var mergeStringChildren = {
+  name: "mergeStringChildren",
+  exit(node) {
+    const children = [];
+    const buffer = [];
+    const flush = () => {
+      if (!buffer.length)
+        return;
+      const text = normalizeWhiteSpace(buffer.join(""));
+      if (text)
+        children.push(text);
+      buffer.length = 0;
+    };
+    for (const child of node.children) {
+      if (typeof child === "string") {
+        buffer.push(child);
+      } else {
+        flush();
+        children.push(child);
+      }
+    }
+    flush();
+    node.children = children;
+    if (node.children.length === 1 && node.children[0] === node.name)
+      node.children = [];
+  }
+};
+var unwrapSingleChildGenerics = {
+  name: "unwrapSingleChildGenerics",
+  exit(node, ctx) {
+    if (node.role !== "generic" || node.name || node.children.length > 1 || !node.children.every((child) => typeof child !== "string" && !!child.ref))
+      return;
+    if (!node.children.length && isClickTargetRoot(node, ctx))
+      return;
+    return "unwrap";
+  }
+};
+var removeNamelessImages = {
+  name: "removeNamelessImages",
+  exit(node, ctx) {
+    if (node.role === "img" && !node.name && !node.children.length && !isClickTargetRoot(node, ctx))
+      return "remove";
+  }
+};
+var removeRedundantNames = {
+  name: "removeRedundantNames",
+  enter(node, ctx) {
+    var _a;
+    if (!node.ref)
+      return;
+    for (const ref of ((_a = ctx.snapshot.info.get(node.ref)) == null ? void 0 : _a.nameFromContentRefs) || [])
+      ctx.pendingContentRefs.add(ref);
+    const beyondDepth = !!ctx.maxDepth && ctx.depth > ctx.maxDepth;
+    if (!beyondDepth && !isLeafGeneric(node))
+      ctx.pendingContentRefs.delete(node.ref);
+  },
+  exit(node, ctx) {
+    var _a;
+    if (!node.ref)
+      return;
+    const nameFromContentRefs = (_a = ctx.snapshot.info.get(node.ref)) == null ? void 0 : _a.nameFromContentRefs;
+    if (!(nameFromContentRefs == null ? void 0 : nameFromContentRefs.length))
+      return;
+    if (nameFromContentRefs.every((ref) => !ctx.pendingContentRefs.has(ref))) {
+      node.name = "";
+    } else {
+      for (const ref of nameFromContentRefs)
+        ctx.pendingContentRefs.delete(ref);
+    }
+  }
+};
+var removeNameRepeatingChild = {
+  name: "removeNameRepeatingChild",
+  exit(node, ctx) {
+    const parent = ctx.ancestors[ctx.ancestors.length - 1];
+    if (!(parent == null ? void 0 : parent.name) || node.role !== "generic" || node.active || Object.keys(node.props).length)
+      return;
+    const singleTextChild = node.children.length === 1 && typeof node.children[0] === "string" ? node.children[0] : void 0;
+    const text = node.name ? node.children.length ? void 0 : node.name : singleTextChild;
+    if (text && text === parent.name) {
+      if (node.ref)
+        ctx.pendingContentRefs.add(node.ref);
+      return "remove";
+    }
+  }
+};
+var inlineTextIntoGeneric = {
+  name: "inlineTextIntoGeneric",
+  exit(node) {
+    if (node.role !== "generic" || Object.keys(node.props).length || node.children.length !== 1)
+      return;
+    const child = node.children[0];
+    if (typeof child === "string")
+      return;
+    if (child.role !== "generic" || child.name || child.active || Object.keys(child.props).length)
+      return;
+    if (child.children.length === 1 && typeof child.children[0] === "string")
+      node.children = [child.children[0]];
+  }
+};
+var normalizePlugins = [
+  mergeStringChildren,
+  unwrapSingleChildGenerics
+];
+var aiPlugins = [
+  mergeStringChildren,
+  removeNamelessImages,
+  removeRedundantNames,
+  inlineTextIntoGeneric,
+  removeNameRepeatingChild,
+  unwrapSingleChildGenerics
+];
+
+// src/vendor/injected/ariaSnapshot.ts
+var lastRef = 0;
+function toInternalOptions(options) {
+  const renderBoxes = options.boxes;
+  if (options.mode === "ai") {
+    return {
+      visibility: "ariaOrVisible",
+      refs: options.refs ? "interactable" : "none",
+      refPrefix: options.refPrefix,
+      includeGenericRole: true,
+      renderActive: !options.doNotRenderActive,
+      renderCursorPointer: true,
+      renderBoxes
+    };
+  }
+  if (options.mode === "autoexpect") {
+    return { visibility: "ariaAndVisible", refs: "none", renderBoxes };
+  }
+  return { visibility: "aria", refs: "none", renderBoxes };
+}
+function generateAriaTree(rootElement, publicOptions) {
+  const options = toInternalOptions(publicOptions);
+  const visited = /* @__PURE__ */ new Set();
+  const nameSourceElements = /* @__PURE__ */ new Map();
+  const snapshot = {
+    root: { role: "fragment", name: "", children: [], props: {}, box: computeBox(rootElement), receivesPointerEvents: true },
+    info: /* @__PURE__ */ new Map(),
+    refs: /* @__PURE__ */ new Map(),
+    iframeRefs: []
+  };
+  setAriaNodeElement(snapshot.root, rootElement);
+  const visit = (ariaNode, node, parentElementVisible) => {
+    if (visited.has(node))
+      return;
+    visited.add(node);
+    if (node.nodeType === Node.TEXT_NODE && node.nodeValue) {
+      if (!parentElementVisible)
+        return;
+      const text = node.nodeValue;
+      if (ariaNode.role !== "textbox" && text)
+        ariaNode.children.push(node.nodeValue || "");
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE)
+      return;
+    const element = node;
+    const isElementVisibleForAria = !isElementHiddenForAria(element);
+    let visible = isElementVisibleForAria;
+    if (options.visibility === "ariaOrVisible")
+      visible = isElementVisibleForAria || isElementVisible(element);
+    if (options.visibility === "ariaAndVisible")
+      visible = isElementVisibleForAria && isElementVisible(element);
+    if (options.visibility === "aria" && !visible)
+      return;
+    const ariaChildren = [];
+    if (element.hasAttribute("aria-owns")) {
+      const ids = element.getAttribute("aria-owns").split(/\s+/);
+      for (const id of ids) {
+        const ownedElement = rootElement.ownerDocument.getElementById(id);
+        if (ownedElement)
+          ariaChildren.push(ownedElement);
+      }
+    }
+    const childAriaNode = visible ? toAriaNode(element, options, nameSourceElements) : null;
+    let elementInfo;
+    if (childAriaNode) {
+      if (childAriaNode.ref) {
+        elementInfo = { element, nameFromContentRefs: [] };
+        snapshot.info.set(childAriaNode.ref, elementInfo);
+        snapshot.refs.set(element, childAriaNode.ref);
+        if (childAriaNode.role === "iframe")
+          snapshot.iframeRefs.push(childAriaNode.ref);
+      }
+      ariaNode.children.push(childAriaNode);
+    }
+    processElement(childAriaNode || ariaNode, element, ariaChildren, visible);
+    if (elementInfo) {
+      for (const contributor of nameSourceElements.get(childAriaNode) || []) {
+        const ref = snapshot.refs.get(contributor);
+        if (ref && ref !== childAriaNode.ref)
+          elementInfo.nameFromContentRefs.push(ref);
+      }
+    }
+  };
+  function processElement(ariaNode, element, ariaChildren, parentElementVisible) {
+    var _a;
+    const display = ((_a = getElementComputedStyle(element)) == null ? void 0 : _a.display) || "inline";
+    const treatAsBlock = display !== "inline" || element.nodeName === "BR" ? " " : "";
+    if (treatAsBlock)
+      ariaNode.children.push(treatAsBlock);
+    ariaNode.children.push(getCSSContent(element, "::before") || "");
+    const assignedNodes = element.nodeName === "SLOT" ? element.assignedNodes() : [];
+    if (assignedNodes.length) {
+      for (const child of assignedNodes)
+        visit(ariaNode, child, parentElementVisible);
+    } else {
+      for (let child = element.firstChild; child; child = child.nextSibling) {
+        if (!child.assignedSlot)
+          visit(ariaNode, child, parentElementVisible);
+      }
+      if (element.shadowRoot) {
+        for (let child = element.shadowRoot.firstChild; child; child = child.nextSibling)
+          visit(ariaNode, child, parentElementVisible);
+      }
+    }
+    for (const child of ariaChildren)
+      visit(ariaNode, child, parentElementVisible);
+    ariaNode.children.push(getCSSContent(element, "::after") || "");
+    if (treatAsBlock)
+      ariaNode.children.push(treatAsBlock);
+    if (ariaNode.children.length === 1 && ariaNode.name === ariaNode.children[0])
+      ariaNode.children = [];
+    if (ariaNode.role === "link" && element.hasAttribute("href")) {
+      const href = element.getAttribute("href");
+      ariaNode.props["url"] = truncateDataUrl(href);
+    }
+    if (ariaNode.role === "textbox" && element.hasAttribute("placeholder") && element.getAttribute("placeholder") !== ariaNode.name) {
+      const placeholder = element.getAttribute("placeholder");
+      ariaNode.props["placeholder"] = placeholder;
+    }
+  }
+  beginAriaCaches();
+  try {
+    visit(snapshot.root, rootElement, true);
+  } finally {
+    endAriaCaches();
+  }
+  distillAriaSnapshot(snapshot, publicOptions);
+  return snapshot;
+}
+function computeAriaRef(ariaNode, options) {
+  var _a;
+  if (options.refs === "none")
+    return;
+  if (options.refs === "interactable" && (!ariaNode.box.visible || !ariaNode.receivesPointerEvents))
+    return;
+  const element = ariaNodeElement(ariaNode);
+  let ariaRef = element._ariaRef;
+  if (!ariaRef || ariaRef.role !== ariaNode.role || ariaRef.name !== ariaNode.name) {
+    ariaRef = { role: ariaNode.role, name: ariaNode.name, ref: ((_a = options.refPrefix) != null ? _a : "") + "e" + ++lastRef };
+    element._ariaRef = ariaRef;
+  }
+  ariaNode.ref = ariaRef.ref;
+}
+function toAriaNode(element, options, nameSourceElements) {
+  var _a;
+  const active = element.ownerDocument.activeElement === element && element.ownerDocument.hasFocus();
+  if (element.nodeName === "IFRAME" || element.nodeName === "FRAME") {
+    const ariaNode = {
+      role: "iframe",
+      name: "",
+      children: [],
+      props: {},
+      box: computeBox(element),
+      receivesPointerEvents: true,
+      active
+    };
+    setAriaNodeElement(ariaNode, element);
+    computeAriaRef(ariaNode, options);
+    return ariaNode;
+  }
+  const defaultRole = options.includeGenericRole ? "generic" : null;
+  const role = (_a = getAriaRole(element)) != null ? _a : defaultRole;
+  if (!role || role === "presentation" || role === "none")
+    return null;
+  const name = getElementAccessibleName(element, false);
+  const receivesPointerEvents2 = receivesPointerEvents(element);
+  const box = computeBox(element);
+  if (role === "generic" && box.inline && element.childNodes.length === 1 && element.childNodes[0].nodeType === Node.TEXT_NODE)
+    return null;
+  const result = {
+    role,
+    name: normalizeWhiteSpace(name.text),
+    children: [],
+    props: {},
+    box,
+    receivesPointerEvents: receivesPointerEvents2,
+    active
+  };
+  setAriaNodeElement(result, element);
+  nameSourceElements.set(result, name.elements);
+  computeAriaRef(result, options);
+  if (kAriaCheckedRoles.includes(role))
+    result.checked = getAriaChecked(element);
+  if (kAriaDisabledRoles.includes(role))
+    result.disabled = getAriaDisabled2(element);
+  if (kAriaExpandedRoles.includes(role))
+    result.expanded = getAriaExpanded(element);
+  if (kAriaInvalidRoles.includes(role)) {
+    const invalid = getAriaInvalid(element);
+    result.invalid = invalid === "false" ? false : invalid === "true" ? true : invalid;
+  }
+  if (kAriaLevelRoles.includes(role))
+    result.level = getAriaLevel(element);
+  if (kAriaPressedRoles.includes(role))
+    result.pressed = getAriaPressed(element);
+  if (kAriaSelectedRoles.includes(role))
+    result.selected = getAriaSelected(element);
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+    if (element.type !== "checkbox" && element.type !== "radio" && element.type !== "file")
+      result.children = [element.value];
+  }
+  return result;
+}
+function renderAriaTreeAsJSON(ariaSnapshot, publicOptions) {
+  const options = toInternalOptions(publicOptions);
+  const iframeDepths = {};
+  const visit = (ariaNode, depth, renderCursorPointer) => {
+    if (ariaNode.role === "iframe" && ariaNode.ref)
+      iframeDepths[ariaNode.ref] = depth;
+    const node = { role: ariaNode.role };
+    if (ariaNode.name)
+      node.name = ariaNode.name;
+    if (ariaNode.checked === "mixed" || ariaNode.checked === true)
+      node.checked = ariaNode.checked;
+    if (ariaNode.disabled)
+      node.disabled = true;
+    if (ariaNode.expanded)
+      node.expanded = true;
+    if (ariaNode.active && options.renderActive)
+      node.active = true;
+    if (ariaNode.invalid)
+      node.invalid = ariaNode.invalid;
+    if (ariaNode.level)
+      node.level = ariaNode.level;
+    if (ariaNode.pressed === "mixed" || ariaNode.pressed === true)
+      node.pressed = ariaNode.pressed;
+    if (ariaNode.selected === true)
+      node.selected = true;
+    if (ariaNode.ref) {
+      node.ref = ariaNode.ref;
+      if (renderCursorPointer && hasPointerCursor(ariaNode))
+        node.cursor = "pointer";
+    }
+    if (options.renderBoxes) {
+      const element = ariaNodeElement(ariaNode);
+      if (element) {
+        const r = element.getBoundingClientRect();
+        node.box = { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
+      }
+    }
+    if (ariaNode.props.url !== void 0)
+      node.url = ariaNode.props.url;
+    if (ariaNode.props.placeholder !== void 0)
+      node.placeholder = ariaNode.props.placeholder;
+    const singleTextChild = ariaNode.children.length === 1 && typeof ariaNode.children[0] === "string" ? ariaNode.children[0] : void 0;
+    const isAtDepthLimit = !!publicOptions.depth && depth === publicOptions.depth;
+    if (singleTextChild !== void 0) {
+      node.text = singleTextChild;
+    } else if (!isAtDepthLimit && ariaNode.children.length) {
+      const inCursorPointer = !!ariaNode.ref && renderCursorPointer && hasPointerCursor(ariaNode);
+      node.children = ariaNode.children.map((child) => {
+        if (typeof child === "string")
+          return child;
+        return visit(child, depth + 1, renderCursorPointer && !inCursorPointer);
+      });
+    }
+    return node;
+  };
+  const json = [];
+  const nodesToRender = ariaSnapshot.root.role === "fragment" ? ariaSnapshot.root.children : [ariaSnapshot.root];
+  for (const nodeToRender of nodesToRender) {
+    if (typeof nodeToRender === "string")
+      json.push({ role: "text", text: nodeToRender });
+    else
+      json.push(visit(nodeToRender, 0, !!options.renderCursorPointer));
+  }
+  return { json, iframeDepths };
+}
+var elementSymbol = /* @__PURE__ */ Symbol("element");
+function ariaNodeElement(ariaNode) {
+  return ariaNode[elementSymbol];
+}
+function setAriaNodeElement(ariaNode, element) {
+  ariaNode[elementSymbol] = element;
 }
 
 // src/vendor/isomorphic/cssParser.ts
@@ -3432,6 +4317,28 @@ var RefactInjected = class {
   getAccessibleDescription(element) {
     this.ensureConnected(element);
     return getElementAccessibleDescription(element, false).text;
+  }
+  ariaSnapshot(element, options) {
+    var _a;
+    const root = (_a = element != null ? element : this.global.document.body) != null ? _a : this.global.document.documentElement;
+    this.ensureConnected(root);
+    const tree = generateAriaTree(root, options);
+    const { json } = renderAriaTreeAsJSON(tree, options);
+    const nodes = [];
+    if (options.boxes) {
+      const visit = (node) => {
+        var _a2;
+        if (typeof node === "string")
+          return;
+        if (node.box)
+          nodes.push({ role: node.role, name: node.name, ref: node.ref, box: node.box });
+        for (const child of (_a2 = node.children) != null ? _a2 : [])
+          visit(child);
+      };
+      for (const node of json)
+        visit(node);
+    }
+    return { yaml: renderAriaSnapshotAsYaml(json), nodes };
   }
 };
 function bootstrapRefactInjected(global, builtins) {

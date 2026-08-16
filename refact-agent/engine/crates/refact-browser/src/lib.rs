@@ -4,6 +4,7 @@ mod hit_target;
 mod injected_source;
 mod keyboard;
 mod mouse;
+mod snapshot;
 mod us_keyboard_layout;
 mod world;
 
@@ -32,6 +33,7 @@ pub use mouse::{
     MouseDispatch, MouseDispatcher, MouseError, MouseEventPayload, MouseEventType, ScrollStrategy,
     TouchEventPayload, TouchEventType, clickable_point_from_quads,
 };
+pub use snapshot::{AriaSnapshot, SnapshotBox, SnapshotMode, SnapshotNode, SnapshotOptions};
 pub use us_keyboard_layout::{
     KEYPAD_LOCATION, KeyDefinition, KeyDescription, ShiftedKeyDefinition, US_KEYBOARD_LAYOUT,
 };

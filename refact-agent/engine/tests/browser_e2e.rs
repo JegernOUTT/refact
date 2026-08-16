@@ -44,6 +44,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "states.html",
     "roles.html",
     "accname.html",
+    "snapshot.html",
     "controlled-input.html",
     "iframe-form.html",
     "shadow-dom.html",
@@ -1410,6 +1411,82 @@ async fn element_states_absorb_detachment_between_animation_frames() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn aria_snapshot_serializes_composed_tree_and_distills_generics() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    let default_snapshot = case
+        .runtime
+        .world_manager
+        .aria_snapshot(
+            &case.tab,
+            None,
+            refact_lsp::refact_browser::SnapshotOptions::default(),
+        )
+        .unwrap();
+    assert!(!default_snapshot.yaml.contains("Hidden snapshot text"));
+
+    let snapshot = case
+        .runtime
+        .world_manager
+        .aria_snapshot(
+            &case.tab,
+            None,
+            refact_lsp::refact_browser::SnapshotOptions {
+                mode: refact_lsp::refact_browser::SnapshotMode::Ai,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let yaml = snapshot.yaml;
+    for expected in [
+        "- navigation \"Primary\"",
+        "- link \"Guide\"",
+        "- /url: /guide",
+        "- button \"Save\"",
+        "- heading \"Snapshot page\" [level=1]",
+        "- heading \"Controls\" [level=2]",
+        "- textbox \"Search\"",
+        "- /placeholder: Find docs",
+        "- checkbox \"Subscribe\" [checked]",
+        "Before Center After",
+        "- button \"Shadow action\"",
+        "- group \"Owned group\"",
+        "- button \"Owned action\"",
+    ] {
+        assert!(yaml.contains(expected), "missing {expected:?} in:\n{yaml}");
+    }
+    assert!(!yaml.contains("Hidden snapshot text"));
+    assert!(!yaml.contains("- generic:\n    - link \"Guide\""));
+
+    let boxed = case
+        .runtime
+        .world_manager
+        .aria_snapshot(
+            &case.tab,
+            None,
+            refact_lsp::refact_browser::SnapshotOptions {
+                mode: refact_lsp::refact_browser::SnapshotMode::Ai,
+                boxes: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(boxed.yaml.contains("[box="));
+    assert!(boxed.nodes.iter().any(|node| node.role == "button"));
+
+    let positions = [
+        "navigation \"Primary\"",
+        "link \"Guide\"",
+        "button \"Save\"",
+        "heading \"Snapshot page\"",
+        "button \"Shadow action\"",
+        "group \"Owned group\"",
+        "button \"Owned action\"",
+    ]
+    .map(|line| yaml.find(line).unwrap());
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
 async fn selector_evaluator_matches_text_visibility_and_global_nth() {
     let Some(mut case) = BrowserCase::start("selectors.html").await else {
         return;
