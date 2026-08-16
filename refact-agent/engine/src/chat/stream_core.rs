@@ -2266,8 +2266,33 @@ pub async fn run_llm_stream<C: StreamCollector>(
         supports_cache_control: params.model_rec.supports_cache_control,
     };
 
+    // P-9: extract Destination::from_model_record into src/privacy/destinations.rs and move this
+    // gate inside the retry/fallback loop so every attempt is re-checked against its destination.
+    let privacy_destination = refact_privacy::Destination {
+        id: refact_privacy::DestinationId(
+            params
+                .model_rec
+                .id
+                .split('/')
+                .next()
+                .unwrap_or(params.model_rec.id.as_str())
+                .to_string(),
+        ),
+        kind: refact_privacy::DestinationKind::Provider,
+        display_name: params.model_rec.id.clone(),
+    };
+    let privacy_policy = refact_privacy::PrivacyPolicy::default();
+    let cleared_request = refact_privacy::clear(
+        params.llm_request.clone(),
+        &privacy_destination,
+        &privacy_policy,
+    )
+    .map_err(|refusal| {
+        LlmStreamError::new(refusal.message.clone(), partial_output_emitted)
+    })?;
+
     let http_parts = adapter
-        .build_http(&params.llm_request, &adapter_settings)
+        .build_http(&cleared_request, &adapter_settings)
         .map_err(|e| {
             LlmStreamError::new(
                 format!("Failed to build LLM request: {}", e),

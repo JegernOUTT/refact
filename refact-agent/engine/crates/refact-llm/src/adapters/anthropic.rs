@@ -2,6 +2,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 
 use refact_core::chat_types::ChatUsage;
+use refact_privacy::Cleared;
 use crate::adapter::{
     AdapterSettings, HttpParts, LlmWireAdapter, StreamParseError, extract_extra_fields,
     insert_extra_headers,
@@ -32,7 +33,7 @@ pub struct AnthropicAdapter;
 impl LlmWireAdapter for AnthropicAdapter {
     fn build_http(
         &self,
-        req: &LlmRequest,
+        req: &Cleared<LlmRequest>,
         settings: &AdapterSettings,
     ) -> Result<HttpParts, String> {
         let mut headers = HeaderMap::new();
@@ -1465,6 +1466,10 @@ mod tests {
         ChatContent, ChatMessage, ChatToolCall, ChatToolFunction, ContextFile,
     };
 
+    fn cleared(request: &LlmRequest) -> Cleared<LlmRequest> {
+        refact_privacy::testing::cleared(request.clone())
+    }
+
     fn settings() -> AdapterSettings {
         AdapterSettings {
             api_key: "sk-ant-test".to_string(),
@@ -1481,6 +1486,17 @@ mod tests {
             supports_web_search: false,
             supports_cache_control: true,
         }
+    }
+
+    #[test]
+    fn build_http_omits_privacy_metadata() {
+        let mut message = ChatMessage::new("user".to_string(), "hello".to_string());
+        message.extra.insert("privacy".to_string(), json!({"files": []}));
+        let request = LlmRequest::new("claude-3-sonnet".to_string(), vec![message]);
+
+        let http = AnthropicAdapter.build_http(&cleared(&request), &settings()).unwrap();
+
+        assert!(!http.body.to_string().contains("\"privacy\""));
     }
 
     fn claude_code_settings() -> AdapterSettings {
@@ -1644,7 +1660,7 @@ mod tests {
         )
         .with_claude_code_identity(Some(identity.clone()));
 
-        let http = adapter.build_http(&req, &claude_code_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &claude_code_settings()).unwrap();
 
         assert_eq!(
             http.headers.get("x-claude-code-session-id").unwrap(),
@@ -1673,8 +1689,8 @@ mod tests {
         let req_b = LlmRequest::new("claude_code/claude-sonnet-4".to_string(), messages)
             .with_claude_code_identity(Some(identity));
 
-        let http_a = adapter.build_http(&req_a, &claude_code_settings()).unwrap();
-        let http_b = adapter.build_http(&req_b, &claude_code_settings()).unwrap();
+        let http_a = adapter.build_http(&cleared(&req_a), &claude_code_settings()).unwrap();
+        let http_b = adapter.build_http(&cleared(&req_b), &claude_code_settings()).unwrap();
 
         assert_eq!(
             http_a.headers.get("x-claude-code-session-id"),
@@ -1863,7 +1879,7 @@ mod tests {
     fn test_build_http_headers() {
         let adapter = AnthropicAdapter;
         let req = LlmRequest::new("claude".to_string(), vec![]);
-        let http = adapter.build_http(&req, &settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings()).unwrap();
         assert!(http.headers.get("x-api-key").is_some());
         assert!(http.headers.get("anthropic-version").is_some());
     }
@@ -1890,7 +1906,7 @@ mod tests {
             .extra_headers
             .insert("Copilot-Vision-Request".to_string(), "true".to_string());
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(
             http.headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
@@ -1918,7 +1934,7 @@ mod tests {
                 ..Default::default()
             }],
         );
-        let image_http = adapter.build_http(&image_req, &settings).unwrap();
+        let image_http = adapter.build_http(&cleared(&image_req), &settings).unwrap();
         assert_eq!(
             image_http
                 .headers
@@ -1943,7 +1959,7 @@ mod tests {
         .with_reasoning(ReasoningIntent::High);
 
         let http = adapter
-            .build_http(&req_with_reasoning, &settings())
+            .build_http(&cleared(&req_with_reasoning), &settings())
             .unwrap();
         let beta = http
             .headers
@@ -1964,7 +1980,7 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "test".to_string())],
         );
 
-        let http = adapter.build_http(&req_no_reasoning, &settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req_no_reasoning), &settings()).unwrap();
         assert!(http.headers.get("anthropic-beta").is_none());
     }
 
@@ -1977,7 +1993,7 @@ mod tests {
         )
         .with_cache_control(CacheControl::Ephemeral);
 
-        let http = adapter.build_http(&req, &settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings()).unwrap();
         assert!(http.body.get("cache_control").is_none());
         assert_eq!(count_cache_control_markers(&http.body), 1);
         assert_eq!(
@@ -2033,7 +2049,7 @@ mod tests {
             Some(CanonicalToolChoice::Auto),
         );
 
-        let http = adapter.build_http(&req, &settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings()).unwrap();
 
         assert!(http.body.get("cache_control").is_none());
         assert_eq!(count_cache_control_markers(&http.body), 3);
@@ -2080,7 +2096,7 @@ mod tests {
             Some(CanonicalToolChoice::Required),
         );
 
-        let http = adapter.build_http(&req, &settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings()).unwrap();
 
         assert!(http.body.get("cache_control").is_none());
         assert_eq!(count_cache_control_markers(&http.body), 2);
@@ -2104,7 +2120,7 @@ mod tests {
         )
         .with_cache_control(CacheControl::Off);
 
-        let http = adapter.build_http(&req, &settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings()).unwrap();
 
         assert!(http.body.get("cache_control").is_none());
         assert_eq!(count_cache_control_markers(&http.body), 0);
@@ -2121,7 +2137,7 @@ mod tests {
         let mut settings = settings();
         settings.supports_cache_control = false;
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert!(http.body.get("cache_control").is_none());
         assert_eq!(count_cache_control_markers(&http.body), 0);
@@ -2139,7 +2155,7 @@ mod tests {
         )
         .with_cache_control(CacheControl::Ephemeral);
 
-        let http = adapter.build_http(&req, &settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings()).unwrap();
 
         let system = http.body["system"].as_array().unwrap();
         assert_eq!(system.len(), 1);
@@ -2185,7 +2201,7 @@ mod tests {
         let mut settings = settings();
         settings.supports_web_search = true;
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.body["tools"][0]["name"], "lookup");
         assert_eq!(http.body["tools"][0]["cache_control"]["type"], "ephemeral");
@@ -2212,7 +2228,7 @@ mod tests {
             None,
         );
 
-        let http = adapter.build_http(&req, &settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings()).unwrap();
 
         assert!(count_cache_control_markers(&http.body) <= 4);
         assert_eq!(count_cache_control_markers(&http.body), 3);
@@ -2331,7 +2347,7 @@ mod tests {
         )
         .with_cache_control(CacheControl::Ephemeral);
 
-        let http = adapter.build_http(&req, &settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings()).unwrap();
 
         let assistant_content = http.body["messages"][1]["content"].as_array().unwrap();
         assert_eq!(assistant_content[0]["type"], "thinking");
@@ -2450,7 +2466,7 @@ mod tests {
             None,
         );
 
-        let http = adapter.build_http(&req, &claude_code_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &claude_code_settings()).unwrap();
 
         assert!(http.body.get("cache_control").is_none());
         let system = http.body["system"].as_array().unwrap();
@@ -2493,7 +2509,7 @@ mod tests {
         )
         .with_reasoning(ReasoningIntent::High);
 
-        let http = adapter.build_http(&req, &no_reasoning_settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &no_reasoning_settings).unwrap();
         assert!(http.headers.get("anthropic-beta").is_none());
     }
 
@@ -2660,7 +2676,7 @@ mod tests {
             ("custom_field".to_string(), json!("allowed")),
         ]));
 
-        let http = adapter.build_http(&req, &settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings()).unwrap();
 
         assert_eq!(http.body["model"], "claude-3-sonnet");
         assert_ne!(
@@ -3181,7 +3197,7 @@ mod tests {
         req_low_max.reasoning = ReasoningIntent::High; // Will use DEFAULT_THINKING_BUDGET
         req_low_max.stream = true;
 
-        let http = adapter.build_http(&req_low_max, &settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req_low_max), &settings()).unwrap();
         // Should be adjusted: budget + max(current_max, 1024)
         assert_eq!(http.body["max_tokens"], DEFAULT_THINKING_BUDGET + 4096);
         assert_eq!(
@@ -3198,7 +3214,7 @@ mod tests {
         req_high_max.reasoning = ReasoningIntent::High;
         req_high_max.stream = true;
 
-        let http2 = adapter.build_http(&req_high_max, &settings()).unwrap();
+        let http2 = adapter.build_http(&cleared(&req_high_max), &settings()).unwrap();
         // Should remain unchanged
         assert_eq!(http2.body["max_tokens"], 20000);
 
@@ -3211,7 +3227,7 @@ mod tests {
         req_no_thinking.reasoning = ReasoningIntent::Off;
         req_no_thinking.stream = true;
 
-        let http3 = adapter.build_http(&req_no_thinking, &settings()).unwrap();
+        let http3 = adapter.build_http(&cleared(&req_no_thinking), &settings()).unwrap();
         assert_eq!(http3.body["max_tokens"], 4096);
         assert!(http3.body.get("thinking").is_none());
     }
@@ -3781,7 +3797,7 @@ mod tests {
         );
         let mut s = settings();
         s.supports_web_search = true;
-        let http = adapter.build_http(&req, &s).unwrap();
+        let http = adapter.build_http(&cleared(&req), &s).unwrap();
 
         let tools = http.body["tools"].as_array().unwrap();
         let has_web_search = tools
@@ -3801,7 +3817,7 @@ mod tests {
             None,
         );
         let s = settings(); // supports_web_search: false
-        let http = adapter.build_http(&req, &s).unwrap();
+        let http = adapter.build_http(&cleared(&req), &s).unwrap();
 
         let tools = http.body["tools"].as_array().unwrap();
         let has_web_search = tools
@@ -4196,7 +4212,7 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "hi".to_string())],
         )
         .with_reasoning(ReasoningIntent::Medium);
-        let http = adapter.build_http(&req, &effort_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &effort_settings()).unwrap();
         assert_eq!(http.body["thinking"]["type"], "adaptive");
         assert_eq!(http.body["thinking"]["display"], "summarized");
         assert!(http.body["thinking"].get("budget_tokens").is_none());
@@ -4213,7 +4229,7 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "hi".to_string())],
         )
         .with_reasoning(ReasoningIntent::BudgetTokens(5000));
-        let http = adapter.build_http(&req, &effort_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &effort_settings()).unwrap();
         assert_eq!(http.body["thinking"]["type"], "adaptive");
         assert_eq!(http.body["thinking"]["display"], "summarized");
         assert!(http.body["thinking"].get("budget_tokens").is_none());
@@ -4237,7 +4253,7 @@ mod tests {
         )
         .with_reasoning(ReasoningIntent::Medium)
         .with_extra_body(extra);
-        let http = adapter.build_http(&req, &effort_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &effort_settings()).unwrap();
         assert_eq!(http.body["thinking"]["type"], "enabled");
         let beta = http
             .headers

@@ -103,7 +103,24 @@ fn anthropic_count_http_parts(
     let count_url = anthropic_count_url(&settings.endpoint)
         .ok_or_else(|| "Anthropic cloud token count requires a /messages endpoint".to_string())?;
 
-    let mut http = crate::llm::adapters::anthropic::AnthropicAdapter.build_http(req, settings)?;
+    // P-9: share the destination helper + policy resolution with stream_core.
+    let privacy_destination = refact_privacy::Destination {
+        id: refact_privacy::DestinationId(
+            settings
+                .model_name
+                .split('/')
+                .next()
+                .unwrap_or(settings.model_name.as_str())
+                .to_string(),
+        ),
+        kind: refact_privacy::DestinationKind::Provider,
+        display_name: settings.model_name.clone(),
+    };
+    let privacy_policy = refact_privacy::PrivacyPolicy::default();
+    let cleared_req = refact_privacy::clear(req.clone(), &privacy_destination, &privacy_policy)
+        .map_err(|refusal| refusal.message.clone())?;
+    let mut http =
+        crate::llm::adapters::anthropic::AnthropicAdapter.build_http(&cleared_req, settings)?;
     let output_token_reserve =
         body_usize(&http.body, "max_tokens").unwrap_or(req.params.max_tokens);
     http.url = count_url;

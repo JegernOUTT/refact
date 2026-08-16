@@ -3,6 +3,7 @@ use serde_json::Value;
 
 pub use refact_chat_api::ClaudeCodeIdentity;
 use refact_core::chat_types::{ChatMessage, ChatUsage};
+use refact_privacy::{records_from_messages, FileRecord, PrivacyAudited};
 use crate::params::{CacheControl, CommonParams, ReasoningIntent};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +31,12 @@ pub struct LlmRequest {
     pub previous_response_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_code_identity: Option<ClaudeCodeIdentity>,
+}
+
+impl PrivacyAudited for LlmRequest {
+    fn privacy_records(&self) -> Vec<FileRecord> {
+        records_from_messages(&self.messages)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

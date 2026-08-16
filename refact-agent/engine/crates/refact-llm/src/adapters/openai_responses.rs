@@ -2,6 +2,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_
 use serde_json::{json, Value};
 
 use refact_core::chat_types::ChatUsage;
+use refact_privacy::Cleared;
 use crate::adapter::{
     AdapterSettings, HttpParts, LlmWireAdapter, StreamParseError, extract_extra_fields,
     insert_extra_headers,
@@ -41,7 +42,7 @@ const ALL_INCLUDE_FIELDS: &[&str] = &[
 impl LlmWireAdapter for OpenAiResponsesAdapter {
     fn build_http(
         &self,
-        req: &LlmRequest,
+        req: &Cleared<LlmRequest>,
         settings: &AdapterSettings,
     ) -> Result<HttpParts, String> {
         let mut headers = HeaderMap::new();
@@ -1299,6 +1300,10 @@ mod tests {
     use super::*;
     use refact_core::chat_types::{ChatContent, ChatMessage};
 
+    fn cleared(request: &LlmRequest) -> Cleared<LlmRequest> {
+        refact_privacy::testing::cleared(request.clone())
+    }
+
     fn default_settings() -> AdapterSettings {
         AdapterSettings {
             api_key: "test-key".to_string(),
@@ -1315,6 +1320,17 @@ mod tests {
             supports_web_search: false,
             supports_cache_control: true,
         }
+    }
+
+    #[test]
+    fn build_http_omits_privacy_metadata() {
+        let mut message = ChatMessage::new("user".to_string(), "hello".to_string());
+        message.extra.insert("privacy".to_string(), json!({"files": []}));
+        let request = LlmRequest::new("gpt-4.1".to_string(), vec![message]);
+
+        let http = OpenAiResponsesAdapter.build_http(&cleared(&request), &default_settings()).unwrap();
+
+        assert!(!http.body.to_string().contains("\"privacy\""));
     }
 
     fn chatgpt_backend_settings() -> AdapterSettings {
@@ -1481,7 +1497,7 @@ mod tests {
         req.params.stop = vec!["STOP".to_string()];
 
         let http = adapter
-            .build_http(&req, &chatgpt_backend_settings())
+            .build_http(&cleared(&req), &chatgpt_backend_settings())
             .unwrap();
 
         assert!(
@@ -1520,7 +1536,7 @@ mod tests {
         .with_reasoning(crate::params::ReasoningIntent::Medium);
 
         let http = adapter
-            .build_http(&req, &chatgpt_backend_settings())
+            .build_http(&cleared(&req), &chatgpt_backend_settings())
             .unwrap();
 
         assert_eq!(
@@ -1538,7 +1554,7 @@ mod tests {
         );
 
         let http = adapter
-            .build_http(&req, &chatgpt_backend_settings())
+            .build_http(&cleared(&req), &chatgpt_backend_settings())
             .unwrap();
 
         assert_eq!(
@@ -1560,7 +1576,7 @@ mod tests {
         );
 
         let http = adapter
-            .build_http(&req, &chatgpt_backend_settings())
+            .build_http(&cleared(&req), &chatgpt_backend_settings())
             .unwrap();
 
         assert_eq!(http.body["instructions"], json!("Be precise"));
@@ -1584,7 +1600,7 @@ mod tests {
         req.extra_body = Some(extra);
 
         let http = adapter
-            .build_http(&req, &chatgpt_backend_settings())
+            .build_http(&cleared(&req), &chatgpt_backend_settings())
             .unwrap();
 
         assert!(
@@ -1615,7 +1631,7 @@ mod tests {
             "wss://chatgpt.com/backend-api/codex/responses".to_string(),
         );
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert!(http
             .headers
@@ -1638,7 +1654,7 @@ mod tests {
         );
         req.previous_response_id = Some("resp_123".to_string());
 
-        let http = adapter.build_http(&req, &default_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
 
         assert_eq!(http.body["previous_response_id"], "resp_123");
         assert_eq!(
@@ -1655,7 +1671,7 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
         );
 
-        let http = adapter.build_http(&req, &default_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
         assert_eq!(
             http.body["store"], true,
             "Responses API should default to store=true"
@@ -1672,7 +1688,7 @@ mod tests {
         req.params.temperature = Some(0.5);
         req.params.top_p = Some(0.9);
 
-        let http = adapter.build_http(&req, &default_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
 
         assert!(
             http.body.get("max_output_tokens").is_some(),
@@ -1700,7 +1716,7 @@ mod tests {
         let mut settings = default_settings();
         settings.supports_reasoning = false;
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert!((http.body["top_p"].as_f64().unwrap() - 0.9).abs() < 0.000_001);
     }
@@ -1717,7 +1733,7 @@ mod tests {
         );
         let settings = default_settings();
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.body["model"], "gpt-4.1");
         assert_eq!(http.body["instructions"], "You are helpful");
@@ -1742,7 +1758,7 @@ mod tests {
         settings.endpoint = "https://api.githubcopilot.com/v1/responses".to_string();
         settings.api_key = "copilot-token".to_string();
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(
             http.headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
@@ -1761,7 +1777,7 @@ mod tests {
             "github_copilot/gpt-4.1".to_string(),
             vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
         );
-        let text_http = adapter.build_http(&text_req, &settings).unwrap();
+        let text_http = adapter.build_http(&cleared(&text_req), &settings).unwrap();
         assert!(text_http.headers.get("Copilot-Vision-Request").is_none());
     }
 
@@ -1773,7 +1789,7 @@ mod tests {
         req.params.temperature = Some(0.5);
         let settings = default_settings();
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.body["reasoning"]["effort"], "medium");
         assert!(
@@ -2486,7 +2502,7 @@ mod tests {
         )
         .with_reasoning(crate::params::ReasoningIntent::Medium);
 
-        let http = adapter.build_http(&req, &default_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
 
         // Should include reasoning.encrypted_content for multi-turn support
         let include = http.body["include"].as_array().unwrap();
@@ -2507,7 +2523,7 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "Hi".to_string())],
         );
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         let include = http.body["include"].as_array().unwrap();
         assert!(

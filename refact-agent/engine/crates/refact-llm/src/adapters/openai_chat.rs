@@ -2,6 +2,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_
 use serde_json::{json, Value};
 
 use refact_core::chat_types::ChatUsage;
+use refact_privacy::Cleared;
 use crate::adapter::{
     AdapterSettings, HttpParts, LlmWireAdapter, StreamParseError, extract_extra_fields,
     insert_extra_headers,
@@ -100,7 +101,7 @@ fn normalize_legacy_function_call_delta(fc: &Value) -> Option<Value> {
 impl LlmWireAdapter for OpenAiChatAdapter {
     fn build_http(
         &self,
-        req: &LlmRequest,
+        req: &Cleared<LlmRequest>,
         settings: &AdapterSettings,
     ) -> Result<HttpParts, String> {
         let mut headers = HeaderMap::new();
@@ -793,6 +794,10 @@ mod tests {
     use super::*;
     use refact_core::chat_types::{ChatContent, ChatMessage};
 
+    fn cleared(request: &LlmRequest) -> Cleared<LlmRequest> {
+        refact_privacy::testing::cleared(request.clone())
+    }
+
     fn default_settings() -> AdapterSettings {
         AdapterSettings {
             api_key: "test-key".to_string(),
@@ -809,6 +814,17 @@ mod tests {
             supports_web_search: false,
             supports_cache_control: true,
         }
+    }
+
+    #[test]
+    fn build_http_omits_privacy_metadata() {
+        let mut message = ChatMessage::new("user".to_string(), "hello".to_string());
+        message.extra.insert("privacy".to_string(), json!({"files": []}));
+        let request = LlmRequest::new("gpt-4".to_string(), vec![message]);
+
+        let http = OpenAiChatAdapter.build_http(&cleared(&request), &default_settings()).unwrap();
+
+        assert!(!http.body.to_string().contains("\"privacy\""));
     }
 
     fn event_message(subkind: &str, source: &str, payload: Value, content: &str) -> ChatMessage {
@@ -998,7 +1014,7 @@ mod tests {
         req.params.top_p = Some(0.9);
         let settings = default_settings();
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.url, "https://api.openai.com/v1/chat/completions");
         assert!(http.headers.contains_key(AUTHORIZATION));
@@ -1026,7 +1042,7 @@ mod tests {
         settings.endpoint = "https://api.githubcopilot.com/v1/chat/completions".to_string();
         settings.api_key = "copilot-token".to_string();
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(
             http.headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
@@ -1053,7 +1069,7 @@ mod tests {
             "github_copilot/gpt-4.1".to_string(),
             vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
         );
-        let text_http = adapter.build_http(&text_req, &settings).unwrap();
+        let text_http = adapter.build_http(&cleared(&text_req), &settings).unwrap();
         assert!(text_http.headers.get("Copilot-Vision-Request").is_none());
     }
 
@@ -1077,7 +1093,7 @@ mod tests {
             .extra_headers
             .insert("Copilot-Vision-Request".to_string(), "true".to_string());
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(
             http.headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
@@ -1102,7 +1118,7 @@ mod tests {
         let mut settings = default_settings();
         settings.endpoint = "https://api.githubcopilot.com/v1/chat/completions".to_string();
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(
             http.headers.get("x-initiator").unwrap().to_str().unwrap(),
@@ -1125,7 +1141,7 @@ mod tests {
         settings.supports_reasoning = true;
         settings.supports_temperature = true;
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert!(http.body.get("temperature").is_none());
         assert!(http.body.get("top_p").is_none());
@@ -1148,7 +1164,7 @@ mod tests {
             "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions".to_string();
         settings.supports_reasoning = true;
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.body["enable_thinking"], true);
         assert_eq!(http.body["thinking_budget"], 2048);
@@ -1167,7 +1183,7 @@ mod tests {
         settings.model_name = "qwen3-max".to_string();
         settings.supports_reasoning = true;
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.body["enable_thinking"], false);
         assert!(http.body.get("thinking_budget").is_none());
@@ -1189,7 +1205,7 @@ mod tests {
         settings.model_name = "qwen3-max".to_string();
         settings.supports_reasoning = true;
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert!(http.body.get("enable_thinking").is_none());
         assert!(http.body.get("thinking_budget").is_none());
@@ -1211,7 +1227,7 @@ mod tests {
         settings.model_name = "glm-4.7".to_string();
         settings.supports_reasoning = true;
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.body["thinking"], json!({"type": "enabled"}));
         assert!(http.body.get("reasoning_effort").is_none());
@@ -1229,7 +1245,7 @@ mod tests {
         settings.model_name = "glm-4.7".to_string();
         settings.supports_reasoning = true;
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.body["thinking"], json!({"type": "disabled"}));
         assert!(http.body.get("reasoning_effort").is_none());
@@ -1249,7 +1265,7 @@ mod tests {
             .with_tools(tools, Some(CanonicalToolChoice::Auto));
         let settings = default_settings();
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert!(http.body.get("tools").is_some());
         assert_eq!(http.body["tool_choice"], "auto");
@@ -1263,7 +1279,7 @@ mod tests {
         let mut settings = default_settings();
         settings.supports_tools = false;
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert!(http.body.get("tools").is_none());
     }
@@ -1438,7 +1454,7 @@ mod tests {
         });
         let settings = default_settings();
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         let rf = &http.body["response_format"];
         assert_eq!(rf["type"], "json_schema");
@@ -1453,7 +1469,7 @@ mod tests {
         req.response_format = Some(ResponseFormat::JsonObject);
         let settings = default_settings();
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.body["response_format"]["type"], "json_object");
     }
@@ -1465,7 +1481,7 @@ mod tests {
         req.params.max_tokens = 500;
         let settings = default_settings();
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.body["max_tokens"], 500);
         assert!(http.body.get("max_completion_tokens").is_none());
@@ -1479,7 +1495,7 @@ mod tests {
         let mut settings = default_settings();
         settings.supports_max_completion_tokens = true;
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.body["max_completion_tokens"], 500);
         assert!(http.body.get("max_tokens").is_none());
@@ -1502,7 +1518,7 @@ mod tests {
             ("custom_field".to_string(), json!("allowed")),
         ]));
 
-        let http = adapter.build_http(&req, &default_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
 
         assert_eq!(http.body["model"], "gpt-4");
         assert_ne!(
@@ -1521,7 +1537,7 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "Hi".to_string())],
         );
 
-        let http = adapter.build_http(&req, &default_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
 
         // User-Agent should use space separator for broadly compatible provider logging.
         let ua = http.headers.get(USER_AGENT).unwrap().to_str().unwrap();
@@ -1868,7 +1884,7 @@ mod tests {
         settings.endpoint = "https://openrouter.ai/api/v1/chat/completions".to_string();
         settings.model_name = "anthropic/claude-sonnet-4.6".to_string();
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
         assert_eq!(http.body["cache_control"]["type"], "ephemeral");
         assert_eq!(http.body["cache_control"]["ttl"], "1h");
 
@@ -1898,7 +1914,7 @@ mod tests {
         let mut settings = default_settings();
         settings.model_name = "claude-compatible".to_string();
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert!(http.body.get("cache_control").is_none());
         assert!(!http.body.to_string().contains("cache_control"));
@@ -1919,7 +1935,7 @@ mod tests {
         settings.model_name = "local-model".to_string();
         settings.supports_cache_control = false;
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert!(http.body.get("cache_control").is_none());
         assert!(!http.body.to_string().contains("cache_control"));

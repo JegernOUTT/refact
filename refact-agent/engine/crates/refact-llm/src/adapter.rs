@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use reqwest::header::HeaderMap;
+use refact_privacy::Cleared;
 use serde_json::{Map, Value};
 
 use crate::canonical::{LlmRequest, LlmStreamDelta};
@@ -30,7 +31,7 @@ pub struct AdapterSettings {
 }
 
 pub trait LlmWireAdapter: Send + Sync {
-    fn build_http(&self, req: &LlmRequest, settings: &AdapterSettings)
+    fn build_http(&self, req: &Cleared<LlmRequest>, settings: &AdapterSettings)
         -> Result<HttpParts, String>;
 
     fn parse_stream_chunk(&self, data: &str) -> Result<Vec<LlmStreamDelta>, StreamParseError>;

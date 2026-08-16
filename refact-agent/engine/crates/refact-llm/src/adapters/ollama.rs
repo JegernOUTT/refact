@@ -2,6 +2,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_
 use serde_json::{json, Map, Value};
 
 use refact_core::chat_types::{ChatContent, ChatMessage, ChatUsage};
+use refact_privacy::Cleared;
 use crate::adapter::{
     AdapterSettings, HttpParts, LlmWireAdapter, StreamParseError, insert_extra_headers,
 };
@@ -16,7 +17,7 @@ pub struct OllamaAdapter;
 impl LlmWireAdapter for OllamaAdapter {
     fn build_http(
         &self,
-        req: &LlmRequest,
+        req: &Cleared<LlmRequest>,
         settings: &AdapterSettings,
     ) -> Result<HttpParts, String> {
         let mut headers = HeaderMap::new();
@@ -557,6 +558,10 @@ mod tests {
     use refact_core::chat_types::{ChatToolCall, ChatToolFunction};
     use refact_core::chat_types::MultimodalElement;
 
+    fn cleared(request: &LlmRequest) -> Cleared<LlmRequest> {
+        refact_privacy::testing::cleared(request.clone())
+    }
+
     fn default_settings() -> AdapterSettings {
         AdapterSettings {
             api_key: "ollama-key".to_string(),
@@ -573,6 +578,17 @@ mod tests {
             supports_web_search: false,
             supports_cache_control: false,
         }
+    }
+
+    #[test]
+    fn build_http_omits_privacy_metadata() {
+        let mut message = ChatMessage::new("user".to_string(), "hello".to_string());
+        message.extra.insert("privacy".to_string(), json!({"files": []}));
+        let request = LlmRequest::new("llama3.1:8b".to_string(), vec![message]);
+
+        let http = OllamaAdapter.build_http(&cleared(&request), &default_settings()).unwrap();
+
+        assert!(!http.body.to_string().contains("\"privacy\""));
     }
 
     fn goal_message(mode: &str, version: u32, content: &str) -> ChatMessage {
@@ -682,7 +698,7 @@ mod tests {
             .extra_headers
             .insert(OLLAMA_KEEP_ALIVE_HEADER.to_string(), "10m".to_string());
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.url, "http://localhost:11434/api/chat");
         assert_eq!(http.body["model"], "llama3.1:8b");
@@ -775,7 +791,7 @@ mod tests {
             .extra_headers
             .insert(OLLAMA_NUM_CTX_HEADER.to_string(), "16384".to_string());
 
-        let http = adapter.build_http(&req, &settings).unwrap();
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert_eq!(http.body["options"]["num_ctx"], 16384);
         assert!(http.headers.get(OLLAMA_NUM_CTX_HEADER).is_none());
@@ -786,12 +802,12 @@ mod tests {
         let adapter = OllamaAdapter;
         let messages = vec![ChatMessage::new("user".to_string(), "Hi".to_string())];
         let req = LlmRequest::new("ollama/llama3.1:8b".to_string(), messages.clone());
-        let http = adapter.build_http(&req, &default_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
         assert!(http.body.get("think").is_none());
 
         let req = LlmRequest::new("ollama/llama3.1:8b".to_string(), messages)
             .with_reasoning(ReasoningIntent::High);
-        let http = adapter.build_http(&req, &default_settings()).unwrap();
+        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
         assert_eq!(http.body["think"], true);
     }
 

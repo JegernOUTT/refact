@@ -222,6 +222,7 @@ refact-codehealth = { path = "crates/refact-codehealth" }
 refact-git-intel = { path = "crates/refact-git-intel" }
 refact-codewiki = { path = "crates/refact-codewiki" }
 refact-llm = { path = "crates/refact-llm" }
+refact-privacy = { path = "crates/refact-privacy" }
 refact-knowledge-graph = { path = "crates/refact-knowledge-graph" }
 refact-git = { path = "crates/refact-git" }
 refact-postprocessing = { path = "crates/refact-postprocessing" }
