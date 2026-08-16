@@ -839,96 +839,41 @@ fn step_fill(
     clear_first: bool,
     verify: bool,
 ) -> StepResult {
-    let info = match resolve_interactable(tab, world, locator) {
+    let info = match resolve_element(tab, world, locator) {
         Ok(i) => i,
         Err(e) => return StepResult::failure(idx, "Fill: element resolution failed", e),
     };
-
-    if info.readonly {
-        return StepResult::failure(idx, "Fill failed", "Element is readonly");
-    }
-
-    let strategies = choose_fill_strategies(&info.field_kind);
-    if strategies.is_empty() {
-        return StepResult::failure(
-            idx,
-            "Fill failed",
-            format!(
-                "Cannot fill {:?} — use select_option or check/uncheck instead",
-                info.field_kind
-            ),
-        );
-    }
-
-    let mut last_error = String::new();
-    let mut retries = 0u32;
-
-    for strategy in &strategies {
-        let fill_js = generate_fill_js(strategy, text, clear_first);
-        match call_handle_json(tab, world, &info.handle, &fill_js) {
-            Ok(result) => {
-                let ok = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                if !ok {
-                    last_error = result
-                        .get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Strategy returned not-ok")
-                        .to_string();
-                    retries += 1;
-                    continue;
-                }
-
-                if verify {
-                    match verify_field_value(tab, world, &info.handle, text, &info.field_kind) {
-                        Ok(true) => {
-                            let mut r = StepResult::success(
-                                idx,
-                                format!("Filled <{}> with {} chars", info.tag, text.len()),
-                            );
-                            r.field_kind = Some(info.field_kind.clone());
-                            r.fill_strategy = Some(strategy.clone());
-                            r.verified = Some(true);
-                            r.retries = retries;
-                            return r;
-                        }
-                        Ok(false) => {
-                            last_error = "Verification failed: value mismatch".to_string();
-                            retries += 1;
-                            continue;
-                        }
-                        Err(e) => {
-                            last_error = format!("Verification error: {}", e);
-                            retries += 1;
-                            continue;
-                        }
-                    }
-                }
-
-                let mut r = StepResult::success(
-                    idx,
-                    format!("Filled <{}> with {} chars", info.tag, text.len()),
-                );
-                r.field_kind = Some(info.field_kind.clone());
-                r.fill_strategy = Some(strategy.clone());
-                r.verified = if verify { Some(true) } else { None };
-                r.retries = retries;
-                return r;
-            }
-            Err(e) => {
-                last_error = e;
-                retries += 1;
-            }
+    match refact_browser::forms::fill(
+        tab,
+        world,
+        &info.handle,
+        &info.info,
+        text,
+        clear_first,
+        verify,
+    ) {
+        Ok(outcome) => {
+            let mut result = StepResult::success(
+                idx,
+                format!("Filled <{}> with {} chars", info.tag, text.len()),
+            );
+            result.field_kind = Some(info.field_kind.clone());
+            result.fill_strategy = Some(outcome.strategy);
+            result.verified = outcome.verified;
+            result.retries = outcome.retries;
+            result
+        }
+        Err(error) => {
+            let mut result = StepResult::failure(
+                idx,
+                format!("Fill failed after {} strategies", error.retries),
+                error.message,
+            );
+            result.field_kind = Some(info.field_kind.clone());
+            result.retries = error.retries;
+            result
         }
     }
-
-    let mut r = StepResult::failure(
-        idx,
-        format!("Fill failed after {} strategies", retries),
-        last_error,
-    );
-    r.field_kind = Some(info.field_kind.clone());
-    r.retries = retries;
-    r
 }
 
 fn step_clear(
@@ -938,96 +883,25 @@ fn step_clear(
     locator: &BrowserLocator,
     verify: bool,
 ) -> StepResult {
-    let info = match resolve_interactable(tab, world, locator) {
+    let info = match resolve_element(tab, world, locator) {
         Ok(i) => i,
         Err(e) => return StepResult::failure(idx, "Clear: element resolution failed", e),
     };
-
-    match info.field_kind {
-        FieldKind::Checkbox | FieldKind::Radio => {
-            return StepResult::failure(
-                idx,
-                "Clear not supported for this field",
-                format!(
-                    "Use uncheck instead for <{}> ({:?})",
-                    info.tag, info.field_kind
-                ),
-            );
+    match refact_browser::forms::clear(tab, world, &info.handle, &info.info, verify) {
+        Ok(outcome) => {
+            let mut result = StepResult::success(idx, format!("Cleared <{}>", info.tag));
+            result.field_kind = Some(info.field_kind.clone());
+            result.fill_strategy = outcome.strategy;
+            result.verified = outcome.verified;
+            result.retries = outcome.retries;
+            result
         }
-        FieldKind::FileInput => {
-            return StepResult::failure(
-                idx,
-                "Clear not supported for file inputs",
-                "Security restrictions prevent clearing file inputs programmatically".to_string(),
-            );
+        Err(error) => {
+            let mut result = StepResult::failure(idx, "Clear failed", error.message);
+            result.field_kind = Some(info.field_kind.clone());
+            result.retries = error.retries;
+            result
         }
-        FieldKind::HiddenInput => {
-            return StepResult::failure(
-                idx,
-                "Clear not supported for hidden inputs",
-                format!("Element <{}> is a hidden input", info.tag),
-            );
-        }
-        FieldKind::Select => {
-            let js = r#"(function() {
-  var el = this;
-  if (!el || el.tagName !== 'SELECT') return JSON.stringify({error: 'Not a SELECT element'});
-  var hadEmpty = false;
-  el.selectedIndex = -1;
-  for (var i = 0; i < el.options.length; i++) {
-    if (el.options[i].value === '' || el.options[i].text.trim() === '') {
-      el.selectedIndex = i;
-      hadEmpty = true;
-      break;
-    }
-  }
-  el.dispatchEvent(new Event('change', {bubbles: true}));
-  return JSON.stringify({ok: true, value: el.value, had_empty_option: hadEmpty});
-})()"#;
-            return match call_handle_json(tab, world, &info.handle, js) {
-                Ok(result) => {
-                    let had_empty = result
-                        .get("had_empty_option")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    if verify && !had_empty {
-                        StepResult::failure(
-                            idx,
-                            "Clear select: no empty option found",
-                            "No option with empty value/text exists to select",
-                        )
-                    } else {
-                        StepResult::success(idx, format!("Cleared <{}> (select)", info.tag))
-                    }
-                }
-                Err(e) => StepResult::failure(idx, "Clear failed", e),
-            };
-        }
-        _ => {}
-    }
-
-    let clear_js = generate_clear_js(&info.field_kind);
-    match call_handle_json(tab, world, &info.handle, &clear_js) {
-        Ok(_) => {
-            if verify {
-                match verify_field_value(tab, world, &info.handle, "", &info.field_kind) {
-                    Ok(true) => {
-                        let mut r = StepResult::success(idx, format!("Cleared <{}>", info.tag));
-                        r.verified = Some(true);
-                        r
-                    }
-                    Ok(false) => StepResult::failure(
-                        idx,
-                        "Clear verification failed",
-                        "Field still has content",
-                    ),
-                    Err(e) => StepResult::failure(idx, "Clear verification error", e),
-                }
-            } else {
-                StepResult::success(idx, format!("Cleared <{}>", info.tag))
-            }
-        }
-        Err(e) => StepResult::failure(idx, "Clear failed", e),
     }
 }
 
@@ -1038,34 +912,20 @@ fn step_select_option(
     locator: &BrowserLocator,
     value: &str,
 ) -> StepResult {
-    match resolve_interactable(tab, world, locator) {
-        Ok(info) => {
-            let js = format!(
-                r#"(function() {{
-  var el = this;
-  if (!el || el.tagName !== 'SELECT') return JSON.stringify({{error: 'Not a SELECT element'}});
-  var val = {value};
-  var found = false;
-  for (var i = 0; i < el.options.length; i++) {{
-    if (el.options[i].value === val || el.options[i].text.trim() === val) {{
-      el.selectedIndex = i;
-      found = true;
-      break;
-    }}
-  }}
-  if (!found) return JSON.stringify({{error: 'Option not found: ' + val}});
-  el.dispatchEvent(new Event('change', {{bubbles: true}}));
-  return JSON.stringify({{ok: true, selected: el.value}});
-}})()"#,
-                value = js_string_literal(value),
-            );
-            match call_handle_json(tab, world, &info.handle, &js) {
-                Ok(_) => {
-                    StepResult::success(idx, format!("Selected '{}' in <{}>", value, info.tag))
-                }
-                Err(e) => StepResult::failure(idx, "Select option failed", e),
-            }
-        }
+    match resolve_element(tab, world, locator) {
+        Ok(info) => match refact_browser::forms::select_option(
+            tab,
+            world,
+            &info.handle,
+            value,
+        ) {
+            Ok(outcome) => StepResult::success(
+                idx,
+                format!("Selected '{}' in <{}>", value, info.tag),
+            )
+            .with_data(serde_json::json!({"selected": outcome.selected})),
+            Err(error) => StepResult::failure(idx, "Select option failed", error.message),
+        },
         Err(e) => StepResult::failure(idx, "Select: element resolution failed", e),
     }
 }
@@ -1078,70 +938,18 @@ fn step_check_uncheck(
     check: bool,
 ) -> StepResult {
     let action = if check { "check" } else { "uncheck" };
-    let info = match resolve_interactable(tab, world, locator) {
+    let info = match resolve_element(tab, world, locator) {
         Ok(i) => i,
         Err(e) => return StepResult::failure(idx, "Check/uncheck: resolution failed", e),
     };
-
-    if !check && info.field_kind == FieldKind::Radio {
-        return StepResult::failure(
-            idx,
-            "Uncheck not supported for radio buttons",
-            "Radio buttons cannot be unchecked; select a different radio instead".to_string(),
-        );
-    }
-
-    let is_supported = matches!(info.field_kind, FieldKind::Checkbox | FieldKind::Radio);
-    let is_aria = !is_supported && {
-        let check_aria = r#"(function() {
-  var el = this;
-  if (!el) return JSON.stringify({ok: false});
-  var role = el.getAttribute('role');
-  var supported = role === 'checkbox' || role === 'switch' || role === 'radio';
-  return JSON.stringify({ok: supported});
-})()"#;
-        call_handle_json(tab, world, &info.handle, check_aria)
-            .ok()
-            .and_then(|v| v.get("ok").and_then(|b| b.as_bool()))
-            .unwrap_or(false)
-    };
-
-    if !is_supported && !is_aria {
-        return StepResult::failure(
-            idx,
-            format!("{} not supported for this element", action),
-            format!(
-                "Element <{}> has field_kind={:?} and no checkbox/radio/switch role",
-                info.tag, info.field_kind
-            ),
-        );
-    }
-
-    let js = format!(
-        r#"(function() {{
-  var el = this;
-  if (!el) return JSON.stringify({{error: 'No resolved element'}});
-  var want = {want};
-  var role = el.getAttribute('role');
-  var isAria = role === 'checkbox' || role === 'switch' || role === 'radio';
-  if (isAria && !('checked' in el)) {{
-    var current = el.getAttribute('aria-checked') === 'true';
-    if (current !== want) {{
-      el.click();
-    }}
-    var final_state = el.getAttribute('aria-checked') === 'true';
-    return JSON.stringify({{ok: final_state === want, checked: final_state, verified: true}});
-  }}
-  if (el.checked !== want) {{
-    el.click();
-  }}
-  return JSON.stringify({{ok: el.checked === want, checked: el.checked, verified: true}});
-}})()"#,
-        want = if check { "true" } else { "false" },
-    );
-    match call_handle_json(tab, world, &info.handle, &js) {
-        Ok(_) => StepResult::success(idx, format!("{}ed <{}>", action, info.tag)),
-        Err(e) => StepResult::failure(idx, format!("{} failed", action), e),
+    match refact_browser::forms::set_checked(tab, world, &info.handle, check) {
+        Ok(outcome) => StepResult::success(idx, format!("{}ed <{}>", action, info.tag))
+            .with_data(serde_json::json!({
+                "checked": outcome.checked,
+                "changed": outcome.changed,
+                "verified": outcome.verified,
+            })),
+        Err(error) => StepResult::failure(idx, format!("{} failed", action), error.message),
     }
 }
 
@@ -1935,231 +1743,6 @@ fn step_highlight_element(
     }
 }
 
-pub fn choose_fill_strategies(field_kind: &FieldKind) -> Vec<FillStrategy> {
-    match field_kind {
-        FieldKind::ContentEditable => vec![
-            FillStrategy::ContentEditablePath,
-            FillStrategy::NativeTyping,
-        ],
-        FieldKind::Textarea => vec![
-            FillStrategy::DomValueSetter,
-            FillStrategy::NativePrototypeSetter,
-            FillStrategy::NativeTyping,
-        ],
-        FieldKind::Select => vec![],
-        FieldKind::Checkbox | FieldKind::Radio => vec![],
-        FieldKind::FileInput | FieldKind::HiddenInput => vec![],
-        _ => vec![
-            FillStrategy::DomValueSetter,
-            FillStrategy::NativePrototypeSetter,
-            FillStrategy::NativeTyping,
-            FillStrategy::ClickAndType,
-        ],
-    }
-}
-
-fn generate_fill_js(strategy: &FillStrategy, text: &str, clear_first: bool) -> String {
-    let text_lit = js_string_literal(text);
-
-    match strategy {
-        FillStrategy::DomValueSetter => {
-            let clear = if clear_first { "el.value = '';" } else { "" };
-            format!(
-                r#"(function() {{
-  var el = this;
-  if (!el) return JSON.stringify({{error: 'No resolved element'}});
-  el.scrollIntoView({{block: 'center', behavior: 'instant'}});
-  el.focus();
-  {clear}
-  el.value = {text};
-  el.dispatchEvent(new Event('input', {{bubbles: true}}));
-  el.dispatchEvent(new Event('change', {{bubbles: true}}));
-  return JSON.stringify({{ok: true, value: el.value}});
-}})()"#,
-                text = text_lit,
-            )
-        }
-
-        FillStrategy::NativePrototypeSetter => {
-            let clear = if clear_first {
-                "setter.call(el, ''); el.dispatchEvent(new Event('input', {bubbles:true}));"
-            } else {
-                ""
-            };
-            format!(
-                r#"(function() {{
-  var el = this;
-  if (!el) return JSON.stringify({{error: 'No resolved element'}});
-  var proto = (el.tagName === 'TEXTAREA') ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  var desc = Object.getOwnPropertyDescriptor(proto, 'value');
-  if (!desc || !desc.set) return JSON.stringify({{error: 'No value setter on prototype'}});
-  var setter = desc.set;
-  el.scrollIntoView({{block: 'center', behavior: 'instant'}});
-  el.focus();
-  {clear}
-  setter.call(el, {text});
-  el.dispatchEvent(new Event('input', {{bubbles: true}}));
-  el.dispatchEvent(new Event('change', {{bubbles: true}}));
-  return JSON.stringify({{ok: true, value: el.value}});
-}})()"#,
-                text = text_lit,
-            )
-        }
-
-        FillStrategy::ContentEditablePath => {
-            let clear = if clear_first {
-                "document.execCommand('selectAll', false, null); document.execCommand('delete', false, null);"
-            } else {
-                ""
-            };
-            format!(
-                r#"(function() {{
-  var el = this;
-  if (!el) return JSON.stringify({{error: 'No resolved element'}});
-  if (!el.isContentEditable) return JSON.stringify({{error: 'Element is not contentEditable'}});
-  el.scrollIntoView({{block: 'center', behavior: 'instant'}});
-  el.focus();
-  {clear}
-  document.execCommand('insertText', false, {text});
-  var actual = (el.innerText || el.textContent || '').trim();
-  return JSON.stringify({{ok: true, value: actual}});
-}})()"#,
-                text = text_lit,
-            )
-        }
-
-        FillStrategy::NativeTyping => {
-            let clear = if clear_first {
-                "if (el.select) el.select(); document.execCommand('selectAll', false, null); document.execCommand('delete', false, null);"
-            } else {
-                ""
-            };
-            format!(
-                r#"(function() {{
-  var el = this;
-  if (!el) return JSON.stringify({{error: 'No resolved element'}});
-  el.scrollIntoView({{block: 'center', behavior: 'instant'}});
-  el.focus();
-  {clear}
-  document.execCommand('insertText', false, {text});
-  var actual = el.value !== undefined ? el.value : (el.innerText || el.textContent || '').trim();
-  return JSON.stringify({{ok: true, value: actual}});
-}})()"#,
-                text = text_lit,
-            )
-        }
-
-        FillStrategy::ClickAndType => {
-            let clear = if clear_first {
-                r#"if (el.select) { el.select(); } else { document.execCommand('selectAll', false, null); }
-  document.execCommand('delete', false, null);"#
-            } else {
-                ""
-            };
-            format!(
-                r#"(function() {{
-  var el = this;
-  if (!el) return JSON.stringify({{error: 'No resolved element'}});
-  el.scrollIntoView({{block: 'center', behavior: 'instant'}});
-  el.click();
-  el.focus();
-  {clear}
-  var text = {text};
-  for (var i = 0; i < text.length; i++) {{
-    var ch = text[i];
-    el.dispatchEvent(new KeyboardEvent('keydown', {{key: ch, bubbles: true}}));
-    el.dispatchEvent(new KeyboardEvent('keypress', {{key: ch, bubbles: true}}));
-    document.execCommand('insertText', false, ch);
-    el.dispatchEvent(new KeyboardEvent('keyup', {{key: ch, bubbles: true}}));
-  }}
-  el.dispatchEvent(new Event('input', {{bubbles: true}}));
-  el.dispatchEvent(new Event('change', {{bubbles: true}}));
-  var actual = el.value !== undefined ? el.value : (el.innerText || el.textContent || '').trim();
-  return JSON.stringify({{ok: true, value: actual}});
-}})()"#,
-                text = text_lit,
-            )
-        }
-    }
-}
-
-fn generate_clear_js(field_kind: &FieldKind) -> String {
-    match field_kind {
-        FieldKind::ContentEditable => r#"(function() {
-  var el = this;
-  if (!el) return JSON.stringify({error: 'No resolved element'});
-  el.focus();
-  document.execCommand('selectAll', false, null);
-  document.execCommand('delete', false, null);
-  return JSON.stringify({ok: true, value: (el.innerText || '').trim()});
-})()"#
-            .to_string(),
-        _ => r#"(function() {
-  var el = this;
-  if (!el) return JSON.stringify({error: 'No resolved element'});
-  el.focus();
-  if (el.select) el.select();
-  el.value = '';
-  el.dispatchEvent(new Event('input', {bubbles: true}));
-  el.dispatchEvent(new Event('change', {bubbles: true}));
-  return JSON.stringify({ok: true, value: el.value});
-})()"#
-            .to_string(),
-    }
-}
-
-fn verify_field_value(
-    tab: &Tab,
-    world: &WorldManager,
-    handle: &ElementHandle,
-    expected: &str,
-    field_kind: &FieldKind,
-) -> Result<bool, String> {
-    let js = match field_kind {
-        FieldKind::ContentEditable => format!(
-            r#"(function() {{
-  var el = this;
-  if (!el) return JSON.stringify({{error: 'No resolved element'}});
-  var actual = (el.innerText || el.textContent || '').trim();
-  return JSON.stringify({{actual: actual}});
-}})()"#,
-        ),
-        FieldKind::PasswordInput => {
-            format!(
-                r#"(function() {{
-  var el = this;
-  if (!el) return JSON.stringify({{error: 'No resolved element'}});
-  return JSON.stringify({{actual_length: (el.value || '').length, expected_length: {len}}});
-}})()"#,
-                len = expected.len(),
-            )
-        }
-        _ => format!(
-            r#"(function() {{
-  var el = this;
-  if (!el) return JSON.stringify({{error: 'No resolved element'}});
-  return JSON.stringify({{actual: el.value !== undefined ? String(el.value) : ''}});
-}})()"#,
-        ),
-    };
-
-    let result = call_handle_json(tab, world, handle, &js)?;
-
-    match field_kind {
-        FieldKind::PasswordInput => {
-            let actual_len = result
-                .get("actual_length")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            Ok(actual_len == expected.len() as u64)
-        }
-        _ => {
-            let actual = result.get("actual").and_then(|v| v.as_str()).unwrap_or("");
-            Ok(actual == expected)
-        }
-    }
-}
-
 pub fn describe_locator(locator: &BrowserLocator) -> String {
     match &locator.strategy {
         LocatorStrategy::Css { value } => format!("css={}", value),
@@ -2187,140 +1770,6 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_strategies_text_input() {
-        let strategies = choose_fill_strategies(&FieldKind::TextInput);
-        assert_eq!(strategies.len(), 4);
-        assert_eq!(strategies[0], FillStrategy::DomValueSetter);
-        assert_eq!(strategies[1], FillStrategy::NativePrototypeSetter);
-        assert_eq!(strategies[2], FillStrategy::NativeTyping);
-        assert_eq!(strategies[3], FillStrategy::ClickAndType);
-    }
-
-    #[test]
-    fn test_strategies_password_input() {
-        let strategies = choose_fill_strategies(&FieldKind::PasswordInput);
-        assert!(!strategies.is_empty());
-        assert_eq!(strategies[0], FillStrategy::DomValueSetter);
-    }
-
-    #[test]
-    fn test_strategies_textarea() {
-        let strategies = choose_fill_strategies(&FieldKind::Textarea);
-        assert_eq!(strategies.len(), 3);
-        assert_eq!(strategies[0], FillStrategy::DomValueSetter);
-    }
-
-    #[test]
-    fn test_strategies_content_editable() {
-        let strategies = choose_fill_strategies(&FieldKind::ContentEditable);
-        assert_eq!(strategies.len(), 2);
-        assert_eq!(strategies[0], FillStrategy::ContentEditablePath);
-        assert_eq!(strategies[1], FillStrategy::NativeTyping);
-    }
-
-    #[test]
-    fn test_strategies_select_is_empty() {
-        assert!(choose_fill_strategies(&FieldKind::Select).is_empty());
-    }
-
-    #[test]
-    fn test_strategies_checkbox_is_empty() {
-        assert!(choose_fill_strategies(&FieldKind::Checkbox).is_empty());
-    }
-
-    #[test]
-    fn test_strategies_radio_is_empty() {
-        assert!(choose_fill_strategies(&FieldKind::Radio).is_empty());
-    }
-
-    #[test]
-    fn test_strategies_file_input_is_empty() {
-        assert!(choose_fill_strategies(&FieldKind::FileInput).is_empty());
-    }
-
-    #[test]
-    fn test_strategies_email_input() {
-        let strategies = choose_fill_strategies(&FieldKind::EmailInput);
-        assert_eq!(strategies.len(), 4);
-    }
-
-    #[test]
-    fn test_strategies_search_input() {
-        let strategies = choose_fill_strategies(&FieldKind::SearchInput);
-        assert_eq!(strategies.len(), 4);
-    }
-
-    #[test]
-    fn test_generate_fill_dom_setter_contains_value_assignment() {
-        let js = generate_fill_js(&FillStrategy::DomValueSetter, "hello", true);
-        assert!(js.contains("el.value ="));
-        assert!(js.contains("'hello'"));
-        assert!(js.contains("el.value = '';"));
-        assert!(js.contains("dispatchEvent"));
-    }
-
-    #[test]
-    fn test_generate_fill_dom_setter_no_clear() {
-        let js = generate_fill_js(&FillStrategy::DomValueSetter, "test", false);
-        assert!(!js.contains("el.value = '';"));
-        assert!(js.contains("el.value ="));
-    }
-
-    #[test]
-    fn test_generate_fill_prototype_setter() {
-        let js = generate_fill_js(&FillStrategy::NativePrototypeSetter, "world", true);
-        assert!(js.contains("getOwnPropertyDescriptor"));
-        assert!(js.contains("HTMLInputElement.prototype"));
-        assert!(js.contains("setter.call"));
-        assert!(js.contains("'world'"));
-    }
-
-    #[test]
-    fn test_generate_fill_contenteditable() {
-        let js = generate_fill_js(&FillStrategy::ContentEditablePath, "rich text", true);
-        assert!(js.contains("isContentEditable"));
-        assert!(js.contains("insertText"));
-        assert!(js.contains("selectAll"));
-        assert!(js.contains("'rich text'"));
-    }
-
-    #[test]
-    fn test_generate_fill_native_typing() {
-        let js = generate_fill_js(&FillStrategy::NativeTyping, "typed", true);
-        assert!(js.contains("insertText"));
-        assert!(js.contains("'typed'"));
-    }
-
-    #[test]
-    fn test_generate_fill_click_and_type() {
-        let js = generate_fill_js(&FillStrategy::ClickAndType, "slow", true);
-        assert!(js.contains("el.click()"));
-        assert!(js.contains("KeyboardEvent"));
-        assert!(js.contains("'slow'"));
-    }
-
-    #[test]
-    fn test_generate_fill_escapes_special_chars() {
-        let js = generate_fill_js(&FillStrategy::DomValueSetter, "it's \"quoted\"", false);
-        assert!(js.contains("it\\'s"));
-    }
-
-    #[test]
-    fn test_generate_clear_input() {
-        let js = generate_clear_js(&FieldKind::TextInput);
-        assert!(js.contains("el.value = ''"));
-        assert!(js.contains("dispatchEvent"));
-    }
-
-    #[test]
-    fn test_generate_clear_contenteditable() {
-        let js = generate_clear_js(&FieldKind::ContentEditable);
-        assert!(js.contains("selectAll"));
-        assert!(js.contains("delete"));
-        assert!(js.contains("innerText"));
-    }
 
     #[test]
     fn test_describe_locator_css() {
@@ -2409,44 +1858,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fill_js_all_strategies_produce_iife() {
-        let strategies = vec![
-            FillStrategy::DomValueSetter,
-            FillStrategy::NativePrototypeSetter,
-            FillStrategy::ContentEditablePath,
-            FillStrategy::NativeTyping,
-            FillStrategy::ClickAndType,
-        ];
-        for s in strategies {
-            let js = generate_fill_js(&s, "test", true);
-            assert!(
-                js.starts_with("(function()"),
-                "Strategy {:?} should be IIFE",
-                s
-            );
-            assert!(
-                js.ends_with("})()"),
-                "Strategy {:?} should end with {{}})()",
-                s
-            );
-            assert!(
-                js.contains("JSON.stringify"),
-                "Strategy {:?} should return JSON",
-                s,
-            );
-        }
-    }
-
-    #[test]
-    fn test_clear_js_produces_iife() {
-        for kind in &[FieldKind::TextInput, FieldKind::ContentEditable] {
-            let js = generate_clear_js(kind);
-            assert!(js.starts_with("(function()"));
-            assert!(js.contains("JSON.stringify"));
-        }
-    }
-
-    #[test]
     fn console_report_text_is_redacted() {
         let entry = mask_console_entry(refact_integrations::browser_types::ConsoleEntry {
             timestamp: 1.0,
@@ -2479,50 +1890,4 @@ mod tests {
         assert!(stabilized);
     }
 
-    #[test]
-    fn test_select_option_js_contains_option_search() {
-        let value = "Option A";
-        let js_val = js_string_literal(value);
-        assert_eq!(js_val, "'Option A'");
-    }
-
-    #[test]
-    fn test_all_text_like_inputs_have_strategies() {
-        let text_kinds = vec![
-            FieldKind::TextInput,
-            FieldKind::PasswordInput,
-            FieldKind::EmailInput,
-            FieldKind::SearchInput,
-            FieldKind::NumberInput,
-            FieldKind::TelInput,
-            FieldKind::UrlInput,
-        ];
-        for kind in text_kinds {
-            let strategies = choose_fill_strategies(&kind);
-            assert!(
-                !strategies.is_empty(),
-                "FieldKind {:?} should have fill strategies",
-                kind,
-            );
-        }
-    }
-
-    #[test]
-    fn test_unfillable_kinds_have_no_strategies() {
-        let unfillable = vec![
-            FieldKind::Select,
-            FieldKind::Checkbox,
-            FieldKind::Radio,
-            FieldKind::FileInput,
-            FieldKind::HiddenInput,
-        ];
-        for kind in unfillable {
-            let strategies = choose_fill_strategies(&kind);
-            assert!(
-                strategies.is_empty(),
-                "FieldKind {:?} should have no fill strategies",
-                kind,
-            );
-        }
-    }
 }

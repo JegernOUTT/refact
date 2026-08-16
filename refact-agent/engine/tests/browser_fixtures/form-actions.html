@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Form actions</title>
+</head>
+<body>
+  <label for="fallback">Fallback input</label>
+  <input id="fallback">
+  <label><input id="checkbox" type="checkbox"> Checkbox</label>
+  <label><input id="radio" type="radio" name="choice" checked> Radio</label>
+  <select id="multiple" multiple>
+    <option value="alpha">Alpha</option>
+    <option value="beta">Beta option</option>
+    <option value="disabled" disabled>Disabled option</option>
+  </select>
+  <script>
+    document.querySelector('#fallback').addEventListener('beforeinput', event => event.preventDefault());
+  </script>
+</body>
+</html>

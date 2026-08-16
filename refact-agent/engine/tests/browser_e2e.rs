@@ -19,7 +19,7 @@ use refact_lsp::integrations::browser_controller::execute_steps as execute_fixtu
 use refact_lsp::integrations::browser_controller::execute_steps as execute_steps_with_policy;
 use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_models::{
-    BrowserActionRequest, BrowserLocator, BrowserStep, SessionPolicy, TabTarget,
+    BrowserActionRequest, BrowserLocator, BrowserStep, FillStrategy, SessionPolicy, TabTarget,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -46,6 +46,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "accname.html",
     "snapshot.html",
     "controlled-input.html",
+    "form-actions.html",
     "iframe-form.html",
     "shadow-dom.html",
     "dialog.html",
@@ -595,21 +596,129 @@ async fn fill_controlled_input_react() {
     };
     let report = execute_fixture_steps(
         &case.tab,
-        &[
-            BrowserStep::Fill {
-                locator: BrowserLocator::css("#controlled"),
-                text: "typed by browser".to_string(),
-                clear_first: true,
-                verify: true,
-            },
-            text_step("#state"),
-        ],
+        &[BrowserStep::Fill {
+            locator: BrowserLocator::css("#controlled"),
+            text: "typed by browser".to_string(),
+            clear_first: true,
+            verify: true,
+        }],
     );
     assert!(
         report.ok,
         "controlled fill should use trusted input: {report:?}"
     );
-    assert_eq!(returned_text(&report), "typed by browser");
+    let output = case
+        .tab
+        .evaluate("document.querySelector('#state').textContent", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(output, "typed by browser");
+    assert_eq!(
+        report.steps[0].fill_strategy,
+        Some(FillStrategy::NativeTyping)
+    );
+    assert_eq!(report.steps[0].verified, Some(true));
+    assert_eq!(report.steps[0].retries, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn fill_falls_back_when_cdp_input_is_rejected() {
+    let Some(case) = BrowserCase::start("form-actions.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::Fill {
+            locator: BrowserLocator::css("#fallback"),
+            text: "fallback value".to_string(),
+            clear_first: true,
+            verify: true,
+        }],
+    );
+    assert!(report.ok, "fallback fill failed: {report:?}");
+    assert_ne!(
+        report.steps[0].fill_strategy,
+        Some(FillStrategy::NativeTyping)
+    );
+    assert_eq!(report.steps[0].verified, Some(true));
+    assert!(report.steps[0].retries > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn checkbox_actions_are_verified_and_idempotent() {
+    let Some(case) = BrowserCase::start("form-actions.html").await else {
+        return;
+    };
+    let locator = BrowserLocator::css("#checkbox");
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::Check {
+                locator: locator.clone(),
+            },
+            BrowserStep::Check {
+                locator: locator.clone(),
+            },
+            BrowserStep::Uncheck {
+                locator: locator.clone(),
+            },
+            BrowserStep::Uncheck { locator },
+        ],
+    );
+    assert!(report.ok, "checkbox actions failed: {report:?}");
+    let changed = report
+        .steps
+        .iter()
+        .map(|step| step.data.as_ref().unwrap()["changed"].as_bool().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(changed, vec![true, false, true, false]);
+    assert!(report
+        .steps
+        .iter()
+        .all(|step| step.data.as_ref().unwrap()["verified"] == true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn radio_uncheck_returns_playwright_error() {
+    let Some(case) = BrowserCase::start("form-actions.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::Uncheck {
+            locator: BrowserLocator::css("#radio"),
+        }],
+    );
+    assert!(!report.ok);
+    assert!(report.steps[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("Cannot uncheck radio button"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn select_option_selects_from_multiple_select() {
+    let Some(case) = BrowserCase::start("form-actions.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::SelectOption {
+            locator: BrowserLocator::css("#multiple"),
+            value: "Beta option".to_string(),
+        }],
+    );
+    assert!(report.ok, "select option failed: {report:?}");
+    assert_eq!(
+        report.steps[0].data.as_ref().unwrap()["selected"],
+        json!(["beta"])
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1183,18 +1292,21 @@ async fn contenteditable_fill_updates_output() {
     };
     let report = execute_fixture_steps(
         &case.tab,
-        &[
-            BrowserStep::Fill {
-                locator: BrowserLocator::css("#editor"),
-                text: "editable text".to_string(),
-                clear_first: true,
-                verify: true,
-            },
-            text_step("#result"),
-        ],
+        &[BrowserStep::Fill {
+            locator: BrowserLocator::css("#editor"),
+            text: "editable text".to_string(),
+            clear_first: true,
+            verify: true,
+        }],
     );
     assert!(report.ok, "contenteditable fill failed: {report:?}");
-    assert_eq!(returned_text(&report), "editable text");
+    let output = case
+        .tab
+        .evaluate("document.querySelector('#result').textContent", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(output, "editable text");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
