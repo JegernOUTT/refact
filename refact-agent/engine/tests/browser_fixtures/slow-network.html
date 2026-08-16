@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Slow network</title>
+  <style>
+    #overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      background: white;
+    }
+  </style>
+</head>
+<body>
+  <button id="load">Load network resources</button>
+  <div id="overlay"><button id="accept-all">Continue</button></div>
+  <output id="result"></output>
+  <script>
+    document.querySelector('#accept-all').addEventListener('click', (event) => {
+      event.currentTarget.parentElement.remove();
+    });
+    document.querySelector('#load').addEventListener('click', async () => {
+      confirm('Load network resources?');
+      const [slow, missing] = await Promise.all([
+        fetch('/slow-echo?ms=700'),
+        fetch('/missing-network-resource'),
+      ]);
+      const value = await slow.json();
+      document.querySelector('#result').textContent = `${value.echo}:${missing.status}`;
+    });
+  </script>
+</body>
+</html>

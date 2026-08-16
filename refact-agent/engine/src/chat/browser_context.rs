@@ -566,6 +566,7 @@ mod tests {
                 url: "https://example.com".to_string(),
                 resource_type: "Document".to_string(),
                 status: Some(200),
+                ..NetworkEntry::default()
             }],
             mutations: vec![MutationSummaryEntry {
                 timestamp: 45247000.0,
@@ -721,6 +722,7 @@ mod tests {
             url: "https://api.com/data".to_string(),
             resource_type: "Fetch".to_string(),
             status: Some(200),
+            ..NetworkEntry::default()
         };
         let formatted = format_network_entry(&entry);
         assert!(formatted.contains("GET https://api.com/data → 200"));
@@ -734,6 +736,7 @@ mod tests {
             url: "https://api.com/data".to_string(),
             resource_type: "XHR".to_string(),
             status: None,
+            ..NetworkEntry::default()
         };
         let formatted = format_network_entry(&entry);
         assert!(formatted.contains("POST https://api.com/data"));
@@ -1019,6 +1022,7 @@ mod tests {
                 url: "https://example.com".to_string(),
                 resource_type: "Document".to_string(),
                 status: Some(200),
+                ..NetworkEntry::default()
             }],
             mutations: vec![MutationSummaryEntry {
                 timestamp: 1000.0,

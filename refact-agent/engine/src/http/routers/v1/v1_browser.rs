@@ -2125,6 +2125,7 @@ mod tests {
             url: "https://example.com/api?key=123".to_string(),
             resource_type: "Fetch".to_string(),
             status: Some(200),
+            ..crate::integrations::browser_types::NetworkEntry::default()
         };
         let curl = format_curl_minimal(&entry);
         assert_eq!(curl, "curl 'https://example.com/api?key=123'");
@@ -2138,6 +2139,7 @@ mod tests {
             url: "https://example.com/api".to_string(),
             resource_type: "XHR".to_string(),
             status: Some(201),
+            ..crate::integrations::browser_types::NetworkEntry::default()
         };
         let curl = format_curl_minimal(&entry);
         assert_eq!(curl, "curl -X POST 'https://example.com/api'");
@@ -2151,6 +2153,7 @@ mod tests {
             url: "https://example.com".to_string(),
             resource_type: "Document".to_string(),
             status: Some(200),
+            ..crate::integrations::browser_types::NetworkEntry::default()
         };
         let curl = format_curl_minimal(&entry);
         assert_eq!(curl, "curl 'https://example.com'");

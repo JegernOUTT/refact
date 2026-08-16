@@ -10,6 +10,7 @@ mod locator_handlers;
 mod locator_gen;
 mod locators;
 mod mouse;
+mod network;
 mod refs;
 mod snapshot;
 mod us_keyboard_layout;
@@ -51,6 +52,9 @@ pub use mouse::{
     MouseDispatch, MouseDispatcher, MouseError, MouseEventPayload, MouseEventType, ScrollStrategy,
     TouchEventPayload, TouchEventType, clickable_point_from_quads,
 };
+pub use network::{
+    NetworkLoadState, NetworkMonitorHandle, RequestStarted, ResponseReceived, UrlMatcher,
+};
 pub use refs::{ElementHandleInfo, Ref, RefError, RefParseError, RefRegistry, SnapshotGeneration};
 pub use snapshot::{AriaSnapshot, SnapshotBox, SnapshotMode, SnapshotNode, SnapshotOptions};
 pub use us_keyboard_layout::{
@@ -61,7 +65,7 @@ pub use world::{
     WorldManager,
 };
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, hash_map::DefaultHasher};
 use std::hash::Hasher;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -69,7 +73,7 @@ use std::time::{Duration, Instant};
 
 use headless_chrome::Browser;
 use headless_chrome::protocol::cdp::types::Event;
-use headless_chrome::protocol::cdp::Page;
+use headless_chrome::protocol::cdp::{Network, Page};
 use serde_json;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -173,6 +177,7 @@ pub struct BrowserBuffers {
     pub last_send_console_cursor: usize,
     pub last_report_console_cursor: usize,
     pub last_send_network_cursor: usize,
+    pub last_report_network_cursor: usize,
     pub last_send_mutation_cursor: usize,
     pub last_timeline_action_cursor: usize,
     pub last_timeline_console_cursor: usize,
@@ -200,6 +205,7 @@ impl BrowserBuffers {
             last_send_console_cursor: 0,
             last_report_console_cursor: 0,
             last_send_network_cursor: 0,
+            last_report_network_cursor: 0,
             last_send_mutation_cursor: 0,
             last_timeline_action_cursor: 0,
             last_timeline_console_cursor: 0,
@@ -237,7 +243,16 @@ impl BrowserBuffers {
         let network = std::mem::take(&mut *self.raw_network_entries.lock().unwrap());
         for e in network {
             self.network_buffer.push(e);
-            enforce_buffer_limit(&mut self.network_buffer, &mut self.last_send_network_cursor);
+            if self.network_buffer.len() > MAX_BUFFER_SIZE {
+                let excess = self.network_buffer.len() - MAX_BUFFER_SIZE;
+                self.network_buffer.drain(..excess);
+                self.last_send_network_cursor =
+                    self.last_send_network_cursor.saturating_sub(excess);
+                self.last_report_network_cursor =
+                    self.last_report_network_cursor.saturating_sub(excess);
+                self.last_timeline_network_cursor =
+                    self.last_timeline_network_cursor.saturating_sub(excess);
+            }
         }
     }
 
@@ -315,6 +330,10 @@ impl BrowserBuffers {
 
     pub fn flush_network_buffer(&mut self) -> Vec<NetworkEntry> {
         flush_buffer_since(&self.network_buffer, &mut self.last_send_network_cursor)
+    }
+
+    pub fn flush_report_network(&mut self) -> Vec<NetworkEntry> {
+        flush_buffer_since(&self.network_buffer, &mut self.last_report_network_cursor)
     }
 
     pub fn flush_mutation_summary(&mut self) -> Vec<MutationSummaryEntry> {
@@ -417,6 +436,7 @@ pub struct BrowserRuntime {
     pub profile_dir: PathBuf,
     pub window_bounds: Option<WindowBounds>,
     pub buffers: BrowserBuffers,
+    pub network_monitor: Arc<NetworkMonitorHandle>,
     pub idle_timeout: Duration,
     pub is_connected: bool,
     pub last_activity: Instant,
@@ -490,6 +510,7 @@ impl BrowserRuntime {
             profile_dir,
             window_bounds,
             buffers: BrowserBuffers::new(mask_passwords),
+            network_monitor: Arc::new(NetworkMonitorHandle::default()),
             idle_timeout,
             is_connected: true,
             last_activity: Instant::now(),
@@ -526,6 +547,7 @@ impl BrowserRuntime {
             profile_dir: PathBuf::new(),
             window_bounds: None,
             buffers: BrowserBuffers::new(mask_passwords),
+            network_monitor: Arc::new(NetworkMonitorHandle::default()),
             idle_timeout,
             is_connected: true,
             last_activity: Instant::now(),
@@ -883,39 +905,163 @@ pub fn setup_console_capture(
 
 pub fn setup_network_capture(
     tab: &headless_chrome::Tab,
+    monitor: Arc<NetworkMonitorHandle>,
     network_buffer: Arc<Mutex<Vec<NetworkEntry>>>,
 ) -> Result<(), String> {
-    let buf = network_buffer.clone();
-    tab.register_response_handling(
-        "__refact_network",
-        Box::new(move |params, _fetch_body| {
-            let url = params.response.url.clone();
-            let status = params.response.status;
-            let resource_type = format!("{:?}", params.Type);
-            let allowed = matches!(
-                resource_type.as_str(),
-                "Document" | "Xhr" | "Fetch" | "XHR" | "Other"
-            );
-            if allowed {
-                if let Ok(mut buf) = buf.lock() {
-                    buf.push(NetworkEntry {
-                        timestamp: normalize_timestamp_ms(params.timestamp as f64),
-                        method: String::new(),
-                        url,
-                        resource_type,
-                        status: Some(status as u16),
-                    });
-                    if buf.len() > MAX_BUFFER_SIZE {
-                        let excess = buf.len() - MAX_BUFFER_SIZE;
-                        buf.drain(..excess);
-                    }
+    tab.call_method(Network::Enable {
+        max_total_buffer_size: None,
+        max_resource_buffer_size: None,
+        max_post_data_size: None,
+        report_direct_socket_traffic: None,
+        enable_durable_messages: None,
+    })
+    .map_err(|error| format!("Failed to enable network events: {error}"))?;
+
+    let frame_tree = tab
+        .call_method(Page::GetFrameTree(None))
+        .map_err(|error| format!("Failed to read browser frame tree: {error}"))?
+        .frame_tree;
+    let main_frame_id = frame_tree.frame.id.clone();
+    attach_network_frame_tree(&monitor, &frame_tree, None);
+    if let Ok(ready_state) = tab.evaluate("document.readyState", false) {
+        match ready_state.value.as_ref().and_then(|value| value.as_str()) {
+            Some("interactive") => monitor.lifecycle(&main_frame_id, "DOMContentLoaded"),
+            Some("complete") => {
+                monitor.lifecycle(&main_frame_id, "DOMContentLoaded");
+                monitor.lifecycle(&main_frame_id, "load");
+            }
+            _ => {}
+        }
+    }
+
+    tab.add_event_listener(Arc::new(move |event: &Event| {
+        match event {
+            Event::NetworkRequestWillBeSent(event) => {
+                let params = &event.params;
+                monitor.request_started(RequestStarted {
+                    request_id: params.request_id.clone(),
+                    loader_id: params.loader_id.clone(),
+                    frame_id: params.frame_id.clone(),
+                    method: params.request.method.clone(),
+                    url: params.request.url.clone(),
+                    resource_type: params
+                        .Type
+                        .as_ref()
+                        .map(|resource_type| format!("{resource_type:?}"))
+                        .unwrap_or_else(|| "Other".to_string()),
+                    headers: cdp_headers(&params.request.headers),
+                    timestamp: normalize_timestamp_ms(params.timestamp),
+                    redirect_response: params.redirect_response.as_ref().map(|response| {
+                        response_received(
+                            params.request_id.clone(),
+                            normalize_timestamp_ms(params.timestamp),
+                            response,
+                        )
+                    }),
+                });
+            }
+            Event::NetworkRequestWillBeSentExtraInfo(event) => monitor.request_extra(
+                event.params.request_id.clone(),
+                cdp_headers(&event.params.headers),
+            ),
+            Event::NetworkResponseReceived(event) => monitor.response_received(response_received(
+                event.params.request_id.clone(),
+                normalize_timestamp_ms(event.params.timestamp),
+                &event.params.response,
+            )),
+            Event::NetworkResponseReceivedExtraInfo(event) => monitor.response_extra(
+                event.params.request_id.clone(),
+                cdp_headers(&event.params.headers),
+            ),
+            Event::NetworkLoadingFinished(event) => monitor.loading_finished(
+                &event.params.request_id,
+                normalize_timestamp_ms(event.params.timestamp),
+                Some(event.params.encoded_data_length.max(0.0) as u64),
+            ),
+            Event::NetworkLoadingFailed(event) => monitor.loading_failed(
+                &event.params.request_id,
+                normalize_timestamp_ms(event.params.timestamp),
+                event.params.error_text.clone(),
+            ),
+            Event::PageLifecycleEvent(event) => {
+                monitor.lifecycle(&event.params.frame_id, &event.params.name)
+            }
+            Event::PageFrameAttached(event) => monitor.attach_frame(
+                event.params.frame_id.clone(),
+                Some(event.params.parent_frame_id.clone()),
+            ),
+            Event::PageFrameDetached(event) => monitor.detach_frame(&event.params.frame_id),
+            _ => {}
+        }
+        let completed = monitor.drain_completed();
+        if !completed.is_empty() {
+            if let Ok(mut buffer) = network_buffer.lock() {
+                buffer.extend(completed);
+                if buffer.len() > MAX_BUFFER_SIZE {
+                    let excess = buffer.len() - MAX_BUFFER_SIZE;
+                    buffer.drain(..excess);
                 }
             }
-        }),
-    )
-    .map_err(|e| format!("Failed to setup network capture: {}", e))?;
-
+        }
+    }))
+    .map_err(|error| format!("Failed to add network listener: {error}"))?;
     Ok(())
+}
+
+fn attach_network_frame_tree(
+    monitor: &NetworkMonitorHandle,
+    tree: &Page::FrameTree,
+    parent_id: Option<String>,
+) {
+    let frame_id = tree.frame.id.clone();
+    monitor.attach_frame(frame_id.clone(), parent_id);
+    if let Some(children) = &tree.child_frames {
+        for child in children {
+            attach_network_frame_tree(monitor, child, Some(frame_id.clone()));
+        }
+    }
+}
+
+fn cdp_headers(headers: &Network::Headers) -> BTreeMap<String, String> {
+    headers
+        .0
+        .as_ref()
+        .and_then(|value| value.as_object())
+        .map(|headers| {
+            headers
+                .iter()
+                .map(|(name, value)| {
+                    let value = value
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| value.to_string());
+                    (name.clone(), value)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn response_received(
+    request_id: String,
+    timestamp: f64,
+    response: &Network::Response,
+) -> ResponseReceived {
+    let timing = response.timing.as_ref();
+    ResponseReceived {
+        request_id,
+        status: response.status as u16,
+        status_text: response.status_text.clone(),
+        headers: cdp_headers(&response.headers),
+        timestamp,
+        encoded_data_length: Some(response.encoded_data_length.max(0.0) as u64),
+        from_service_worker: response.from_service_worker.unwrap_or(false),
+        request_start: timing
+            .map(|timing| normalize_timestamp_ms(timing.request_time) + timing.send_start.max(0.0)),
+        response_start: timing.map(|timing| {
+            normalize_timestamp_ms(timing.request_time) + timing.receive_headers_end.max(0.0)
+        }),
+    }
 }
 
 pub fn setup_recording_for_tab(
@@ -930,7 +1076,11 @@ pub fn setup_recording_for_tab(
         runtime.buffers.raw_recorder_events.clone(),
     )?;
     setup_console_capture(tab, runtime.buffers.raw_console_entries.clone())?;
-    setup_network_capture(tab, runtime.buffers.raw_network_entries.clone())?;
+    setup_network_capture(
+        tab,
+        runtime.network_monitor.clone(),
+        runtime.buffers.raw_network_entries.clone(),
+    )?;
     let target_id = tab.get_target_id().to_string();
     runtime.recording_tab_target_id = Some(target_id.clone());
     runtime.active_tab_target_id = Some(target_id);
@@ -1226,11 +1376,29 @@ mod tests {
             url: "https://example.com".to_string(),
             resource_type: "Document".to_string(),
             status: None,
+            ..NetworkEntry::default()
         });
         let flushed = buf.flush_network_buffer();
         assert_eq!(flushed.len(), 1);
         let flushed2 = buf.flush_network_buffer();
         assert_eq!(flushed2.len(), 0);
+    }
+
+    #[test]
+    fn report_network_cursor_is_independent() {
+        let mut buf = make_test_buffers();
+        buf.network_buffer.push(NetworkEntry {
+            timestamp: 1.0,
+            method: "GET".to_string(),
+            url: "https://example.com/api".to_string(),
+            resource_type: "Fetch".to_string(),
+            status: Some(200),
+            ..NetworkEntry::default()
+        });
+
+        assert_eq!(buf.flush_report_network().len(), 1);
+        assert!(buf.flush_report_network().is_empty());
+        assert_eq!(buf.flush_network_buffer().len(), 1);
     }
 
     #[test]

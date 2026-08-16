@@ -14,8 +14,8 @@ use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
 use refact_browser::{
     CdpKeyboardDispatcher, ElementHandle, Keyboard, LocatorHandler, LocatorHandlerLease,
-    LocatorHandlerOperation, LocatorHandlerProbe, LocatorHandlerRegistry, WorldManager,
-    DEFAULT_DISMISS_OVERLAYS_HANDLER,
+    LocatorHandlerOperation, LocatorHandlerProbe, LocatorHandlerRegistry, NetworkLoadState,
+    NetworkMonitorHandle, UrlMatcher, WorldManager, DEFAULT_DISMISS_OVERLAYS_HANDLER,
 };
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 
@@ -256,6 +256,7 @@ fn execute_steps_with_world(
         stabilized: false,
         console: vec![],
         page_errors: vec![],
+        network: vec![],
         locator_handlers,
         dialogs: vec![],
         screenshot: None,
@@ -354,6 +355,20 @@ pub async fn execute_request_with_runtime(
         let rt = runtime_arc.lock().await;
         rt.locator_handlers.clone()
     };
+    let network_monitor = {
+        let rt = runtime_arc.lock().await;
+        rt.network_monitor.clone()
+    };
+    let armed_network_waits = request
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(index, step)| match step {
+            BrowserStep::WaitForRequest { .. } => Some((index, network_monitor.request_cursor())),
+            BrowserStep::WaitForResponse { .. } => Some((index, network_monitor.response_cursor())),
+            _ => None,
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let mut results = Vec::new();
     let mut locator_handlers = Vec::new();
     let mut all_ok = true;
@@ -383,14 +398,15 @@ pub async fn execute_request_with_runtime(
             }
             match &current_tab {
                 Some(tab) => tokio::task::block_in_place(|| {
-                    execute_single_step(
+                    execute_runtime_network_step(
                         tab,
                         &world,
+                        &network_monitor,
                         step,
                         idx,
-                        None,
+                        armed_network_waits.get(&idx).copied(),
                         image_policy,
-                        Some(&handlers),
+                        &handlers,
                         &mut locator_handlers,
                     )
                 }),
@@ -425,7 +441,12 @@ pub async fn execute_request_with_runtime(
     };
     let (url, title, stabilized, screenshot) = if let Some(tab) = active_tab {
         let stabilized = tokio::task::block_in_place(|| {
-            wait_for_report_stability(&tab, &world, REPORT_STABILIZATION_TIMEOUT_MS)
+            wait_for_report_stability(
+                &tab,
+                &world,
+                &network_monitor,
+                REPORT_STABILIZATION_TIMEOUT_MS,
+            )
         });
         let url = tab.get_url();
         let page_changed = initial_url.as_deref() != Some(url.as_str());
@@ -444,7 +465,7 @@ pub async fn execute_request_with_runtime(
     } else {
         (None, None, false, None)
     };
-    let (console, page_errors, dialogs) = {
+    let (console, page_errors, network, dialogs) = {
         let mut rt = runtime_arc.lock().await;
         rt.drain_raw_events();
         let mut console = rt
@@ -458,8 +479,9 @@ pub async fn execute_request_with_runtime(
             .map(|entry| entry.text.clone())
             .collect();
         console.retain(|entry| entry.level != "page_error");
+        let network = rt.flush_report_network();
         let dialogs = rt.dialog_manager.take_reports();
-        (console, page_errors, dialogs)
+        (console, page_errors, network, dialogs)
     };
 
     Ok(ExecutionReport {
@@ -470,6 +492,7 @@ pub async fn execute_request_with_runtime(
         stabilized,
         console,
         page_errors,
+        network,
         locator_handlers,
         dialogs,
         screenshot,
@@ -671,6 +694,7 @@ pub fn execute_steps_with_runtime(
         stabilized: false,
         console: vec![],
         page_errors: vec![],
+        network: vec![],
         locator_handlers,
         dialogs,
         screenshot: None,
@@ -685,6 +709,121 @@ fn is_navigation_step(step: &BrowserStep) -> bool {
             | BrowserStep::GoBack
             | BrowserStep::GoForward
     )
+}
+
+fn execute_runtime_network_step(
+    tab: &Tab,
+    world: &WorldManager,
+    network_monitor: &NetworkMonitorHandle,
+    step: &BrowserStep,
+    idx: usize,
+    armed_cursor: Option<u64>,
+    image_policy: &ImagePolicy,
+    handlers: &Arc<Mutex<LocatorHandlerRegistry>>,
+    locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+) -> StepResult {
+    match step {
+        BrowserStep::WaitForNetworkIdle { timeout_ms } => wait_for_load_state(
+            network_monitor,
+            idx,
+            BrowserLoadState::Networkidle,
+            clamp_timeout_ms(*timeout_ms),
+        ),
+        BrowserStep::WaitForLoadState { state, timeout_ms } => {
+            wait_for_load_state(network_monitor, idx, *state, clamp_timeout_ms(*timeout_ms))
+        }
+        BrowserStep::WaitForRequest {
+            url_or_pattern,
+            timeout_ms,
+        } => wait_for_network_entry(
+            network_monitor,
+            idx,
+            url_or_pattern,
+            armed_cursor.unwrap_or_else(|| network_monitor.request_cursor()),
+            clamp_timeout_ms(*timeout_ms),
+            false,
+        ),
+        BrowserStep::WaitForResponse {
+            url_or_pattern,
+            timeout_ms,
+        } => wait_for_network_entry(
+            network_monitor,
+            idx,
+            url_or_pattern,
+            armed_cursor.unwrap_or_else(|| network_monitor.response_cursor()),
+            clamp_timeout_ms(*timeout_ms),
+            true,
+        ),
+        _ => execute_single_step(
+            tab,
+            world,
+            step,
+            idx,
+            None,
+            image_policy,
+            Some(handlers),
+            locator_handler_firings,
+        ),
+    }
+}
+
+fn wait_for_load_state(
+    monitor: &NetworkMonitorHandle,
+    idx: usize,
+    state: BrowserLoadState,
+    timeout_ms: u64,
+) -> StepResult {
+    let state_name = match state {
+        BrowserLoadState::Domcontentloaded => "domcontentloaded",
+        BrowserLoadState::Load => "load",
+        BrowserLoadState::Networkidle => "networkidle",
+    };
+    let monitor_state = match state {
+        BrowserLoadState::Domcontentloaded => NetworkLoadState::Domcontentloaded,
+        BrowserLoadState::Load => NetworkLoadState::Load,
+        BrowserLoadState::Networkidle => NetworkLoadState::Networkidle,
+    };
+    match monitor.wait_for_load_state(monitor_state, Duration::from_millis(timeout_ms)) {
+        Ok(()) => StepResult::success(idx, format!("Reached load state {state_name}")),
+        Err(error) => StepResult::failure(idx, format!("Wait for load state {state_name}"), error),
+    }
+}
+
+fn wait_for_network_entry(
+    monitor: &NetworkMonitorHandle,
+    idx: usize,
+    pattern: &UrlPattern,
+    cursor: u64,
+    timeout_ms: u64,
+    response: bool,
+) -> StepResult {
+    let matcher = match pattern {
+        UrlPattern::Text(value) => UrlMatcher::text(value),
+        UrlPattern::Regex { source, flags } => UrlMatcher::regex(source, flags),
+    };
+    let matcher = match matcher {
+        Ok(matcher) => matcher,
+        Err(error) => return StepResult::failure(idx, "Invalid URL pattern", error),
+    };
+    let result = if response {
+        monitor.wait_for_response(&matcher, cursor, Duration::from_millis(timeout_ms))
+    } else {
+        monitor.wait_for_request(&matcher, cursor, Duration::from_millis(timeout_ms))
+    };
+    match result {
+        Ok(entry) => {
+            let kind = if response { "response" } else { "request" };
+            StepResult::success(
+                idx,
+                format!("Matched {kind}: {} {}", entry.method, entry.url),
+            )
+            .with_data(serde_json::to_value(entry).unwrap_or_default())
+        }
+        Err(error) => {
+            let kind = if response { "response" } else { "request" };
+            StepResult::failure(idx, format!("Wait for {kind}"), error)
+        }
+    }
 }
 
 fn needs_locator_handler_checkpoint(step: &BrowserStep) -> bool {
@@ -1070,6 +1209,13 @@ fn execute_single_step(
         BrowserStep::WaitForNetworkIdle { timeout_ms } => {
             step_wait_for_network_idle(tab, idx, clamp_timeout_ms(*timeout_ms))
         }
+        BrowserStep::WaitForLoadState { .. }
+        | BrowserStep::WaitForRequest { .. }
+        | BrowserStep::WaitForResponse { .. } => StepResult::failure(
+            idx,
+            "Network wait",
+            "Network waits require a browser runtime",
+        ),
         BrowserStep::WaitForElementHidden {
             locator,
             timeout_ms,
@@ -1398,13 +1544,21 @@ fn poll_condition(
     }
 }
 
-fn wait_for_report_stability(tab: &Tab, world: &WorldManager, timeout_ms: u64) -> bool {
+fn wait_for_report_stability(
+    tab: &Tab,
+    world: &WorldManager,
+    network_monitor: &NetworkMonitorHandle,
+    timeout_ms: u64,
+) -> bool {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     if poll_until_deadline(tab, "document.readyState !== 'loading'", deadline).is_err() {
         return false;
     }
-    let _ = tab.evaluate(NETWORK_INFLIGHT_TRACKER_JS, false);
-    if wait_for_network_quiet_until(tab, deadline).is_err() {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if network_monitor
+        .wait_for_load_state(NetworkLoadState::Networkidle, remaining)
+        .is_err()
+    {
         return false;
     }
 
@@ -1450,32 +1604,6 @@ fn poll_until_deadline(tab: &Tab, js_condition: &str, deadline: Instant) -> Resu
             == Some(true)
         {
             return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err("Timed out".to_string());
-        }
-        std::thread::sleep(Duration::from_millis(REPORT_STABILITY_INTERVAL_MS));
-    }
-}
-
-fn wait_for_network_quiet_until(tab: &Tab, deadline: Instant) -> Result<(), String> {
-    let snapshot_js = r#"(function() {
-  return window.__refact_inflight_installed ? (window.__refact_inflight | 0) : 0;
-})()"#;
-    let quiet_window = Duration::from_millis(NETWORK_IDLE_WINDOW_MS);
-    let mut quiet_since: Option<Instant> = None;
-    loop {
-        let inflight = eval_js_value(tab, snapshot_js)
-            .ok()
-            .and_then(|value| value.as_i64())
-            .unwrap_or(0);
-        if inflight == 0 {
-            if quiet_since.is_some_and(|since| since.elapsed() >= quiet_window) {
-                return Ok(());
-            }
-            quiet_since.get_or_insert_with(Instant::now);
-        } else {
-            quiet_since = None;
         }
         if Instant::now() >= deadline {
             return Err("Timed out".to_string());

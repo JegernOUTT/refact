@@ -4057,6 +4057,7 @@ dependencies = [
  "refact-chat-api",
  "refact-core",
  "refact-integrations",
+ "regex",
  "serde",
  "serde_json",
  "tracing",

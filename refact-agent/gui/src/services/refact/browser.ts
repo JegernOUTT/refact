@@ -213,6 +213,34 @@ export type BrowserConsoleEntry = {
   text: string;
 };
 
+export type BrowserNetworkTiming = {
+  start_time: number;
+  request_start?: number | null;
+  response_start?: number | null;
+  response_end?: number | null;
+};
+
+export type BrowserNetworkEntry = {
+  timestamp: number;
+  method: string;
+  url: string;
+  resource_type: string;
+  status?: number | null;
+  status_text?: string | null;
+  request_headers?: Record<string, string>;
+  response_headers?: Record<string, string>;
+  frame_id?: string | null;
+  loader_id?: string | null;
+  document_id?: string | null;
+  redirect_from?: string | null;
+  timing?: BrowserNetworkTiming | null;
+  encoded_data_length?: number | null;
+  transfer_size?: number | null;
+  failure_text?: string | null;
+  from_service_worker: boolean;
+  is_navigation_request: boolean;
+};
+
 export type BrowserReportScreenshot = {
   mime: string;
   data: string;
@@ -253,6 +281,7 @@ export type BrowserActionResponse = {
   stabilized?: boolean;
   console?: BrowserConsoleEntry[];
   page_errors?: string[];
+  network?: BrowserNetworkEntry[];
   locator_handlers?: LocatorHandlerFiring[];
   dialogs?: BrowserDialogInfo[];
   screenshot?: BrowserReportScreenshot | null;

@@ -358,6 +358,28 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     return typedResult.page_errors.join("\n");
   }, [typedResult]);
 
+  const typedNetworkBlock = useMemo(() => {
+    if (!typedResult?.network?.length) return null;
+    return typedResult.network
+      .map((entry) => {
+        const status = entry.status == null ? "pending" : String(entry.status);
+        const size = entry.transfer_size ?? entry.encoded_data_length;
+        const details = [
+          entry.resource_type,
+          entry.from_service_worker ? "service worker" : null,
+          entry.is_navigation_request ? "navigation" : null,
+          size == null ? null : `${size} B`,
+          entry.failure_text ? `failed: ${entry.failure_text}` : null,
+        ]
+          .filter((value): value is string => value !== null)
+          .join(" · ");
+        return `${entry.method || "GET"} ${status} ${entry.url}${
+          details ? `\n  ${details}` : ""
+        }`;
+      })
+      .join("\n");
+  }, [typedResult]);
+
   const typedLocatorHandlers = useMemo(() => {
     if (!typedResult?.locator_handlers?.length) return null;
     return typedResult.locator_handlers;
@@ -455,6 +477,17 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
           <Box className={styles.logContent}>
             <ShikiCodeBlock showLineNumbers={false}>
               {typedPageErrorsBlock}
+            </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
+
+      {typedNetworkBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Network</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedNetworkBlock}
             </ShikiCodeBlock>
           </Box>
         </Box>

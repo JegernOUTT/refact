@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const MAX_BUFFER_SIZE: usize = 10000;
 pub const SCROLL_DEBOUNCE_MS: f64 = 300.0;
@@ -90,13 +91,50 @@ pub struct ConsoleEntry {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct NetworkEntry {
     pub timestamp: f64,
     pub method: String,
     pub url: String,
     pub resource_type: String,
     pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_text: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub request_headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub response_headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loader_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<NetworkTiming>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoded_data_length: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_text: Option<String>,
+    #[serde(default)]
+    pub from_service_worker: bool,
+    #[serde(default)]
+    pub is_navigation_request: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NetworkTiming {
+    pub start_time: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_start: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_start: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_end: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -390,6 +428,7 @@ mod tests {
             url: "https://example.com".to_string(),
             resource_type: "Document".to_string(),
             status: Some(200),
+            ..NetworkEntry::default()
         }];
         let mut cursor = 0usize;
         let flushed = flush_buffer_since(&buffer, &mut cursor);
@@ -401,6 +440,7 @@ mod tests {
             url: "https://api.example.com".to_string(),
             resource_type: "XHR".to_string(),
             status: Some(201),
+            ..NetworkEntry::default()
         });
         let flushed2 = flush_buffer_since(&buffer, &mut cursor);
         assert_eq!(flushed2.len(), 1);
@@ -445,6 +485,7 @@ mod tests {
             url: "https://api.example.com/data".to_string(),
             resource_type: "Fetch".to_string(),
             status: Some(404),
+            ..NetworkEntry::default()
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: NetworkEntry = serde_json::from_str(&json).unwrap();
@@ -459,6 +500,7 @@ mod tests {
             url: "https://example.com".to_string(),
             resource_type: "Document".to_string(),
             status: None,
+            ..NetworkEntry::default()
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert!(json["status"].is_null());

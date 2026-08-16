@@ -95,6 +95,22 @@ describe("ChromeTool", () => {
           { timestamp: 1, level: "Log", text: "loaded transactional state" },
         ],
         page_errors: ["ReferenceError: fixtureFailure is not defined"],
+        network: [
+          {
+            timestamp: 2,
+            method: "GET",
+            url: "https://example.com/api/items",
+            resource_type: "Fetch",
+            status: 404,
+            status_text: "Not Found",
+            request_headers: {},
+            response_headers: {},
+            transfer_size: 321,
+            failure_text: "net::ERR_HTTP_RESPONSE_CODE_FAILURE",
+            from_service_worker: false,
+            is_navigation_request: false,
+          },
+        ],
         locator_handlers: [
           {
             name: "dismiss_overlays",
@@ -144,6 +160,7 @@ describe("ChromeTool", () => {
     expect(screen.getByText("Page State")).toBeInTheDocument();
     expect(screen.getByText("Console")).toBeInTheDocument();
     expect(screen.getByText("Page Errors")).toBeInTheDocument();
+    expect(screen.getByText("Network")).toBeInTheDocument();
     expect(screen.getByText("Locator Handlers")).toBeInTheDocument();
     expect(screen.getByText("Dialogs")).toBeInTheDocument();
     expect(
@@ -155,6 +172,16 @@ describe("ChromeTool", () => {
     expect(
       screen.getByText((text) =>
         text.includes("fixtureFailure is not defined"),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) =>
+        text.includes("GET 404 https://example.com/api/items"),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) =>
+        text.includes("net::ERR_HTTP_RESPONSE_CODE_FAILURE"),
       ),
     ).toBeInTheDocument();
     expect(screen.getByText("dismiss_overlays")).toBeInTheDocument();

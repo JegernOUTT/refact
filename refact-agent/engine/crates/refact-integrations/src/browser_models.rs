@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::browser_types::ConsoleEntry;
+use crate::browser_types::{ConsoleEntry, NetworkEntry};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocatorRegex {
@@ -682,6 +682,21 @@ pub enum BrowserStep {
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
+    WaitForLoadState {
+        state: BrowserLoadState,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    WaitForRequest {
+        url_or_pattern: UrlPattern,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    WaitForResponse {
+        url_or_pattern: UrlPattern,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
     WaitForElementHidden {
         locator: BrowserLocator,
         #[serde(default)]
@@ -766,6 +781,21 @@ pub enum BrowserStep {
 pub enum LocatorHandlerAction {
     Click,
     Steps { steps: Vec<BrowserStep> },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserLoadState {
+    Domcontentloaded,
+    Load,
+    Networkidle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum UrlPattern {
+    Text(String),
+    Regex { source: String, flags: String },
 }
 
 fn default_true() -> bool {
@@ -903,6 +933,8 @@ pub struct ExecutionReport {
     pub console: Vec<ConsoleEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub page_errors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network: Vec<NetworkEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub locator_handlers: Vec<LocatorHandlerFiring>,
     pub dialogs: Vec<DialogInfo>,
@@ -1322,6 +1354,33 @@ mod tests {
     }
 
     #[test]
+    fn test_network_wait_steps_serde() {
+        let load: BrowserStep = serde_json::from_str(
+            r#"{"action":"wait_for_load_state","state":"networkidle","timeout_ms":7000}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            load,
+            BrowserStep::WaitForLoadState {
+                state: BrowserLoadState::Networkidle,
+                timeout_ms: Some(7000)
+            }
+        ));
+
+        let response: BrowserStep = serde_json::from_str(
+            r#"{"action":"wait_for_response","url_or_pattern":{"source":"/api/.*","flags":"i"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            response,
+            BrowserStep::WaitForResponse {
+                url_or_pattern: UrlPattern::Regex { source, flags },
+                timeout_ms: None
+            } if source == "/api/.*" && flags == "i"
+        ));
+    }
+
+    #[test]
     fn test_step_extract_links_serde() {
         let json_str = r#"{"action": "extract_links", "limit": 10}"#;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
@@ -1532,6 +1591,7 @@ mod tests {
             stabilized: true,
             console: vec![],
             page_errors: vec![],
+            network: vec![],
             locator_handlers: vec![],
             dialogs: vec![DialogInfo {
                 dialog_type: DialogType::Prompt,

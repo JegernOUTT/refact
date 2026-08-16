@@ -19,8 +19,8 @@ use refact_lsp::integrations::browser_controller::execute_steps as execute_fixtu
 use refact_lsp::integrations::browser_controller::execute_steps as execute_steps_with_policy;
 use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_models::{
-    BrowserActionRequest, BrowserLocator, BrowserStep, FillStrategy, SessionPolicy, TabTarget,
-    LocatorHandlerAction,
+    BrowserActionRequest, BrowserLoadState, BrowserLocator, BrowserStep, FillStrategy,
+    LocatorHandlerAction, SessionPolicy, TabTarget, UrlPattern,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -52,6 +52,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "shadow-dom.html",
     "dialog.html",
     "fetch-after-click.html",
+    "slow-network.html",
     "popup.html",
     "upload.html",
     "download.html",
@@ -381,6 +382,11 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
         .console
         .iter()
         .any(|entry| entry.text.contains("slow echo settled after 400ms")));
+    assert!(report.network.iter().any(|entry| {
+        entry.url.contains("/slow-echo")
+            && entry.status == Some(200)
+            && entry.failure_text.is_none()
+    }));
     assert_eq!(
         execute_request_with_runtime(
             runtime,
@@ -400,6 +406,75 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
         .count(),
         0
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() {
+    let Some(mut case) = BrowserCase::start("slow-network.html").await else {
+        return;
+    };
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let report = execute_request_with_runtime(
+        runtime,
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::AddLocatorHandler {
+                    name: "network-overlay".to_string(),
+                    locator: BrowserLocator::css("#accept-all"),
+                    handler: LocatorHandlerAction::Click,
+                    times: Some(1),
+                    no_wait_after: false,
+                },
+                BrowserStep::HandleDialog {
+                    accept: false,
+                    prompt_text: None,
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#load"),
+                },
+                BrowserStep::WaitForResponse {
+                    url_or_pattern: UrlPattern::Regex {
+                        source: "/missing-network-resource$".to_string(),
+                        flags: String::new(),
+                    },
+                    timeout_ms: Some(3_000),
+                },
+                BrowserStep::WaitForLoadState {
+                    state: BrowserLoadState::Networkidle,
+                    timeout_ms: Some(3_000),
+                },
+                BrowserStep::GetText {
+                    locator: BrowserLocator::css("#result"),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.ok, "mixed browser batch failed: {report:?}");
+    assert!(report.steps[3].summary.contains("Matched response"));
+    assert!(report.steps[4].summary.contains("networkidle"));
+    assert_eq!(returned_text(&report), "echo ok after 700ms:404");
+    assert!(report
+        .locator_handlers
+        .iter()
+        .any(|firing| firing.name == "network-overlay" && firing.ok));
+    assert_eq!(report.dialogs.len(), 1);
+    assert!(!report.dialogs[0].automatic);
+    assert!(report
+        .network
+        .iter()
+        .any(|entry| { entry.url.contains("/slow-echo") && entry.status == Some(200) }));
+    assert!(report.network.iter().any(|entry| {
+        entry.url.contains("/missing-network-resource") && entry.status == Some(404)
+    }));
 }
 
 #[test]
@@ -1651,7 +1726,10 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
     )
     .await
     .unwrap();
-    assert!(accept_report.ok, "accepted dialog failed: {accept_report:?}");
+    assert!(
+        accept_report.ok,
+        "accepted dialog failed: {accept_report:?}"
+    );
     assert_eq!(returned_eval_string(&accept_report), "confirmed");
     assert!(!accept_report.dialogs[0].automatic);
 
@@ -2183,34 +2261,88 @@ async fn get_by_locators_match_playwright_semantics() {
             .unwrap()
     };
 
-    assert_eq!(resolve(json!({"by":"role","role":"button","name":"save item"})).len(), 1);
-    assert_eq!(resolve(json!({"by":"role","role":"button","name":"Save Item","exact":true})).len(), 1);
-    assert!(resolve(json!({"by":"role","role":"button","name":"save item","exact":true})).is_empty());
-    assert_eq!(resolve(json!({"by":"role","role":"button","description":"primary ACTION"})).len(), 1);
-    assert_eq!(resolve(json!({"by":"role","role":"heading","name":"account","level":2})).len(), 1);
-    assert_eq!(resolve(json!({"by":"role","role":"checkbox","checked":true})).len(), 1);
-    assert_eq!(resolve(json!({"by":"role","role":"button","disabled":true})).len(), 1);
+    assert_eq!(
+        resolve(json!({"by":"role","role":"button","name":"save item"})).len(),
+        1
+    );
+    assert_eq!(
+        resolve(json!({"by":"role","role":"button","name":"Save Item","exact":true})).len(),
+        1
+    );
+    assert!(
+        resolve(json!({"by":"role","role":"button","name":"save item","exact":true})).is_empty()
+    );
+    assert_eq!(
+        resolve(json!({"by":"role","role":"button","description":"primary ACTION"})).len(),
+        1
+    );
+    assert_eq!(
+        resolve(json!({"by":"role","role":"heading","name":"account","level":2})).len(),
+        1
+    );
+    assert_eq!(
+        resolve(json!({"by":"role","role":"checkbox","checked":true})).len(),
+        1
+    );
+    assert_eq!(
+        resolve(json!({"by":"role","role":"button","disabled":true})).len(),
+        1
+    );
     assert!(resolve(json!({"by":"role","role":"button","name":"hidden"})).is_empty());
-    assert_eq!(resolve(json!({"by":"role","role":"button","name":"hidden","include_hidden":true})).len(), 1);
+    assert_eq!(
+        resolve(json!({"by":"role","role":"button","name":"hidden","include_hidden":true})).len(),
+        1
+    );
 
     let smallest = resolve(json!({"by":"text","value":"unique text"}));
     assert_eq!(smallest.len(), 1);
     let id = case
         .runtime
         .world_manager
-        .call_function_on(&case.tab, &smallest[0], "function() { return this.id; }", vec![])
+        .call_function_on(
+            &case.tab,
+            &smallest[0],
+            "function() { return this.id; }",
+            vec![],
+        )
         .unwrap();
     assert_eq!(id, json!("smallest-text"));
-    assert_eq!(resolve(json!({"by":"text","value":"send request"})).len(), 1);
+    assert_eq!(
+        resolve(json!({"by":"text","value":"send request"})).len(),
+        1
+    );
 
-    for value in ["Wrapping Label", "For Label", "ARIA Label", "Referenced Label"] {
-        assert_eq!(resolve(json!({"by":"label","value":value,"exact":true})).len(), 1);
+    for value in [
+        "Wrapping Label",
+        "For Label",
+        "ARIA Label",
+        "Referenced Label",
+    ] {
+        assert_eq!(
+            resolve(json!({"by":"label","value":value,"exact":true})).len(),
+            1
+        );
     }
-    assert_eq!(resolve(json!({"by":"placeholder","value":"search WORKSPACE"})).len(), 1);
-    assert_eq!(resolve(json!({"by":"placeholder","value":"  Search   workspace  ","exact":true})).len(), 1);
-    assert_eq!(resolve(json!({"by":"alt_text","value":"product logo"})).len(), 1);
-    assert_eq!(resolve(json!({"by":"title","value":"More Information","exact":true})).len(), 1);
-    assert_eq!(resolve(json!({"by":"test_id","value":"save-card"})).len(), 1);
+    assert_eq!(
+        resolve(json!({"by":"placeholder","value":"search WORKSPACE"})).len(),
+        1
+    );
+    assert_eq!(
+        resolve(json!({"by":"placeholder","value":"  Search   workspace  ","exact":true})).len(),
+        1
+    );
+    assert_eq!(
+        resolve(json!({"by":"alt_text","value":"product logo"})).len(),
+        1
+    );
+    assert_eq!(
+        resolve(json!({"by":"title","value":"More Information","exact":true})).len(),
+        1
+    );
+    assert_eq!(
+        resolve(json!({"by":"test_id","value":"save-card"})).len(),
+        1
+    );
 
     let custom = refact_lsp::refact_browser::test_id_locator("custom-card", "data-qa");
     assert_eq!(resolve(serde_json::to_value(custom).unwrap()).len(), 1);
