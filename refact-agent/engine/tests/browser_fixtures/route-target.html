@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Route target</title>
+</head>
+<body>
+  <button id="fetch-data">Fetch data</button>
+  <button id="fetch-redirect">Fetch redirect</button>
+  <button id="open-popup">Open popup</button>
+  <output id="result">idle</output>
+  <script>
+    async function fetchInto(path) {
+      try {
+        const response = await fetch(path);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        document.querySelector('#result').textContent = JSON.stringify(await response.json());
+      } catch (error) {
+        document.querySelector('#result').textContent = `fetch failed: ${error.message}`;
+      }
+    }
+
+    document.querySelector('#fetch-data').addEventListener('click', () => fetchInto('/api/data'));
+    document.querySelector('#fetch-redirect').addEventListener('click', () => fetchInto('/api/redirect'));
+    document.querySelector('#open-popup').addEventListener('click', () => {
+      window.open('/route-target.html?popup=1', 'route-target-popup', 'width=420,height=240');
+    });
+  </script>
+</body>
+</html>

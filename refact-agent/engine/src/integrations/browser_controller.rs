@@ -582,6 +582,8 @@ fn execute_steps_with_world(
         uploads: vec![],
         downloads: vec![],
         new_tabs: vec![],
+        active_routes: vec![],
+        intercepted_requests: vec![],
         screenshot: None,
     }
 }
@@ -596,6 +598,42 @@ pub fn is_tab_management_step(step: &BrowserStep) -> bool {
             | BrowserStep::HandleDialog { .. }
             | BrowserStep::ExpectFileChooser { .. }
     )
+}
+
+fn execute_route_management_step(
+    runtime: &mut BrowserRuntime,
+    step: &BrowserStep,
+    idx: usize,
+) -> Option<StepResult> {
+    match step {
+        BrowserStep::Route { pattern, handler } => {
+            Some(match runtime.add_route(pattern.clone(), handler.clone()) {
+                Ok(()) => StepResult::success(idx, "Added network route")
+                    .with_data(serde_json::json!({"routes": runtime.route_registry.list()})),
+                Err(error) => StepResult::failure(idx, "Add network route", error),
+            })
+        }
+        BrowserStep::Unroute { pattern } => Some(match runtime.remove_routes(pattern.as_ref()) {
+            Ok(removed) => StepResult::success(
+                idx,
+                if pattern.is_some() {
+                    format!("Removed {removed} matching network route(s)")
+                } else {
+                    format!("Removed all {removed} network route(s)")
+                },
+            )
+            .with_data(serde_json::json!({"routes": runtime.route_registry.list()})),
+            Err(error) => StepResult::failure(idx, "Remove network routes", error),
+        }),
+        BrowserStep::ListRoutes => {
+            let routes = runtime.route_registry.list();
+            Some(
+                StepResult::success(idx, format!("Listed {} network route(s)", routes.len()))
+                    .with_data(serde_json::json!({"routes": routes})),
+            )
+        }
+        _ => None,
+    }
 }
 
 pub fn execute_step(
@@ -722,6 +760,7 @@ pub async fn execute_request_with_runtime(
     let mut pending_popup_wait: Option<(usize, Instant, u64, std::collections::BTreeSet<String>)> =
         None;
     let mut new_tabs = Vec::new();
+    let mut routed_requests = Vec::new();
 
     for (idx, step) in request.steps.iter().enumerate() {
         let step_tab_ids = runtime_arc.lock().await.known_tab_ids();
@@ -760,6 +799,12 @@ pub async fn execute_request_with_runtime(
                 }
                 Err(error) => StepResult::failure(idx, "Wait for download", error),
             }
+        } else if matches!(
+            step,
+            BrowserStep::Route { .. } | BrowserStep::Unroute { .. } | BrowserStep::ListRoutes
+        ) {
+            let mut rt = runtime_arc.lock().await;
+            execute_route_management_step(&mut rt, step, idx).unwrap()
         } else if is_tab_management_step(step) {
             let step_report = tokio::task::block_in_place(|| {
                 let mut rt = runtime_arc.blocking_lock();
@@ -771,6 +816,7 @@ pub async fn execute_request_with_runtime(
                 current_tab = rt.get_active_tab();
             }
             new_tabs.extend(step_report.new_tabs);
+            routed_requests.extend(step_report.intercepted_requests);
             step_report.steps.into_iter().next().unwrap_or_else(|| {
                 StepResult::failure(idx, "Browser action", "No step result produced")
             })
@@ -993,7 +1039,16 @@ pub async fn execute_request_with_runtime(
     } else {
         (None, None, false, None)
     };
-    let (console, page_errors, network, dialogs, uploads, downloads) = {
+    let (
+        console,
+        page_errors,
+        network,
+        dialogs,
+        uploads,
+        downloads,
+        active_routes,
+        intercepted_requests,
+    ) = {
         let mut rt = runtime_arc.lock().await;
         rt.drain_raw_events();
         let mut console = rt
@@ -1011,7 +1066,18 @@ pub async fn execute_request_with_runtime(
         let dialogs = rt.dialog_manager.take_reports();
         let uploads = rt.file_chooser_manager.take_uploads();
         let downloads = rt.download_monitor.take_report();
-        (console, page_errors, network, dialogs, uploads, downloads)
+        let active_routes = rt.route_registry.list();
+        routed_requests.extend(rt.route_registry.drain_interceptions());
+        (
+            console,
+            page_errors,
+            network,
+            dialogs,
+            uploads,
+            downloads,
+            active_routes,
+            routed_requests,
+        )
     };
 
     Ok(ExecutionReport {
@@ -1028,6 +1094,8 @@ pub async fn execute_request_with_runtime(
         uploads,
         downloads,
         new_tabs,
+        active_routes,
+        intercepted_requests,
         screenshot,
     })
 }
@@ -1163,6 +1231,8 @@ pub fn execute_steps_with_runtime(
                             uploads: runtime.file_chooser_manager.take_uploads(),
                             downloads: runtime.download_monitor.take_report(),
                             new_tabs,
+                            active_routes: runtime.route_registry.list(),
+                            intercepted_requests: runtime.route_registry.drain_interceptions(),
                             screenshot: None,
                         };
                     }
@@ -1269,6 +1339,11 @@ pub fn execute_steps_with_runtime(
                     .collect::<Vec<_>>();
                 StepResult::success(idx, format!("Listed {} tabs", tab_list.len()))
                     .with_data(serde_json::json!({"tabs": tab_list}))
+            }
+            step @ (BrowserStep::Route { .. }
+            | BrowserStep::Unroute { .. }
+            | BrowserStep::ListRoutes) => {
+                execute_route_management_step(runtime, step, idx).unwrap()
             }
             BrowserStep::WaitForPopup { timeout_ms } => {
                 let before = runtime.known_tab_ids();
@@ -1465,6 +1540,8 @@ pub fn execute_steps_with_runtime(
         uploads,
         downloads,
         new_tabs,
+        active_routes: runtime.route_registry.list(),
+        intercepted_requests: runtime.route_registry.drain_interceptions(),
         screenshot: None,
     }
 }
@@ -1946,6 +2023,9 @@ fn execute_single_step(
         | BrowserStep::SwitchTab { .. }
         | BrowserStep::ListTabs
         | BrowserStep::WaitForPopup { .. }
+        | BrowserStep::Route { .. }
+        | BrowserStep::Unroute { .. }
+        | BrowserStep::ListRoutes
         | BrowserStep::HandleDialog { .. } => StepResult::failure(
             idx,
             "Runtime management step",

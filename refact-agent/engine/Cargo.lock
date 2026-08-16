@@ -4053,6 +4053,7 @@ dependencies = [
 name = "refact-browser"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "headless_chrome",
  "refact-chat-api",
  "refact-core",

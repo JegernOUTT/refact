@@ -67,10 +67,14 @@ impl LocatorHandler {
                         | BrowserStep::SwitchTab { .. }
                         | BrowserStep::ListTabs
                         | BrowserStep::WaitForPopup { .. }
+                        | BrowserStep::Route { .. }
+                        | BrowserStep::Unroute { .. }
+                        | BrowserStep::ListRoutes
                 )
             }) {
                 return Err(
-                    "Locator handler steps cannot manage handlers or browser tabs".to_string(),
+                    "Locator handler steps cannot manage handlers, browser tabs, or network routes"
+                        .to_string(),
                 );
             }
         }

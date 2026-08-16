@@ -352,6 +352,44 @@ export type BrowserReportTab = {
   opened_by_step?: number | null;
 };
 
+export type BrowserUrlPattern = string | { source: string; flags?: string };
+
+export type BrowserRouteHandler =
+  | {
+      type: "fulfill";
+      status: number;
+      headers?: Record<string, string>;
+      body?: string;
+      content_type?: string;
+      body_base64?: boolean;
+    }
+  | { type: "abort"; reason: string }
+  | {
+      type: "continue";
+      url?: string;
+      method?: string;
+      headers?: Record<string, string>;
+      post_data?: string;
+    };
+
+export type BrowserRouteInfo = {
+  pattern: BrowserUrlPattern;
+  handler: BrowserRouteHandler;
+};
+
+export type BrowserRouteInterception = {
+  url: string;
+  method: string;
+  pattern: BrowserUrlPattern;
+  action: "fulfill" | "abort" | "continue";
+  request_headers?: Record<string, string>;
+  request_body_preview?: string;
+  response_body_preview?: string;
+  status?: number;
+  reason?: string;
+  redirect_hop: boolean;
+};
+
 export type BrowserActionResponse = {
   ok: boolean;
   steps: BrowserExecutionStep[];
@@ -366,6 +404,8 @@ export type BrowserActionResponse = {
   uploads?: BrowserUploadInfo[];
   downloads?: BrowserDownloadInfo[];
   new_tabs?: BrowserReportTab[];
+  active_routes?: BrowserRouteInfo[];
+  intercepted_requests?: BrowserRouteInterception[];
   screenshot?: BrowserReportScreenshot | null;
 };
 

@@ -171,6 +171,22 @@ describe("ChromeTool", () => {
             opened_by_step: 1,
           },
         ],
+        active_routes: [
+          {
+            pattern: "**/api/**",
+            handler: { type: "fulfill", status: 200 },
+          },
+        ],
+        intercepted_requests: [
+          {
+            url: "https://example.com/api/data",
+            method: "GET",
+            pattern: "**/api/**",
+            action: "fulfill",
+            status: 200,
+            redirect_hop: true,
+          },
+        ],
       }),
     });
 
@@ -198,6 +214,16 @@ describe("ChromeTool", () => {
     expect(screen.getByText("Uploads")).toBeInTheDocument();
     expect(screen.getByText("Downloads")).toBeInTheDocument();
     expect(screen.getByText("New Tabs")).toBeInTheDocument();
+    expect(screen.getByText("Active Routes")).toBeInTheDocument();
+    expect(screen.getByText("Intercepted Requests")).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("fulfill: **/api/**")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) =>
+        text.includes("GET https://example.com/api/data"),
+      ),
+    ).toBeInTheDocument();
     expect(
       screen.getByText((text) => text.includes("Popup Fixture")),
     ).toBeInTheDocument();

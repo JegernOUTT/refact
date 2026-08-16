@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+base64 = "0.22.1"
 refact-chat-api = { path = "../refact-chat-api" }
 refact-core = { path = "../refact-core" }
 refact-integrations = { path = "../refact-integrations" }

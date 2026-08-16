@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::browser_types::{ConsoleEntry, NetworkEntry};
@@ -690,6 +692,16 @@ pub enum BrowserStep {
         timeout_ms: Option<u64>,
     },
 
+    Route {
+        pattern: UrlPattern,
+        handler: RouteHandler,
+    },
+    Unroute {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<UrlPattern>,
+    },
+    ListRoutes,
+
     Click {
         locator: BrowserLocator,
     },
@@ -878,6 +890,35 @@ pub enum LocatorHandlerAction {
     Steps { steps: Vec<BrowserStep> },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RouteHandler {
+    Fulfill {
+        status: u16,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        headers: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_type: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        body_base64: bool,
+    },
+    Abort {
+        reason: String,
+    },
+    Continue {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        headers: Option<BTreeMap<String, String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        post_data: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserLoadState {
@@ -916,6 +957,9 @@ impl BrowserStep {
         "switch_tab",
         "list_tabs",
         "wait_for_popup",
+        "route",
+        "unroute",
+        "list_routes",
         "click",
         "click_if_exists",
         "hover",
@@ -1127,8 +1171,38 @@ pub struct ExecutionReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub downloads: Vec<DownloadInfo>,
     pub new_tabs: Vec<TabInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_routes: Vec<RouteInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intercepted_requests: Vec<RouteInterception>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<BrowserScreenshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteInfo {
+    pub pattern: UrlPattern,
+    pub handler: RouteHandler,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteInterception {
+    pub url: String,
+    pub method: String,
+    pub pattern: UrlPattern,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub request_headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub redirect_hop: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1279,6 +1353,14 @@ mod tests {
             BrowserStep::WaitForPopup {
                 timeout_ms: Some(1_000),
             },
+            BrowserStep::Route {
+                pattern: UrlPattern::Text("**/api/**".to_string()),
+                handler: RouteHandler::Abort {
+                    reason: "blockedbyclient".to_string(),
+                },
+            },
+            BrowserStep::Unroute { pattern: None },
+            BrowserStep::ListRoutes,
             BrowserStep::Click { locator: locator() },
             BrowserStep::ClickIfExists { locator: locator() },
             BrowserStep::Hover { locator: locator() },
@@ -1819,6 +1901,43 @@ mod tests {
     }
 
     #[test]
+    fn route_handlers_and_patternless_unroute_round_trip() {
+        for value in [
+            serde_json::json!({
+                "action": "route",
+                "pattern": "**/api/**",
+                "handler": {
+                    "type": "fulfill",
+                    "status": 200,
+                    "content_type": "application/json",
+                    "body": "{\"ok\":true}",
+                    "headers": {"X-Mocked": "yes"}
+                }
+            }),
+            serde_json::json!({
+                "action": "route",
+                "pattern": "**/*.png",
+                "handler": {"type": "abort", "reason": "blockedbyclient"}
+            }),
+            serde_json::json!({
+                "action": "route",
+                "pattern": {"source": "/api/", "flags": "i"},
+                "handler": {
+                    "type": "continue",
+                    "url": "https://example.com/api/other",
+                    "method": "POST",
+                    "headers": {"X-Test": "route"},
+                    "post_data": "password=secret"
+                }
+            }),
+            serde_json::json!({"action": "unroute"}),
+        ] {
+            let step: BrowserStep = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(step).unwrap(), value);
+        }
+    }
+
+    #[test]
     fn test_file_transfer_steps_serde() {
         let upload: BrowserStep = serde_json::from_str(
             r##"{"action":"set_input_files","locator":{"by":"css","value":"#file"},"paths":["/workspace/a.txt"]}"##,
@@ -2160,6 +2279,8 @@ mod tests {
                 state: DownloadState::Completed,
             }],
             new_tabs: vec![],
+            active_routes: vec![],
+            intercepted_requests: vec![],
             screenshot: None,
         };
         let json = serde_json::to_value(&report).unwrap();

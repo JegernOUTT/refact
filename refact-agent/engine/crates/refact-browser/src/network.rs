@@ -642,7 +642,7 @@ fn counts_for_network_idle(url: &str, resource_type: &str) -> bool {
     !without_query.to_ascii_lowercase().ends_with("/favicon.ico")
 }
 
-fn mask_headers(headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
+pub(crate) fn mask_headers(headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
     headers
         .into_iter()
         .map(|(name, value)| {
@@ -660,7 +660,7 @@ fn mask_headers(headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn mask_text(value: &str) -> String {
+pub(crate) fn mask_text(value: &str) -> String {
     let redacted = redact_sensitive(value);
     let expression =
         Regex::new(r"(?i)(password|passwd|token|api[_-]?key|authorization)(=|%3[dD])([^&\s]+)")

@@ -13,6 +13,7 @@ mod locators;
 mod mouse;
 mod network;
 mod refs;
+mod routing;
 mod snapshot;
 mod us_keyboard_layout;
 mod world;
@@ -59,6 +60,7 @@ pub use network::{
     NetworkLoadState, NetworkMonitorHandle, RequestStarted, ResponseReceived, UrlMatcher,
 };
 pub use refs::{ElementHandleInfo, Ref, RefError, RefParseError, RefRegistry, SnapshotGeneration};
+pub use routing::RouteRegistry;
 pub use snapshot::{AriaSnapshot, SnapshotBox, SnapshotMode, SnapshotNode, SnapshotOptions};
 pub use us_keyboard_layout::{
     KEYPAD_LOCATION, KeyDefinition, KeyDescription, ShiftedKeyDefinition, US_KEYBOARD_LAYOUT,
@@ -446,6 +448,7 @@ pub struct BrowserRuntime {
     pub window_bounds: Option<WindowBounds>,
     pub buffers: BrowserBuffers,
     pub network_monitor: Arc<NetworkMonitorHandle>,
+    pub route_registry: Arc<RouteRegistry>,
     pub idle_timeout: Duration,
     pub is_connected: bool,
     pub last_activity: Instant,
@@ -531,6 +534,7 @@ impl BrowserRuntime {
             window_bounds,
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
+            route_registry: Arc::new(RouteRegistry::default()),
             idle_timeout,
             is_connected: true,
             last_activity: Instant::now(),
@@ -578,6 +582,7 @@ impl BrowserRuntime {
             window_bounds: None,
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
+            route_registry: Arc::new(RouteRegistry::default()),
             idle_timeout,
             is_connected: true,
             last_activity: Instant::now(),
@@ -590,6 +595,77 @@ impl BrowserRuntime {
 
     pub fn mask_passwords(&self) -> bool {
         self.buffers.mask_passwords
+    }
+
+    pub fn add_route(
+        &mut self,
+        pattern: refact_integrations::browser_models::UrlPattern,
+        handler: refact_integrations::browser_models::RouteHandler,
+    ) -> Result<(), String> {
+        let enable = self.route_registry.is_empty();
+        self.route_registry.add(pattern.clone(), handler)?;
+        if enable {
+            let tabs = self
+                .browser
+                .get_tabs()
+                .lock()
+                .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            for tab in tabs {
+                if let Err(error) = self.route_registry.enable_for_tab(&tab) {
+                    self.route_registry.remove(Some(&pattern));
+                    for enabled_tab in self
+                        .browser
+                        .get_tabs()
+                        .lock()
+                        .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default()
+                    {
+                        let _ = self.route_registry.disable_for_tab(&enabled_tab);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn remove_routes(
+        &mut self,
+        pattern: Option<&refact_integrations::browser_models::UrlPattern>,
+    ) -> Result<usize, String> {
+        let previous_routes = self.route_registry.snapshot();
+        let removed = self.route_registry.remove(pattern);
+        if removed > 0 && self.route_registry.is_empty() {
+            let tabs = self
+                .browser
+                .get_tabs()
+                .lock()
+                .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let mut errors = Vec::new();
+            for tab in tabs {
+                if let Err(error) = self.route_registry.disable_for_tab(&tab) {
+                    errors.push(error);
+                }
+            }
+            if !errors.is_empty() {
+                self.route_registry.restore(previous_routes)?;
+                for tab in self
+                    .browser
+                    .get_tabs()
+                    .lock()
+                    .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default()
+                {
+                    if let Err(error) = self.route_registry.enable_for_tab(&tab) {
+                        errors.push(error);
+                    }
+                }
+                return Err(errors.join("; "));
+            }
+        }
+        Ok(removed)
     }
 
     pub fn reattach(&mut self, chat_id: &str) {
@@ -773,6 +849,14 @@ fn tab_opener(
 
 impl Drop for BrowserRuntime {
     fn drop(&mut self) {
+        if !self.route_registry.is_empty() {
+            if let Ok(tabs) = self.browser.get_tabs().lock() {
+                for tab in tabs.iter() {
+                    let _ = self.route_registry.disable_for_tab(tab);
+                }
+            }
+            self.route_registry.remove(None);
+        }
         let _ = std::fs::remove_dir_all(&self.downloads_dir);
     }
 }
@@ -1211,6 +1295,9 @@ pub fn setup_recording_for_tab(
         runtime.network_monitor.clone(),
         runtime.buffers.raw_network_entries.clone(),
     )?;
+    if !runtime.route_registry.is_empty() {
+        runtime.route_registry.enable_for_tab(tab)?;
+    }
     let target_id = tab.get_target_id().to_string();
     register_adopted_tab(&mut runtime.adopted_tab_target_ids, target_id.clone());
     if runtime.recording_tab_target_id.is_none() {

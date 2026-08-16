@@ -494,13 +494,45 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     return typedResult.new_tabs
       .map((tab) => {
         const opener = tab.opener
-          ? ` · opener ${tab.opener.tab_id}${tab.opener.frame_id ? ` frame ${tab.opener.frame_id}` : ""}`
+          ? ` · opener ${tab.opener.tab_id}${
+              tab.opener.frame_id ? ` frame ${tab.opener.frame_id}` : ""
+            }`
           : "";
         const step =
           tab.opened_by_step === undefined || tab.opened_by_step === null
             ? ""
             : ` · step ${tab.opened_by_step + 1}`;
-        return `${tab.active ? "Active" : "Opened"}: ${tab.title || tab.url}\n  ${tab.url}\n  ${tab.id}${opener}${step}`;
+        return `${tab.active ? "Active" : "Opened"}: ${
+          tab.title || tab.url
+        }\n  ${tab.url}\n  ${tab.id}${opener}${step}`;
+      })
+      .join("\n");
+  }, [typedResult]);
+
+  const typedRoutesBlock = useMemo(() => {
+    if (!typedResult?.active_routes?.length) return null;
+    return typedResult.active_routes
+      .map((route) => {
+        const pattern =
+          typeof route.pattern === "string"
+            ? route.pattern
+            : `/${route.pattern.source}/${route.pattern.flags ?? ""}`;
+        return `${route.handler.type}: ${pattern}`;
+      })
+      .join("\n");
+  }, [typedResult]);
+
+  const typedInterceptionsBlock = useMemo(() => {
+    if (!typedResult?.intercepted_requests?.length) return null;
+    return typedResult.intercepted_requests
+      .map((entry) => {
+        const outcome = entry.status
+          ? ` ${entry.status}`
+          : entry.reason
+            ? ` ${entry.reason}`
+            : "";
+        const redirect = entry.redirect_hop ? " · redirect hop" : "";
+        return `${entry.action}${outcome}: ${entry.method} ${entry.url}${redirect}`;
       })
       .join("\n");
   }, [typedResult]);
@@ -588,6 +620,28 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       )}
 
       <NetworkPanel entries={typedResult?.network} />
+
+      {typedRoutesBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Active Routes</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedRoutesBlock}
+            </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
+
+      {typedInterceptionsBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Intercepted Requests</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedInterceptionsBlock}
+            </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
 
       {typedLocatorHandlers && (
         <Box className={styles.section}>

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::Arc;
@@ -21,7 +22,8 @@ use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
     AccessibilitySnapshotOptions, BrowserActionRequest, BrowserLoadState, BrowserLocator,
-    BrowserStep, FillStrategy, LocatorHandlerAction, SessionPolicy, TabTarget, UrlPattern,
+    BrowserStep, FillStrategy, LocatorHandlerAction, RouteHandler, SessionPolicy, TabTarget,
+    UrlPattern,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -58,6 +60,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "fetch-after-click.html",
     "slow-network.html",
     "popup.html",
+    "route-target.html",
     "upload.html",
     "download.html",
     "contenteditable.html",
@@ -166,6 +169,22 @@ async fn upload(headers: HeaderMap, body: Bytes) -> Response<Body> {
         .unwrap()
 }
 
+async fn route_data(headers: HeaderMap) -> impl IntoResponse {
+    let source = headers
+        .get("x-route-test")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("origin");
+    axum::Json(json!({"source": source}))
+}
+
+async fn route_redirect() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, "/api/data")
+        .body(Body::empty())
+        .unwrap()
+}
+
 fn content_type(path: &FsPath) -> &'static str {
     match path.extension().and_then(|extension| extension.to_str()) {
         Some("html") => "text/html; charset=utf-8",
@@ -218,6 +237,8 @@ impl FixtureServer {
         }
         let app = Router::new()
             .route("/slow-echo", get(slow_echo))
+            .route("/api/data", get(route_data))
+            .route("/api/redirect", get(route_redirect))
             .route("/download", get(download))
             .route("/upload", post(upload))
             .route("/*path", get(static_fixture))
@@ -1827,6 +1848,221 @@ async fn wait_for_popup_click_and_popup_action_share_one_batch() {
         runtime.lock().await.active_tab_target_id(),
         Some(primary_target_id.as_str())
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups() {
+    let Some(mut case) = BrowserCase::start("route-target.html").await else {
+        return;
+    };
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let data_pattern = UrlPattern::Text(case.server.url("api/data"));
+    let api_pattern = UrlPattern::Text(format!("{}/api/**", case.server.base_url));
+
+    let fulfill = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::Route {
+                    pattern: data_pattern.clone(),
+                    handler: RouteHandler::Fulfill {
+                        status: 200,
+                        headers: BTreeMap::new(),
+                        body: Some(json!({"source": "mocked"}).to_string()),
+                        content_type: Some("application/json".to_string()),
+                        body_base64: false,
+                    },
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#fetch-data"),
+                },
+                BrowserStep::WaitForText {
+                    text: "mocked".to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(fulfill.ok, "fulfill route failed: {fulfill:?}");
+    assert_eq!(fulfill.intercepted_requests[0].action, "fulfill");
+    assert_eq!(fulfill.intercepted_requests[0].status, Some(200));
+    assert!(fulfill
+        .network
+        .iter()
+        .any(|request| request.url.ends_with("/api/data") && request.status == Some(200)));
+
+    let abort = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::Unroute {
+                    pattern: Some(data_pattern.clone()),
+                },
+                BrowserStep::Route {
+                    pattern: data_pattern.clone(),
+                    handler: RouteHandler::Abort {
+                        reason: "blockedbyclient".to_string(),
+                    },
+                },
+                BrowserStep::Eval {
+                    expression: "document.querySelector('#result').textContent = 'idle'"
+                        .to_string(),
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#fetch-data"),
+                },
+                BrowserStep::WaitForText {
+                    text: "fetch failed".to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(abort.ok, "abort route failed: {abort:?}");
+    assert_eq!(abort.intercepted_requests[0].action, "abort");
+    assert_eq!(
+        abort.intercepted_requests[0].reason.as_deref(),
+        Some("blockedbyclient")
+    );
+
+    let modified = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::Unroute { pattern: None },
+                BrowserStep::Route {
+                    pattern: api_pattern.clone(),
+                    handler: RouteHandler::Continue {
+                        url: None,
+                        method: None,
+                        headers: Some(BTreeMap::from([(
+                            "X-Route-Test".to_string(),
+                            "modified".to_string(),
+                        )])),
+                        post_data: None,
+                    },
+                },
+                BrowserStep::Eval {
+                    expression: "document.querySelector('#result').textContent = 'idle'"
+                        .to_string(),
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#fetch-redirect"),
+                },
+                BrowserStep::WaitForText {
+                    text: "modified".to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(modified.ok, "continue route failed: {modified:?}");
+    assert_eq!(modified.intercepted_requests.len(), 2);
+    assert!(modified
+        .intercepted_requests
+        .iter()
+        .any(|request| request.redirect_hop));
+    assert!(modified
+        .network
+        .iter()
+        .any(|request| request.url.ends_with("/api/redirect") && request.status == Some(302)));
+    assert!(modified
+        .network
+        .iter()
+        .any(|request| request.url.ends_with("/api/data") && request.status == Some(200)));
+
+    let unroute = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::Unroute { pattern: None },
+                BrowserStep::Eval {
+                    expression: "document.querySelector('#result').textContent = 'idle'"
+                        .to_string(),
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#fetch-data"),
+                },
+                BrowserStep::WaitForText {
+                    text: "origin".to_string(),
+                    timeout_ms: Some(5_000),
+                },
+                BrowserStep::ListRoutes,
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(unroute.ok, "unroute failed: {unroute:?}");
+    assert!(unroute.active_routes.is_empty());
+    assert!(unroute.intercepted_requests.is_empty());
+
+    let popup = execute_request_with_runtime(
+        runtime,
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::Route {
+                    pattern: data_pattern,
+                    handler: RouteHandler::Fulfill {
+                        status: 200,
+                        headers: BTreeMap::new(),
+                        body: Some(json!({"source": "popup-mocked"}).to_string()),
+                        content_type: Some("application/json".to_string()),
+                        body_base64: false,
+                    },
+                },
+                BrowserStep::WaitForPopup {
+                    timeout_ms: Some(5_000),
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#open-popup"),
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#fetch-data"),
+                },
+                BrowserStep::WaitForText {
+                    text: "popup-mocked".to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(popup.ok, "popup route inheritance failed: {popup:?}");
+    assert_eq!(popup.new_tabs.len(), 1);
+    assert!(popup
+        .intercepted_requests
+        .iter()
+        .any(|request| request.action == "fulfill"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

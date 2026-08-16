@@ -90,7 +90,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Waiting: wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. ",
     "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, or `wait_for_selector` for genuine synchronization.\n",
     "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, styles, tab_log.\n",
-    "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report.\n",
+    "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, or continue modifications; unroute removes one pattern or all routes; list_routes returns active routes. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. Page-level routes may not observe requests served by a service worker.\n",
     "Files: set_input_files, expect_file_chooser, wait_for_download.\n",
     "Dialogs: handle_dialog arms the next dialog with `accept` and optional `prompt_text`; unarmed dialogs auto-dismiss except beforeunload, which is accepted.\n",
     "Advanced: eval, add_locator_handler, remove_locator_handler, dismiss_overlays, highlight_element, and fixed-delay wait_seconds. Locator handlers use `{type:\"click\"}` or `{type:\"steps\",steps:[...]}`.\n",
@@ -276,6 +276,7 @@ fn browser_step_schema_with_actions(
         serde_json::json!({"type": "string", "enum": ["domcontentloaded", "load", "networkidle"]}),
     );
     properties.insert("url_or_pattern".to_string(), url_pattern_schema());
+    properties.insert("pattern".to_string(), url_pattern_schema());
     properties.insert("save_as".to_string(), serde_json::json!({"type": "string"}));
     properties.insert("name".to_string(), serde_json::json!({"type": "string"}));
     properties.insert(
@@ -292,7 +293,7 @@ fn browser_step_schema_with_actions(
         serde_json::json!({"type": "string"}),
     );
     if include_locator_handler {
-        properties.insert("handler".to_string(), locator_handler_schema());
+        properties.insert("handler".to_string(), handler_schema());
     }
     serde_json::json!({
         "type": "object",
@@ -301,7 +302,56 @@ fn browser_step_schema_with_actions(
     })
 }
 
+fn route_handler_schema() -> serde_json::Value {
+    serde_json::json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "required": ["type", "status"],
+                "properties": {
+                    "type": {"type": "string", "enum": ["fulfill"]},
+                    "status": {"type": "integer", "minimum": 100, "maximum": 599},
+                    "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "content_type": {"type": "string"},
+                    "body": {"type": "string", "description": "UTF-8 text by default; set body_base64=true when this string contains base64-encoded binary response bytes"},
+                    "body_base64": {"type": "boolean", "description": "Treat body as already-base64-encoded binary bytes instead of UTF-8 text"}
+                }
+            },
+            {
+                "type": "object",
+                "required": ["type", "reason"],
+                "properties": {
+                    "type": {"type": "string", "enum": ["abort"]},
+                    "reason": {"type": "string", "enum": ["failed", "aborted", "timedout", "accessdenied", "connectionclosed", "connectionreset", "connectionrefused", "connectionaborted", "connectionfailed", "namenotresolved", "internetdisconnected", "addressunreachable", "blockedbyclient", "blockedbyresponse"]}
+                }
+            },
+            {
+                "type": "object",
+                "required": ["type"],
+                "properties": {
+                    "type": {"type": "string", "enum": ["continue"]},
+                    "url": {"type": "string"},
+                    "method": {"type": "string"},
+                    "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "post_data": {"type": "string", "description": "UTF-8 request body replacement"}
+                }
+            }
+        ]
+    })
+}
+
+fn handler_schema() -> serde_json::Value {
+    serde_json::json!({
+        "oneOf": [locator_handler_schema(), route_handler_schema()]
+    })
+}
+
 fn locator_handler_schema() -> serde_json::Value {
+    let actions = LOCATOR_HANDLER_STEP_ACTIONS
+        .iter()
+        .copied()
+        .filter(|action| !matches!(*action, "route" | "unroute" | "list_routes"))
+        .collect::<Vec<_>>();
     serde_json::json!({
         "oneOf": [
             {
@@ -316,7 +366,7 @@ fn locator_handler_schema() -> serde_json::Value {
                     "type": {"type": "string", "enum": ["steps"]},
                     "steps": {
                         "type": "array",
-                        "items": browser_step_schema_with_actions(LOCATOR_HANDLER_STEP_ACTIONS, false)
+                        "items": browser_step_schema_with_actions(&actions, false)
                     }
                 }
             }
@@ -693,6 +743,7 @@ mod tests {
             "name",
             "no_wait_after",
             "paths",
+            "pattern",
             "prompt_text",
             "property_filter",
             "refs",
@@ -724,6 +775,25 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap();
         assert_eq!(url_pattern_required, &[Value::String("source".to_string())]);
+        let handler_types = schema
+            .pointer("/properties/request/properties/steps/items/properties/handler/oneOf/1/oneOf")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|handler| {
+                handler
+                    .pointer("/properties/type/enum/0")
+                    .and_then(Value::as_str)
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            handler_types,
+            BTreeSet::from(["abort", "continue", "fulfill"])
+        );
+        assert!(schema
+            .pointer("/properties/request/properties/steps/items/properties/handler/oneOf/1/oneOf/0/properties/body/description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains("UTF-8") && description.contains("base64")));
     }
 
     #[test]

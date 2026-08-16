@@ -1,0 +1,555 @@
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
+use base64::Engine;
+use headless_chrome::Tab;
+use headless_chrome::browser::tab::{RequestPausedDecision, RequestInterceptor};
+use headless_chrome::protocol::cdp::{Fetch, Network};
+
+use refact_integrations::browser_models::{RouteHandler, RouteInfo, RouteInterception, UrlPattern};
+
+use crate::network::{UrlMatcher, mask_headers, mask_text};
+
+const INTERCEPTION_REPORT_CAP: usize = 1_000;
+
+#[derive(Clone, Debug)]
+struct RegisteredRoute {
+    info: RouteInfo,
+    matcher: UrlMatcher,
+}
+
+#[derive(Debug, Default)]
+struct RouteState {
+    routes: Vec<RegisteredRoute>,
+    interceptions: Vec<RouteInterception>,
+}
+
+#[derive(Debug, Default)]
+pub struct RouteRegistry {
+    state: Mutex<RouteState>,
+}
+
+impl RouteRegistry {
+    pub fn add(&self, pattern: UrlPattern, handler: RouteHandler) -> Result<(), String> {
+        let matcher = matcher_for_pattern(&pattern)?;
+        validate_handler(&handler)?;
+        self.state.lock().unwrap().routes.push(RegisteredRoute {
+            info: RouteInfo { pattern, handler },
+            matcher,
+        });
+        Ok(())
+    }
+
+    pub fn remove(&self, pattern: Option<&UrlPattern>) -> usize {
+        let mut state = self.state.lock().unwrap();
+        let previous = state.routes.len();
+        match pattern {
+            Some(pattern) => state.routes.retain(|route| &route.info.pattern != pattern),
+            None => state.routes.clear(),
+        }
+        previous - state.routes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.state.lock().unwrap().routes.is_empty()
+    }
+
+    pub fn list(&self) -> Vec<RouteInfo> {
+        self.state
+            .lock()
+            .unwrap()
+            .routes
+            .iter()
+            .map(|route| masked_route_info(&route.info))
+            .collect()
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<RouteInfo> {
+        self.state
+            .lock()
+            .unwrap()
+            .routes
+            .iter()
+            .map(|route| route.info.clone())
+            .collect()
+    }
+
+    pub(crate) fn restore(&self, routes: Vec<RouteInfo>) -> Result<(), String> {
+        let registered = routes
+            .into_iter()
+            .map(|info| {
+                let matcher = matcher_for_pattern(&info.pattern)?;
+                Ok(RegisteredRoute { info, matcher })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        self.state.lock().unwrap().routes = registered;
+        Ok(())
+    }
+
+    pub fn drain_interceptions(&self) -> Vec<RouteInterception> {
+        std::mem::take(&mut self.state.lock().unwrap().interceptions)
+    }
+
+    pub fn enable_for_tab(self: &std::sync::Arc<Self>, tab: &Tab) -> Result<(), String> {
+        let registry = self.clone();
+        let interceptor: std::sync::Arc<dyn RequestInterceptor + Send + Sync> =
+            std::sync::Arc::new(move |_, _, event: Fetch::events::RequestPausedEvent| {
+                registry.decide(
+                    event.params.request_id,
+                    event.params.request.url,
+                    event.params.request.method,
+                    headers_from_cdp(&event.params.request.headers),
+                    event.params.request.post_data,
+                    event.params.redirected_request_id.is_some(),
+                )
+            });
+        tab.enable_request_interception(interceptor)
+            .map_err(|error| format!("Failed to install route interceptor: {error}"))?;
+        let patterns = [Fetch::RequestPattern {
+            url_pattern: None,
+            resource_Type: None,
+            request_stage: Some(Fetch::RequestStage::Request),
+        }];
+        tab.enable_fetch(Some(&patterns), Some(true))
+            .map(|_| ())
+            .map_err(|error| format!("Failed to enable request routing: {error}"))
+    }
+
+    pub fn disable_for_tab(&self, tab: &Tab) -> Result<(), String> {
+        tab.disable_fetch()
+            .map(|_| ())
+            .map_err(|error| format!("Failed to disable request routing: {error}"))
+    }
+
+    fn decide(
+        &self,
+        request_id: String,
+        url: String,
+        method: String,
+        request_headers: BTreeMap<String, String>,
+        post_data: Option<String>,
+        redirect_hop: bool,
+    ) -> RequestPausedDecision {
+        let mut state = self.state.lock().unwrap();
+        let Some(route) = state
+            .routes
+            .iter()
+            .find(|route| route.matcher.is_match(&url))
+            .cloned()
+        else {
+            return RequestPausedDecision::Continue(None);
+        };
+
+        let (decision, action, status, reason, response_body_preview) = match &route.info.handler {
+            RouteHandler::Fulfill {
+                status,
+                headers,
+                body,
+                content_type,
+                body_base64,
+            } => {
+                let mut headers = headers.clone();
+                if let Some(content_type) = content_type {
+                    if !headers
+                        .keys()
+                        .any(|name| name.eq_ignore_ascii_case("content-type"))
+                    {
+                        headers.insert("Content-Type".to_string(), content_type.clone());
+                    }
+                }
+                let body_wire = body.as_ref().map(|body| {
+                    if *body_base64 {
+                        body.clone()
+                    } else {
+                        base64::engine::general_purpose::STANDARD.encode(body.as_bytes())
+                    }
+                });
+                let response_body_preview = body.as_ref().map(|body| {
+                    if *body_base64 {
+                        "[base64 body]".to_string()
+                    } else {
+                        mask_text(body)
+                    }
+                });
+                (
+                    RequestPausedDecision::Fulfill(Fetch::FulfillRequest {
+                        request_id,
+                        response_code: *status as u32,
+                        response_headers: Some(headers_to_cdp(&headers)),
+                        binary_response_headers: None,
+                        body: body_wire,
+                        response_phrase: None,
+                    }),
+                    "fulfill".to_string(),
+                    Some(*status),
+                    None,
+                    response_body_preview,
+                )
+            }
+            RouteHandler::Abort { reason } => (
+                RequestPausedDecision::Fail(Fetch::FailRequest {
+                    request_id,
+                    error_reason: parse_error_reason(reason)
+                        .unwrap_or(Network::ErrorReason::Failed),
+                }),
+                "abort".to_string(),
+                None,
+                Some(reason.clone()),
+                None,
+            ),
+            RouteHandler::Continue {
+                url,
+                method,
+                headers,
+                post_data,
+            } => (
+                RequestPausedDecision::Continue(Some(Fetch::ContinueRequest {
+                    request_id,
+                    url: url.clone(),
+                    method: method.clone(),
+                    post_data: post_data.as_ref().map(|data| {
+                        base64::engine::general_purpose::STANDARD.encode(data.as_bytes())
+                    }),
+                    headers: headers.as_ref().map(|overrides| {
+                        headers_to_cdp(&merge_headers(&request_headers, overrides))
+                    }),
+                    intercept_response: None,
+                })),
+                "continue".to_string(),
+                None,
+                None,
+                None,
+            ),
+        };
+
+        state.interceptions.push(RouteInterception {
+            url: mask_text(&url),
+            method,
+            pattern: mask_pattern(&route.info.pattern),
+            action,
+            request_headers: mask_headers(request_headers),
+            request_body_preview: post_data.map(|data| mask_text(&data)),
+            response_body_preview,
+            status,
+            reason,
+            redirect_hop,
+        });
+        if state.interceptions.len() > INTERCEPTION_REPORT_CAP {
+            let excess = state.interceptions.len() - INTERCEPTION_REPORT_CAP;
+            state.interceptions.drain(..excess);
+        }
+        decision
+    }
+}
+
+fn matcher_for_pattern(pattern: &UrlPattern) -> Result<UrlMatcher, String> {
+    match pattern {
+        UrlPattern::Text(value) => UrlMatcher::text(value),
+        UrlPattern::Regex { source, flags } => UrlMatcher::regex(source, flags),
+    }
+}
+
+fn validate_handler(handler: &RouteHandler) -> Result<(), String> {
+    match handler {
+        RouteHandler::Fulfill { status, .. } if !(100..=599).contains(status) => Err(format!(
+            "Route fulfill status must be between 100 and 599, got {status}"
+        )),
+        RouteHandler::Fulfill {
+            body: Some(body),
+            body_base64: true,
+            ..
+        } => base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .map(|_| ())
+            .map_err(|error| format!("Invalid base64 route body: {error}")),
+        RouteHandler::Abort { reason } => parse_error_reason(reason)
+            .map(|_| ())
+            .ok_or_else(|| format!("Unsupported route abort reason: {reason}")),
+        _ => Ok(()),
+    }
+}
+
+fn parse_error_reason(reason: &str) -> Option<Network::ErrorReason> {
+    let normalized = reason
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    Some(match normalized.as_str() {
+        "failed" => Network::ErrorReason::Failed,
+        "aborted" => Network::ErrorReason::Aborted,
+        "timedout" => Network::ErrorReason::TimedOut,
+        "accessdenied" => Network::ErrorReason::AccessDenied,
+        "connectionclosed" => Network::ErrorReason::ConnectionClosed,
+        "connectionreset" => Network::ErrorReason::ConnectionReset,
+        "connectionrefused" => Network::ErrorReason::ConnectionRefused,
+        "connectionaborted" => Network::ErrorReason::ConnectionAborted,
+        "connectionfailed" => Network::ErrorReason::ConnectionFailed,
+        "namenotresolved" => Network::ErrorReason::NameNotResolved,
+        "internetdisconnected" => Network::ErrorReason::InternetDisconnected,
+        "addressunreachable" => Network::ErrorReason::AddressUnreachable,
+        "blockedbyclient" => Network::ErrorReason::BlockedByClient,
+        "blockedbyresponse" => Network::ErrorReason::BlockedByResponse,
+        _ => return None,
+    })
+}
+
+fn headers_from_cdp(headers: &Network::Headers) -> BTreeMap<String, String> {
+    headers
+        .0
+        .as_ref()
+        .and_then(|value| value.as_object())
+        .map(|headers| {
+            headers
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        value
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| value.to_string()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn headers_to_cdp(headers: &BTreeMap<String, String>) -> Vec<Fetch::HeaderEntry> {
+    headers
+        .iter()
+        .map(|(name, value)| Fetch::HeaderEntry {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
+fn merge_headers(
+    existing: &BTreeMap<String, String>,
+    overrides: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut merged = existing.clone();
+    for (name, value) in overrides {
+        if let Some(existing_name) = merged
+            .keys()
+            .find(|existing_name| existing_name.eq_ignore_ascii_case(name))
+            .cloned()
+        {
+            merged.remove(&existing_name);
+        }
+        merged.insert(name.clone(), value.clone());
+    }
+    merged
+}
+
+fn masked_route_info(info: &RouteInfo) -> RouteInfo {
+    let handler = match &info.handler {
+        RouteHandler::Fulfill {
+            status,
+            headers,
+            body,
+            content_type,
+            body_base64,
+        } => RouteHandler::Fulfill {
+            status: *status,
+            headers: mask_headers(headers.clone()),
+            body: body.as_ref().map(|body| {
+                if *body_base64 {
+                    "[base64 body]".to_string()
+                } else {
+                    mask_text(body)
+                }
+            }),
+            content_type: content_type.clone(),
+            body_base64: *body_base64,
+        },
+        RouteHandler::Abort { reason } => RouteHandler::Abort {
+            reason: reason.clone(),
+        },
+        RouteHandler::Continue {
+            url,
+            method,
+            headers,
+            post_data,
+        } => RouteHandler::Continue {
+            url: url.as_ref().map(|url| mask_text(url)),
+            method: method.clone(),
+            headers: headers.clone().map(mask_headers),
+            post_data: post_data.as_ref().map(|data| mask_text(data)),
+        },
+    };
+    RouteInfo {
+        pattern: mask_pattern(&info.pattern),
+        handler,
+    }
+}
+
+fn mask_pattern(pattern: &UrlPattern) -> UrlPattern {
+    match pattern {
+        UrlPattern::Text(value) => UrlPattern::Text(mask_text(value)),
+        UrlPattern::Regex { source, flags } => UrlPattern::Regex {
+            source: mask_text(source),
+            flags: flags.clone(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn route(pattern: &str, handler: RouteHandler) -> (UrlPattern, RouteHandler) {
+        (UrlPattern::Text(pattern.to_string()), handler)
+    }
+
+    #[test]
+    fn registry_add_remove_and_clear_reuse_url_matcher() {
+        let registry = RouteRegistry::default();
+        let (pattern, handler) = route(
+            "https://example.com/**",
+            RouteHandler::Abort {
+                reason: "blockedbyclient".to_string(),
+            },
+        );
+        registry.add(pattern.clone(), handler).unwrap();
+        registry
+            .add(
+                UrlPattern::Regex {
+                    source: "/assets/.*".to_string(),
+                    flags: "i".to_string(),
+                },
+                RouteHandler::Continue {
+                    url: None,
+                    method: None,
+                    headers: None,
+                    post_data: None,
+                },
+            )
+            .unwrap();
+
+        assert!(!registry.is_empty());
+        assert_eq!(registry.list().len(), 2);
+        assert_eq!(registry.remove(Some(&pattern)), 1);
+        assert_eq!(registry.remove(None), 1);
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn registry_rejects_invalid_fulfill_status_and_base64_body() {
+        let registry = RouteRegistry::default();
+        assert!(registry
+            .add(
+                UrlPattern::Text("https://example.com/**".to_string()),
+                RouteHandler::Fulfill {
+                    status: 99,
+                    headers: BTreeMap::new(),
+                    body: None,
+                    content_type: None,
+                    body_base64: false,
+                },
+            )
+            .is_err());
+        assert!(registry
+            .add(
+                UrlPattern::Text("https://example.com/**".to_string()),
+                RouteHandler::Fulfill {
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    body: Some("not base64".to_string()),
+                    content_type: None,
+                    body_base64: true,
+                },
+            )
+            .is_err());
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn redirect_hops_are_matched_and_reported_each_time() {
+        let registry = RouteRegistry::default();
+        registry
+            .add(
+                UrlPattern::Text("https://example.com/**".to_string()),
+                RouteHandler::Continue {
+                    url: None,
+                    method: None,
+                    headers: Some(BTreeMap::from([(
+                        "Authorization".to_string(),
+                        "Bearer secret".to_string(),
+                    )])),
+                    post_data: Some("token=hidden".to_string()),
+                },
+            )
+            .unwrap();
+
+        for (request_id, redirect_hop) in [("one", false), ("two", true)] {
+            let decision = registry.decide(
+                request_id.to_string(),
+                "https://example.com/api/data".to_string(),
+                "POST".to_string(),
+                BTreeMap::from([("Cookie".to_string(), "session=secret".to_string())]),
+                Some("password=hunter2".to_string()),
+                redirect_hop,
+            );
+            assert!(matches!(decision, RequestPausedDecision::Continue(Some(_))));
+        }
+
+        let reports = registry.drain_interceptions();
+        assert_eq!(reports.len(), 2);
+        assert!(!reports[0].redirect_hop);
+        assert!(reports[1].redirect_hop);
+        assert_eq!(reports[0].request_headers["Cookie"], "[REDACTED]");
+        assert!(!reports[0]
+            .request_body_preview
+            .as_deref()
+            .unwrap()
+            .contains("hunter2"));
+    }
+
+    #[test]
+    fn fulfill_abort_and_continue_create_expected_decisions() {
+        let handlers = [
+            RouteHandler::Fulfill {
+                status: 201,
+                headers: BTreeMap::new(),
+                body: Some("ok".to_string()),
+                content_type: Some("text/plain".to_string()),
+                body_base64: false,
+            },
+            RouteHandler::Abort {
+                reason: "blockedbyclient".to_string(),
+            },
+            RouteHandler::Continue {
+                url: Some("https://example.com/other".to_string()),
+                method: Some("PATCH".to_string()),
+                headers: None,
+                post_data: Some("updated".to_string()),
+            },
+        ];
+        for (index, handler) in handlers.into_iter().enumerate() {
+            let registry = RouteRegistry::default();
+            registry
+                .add(
+                    UrlPattern::Text("https://example.com/**".to_string()),
+                    handler,
+                )
+                .unwrap();
+            let decision = registry.decide(
+                index.to_string(),
+                "https://example.com/api".to_string(),
+                "GET".to_string(),
+                BTreeMap::new(),
+                None,
+                false,
+            );
+            match index {
+                0 => assert!(matches!(decision, RequestPausedDecision::Fulfill(_))),
+                1 => assert!(matches!(decision, RequestPausedDecision::Fail(_))),
+                _ => assert!(matches!(decision, RequestPausedDecision::Continue(Some(_)))),
+            }
+            assert_eq!(registry.drain_interceptions().len(), 1);
+        }
+    }
+}
