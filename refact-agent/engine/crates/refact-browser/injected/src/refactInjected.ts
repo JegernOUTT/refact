@@ -21,6 +21,12 @@ import {
   getReadonly,
   isElementVisible,
 } from './vendor/injected/domUtils';
+import {
+  HitTargetController,
+  type HitTargetAction,
+  type HitTargetPoint,
+  type HitTargetResult,
+} from './vendor/injected/hitTarget';
 import type { RefactBuiltins } from './vendor/injected/utilityScript';
 import { getAriaRole, getImplicitAriaRole } from './vendor/injected/roleUtils';
 import { getElementAccessibleDescription, getElementAccessibleName } from './vendor/injected/roleUtils';
@@ -56,10 +62,12 @@ type RefactGlobal = typeof globalThis & {
 export class RefactInjected {
   private readonly global: typeof globalThis;
   private readonly builtinSnapshot: RefactBuiltins;
+  private readonly hitTargetController: HitTargetController;
 
   constructor(global: typeof globalThis, builtins: RefactBuiltins) {
     this.global = global;
     this.builtinSnapshot = builtins;
+    this.hitTargetController = new HitTargetController(global, builtins);
   }
 
   version(): string {
@@ -202,6 +210,23 @@ export class RefactInjected {
       checked: this.bestEffort(() => element.isConnected ? getCheckedState(element) : null, null),
       stable: await this.bestEffortStable(element),
     };
+  }
+
+  expectHitTarget(element: Element, point: HitTargetPoint): HitTargetResult {
+    return this.hitTargetController.expectHitTarget(point, element);
+  }
+
+  installHitTargetInterceptor(
+    element: Element,
+    action: HitTargetAction,
+    point: HitTargetPoint | undefined,
+    blockAllEvents = false,
+  ): Readonly<{ status: 'installed'; id: number }> | HitTargetResult {
+    return this.hitTargetController.install(element, action, point, blockAllEvents);
+  }
+
+  takeHitTargetInterceptor(id: number): HitTargetResult {
+    return this.hitTargetController.take(id);
   }
 
   private bestEffort<T>(read: () => T, fallback: T): T {

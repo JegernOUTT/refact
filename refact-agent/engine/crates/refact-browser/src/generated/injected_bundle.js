@@ -1,4 +1,4 @@
-// @refact-injected-hash ec101c9d3666186c4de030d8f6338fde77f23842bd8a0a882397cc5a407034ec
+// @refact-injected-hash dc1d3e4f02ac6061b0e903bf0a8760f8a44ae343ed961bfa6b442ca50fbb5eb8
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -200,6 +200,240 @@ var cacheStyle;
 var cacheStyleBefore;
 var cacheStyleAfter;
 var cacheStyleVisibility;
+
+// src/vendor/isomorphic/stringUtils.ts
+function trimString(input, cap, suffix = "") {
+  if (input.length <= cap)
+    return input;
+  const chars = [...input];
+  if (chars.length > cap)
+    return chars.slice(0, cap - suffix.length).join("") + suffix;
+  return chars.join("");
+}
+function trimStringWithEllipsis(input, cap) {
+  return trimString(input, cap, "…");
+}
+var ansiRegex = new RegExp("([\\u001B\\u009B][[\\]()#?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?\\u0007)|(?:(?:\\d{0,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~])))", "g");
+
+// src/vendor/injected/hitTarget.ts
+var autoClosingTags = [
+  "AREA",
+  "BASE",
+  "BR",
+  "COL",
+  "COMMAND",
+  "EMBED",
+  "HR",
+  "IMG",
+  "INPUT",
+  "KEYGEN",
+  "LINK",
+  "MENUITEM",
+  "META",
+  "PARAM",
+  "SOURCE",
+  "TRACK",
+  "WBR"
+];
+var booleanAttributes = ["checked", "selected", "disabled", "readonly", "multiple"];
+var HitTargetController = class {
+  constructor(global, builtins) {
+    this.nextInterceptorId = 1;
+    this.global = global;
+    this.builtins = builtins;
+    this.interceptors = new builtins.Map();
+  }
+  expectHitTarget(hitPoint, targetElement) {
+    if (!(targetElement == null ? void 0 : targetElement.isConnected))
+      return { status: "not_connected" };
+    return this.toResult(this.checkHitTarget(hitPoint, targetElement));
+  }
+  install(targetElement, action, hitPoint, blockAllEvents = false) {
+    if (!(targetElement == null ? void 0 : targetElement.isConnected))
+      return { status: "not_connected" };
+    if (hitPoint) {
+      const preliminaryResult = this.checkHitTarget(hitPoint, targetElement);
+      if (preliminaryResult !== "done")
+        return this.toResult(preliminaryResult);
+    }
+    if (action === "drag")
+      return { status: "skipped" };
+    const events = new this.builtins.Set(this.eventNames(action));
+    const id = this.nextInterceptorId++;
+    const interceptor = {
+      events,
+      blockAllEvents,
+      result: void 0,
+      listener: (() => {
+      })
+    };
+    const listener = (event) => {
+      if (!events.has(event.type) || !event.isTrusted)
+        return;
+      const point = this.eventPoint(event);
+      if (interceptor.result === void 0 && point)
+        interceptor.result = this.checkHitTarget(point, targetElement);
+      if (interceptor.blockAllEvents || interceptor.result !== "done" && interceptor.result !== void 0) {
+        this.builtins.preventDefault(event);
+        this.builtins.stopPropagation(event);
+        this.builtins.stopImmediatePropagation(event);
+      }
+    };
+    interceptor.listener = listener;
+    for (const eventName of events)
+      this.builtins.addWindowEventListener(eventName, listener, { capture: true, passive: false });
+    this.interceptors.set(id, interceptor);
+    return { status: "installed", id };
+  }
+  take(id) {
+    var _a;
+    const interceptor = this.interceptors.get(id);
+    if (!interceptor)
+      throw new Error(`Unknown hit-target interceptor ${id}`);
+    this.interceptors.delete(id);
+    for (const eventName of interceptor.events)
+      this.builtins.removeWindowEventListener(eventName, interceptor.listener, { capture: true });
+    return this.toResult((_a = interceptor.result) != null ? _a : "done");
+  }
+  checkHitTarget(hitPoint, targetElement) {
+    var _a;
+    const roots = [];
+    let parentElement = targetElement;
+    while (parentElement) {
+      const root = enclosingShadowRootOrDocument2(parentElement);
+      if (!root)
+        break;
+      roots.push(root);
+      if (root.nodeType === 9)
+        break;
+      parentElement = root.host;
+    }
+    let hitElement;
+    for (let index = roots.length - 1; index >= 0; index--) {
+      const root = roots[index];
+      const elements = this.builtins.arrayFrom(
+        root.nodeType === 9 ? this.builtins.documentElementsFromPoint(root, hitPoint.x, hitPoint.y) : this.builtins.shadowElementsFromPoint(root, hitPoint.x, hitPoint.y)
+      );
+      const singleElement = root.nodeType === 9 ? this.builtins.documentElementFromPoint(root, hitPoint.x, hitPoint.y) : this.builtins.shadowElementFromPoint(root, hitPoint.x, hitPoint.y);
+      if (singleElement && elements[0] && parentElementOrShadowHost2(singleElement) === elements[0]) {
+        const style = this.builtins.getComputedStyle(singleElement);
+        if ((style == null ? void 0 : style.display) === "contents")
+          elements.unshift(singleElement);
+      }
+      if (elements[0] && elements[0].shadowRoot === root && elements[1] === singleElement)
+        elements.shift();
+      const innerElement = elements[0];
+      if (!innerElement)
+        break;
+      hitElement = innerElement;
+      if (index && innerElement !== roots[index - 1].host)
+        break;
+    }
+    const hitParents = [];
+    while (hitElement && hitElement !== targetElement) {
+      hitParents.push(hitElement);
+      hitElement = (_a = hitElement.assignedSlot) != null ? _a : parentElementOrShadowHost2(hitElement);
+    }
+    if (hitElement === targetElement)
+      return "done";
+    const hitTargetDescription = previewNode(hitParents[0] || this.global.document.documentElement);
+    let rootHitTargetDescription;
+    let element = targetElement;
+    while (element) {
+      const index = hitParents.indexOf(element);
+      if (index !== -1) {
+        if (index > 1)
+          rootHitTargetDescription = previewNode(hitParents[index - 1]);
+        break;
+      }
+      element = parentElementOrShadowHost2(element);
+    }
+    if (rootHitTargetDescription) {
+      return {
+        hitTargetDescription: `${hitTargetDescription} from ${rootHitTargetDescription} subtree intercepts pointer events`
+      };
+    }
+    return { hitTargetDescription: `${hitTargetDescription} intercepts pointer events` };
+  }
+  eventNames(action) {
+    if (action === "hover")
+      return ["mousemove"];
+    if (action === "tap")
+      return ["pointerdown", "pointerup", "pointercancel", "touchstart", "touchend", "touchcancel"];
+    return [
+      "mousedown",
+      "mouseup",
+      "pointerdown",
+      "pointerup",
+      "click",
+      "auxclick",
+      "dblclick",
+      "contextmenu"
+    ];
+  }
+  eventPoint(event) {
+    if ("touches" in event) {
+      const touch = event.touches[0];
+      return touch ? { x: touch.clientX, y: touch.clientY } : void 0;
+    }
+    if ("clientX" in event && "clientY" in event) {
+      const pointer = event;
+      return { x: pointer.clientX, y: pointer.clientY };
+    }
+    return void 0;
+  }
+  toResult(result) {
+    if (result === "done")
+      return { status: "done" };
+    return { status: "intercepted", description: result.hitTargetDescription };
+  }
+};
+function parentElementOrShadowHost2(element) {
+  if (element.parentElement)
+    return element.parentElement;
+  if (!element.parentNode)
+    return void 0;
+  if (element.parentNode.nodeType === 11 && element.parentNode.host)
+    return element.parentNode.host;
+  return void 0;
+}
+function enclosingShadowRootOrDocument2(element) {
+  let node = element;
+  while (node.parentNode)
+    node = node.parentNode;
+  if (node.nodeType === 11 || node.nodeType === 9)
+    return node;
+  return void 0;
+}
+function previewNode(node) {
+  if (node.nodeType === 3)
+    return oneLine(`#text=${node.nodeValue || ""}`);
+  if (node.nodeType !== 1)
+    return oneLine(`<${node.nodeName.toLowerCase()} />`);
+  const element = node;
+  const attributes = [];
+  for (let index = 0; index < element.attributes.length; index++) {
+    const { name, value } = element.attributes[index];
+    if (name === "style")
+      continue;
+    attributes.push(!value && booleanAttributes.includes(name) ? ` ${name}` : ` ${name}="${value}"`);
+  }
+  attributes.sort((left, right) => left.length - right.length);
+  const attributeText = trimStringWithEllipsis(attributes.join(""), 500);
+  if (autoClosingTags.includes(element.nodeName))
+    return oneLine(`<${element.nodeName.toLowerCase()}${attributeText}/>`);
+  const children = element.childNodes;
+  let onlyText = children.length <= 5;
+  for (let index = 0; index < children.length; index++)
+    onlyText = onlyText && children[index].nodeType === 3;
+  const text = onlyText ? element.textContent || "" : children.length ? "…" : "";
+  return oneLine(
+    `<${element.nodeName.toLowerCase()}${attributeText}>${trimStringWithEllipsis(text, 50)}</${element.nodeName.toLowerCase()}>`
+  );
+}
+function oneLine(value) {
+  return value.replace(/\n/g, "↵").replace(/\t/g, "⇆");
+}
 
 // src/vendor/isomorphic/cssTokenizer.ts
 var between = function(num, first, last) {
@@ -2013,6 +2247,7 @@ var RefactInjected = class {
   constructor(global, builtins) {
     this.global = global;
     this.builtinSnapshot = builtins;
+    this.hitTargetController = new HitTargetController(global, builtins);
   }
   version() {
     return "playwright-1.63.0-next-refact-1";
@@ -2150,6 +2385,15 @@ var RefactInjected = class {
       checked: this.bestEffort(() => element.isConnected ? getCheckedState(element) : null, null),
       stable: await this.bestEffortStable(element)
     };
+  }
+  expectHitTarget(element, point) {
+    return this.hitTargetController.expectHitTarget(point, element);
+  }
+  installHitTargetInterceptor(element, action, point, blockAllEvents = false) {
+    return this.hitTargetController.install(element, action, point, blockAllEvents);
+  }
+  takeHitTargetInterceptor(id) {
+    return this.hitTargetController.take(id);
   }
   bestEffort(read, fallback) {
     try {

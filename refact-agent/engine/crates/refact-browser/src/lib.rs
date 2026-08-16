@@ -1,5 +1,6 @@
 mod actionability;
 mod handles;
+mod hit_target;
 mod injected_source;
 mod keyboard;
 mod mouse;
@@ -14,6 +15,12 @@ pub use actionability::{
 };
 pub use handles::{
     CheckedState, ElementHandle, ElementState, ElementStateName, HandleError, HandleRegistry,
+};
+pub use hit_target::{
+    CdpFrameHitTargetDriver, FrameHitTargetDriver, FrameOwnerGeometry, FramePointTranslation,
+    FramePointTranslationGeometry, HitTargetController, HitTargetError, HitTargetPoint,
+    HitTargetResult, InterceptorToken, install_interceptor, take_result, translate_point_to_frame,
+    translate_point_to_frame_cdp,
 };
 pub use injected_source::{INJECTED_BUNDLE, wrapped_bootstrap};
 pub use keyboard::{

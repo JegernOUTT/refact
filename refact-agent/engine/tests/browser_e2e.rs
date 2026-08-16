@@ -20,7 +20,7 @@ use refact_lsp::integrations::browser_controller::execute_steps as execute_steps
 use refact_lsp::integrations::browser_models::{BrowserLocator, BrowserStep};
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
-    Mouse, UTILITY_WORLD_NAME,
+    HitTargetController, HitTargetResult, Mouse, MouseButton, UTILITY_WORLD_NAME,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -53,6 +53,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "hover-menu.html",
     "strict-multi.html",
     "hostile-globals.html",
+    "hit-target.html",
 ];
 
 fn execute_steps(
@@ -652,6 +653,137 @@ async fn cdp_mouse_hover_reveals_css_only_menu() {
         .value
         .unwrap();
     assert_eq!(display, "block");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn hit_target_preliminary_check_names_covering_overlay() {
+    let Some(mut case) = BrowserCase::start("hit-target.html").await else {
+        return;
+    };
+    case.setup_world();
+    let handle = case
+        .runtime
+        .world_manager
+        .call_injected_handles(
+            &case.tab,
+            "resolveAll",
+            json!([{"by":"css","value":"#target"}]),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let point = CdpMouseDispatcher::new(&case.tab)
+        .clickable_point(&handle)
+        .unwrap();
+    case.tab.evaluate("window.addOverlay()", false).unwrap();
+    let result = HitTargetController::default()
+        .expect_hit_target(
+            &case.tab,
+            &case.runtime.world_manager,
+            &handle,
+            refact_lsp::refact_browser::HitTargetPoint {
+                x: point.x,
+                y: point.y,
+            },
+        )
+        .unwrap();
+    let HitTargetResult::Intercepted { description } = result else {
+        panic!("expected overlay interception, got {result:?}");
+    };
+    assert!(description.contains("<div class=\"overlay\"></div>"));
+    assert!(description.ends_with("intercepts pointer events"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn hit_target_preliminary_check_walks_open_shadow_root() {
+    let Some(mut case) = BrowserCase::start("hit-target.html").await else {
+        return;
+    };
+    case.setup_world();
+    let handle = case
+        .runtime
+        .world_manager
+        .resolve_expression_handle(
+            &case.tab,
+            "document.querySelector('#shadow-host').shadowRoot.querySelector('#shadow-target')",
+        )
+        .unwrap();
+    let point = CdpMouseDispatcher::new(&case.tab)
+        .clickable_point(&handle)
+        .unwrap();
+    assert_eq!(
+        HitTargetController::default()
+            .expect_hit_target(
+                &case.tab,
+                &case.runtime.world_manager,
+                &handle,
+                refact_lsp::refact_browser::HitTargetPoint {
+                    x: point.x,
+                    y: point.y,
+                },
+            )
+            .unwrap(),
+        HitTargetResult::Done
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn hit_target_interceptor_suppresses_overlay_appearing_after_precheck() {
+    let Some(mut case) = BrowserCase::start("hit-target.html").await else {
+        return;
+    };
+    case.setup_world();
+    let handle = case
+        .runtime
+        .world_manager
+        .call_injected_handles(
+            &case.tab,
+            "resolveAll",
+            json!([{"by":"css","value":"#target"}]),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let point = CdpMouseDispatcher::new(&case.tab)
+        .clickable_point(&handle)
+        .unwrap();
+    let controller = HitTargetController::default();
+    let token = controller
+        .install_interceptor(
+            &case.tab,
+            &case.runtime.world_manager,
+            &handle,
+            refact_lsp::refact_browser::ActionKind::Click,
+            Some(refact_lsp::refact_browser::HitTargetPoint {
+                x: point.x,
+                y: point.y,
+            }),
+        )
+        .unwrap();
+    case.tab.evaluate("window.addLateOverlay()", false).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(&case.tab));
+    let mut mouse = Mouse::new(CdpMouseDispatcher::new(&case.tab), &keyboard);
+    mouse.click(point.x, point.y, MouseButton::Left).unwrap();
+    let result = controller
+        .take_result(&case.tab, &case.runtime.world_manager, token)
+        .unwrap();
+    let HitTargetResult::Intercepted { description } = result else {
+        panic!("expected event-time overlay interception, got {result:?}");
+    };
+    assert!(description.contains("class=\"overlay\""));
+    let output = case
+        .tab
+        .evaluate("document.querySelector('#result').textContent", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(output, "idle");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

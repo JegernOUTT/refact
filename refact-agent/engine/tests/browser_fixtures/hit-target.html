@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Hit target fixture</title>
+  <style>
+    #target, #shadow-host { display: block; margin: 40px; width: 180px; height: 48px; }
+    .overlay { position: fixed; inset: 0; z-index: 1000; background: transparent; }
+  </style>
+</head>
+<body>
+  <button id="target">Target button</button>
+  <div id="shadow-host"></div>
+  <output id="result">idle</output>
+  <script>
+    const target = document.querySelector('#target');
+    const result = document.querySelector('#result');
+    target.addEventListener('click', () => result.textContent = 'target clicked');
+    const shadow = document.querySelector('#shadow-host').attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<button id="shadow-target">Shadow target</button>';
+    shadow.querySelector('#shadow-target').addEventListener('click', () => result.textContent = 'shadow clicked');
+    window.addOverlay = () => {
+      const overlay = document.createElement('div');
+      overlay.className = 'overlay';
+      overlay.addEventListener('click', () => result.textContent = 'overlay clicked');
+      document.body.appendChild(overlay);
+    };
+    window.addLateOverlay = () => setTimeout(window.addOverlay, 0);
+  </script>
+</body>
+</html>
