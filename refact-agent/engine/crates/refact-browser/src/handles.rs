@@ -9,6 +9,9 @@ use serde_json::Value;
 
 use crate::world::WorldManager;
 
+const GET_ACCESSIBLE_NAME_FUNCTION: &str = "function(includeHidden) { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.getAccessibleName(this, includeHidden); }";
+const GET_ACCESSIBLE_DESCRIPTION_FUNCTION: &str = "function() { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.getAccessibleDescription(this); }";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ElementStateName {
@@ -101,6 +104,39 @@ impl WorldManager {
             HandleError::Protocol(format!("Failed to parse browser element states: {error}"))
         })
     }
+
+    pub fn get_accessible_name(
+        &self,
+        tab: &Tab,
+        handle: &ElementHandle,
+        include_hidden: bool,
+    ) -> Result<String, HandleError> {
+        let value = self.call_function_on(
+            tab,
+            handle,
+            GET_ACCESSIBLE_NAME_FUNCTION,
+            vec![Value::Bool(include_hidden)],
+        )?;
+        parse_accessible_text(value, "name")
+    }
+
+    pub fn get_accessible_description(
+        &self,
+        tab: &Tab,
+        handle: &ElementHandle,
+    ) -> Result<String, HandleError> {
+        let value =
+            self.call_function_on(tab, handle, GET_ACCESSIBLE_DESCRIPTION_FUNCTION, Vec::new())?;
+        parse_accessible_text(value, "description")
+    }
+}
+
+fn parse_accessible_text(value: Value, kind: &str) -> Result<String, HandleError> {
+    serde_json::from_value(value).map_err(|error| {
+        HandleError::Protocol(format!(
+            "Failed to parse browser accessible {kind}: {error}"
+        ))
+    })
 }
 
 #[derive(Default)]
@@ -318,5 +354,19 @@ mod tests {
             serde_json::to_value(ElementStateName::Stable).unwrap(),
             "stable"
         );
+    }
+
+    #[test]
+    fn accessible_text_wrappers_deserialize_string_results() {
+        assert_eq!(
+            parse_accessible_text(serde_json::json!("First\u{a0}Second"), "name").unwrap(),
+            "First\u{a0}Second"
+        );
+        assert!(matches!(
+            parse_accessible_text(serde_json::json!({ "text": "wrong wire type" }), "description"),
+            Err(HandleError::Protocol(message)) if message.contains("accessible description")
+        ));
+        assert!(GET_ACCESSIBLE_NAME_FUNCTION.contains("getAccessibleName(this, includeHidden)"));
+        assert!(GET_ACCESSIBLE_DESCRIPTION_FUNCTION.contains("getAccessibleDescription(this)"));
     }
 }

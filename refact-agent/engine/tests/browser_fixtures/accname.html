@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Accessible names and descriptions</title>
+  <style>
+    #pseudo-inline::before { content: "Before"; display: inline; }
+    #pseudo-inline::after { content: "After"; display: inline; }
+    #pseudo-block::before { content: "Before"; display: block; }
+    #pseudo-block::after { content: "After"; display: block; }
+  </style>
+</head>
+<body>
+  <span id="label-first">First</span>
+  <span id="label-second">Second</span>
+  <button id="labelledby-order" aria-labelledby="label-second label-first" data-expected-name="Second First">Ignored</button>
+  <button id="aria-label" aria-label="ARIA label" data-expected-name="ARIA label">Content</button>
+
+  <label for="label-for">Label for</label>
+  <input id="label-for" data-expected-name="Label for">
+  <label>Wrapping label <input id="wrapping-label" data-expected-name="Wrapping label"></label>
+
+  <button id="embedded-textbox" data-expected-name="Value: current value">Value: <input value="current value"></button>
+  <button id="embedded-combobox" data-expected-name="Choice: combo value">Choice: <input role="combobox" value="combo value"></button>
+  <button id="embedded-listbox" data-expected-name="List: list value">List: <input role="listbox" value="list value"></button>
+
+  <img id="image-alt" alt="Image alternative" data-expected-name="Image alternative">
+  <figure id="figure-caption" data-expected-name="Figure caption"><figcaption>Figure caption</figcaption></figure>
+  <table id="table-caption" data-expected-name="Table caption"><caption>Table caption</caption><tr><td>Cell</td></tr></table>
+  <svg id="svg-title" data-expected-name="SVG title"><title>SVG title</title><circle cx="5" cy="5" r="5"></circle></svg>
+
+  <input id="placeholder" placeholder="Placeholder fallback" data-expected-name="Placeholder fallback">
+  <div id="title-fallback" role="img" title="Title fallback" data-expected-name="Title fallback"></div>
+  <button id="nested-content" data-expected-name="Nested markup"><span>Nested <strong>markup</strong></span></button>
+  <button id="whitespace" data-expected-name="One&nbsp;Two Three"> One&nbsp;Two
+    Three </button>
+
+  <button id="pseudo-inline" data-expected-name="BeforeCoreAfter">Core</button>
+  <button id="pseudo-block" data-expected-name="Before Core After">Core</button>
+
+  <input id="file-default" type="file" title="Ignored file title" data-expected-name="Choose File">
+  <input id="image-default" type="image" data-expected-name="Submit">
+
+  <span id="empty-label"></span>
+  <input id="button-empty-labelledby" type="button" value="Button value" aria-labelledby="empty-label" data-expected-name="Button value">
+  <input id="submit-empty-labelledby" type="submit" value="Submit value" aria-labelledby="empty-label" data-expected-name="Submit value">
+  <input id="reset-empty-labelledby" type="reset" value="Reset value" aria-labelledby="empty-label" data-expected-name="Reset value">
+
+  <table id="table-summary" summary="Table summary" data-expected-name="Table summary"><tr><td>Summary cell</td></tr></table>
+  <table id="table-title-reference" title="Ignored table title"><tr><td>Referenced table content</td></tr></table>
+  <button id="table-title-ignored" aria-labelledby="table-title-reference" data-expected-name="Referenced table content">Ignored</button>
+
+  <span id="hidden-label" hidden>Hidden referenced label</span>
+  <button id="hidden-reference" aria-labelledby="hidden-label" data-expected-name="Hidden referenced label">Ignored</button>
+  <button id="hidden-self" hidden>Hidden self</button>
+
+  <p id="description" hidden>Detailed description</p>
+  <button id="described" aria-describedby="description" data-expected-name="Described button" data-expected-description="Detailed description">Described button</button>
+
+  <div id="naming-prohibited" role="generic" aria-label="Ignored generic label" data-expected-name=""></div>
+</body>
+</html>

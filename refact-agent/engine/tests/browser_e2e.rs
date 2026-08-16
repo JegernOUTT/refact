@@ -40,6 +40,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "moving-target.html",
     "states.html",
     "roles.html",
+    "accname.html",
     "controlled-input.html",
     "iframe-form.html",
     "shadow-dom.html",
@@ -819,6 +820,106 @@ async fn computed_roles_match_playwright_html_aam() {
             actual["id"]
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn accessible_text_matches_playwright_accname_and_html_aam() {
+    let Some(mut case) = BrowserCase::start("accname.html").await else {
+        return;
+    };
+    case.setup_world();
+    let handles = case
+        .runtime
+        .world_manager
+        .call_injected_handles(
+            &case.tab,
+            "resolveAll",
+            json!([{"by":"css","value":"[data-expected-name]"}]),
+        )
+        .unwrap();
+    assert_eq!(handles.len(), 27);
+    for handle in handles {
+        let expected = case
+            .runtime
+            .world_manager
+            .call_function_on(
+                &case.tab,
+                &handle,
+                "function() { return { id: this.id, expected: this.dataset.expectedName }; }",
+                Vec::new(),
+            )
+            .unwrap();
+        let actual = case
+            .runtime
+            .world_manager
+            .get_accessible_name(&case.tab, &handle, false)
+            .unwrap();
+        assert_eq!(
+            actual, expected["expected"],
+            "accessible name mismatch for {}",
+            expected["id"]
+        );
+    }
+
+    let description_handles = case
+        .runtime
+        .world_manager
+        .call_injected_handles(
+            &case.tab,
+            "resolveAll",
+            json!([{"by":"css","value":"[data-expected-description]"}]),
+        )
+        .unwrap();
+    for handle in description_handles {
+        let expected = case
+            .runtime
+            .world_manager
+            .call_function_on(
+                &case.tab,
+                &handle,
+                "function() { return { id: this.id, expected: this.dataset.expectedDescription }; }",
+                Vec::new(),
+            )
+            .unwrap();
+        let actual = case
+            .runtime
+            .world_manager
+            .get_accessible_description(&case.tab, &handle)
+            .unwrap();
+        assert_eq!(
+            actual, expected["expected"],
+            "accessible description mismatch for {}",
+            expected["id"]
+        );
+    }
+
+    let hidden = case
+        .runtime
+        .world_manager
+        .call_injected_handles(
+            &case.tab,
+            "resolveAll",
+            json!([{"by":"css","value":"#hidden-self"}]),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(
+        case.runtime
+            .world_manager
+            .get_accessible_name(&case.tab, &hidden, false)
+            .unwrap(),
+        ""
+    );
+    assert_eq!(
+        case.runtime
+            .world_manager
+            .get_accessible_name(&case.tab, &hidden, true)
+            .unwrap(),
+        "Hidden self"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -23,6 +23,7 @@ import {
 } from './vendor/injected/domUtils';
 import type { RefactBuiltins } from './vendor/injected/utilityScript';
 import { getAriaRole, getImplicitAriaRole } from './vendor/injected/roleUtils';
+import { getElementAccessibleDescription, getElementAccessibleName } from './vendor/injected/roleUtils';
 
 type ElementStateName = 'visible' | 'enabled' | 'editable' | 'checked' | 'unchecked' | 'mixed' | 'stable';
 
@@ -286,6 +287,17 @@ export class RefactInjected {
   computeRole(element: Element): string {
     this.ensureConnected(element);
     return getAriaRole(element) ?? 'generic';
+  }
+
+  getAccessibleName(element: Element, includeHidden = false): string {
+    this.ensureConnected(element);
+    // Matching normalization, case folding, substring, and regex semantics belong to locator consumers.
+    return getElementAccessibleName(element, includeHidden).text;
+  }
+
+  getAccessibleDescription(element: Element): string {
+    this.ensureConnected(element);
+    return getElementAccessibleDescription(element, false).text;
   }
 }
 

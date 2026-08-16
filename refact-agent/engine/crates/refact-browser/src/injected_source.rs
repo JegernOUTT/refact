@@ -105,6 +105,20 @@ mod tests {
     }
 
     #[test]
+    fn injected_bundle_contains_playwright_accessible_text_computation() {
+        for marker in [
+            "getAccessibleName(element, includeHidden = false)",
+            "getAccessibleDescription(element)",
+            "getElementAccessibleName",
+            "getElementAccessibleDescription",
+            "Choose File",
+            "return compositeString(\"Submit\"",
+        ] {
+            assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
+        }
+    }
+
+    #[test]
     fn role_utility_notice_names_source_and_commit() {
         let notice = include_str!("../injected/NOTICE.md");
         assert!(notice.contains("src/vendor/injected/roleUtils.ts"));

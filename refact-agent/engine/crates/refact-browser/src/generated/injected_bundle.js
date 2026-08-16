@@ -1,4 +1,4 @@
-// @refact-injected-hash 2ee48514ff1a31781794afa9115f75edf067469c6050792ec3677bf97249b502
+// @refact-injected-hash ec101c9d3666186c4de030d8f6338fde77f23842bd8a0a882397cc5a407034ec
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -200,6 +200,964 @@ var cacheStyle;
 var cacheStyleBefore;
 var cacheStyleAfter;
 var cacheStyleVisibility;
+
+// src/vendor/isomorphic/cssTokenizer.ts
+var between = function(num, first, last) {
+  return num >= first && num <= last;
+};
+function digit(code) {
+  return between(code, 48, 57);
+}
+function hexdigit(code) {
+  return digit(code) || between(code, 65, 70) || between(code, 97, 102);
+}
+function uppercaseletter(code) {
+  return between(code, 65, 90);
+}
+function lowercaseletter(code) {
+  return between(code, 97, 122);
+}
+function letter(code) {
+  return uppercaseletter(code) || lowercaseletter(code);
+}
+function nonascii(code) {
+  return code >= 128;
+}
+function namestartchar(code) {
+  return letter(code) || nonascii(code) || code === 95;
+}
+function namechar(code) {
+  return namestartchar(code) || digit(code) || code === 45;
+}
+function nonprintable(code) {
+  return between(code, 0, 8) || code === 11 || between(code, 14, 31) || code === 127;
+}
+function newline(code) {
+  return code === 10;
+}
+function whitespace(code) {
+  return newline(code) || code === 9 || code === 32;
+}
+var maximumallowedcodepoint = 1114111;
+var InvalidCharacterError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "InvalidCharacterError";
+  }
+};
+function preprocess(str) {
+  const codepoints = [];
+  for (let i = 0; i < str.length; i++) {
+    let code = str.charCodeAt(i);
+    if (code === 13 && str.charCodeAt(i + 1) === 10) {
+      code = 10;
+      i++;
+    }
+    if (code === 13 || code === 12)
+      code = 10;
+    if (code === 0)
+      code = 65533;
+    if (between(code, 55296, 56319) && between(str.charCodeAt(i + 1), 56320, 57343)) {
+      const lead = code - 55296;
+      const trail = str.charCodeAt(i + 1) - 56320;
+      code = Math.pow(2, 16) + lead * Math.pow(2, 10) + trail;
+      i++;
+    }
+    codepoints.push(code);
+  }
+  return codepoints;
+}
+function stringFromCode(code) {
+  if (code <= 65535)
+    return String.fromCharCode(code);
+  code -= Math.pow(2, 16);
+  const lead = Math.floor(code / Math.pow(2, 10)) + 55296;
+  const trail = code % Math.pow(2, 10) + 56320;
+  return String.fromCharCode(lead) + String.fromCharCode(trail);
+}
+function tokenize(str1) {
+  const str = preprocess(str1);
+  let i = -1;
+  const tokens = [];
+  let code;
+  let line = 0;
+  let column = 0;
+  let lastLineLength = 0;
+  const incrLineno = function() {
+    line += 1;
+    lastLineLength = column;
+    column = 0;
+  };
+  const locStart = { line, column };
+  const codepoint = function(i2) {
+    if (i2 >= str.length)
+      return -1;
+    return str[i2];
+  };
+  const next = function(num) {
+    if (num === void 0)
+      num = 1;
+    if (num > 3)
+      throw "Spec Error: no more than three codepoints of lookahead.";
+    return codepoint(i + num);
+  };
+  const consume = function(num) {
+    if (num === void 0)
+      num = 1;
+    i += num;
+    code = codepoint(i);
+    if (newline(code))
+      incrLineno();
+    else
+      column += num;
+    return true;
+  };
+  const reconsume = function() {
+    i -= 1;
+    if (newline(code)) {
+      line -= 1;
+      column = lastLineLength;
+    } else {
+      column -= 1;
+    }
+    locStart.line = line;
+    locStart.column = column;
+    return true;
+  };
+  const eof = function(codepoint2) {
+    if (codepoint2 === void 0)
+      codepoint2 = code;
+    return codepoint2 === -1;
+  };
+  const donothing = function() {
+  };
+  const parseerror = function() {
+  };
+  const consumeAToken = function() {
+    consumeComments();
+    consume();
+    if (whitespace(code)) {
+      while (whitespace(next()))
+        consume();
+      return new WhitespaceToken();
+    } else if (code === 34) {
+      return consumeAStringToken();
+    } else if (code === 35) {
+      if (namechar(next()) || areAValidEscape(next(1), next(2))) {
+        const token = new HashToken("");
+        if (wouldStartAnIdentifier(next(1), next(2), next(3)))
+          token.type = "id";
+        token.value = consumeAName();
+        return token;
+      } else {
+        return new DelimToken(code);
+      }
+    } else if (code === 36) {
+      if (next() === 61) {
+        consume();
+        return new SuffixMatchToken();
+      } else {
+        return new DelimToken(code);
+      }
+    } else if (code === 39) {
+      return consumeAStringToken();
+    } else if (code === 40) {
+      return new OpenParenToken();
+    } else if (code === 41) {
+      return new CloseParenToken();
+    } else if (code === 42) {
+      if (next() === 61) {
+        consume();
+        return new SubstringMatchToken();
+      } else {
+        return new DelimToken(code);
+      }
+    } else if (code === 43) {
+      if (startsWithANumber()) {
+        reconsume();
+        return consumeANumericToken();
+      } else {
+        return new DelimToken(code);
+      }
+    } else if (code === 44) {
+      return new CommaToken();
+    } else if (code === 45) {
+      if (startsWithANumber()) {
+        reconsume();
+        return consumeANumericToken();
+      } else if (next(1) === 45 && next(2) === 62) {
+        consume(2);
+        return new CDCToken();
+      } else if (startsWithAnIdentifier()) {
+        reconsume();
+        return consumeAnIdentlikeToken();
+      } else {
+        return new DelimToken(code);
+      }
+    } else if (code === 46) {
+      if (startsWithANumber()) {
+        reconsume();
+        return consumeANumericToken();
+      } else {
+        return new DelimToken(code);
+      }
+    } else if (code === 58) {
+      return new ColonToken();
+    } else if (code === 59) {
+      return new SemicolonToken();
+    } else if (code === 60) {
+      if (next(1) === 33 && next(2) === 45 && next(3) === 45) {
+        consume(3);
+        return new CDOToken();
+      } else {
+        return new DelimToken(code);
+      }
+    } else if (code === 64) {
+      if (wouldStartAnIdentifier(next(1), next(2), next(3)))
+        return new AtKeywordToken(consumeAName());
+      else
+        return new DelimToken(code);
+    } else if (code === 91) {
+      return new OpenSquareToken();
+    } else if (code === 92) {
+      if (startsWithAValidEscape()) {
+        reconsume();
+        return consumeAnIdentlikeToken();
+      } else {
+        parseerror();
+        return new DelimToken(code);
+      }
+    } else if (code === 93) {
+      return new CloseSquareToken();
+    } else if (code === 94) {
+      if (next() === 61) {
+        consume();
+        return new PrefixMatchToken();
+      } else {
+        return new DelimToken(code);
+      }
+    } else if (code === 123) {
+      return new OpenCurlyToken();
+    } else if (code === 124) {
+      if (next() === 61) {
+        consume();
+        return new DashMatchToken();
+      } else if (next() === 124) {
+        consume();
+        return new ColumnToken();
+      } else {
+        return new DelimToken(code);
+      }
+    } else if (code === 125) {
+      return new CloseCurlyToken();
+    } else if (code === 126) {
+      if (next() === 61) {
+        consume();
+        return new IncludeMatchToken();
+      } else {
+        return new DelimToken(code);
+      }
+    } else if (digit(code)) {
+      reconsume();
+      return consumeANumericToken();
+    } else if (namestartchar(code)) {
+      reconsume();
+      return consumeAnIdentlikeToken();
+    } else if (eof()) {
+      return new EOFToken();
+    } else {
+      return new DelimToken(code);
+    }
+  };
+  const consumeComments = function() {
+    while (next(1) === 47 && next(2) === 42) {
+      consume(2);
+      while (true) {
+        consume();
+        if (code === 42 && next() === 47) {
+          consume();
+          break;
+        } else if (eof()) {
+          parseerror();
+          return;
+        }
+      }
+    }
+  };
+  const consumeANumericToken = function() {
+    const num = consumeANumber();
+    if (wouldStartAnIdentifier(next(1), next(2), next(3))) {
+      const token = new DimensionToken();
+      token.value = num.value;
+      token.repr = num.repr;
+      token.type = num.type;
+      token.unit = consumeAName();
+      return token;
+    } else if (next() === 37) {
+      consume();
+      const token = new PercentageToken();
+      token.value = num.value;
+      token.repr = num.repr;
+      return token;
+    } else {
+      const token = new NumberToken();
+      token.value = num.value;
+      token.repr = num.repr;
+      token.type = num.type;
+      return token;
+    }
+  };
+  const consumeAnIdentlikeToken = function() {
+    const str2 = consumeAName();
+    if (str2.toLowerCase() === "url" && next() === 40) {
+      consume();
+      while (whitespace(next(1)) && whitespace(next(2)))
+        consume();
+      if (next() === 34 || next() === 39)
+        return new FunctionToken(str2);
+      else if (whitespace(next()) && (next(2) === 34 || next(2) === 39))
+        return new FunctionToken(str2);
+      else
+        return consumeAURLToken();
+    } else if (next() === 40) {
+      consume();
+      return new FunctionToken(str2);
+    } else {
+      return new IdentToken(str2);
+    }
+  };
+  const consumeAStringToken = function(endingCodePoint) {
+    if (endingCodePoint === void 0)
+      endingCodePoint = code;
+    let string = "";
+    while (consume()) {
+      if (code === endingCodePoint || eof()) {
+        return new StringToken(string);
+      } else if (newline(code)) {
+        parseerror();
+        reconsume();
+        return new BadStringToken();
+      } else if (code === 92) {
+        if (eof(next()))
+          donothing();
+        else if (newline(next()))
+          consume();
+        else
+          string += stringFromCode(consumeEscape());
+      } else {
+        string += stringFromCode(code);
+      }
+    }
+    throw new Error("Internal error");
+  };
+  const consumeAURLToken = function() {
+    const token = new URLToken("");
+    while (whitespace(next()))
+      consume();
+    if (eof(next()))
+      return token;
+    while (consume()) {
+      if (code === 41 || eof()) {
+        return token;
+      } else if (whitespace(code)) {
+        while (whitespace(next()))
+          consume();
+        if (next() === 41 || eof(next())) {
+          consume();
+          return token;
+        } else {
+          consumeTheRemnantsOfABadURL();
+          return new BadURLToken();
+        }
+      } else if (code === 34 || code === 39 || code === 40 || nonprintable(code)) {
+        parseerror();
+        consumeTheRemnantsOfABadURL();
+        return new BadURLToken();
+      } else if (code === 92) {
+        if (startsWithAValidEscape()) {
+          token.value += stringFromCode(consumeEscape());
+        } else {
+          parseerror();
+          consumeTheRemnantsOfABadURL();
+          return new BadURLToken();
+        }
+      } else {
+        token.value += stringFromCode(code);
+      }
+    }
+    throw new Error("Internal error");
+  };
+  const consumeEscape = function() {
+    consume();
+    if (hexdigit(code)) {
+      const digits = [code];
+      for (let total = 0; total < 5; total++) {
+        if (hexdigit(next())) {
+          consume();
+          digits.push(code);
+        } else {
+          break;
+        }
+      }
+      if (whitespace(next()))
+        consume();
+      let value = parseInt(digits.map(function(x) {
+        return String.fromCharCode(x);
+      }).join(""), 16);
+      if (value > maximumallowedcodepoint)
+        value = 65533;
+      return value;
+    } else if (eof()) {
+      return 65533;
+    } else {
+      return code;
+    }
+  };
+  const areAValidEscape = function(c1, c2) {
+    if (c1 !== 92)
+      return false;
+    if (newline(c2))
+      return false;
+    return true;
+  };
+  const startsWithAValidEscape = function() {
+    return areAValidEscape(code, next());
+  };
+  const wouldStartAnIdentifier = function(c1, c2, c3) {
+    if (c1 === 45)
+      return namestartchar(c2) || c2 === 45 || areAValidEscape(c2, c3);
+    else if (namestartchar(c1))
+      return true;
+    else if (c1 === 92)
+      return areAValidEscape(c1, c2);
+    else
+      return false;
+  };
+  const startsWithAnIdentifier = function() {
+    return wouldStartAnIdentifier(code, next(1), next(2));
+  };
+  const wouldStartANumber = function(c1, c2, c3) {
+    if (c1 === 43 || c1 === 45) {
+      if (digit(c2))
+        return true;
+      if (c2 === 46 && digit(c3))
+        return true;
+      return false;
+    } else if (c1 === 46) {
+      if (digit(c2))
+        return true;
+      return false;
+    } else if (digit(c1)) {
+      return true;
+    } else {
+      return false;
+    }
+  };
+  const startsWithANumber = function() {
+    return wouldStartANumber(code, next(1), next(2));
+  };
+  const consumeAName = function() {
+    let result = "";
+    while (consume()) {
+      if (namechar(code)) {
+        result += stringFromCode(code);
+      } else if (startsWithAValidEscape()) {
+        result += stringFromCode(consumeEscape());
+      } else {
+        reconsume();
+        return result;
+      }
+    }
+    throw new Error("Internal parse error");
+  };
+  const consumeANumber = function() {
+    let repr = "";
+    let type = "integer";
+    if (next() === 43 || next() === 45) {
+      consume();
+      repr += stringFromCode(code);
+    }
+    while (digit(next())) {
+      consume();
+      repr += stringFromCode(code);
+    }
+    if (next(1) === 46 && digit(next(2))) {
+      consume();
+      repr += stringFromCode(code);
+      consume();
+      repr += stringFromCode(code);
+      type = "number";
+      while (digit(next())) {
+        consume();
+        repr += stringFromCode(code);
+      }
+    }
+    const c1 = next(1);
+    const c2 = next(2);
+    const c3 = next(3);
+    if ((c1 === 69 || c1 === 101) && digit(c2)) {
+      consume();
+      repr += stringFromCode(code);
+      consume();
+      repr += stringFromCode(code);
+      type = "number";
+      while (digit(next())) {
+        consume();
+        repr += stringFromCode(code);
+      }
+    } else if ((c1 === 69 || c1 === 101) && (c2 === 43 || c2 === 45) && digit(c3)) {
+      consume();
+      repr += stringFromCode(code);
+      consume();
+      repr += stringFromCode(code);
+      consume();
+      repr += stringFromCode(code);
+      type = "number";
+      while (digit(next())) {
+        consume();
+        repr += stringFromCode(code);
+      }
+    }
+    const value = convertAStringToANumber(repr);
+    return { type, value, repr };
+  };
+  const convertAStringToANumber = function(string) {
+    return +string;
+  };
+  const consumeTheRemnantsOfABadURL = function() {
+    while (consume()) {
+      if (code === 41 || eof()) {
+        return;
+      } else if (startsWithAValidEscape()) {
+        consumeEscape();
+        donothing();
+      } else {
+        donothing();
+      }
+    }
+  };
+  let iterationCount = 0;
+  while (!eof(next())) {
+    tokens.push(consumeAToken());
+    iterationCount++;
+    if (iterationCount > str.length * 2)
+      throw new Error("I'm infinite-looping!");
+  }
+  return tokens;
+}
+var CSSParserToken = class {
+  constructor() {
+    this.tokenType = "";
+  }
+  toJSON() {
+    return { token: this.tokenType };
+  }
+  toString() {
+    return this.tokenType;
+  }
+  toSource() {
+    return "" + this;
+  }
+};
+var BadStringToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = "BADSTRING";
+  }
+};
+var BadURLToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = "BADURL";
+  }
+};
+var WhitespaceToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = "WHITESPACE";
+  }
+  toString() {
+    return "WS";
+  }
+  toSource() {
+    return " ";
+  }
+};
+var CDOToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = "CDO";
+  }
+  toSource() {
+    return "<!--";
+  }
+};
+var CDCToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = "CDC";
+  }
+  toSource() {
+    return "-->";
+  }
+};
+var ColonToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = ":";
+  }
+};
+var SemicolonToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = ";";
+  }
+};
+var CommaToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = ",";
+  }
+};
+var GroupingToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.value = "";
+    this.mirror = "";
+  }
+};
+var OpenCurlyToken = class extends GroupingToken {
+  constructor() {
+    super();
+    this.tokenType = "{";
+    this.value = "{";
+    this.mirror = "}";
+  }
+};
+var CloseCurlyToken = class extends GroupingToken {
+  constructor() {
+    super();
+    this.tokenType = "}";
+    this.value = "}";
+    this.mirror = "{";
+  }
+};
+var OpenSquareToken = class extends GroupingToken {
+  constructor() {
+    super();
+    this.tokenType = "[";
+    this.value = "[";
+    this.mirror = "]";
+  }
+};
+var CloseSquareToken = class extends GroupingToken {
+  constructor() {
+    super();
+    this.tokenType = "]";
+    this.value = "]";
+    this.mirror = "[";
+  }
+};
+var OpenParenToken = class extends GroupingToken {
+  constructor() {
+    super();
+    this.tokenType = "(";
+    this.value = "(";
+    this.mirror = ")";
+  }
+};
+var CloseParenToken = class extends GroupingToken {
+  constructor() {
+    super();
+    this.tokenType = ")";
+    this.value = ")";
+    this.mirror = "(";
+  }
+};
+var IncludeMatchToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = "~=";
+  }
+};
+var DashMatchToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = "|=";
+  }
+};
+var PrefixMatchToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = "^=";
+  }
+};
+var SuffixMatchToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = "$=";
+  }
+};
+var SubstringMatchToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = "*=";
+  }
+};
+var ColumnToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = "||";
+  }
+};
+var EOFToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.tokenType = "EOF";
+  }
+  toSource() {
+    return "";
+  }
+};
+var DelimToken = class extends CSSParserToken {
+  constructor(code) {
+    super();
+    this.tokenType = "DELIM";
+    this.value = "";
+    this.value = stringFromCode(code);
+  }
+  toString() {
+    return "DELIM(" + this.value + ")";
+  }
+  toJSON() {
+    const json = this.constructor.prototype.constructor.prototype.toJSON.call(this);
+    json.value = this.value;
+    return json;
+  }
+  toSource() {
+    if (this.value === "\\")
+      return "\\\n";
+    else
+      return this.value;
+  }
+};
+var StringValuedToken = class extends CSSParserToken {
+  constructor() {
+    super(...arguments);
+    this.value = "";
+  }
+  ASCIIMatch(str) {
+    return this.value.toLowerCase() === str.toLowerCase();
+  }
+  toJSON() {
+    const json = this.constructor.prototype.constructor.prototype.toJSON.call(this);
+    json.value = this.value;
+    return json;
+  }
+};
+var IdentToken = class extends StringValuedToken {
+  constructor(val) {
+    super();
+    this.tokenType = "IDENT";
+    this.value = val;
+  }
+  toString() {
+    return "IDENT(" + this.value + ")";
+  }
+  toSource() {
+    return escapeIdent(this.value);
+  }
+};
+var FunctionToken = class extends StringValuedToken {
+  constructor(val) {
+    super();
+    this.tokenType = "FUNCTION";
+    this.value = val;
+    this.mirror = ")";
+  }
+  toString() {
+    return "FUNCTION(" + this.value + ")";
+  }
+  toSource() {
+    return escapeIdent(this.value) + "(";
+  }
+};
+var AtKeywordToken = class extends StringValuedToken {
+  constructor(val) {
+    super();
+    this.tokenType = "AT-KEYWORD";
+    this.value = val;
+  }
+  toString() {
+    return "AT(" + this.value + ")";
+  }
+  toSource() {
+    return "@" + escapeIdent(this.value);
+  }
+};
+var HashToken = class extends StringValuedToken {
+  constructor(val) {
+    super();
+    this.tokenType = "HASH";
+    this.value = val;
+    this.type = "unrestricted";
+  }
+  toString() {
+    return "HASH(" + this.value + ")";
+  }
+  toJSON() {
+    const json = this.constructor.prototype.constructor.prototype.toJSON.call(this);
+    json.value = this.value;
+    json.type = this.type;
+    return json;
+  }
+  toSource() {
+    if (this.type === "id")
+      return "#" + escapeIdent(this.value);
+    else
+      return "#" + escapeHash(this.value);
+  }
+};
+var StringToken = class extends StringValuedToken {
+  constructor(val) {
+    super();
+    this.tokenType = "STRING";
+    this.value = val;
+  }
+  toString() {
+    return '"' + escapeString(this.value) + '"';
+  }
+};
+var URLToken = class extends StringValuedToken {
+  constructor(val) {
+    super();
+    this.tokenType = "URL";
+    this.value = val;
+  }
+  toString() {
+    return "URL(" + this.value + ")";
+  }
+  toSource() {
+    return 'url("' + escapeString(this.value) + '")';
+  }
+};
+var NumberToken = class extends CSSParserToken {
+  constructor() {
+    super();
+    this.tokenType = "NUMBER";
+    this.type = "integer";
+    this.repr = "";
+  }
+  toString() {
+    if (this.type === "integer")
+      return "INT(" + this.value + ")";
+    return "NUMBER(" + this.value + ")";
+  }
+  toJSON() {
+    const json = super.toJSON();
+    json.value = this.value;
+    json.type = this.type;
+    json.repr = this.repr;
+    return json;
+  }
+  toSource() {
+    return this.repr;
+  }
+};
+var PercentageToken = class extends CSSParserToken {
+  constructor() {
+    super();
+    this.tokenType = "PERCENTAGE";
+    this.repr = "";
+  }
+  toString() {
+    return "PERCENTAGE(" + this.value + ")";
+  }
+  toJSON() {
+    const json = this.constructor.prototype.constructor.prototype.toJSON.call(this);
+    json.value = this.value;
+    json.repr = this.repr;
+    return json;
+  }
+  toSource() {
+    return this.repr + "%";
+  }
+};
+var DimensionToken = class extends CSSParserToken {
+  constructor() {
+    super();
+    this.tokenType = "DIMENSION";
+    this.type = "integer";
+    this.repr = "";
+    this.unit = "";
+  }
+  toString() {
+    return "DIM(" + this.value + "," + this.unit + ")";
+  }
+  toJSON() {
+    const json = this.constructor.prototype.constructor.prototype.toJSON.call(this);
+    json.value = this.value;
+    json.type = this.type;
+    json.repr = this.repr;
+    json.unit = this.unit;
+    return json;
+  }
+  toSource() {
+    const source = this.repr;
+    let unit = escapeIdent(this.unit);
+    if (unit[0].toLowerCase() === "e" && (unit[1] === "-" || between(unit.charCodeAt(1), 48, 57))) {
+      unit = "\\65 " + unit.slice(1, unit.length);
+    }
+    return source + unit;
+  }
+};
+function escapeIdent(string) {
+  string = "" + string;
+  let result = "";
+  const firstcode = string.charCodeAt(0);
+  for (let i = 0; i < string.length; i++) {
+    const code = string.charCodeAt(i);
+    if (code === 0)
+      throw new InvalidCharacterError("Invalid character: the input contains U+0000.");
+    if (between(code, 1, 31) || code === 127 || i === 0 && between(code, 48, 57) || i === 1 && between(code, 48, 57) && firstcode === 45)
+      result += "\\" + code.toString(16) + " ";
+    else if (code >= 128 || code === 45 || code === 95 || between(code, 48, 57) || between(code, 65, 90) || between(code, 97, 122))
+      result += string[i];
+    else
+      result += "\\" + string[i];
+  }
+  return result;
+}
+function escapeHash(string) {
+  string = "" + string;
+  let result = "";
+  for (let i = 0; i < string.length; i++) {
+    const code = string.charCodeAt(i);
+    if (code === 0)
+      throw new InvalidCharacterError("Invalid character: the input contains U+0000.");
+    if (code >= 128 || code === 45 || code === 95 || between(code, 48, 57) || between(code, 65, 90) || between(code, 97, 122))
+      result += string[i];
+    else
+      result += "\\" + code.toString(16) + " ";
+  }
+  return result;
+}
+function escapeString(string) {
+  string = "" + string;
+  let result = "";
+  for (let i = 0; i < string.length; i++) {
+    const code = string.charCodeAt(i);
+    if (code === 0)
+      throw new InvalidCharacterError("Invalid character: the input contains U+0000.");
+    if (between(code, 1, 31) || code === 127)
+      result += "\\" + code.toString(16) + " ";
+    else if (code === 34 || code === 92)
+      result += "\\" + string[i];
+    else
+      result += string[i];
+  }
+  return result;
+}
 
 // src/vendor/injected/roleUtils.ts
 function hasExplicitAccessibleName(e) {
@@ -515,6 +1473,50 @@ function computeAriaRole(element) {
   }
   return explicitRole;
 }
+function getAriaBoolean(attr) {
+  return attr === null ? void 0 : attr.toLowerCase() === "true";
+}
+function isElementIgnoredForAria(element) {
+  return ["STYLE", "SCRIPT", "NOSCRIPT", "TEMPLATE"].includes(elementSafeTagName(element));
+}
+function isElementHiddenForAria(element) {
+  if (isElementIgnoredForAria(element))
+    return true;
+  const style = getElementComputedStyle(element);
+  const isSlot = element.nodeName === "SLOT";
+  if ((style == null ? void 0 : style.display) === "contents" && !isSlot) {
+    for (let child = element.firstChild; child; child = child.nextSibling) {
+      if (child.nodeType === 1 && !isElementHiddenForAria(child))
+        return false;
+      if (child.nodeType === 3 && isVisibleTextNode(child))
+        return false;
+    }
+    return true;
+  }
+  const isOptionInsideSelect = element.nodeName === "OPTION" && !!element.closest("select");
+  if (!isOptionInsideSelect && !isSlot && !isElementStyleVisibilityVisible(element, style))
+    return true;
+  return belongsToDisplayNoneOrAriaHiddenOrNonSlotted(element);
+}
+function belongsToDisplayNoneOrAriaHiddenOrNonSlotted(element) {
+  let hidden = cacheIsHidden == null ? void 0 : cacheIsHidden.get(element);
+  if (hidden === void 0) {
+    hidden = false;
+    if (element.parentElement && element.parentElement.shadowRoot && !element.assignedSlot)
+      hidden = true;
+    if (!hidden) {
+      const style = getElementComputedStyle(element);
+      hidden = !style || style.display === "none" || getAriaBoolean(element.getAttribute("aria-hidden")) === true;
+    }
+    if (!hidden) {
+      const parent = parentElementOrShadowHost(element);
+      if (parent)
+        hidden = belongsToDisplayNoneOrAriaHiddenOrNonSlotted(parent);
+    }
+    cacheIsHidden == null ? void 0 : cacheIsHidden.set(element, hidden);
+  }
+  return hidden;
+}
 function getIdRefs(element, ref) {
   if (!ref)
     return [];
@@ -534,6 +1536,414 @@ function getIdRefs(element, ref) {
     return [];
   }
 }
+function trimFlatString(s) {
+  return s.trim();
+}
+function asFlatString(s) {
+  return s.split(" ").map((chunk) => chunk.replace(/\r\n/g, "\n").replace(/[\u200b\u00ad]/g, "").replace(/\s\s*/g, " ")).join(" ").trim();
+}
+function queryInAriaOwned(element, selector) {
+  const result = [...element.querySelectorAll(selector)];
+  for (const owned of getIdRefs(element, element.getAttribute("aria-owns"))) {
+    if (owned.matches(selector))
+      result.push(owned);
+    result.push(...owned.querySelectorAll(selector));
+  }
+  return result;
+}
+function getCSSContent(element, pseudo) {
+  const cache = pseudo === "::before" ? cachePseudoContentBefore : pseudo === "::after" ? cachePseudoContentAfter : cachePseudoContent;
+  if (cache == null ? void 0 : cache.has(element))
+    return cache == null ? void 0 : cache.get(element);
+  const style = getElementComputedStyle(element, pseudo);
+  let content;
+  if (style) {
+    const contentValue = style.content;
+    if (contentValue && contentValue !== "none" && contentValue !== "normal") {
+      if (style.display !== "none" && style.visibility !== "hidden") {
+        content = parseCSSContentPropertyAsString(element, contentValue, !!pseudo);
+      }
+    }
+  }
+  if (pseudo && content !== void 0) {
+    const display = (style == null ? void 0 : style.display) || "inline";
+    if (display !== "inline")
+      content = " " + content + " ";
+  }
+  if (cache)
+    cache.set(element, content);
+  return content;
+}
+function parseCSSContentPropertyAsString(element, content, isPseudo) {
+  if (!content || content === "none" || content === "normal") {
+    return;
+  }
+  try {
+    let tokens = tokenize(content).filter((token) => !(token instanceof WhitespaceToken));
+    const delimIndex = tokens.findIndex((token) => token instanceof DelimToken && token.value === "/");
+    if (delimIndex !== -1) {
+      tokens = tokens.slice(delimIndex + 1);
+    } else if (!isPseudo) {
+      return;
+    }
+    const accumulated = [];
+    let index = 0;
+    while (index < tokens.length) {
+      if (tokens[index] instanceof StringToken) {
+        accumulated.push(tokens[index].value);
+        index++;
+      } else if (index + 2 < tokens.length && tokens[index] instanceof FunctionToken && tokens[index].value === "attr" && tokens[index + 1] instanceof IdentToken && tokens[index + 2] instanceof CloseParenToken) {
+        const attrName = tokens[index + 1].value;
+        accumulated.push(element.getAttribute(attrName) || "");
+        index += 3;
+      } else {
+        return;
+      }
+    }
+    return accumulated.join("");
+  } catch {
+  }
+}
+function getAriaLabelledByElements(element) {
+  const ref = element.getAttribute("aria-labelledby");
+  if (ref === null)
+    return null;
+  const refs = getIdRefs(element, ref);
+  return refs.length ? refs : null;
+}
+function allowsNameFromContent(role, targetDescendant) {
+  const alwaysAllowsNameFromContent = ["button", "cell", "checkbox", "columnheader", "gridcell", "heading", "link", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "radio", "row", "rowheader", "switch", "tab", "tooltip", "treeitem"].includes(role);
+  const descendantAllowsNameFromContent = targetDescendant && ["", "caption", "code", "contentinfo", "definition", "deletion", "emphasis", "insertion", "list", "listitem", "mark", "none", "paragraph", "presentation", "region", "row", "rowgroup", "section", "strong", "subscript", "superscript", "table", "term", "time"].includes(role);
+  return alwaysAllowsNameFromContent || descendantAllowsNameFromContent;
+}
+function computeAccessibleNameComposite(element, includeHidden, collectElements) {
+  const elementProhibitsNaming = ["caption", "code", "definition", "deletion", "emphasis", "generic", "insertion", "mark", "paragraph", "presentation", "strong", "subscript", "suggestion", "superscript", "term", "time"].includes(getAriaRole(element) || "");
+  if (elementProhibitsNaming)
+    return { ...emptyCompositeString(), derivedFromContent: false };
+  const outDerivedFromContent = { value: false };
+  const result = getTextAlternativeInternal(element, {
+    includeHidden,
+    collectElements,
+    outDerivedFromContent,
+    visitedElements: /* @__PURE__ */ new Set(),
+    embeddedInTargetElement: "self"
+  });
+  return { text: asFlatString(result.text), elements: result.elements, derivedFromContent: outDerivedFromContent.value };
+}
+function getElementAccessibleName(element, includeHidden) {
+  const cache = includeHidden ? cacheAccessibleNameHidden : cacheAccessibleName;
+  let accessibleName = cache == null ? void 0 : cache.get(element);
+  if (accessibleName === void 0) {
+    accessibleName = computeAccessibleNameComposite(
+      element,
+      includeHidden,
+      true
+      /* collectElements */
+    );
+    cache == null ? void 0 : cache.set(element, accessibleName);
+  }
+  return accessibleName;
+}
+function getElementAccessibleDescription(element, includeHidden) {
+  const cache = includeHidden ? cacheAccessibleDescriptionHidden : cacheAccessibleDescription;
+  let accessibleDescription = cache == null ? void 0 : cache.get(element);
+  if (accessibleDescription === void 0) {
+    accessibleDescription = { text: "", derivedFromContent: false };
+    if (element.hasAttribute("aria-describedby")) {
+      const describedBy = getIdRefs(element, element.getAttribute("aria-describedby"));
+      accessibleDescription.text = asFlatString(describedBy.map((ref) => getTextAlternativeInternal(ref, {
+        includeHidden,
+        visitedElements: /* @__PURE__ */ new Set(),
+        embeddedInDescribedBy: { element: ref, hidden: isElementHiddenForAria(ref) }
+      }).text).join(" "));
+      accessibleDescription.derivedFromContent = describedBy.some((ref) => ref === element || element.contains(ref));
+    } else if (element.hasAttribute("aria-description")) {
+      accessibleDescription.text = asFlatString(element.getAttribute("aria-description") || "");
+    } else {
+      accessibleDescription.text = asFlatString(element.getAttribute("title") || "");
+    }
+    cache == null ? void 0 : cache.set(element, accessibleDescription);
+  }
+  return accessibleDescription;
+}
+function insideTargetElement(options) {
+  return options.embeddedInTargetElement === "self" || options.embeddedInTargetElement === "descendant";
+}
+function getTextAlternativeInternal(element, options) {
+  var _a, _b, _c, _d, _e;
+  if (options.visitedElements.has(element))
+    return emptyCompositeString();
+  const childOptions = {
+    ...options,
+    embeddedInTargetElement: options.embeddedInTargetElement === "self" ? "descendant" : options.embeddedInTargetElement
+  };
+  if (!options.includeHidden) {
+    const isEmbeddedInHiddenReferenceTraversal = !!((_a = options.embeddedInLabelledBy) == null ? void 0 : _a.hidden) || !!((_b = options.embeddedInDescribedBy) == null ? void 0 : _b.hidden) || !!((_c = options.embeddedInNativeTextAlternative) == null ? void 0 : _c.hidden) || !!((_d = options.embeddedInLabel) == null ? void 0 : _d.hidden);
+    if (isElementIgnoredForAria(element) || !isEmbeddedInHiddenReferenceTraversal && isElementHiddenForAria(element)) {
+      options.visitedElements.add(element);
+      return emptyCompositeString();
+    }
+  }
+  const labelledBy = getAriaLabelledByElements(element);
+  if (!options.embeddedInLabelledBy) {
+    const accessibleName = joinCompositeString((labelledBy || []).map((ref) => getTextAlternativeInternal(ref, {
+      ...options,
+      embeddedInLabelledBy: { element: ref, hidden: isElementHiddenForAria(ref) },
+      embeddedInDescribedBy: void 0,
+      embeddedInTargetElement: void 0,
+      embeddedInLabel: void 0,
+      embeddedInNativeTextAlternative: void 0
+    })), " ", options.collectElements);
+    if (accessibleName.text) {
+      if (options.outDerivedFromContent && insideTargetElement(options) && (labelledBy || []).some((ref) => ref === element || element.contains(ref)))
+        options.outDerivedFromContent.value = true;
+      return accessibleName;
+    }
+  }
+  const role = getAriaRole(element) || "";
+  const tagName = elementSafeTagName(element);
+  if (!!options.embeddedInLabel || !!options.embeddedInLabelledBy || options.embeddedInTargetElement === "descendant") {
+    const isOwnLabel = [...element.labels || []].includes(element);
+    const isOwnLabelledBy = (labelledBy || []).includes(element);
+    if (!isOwnLabel && !isOwnLabelledBy) {
+      if (role === "textbox") {
+        options.visitedElements.add(element);
+        if (tagName === "INPUT" || tagName === "TEXTAREA")
+          return compositeString(element.value, element, options.collectElements);
+        return compositeString(element.textContent, element, options.collectElements);
+      }
+      if (["combobox", "listbox"].includes(role)) {
+        options.visitedElements.add(element);
+        let selectedOptions;
+        if (tagName === "SELECT") {
+          selectedOptions = [...element.selectedOptions];
+          if (!selectedOptions.length && element.options.length)
+            selectedOptions.push(element.options[0]);
+        } else {
+          const listbox = role === "combobox" ? queryInAriaOwned(element, "*").find((e) => getAriaRole(e) === "listbox") : element;
+          selectedOptions = listbox ? queryInAriaOwned(listbox, '[aria-selected="true"]').filter((e) => getAriaRole(e) === "option") : [];
+        }
+        if (!selectedOptions.length && tagName === "INPUT") {
+          return compositeString(element.value, element, options.collectElements);
+        }
+        return joinCompositeString(selectedOptions.map((option) => getTextAlternativeInternal(option, childOptions)), " ", options.collectElements);
+      }
+      if (["progressbar", "scrollbar", "slider", "spinbutton", "meter"].includes(role)) {
+        options.visitedElements.add(element);
+        if (element.hasAttribute("aria-valuetext"))
+          return compositeString(element.getAttribute("aria-valuetext"), element, options.collectElements);
+        if (element.hasAttribute("aria-valuenow"))
+          return compositeString(element.getAttribute("aria-valuenow"), element, options.collectElements);
+        return compositeString(element.getAttribute("value"), element, options.collectElements);
+      }
+      if (["menu"].includes(role)) {
+        options.visitedElements.add(element);
+        return emptyCompositeString();
+      }
+    }
+  }
+  const ariaLabel = element.getAttribute("aria-label") || "";
+  if (trimFlatString(ariaLabel)) {
+    options.visitedElements.add(element);
+    return compositeString(ariaLabel, element, options.collectElements);
+  }
+  if (!["presentation", "none"].includes(role)) {
+    if (tagName === "INPUT" && ["button", "submit", "reset"].includes(element.type)) {
+      options.visitedElements.add(element);
+      const value = element.value || "";
+      if (trimFlatString(value))
+        return compositeString(value, element, options.collectElements);
+      if (element.type === "submit")
+        return compositeString("Submit", element, options.collectElements);
+      if (element.type === "reset")
+        return compositeString("Reset", element, options.collectElements);
+      const title = element.getAttribute("title") || "";
+      return compositeString(title, element, options.collectElements);
+    }
+    if (tagName === "INPUT" && element.type === "file") {
+      options.visitedElements.add(element);
+      const labels = element.labels || [];
+      if (labels.length && !options.embeddedInLabelledBy)
+        return getAccessibleNameFromAssociatedLabels(labels, options);
+      return compositeString("Choose File", element, options.collectElements);
+    }
+    if (tagName === "INPUT" && element.type === "image") {
+      options.visitedElements.add(element);
+      const labels = element.labels || [];
+      if (labels.length && !options.embeddedInLabelledBy)
+        return getAccessibleNameFromAssociatedLabels(labels, options);
+      const alt = element.getAttribute("alt") || "";
+      if (trimFlatString(alt))
+        return compositeString(alt, element, options.collectElements);
+      const title = element.getAttribute("title") || "";
+      if (trimFlatString(title))
+        return compositeString(title, element, options.collectElements);
+      return compositeString("Submit", element, options.collectElements);
+    }
+    if (!labelledBy && tagName === "BUTTON") {
+      options.visitedElements.add(element);
+      const labels = element.labels || [];
+      if (labels.length)
+        return getAccessibleNameFromAssociatedLabels(labels, options);
+    }
+    if (!labelledBy && tagName === "OUTPUT") {
+      options.visitedElements.add(element);
+      const labels = element.labels || [];
+      if (labels.length)
+        return getAccessibleNameFromAssociatedLabels(labels, options);
+      return compositeString(element.getAttribute("title") || "", element, options.collectElements);
+    }
+    if (!labelledBy && (tagName === "TEXTAREA" || tagName === "SELECT" || tagName === "INPUT" || tagName === "METER" || tagName === "PROGRESS")) {
+      options.visitedElements.add(element);
+      const labels = element.labels || [];
+      if (labels.length)
+        return getAccessibleNameFromAssociatedLabels(labels, options);
+      const usePlaceholder = tagName === "INPUT" && ["text", "password", "number", "search", "tel", "email", "url"].includes(element.type) || tagName === "TEXTAREA";
+      const placeholder = element.getAttribute("placeholder") || "";
+      const title = element.getAttribute("title") || "";
+      if (!usePlaceholder || title)
+        return compositeString(title, element, options.collectElements);
+      return compositeString(placeholder, element, options.collectElements);
+    }
+    if (!labelledBy && tagName === "FIELDSET") {
+      options.visitedElements.add(element);
+      for (let child = element.firstElementChild; child; child = child.nextElementSibling) {
+        if (elementSafeTagName(child) === "LEGEND") {
+          return getTextAlternativeInternal(child, {
+            ...childOptions,
+            embeddedInNativeTextAlternative: { element: child, hidden: isElementHiddenForAria(child) }
+          });
+        }
+      }
+      const title = element.getAttribute("title") || "";
+      return compositeString(title, element, options.collectElements);
+    }
+    if (!labelledBy && tagName === "FIGURE") {
+      options.visitedElements.add(element);
+      for (let child = element.firstElementChild; child; child = child.nextElementSibling) {
+        if (elementSafeTagName(child) === "FIGCAPTION") {
+          return getTextAlternativeInternal(child, {
+            ...childOptions,
+            embeddedInNativeTextAlternative: { element: child, hidden: isElementHiddenForAria(child) }
+          });
+        }
+      }
+      const title = element.getAttribute("title") || "";
+      return compositeString(title, element, options.collectElements);
+    }
+    if (tagName === "IMG") {
+      options.visitedElements.add(element);
+      const alt = element.getAttribute("alt") || "";
+      if (trimFlatString(alt))
+        return compositeString(alt, element, options.collectElements);
+      const title = element.getAttribute("title") || "";
+      return compositeString(title, element, options.collectElements);
+    }
+    if (tagName === "TABLE") {
+      options.visitedElements.add(element);
+      for (let child = element.firstElementChild; child; child = child.nextElementSibling) {
+        if (elementSafeTagName(child) === "CAPTION") {
+          return getTextAlternativeInternal(child, {
+            ...childOptions,
+            embeddedInNativeTextAlternative: { element: child, hidden: isElementHiddenForAria(child) }
+          });
+        }
+      }
+      const summary = element.getAttribute("summary") || "";
+      if (summary)
+        return compositeString(summary, element, options.collectElements);
+    }
+    if (tagName === "AREA") {
+      options.visitedElements.add(element);
+      const alt = element.getAttribute("alt") || "";
+      if (trimFlatString(alt))
+        return compositeString(alt, element, options.collectElements);
+      const title = element.getAttribute("title") || "";
+      return compositeString(title, element, options.collectElements);
+    }
+    if (tagName === "SVG" || element.ownerSVGElement) {
+      options.visitedElements.add(element);
+      for (let child = element.firstElementChild; child; child = child.nextElementSibling) {
+        if (elementSafeTagName(child) === "TITLE" && child.ownerSVGElement) {
+          return getTextAlternativeInternal(child, {
+            ...childOptions,
+            embeddedInLabelledBy: { element: child, hidden: isElementHiddenForAria(child) }
+          });
+        }
+      }
+    }
+    if (element.ownerSVGElement && tagName === "A") {
+      const title = element.getAttribute("xlink:title") || "";
+      if (trimFlatString(title)) {
+        options.visitedElements.add(element);
+        return compositeString(title, element, options.collectElements);
+      }
+    }
+  }
+  const shouldNameFromContentForSummary = tagName === "SUMMARY" && !["presentation", "none"].includes(role);
+  if (allowsNameFromContent(role, options.embeddedInTargetElement === "descendant") || shouldNameFromContentForSummary || !!options.embeddedInLabelledBy || !!options.embeddedInDescribedBy || !!options.embeddedInLabel || !!options.embeddedInNativeTextAlternative) {
+    options.visitedElements.add(element);
+    const accessibleName = innerAccumulatedElementText(element, childOptions);
+    const maybeTrimmedAccessibleName = options.embeddedInTargetElement === "self" ? trimFlatString(accessibleName.text) : accessibleName.text;
+    if (maybeTrimmedAccessibleName) {
+      if (options.outDerivedFromContent && insideTargetElement(options) && trimFlatString(accessibleName.text))
+        options.outDerivedFromContent.value = true;
+      (_e = accessibleName.elements) == null ? void 0 : _e.add(element);
+      return accessibleName;
+    }
+  }
+  if (!["presentation", "none"].includes(role) || tagName === "IFRAME" || tagName === "FRAME") {
+    options.visitedElements.add(element);
+    const title = element.getAttribute("title") || "";
+    if (trimFlatString(title))
+      return compositeString(title, element, options.collectElements);
+  }
+  options.visitedElements.add(element);
+  return emptyCompositeString();
+}
+function innerAccumulatedElementText(element, options) {
+  const tokens = [];
+  const elements = options.collectElements ? /* @__PURE__ */ new Set() : void 0;
+  const visit = (node, skipSlotted) => {
+    var _a;
+    if (skipSlotted && node.assignedSlot)
+      return;
+    if (node.nodeType === 1) {
+      const display = ((_a = getElementComputedStyle(node)) == null ? void 0 : _a.display) || "inline";
+      const childComposite = getTextAlternativeInternal(node, options);
+      let token = childComposite.text;
+      for (const contributor of childComposite.elements || [])
+        elements == null ? void 0 : elements.add(contributor);
+      if (display !== "inline" || node.nodeName === "BR")
+        token = " " + token + " ";
+      tokens.push(token);
+    } else if (node.nodeType === 3) {
+      tokens.push(node.textContent || "");
+    }
+  };
+  tokens.push(getCSSContent(element, "::before") || "");
+  const content = getCSSContent(element);
+  if (content !== void 0) {
+    tokens.push(content);
+  } else {
+    const assignedNodes = element.nodeName === "SLOT" ? element.assignedNodes() : [];
+    if (assignedNodes.length) {
+      for (const child of assignedNodes)
+        visit(child, false);
+    } else {
+      for (let child = element.firstChild; child; child = child.nextSibling)
+        visit(child, true);
+      if (element.shadowRoot) {
+        for (let child = element.shadowRoot.firstChild; child; child = child.nextSibling)
+          visit(child, true);
+      }
+      for (const owned of getIdRefs(element, element.getAttribute("aria-owns")))
+        visit(owned, true);
+    }
+  }
+  tokens.push(getCSSContent(element, "::after") || "");
+  return { text: tokens.join(""), elements };
+}
 function isNativelyDisabled2(element) {
   const isNativeFormControl = ["BUTTON", "INPUT", "SELECT", "TEXTAREA", "OPTION", "OPTGROUP"].includes(elementSafeTagName(element));
   return isNativeFormControl && (element.hasAttribute("disabled") || belongsToDisabledOptGroup2(element) || belongsToDisabledFieldSet2(element));
@@ -548,6 +1958,24 @@ function belongsToDisabledFieldSet2(element) {
   const legendElement = fieldSetElement.querySelector(":scope > LEGEND");
   return !legendElement || !legendElement.contains(element);
 }
+function getAccessibleNameFromAssociatedLabels(labels, options) {
+  return joinCompositeString([...labels].map((label) => getTextAlternativeInternal(label, {
+    ...options,
+    embeddedInLabel: { element: label, hidden: isElementHiddenForAria(label) },
+    embeddedInNativeTextAlternative: void 0,
+    embeddedInLabelledBy: void 0,
+    embeddedInDescribedBy: void 0,
+    embeddedInTargetElement: void 0
+  })).filter((accessibleName) => !!accessibleName.text), " ", options.collectElements);
+}
+var cacheAccessibleName;
+var cacheAccessibleNameHidden;
+var cacheAccessibleDescription;
+var cacheAccessibleDescriptionHidden;
+var cacheIsHidden;
+var cachePseudoContent;
+var cachePseudoContentBefore;
+var cachePseudoContentAfter;
 var cacheAriaRole;
 var inputTypeToRole = {
   "button": "button",
@@ -559,6 +1987,24 @@ var inputTypeToRole = {
   "reset": "button",
   "submit": "button"
 };
+function emptyCompositeString() {
+  return { text: "" };
+}
+function compositeString(text, element, collectElements) {
+  const elements = text && collectElements ? /* @__PURE__ */ new Set([element]) : void 0;
+  return { text: text || "", elements };
+}
+function joinCompositeString(parts, separator, collectElements) {
+  let elements;
+  if (collectElements) {
+    elements = /* @__PURE__ */ new Set();
+    for (const part of parts) {
+      for (const element of part.elements || [])
+        elements.add(element);
+    }
+  }
+  return { text: parts.map((part) => part.text).join(separator), elements };
+}
 
 // src/refactInjected.ts
 var injectedInstanceName = "__refact_injected__";
@@ -780,6 +2226,14 @@ var RefactInjected = class {
     var _a;
     this.ensureConnected(element);
     return (_a = getAriaRole(element)) != null ? _a : "generic";
+  }
+  getAccessibleName(element, includeHidden = false) {
+    this.ensureConnected(element);
+    return getElementAccessibleName(element, includeHidden).text;
+  }
+  getAccessibleDescription(element) {
+    this.ensureConnected(element);
+    return getElementAccessibleDescription(element, false).text;
   }
 };
 function bootstrapRefactInjected(global, builtins) {
