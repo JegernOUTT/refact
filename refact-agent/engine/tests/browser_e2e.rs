@@ -13,12 +13,23 @@ use headless_chrome::Tab;
 use headless_chrome::protocol::cdp::{Page, Runtime};
 use hyper::body::Bytes;
 use refact_core::image_policy::ImagePolicy;
+use refact_lsp::call_validation::ChatContent;
+use refact_lsp::chat::browser_context::maybe_insert_browser_context;
+use refact_lsp::integrations::browser_controller::execute_steps;
 use refact_lsp::integrations::browser_controller::execute_steps as execute_steps_with_policy;
 use refact_lsp::integrations::browser_models::{BrowserLocator, BrowserStep};
 use refact_lsp::refact_browser::{BrowserRuntime, HandleError, UTILITY_WORLD_NAME};
 use serde::Deserialize;
 use serde_json::json;
+use structopt::StructOpt;
 use tempfile::{tempdir, TempDir};
+
+fn execute_fixture_steps(
+    tab: &Tab,
+    steps: &[BrowserStep],
+) -> refact_lsp::integrations::browser_models::ExecutionReport {
+    execute_steps(tab, steps, &ImagePolicy::browser_capture())
+}
 
 const FIXTURE_PAGES: &[&str] = &[
     "delayed-button.html",
@@ -246,7 +257,7 @@ impl BrowserCase {
         let mut runtime = launch_browser(&profile);
         let tab = runtime.browser.new_tab().unwrap();
         runtime.set_active_tab_target_id(tab.get_target_id().to_string());
-        let report = execute_steps(
+        let report = execute_fixture_steps(
             &tab,
             &[BrowserStep::Navigate {
                 url: server.url(page),
@@ -262,7 +273,7 @@ impl BrowserCase {
     }
 
     fn navigate(&self, page: &str) {
-        let report = execute_steps(
+        let report = execute_fixture_steps(
             &self.tab,
             &[BrowserStep::Navigate {
                 url: self.server.url(page),
@@ -333,6 +344,50 @@ async fn fixture_server_serves_every_page_in_browser() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn navigated_fixture_context_contains_screenshot_image() {
+    let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
+        return;
+    };
+    const CHAT_ID: &str = "browser-context-screenshot-e2e";
+    let cache_dir = tempdir().unwrap();
+    let config_dir = tempdir().unwrap();
+    let command_line = refact_lsp::global_context::CommandLine::from_iter_safe([
+        "browser-e2e",
+        "--http-port",
+        "0",
+        "--lsp-port",
+        "0",
+        "--no-scheduler",
+    ])
+    .unwrap();
+    let (gcx, _) = refact_lsp::global_context::create_global_context(
+        cache_dir.path().to_path_buf(),
+        config_dir.path().to_path_buf(),
+        command_line,
+    )
+    .await;
+    let app = refact_lsp::app_state::AppState::from_gcx(gcx.clone()).await;
+    case.runtime.reattach(CHAT_ID);
+    refact_lsp::integrations::browser_runtime::register_browser_runtime(app, case.runtime).await;
+
+    let (context, oversize) = maybe_insert_browser_context(gcx, CHAT_ID, true, true)
+        .await
+        .expect("navigated page must produce browser context");
+
+    assert!(!oversize);
+    assert_eq!(context.event.extra["event"]["payload"]["page_changed"], true);
+    let ChatContent::Multimodal(elements) = context
+        .screenshot
+        .expect("enabled page change must attach a screenshot")
+        .content
+    else {
+        panic!("expected screenshot context");
+    };
+    assert!(elements.iter().any(|element| element.is_image()));
+}
+
+#[tokio::test]
+#[ignore]
 async fn world_utility_survives_hostile_globals() {
     let Some(mut case) = BrowserCase::start("hostile-globals.html").await else {
         return;
@@ -426,7 +481,7 @@ async fn click_delayed_button_without_wait_seconds() {
     let Some(case) = BrowserCase::start("delayed-button.html").await else {
         return;
     };
-    let report = execute_steps(
+    let report = execute_fixture_steps(
         &case.tab,
         &[
             BrowserStep::Click {
@@ -447,7 +502,7 @@ async fn click_obscured_waits_for_overlay() {
     let Some(case) = BrowserCase::start("overlay.html").await else {
         return;
     };
-    let report = execute_steps(
+    let report = execute_fixture_steps(
         &case.tab,
         &[
             BrowserStep::Click {
@@ -471,7 +526,7 @@ async fn fill_controlled_input_react() {
     let Some(case) = BrowserCase::start("controlled-input.html").await else {
         return;
     };
-    let report = execute_steps(
+    let report = execute_fixture_steps(
         &case.tab,
         &[
             BrowserStep::Fill {
@@ -496,7 +551,7 @@ async fn hover_reveals_css_menu() {
     let Some(case) = BrowserCase::start("hover-menu.html").await else {
         return;
     };
-    let report = execute_steps(
+    let report = execute_fixture_steps(
         &case.tab,
         &[
             BrowserStep::Hover {
@@ -517,7 +572,7 @@ async fn strict_multi_click_errors() {
     let Some(case) = BrowserCase::start("strict-multi.html").await else {
         return;
     };
-    let report = execute_steps(
+    let report = execute_fixture_steps(
         &case.tab,
         &[BrowserStep::Click {
             locator: BrowserLocator::css(".duplicate"),
@@ -587,7 +642,7 @@ async fn moving_target_waits_until_stable() {
     let Some(case) = BrowserCase::start("moving-target.html").await else {
         return;
     };
-    let report = execute_steps(
+    let report = execute_fixture_steps(
         &case.tab,
         &[
             BrowserStep::WaitForElementStable {
@@ -610,7 +665,7 @@ async fn contenteditable_fill_updates_output() {
     let Some(case) = BrowserCase::start("contenteditable.html").await else {
         return;
     };
-    let report = execute_steps(
+    let report = execute_fixture_steps(
         &case.tab,
         &[
             BrowserStep::Fill {
@@ -632,7 +687,7 @@ async fn fetch_after_click_renders_slow_echo() {
     let Some(case) = BrowserCase::start("fetch-after-click.html").await else {
         return;
     };
-    let report = execute_steps(
+    let report = execute_fixture_steps(
         &case.tab,
         &[
             BrowserStep::Click {
@@ -656,7 +711,7 @@ async fn popup_click_opens_second_tab() {
         return;
     };
     let before = case.runtime.browser.get_tabs().lock().unwrap().len();
-    let report = execute_steps(
+    let report = execute_fixture_steps(
         &case.tab,
         &[BrowserStep::Click {
             locator: BrowserLocator::css("#open"),
@@ -674,7 +729,7 @@ async fn iframe_form_submit_reaches_same_origin_frame() {
     let Some(case) = BrowserCase::start("iframe-form.html").await else {
         return;
     };
-    let report = execute_steps(
+    let report = execute_fixture_steps(
         &case.tab,
         &[
             BrowserStep::Fill {
@@ -701,7 +756,7 @@ async fn nested_shadow_dom_button_and_input_are_actionable() {
     let Some(case) = BrowserCase::start("shadow-dom.html").await else {
         return;
     };
-    let report = execute_steps(
+    let report = execute_fixture_steps(
         &case.tab,
         &[
             BrowserStep::Fill {
@@ -731,7 +786,7 @@ async fn dialog_fixture_records_confirmed_result() {
     case.tab
         .evaluate("window.confirm = () => true", false)
         .unwrap();
-    let report = execute_steps(
+    let report = execute_fixture_steps(
         &case.tab,
         &[
             BrowserStep::Click {

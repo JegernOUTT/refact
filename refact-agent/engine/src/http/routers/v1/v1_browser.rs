@@ -34,11 +34,8 @@ async fn image_policy_for_chat(app: &AppState, chat_id: &str) -> ImagePolicy {
         };
         model
     };
-    let Ok(caps) = crate::global_context::try_load_caps_quickly_if_not_present(
-        app.gcx.clone(),
-        0,
-    )
-    .await
+    let Ok(caps) =
+        crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0).await
     else {
         return ImagePolicy::default();
     };
@@ -559,7 +556,8 @@ pub async fn handle_browser_context_commit(
         })?;
 
     let mut rt = runtime_arc.lock().await;
-    rt.commit_cursors();
+    let url = rt.get_active_tab().map(|tab| tab.get_url());
+    rt.commit_cursors(url.as_deref());
 
     Ok(json_response(
         StatusCode::OK,
@@ -1738,13 +1736,10 @@ pub async fn handle_browser_action(
             )
         })?;
     let image_policy = image_policy_for_chat(&app, &post.chat_id).await;
-    let report = browser_controller::execute_request_with_runtime(
-        runtime_arc,
-        post.request,
-        &image_policy,
-    )
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+    let report =
+        browser_controller::execute_request_with_runtime(runtime_arc, post.request, &image_policy)
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
 
     let report_json = serde_json::to_value(&report).unwrap_or_default();
     Ok(json_response(StatusCode::OK, report_json))

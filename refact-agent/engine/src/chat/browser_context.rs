@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
+use base64::Engine;
+use headless_chrome::Tab;
+use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 use serde_json::json;
 
-use crate::call_validation::ChatMessage;
+use crate::call_validation::{ChatContent, ChatMessage, MultimodalElement};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::global_context::GlobalContext;
 use crate::integrations::browser_types::{
@@ -20,6 +23,21 @@ pub struct BrowserContextSnapshot {
     pub mutations: Vec<MutationSummaryEntry>,
     pub total_bytes: usize,
     pub page_changed: bool,
+}
+
+pub struct BrowserContextMessages {
+    pub event: ChatMessage,
+    pub screenshot: Option<ChatMessage>,
+}
+
+type ScreenshotCapture = dyn Fn(&Tab) -> Result<(String, String), String> + Send + Sync;
+
+fn should_emit_context(snapshot: &BrowserContextSnapshot) -> bool {
+    snapshot.page_changed
+        || !snapshot.actions.is_empty()
+        || !snapshot.console.is_empty()
+        || !snapshot.network.is_empty()
+        || !snapshot.mutations.is_empty()
 }
 
 pub fn format_browser_context(snapshot: &BrowserContextSnapshot) -> String {
@@ -260,13 +278,9 @@ pub async fn get_browser_context_for_chat(
 
     let total_bytes = compute_context_size(&actions, &console, &network, &mutations);
 
-    let page_changed = rt.page_changed();
+    let page_changed = rt.page_changed(&url);
 
-    if actions.is_empty() && console.is_empty() && network.is_empty() && mutations.is_empty() {
-        return None;
-    }
-
-    Some(BrowserContextSnapshot {
+    let snapshot = BrowserContextSnapshot {
         url,
         title,
         actions,
@@ -275,7 +289,12 @@ pub async fn get_browser_context_for_chat(
         mutations,
         total_bytes,
         page_changed,
-    })
+    };
+    if !should_emit_context(&snapshot) {
+        return None;
+    }
+
+    Some(snapshot)
 }
 
 pub async fn commit_browser_cursors(gcx: Arc<GlobalContext>, chat_id: &str) {
@@ -286,8 +305,93 @@ pub async fn commit_browser_cursors(gcx: Arc<GlobalContext>, chat_id: &str) {
     .await
     {
         let mut rt = runtime_arc.lock().await;
-        rt.commit_cursors();
+        let url = rt.get_active_tab().map(|tab| tab.get_url());
+        rt.commit_cursors(url.as_deref());
     }
+}
+
+async fn image_policy_for_chat(gcx: Arc<GlobalContext>, chat_id: &str) -> ImagePolicy {
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let model_id = {
+        let sessions = app.chat.sessions.read().await;
+        let session = sessions.get(chat_id).cloned();
+        drop(sessions);
+        let Some(session) = session else {
+            return ImagePolicy::browser_capture();
+        };
+        let model_id = session.lock().await.thread.model.clone();
+        model_id
+    };
+    let Ok(caps) = crate::global_context::try_load_caps_quickly_if_not_present(gcx, 0).await else {
+        return ImagePolicy::browser_capture();
+    };
+    crate::caps::resolve_chat_model(caps, &model_id)
+        .map(|model| ImagePolicy::for_model(&model.base).with_format(ImageFormat::Webp, Some(80)))
+        .unwrap_or_else(|_| ImagePolicy::browser_capture())
+}
+
+async fn capture_browser_screenshot_with(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    attach_screenshot: bool,
+    page_changed: bool,
+    capture: &ScreenshotCapture,
+) -> Option<ChatMessage> {
+    if !attach_screenshot || !page_changed {
+        return None;
+    }
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let (_, runtime_arc) =
+        crate::integrations::browser_runtime::find_runtime_by_chat_id(app, chat_id).await?;
+    let policy = image_policy_for_chat(gcx, chat_id).await;
+    let rt = runtime_arc.lock().await;
+    let tab = rt.get_active_tab()?;
+    capture_screenshot_message_with(true, true, &policy, &|| capture(&tab))
+}
+
+pub async fn capture_browser_screenshot(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+) -> Option<ChatMessage> {
+    capture_browser_screenshot_with(
+        gcx,
+        chat_id,
+        true,
+        true,
+        &crate::integrations::browser_controller::capture_viewport_screenshot_png,
+    )
+    .await
+}
+
+fn screenshot_message(
+    capture: (String, String),
+    policy: &ImagePolicy,
+) -> Result<ChatMessage, String> {
+    let (encoded, mime) = capture;
+    let raw = base64::prelude::BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("Base64 decode failed: {error}"))?;
+    let (resized, resized_mime) = resize_to_policy(&raw, &mime, policy)?;
+    Ok(ChatMessage {
+        role: "user".to_string(),
+        content: ChatContent::Multimodal(vec![MultimodalElement::new(
+            resized_mime,
+            base64::prelude::BASE64_STANDARD.encode(resized),
+        )?]),
+        ..Default::default()
+    })
+}
+
+fn capture_screenshot_message_with(
+    attach_screenshot: bool,
+    page_changed: bool,
+    policy: &ImagePolicy,
+    capture: &dyn Fn() -> Result<(String, String), String>,
+) -> Option<ChatMessage> {
+    if !attach_screenshot || !page_changed {
+        return None;
+    }
+    screenshot_message(capture().ok()?, policy).ok()
 }
 
 pub async fn maybe_insert_browser_context(
@@ -295,7 +399,7 @@ pub async fn maybe_insert_browser_context(
     chat_id: &str,
     has_browser_meta: bool,
     attach_screenshot_on_send: bool,
-) -> Option<(ChatMessage, bool)> {
+) -> Option<(BrowserContextMessages, bool)> {
     if !has_browser_meta {
         return None;
     }
@@ -303,18 +407,21 @@ pub async fn maybe_insert_browser_context(
     let snapshot = get_browser_context_for_chat(gcx.clone(), chat_id).await?;
 
     if snapshot.total_bytes > OVERSIZE_THRESHOLD {
-        return Some((make_context_message(&snapshot, false), true));
+        return Some((make_context_messages(&snapshot, None), true));
     }
+
+    let screenshot = capture_browser_screenshot_with(
+        gcx.clone(),
+        chat_id,
+        attach_screenshot_on_send,
+        snapshot.page_changed,
+        &crate::integrations::browser_controller::capture_viewport_screenshot_png,
+    )
+    .await;
 
     commit_browser_cursors(gcx, chat_id).await;
 
-    Some((
-        make_context_message(
-            &snapshot,
-            attach_screenshot_on_send && snapshot.page_changed,
-        ),
-        false,
-    ))
+    Some((make_context_messages(&snapshot, screenshot), false))
 }
 
 pub fn apply_decision_to_snapshot(
@@ -362,32 +469,60 @@ pub fn apply_decision_to_snapshot(
     );
 }
 
-pub fn make_context_message(
+pub fn make_context_messages(
     snapshot: &BrowserContextSnapshot,
-    _attach_screenshot: bool,
-) -> ChatMessage {
+    screenshot: Option<ChatMessage>,
+) -> BrowserContextMessages {
     let text = format_browser_context(snapshot);
-    event(
-        EventSubkind::SystemNotice,
-        "chat.browser_context",
-        json!({
-            "url": snapshot.url,
-            "title": snapshot.title,
-            "actions": snapshot.actions.len(),
-            "console": snapshot.console.len(),
-            "network": snapshot.network.len(),
-            "mutations": snapshot.mutations.len(),
-            "total_bytes": snapshot.total_bytes,
-            "page_changed": snapshot.page_changed,
-        }),
-        text,
-    )
+    BrowserContextMessages {
+        event: event(
+            EventSubkind::SystemNotice,
+            "chat.browser_context",
+            json!({
+                "url": snapshot.url,
+                "title": snapshot.title,
+                "actions": snapshot.actions.len(),
+                "console": snapshot.console.len(),
+                "network": snapshot.network.len(),
+                "mutations": snapshot.mutations.len(),
+                "total_bytes": snapshot.total_bytes,
+                "page_changed": snapshot.page_changed,
+            }),
+            text,
+        ),
+        screenshot,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call_validation::ChatContent;
+    use refact_core::image_policy::ImageFormat;
+
+    fn empty_snapshot(page_changed: bool) -> BrowserContextSnapshot {
+        BrowserContextSnapshot {
+            url: "https://example.com".to_string(),
+            title: "Example".to_string(),
+            actions: vec![],
+            console: vec![],
+            network: vec![],
+            mutations: vec![],
+            total_bytes: 8,
+            page_changed,
+        }
+    }
+
+    fn tiny_png() -> Vec<u8> {
+        let image = image::DynamicImage::new_rgba8(2, 2);
+        let mut bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
 
     #[test]
     fn test_format_browser_context_full() {
@@ -641,7 +776,9 @@ mod tests {
             page_changed: false,
         };
 
-        let msg = make_context_message(&snapshot, false);
+        let messages = make_context_messages(&snapshot, None);
+        let msg = messages.event;
+        assert!(messages.screenshot.is_none());
         assert_eq!(msg.role, "event");
         let event = msg.extra.get("event").unwrap();
         assert_eq!(event["subkind"], "system_notice");
@@ -653,6 +790,190 @@ mod tests {
             }
             _ => panic!("Expected SimpleText"),
         }
+    }
+
+    #[test]
+    fn navigation_only_snapshot_produces_context_message() {
+        let snapshot = empty_snapshot(true);
+        assert!(should_emit_context(&snapshot));
+        let messages = make_context_messages(&snapshot, None);
+
+        assert_eq!(messages.event.role, "event");
+        assert_eq!(
+            messages.event.extra["event"]["payload"]["page_changed"],
+            true
+        );
+        assert!(messages
+            .event
+            .content
+            .content_text_only()
+            .contains("URL: https://example.com"));
+    }
+
+    #[test]
+    fn toggle_off_does_not_capture_and_produces_text_only_context() {
+        let calls = std::cell::Cell::new(0);
+        let screenshot =
+            capture_screenshot_message_with(false, true, &ImagePolicy::browser_capture(), &|| {
+                calls.set(calls.get() + 1);
+                Ok((String::new(), "image/png".to_string()))
+            });
+        let messages = make_context_messages(&empty_snapshot(true), None);
+
+        assert_eq!(calls.get(), 0);
+        assert!(screenshot.is_none());
+        assert!(matches!(messages.event.content, ChatContent::SimpleText(_)));
+        assert!(messages.screenshot.is_none());
+    }
+
+    #[test]
+    fn unchanged_page_does_not_capture_screenshot() {
+        let calls = std::cell::Cell::new(0);
+
+        let screenshot =
+            capture_screenshot_message_with(true, false, &ImagePolicy::browser_capture(), &|| {
+                calls.set(calls.get() + 1);
+                Ok((String::new(), "image/png".to_string()))
+            });
+
+        assert_eq!(calls.get(), 0);
+        assert!(screenshot.is_none());
+    }
+
+    #[test]
+    fn enabled_page_change_uses_mock_capture() {
+        let calls = std::cell::Cell::new(0);
+        let encoded = base64::prelude::BASE64_STANDARD.encode(tiny_png());
+
+        let screenshot = capture_screenshot_message_with(
+            true,
+            true,
+            &ImagePolicy::default().with_format(ImageFormat::Png, None),
+            &|| {
+                calls.set(calls.get() + 1);
+                Ok((encoded.clone(), "image/png".to_string()))
+            },
+        );
+
+        assert_eq!(calls.get(), 1);
+        assert!(
+            screenshot.is_some_and(|message| matches!(message.content, ChatContent::Multimodal(_)))
+        );
+    }
+
+    #[test]
+    fn unchanged_empty_snapshot_is_suppressed() {
+        assert!(!should_emit_context(&empty_snapshot(false)));
+    }
+
+    #[test]
+    fn screenshot_message_resizes_and_uses_capture_format() {
+        let encoded = base64::prelude::BASE64_STANDARD.encode(tiny_png());
+        let policy = ImagePolicy::default().with_format(ImageFormat::Webp, Some(80));
+
+        let message = screenshot_message((encoded, "image/png".to_string()), &policy).unwrap();
+
+        assert_eq!(message.role, "user");
+        let ChatContent::Multimodal(elements) = message.content else {
+            panic!("expected multimodal screenshot");
+        };
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].m_type, "image/webp");
+        let bytes = base64::prelude::BASE64_STANDARD
+            .decode(&elements[0].m_content)
+            .unwrap();
+        assert!(image::load_from_memory(&bytes).is_ok());
+    }
+
+    #[test]
+    fn screenshot_survives_provider_bound_linearize() {
+        use refact_llm::adapter::{AdapterSettings, LlmWireAdapter};
+        use refact_llm::adapters::openai_chat::OpenAiChatAdapter;
+        use refact_llm::canonical::LlmRequest;
+
+        let encoded = base64::prelude::BASE64_STANDARD.encode(tiny_png());
+        let screenshot = screenshot_message(
+            (encoded, "image/png".to_string()),
+            &ImagePolicy::default().with_format(ImageFormat::Png, None),
+        )
+        .unwrap();
+        let context = make_context_messages(&empty_snapshot(true), Some(screenshot));
+        let linearized = crate::chat::linearize::apply_summarization_linearize(vec![
+            context.event,
+            context.screenshot.unwrap(),
+            ChatMessage::new("user".to_string(), "inspect this page".to_string()),
+        ]);
+        let request = LlmRequest::new("gpt-4.1".to_string(), linearized);
+        let settings = AdapterSettings {
+            api_key: String::new(),
+            auth_token: String::new(),
+            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            extra_headers: Default::default(),
+            model_name: "gpt-4.1".to_string(),
+            supports_tools: true,
+            supports_reasoning: false,
+            reasoning_type: None,
+            supports_temperature: true,
+            supports_max_completion_tokens: false,
+            eof_is_done: false,
+            supports_web_search: false,
+            supports_cache_control: false,
+        };
+
+        let body = OpenAiChatAdapter
+            .build_http(&request, &settings)
+            .unwrap()
+            .body;
+        let serialized = body["messages"].to_string();
+
+        assert!(serialized.contains("<event subkind=\\\"system_notice\\\""));
+        assert!(serialized.contains("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn screenshot_survives_anthropic_wire_lowering() {
+        use refact_llm::adapter::{AdapterSettings, LlmWireAdapter};
+        use refact_llm::adapters::anthropic::AnthropicAdapter;
+        use refact_llm::canonical::LlmRequest;
+
+        let encoded = base64::prelude::BASE64_STANDARD.encode(tiny_png());
+        let screenshot = screenshot_message(
+            (encoded, "image/png".to_string()),
+            &ImagePolicy::default().with_format(ImageFormat::Png, None),
+        )
+        .unwrap();
+        let context = make_context_messages(&empty_snapshot(true), Some(screenshot));
+        let linearized = crate::chat::linearize::apply_summarization_linearize(vec![
+            context.event,
+            context.screenshot.unwrap(),
+            ChatMessage::new("user".to_string(), "inspect this page".to_string()),
+        ]);
+        let request = LlmRequest::new("claude-sonnet-4-5".to_string(), linearized);
+        let settings = AdapterSettings {
+            api_key: String::new(),
+            auth_token: String::new(),
+            endpoint: "https://api.anthropic.com/v1/messages".to_string(),
+            extra_headers: Default::default(),
+            model_name: "claude-sonnet-4-5".to_string(),
+            supports_tools: true,
+            supports_reasoning: false,
+            reasoning_type: None,
+            supports_temperature: true,
+            supports_max_completion_tokens: false,
+            eof_is_done: false,
+            supports_web_search: false,
+            supports_cache_control: false,
+        };
+
+        let body = AnthropicAdapter
+            .build_http(&request, &settings)
+            .unwrap()
+            .body;
+        let serialized = body["messages"].to_string();
+
+        assert!(serialized.contains("<event subkind=\\\"system_notice\\\""));
+        assert!(serialized.contains("\"type\":\"image\""));
+        assert!(serialized.contains("\"media_type\":\"image/png\""));
     }
 
     #[test]

@@ -125,7 +125,7 @@ pub struct BrowserBuffers {
     pub last_timeline_console_cursor: usize,
     pub last_timeline_network_cursor: usize,
     pub last_frame_hash: Option<u64>,
-    pub last_send_frame_hash: Option<u64>,
+    pub last_send_url: Option<String>,
     pub last_frame_data: Option<Vec<u8>>,
     pub last_frame_time: Option<Instant>,
     pub mask_passwords: bool,
@@ -151,7 +151,7 @@ impl BrowserBuffers {
             last_timeline_console_cursor: 0,
             last_timeline_network_cursor: 0,
             last_frame_hash: None,
-            last_send_frame_hash: None,
+            last_send_url: None,
             last_frame_data: None,
             last_frame_time: None,
             mask_passwords,
@@ -302,16 +302,16 @@ impl BrowserBuffers {
         (new_actions, new_console, new_network)
     }
 
-    pub fn commit_cursors(&mut self) {
+    pub fn commit_cursors(&mut self, url: Option<&str>) {
         self.flush_action_buffer();
         self.flush_console_buffer();
         self.flush_network_buffer();
         self.flush_mutation_summary();
-        self.last_send_frame_hash = self.last_frame_hash;
+        self.last_send_url = url.map(str::to_string);
     }
 
-    pub fn page_changed(&self) -> bool {
-        self.last_frame_hash != self.last_send_frame_hash
+    pub fn page_changed(&self, url: &str) -> bool {
+        self.last_send_url.as_deref() != Some(url)
     }
 
     pub fn is_frame_rate_limited(&self) -> bool {
@@ -1208,35 +1208,15 @@ mod tests {
     }
 
     #[test]
-    fn test_page_changed_true_after_frame_update() {
+    fn page_changed_tracks_first_same_and_new_urls() {
         let mut buf = make_test_buffers();
-        buf.update_frame_state(42, vec![1, 2, 3]);
-        assert!(buf.page_changed());
-    }
 
-    #[test]
-    fn test_page_changed_false_after_commit() {
-        let mut buf = make_test_buffers();
-        buf.update_frame_state(42, vec![1, 2, 3]);
-        assert!(buf.page_changed());
-        buf.commit_cursors();
-        assert!(!buf.page_changed());
-    }
-
-    #[test]
-    fn test_page_changed_true_after_new_frame_post_commit() {
-        let mut buf = make_test_buffers();
-        buf.update_frame_state(42, vec![1, 2, 3]);
-        buf.commit_cursors();
-        assert!(!buf.page_changed());
-        buf.update_frame_state(99, vec![4, 5, 6]);
-        assert!(buf.page_changed());
-    }
-
-    #[test]
-    fn test_page_changed_false_when_no_frames() {
-        let buf = make_test_buffers();
-        assert!(!buf.page_changed());
+        assert!(buf.page_changed("https://example.com/first"));
+        buf.commit_cursors(Some("https://example.com/first"));
+        assert!(!buf.page_changed("https://example.com/first"));
+        assert!(buf.page_changed("https://example.com/second"));
+        buf.commit_cursors(Some("https://example.com/second"));
+        assert!(!buf.page_changed("https://example.com/second"));
     }
 
     #[test]

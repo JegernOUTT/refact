@@ -39,6 +39,7 @@ pub use refact_self_update;
 pub use refact_tasks;
 pub use refact_chat_api;
 pub use refact_chat_history;
+pub use refact_core;
 pub use refact_ext;
 pub use refact_yaml_configs;
 pub use refact_worktrees;

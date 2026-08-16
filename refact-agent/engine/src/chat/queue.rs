@@ -1434,8 +1434,11 @@ pub async fn process_command_queue(
                 {
                     let mut session = session_arc.lock().await;
 
-                    if let Some((ctx_msg, _)) = browser_ctx_result {
-                        session.add_message(ctx_msg);
+                    if let Some((ctx_messages, _)) = browser_ctx_result {
+                        session.add_message(ctx_messages.event);
+                        if let Some(screenshot) = ctx_messages.screenshot {
+                            session.add_message(screenshot);
+                        }
                     }
 
                     // Set compaction anchor for slash-command skill activation before any skill
@@ -1935,6 +1938,16 @@ pub async fn process_command_queue(
                     &browser_chat_id,
                 )
                 .await;
+                let screenshot = if include_screenshot
+                    && snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.page_changed)
+                {
+                    browser_context::capture_browser_screenshot(app.gcx.clone(), &browser_chat_id)
+                        .await
+                } else {
+                    None
+                };
 
                 {
                     let mut session = session_arc.lock().await;
@@ -1950,9 +1963,12 @@ pub async fn process_command_queue(
                             last_n_console,
                             last_n_network,
                         );
-                        let ctx_msg =
-                            browser_context::make_context_message(&snap, include_screenshot);
-                        session.add_message(ctx_msg);
+                        let ctx_messages =
+                            browser_context::make_context_messages(&snap, screenshot);
+                        session.add_message(ctx_messages.event);
+                        if let Some(screenshot) = ctx_messages.screenshot {
+                            session.add_message(screenshot);
+                        }
                     }
 
                     if pending.skill_activation_name.is_some()

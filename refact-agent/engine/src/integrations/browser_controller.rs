@@ -1562,23 +1562,51 @@ fn step_accessibility_snapshot(tab: &Tab, idx: usize) -> StepResult {
     }
 }
 
-fn step_screenshot(tab: &Tab, idx: usize, policy: &ImagePolicy) -> StepResult {
+pub fn capture_viewport_screenshot(
+    tab: &Tab,
+    policy: &ImagePolicy,
+) -> Result<(String, String), String> {
     let (format, mime, quality) = capture_options(policy);
-    match tab.call_method(Page::CaptureScreenshot {
-        format: Some(format),
-        clip: None,
-        quality: quality.map(|q| q as u32),
-        from_surface: Some(true),
-        capture_beyond_viewport: Some(false),
-        optimize_for_speed: None,
-    }) {
-        Ok(result) => StepResult::success(idx, "Screenshot captured".to_string()).with_data(
+    capture_viewport_screenshot_as(tab, format, mime, quality)
+}
+
+fn capture_viewport_screenshot_as(
+    tab: &Tab,
+    format: Page::CaptureScreenshotFormatOption,
+    mime: &'static str,
+    quality: Option<u8>,
+) -> Result<(String, String), String> {
+    let result = tab
+        .call_method(Page::CaptureScreenshot {
+            format: Some(format),
+            clip: None,
+            quality: quality.map(|q| q as u32),
+            from_surface: Some(true),
+            capture_beyond_viewport: Some(false),
+            optimize_for_speed: None,
+        })
+        .map_err(|error| error.to_string())?;
+    Ok((result.data, mime.to_string()))
+}
+
+pub fn capture_viewport_screenshot_png(tab: &Tab) -> Result<(String, String), String> {
+    capture_viewport_screenshot_as(
+        tab,
+        Page::CaptureScreenshotFormatOption::Png,
+        "image/png",
+        None,
+    )
+}
+
+fn step_screenshot(tab: &Tab, idx: usize, policy: &ImagePolicy) -> StepResult {
+    match capture_viewport_screenshot(tab, policy) {
+        Ok((data, mime)) => StepResult::success(idx, "Screenshot captured".to_string()).with_data(
             serde_json::json!({
                 "mime": mime,
-                "data": result.data,
+                "data": data,
             }),
         ),
-        Err(e) => StepResult::failure(idx, "Screenshot failed", e.to_string()),
+        Err(error) => StepResult::failure(idx, "Screenshot failed", error),
     }
 }
 

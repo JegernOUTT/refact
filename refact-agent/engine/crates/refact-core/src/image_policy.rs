@@ -58,6 +58,12 @@ impl ImagePolicy {
         Self::from_metadata(model.image_max_side_px, model.image_preferred_side_px)
     }
 
+    pub fn with_format(mut self, format: ImageFormat, quality: Option<u8>) -> Self {
+        self.format = format;
+        self.quality = quality;
+        self
+    }
+
     pub fn browser_capture() -> Self {
         Self {
             format: ImageFormat::Webp,
