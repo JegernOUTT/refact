@@ -340,7 +340,8 @@ impl Tool for ToolProcessStart {
                 &destination,
                 observation,
                 &mut result_message,
-            )?;
+            )
+            .await?;
         }
         Ok((false, vec![ContextEnum::ChatMessage(result_message)]))
     }
@@ -574,7 +575,8 @@ impl Tool for ToolProcessRead {
                 &destination,
                 observation,
                 &mut result_message,
-            )?;
+            )
+            .await?;
         }
         Ok((false, vec![ContextEnum::ChatMessage(result_message)]))
     }
@@ -762,7 +764,8 @@ impl Tool for ToolProcessWait {
                 &destination,
                 observation,
                 &mut result_message,
-            )?;
+            )
+            .await?;
         }
         Ok((false, vec![ContextEnum::ChatMessage(result_message)]))
     }
@@ -1084,7 +1087,7 @@ async fn process_observation_status(
     })
 }
 
-fn apply_process_privacy(
+async fn apply_process_privacy(
     gcx: &Arc<GlobalContext>,
     snapshot: &ExecProcessSnapshot,
     destination: &refact_privacy::Destination,
@@ -1104,7 +1107,9 @@ fn apply_process_privacy(
         destination,
         observation,
         message,
-    )? {
+    )
+    .await?
+    {
         crate::privacy::records::ShellReadDecision::Pass => Ok(()),
         crate::privacy::records::ShellReadDecision::Ask => Ok(()),
     }

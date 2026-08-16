@@ -301,7 +301,8 @@ impl Tool for ToolShell {
                     &destination,
                     result.observation,
                     &mut message,
-                )?;
+                )
+                .await?;
             }
             return Ok((false, vec![ContextEnum::ChatMessage(message)]));
         }
@@ -360,7 +361,8 @@ impl Tool for ToolShell {
                 &destination,
                 result.observation,
                 &mut message,
-            )?;
+            )
+            .await?;
         }
 
         Ok((false, vec![ContextEnum::ChatMessage(message)]))
@@ -421,7 +423,7 @@ fn request_cwd(snapshot: &ExecProcessSnapshot) -> &std::path::Path {
         .unwrap_or_else(|| std::path::Path::new("."))
 }
 
-fn apply_shell_privacy(
+async fn apply_shell_privacy(
     gcx: &Arc<GlobalContext>,
     command: &str,
     cwd: &std::path::Path,
@@ -436,7 +438,9 @@ fn apply_shell_privacy(
         destination,
         observation,
         message,
-    )? {
+    )
+    .await?
+    {
         crate::privacy::records::ShellReadDecision::Pass => Ok(()),
         crate::privacy::records::ShellReadDecision::Ask => Ok(()),
     }

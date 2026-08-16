@@ -20,6 +20,10 @@ pub use refact_privacy::{PolicyLoad, PrivacyPolicy};
 
 const PRIVACY_TOO_OLD: Duration = Duration::from_secs(3);
 
+pub async fn warn_observation_degraded_once(gcx: Arc<GlobalContext>, reason: &str) {
+    crate::buddy::observers::privacy_degraded::warn_once(gcx, reason).await;
+}
+
 fn legacy_settings(policy: &PrivacyPolicy, loaded_ts: u64) -> PrivacySettings {
     let mut blocked = policy.blocked.clone();
     let mut only_send_to_servers_i_control = Vec::new();

@@ -81,7 +81,7 @@ fn zone_for_record_path<'a>(
     compiled.strictest_zone_for_paths(candidates)
 }
 
-pub fn apply_shell_observation(
+pub async fn apply_shell_observation(
     gcx: &Arc<GlobalContext>,
     command: &str,
     cwd: &Path,
@@ -96,6 +96,7 @@ pub fn apply_shell_observation(
             let compiled = policy.compile().map_err(|error| error.to_string())?;
             let heuristic =
                 crate::privacy::heuristic::attribute_shell_command(command, cwd, &compiled);
+            crate::privacy::warn_observation_degraded_once(gcx.clone(), &reason).await;
             message.extra.insert(
                 "privacy_observation".to_string(),
                 serde_json::json!({
@@ -397,6 +398,7 @@ mod tests {
             }),
             &mut message,
         )
+        .await
         .unwrap();
 
         assert_eq!(decision, ShellReadDecision::Pass);
@@ -434,6 +436,7 @@ mod tests {
             }),
             &mut message,
         )
+        .await
         .unwrap();
 
         assert_eq!(decision, ShellReadDecision::Pass);
@@ -457,6 +460,7 @@ mod tests {
             ObservationStatus::Unavailable("ptrace unavailable".to_string()),
             &mut message,
         )
+        .await
         .unwrap();
 
         assert_eq!(decision, ShellReadDecision::Pass);
@@ -490,6 +494,7 @@ mod tests {
             }),
             &mut message,
         )
+        .await
         .unwrap();
 
         assert_eq!(decision, ShellReadDecision::Ask);

@@ -5,6 +5,7 @@ pub mod diagnostic_cluster;
 pub mod git_pressure;
 pub mod mcp_auth;
 pub mod memory_garden;
+pub mod privacy_degraded;
 pub mod provider_health;
 pub mod task_health;
 pub mod trajectory_clutter;
