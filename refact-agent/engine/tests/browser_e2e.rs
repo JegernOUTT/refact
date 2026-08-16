@@ -1963,3 +1963,60 @@ async fn aria_refs_reuse_invalidate_and_resolve_latest_snapshot_elements() {
         Err(refact_lsp::refact_browser::RefError::GenerationMismatch { .. })
     ));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn get_by_locators_match_playwright_semantics() {
+    let Some(mut case) = BrowserCase::start("getby.html").await else {
+        return;
+    };
+    case.setup_world();
+
+    let resolve = |locator: serde_json::Value| {
+        case.runtime
+            .world_manager
+            .call_injected_handles(&case.tab, "resolveAll", json!([locator]))
+            .unwrap()
+    };
+
+    assert_eq!(resolve(json!({"by":"role","role":"button","name":"save item"})).len(), 1);
+    assert_eq!(resolve(json!({"by":"role","role":"button","name":"Save Item","exact":true})).len(), 1);
+    assert!(resolve(json!({"by":"role","role":"button","name":"save item","exact":true})).is_empty());
+    assert_eq!(resolve(json!({"by":"role","role":"button","description":"primary ACTION"})).len(), 1);
+    assert_eq!(resolve(json!({"by":"role","role":"heading","name":"account","level":2})).len(), 1);
+    assert_eq!(resolve(json!({"by":"role","role":"checkbox","checked":true})).len(), 1);
+    assert_eq!(resolve(json!({"by":"role","role":"button","disabled":true})).len(), 1);
+    assert!(resolve(json!({"by":"role","role":"button","name":"hidden"})).is_empty());
+    assert_eq!(resolve(json!({"by":"role","role":"button","name":"hidden","include_hidden":true})).len(), 1);
+
+    let smallest = resolve(json!({"by":"text","value":"unique text"}));
+    assert_eq!(smallest.len(), 1);
+    let id = case
+        .runtime
+        .world_manager
+        .call_function_on(&case.tab, &smallest[0], "function() { return this.id; }", vec![])
+        .unwrap();
+    assert_eq!(id, json!("smallest-text"));
+    assert_eq!(resolve(json!({"by":"text","value":"send request"})).len(), 1);
+
+    for value in ["Wrapping Label", "For Label", "ARIA Label", "Referenced Label"] {
+        assert_eq!(resolve(json!({"by":"label","value":value,"exact":true})).len(), 1);
+    }
+    assert_eq!(resolve(json!({"by":"placeholder","value":"search WORKSPACE"})).len(), 1);
+    assert_eq!(resolve(json!({"by":"placeholder","value":"  Search   workspace  ","exact":true})).len(), 1);
+    assert_eq!(resolve(json!({"by":"alt_text","value":"product logo"})).len(), 1);
+    assert_eq!(resolve(json!({"by":"title","value":"More Information","exact":true})).len(), 1);
+    assert_eq!(resolve(json!({"by":"test_id","value":"save-card"})).len(), 1);
+
+    let custom = refact_lsp::refact_browser::test_id_locator("custom-card", "data-qa");
+    assert_eq!(resolve(serde_json::to_value(custom).unwrap()).len(), 1);
+
+    let regex: BrowserLocator = serde_json::from_value(json!({
+        "by": "text",
+        "value": "does not matter",
+        "exact": true,
+        "regex": {"source": "unique\\s+text", "flags": "i"}
+    }))
+    .unwrap();
+    assert_eq!(resolve(serde_json::to_value(regex).unwrap()).len(), 1);
+}

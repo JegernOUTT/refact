@@ -1,4 +1,4 @@
-// @refact-injected-hash 563a082ebbc1d005323fe4f7f75a908200ca7f292a27566a4497d71514c68877
+// @refact-injected-hash d69deed48119b2427f52c6eb001ee1639cb44ab2f0a4649e7f3fb01565710df8
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -1933,6 +1933,24 @@ function getElementAccessibleName(element, includeHidden) {
   }
   return accessibleName;
 }
+function getElementAccessibleNameText(element, includeHidden) {
+  var _a;
+  const composite = (_a = includeHidden ? cacheAccessibleNameHidden : cacheAccessibleName) == null ? void 0 : _a.get(element);
+  if (composite !== void 0)
+    return composite.text;
+  const cache = includeHidden ? cacheAccessibleNameTextHidden : cacheAccessibleNameText;
+  let text = cache == null ? void 0 : cache.get(element);
+  if (text === void 0) {
+    text = computeAccessibleNameComposite(
+      element,
+      includeHidden,
+      false
+      /* collectElements */
+    ).text;
+    cache == null ? void 0 : cache.set(element, text);
+  }
+  return text;
+}
 function getElementAccessibleDescription(element, includeHidden) {
   const cache = includeHidden ? cacheAccessibleDescriptionHidden : cacheAccessibleDescription;
   let accessibleDescription = cache == null ? void 0 : cache.get(element);
@@ -3458,6 +3476,435 @@ function parseSelectorString(selector) {
   append();
   return result;
 }
+function parseAttributeSelector(selector, allowUnquotedStrings) {
+  let wp = 0;
+  let EOL = selector.length === 0;
+  const next = () => selector[wp] || "";
+  const eat1 = () => {
+    const result2 = next();
+    ++wp;
+    EOL = wp >= selector.length;
+    return result2;
+  };
+  const syntaxError = (stage) => {
+    if (EOL)
+      throw new InvalidSelectorError(`Unexpected end of selector while parsing selector \`${selector}\``);
+    throw new InvalidSelectorError(`Error while parsing selector \`${selector}\` - unexpected symbol "${next()}" at position ${wp}` + (stage ? " during " + stage : ""));
+  };
+  function skipSpaces() {
+    while (!EOL && /\s/.test(next()))
+      eat1();
+  }
+  function isCSSNameChar(char) {
+    return char >= "" || char >= "0" && char <= "9" || char >= "A" && char <= "Z" || char >= "a" && char <= "z" || char >= "0" && char <= "9" || char === "_" || char === "-";
+  }
+  function readIdentifier() {
+    let result2 = "";
+    skipSpaces();
+    while (!EOL && isCSSNameChar(next()))
+      result2 += eat1();
+    return result2;
+  }
+  function readQuotedString(quote) {
+    let result2 = eat1();
+    if (result2 !== quote)
+      syntaxError("parsing quoted string");
+    while (!EOL && next() !== quote) {
+      if (next() === "\\")
+        eat1();
+      result2 += eat1();
+    }
+    if (next() !== quote)
+      syntaxError("parsing quoted string");
+    result2 += eat1();
+    return result2;
+  }
+  function readRegularExpression() {
+    if (eat1() !== "/")
+      syntaxError("parsing regular expression");
+    let source = "";
+    let inClass = false;
+    while (!EOL) {
+      if (next() === "\\") {
+        source += eat1();
+        if (EOL)
+          syntaxError("parsing regular expression");
+      } else if (inClass && next() === "]") {
+        inClass = false;
+      } else if (!inClass && next() === "[") {
+        inClass = true;
+      } else if (!inClass && next() === "/") {
+        break;
+      }
+      source += eat1();
+    }
+    if (eat1() !== "/")
+      syntaxError("parsing regular expression");
+    let flags = "";
+    while (!EOL && next().match(/[dgimsuvy]/))
+      flags += eat1();
+    try {
+      return new RegExp(source, flags);
+    } catch (e) {
+      throw new InvalidSelectorError(`Error while parsing selector \`${selector}\`: ${e.message}`);
+    }
+  }
+  function readAttributeToken() {
+    let token = "";
+    skipSpaces();
+    if (next() === `'` || next() === `"`)
+      token = readQuotedString(next()).slice(1, -1);
+    else
+      token = readIdentifier();
+    if (!token)
+      syntaxError("parsing property path");
+    return token;
+  }
+  function readOperator() {
+    skipSpaces();
+    let op = "";
+    if (!EOL)
+      op += eat1();
+    if (!EOL && op !== "=")
+      op += eat1();
+    if (!["=", "*=", "^=", "$=", "|=", "~="].includes(op))
+      syntaxError("parsing operator");
+    return op;
+  }
+  function readAttribute() {
+    eat1();
+    const jsonPath = [];
+    jsonPath.push(readAttributeToken());
+    skipSpaces();
+    while (next() === ".") {
+      eat1();
+      jsonPath.push(readAttributeToken());
+      skipSpaces();
+    }
+    if (next() === "]") {
+      eat1();
+      return { name: jsonPath.join("."), jsonPath, op: "<truthy>", value: null, caseSensitive: false };
+    }
+    const operator = readOperator();
+    let value = void 0;
+    let caseSensitive = true;
+    skipSpaces();
+    if (next() === "/") {
+      if (operator !== "=")
+        throw new InvalidSelectorError(`Error while parsing selector \`${selector}\` - cannot use ${operator} in attribute with regular expression`);
+      value = readRegularExpression();
+    } else if (next() === `'` || next() === `"`) {
+      value = readQuotedString(next()).slice(1, -1);
+      skipSpaces();
+      if (next() === "i" || next() === "I") {
+        caseSensitive = false;
+        eat1();
+      } else if (next() === "s" || next() === "S") {
+        caseSensitive = true;
+        eat1();
+      }
+    } else {
+      value = "";
+      while (!EOL && (isCSSNameChar(next()) || next() === "+" || next() === "."))
+        value += eat1();
+      if (value === "true") {
+        value = true;
+      } else if (value === "false") {
+        value = false;
+      } else {
+        if (!allowUnquotedStrings) {
+          value = +value;
+          if (Number.isNaN(value))
+            syntaxError("parsing attribute value");
+        }
+      }
+    }
+    skipSpaces();
+    if (next() !== "]")
+      syntaxError("parsing attribute value");
+    eat1();
+    if (operator !== "=" && typeof value !== "string")
+      throw new InvalidSelectorError(`Error while parsing selector \`${selector}\` - cannot use ${operator} in attribute with non-string matching value - ${value}`);
+    return { name: jsonPath.join("."), jsonPath, op: operator, value, caseSensitive };
+  }
+  const result = {
+    name: "",
+    attributes: []
+  };
+  result.name = readIdentifier();
+  skipSpaces();
+  while (next() === "[") {
+    result.attributes.push(readAttribute());
+    skipSpaces();
+  }
+  if (!EOL)
+    syntaxError(void 0);
+  if (!result.name && !result.attributes.length)
+    throw new InvalidSelectorError(`Error while parsing selector \`${selector}\` - selector cannot be empty`);
+  return result;
+}
+
+// src/vendor/injected/selectorUtils.ts
+function matchesAttributePart(value, attr) {
+  const objValue = typeof value === "string" && !attr.caseSensitive ? value.toUpperCase() : value;
+  const attrValue = typeof attr.value === "string" && !attr.caseSensitive ? attr.value.toUpperCase() : attr.value;
+  if (attr.op === "<truthy>")
+    return !!objValue;
+  if (attr.op === "=") {
+    if (attrValue instanceof RegExp)
+      return typeof objValue === "string" && !!objValue.match(attrValue);
+    return objValue === attrValue;
+  }
+  if (typeof objValue !== "string" || typeof attrValue !== "string")
+    return false;
+  if (attr.op === "*=")
+    return objValue.includes(attrValue);
+  if (attr.op === "^=")
+    return objValue.startsWith(attrValue);
+  if (attr.op === "$=")
+    return objValue.endsWith(attrValue);
+  if (attr.op === "|=")
+    return objValue === attrValue || objValue.startsWith(attrValue + "-");
+  if (attr.op === "~=")
+    return objValue.split(" ").includes(attrValue);
+  return false;
+}
+function shouldSkipForTextMatching(element) {
+  const document = element.ownerDocument;
+  return element.nodeName === "SCRIPT" || element.nodeName === "NOSCRIPT" || element.nodeName === "STYLE" || document.head && document.head.contains(element);
+}
+function elementText(cache, root) {
+  let value = cache.get(root);
+  if (value === void 0) {
+    value = { full: "", normalized: "", immediate: [] };
+    if (!shouldSkipForTextMatching(root)) {
+      let currentImmediate = "";
+      if (root instanceof HTMLInputElement && (root.type === "submit" || root.type === "button" || root.type === "reset")) {
+        value = { full: root.value, normalized: normalizeWhiteSpace(root.value), immediate: [root.value] };
+      } else {
+        for (let child = root.firstChild; child; child = child.nextSibling) {
+          if (child.nodeType === Node.TEXT_NODE) {
+            value.full += child.nodeValue || "";
+            currentImmediate += child.nodeValue || "";
+          } else if (child.nodeType === Node.COMMENT_NODE) {
+            continue;
+          } else {
+            if (currentImmediate)
+              value.immediate.push(currentImmediate);
+            currentImmediate = "";
+            if (child.nodeType === Node.ELEMENT_NODE)
+              value.full += elementText(cache, child).full;
+          }
+        }
+        if (currentImmediate)
+          value.immediate.push(currentImmediate);
+        if (root.shadowRoot)
+          value.full += elementText(cache, root.shadowRoot).full;
+        if (value.full)
+          value.normalized = normalizeWhiteSpace(value.full);
+      }
+    }
+    cache.set(root, value);
+  }
+  return value;
+}
+function elementMatchesText(cache, element, matcher) {
+  if (shouldSkipForTextMatching(element))
+    return "none";
+  if (!matcher(elementText(cache, element)))
+    return "none";
+  for (let child = element.firstChild; child; child = child.nextSibling) {
+    if (child.nodeType === Node.ELEMENT_NODE && matcher(elementText(cache, child)))
+      return "selfAndChildren";
+  }
+  if (element.shadowRoot && matcher(elementText(cache, element.shadowRoot)))
+    return "selfAndChildren";
+  return "self";
+}
+function getElementLabels(textCache, element, options) {
+  let labels = getAriaLabelledByElements(element);
+  if (labels) {
+    if (options == null ? void 0 : options.skipRefsInsideElement)
+      labels = labels.filter((label) => label !== element && !element.contains(label));
+    return labels.map((label) => elementText(textCache, label));
+  }
+  const ariaLabel = element.getAttribute("aria-label");
+  if (ariaLabel !== null && !!ariaLabel.trim())
+    return [{ full: ariaLabel, normalized: normalizeWhiteSpace(ariaLabel), immediate: [ariaLabel] }];
+  const isNonHiddenInput = element.nodeName === "INPUT" && element.type !== "hidden";
+  if (["BUTTON", "METER", "OUTPUT", "PROGRESS", "SELECT", "TEXTAREA"].includes(element.nodeName) || isNonHiddenInput) {
+    const labels2 = element.labels;
+    if (labels2)
+      return [...labels2].map((label) => elementText(textCache, label));
+  }
+  return [];
+}
+
+// src/vendor/injected/roleSelectorEngine.ts
+var kSupportedAttributes = ["selected", "checked", "pressed", "expanded", "level", "disabled", "name", "description", "include-hidden"];
+kSupportedAttributes.sort();
+function validateSupportedRole(attr, roles, role) {
+  if (!roles.includes(role))
+    throw new Error(`"${attr}" attribute is only supported for roles: ${roles.slice().sort().map((role2) => `"${role2}"`).join(", ")}`);
+}
+function validateSupportedValues(attr, values) {
+  if (attr.op !== "<truthy>" && !values.includes(attr.value))
+    throw new Error(`"${attr.name}" must be one of ${values.map((v) => JSON.stringify(v)).join(", ")}`);
+}
+function validateSupportedOp(attr, ops) {
+  if (!ops.includes(attr.op))
+    throw new Error(`"${attr.name}" does not support "${attr.op}" matcher`);
+}
+function validateAttributes(attrs, role) {
+  const options = { role };
+  for (const attr of attrs) {
+    switch (attr.name) {
+      case "checked": {
+        validateSupportedRole(attr.name, kAriaCheckedRoles, role);
+        validateSupportedValues(attr, [true, false, "mixed"]);
+        validateSupportedOp(attr, ["<truthy>", "="]);
+        options.checked = attr.op === "<truthy>" ? true : attr.value;
+        break;
+      }
+      case "pressed": {
+        validateSupportedRole(attr.name, kAriaPressedRoles, role);
+        validateSupportedValues(attr, [true, false, "mixed"]);
+        validateSupportedOp(attr, ["<truthy>", "="]);
+        options.pressed = attr.op === "<truthy>" ? true : attr.value;
+        break;
+      }
+      case "selected": {
+        validateSupportedRole(attr.name, kAriaSelectedRoles, role);
+        validateSupportedValues(attr, [true, false]);
+        validateSupportedOp(attr, ["<truthy>", "="]);
+        options.selected = attr.op === "<truthy>" ? true : attr.value;
+        break;
+      }
+      case "expanded": {
+        validateSupportedRole(attr.name, kAriaExpandedRoles, role);
+        validateSupportedValues(attr, [true, false]);
+        validateSupportedOp(attr, ["<truthy>", "="]);
+        options.expanded = attr.op === "<truthy>" ? true : attr.value;
+        break;
+      }
+      case "level": {
+        validateSupportedRole(attr.name, kAriaLevelRoles, role);
+        if (typeof attr.value === "string")
+          attr.value = +attr.value;
+        if (attr.op !== "=" || typeof attr.value !== "number" || Number.isNaN(attr.value))
+          throw new Error(`"level" attribute must be compared to a number`);
+        options.level = attr.value;
+        break;
+      }
+      case "disabled": {
+        validateSupportedValues(attr, [true, false]);
+        validateSupportedOp(attr, ["<truthy>", "="]);
+        options.disabled = attr.op === "<truthy>" ? true : attr.value;
+        break;
+      }
+      case "name": {
+        if (attr.op === "<truthy>")
+          throw new Error(`"name" attribute must have a value`);
+        if (typeof attr.value !== "string" && !(attr.value instanceof RegExp))
+          throw new Error(`"name" attribute must be a string or a regular expression`);
+        options.name = attr.value;
+        options.nameOp = attr.op;
+        options.nameExact = attr.caseSensitive;
+        break;
+      }
+      case "description": {
+        if (attr.op === "<truthy>")
+          throw new Error(`"description" attribute must have a value`);
+        if (typeof attr.value !== "string" && !(attr.value instanceof RegExp))
+          throw new Error(`"description" attribute must be a string or a regular expression`);
+        options.description = attr.value;
+        options.descriptionOp = attr.op;
+        options.descriptionExact = attr.caseSensitive;
+        break;
+      }
+      case "include-hidden": {
+        validateSupportedValues(attr, [true, false]);
+        validateSupportedOp(attr, ["<truthy>", "="]);
+        options.includeHidden = attr.op === "<truthy>" ? true : attr.value;
+        break;
+      }
+      default: {
+        throw new Error(`Unknown attribute "${attr.name}", must be one of ${kSupportedAttributes.map((a) => `"${a}"`).join(", ")}.`);
+      }
+    }
+  }
+  return options;
+}
+function queryRole(scope, options, internal) {
+  const result = [];
+  const match = (element) => {
+    if (getAriaRole(element) !== options.role)
+      return;
+    if (options.selected !== void 0 && getAriaSelected(element) !== options.selected)
+      return;
+    if (options.checked !== void 0 && getAriaChecked(element) !== options.checked)
+      return;
+    if (options.pressed !== void 0 && getAriaPressed(element) !== options.pressed)
+      return;
+    if (options.expanded !== void 0 && getAriaExpanded(element) !== options.expanded)
+      return;
+    if (options.level !== void 0 && getAriaLevel(element) !== options.level)
+      return;
+    if (options.disabled !== void 0 && getAriaDisabled2(element) !== options.disabled)
+      return;
+    if (!options.includeHidden && isElementHiddenForAria(element))
+      return;
+    if (options.name !== void 0) {
+      const accessibleName = normalizeWhiteSpace(getElementAccessibleNameText(element, !!options.includeHidden));
+      if (typeof options.name === "string")
+        options.name = normalizeWhiteSpace(options.name);
+      if (internal && !options.nameExact && options.nameOp === "=")
+        options.nameOp = "*=";
+      if (!matchesAttributePart(accessibleName, { name: "", jsonPath: [], op: options.nameOp || "=", value: options.name, caseSensitive: !!options.nameExact }))
+        return;
+    }
+    if (options.description !== void 0) {
+      const accessibleDescription = normalizeWhiteSpace(getElementAccessibleDescription(element, !!options.includeHidden).text);
+      if (typeof options.description === "string")
+        options.description = normalizeWhiteSpace(options.description);
+      if (internal && !options.descriptionExact && options.descriptionOp === "=")
+        options.descriptionOp = "*=";
+      if (!matchesAttributePart(accessibleDescription, { name: "", jsonPath: [], op: options.descriptionOp || "=", value: options.description, caseSensitive: !!options.descriptionExact }))
+        return;
+    }
+    result.push(element);
+  };
+  const query = (root) => {
+    const shadows = [];
+    if (root.shadowRoot)
+      shadows.push(root.shadowRoot);
+    for (const element of root.querySelectorAll("*")) {
+      match(element);
+      if (element.shadowRoot)
+        shadows.push(element.shadowRoot);
+    }
+    shadows.forEach(query);
+  };
+  query(scope);
+  return result;
+}
+function createRoleEngine(internal) {
+  return {
+    queryAll: (scope, selector) => {
+      const parsed = parseAttributeSelector(selector, true);
+      const role = parsed.name.toLowerCase();
+      if (!role)
+        throw new Error(`Role must not be empty`);
+      const options = validateAttributes(parsed.attributes, role);
+      beginAriaCaches();
+      try {
+        return queryRole(scope, options, internal);
+      } finally {
+        endAriaCaches();
+      }
+    }
+  };
+}
 
 // src/vendor/injected/layoutSelectorUtils.ts
 function boxRightOf(box1, box2, maxDistance) {
@@ -3512,60 +3959,6 @@ function layoutSelectorScore(name, element, inner, maxDistance) {
       bestScore = score;
   }
   return bestScore;
-}
-
-// src/vendor/injected/selectorUtils.ts
-function shouldSkipForTextMatching(element) {
-  const document = element.ownerDocument;
-  return element.nodeName === "SCRIPT" || element.nodeName === "NOSCRIPT" || element.nodeName === "STYLE" || document.head && document.head.contains(element);
-}
-function elementText(cache, root) {
-  let value = cache.get(root);
-  if (value === void 0) {
-    value = { full: "", normalized: "", immediate: [] };
-    if (!shouldSkipForTextMatching(root)) {
-      let currentImmediate = "";
-      if (root instanceof HTMLInputElement && (root.type === "submit" || root.type === "button" || root.type === "reset")) {
-        value = { full: root.value, normalized: normalizeWhiteSpace(root.value), immediate: [root.value] };
-      } else {
-        for (let child = root.firstChild; child; child = child.nextSibling) {
-          if (child.nodeType === Node.TEXT_NODE) {
-            value.full += child.nodeValue || "";
-            currentImmediate += child.nodeValue || "";
-          } else if (child.nodeType === Node.COMMENT_NODE) {
-            continue;
-          } else {
-            if (currentImmediate)
-              value.immediate.push(currentImmediate);
-            currentImmediate = "";
-            if (child.nodeType === Node.ELEMENT_NODE)
-              value.full += elementText(cache, child).full;
-          }
-        }
-        if (currentImmediate)
-          value.immediate.push(currentImmediate);
-        if (root.shadowRoot)
-          value.full += elementText(cache, root.shadowRoot).full;
-        if (value.full)
-          value.normalized = normalizeWhiteSpace(value.full);
-      }
-    }
-    cache.set(root, value);
-  }
-  return value;
-}
-function elementMatchesText(cache, element, matcher) {
-  if (shouldSkipForTextMatching(element))
-    return "none";
-  if (!matcher(elementText(cache, element)))
-    return "none";
-  for (let child = element.firstChild; child; child = child.nextSibling) {
-    if (child.nodeType === Node.ELEMENT_NODE && matcher(elementText(cache, child)))
-      return "selfAndChildren";
-  }
-  if (element.shadowRoot && matcher(elementText(cache, element.shadowRoot)))
-    return "selfAndChildren";
-  return "self";
 }
 
 // src/vendor/injected/selectorEvaluator.ts
@@ -3937,7 +4330,7 @@ var textEngine = {
     if (args.length !== 1 || typeof args[0] !== "string")
       throw new Error(`"text" engine expects a single string`);
     const text = normalizeWhiteSpace(args[0]).toLowerCase();
-    const matcher = (elementText2) => elementText2.normalized.toLowerCase().includes(text);
+    const matcher = (elementText3) => elementText3.normalized.toLowerCase().includes(text);
     return elementMatchesText(evaluator._cacheText, element, matcher) === "self";
   }
 };
@@ -3946,10 +4339,10 @@ var textIsEngine = {
     if (args.length !== 1 || typeof args[0] !== "string")
       throw new Error(`"text-is" engine expects a single string`);
     const text = normalizeWhiteSpace(args[0]);
-    const matcher = (elementText2) => {
-      if (!text && !elementText2.immediate.length)
+    const matcher = (elementText3) => {
+      if (!text && !elementText3.immediate.length)
         return true;
-      return elementText2.immediate.some((s) => normalizeWhiteSpace(s) === text);
+      return elementText3.immediate.some((s) => normalizeWhiteSpace(s) === text);
     };
     return elementMatchesText(evaluator._cacheText, element, matcher) !== "none";
   }
@@ -3959,7 +4352,7 @@ var textMatchesEngine = {
     if (args.length === 0 || typeof args[0] !== "string" || args.length > 2 || args.length === 2 && typeof args[1] !== "string")
       throw new Error(`"text-matches" engine expects a regexp body and optional regexp flags`);
     const re = new RegExp(args[0], args.length === 2 ? args[1] : void 0);
-    const matcher = (elementText2) => re.test(elementText2.full);
+    const matcher = (elementText3) => re.test(elementText3.full);
     return elementMatchesText(evaluator._cacheText, element, matcher) === "self";
   }
 };
@@ -3970,7 +4363,7 @@ var hasTextEngine = {
     if (shouldSkipForTextMatching(element))
       return false;
     const text = normalizeWhiteSpace(args[0]).toLowerCase();
-    const matcher = (elementText2) => elementText2.normalized.toLowerCase().includes(text);
+    const matcher = (elementText3) => elementText3.normalized.toLowerCase().includes(text);
     return matcher(elementText(evaluator._cacheText, element));
   }
 };
@@ -4082,6 +4475,89 @@ var XPathEngine = {
 // src/refactInjected.ts
 var injectedInstanceName = "__refact_injected__";
 var bindingName = "__refact_binding";
+function createLocatorRegExp(value) {
+  var _a;
+  return new RegExp(value.source, (_a = value.flags) != null ? _a : "");
+}
+function matchesRegExp(expression, value) {
+  expression.lastIndex = 0;
+  return expression.test(value);
+}
+function createLocatorTextMatcher(value, exact = false, regex) {
+  if (regex) {
+    const expression = createLocatorRegExp(regex);
+    return { matcher: (text) => matchesRegExp(expression, text.normalized), kind: "regex" };
+  }
+  const normalized = normalizeWhiteSpace(value);
+  if (exact)
+    return { matcher: (text) => text.normalized === normalized, kind: "strict" };
+  const folded = normalized.toLowerCase();
+  return { matcher: (text) => text.normalized.toLowerCase().includes(folded), kind: "lax" };
+}
+function queryAllPiercingShadow(scope) {
+  const result = [];
+  const visit = (root) => {
+    if (root instanceof Element)
+      result.push(root);
+    for (const element of root.querySelectorAll("*")) {
+      result.push(element);
+      if (element.shadowRoot)
+        visit(element.shadowRoot);
+    }
+  };
+  visit(scope);
+  return result;
+}
+function queryDescendantsPiercingShadow(scope) {
+  const elements = queryAllPiercingShadow(scope);
+  if (scope instanceof Element)
+    elements.shift();
+  return elements;
+}
+function queryByAttribute(scope, attribute, value, exact = false, regex) {
+  if (!attribute)
+    throw new Error("Test id attribute must not be empty");
+  const expression = regex ? createLocatorRegExp(regex) : void 0;
+  const expected = normalizeWhiteSpace(value);
+  const expectedFolded = expected.toLowerCase();
+  return queryDescendantsPiercingShadow(scope).filter((element) => {
+    const raw = element.getAttribute(attribute);
+    if (raw === null)
+      return false;
+    const actual = normalizeWhiteSpace(raw);
+    if (expression)
+      return matchesRegExp(expression, actual);
+    return exact ? actual === expected : actual.toLowerCase().includes(expectedFolded);
+  });
+}
+function serializeRoleValue(value, regex, exact) {
+  if (regex) {
+    const expression = createLocatorRegExp(regex);
+    return `/${expression.source}/${expression.flags}`;
+  }
+  if (value === void 0)
+    return void 0;
+  return `${JSON.stringify(value)}${exact ? "s" : "i"}`;
+}
+function serializeRoleSelector(locator) {
+  var _a;
+  const role = (_a = locator.role) != null ? _a : "";
+  const attributes = [];
+  const add = (name, value) => {
+    if (value !== void 0)
+      attributes.push(`[${name}=${String(value)}]`);
+  };
+  add("checked", locator.checked);
+  add("disabled", locator.disabled);
+  add("selected", locator.selected);
+  add("expanded", locator.expanded);
+  add("include-hidden", locator.include_hidden);
+  add("level", locator.level);
+  add("name", serializeRoleValue(locator.name, locator.name_regex, locator.exact));
+  add("description", serializeRoleValue(locator.description, locator.description_regex, locator.exact));
+  add("pressed", locator.pressed);
+  return `${role}${attributes.join("")}`;
+}
 var RefactInjected = class {
   constructor(global, builtins) {
     this.global = global;
@@ -4097,10 +4573,10 @@ var RefactInjected = class {
   resolveSimple(cssSelector) {
     return this.global.document.querySelector(cssSelector);
   }
-  resolveAll(locator) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k;
+  resolveAll(locator, scopeOverride) {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l;
     const document = this.global.document;
-    const scope = locator.within ? document.querySelector(locator.within) : document;
+    const scope = scopeOverride != null ? scopeOverride : locator.within ? document.querySelector(locator.within) : document;
     if (!scope)
       throw new Error("Scope selector not found");
     let elements;
@@ -4117,54 +4593,52 @@ var RefactInjected = class {
         elements = Array.from(scope.querySelectorAll(`[name=${JSON.stringify((_c = locator.value) != null ? _c : "")}]`));
         break;
       case "test_id":
-        elements = Array.from(scope.querySelectorAll(`[data-testid=${JSON.stringify((_d = locator.value) != null ? _d : "")}]`));
+        elements = queryByAttribute(scope, (_d = locator.attribute) != null ? _d : "data-testid", (_e = locator.value) != null ? _e : "", locator.exact, locator.regex);
         break;
       case "placeholder":
-        elements = Array.from(scope.querySelectorAll(`[placeholder=${JSON.stringify((_e = locator.value) != null ? _e : "")}]`));
+        elements = queryByAttribute(scope, "placeholder", (_f = locator.value) != null ? _f : "", locator.exact, locator.regex);
+        break;
+      case "alt_text":
+        elements = queryByAttribute(scope, "alt", (_g = locator.value) != null ? _g : "", locator.exact, locator.regex);
+        break;
+      case "title":
+        elements = queryByAttribute(scope, "title", (_h = locator.value) != null ? _h : "", locator.exact, locator.regex);
         break;
       case "autocomplete":
-        elements = Array.from(scope.querySelectorAll(`[autocomplete=${JSON.stringify((_f = locator.value) != null ? _f : "")}]`));
+        elements = Array.from(scope.querySelectorAll(`[autocomplete=${JSON.stringify((_i = locator.value) != null ? _i : "")}]`));
         break;
       case "text": {
-        const target = (_g = locator.value) != null ? _g : "";
-        elements = Array.from(scope.querySelectorAll("*")).filter((element) => {
-          const text = element.innerText;
-          return locator.exact ? (text == null ? void 0 : text.trim()) === target : !!(text == null ? void 0 : text.includes(target));
-        });
+        const cache = /* @__PURE__ */ new Map();
+        const { matcher, kind } = createLocatorTextMatcher((_j = locator.value) != null ? _j : "", locator.exact, locator.regex);
+        elements = [];
+        let lastDidNotMatchSelf = null;
+        for (const element of queryAllPiercingShadow(scope)) {
+          if (kind === "lax" && lastDidNotMatchSelf && lastDidNotMatchSelf.contains(element))
+            continue;
+          const matches = elementMatchesText(cache, element, matcher);
+          if (matches === "none")
+            lastDidNotMatchSelf = element;
+          if (matches === "self")
+            elements.push(element);
+        }
         break;
       }
       case "label": {
-        const target = (_h = locator.value) != null ? _h : "";
-        elements = [];
-        for (const label of Array.from(scope.querySelectorAll("label"))) {
-          if (!((_i = label.innerText) == null ? void 0 : _i.trim().includes(target)))
-            continue;
-          const element = label.htmlFor ? document.getElementById(label.htmlFor) : label.querySelector("input,textarea,select");
-          if (element)
-            elements.push(element);
-        }
-        if (!elements.length)
-          elements = Array.from(scope.querySelectorAll("[aria-label]")).filter(
-            (element) => {
-              var _a2;
-              return (_a2 = element.getAttribute("aria-label")) == null ? void 0 : _a2.includes(target);
-            }
-          );
+        const cache = /* @__PURE__ */ new Map();
+        const { matcher } = createLocatorTextMatcher((_k = locator.value) != null ? _k : "", locator.exact, locator.regex);
+        elements = queryDescendantsPiercingShadow(scope).filter(
+          (element) => getElementLabels(cache, element).some((label) => matcher(label))
+        );
         break;
       }
       case "role": {
-        const role = (_j = locator.role) != null ? _j : "";
-        const candidates = Array.from(scope.querySelectorAll(`[role=${JSON.stringify(role)}]`));
-        elements = locator.name ? candidates.filter((element) => {
-          var _a2;
-          const name = element.getAttribute("aria-label") || element.innerText || "";
-          return name.trim().includes((_a2 = locator.name) != null ? _a2 : "");
-        }) : candidates;
+        const selector = serializeRoleSelector(locator);
+        elements = createRoleEngine(true).queryAll(scope, selector);
         break;
       }
       case "xpath": {
         const result = document.evaluate(
-          (_k = locator.value) != null ? _k : "",
+          (_l = locator.value) != null ? _l : "",
           scope,
           null,
           XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,

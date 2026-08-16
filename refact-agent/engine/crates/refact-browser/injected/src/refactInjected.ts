@@ -36,6 +36,15 @@ import {
   type AriaTreeOptions,
 } from './vendor/injected/ariaSnapshot';
 import { renderAriaSnapshotAsYaml } from './vendor/isomorphic/ariaSnapshotRenderer';
+import { createRoleEngine } from './vendor/injected/roleSelectorEngine';
+import {
+  elementMatchesText,
+  elementText,
+  getElementLabels,
+  type ElementText,
+  type TextMatcher,
+} from './vendor/injected/selectorUtils';
+import { normalizeWhiteSpace } from './vendor/isomorphic/stringUtils';
 
 type ElementStateName = 'visible' | 'enabled' | 'editable' | 'checked' | 'unchecked' | 'mixed' | 'stable';
 
@@ -52,10 +61,24 @@ type RefactLocator = Readonly<{
   value?: string;
   role?: string;
   name?: string;
+  description?: string;
   exact?: boolean;
+  regex?: Readonly<{ source: string; flags?: string }>;
+  name_regex?: Readonly<{ source: string; flags?: string }>;
+  description_regex?: Readonly<{ source: string; flags?: string }>;
+  checked?: boolean | 'mixed';
+  pressed?: boolean | 'mixed';
+  selected?: boolean;
+  expanded?: boolean;
+  disabled?: boolean;
+  level?: number;
+  include_hidden?: boolean;
+  attribute?: string;
   nth?: number;
   within?: string;
 }>;
+
+type LocatorRegex = Readonly<{ source: string; flags?: string }>;
 
 const injectedInstanceName = '__refact_injected__';
 const bindingName = '__refact_binding';
@@ -64,6 +87,95 @@ type RefactGlobal = typeof globalThis & {
   [injectedInstanceName]?: RefactInjected;
   [bindingName]?: (payload: string) => void;
 };
+
+function createLocatorRegExp(value: LocatorRegex): RegExp {
+  return new RegExp(value.source, value.flags ?? '');
+}
+
+function matchesRegExp(expression: RegExp, value: string): boolean {
+  expression.lastIndex = 0;
+  return expression.test(value);
+}
+
+function createLocatorTextMatcher(value: string, exact = false, regex?: LocatorRegex): { matcher: TextMatcher; kind: 'regex' | 'strict' | 'lax' } {
+  if (regex) {
+    const expression = createLocatorRegExp(regex);
+    return { matcher: text => matchesRegExp(expression, text.normalized), kind: 'regex' };
+  }
+  const normalized = normalizeWhiteSpace(value);
+  if (exact)
+    return { matcher: text => text.normalized === normalized, kind: 'strict' };
+  const folded = normalized.toLowerCase();
+  return { matcher: text => text.normalized.toLowerCase().includes(folded), kind: 'lax' };
+}
+
+function queryAllPiercingShadow(scope: Document | Element): Element[] {
+  const result: Element[] = [];
+  const visit = (root: Document | Element | ShadowRoot) => {
+    if (root instanceof Element)
+      result.push(root);
+    for (const element of root.querySelectorAll('*')) {
+      result.push(element);
+      if (element.shadowRoot)
+        visit(element.shadowRoot);
+    }
+  };
+  visit(scope);
+  return result;
+}
+
+function queryDescendantsPiercingShadow(scope: Document | Element): Element[] {
+  const elements = queryAllPiercingShadow(scope);
+  if (scope instanceof Element)
+    elements.shift();
+  return elements;
+}
+
+function queryByAttribute(scope: Document | Element, attribute: string, value: string, exact = false, regex?: LocatorRegex): Element[] {
+  if (!attribute)
+    throw new Error('Test id attribute must not be empty');
+  const expression = regex ? createLocatorRegExp(regex) : undefined;
+  const expected = normalizeWhiteSpace(value);
+  const expectedFolded = expected.toLowerCase();
+  return queryDescendantsPiercingShadow(scope).filter(element => {
+    const raw = element.getAttribute(attribute);
+    if (raw === null)
+      return false;
+    const actual = normalizeWhiteSpace(raw);
+    if (expression)
+      return matchesRegExp(expression, actual);
+    return exact ? actual === expected : actual.toLowerCase().includes(expectedFolded);
+  });
+}
+
+function serializeRoleValue(value: string | undefined, regex: LocatorRegex | undefined, exact: boolean | undefined): string | undefined {
+  if (regex) {
+    const expression = createLocatorRegExp(regex);
+    return `/${expression.source}/${expression.flags}`;
+  }
+  if (value === undefined)
+    return undefined;
+  return `${JSON.stringify(value)}${exact ? 's' : 'i'}`;
+}
+
+function serializeRoleSelector(locator: RefactLocator): string {
+  const role = locator.role ?? '';
+  const attributes: string[] = [];
+  const add = (name: string, value: string | number | boolean | undefined) => {
+    if (value !== undefined)
+      attributes.push(`[${name}=${String(value)}]`);
+  };
+  add('checked', locator.checked);
+  add('disabled', locator.disabled);
+  add('selected', locator.selected);
+  add('expanded', locator.expanded);
+  add('include-hidden', locator.include_hidden);
+  add('level', locator.level);
+  add('name', serializeRoleValue(locator.name, locator.name_regex, locator.exact));
+  add('description', serializeRoleValue(locator.description, locator.description_regex, locator.exact));
+  add('pressed', locator.pressed);
+  return `${role}${attributes.join('')}`;
+}
 
 export class RefactInjected {
   private readonly global: typeof globalThis;
@@ -88,9 +200,9 @@ export class RefactInjected {
     return this.global.document.querySelector(cssSelector);
   }
 
-  resolveAll(locator: RefactLocator): Element[] {
+  resolveAll(locator: RefactLocator, scopeOverride?: Document | Element): Element[] {
     const document = this.global.document;
-    const scope = locator.within ? document.querySelector(locator.within) : document;
+    const scope = scopeOverride ?? (locator.within ? document.querySelector(locator.within) : document);
     if (!scope)
       throw new Error('Scope selector not found');
     let elements: Element[];
@@ -107,49 +219,47 @@ export class RefactInjected {
         elements = Array.from(scope.querySelectorAll(`[name=${JSON.stringify(locator.value ?? '')}]`));
         break;
       case 'test_id':
-        elements = Array.from(scope.querySelectorAll(`[data-testid=${JSON.stringify(locator.value ?? '')}]`));
+        elements = queryByAttribute(scope, locator.attribute ?? 'data-testid', locator.value ?? '', locator.exact, locator.regex);
         break;
       case 'placeholder':
-        elements = Array.from(scope.querySelectorAll(`[placeholder=${JSON.stringify(locator.value ?? '')}]`));
+        elements = queryByAttribute(scope, 'placeholder', locator.value ?? '', locator.exact, locator.regex);
+        break;
+      case 'alt_text':
+        elements = queryByAttribute(scope, 'alt', locator.value ?? '', locator.exact, locator.regex);
+        break;
+      case 'title':
+        elements = queryByAttribute(scope, 'title', locator.value ?? '', locator.exact, locator.regex);
         break;
       case 'autocomplete':
         elements = Array.from(scope.querySelectorAll(`[autocomplete=${JSON.stringify(locator.value ?? '')}]`));
         break;
       case 'text': {
-        const target = locator.value ?? '';
-        elements = Array.from(scope.querySelectorAll('*')).filter(element => {
-          const text = (element as HTMLElement).innerText;
-          return locator.exact ? text?.trim() === target : !!text?.includes(target);
-        });
+        const cache = new Map<Element | ShadowRoot, ElementText>();
+        const { matcher, kind } = createLocatorTextMatcher(locator.value ?? '', locator.exact, locator.regex);
+        elements = [];
+        let lastDidNotMatchSelf: Element | null = null;
+        for (const element of queryAllPiercingShadow(scope)) {
+          if (kind === 'lax' && lastDidNotMatchSelf && lastDidNotMatchSelf.contains(element))
+            continue;
+          const matches = elementMatchesText(cache, element, matcher);
+          if (matches === 'none')
+            lastDidNotMatchSelf = element;
+          if (matches === 'self')
+            elements.push(element);
+        }
         break;
       }
       case 'label': {
-        const target = locator.value ?? '';
-        elements = [];
-        for (const label of Array.from(scope.querySelectorAll('label'))) {
-          if (!(label as HTMLElement).innerText?.trim().includes(target))
-            continue;
-          const element = label.htmlFor
-            ? document.getElementById(label.htmlFor)
-            : label.querySelector('input,textarea,select');
-          if (element)
-            elements.push(element);
-        }
-        if (!elements.length)
-          elements = Array.from(scope.querySelectorAll('[aria-label]')).filter(element =>
-            element.getAttribute('aria-label')?.includes(target),
-          );
+        const cache = new Map<Element | ShadowRoot, ElementText>();
+        const { matcher } = createLocatorTextMatcher(locator.value ?? '', locator.exact, locator.regex);
+        elements = queryDescendantsPiercingShadow(scope).filter(element =>
+          getElementLabels(cache, element).some(label => matcher(label)),
+        );
         break;
       }
       case 'role': {
-        const role = locator.role ?? '';
-        const candidates = Array.from(scope.querySelectorAll(`[role=${JSON.stringify(role)}]`));
-        elements = locator.name
-          ? candidates.filter(element => {
-            const name = element.getAttribute('aria-label') || (element as HTMLElement).innerText || '';
-            return name.trim().includes(locator.name ?? '');
-          })
-          : candidates;
+        const selector = serializeRoleSelector(locator);
+        elements = createRoleEngine(true).queryAll(scope, selector);
         break;
       }
       case 'xpath': {

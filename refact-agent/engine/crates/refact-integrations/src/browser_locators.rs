@@ -147,82 +147,17 @@ fn generate_find_js(strategy: &LocatorStrategy) -> String {
                 js_string_literal(value)
             )
         }
-        LocatorStrategy::TestId { value } => {
-            format!(
-                "var elements = Array.from(scope.querySelectorAll('[data-testid=' + JSON.stringify({}) + ']'));",
-                js_string_literal(value)
-            )
-        }
-        LocatorStrategy::Placeholder { value } => {
-            format!(
-                "var elements = Array.from(scope.querySelectorAll('[placeholder=' + JSON.stringify({}) + ']'));",
-                js_string_literal(value)
-            )
-        }
+        LocatorStrategy::TestId { .. } => injected_locator_find_js(strategy),
+        LocatorStrategy::Placeholder { .. } => injected_locator_find_js(strategy),
         LocatorStrategy::Autocomplete { value } => {
             format!(
                 "var elements = Array.from(scope.querySelectorAll('[autocomplete=' + JSON.stringify({}) + ']'));",
                 js_string_literal(value)
             )
         }
-        LocatorStrategy::Text { value, exact } => {
-            let match_fn = if *exact {
-                "el.innerText.trim() === target"
-            } else {
-                "el.innerText && el.innerText.includes(target)"
-            };
-            format!(
-                "var target = {};\n\
-                 var all = Array.from(scope.querySelectorAll('*'));\n\
-                 var elements = all.filter(function(el) {{ return {}; }});",
-                js_string_literal(value),
-                match_fn,
-            )
-        }
-        LocatorStrategy::Label { value } => {
-            format!(
-                "var labelText = {};\n\
-                 var labels = Array.from(scope.querySelectorAll('label'));\n\
-                 var elements = [];\n\
-                 labels.forEach(function(lbl) {{\n\
-                   if (lbl.innerText && lbl.innerText.trim().includes(labelText)) {{\n\
-                     if (lbl.htmlFor) {{\n\
-                       var target = document.getElementById(lbl.htmlFor);\n\
-                       if (target) elements.push(target);\n\
-                     }} else {{\n\
-                       var input = lbl.querySelector('input,textarea,select');\n\
-                       if (input) elements.push(input);\n\
-                     }}\n\
-                   }}\n\
-                 }});\n\
-                 if (elements.length === 0) {{\n\
-                   var ariaEls = Array.from(scope.querySelectorAll('[aria-label]'));\n\
-                   elements = ariaEls.filter(function(el) {{\n\
-                     return el.getAttribute('aria-label').includes(labelText);\n\
-                   }});\n\
-                 }}",
-                js_string_literal(value),
-            )
-        }
-        LocatorStrategy::Role { role, name } => {
-            let role_selector = format!("[role={}]", js_string_literal(role));
-            match name {
-                Some(n) => format!(
-                    "var roleName = {};\n\
-                     var candidates = Array.from(scope.querySelectorAll({}));\n\
-                     var elements = candidates.filter(function(el) {{\n\
-                       var accName = el.getAttribute('aria-label') || el.innerText || '';\n\
-                       return accName.trim().includes(roleName);\n\
-                     }});",
-                    js_string_literal(n),
-                    js_string_literal(&role_selector),
-                ),
-                None => format!(
-                    "var elements = Array.from(scope.querySelectorAll({}));",
-                    js_string_literal(&format!("[role={}]", js_string_literal(role))),
-                ),
-            }
-        }
+        LocatorStrategy::Text { .. } => injected_locator_find_js(strategy),
+        LocatorStrategy::Label { .. } => injected_locator_find_js(strategy),
+        LocatorStrategy::Role { .. } => injected_locator_find_js(strategy),
         LocatorStrategy::Xpath { value } => {
             format!(
                 "var xpathResult = document.evaluate({}, scope, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);\n\
@@ -234,6 +169,15 @@ fn generate_find_js(strategy: &LocatorStrategy) -> String {
             )
         }
     }
+}
+
+fn injected_locator_find_js(strategy: &LocatorStrategy) -> String {
+    let locator = serde_json::to_string(strategy).expect("locator strategies serialize");
+    format!(
+        "var injected = globalThis.__refact_injected__;\n\
+     if (!injected) throw new Error('RefactInjected is not installed');\n\
+     var elements = injected.resolveAll({locator}, scope);"
+    )
 }
 
 pub const INSPECT_ELEMENT_JS: &str = r#"
@@ -798,9 +742,8 @@ mod tests {
     fn test_generate_resolve_js_label() {
         let loc = BrowserLocator::label("Email Address");
         let js = generate_resolve_js(&loc);
-        assert!(js.contains("label"));
+        assert!(js.contains("resolveAll"));
         assert!(js.contains("Email Address"));
-        assert!(js.contains("htmlFor"));
     }
 
     #[test]
@@ -814,7 +757,8 @@ mod tests {
             within: None,
         };
         let js = generate_resolve_js(&loc);
-        assert!(js.contains("innerText.trim() === target"));
+        assert!(js.contains("resolveAll"));
+        assert!(js.contains("\"exact\":true"));
     }
 
     #[test]
@@ -828,7 +772,8 @@ mod tests {
             within: None,
         };
         let js = generate_resolve_js(&loc);
-        assert!(js.contains("includes(target)"));
+        assert!(js.contains("resolveAll"));
+        assert!(js.contains("\"value\":\"Sub\""));
     }
 
     #[test]
@@ -892,8 +837,8 @@ mod tests {
     fn test_generate_resolve_js_role_with_name() {
         let loc = BrowserLocator::role("textbox", Some("Search"));
         let js = generate_resolve_js(&loc);
-        assert!(js.contains("role"));
-        assert!(js.contains("aria-label"));
+        assert!(js.contains("resolveAll"));
+        assert!(js.contains("\"role\":\"textbox\""));
         assert!(js.contains("Search"));
     }
 

@@ -79,6 +79,35 @@ pub struct ToolChrome {
 
 const MAX_CACHED_LOG_LINES: usize = 1000;
 
+fn browser_locator_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Element locator. Text-like locators use value plus optional exact or regex {source, flags}. Role locators use role plus accessible-name, description, state, level, and visibility filters. Test-id locators may set attribute (default data-testid).",
+        "required": ["by"],
+        "properties": {
+            "by": {"type": "string", "enum": ["css", "id", "name", "text", "label", "role", "xpath", "placeholder", "alt_text", "title", "autocomplete", "test_id"]},
+            "value": {"type": "string", "description": "Selector value for all strategies except role"},
+            "nth": {"type": "integer", "description": "0-based index when multiple elements match"},
+            "within": {"type": "string", "description": "CSS selector to scope the search within"},
+            "exact": {"type": "boolean", "description": "Case-sensitive whole-string match; regex ignores it"},
+            "regex": {"type": "object", "description": "JavaScript RegExp {source, flags}"},
+            "attribute": {"type": "string", "description": "Test-id attribute; defaults to data-testid"},
+            "role": {"type": "string", "description": "ARIA role"},
+            "name": {"type": "string", "description": "Accessible name"},
+            "description": {"type": "string", "description": "Accessible description"},
+            "name_regex": {"type": "object", "description": "Accessible-name JavaScript RegExp {source, flags}"},
+            "description_regex": {"type": "object", "description": "Accessible-description JavaScript RegExp {source, flags}"},
+            "checked": {"description": "Checked state boolean or mixed"},
+            "pressed": {"description": "Pressed state boolean or mixed"},
+            "selected": {"type": "boolean"},
+            "expanded": {"type": "boolean"},
+            "disabled": {"type": "boolean"},
+            "level": {"type": "integer"},
+            "include_hidden": {"type": "boolean"}
+        }
+    })
+}
+
 async fn image_policy_for_model(gcx: Arc<GlobalContext>, model_id: &str) -> ImagePolicy {
     let Ok(caps) = crate::global_context::try_load_caps_quickly_if_not_present(gcx, 0).await else {
         return ImagePolicy::default();
@@ -385,8 +414,9 @@ impl Tool for ToolChrome {
              {{\"action\": \"open_tab\", \"device\": \"desktop\"}}, \
              {{\"action\": \"navigate\", \"url\": \"https://example.com\"}}, \
              {{\"action\": \"screenshot\"}}. \
-             Locators use a `by` field (css/id/name/text/label/role/xpath/placeholder/autocomplete/test_id) and a `value` field \
-             (except role locators which use `role` and optional `name` instead of `value`).",
+             Locators use a `by` field (css/id/name/text/label/role/xpath/placeholder/alt_text/title/autocomplete/test_id) and a `value` field. \
+             Text-like locators accept `exact` or a JavaScript `regex` object with `source` and optional `flags`; regex ignores exact. \
+             Role locators use `role` with accessible-name/description and ARIA-state filters. Test-id locators accept a custom `attribute` and default to `data-testid`.",
             supported_commands.join("\n"));
         ToolDesc {
             name: "chrome".to_string(),
@@ -453,20 +483,7 @@ impl Tool for ToolChrome {
                                             },
                                             "required": ["type"]
                                         },
-                                        "locator": {
-                                            "type": "object",
-                                            "description": "Element locator. Must have 'by' field. For most strategies also include 'value' (e.g. {\"by\":\"css\",\"value\":\"#btn\"}). For 'role' strategy use 'role' and optional 'name' instead of 'value' (e.g. {\"by\":\"role\",\"role\":\"button\",\"name\":\"Submit\"}).",
-                                            "required": ["by"],
-                                            "properties": {
-                                                "by": {"type": "string", "enum": ["css", "id", "name", "text", "label", "role", "xpath", "placeholder", "autocomplete", "test_id"]},
-                                                "value": {"type": "string", "description": "Selector value for all strategies except 'role'"},
-                                                "nth": {"type": "integer", "description": "0-based index when multiple elements match"},
-                                                "within": {"type": "string", "description": "CSS selector to scope the search within"},
-                                                "exact": {"type": "boolean", "description": "Exact match for 'text' strategy"},
-                                                "role": {"type": "string", "description": "ARIA role name for 'role' strategy"},
-                                                "name": {"type": "string", "description": "Accessible name filter for 'role' strategy"}
-                                            }
-                                        },
+                                        "locator": browser_locator_schema(),
                                         "text": {"type": "string", "description": "Text for fill/wait_for_text actions"},
                                         "key": {"type": "string", "description": "Key name for press_key (e.g. Enter, Tab, Escape)"},
                                         "modifiers": {"type": "array", "items": {"type": "string"}, "description": "Modifiers for press_key: Alt, Ctrl, Meta, Shift"},

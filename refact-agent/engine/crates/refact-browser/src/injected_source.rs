@@ -285,4 +285,18 @@ mod tests {
         assert!(INJECTED_BUNDLE.contains("resolveAriaRef"));
         assert!(INJECTED_BUNDLE.contains("REF_DETACHED"));
     }
+
+    #[test]
+    fn injected_bundle_contains_get_by_locator_engines() {
+        for marker in [
+            "createRoleEngine",
+            "createLocatorTextMatcher",
+            "getElementLabels",
+            "queryByAttribute",
+            "data-testid",
+            "include-hidden",
+        ] {
+            assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
+        }
+    }
 }

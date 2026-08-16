@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>getBy fixture</title>
+    <style>
+      #hidden-button {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <button id="primary-button" aria-describedby="primary-description">Save Item</button>
+    <span id="primary-description">Primary action</span>
+    <button id="hidden-button">Hidden Save Item</button>
+    <h2 id="section-heading">Account Settings</h2>
+    <input id="checked-box" type="checkbox" checked />
+    <button id="disabled-button" disabled>Disabled Action</button>
+
+    <div id="text-parent">Outer <span id="smallest-text">Unique Text</span></div>
+    <input id="submit-input" type="submit" value="Send Request" />
+
+    <label>Wrapping Label <input id="wrapped-label" /></label>
+    <label for="for-label">For Label</label><input id="for-label" />
+    <input id="aria-label" aria-label="ARIA Label" />
+    <span id="aria-labelledby-text">Referenced Label</span>
+    <input id="aria-labelledby" aria-labelledby="aria-labelledby-text" />
+
+    <input id="placeholder" placeholder="Search workspace" />
+    <img id="alt-text" alt="Product Logo" />
+    <div id="title-text" title="More Information"></div>
+    <div id="default-test-id" data-testid="save-card"></div>
+    <div id="custom-test-id" data-qa="custom-card"></div>
+  </body>
+</html>

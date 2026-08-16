@@ -31,6 +31,8 @@ This directory contains source adapted from [Microsoft Playwright](https://githu
 | `src/vendor/isomorphic/ariaRole.ts` | `packages/isomorphic/ariaSnapshot.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Includes only the `AriaRole` type required by `roleUtils.ts`. |
 | `src/vendor/isomorphic/utilityScriptSerializers.ts` | `packages/isomorphic/utilityScriptSerializers.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Vendored as a dependency of the utility script and bindings controller; otherwise unchanged. |
 | `src/vendor/isomorphic/yaml.ts` | `packages/isomorphic/yaml.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Vendored as a dependency of the ARIA snapshot renderer; otherwise unchanged. |
+| `src/vendor/injected/roleSelectorEngine.ts` | `packages/injected/src/roleSelectorEngine.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports. |
+| `src/vendor/injected/selectorUtils.ts` | `packages/injected/src/selectorUtils.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Restores the role-dependent label helper after role computation was vendored. |
 
 ## Adapted implementation references
 
