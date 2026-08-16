@@ -1771,8 +1771,6 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
         LocatorStrategy::Name { value } => format!("name={}", value),
         LocatorStrategy::TestId { value, .. } => format!("testid={}", value),
         LocatorStrategy::Placeholder { value, .. } => format!("placeholder={}", value),
-        LocatorStrategy::AltText { value, .. } => format!("alt_text={}", value),
-        LocatorStrategy::Title { value, .. } => format!("title={}", value),
         LocatorStrategy::Autocomplete { value } => format!("autocomplete={}", value),
         LocatorStrategy::Text { value, exact, .. } => {
             if *exact {
