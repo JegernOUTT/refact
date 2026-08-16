@@ -6,8 +6,10 @@ use tracing::{debug, warn};
 
 use crate::call_validation::ChatUsage;
 use crate::caps::BaseModelRecord;
+use crate::global_context::SharedGlobalContext;
 use crate::llm::adapter::{AdapterSettings, HttpParts, LlmWireAdapter};
 use crate::llm::LlmRequest;
+use crate::privacy::destinations::clear_for_model;
 use refact_core::model_caps::{ANTHROPIC_CLOUD_TOKENIZER, CLAUDE_CLOUD_TOKENIZER_ALIAS};
 
 const CLOUD_TOKEN_COUNT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -94,7 +96,9 @@ fn body_usize(body: &Value, key: &str) -> Option<usize> {
 }
 
 fn anthropic_count_http_parts(
+    gcx: &SharedGlobalContext,
     req: &LlmRequest,
+    model_rec: &BaseModelRecord,
     settings: &AdapterSettings,
 ) -> Result<(HttpParts, usize), String> {
     if settings.api_key.is_empty() && settings.auth_token.is_empty() {
@@ -103,22 +107,8 @@ fn anthropic_count_http_parts(
     let count_url = anthropic_count_url(&settings.endpoint)
         .ok_or_else(|| "Anthropic cloud token count requires a /messages endpoint".to_string())?;
 
-    // P-9: share the destination helper + policy resolution with stream_core.
-    let privacy_destination = refact_privacy::Destination {
-        id: refact_privacy::DestinationId(
-            settings
-                .model_name
-                .split('/')
-                .next()
-                .unwrap_or(settings.model_name.as_str())
-                .to_string(),
-        ),
-        kind: refact_privacy::DestinationKind::Provider,
-        display_name: settings.model_name.clone(),
-    };
-    let privacy_policy = refact_privacy::PrivacyPolicy::default();
-    let cleared_req = refact_privacy::clear(req.clone(), &privacy_destination, &privacy_policy)
-        .map_err(|refusal| refusal.message.clone())?;
+    let cleared_req = clear_for_model(gcx, req.clone(), model_rec)
+        .map_err(|refusal| refusal.model_facing().to_string())?;
     let mut http =
         crate::llm::adapters::anthropic::AnthropicAdapter.build_http(&cleared_req, settings)?;
     let output_token_reserve =
@@ -129,6 +119,7 @@ fn anthropic_count_http_parts(
 }
 
 fn cloud_count_http_parts(
+    gcx: &SharedGlobalContext,
     req: &LlmRequest,
     model_rec: &BaseModelRecord,
 ) -> Result<Option<(HttpParts, usize)>, String> {
@@ -159,7 +150,7 @@ fn cloud_count_http_parts(
     };
 
     let parts = match kind {
-        CloudTokenizerKind::Anthropic => anthropic_count_http_parts(req, &settings)?,
+        CloudTokenizerKind::Anthropic => anthropic_count_http_parts(gcx, req, model_rec, &settings)?,
     };
     Ok(Some(parts))
 }
@@ -208,11 +199,12 @@ async fn send_cloud_count_request(
 }
 
 pub async fn try_count_input_tokens(
+    gcx: &SharedGlobalContext,
     client: &reqwest::Client,
     req: &LlmRequest,
     model_rec: &BaseModelRecord,
 ) -> Option<CloudInputTokenCount> {
-    let (parts, output_token_reserve) = match cloud_count_http_parts(req, model_rec) {
+    let (parts, output_token_reserve) = match cloud_count_http_parts(gcx, req, model_rec) {
         Ok(Some(parts)) => parts,
         Ok(None) => return None,
         Err(err) => {
@@ -273,6 +265,7 @@ mod tests {
     use crate::call_validation::ChatMessage;
     use crate::llm::ReasoningIntent;
     use crate::llm::WireFormat;
+    use refact_privacy::PrivacyPolicy;
     use serde_json::json;
 
     fn req() -> LlmRequest {
@@ -295,6 +288,47 @@ mod tests {
         }
     }
 
+    fn test_settings(model: &BaseModelRecord) -> AdapterSettings {
+        AdapterSettings {
+            api_key: model.api_key.clone(),
+            auth_token: model.auth_token.clone(),
+            endpoint: model.endpoint.clone(),
+            extra_headers: model.extra_headers.clone(),
+            model_name: model.name.clone(),
+            supports_tools: true,
+            supports_reasoning: true,
+            reasoning_type: None,
+            supports_temperature: true,
+            supports_max_completion_tokens: model.supports_max_completion_tokens,
+            eof_is_done: model.eof_is_done,
+            supports_web_search: model.supports_web_search,
+            supports_cache_control: model.supports_cache_control,
+        }
+    }
+
+    fn cleared(request: LlmRequest, model: &BaseModelRecord) -> refact_privacy::Cleared<LlmRequest> {
+        let policy = PrivacyPolicy {
+            blocked: Vec::new(),
+            zones: vec![refact_privacy::Zone {
+                name: "normal".to_string(),
+                patterns: vec!["*".to_string()],
+                send_to: vec!["*".to_string()],
+                on_shell_read: refact_privacy::ShellBehavior::Withhold,
+            }],
+            subagents: refact_privacy::SubagentPolicy::default(),
+        };
+        refact_privacy::clear(
+            request,
+            &refact_privacy::Destination {
+                id: refact_privacy::DestinationId("openai".to_string()),
+                kind: refact_privacy::DestinationKind::Provider,
+                display_name: model.id.clone(),
+            },
+            &policy,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn anthropic_count_parts_use_messages_count_tokens_endpoint() {
         let model = base_model(
@@ -302,9 +336,13 @@ mod tests {
             WireFormat::AnthropicMessages,
             "https://api.anthropic.com/v1/messages",
         );
-
-        let (parts, _output_token_reserve) =
-            cloud_count_http_parts(&req(), &model).unwrap().unwrap();
+        let settings = test_settings(&model);
+        let cleared = cleared(req(), &model);
+        let mut parts = crate::llm::adapters::anthropic::AnthropicAdapter
+            .build_http(&cleared, &settings)
+            .unwrap();
+        parts.url = anthropic_count_url(&settings.endpoint).unwrap();
+        strip_anthropic_count_unsupported_fields(&mut parts.body);
 
         assert_eq!(
             parts.url,
@@ -324,11 +362,8 @@ mod tests {
             "https://api.anthropic.com/v1/messages/count_tokens",
         );
 
-        let (parts, _output_token_reserve) =
-            cloud_count_http_parts(&req(), &model).unwrap().unwrap();
-
         assert_eq!(
-            parts.url,
+            anthropic_count_url(&model.endpoint).unwrap(),
             "https://api.anthropic.com/v1/messages/count_tokens"
         );
     }
@@ -343,9 +378,13 @@ mod tests {
         let mut request = req();
         request.reasoning = ReasoningIntent::BudgetTokens(2048);
         request.params.max_tokens = 1024;
+        let settings = test_settings(&model);
+        let cleared = cleared(request, &model);
 
-        let (_parts, output_token_reserve) =
-            cloud_count_http_parts(&request, &model).unwrap().unwrap();
+        let parts = crate::llm::adapters::anthropic::AnthropicAdapter
+            .build_http(&cleared, &settings)
+            .unwrap();
+        let output_token_reserve = body_usize(&parts.body, "max_tokens").unwrap();
 
         assert_eq!(output_token_reserve, 3072);
     }

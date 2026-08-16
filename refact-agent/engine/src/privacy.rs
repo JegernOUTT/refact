@@ -8,6 +8,7 @@ use tracing::error;
 use crate::files_correction::{canonical_path, get_project_dirs};
 use crate::global_context::GlobalContext;
 
+pub mod destinations;
 pub mod heuristic;
 pub mod records;
 

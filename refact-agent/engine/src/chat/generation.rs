@@ -2218,6 +2218,7 @@ async fn run_streaming_generation(
         };
 
         let cloud_input_usage = crate::chat::cloud_token_count::try_count_input_tokens(
+            &app.gcx,
             &app.runtime.http_client,
             &llm_request,
             &model_rec.base,

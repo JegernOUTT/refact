@@ -13,6 +13,7 @@ use crate::call_validation::ChatUsage;
 use crate::caps::BaseModelRecord;
 use crate::llm::{LlmRequest, LlmStreamDelta, WireFormat, get_adapter, safe_truncate};
 use crate::llm::adapter::{AdapterSettings, HttpParts, StreamParseError};
+use crate::privacy::destinations::clear_for_model;
 
 use super::openai_codex_ws::{OpenAICodexWebSocketResponseTracker, OpenAICodexWebSocketSession};
 use super::types::{DeltaOp, stream_heartbeat, stream_idle_timeout, stream_total_timeout};
@@ -2231,6 +2232,20 @@ pub enum LlmStreamOutcome {
     PausedForCacheGuard,
 }
 
+fn build_http_for_attempt(
+    app: &AppState,
+    llm_request: &LlmRequest,
+    model_rec: &BaseModelRecord,
+    adapter: &dyn crate::llm::adapter::LlmWireAdapter,
+    adapter_settings: &AdapterSettings,
+) -> Result<HttpParts, String> {
+    let cleared_request = clear_for_model(&app.gcx, llm_request.clone(), model_rec)
+        .map_err(|refusal| refusal.model_facing().to_string())?;
+    adapter
+        .build_http(&cleared_request, adapter_settings)
+        .map_err(|error| format!("Failed to build LLM request: {error}"))
+}
+
 pub async fn run_llm_stream<C: StreamCollector>(
     app: AppState,
     params: StreamRunParams,
@@ -2266,39 +2281,14 @@ pub async fn run_llm_stream<C: StreamCollector>(
         supports_cache_control: params.model_rec.supports_cache_control,
     };
 
-    // P-9: extract Destination::from_model_record into src/privacy/destinations.rs and move this
-    // gate inside the retry/fallback loop so every attempt is re-checked against its destination.
-    let privacy_destination = refact_privacy::Destination {
-        id: refact_privacy::DestinationId(
-            params
-                .model_rec
-                .id
-                .split('/')
-                .next()
-                .unwrap_or(params.model_rec.id.as_str())
-                .to_string(),
-        ),
-        kind: refact_privacy::DestinationKind::Provider,
-        display_name: params.model_rec.id.clone(),
-    };
-    let privacy_policy = refact_privacy::PrivacyPolicy::default();
-    let cleared_request = refact_privacy::clear(
-        params.llm_request.clone(),
-        &privacy_destination,
-        &privacy_policy,
+    let http_parts = build_http_for_attempt(
+        &app,
+        &params.llm_request,
+        &params.model_rec,
+        adapter,
+        &adapter_settings,
     )
-    .map_err(|refusal| {
-        LlmStreamError::new(refusal.message.clone(), partial_output_emitted)
-    })?;
-
-    let http_parts = adapter
-        .build_http(&cleared_request, &adapter_settings)
-        .map_err(|e| {
-            LlmStreamError::new(
-                format!("Failed to build LLM request: {}", e),
-                partial_output_emitted,
-            )
-        })?;
+    .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
 
     crate::chat::cache_diagnostics::log_provider_request_hashes(
         params.chat_id.as_deref(),
@@ -2986,6 +2976,152 @@ fn format_llm_error_body(status_label: &str, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::call_validation::ChatMessage;
+    use refact_privacy::{Attribution, FileRecord, PolicyLoad, PrivacyPolicy, PrivacyRecord};
+    use refact_privacy::{ShellBehavior, SubagentPolicy, Zone};
+
+    fn privacy_policy(allowed_provider: &str) -> PrivacyPolicy {
+        PrivacyPolicy {
+            blocked: Vec::new(),
+            zones: vec![
+                Zone {
+                    name: "secrets".to_string(),
+                    patterns: vec![".env*".to_string()],
+                    send_to: vec![allowed_provider.to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+                Zone {
+                    name: "normal".to_string(),
+                    patterns: vec!["*".to_string()],
+                    send_to: vec!["*".to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+            ],
+            subagents: SubagentPolicy::default(),
+        }
+    }
+
+    fn request_with_secret() -> LlmRequest {
+        let mut message = ChatMessage::new("user".to_string(), "guarded".to_string());
+        message.extra.insert(
+            "privacy".to_string(),
+            serde_json::to_value(PrivacyRecord {
+                files: vec![FileRecord {
+                    path: ".env".to_string(),
+                    zone: "secrets".to_string(),
+                    attribution: Attribution::Declared,
+                }],
+            })
+            .unwrap(),
+        );
+        LlmRequest::new("model".to_string(), vec![message])
+    }
+
+    fn model_record(provider: &str) -> BaseModelRecord {
+        BaseModelRecord {
+            id: format!("{provider}/model"),
+            name: "model".to_string(),
+            endpoint: "https://example.com/v1/chat/completions".to_string(),
+            wire_format: WireFormat::OpenaiChatCompletions,
+            ..Default::default()
+        }
+    }
+
+    fn adapter_settings(model: &BaseModelRecord) -> AdapterSettings {
+        AdapterSettings {
+            api_key: String::new(),
+            auth_token: String::new(),
+            endpoint: model.endpoint.clone(),
+            extra_headers: HashMap::new(),
+            model_name: model.name.clone(),
+            supports_tools: false,
+            supports_reasoning: false,
+            reasoning_type: None,
+            supports_temperature: true,
+            supports_max_completion_tokens: false,
+            eof_is_done: false,
+            supports_web_search: false,
+            supports_cache_control: false,
+        }
+    }
+
+    async fn app_with_privacy_policy(policy: PrivacyPolicy) -> AppState {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.privacy_policy_load.write().unwrap() = PolicyLoad {
+            policy: Arc::new(policy),
+            error: None,
+            source_paths: Vec::new(),
+        };
+        AppState::from_gcx(gcx).await
+    }
+
+    #[tokio::test]
+    async fn privacy_gate_refuses_disallowed_provider_before_build_http() {
+        let app = app_with_privacy_policy(privacy_policy("trusted")).await;
+        let model = model_record("untrusted");
+
+        let result = build_http_for_attempt(
+            &app,
+            &request_with_secret(),
+            &model,
+            get_adapter(model.wire_format),
+            &adapter_settings(&model),
+        );
+        let error = match result {
+            Ok(_) => panic!("untrusted provider should be refused"),
+            Err(error) => error,
+        };
+
+        assert!(error.starts_with("Output withheld by user privacy policy"));
+    }
+
+    #[tokio::test]
+    async fn privacy_gate_allows_provider_through_build_http() {
+        let app = app_with_privacy_policy(privacy_policy("trusted")).await;
+        let model = model_record("trusted");
+
+        let parts = build_http_for_attempt(
+            &app,
+            &request_with_secret(),
+            &model,
+            get_adapter(model.wire_format),
+            &adapter_settings(&model),
+        )
+        .unwrap();
+
+        assert_eq!(parts.url, model.endpoint);
+        assert_eq!(parts.body["model"], model.name);
+    }
+
+    #[tokio::test]
+    async fn privacy_gate_rechecks_each_provider_attempt() {
+        let app = app_with_privacy_policy(privacy_policy("fallback")).await;
+        let request = request_with_secret();
+        let denied = model_record("primary");
+        let allowed = model_record("fallback");
+
+        let first = build_http_for_attempt(
+            &app,
+            &request,
+            &denied,
+            get_adapter(denied.wire_format),
+            &adapter_settings(&denied),
+        );
+        let second = build_http_for_attempt(
+            &app,
+            &request,
+            &allowed,
+            get_adapter(allowed.wire_format),
+            &adapter_settings(&allowed),
+        );
+
+        let first_error = match first {
+            Ok(_) => panic!("primary provider should be refused"),
+            Err(error) => error,
+        };
+        assert!(first_error.starts_with("Output withheld by user privacy policy"));
+        assert_eq!(second.unwrap().body["model"], allowed.name);
+    }
 
     #[test]
     fn websocket_endpoint_requires_codex_backend_and_internal_marker() {
