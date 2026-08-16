@@ -11,7 +11,6 @@ use crate::policy::{PrivacyPolicy, ShellBehavior, Zone};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyError {
     InvalidGlob { pattern: String, message: String },
-    MissingNormalZone,
 }
 
 impl fmt::Display for PolicyError {
@@ -20,7 +19,6 @@ impl fmt::Display for PolicyError {
             Self::InvalidGlob { pattern, message } => {
                 write!(formatter, "invalid glob pattern {pattern:?}: {message}")
             }
-            Self::MissingNormalZone => write!(formatter, "privacy policy has no normal zone"),
         }
     }
 }
@@ -61,7 +59,7 @@ pub fn compile_patterns(patterns: &[String]) -> Result<Vec<Pattern>, PolicyError
 impl PrivacyPolicy {
     pub fn compile(&self) -> Result<CompiledPolicy, PolicyError> {
         let mut zones =
-            Vec::with_capacity(self.zones.len() + usize::from(!self.blocked.is_empty()));
+            Vec::with_capacity(self.zones.len() + usize::from(!self.blocked.is_empty()) + 1);
         if !self.blocked.is_empty() {
             zones.push(CompiledZone {
                 zone: Zone {
@@ -81,10 +79,26 @@ impl PrivacyPolicy {
             });
         }
 
-        let normal_index = zones
+        let normal_index = match zones
             .iter()
             .position(|compiled| compiled.zone.name == "normal")
-            .ok_or(PolicyError::MissingNormalZone)?;
+        {
+            Some(index) => index,
+            None => {
+                let zone = Zone {
+                    name: "normal".to_string(),
+                    patterns: vec!["**".to_string()],
+                    send_to: vec!["*".to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                };
+                let index = zones.len();
+                zones.push(CompiledZone {
+                    patterns: compile_patterns(&zone.patterns)?,
+                    zone,
+                });
+                index
+            }
+        };
 
         Ok(CompiledPolicy {
             zones,
@@ -334,13 +348,36 @@ mod tests {
     }
 
     #[test]
-    fn compile_requires_a_normal_fallback_zone() {
-        let policy = policy(vec![zone("secrets", &[".env*"], &[])]);
+    fn compile_synthesizes_a_normal_fallback_zone() {
+        let compiled = PrivacyPolicy::default()
+            .compile()
+            .expect("default policy should compile");
+        let normal = compiled.zone_for_path(Path::new("/anything"));
 
-        assert!(matches!(
-            policy.compile(),
-            Err(PolicyError::MissingNormalZone)
-        ));
+        assert_eq!(normal.name, "normal");
+        assert_eq!(normal.send_to, vec!["*"]);
+    }
+
+    #[test]
+    fn compile_keeps_declared_normal_zone_at_its_position() {
+        let policy = policy(vec![
+            zone("secrets", &[".env*"], &[]),
+            zone("normal", &["**"], &["*"]),
+            zone("later", &["later/**"], &[]),
+        ]);
+
+        let compiled = policy.compile().expect("policy should compile");
+
+        assert_eq!(compiled.normal_index, 1);
+        assert_eq!(
+            compiled
+                .zones
+                .iter()
+                .filter(|compiled| compiled.zone.name == "normal")
+                .count(),
+            1
+        );
+        assert_eq!(compiled.zones[1].zone, policy.zones[1]);
     }
 
     #[test]
