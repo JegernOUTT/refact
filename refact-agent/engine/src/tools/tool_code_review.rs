@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use crate::subchat::{run_subchat_once_with_parent, resolve_subchat_params, resolve_subchat_model};
 use crate::tools::code_review_candidates::{parse_candidates_with_reasons, ParsedCandidates};
 use crate::tools::code_review_evidence::collect_evidence;
+use crate::tools::code_review_rank::finalize_review_report;
 use crate::tools::code_review_scope::{
     build_review_scope_with_max_files, validate_review_budget, ReviewScope,
 };
@@ -307,6 +308,7 @@ async fn run_review_pipeline(
     let output = apply_evidence_stage(gcx.clone(), &scope, output).await;
     let mut report = output.into_report();
     verify_review_report(gcx, ccx, tool_call_id, &mut report, metering).await;
+    finalize_review_report(&mut report);
     Ok(CandidateStageOutput {
         report,
         rationales: vec![],
@@ -401,41 +403,108 @@ fn severity_label(severity: &ReviewSeverity) -> &'static str {
 }
 
 fn finding_location(finding: &ReviewFinding) -> String {
-    if finding.line1 == finding.line2 {
-        format!("{}:{}", finding.file, finding.line1)
-    } else {
-        format!("{}:{}-{}", finding.file, finding.line1, finding.line2)
-    }
+    format!("{}:{}-{}", finding.file, finding.line1, finding.line2)
 }
 
-fn render_review_markdown(report: &ReviewReport) -> String {
-    let mut output = report.summary.trim_end().to_string();
-    if let Some(rejected) = report.checks_performed.iter().find_map(|check| {
-        check
-            .strip_prefix("verifier_rejected:")
-            .and_then(|count| count.parse::<usize>().ok())
-    }) {
-        output.push_str(&format!(
-            "\n\nVerification rejected {rejected} candidate finding(s)."
-        ));
-    }
+fn review_verdict(report: &ReviewReport) -> String {
     if report.findings.is_empty() {
-        return output;
+        return "No verified findings.".to_string();
+    }
+    let verified = report
+        .findings
+        .iter()
+        .filter(|finding| {
+            finding.verification_status
+                == crate::tools::code_review_types::VerificationStatus::Verified
+        })
+        .count();
+    let needs_human = report
+        .findings
+        .iter()
+        .filter(|finding| {
+            finding.verification_status
+                == crate::tools::code_review_types::VerificationStatus::NeedsHumanValidation
+        })
+        .count();
+    format!(
+        "Review retained {} finding(s): {verified} verified and {needs_human} needing human validation.",
+        report.findings.len()
+    )
+}
+
+fn render_review_markdown(report: &ReviewReport) -> Result<String, serde_json::Error> {
+    let focus = report.scope.focus.as_deref().unwrap_or("not specified");
+    let diff_base = report.scope.diff_base.as_deref().unwrap_or("not specified");
+    let verdict = if report.findings.is_empty() {
+        report.summary.trim().to_string()
+    } else {
+        review_verdict(report)
+    };
+    let mut output = format!(
+        "## Review summary\n\n- Scope: {} files\n- Focus: {}\n- Diff base: {}\n\n{}",
+        report.scope.files_reviewed.len(),
+        markdown_cell(focus),
+        markdown_cell(diff_base),
+        verdict
+    );
+    if !report.findings.is_empty() && !report.summary.trim().is_empty() {
+        output.push_str("\n\n");
+        output.push_str(report.summary.trim());
     }
 
-    output.push_str(
-        "\n\n### Candidate findings\n\n| Location | Severity | Verification | Claim |\n| --- | --- | --- | --- |\n",
-    );
-    for finding in &report.findings {
-        output.push_str(&format!(
-            "| {} | {} | {} | {} |\n",
-            markdown_cell(&finding_location(finding)),
-            severity_label(&finding.severity),
-            verification_status_label(&finding.verification_status),
-            markdown_cell(&finding.claim),
-        ));
+    output.push_str("\n\n## Findings");
+    for severity in [
+        ReviewSeverity::Critical,
+        ReviewSeverity::High,
+        ReviewSeverity::Medium,
+        ReviewSeverity::Low,
+    ] {
+        let findings = report
+            .findings
+            .iter()
+            .filter(|finding| finding.severity == severity)
+            .collect::<Vec<_>>();
+        if findings.is_empty() {
+            continue;
+        }
+        output.push_str(&format!("\n\n### {}", severity_label(&severity)));
+        for finding in findings {
+            output.push_str(&format!(
+                "\n\n- [{}] {} — {} ({}, {:.2})",
+                finding.id,
+                markdown_cell(&finding_location(finding)),
+                markdown_cell(&finding.claim),
+                verification_status_label(&finding.verification_status),
+                finding.confidence,
+            ));
+            if let Some(impact) = finding.impact.as_deref() {
+                output.push_str(&format!("\n  - Impact: {}", markdown_cell(impact)));
+            }
+            if let Some(remediation) = finding.remediation.as_deref() {
+                output.push_str(&format!(
+                    "\n  - Remediation: {}",
+                    markdown_cell(remediation)
+                ));
+            }
+        }
     }
-    output
+    if report.findings.is_empty() {
+        output.push_str("\n\nNo findings.");
+    }
+
+    output.push_str("\n\n## Checks performed");
+    if report.checks_performed.is_empty() {
+        output.push_str("\n\n- None recorded");
+    } else {
+        for check in &report.checks_performed {
+            output.push_str(&format!("\n\n- {}", markdown_cell(check)));
+        }
+    }
+
+    output.push_str("\n\n```json\n");
+    output.push_str(&serde_json::to_string_pretty(report)?);
+    output.push_str("\n```");
+    Ok(output)
 }
 
 #[async_trait]
@@ -450,7 +519,7 @@ impl Tool for ToolCodeReview {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Perform a thorough code review. Optionally pass `what_to_check` (focus/scope) and `files` (initial guess of relevant paths \u{2014} the reviewer starts there and finds more). Finds all related files and checks for bugs, broken integration/wiring, missing tests, inconsistency, and AI-generated 'slop'.".to_string(),
+            description: "Perform a thorough code review. Optionally pass `what_to_check` (focus/scope) and `files` (initial guess of relevant paths \u{2014} the reviewer starts there and finds more). Finds all related files and checks for bugs, broken integration/wiring, missing tests, inconsistency, and AI-generated 'slop'. The Markdown result ends with a fenced JSON block containing the full machine-parseable ReviewReport.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -564,7 +633,8 @@ impl Tool for ToolCodeReview {
         )
         .await?;
         let report = stage_output.into_report();
-        let final_message = render_review_markdown(&report);
+        let final_message = render_review_markdown(&report)
+            .map_err(|error| format!("failed to serialize code review report: {error}"))?;
 
         let guardrails_prompt = config
             .guardrails_prompt
@@ -614,24 +684,6 @@ mod tests {
     }
 
     #[test]
-    fn render_review_markdown_preserves_passthrough_summary() {
-        let raw_reviewer_text =
-            "# Files Reviewed (1)\n- src/lib.rs\n\n# Code Review\n## High\nFinding body\n";
-        let report = ReviewReport {
-            scope: ReviewScopeSummary {
-                files_reviewed: vec!["src/lib.rs".to_string()],
-                focus: None,
-                diff_base: None,
-            },
-            findings: vec![],
-            checks_performed: vec![],
-            summary: raw_reviewer_text.to_string(),
-        };
-
-        assert_eq!(render_review_markdown(&report), raw_reviewer_text);
-    }
-
-    #[test]
     fn tool_code_review_parse_failure_falls_back_to_legacy_report_with_marker() {
         let reviewer_text = "Legacy prose review".to_string();
         let output = fallback_candidate_stage_output(scope_summary(), reviewer_text.clone());
@@ -663,11 +715,11 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_render_markdown_adds_compact_findings_table() {
+    fn tool_code_review_render_markdown_groups_findings_and_includes_details() {
         let report = ReviewReport {
             scope: scope_summary(),
             findings: vec![ReviewFinding {
-                id: String::new(),
+                id: "rf-1234abcd".to_string(),
                 category: "correctness".to_string(),
                 severity: ReviewSeverity::High,
                 confidence: 0.8,
@@ -678,34 +730,46 @@ mod tests {
                 line2: 6,
                 claim: "The branch | drops errors.".to_string(),
                 evidence: vec![],
-                impact: None,
-                remediation: None,
+                impact: Some("Errors are hidden.".to_string()),
+                remediation: Some("Return the error.".to_string()),
                 checks_performed: vec![],
             }],
-            checks_performed: vec![],
+            checks_performed: vec!["excerpt_ok".to_string()],
             summary: "One plausible issue.".to_string(),
         };
 
-        let markdown = render_review_markdown(&report);
+        let markdown = render_review_markdown(&report).unwrap();
 
-        assert!(markdown.contains("### Candidate findings"));
-        assert!(markdown
-            .contains("| src/lib.rs:4-6 | high | unverified | The branch \\| drops errors. |"));
+        assert!(markdown.starts_with("## Review summary"));
+        assert!(markdown.contains("## Findings\n\n### high"));
+        assert!(markdown.contains(
+            "[rf-1234abcd] src/lib.rs:4-6 — The branch \\| drops errors. (unverified, 0.80)"
+        ));
+        assert!(markdown.contains("Impact: Errors are hidden."));
+        assert!(markdown.contains("Remediation: Return the error."));
+        assert!(markdown.contains("## Checks performed\n\n- excerpt_ok"));
     }
 
     #[test]
-    fn tool_code_review_render_markdown_counts_rejected_candidates() {
-        let report = ReviewReport {
+    fn tool_code_review_render_markdown_clean_change_golden_and_json_roundtrip() {
+        let mut report = ReviewReport {
             scope: scope_summary(),
             findings: vec![],
             checks_performed: vec!["verifier_rejected:2".to_string()],
             summary: "No surviving findings.".to_string(),
         };
+        finalize_review_report(&mut report);
 
-        assert_eq!(
-            render_review_markdown(&report),
-            "No surviving findings.\n\nVerification rejected 2 candidate finding(s)."
-        );
+        let markdown = render_review_markdown(&report).unwrap();
+
+        assert!(markdown.contains("- Scope: 1 files"));
+        assert!(markdown.contains("No verified findings."));
+        assert!(markdown.contains("## Checks performed\n\n- verifier_rejected:2"));
+        assert!(markdown.contains("Reviewed 1 file. Checks performed: verifier_rejected:2."));
+        let json_start = markdown.rfind("```json\n").unwrap() + "```json\n".len();
+        let json_end = markdown.rfind("\n```").unwrap();
+        let parsed: ReviewReport = serde_json::from_str(&markdown[json_start..json_end]).unwrap();
+        assert_eq!(parsed, report);
     }
 
     #[test]
