@@ -93,6 +93,11 @@ import { TaskDocumentsView } from "./TaskDocumentsView";
 import { FinalReportView } from "./FinalReportView";
 import { BackgroundAgentCard } from "../BackgroundAgentCard";
 import styles from "./ToolsContent.module.css";
+import { PrivacyToolResult } from "../../features/Privacy/PrivacyToolResult";
+import {
+  extractPrivacyShellMetadata,
+  isPrivacyRefusalContent,
+} from "../../services/refact/privacy";
 
 function finalReportSuccess(content: string): boolean | null {
   try {
@@ -668,6 +673,35 @@ function processToolCalls(
   const contextFiles = head.id ? contextFilesByToolId[head.id] : undefined;
   const diffs = head.id ? diffsByToolId[head.id] : undefined;
   const isActiveTool = head.id === activeToolCallId;
+
+  if (
+    result &&
+    head.id &&
+    threadId &&
+    (extractPrivacyShellMetadata(result.extra) !== null ||
+      isPrivacyRefusalContent(result.content))
+  ) {
+    const elem = (
+      <PrivacyToolResult
+        key={`privacy-tool-result-${head.id}`}
+        threadId={threadId}
+        toolCallId={head.id}
+        result={result}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+      activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
+      threadId,
+    );
+  }
 
   if (headName === "cat") {
     const elem = (

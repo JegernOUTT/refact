@@ -51,6 +51,7 @@ import { QueuedMessage } from "./QueuedMessage";
 import { selectSseStatusForChat } from "../../features/Connection";
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
 import { ChatLoading } from "./ChatLoading";
+import { ChatShield } from "../../features/Privacy/ChatShield";
 import {
   removeMessage,
   branchFromChat,
@@ -546,7 +547,12 @@ export const ChatContent: React.FC<ChatContentProps> = ({
             renderItem={renderDisplayItem}
             initialScrollIndex={initialScrollIndex}
             footer={virtuosoFooter}
-            header={<PlanBanner threadId={renderChatId} />}
+            header={
+              <Flex direction="column" gap="2">
+                <ChatShield threadId={renderChatId} />
+                <PlanBanner threadId={renderChatId} />
+              </Flex>
+            }
             isStreaming={isStreaming}
           />
 

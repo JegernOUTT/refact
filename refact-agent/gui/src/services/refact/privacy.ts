@@ -79,6 +79,95 @@ export type PrivacyInspectResponse = {
   refusal: string | null;
 };
 
+export type PrivacyRecordMetadata = {
+  files: PrivacyFileRecord[];
+};
+
+export type PrivacyShellMetadata = {
+  withheld: true;
+  local_only_output: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPrivacyFileRecord(value: unknown): value is PrivacyFileRecord {
+  return (
+    isRecord(value) &&
+    typeof value.path === "string" &&
+    typeof value.zone === "string" &&
+    (value.attribution === "declared" ||
+      value.attribution === "observed" ||
+      value.attribution === "heuristic")
+  );
+}
+
+export function extractPrivacyFiles(
+  extra: Record<string, unknown> | undefined,
+): PrivacyFileRecord[] {
+  const privacy = extra?.privacy;
+  if (!isRecord(privacy) || !Array.isArray(privacy.files)) return [];
+  return privacy.files.filter(isPrivacyFileRecord);
+}
+
+export function extractPrivacyShellMetadata(
+  extra: Record<string, unknown> | undefined,
+): PrivacyShellMetadata | null {
+  const shell = extra?.privacy_shell;
+  if (
+    !isRecord(shell) ||
+    shell.withheld !== true ||
+    typeof shell.local_only_output !== "string"
+  ) {
+    return null;
+  }
+  return {
+    withheld: true,
+    local_only_output: shell.local_only_output,
+  };
+}
+
+export function privacyDestinationForModel(model: string): PrivacyDestination {
+  const separator = model.indexOf("/");
+  return {
+    id: separator === -1 ? model : model.slice(0, separator),
+    kind: "provider",
+    display_name: model,
+  };
+}
+
+export function privacyFileIsAllowed(
+  file: PrivacyFileRecord,
+  destination: PrivacyDestination,
+  policy: PrivacyPolicy,
+): boolean {
+  if (file.zone === "blocked") return false;
+  const zone = policy.zones.find((candidate) => candidate.name === file.zone);
+  return (
+    zone?.send_to.some(
+      (allowed) => allowed === "*" || allowed === destination.id,
+    ) ?? false
+  );
+}
+
+export function blockedPrivacyFiles(
+  files: PrivacyFileRecord[],
+  destination: PrivacyDestination,
+  policy: PrivacyPolicy,
+): PrivacyFileRecord[] {
+  return files.filter(
+    (file) => !privacyFileIsAllowed(file, destination, policy),
+  );
+}
+
+export function isPrivacyRefusalContent(content: unknown): boolean {
+  return (
+    typeof content === "string" &&
+    content.startsWith("Output withheld by user privacy policy")
+  );
+}
+
 export const privacyApi = createApi({
   reducerPath: "privacyApi",
   tagTypes: ["PRIVACY_POLICY", "PRIVACY_STATUS"],

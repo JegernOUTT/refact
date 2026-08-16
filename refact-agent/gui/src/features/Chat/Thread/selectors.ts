@@ -36,6 +36,10 @@ import type {
   CompressionPhase,
   CompressionReason,
 } from "../../../services/refact/chatSubscription";
+import {
+  extractPrivacyFiles,
+  type PrivacyFileRecord,
+} from "../../../services/refact/privacy";
 
 const EMPTY_MESSAGES: ChatMessages = [];
 const EMPTY_EVENT_MESSAGES: EventMessage[] = [];
@@ -224,6 +228,60 @@ export const selectMessagesById = (state: RootState, chatId: string) =>
 
 export const selectMessages = (state: RootState) =>
   selectMessagesById(state, state.chat.current_thread_id);
+
+export const selectPrivacyFilesById = createSelector(
+  [selectMessagesById],
+  (messages): PrivacyFileRecord[] => {
+    const files: PrivacyFileRecord[] = [];
+    for (const message of messages) {
+      for (const file of extractPrivacyFiles(message.extra)) {
+        if (
+          !files.some(
+            (candidate) =>
+              candidate.path === file.path &&
+              candidate.zone === file.zone &&
+              candidate.attribution === file.attribution,
+          )
+        ) {
+          files.push(file);
+        }
+      }
+    }
+    return files;
+  },
+);
+
+export type PrivacyStepContext = {
+  step: number;
+  branchMessageId: string | null;
+};
+
+export const selectPrivacyStepContextById = createSelector(
+  [
+    selectMessagesById,
+    (_state: RootState, _chatId: string, toolCallId: string) => toolCallId,
+  ],
+  (messages, toolCallId): PrivacyStepContext => {
+    const resultIndex = messages.findIndex(
+      (message) =>
+        isToolMessage(message) && message.tool_call_id === toolCallId,
+    );
+    const callIndex = messages.findIndex(
+      (message) =>
+        isAssistantMessage(message) &&
+        message.tool_calls?.some((toolCall) => toolCall.id === toolCallId),
+    );
+    const stepIndex = callIndex === -1 ? resultIndex : callIndex;
+    const branchMessage = messages
+      .slice(0, Math.max(stepIndex, 0))
+      .reverse()
+      .find((message) => typeof message.message_id === "string");
+    return {
+      step: stepIndex === -1 ? messages.length : stepIndex + 1,
+      branchMessageId: branchMessage?.message_id ?? null,
+    };
+  },
+);
 
 export const selectModel = (state: RootState) =>
   selectModelById(state, state.chat.current_thread_id);
