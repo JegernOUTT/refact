@@ -179,7 +179,9 @@ describe("ChromeTool", () => {
     expect(screen.getByText("Page State")).toBeInTheDocument();
     expect(screen.getByText("Console")).toBeInTheDocument();
     expect(screen.getByText("Page Errors")).toBeInTheDocument();
-    expect(screen.getByText("Network")).toBeInTheDocument();
+    const networkTrigger = screen.getByRole("button", { name: "Network (1)" });
+    expect(networkTrigger).toHaveAttribute("aria-expanded", "false");
+    await user.click(networkTrigger);
     expect(screen.getByText("Locator Handlers")).toBeInTheDocument();
     expect(screen.getByText("Dialogs")).toBeInTheDocument();
     expect(screen.getByText("Uploads")).toBeInTheDocument();
@@ -195,15 +197,13 @@ describe("ChromeTool", () => {
         text.includes("fixtureFailure is not defined"),
       ),
     ).toBeInTheDocument();
+    expect(screen.getByText("GET")).toBeInTheDocument();
+    expect(screen.getByLabelText("Status 404")).toBeInTheDocument();
     expect(
-      screen.getByText((text) =>
-        text.includes("GET 404 https://example.com/api/items"),
-      ),
+      screen.getByTitle("https://example.com/api/items"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText((text) =>
-        text.includes("net::ERR_HTTP_RESPONSE_CODE_FAILURE"),
-      ),
+      screen.getByText("net::ERR_HTTP_RESPONSE_CODE_FAILURE"),
     ).toBeInTheDocument();
     expect(screen.getByText("dismiss_overlays")).toBeInTheDocument();
     expect(screen.getByText("Action: click")).toBeInTheDocument();

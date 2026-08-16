@@ -81,8 +81,11 @@ describe("Browser API contract tests", () => {
         {
           method: "GET",
           url: "https://api.example.com",
+          resource_type: "Fetch",
           status: 200,
           timestamp: 1000,
+          from_service_worker: false,
+          is_navigation_request: false,
         },
       ],
       mutations: [],

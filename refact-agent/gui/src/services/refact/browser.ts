@@ -60,7 +60,7 @@ export type BrowserContextResponse = {
   title: string;
   actions: unknown[];
   console: unknown[];
-  network: unknown[];
+  network: BrowserNetworkEntry[];
   mutations: unknown[];
   total_bytes: number;
 };
@@ -225,7 +225,7 @@ export type BrowserNetworkEntry = {
   method: string;
   url: string;
   resource_type: string;
-  status?: number | null;
+  status: number | null;
   status_text?: string | null;
   request_headers?: Record<string, string>;
   response_headers?: Record<string, string>;
@@ -256,7 +256,7 @@ export type BrowserDialogInfo = {
 
 export type BrowserUploadInfo = {
   paths: string[];
-  source: "direct" | "file_chooser" | string;
+  source: string;
   in_memory_payloads: boolean;
 };
 

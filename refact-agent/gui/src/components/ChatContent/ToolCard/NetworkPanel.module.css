@@ -1,0 +1,101 @@
+.section {
+  composes: section from "./ToolCardBody.module.css";
+}
+
+.panel {
+  min-width: 0;
+}
+
+.filters {
+  min-width: 0;
+}
+
+.filterInput {
+  flex: 1 1 var(--rf-overlay-popover-min);
+  min-width: 0;
+}
+
+.scrollRegion {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  min-width: 0;
+  max-height: calc(var(--rf-control-h-lg) * 8);
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.list {
+  display: grid;
+  min-width: 0;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-1) var(--rf-space-2);
+  padding: var(--rf-space-2);
+  border-block-end: var(--rf-hairline) solid var(--rf-border);
+}
+
+.row:last-child {
+  border-block-end: 0;
+}
+
+.row[data-error="true"] {
+  padding-inline-start: var(--rf-space-2);
+  background: var(--rf-surface-1);
+  border-inline-start: calc(var(--rf-hairline) * 2) solid var(--rf-color-danger);
+}
+
+.method {
+  font-family: var(--rf-font-mono);
+}
+
+.url {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta {
+  grid-column: 2 / -1;
+  min-width: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.meta > span:not(:last-child)::after {
+  margin-inline-start: var(--rf-space-2);
+  color: var(--rf-color-faint);
+  content: "·";
+}
+
+.redirect,
+.failure {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.redirect {
+  color: var(--rf-color-info);
+}
+
+.failure {
+  color: var(--rf-color-danger);
+  font-family: var(--rf-font-mono);
+}
+
+.empty {
+  color: var(--rf-color-muted);
+}
