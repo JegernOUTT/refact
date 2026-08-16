@@ -1192,6 +1192,34 @@ pub fn setup_recording_for_runtime(runtime: &mut BrowserRuntime) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_pointer_path_uses_actionability_cdp_mouse() {
+        let source = include_str!("../../../src/integrations/browser_controller.rs");
+        let routing = source
+            .split_once("fn step_locator_action(")
+            .unwrap()
+            .1
+            .split_once("fn step_actionable_action(")
+            .unwrap()
+            .0;
+        assert!(routing.contains("\"click\" => Some(ActionKind::Click)"));
+        assert!(routing.contains("return step_actionable_action("));
+        assert!(!routing.contains("this.click()"));
+
+        let driver = source
+            .split_once("impl ActionabilityDriver for BrowserActionDriver")
+            .unwrap()
+            .1
+            .split_once("fn intercepts_pointer_events(")
+            .unwrap()
+            .0;
+        assert!(driver.contains("CdpMouseDispatcher::new(self.tab)"));
+        assert!(driver.contains("mouse.click(point.x, point.y, MouseButton::Left)"));
+        assert!(driver.contains("mouse.hover(point.x, point.y)"));
+        assert!(!driver.contains("this.click()"));
+    }
+
     fn make_test_buffers() -> BrowserBuffers {
         BrowserBuffers::new(true)
     }
