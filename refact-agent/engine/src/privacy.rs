@@ -9,6 +9,7 @@ use crate::files_correction::{canonical_path, get_project_dirs};
 use crate::global_context::GlobalContext;
 
 pub mod heuristic;
+pub mod records;
 
 pub use refact_core::privacy_types::{FilePrivacyLevel, FilePrivacySettings, PrivacySettings};
 pub use refact_privacy::{PolicyLoad, PrivacyPolicy};

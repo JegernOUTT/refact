@@ -252,8 +252,7 @@ impl Tool for ToolCat {
             )
         };
 
-        // Keep multimodal shape intact: we append a new text block.
-        results.push(ContextEnum::ChatMessage(ChatMessage {
+        let mut tool_message = ChatMessage {
             role: "tool".to_string(),
             content: match chat_content {
                 ChatContent::SimpleText(t) => {
@@ -273,7 +272,15 @@ impl Tool for ToolCat {
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
             ..Default::default()
-        }));
+        };
+        let gcx = ccx.lock().await.app.gcx.clone();
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+        let records = crate::privacy::records::declared_file_records(
+            &gcx,
+            filenames_present.iter().map(PathBuf::from),
+        )?;
+        crate::privacy::records::merge_records(&mut tool_message, records);
+        results.push(ContextEnum::ChatMessage(tool_message));
 
         Ok((corrections, results))
     }
@@ -1222,6 +1229,52 @@ mod tests {
             text.contains("exceeds the") && text.contains("byte read limit"),
             "expected an oversized-file notice, got: {}",
             text
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_cat_attaches_declared_secrets_record() {
+        let temp = tempfile::Builder::new()
+            .prefix("refact-tool-cat-")
+            .tempdir()
+            .unwrap();
+        let file = temp.path().join(".env");
+        write_lines(&file, 2);
+        let ccx = ccx_for_root(temp.path()).await;
+        let gcx = ccx.lock().await.app.gcx.clone();
+        let policy = refact_privacy::PrivacyPolicy {
+            blocked: Vec::new(),
+            zones: vec![
+                refact_privacy::Zone {
+                    name: "secrets".to_string(),
+                    patterns: vec![file.to_string_lossy().to_string()],
+                    send_to: vec!["*".to_string()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                },
+                refact_privacy::Zone {
+                    name: "normal".to_string(),
+                    patterns: vec!["*".to_string()],
+                    send_to: vec!["*".to_string()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                },
+            ],
+            subagents: refact_privacy::SubagentPolicy::default(),
+        };
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(policy);
+
+        let results = run_cat(ccx, file.to_string_lossy().to_string()).await;
+        let message = results
+            .iter()
+            .find_map(|result| match result {
+                ContextEnum::ChatMessage(message) if message.role == "tool" => Some(message),
+                _ => None,
+            })
+            .expect("cat should emit a tool message");
+
+        assert_eq!(message.extra["privacy"]["files"][0]["zone"], "secrets");
+        assert_eq!(
+            message.extra["privacy"]["files"][0]["attribution"],
+            "declared"
         );
     }
 }

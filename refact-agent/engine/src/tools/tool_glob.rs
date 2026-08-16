@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -229,14 +229,21 @@ impl Tool for ToolGlob {
             }
         }
 
-        let results = vec![ContextEnum::ChatMessage(ChatMessage {
+        let mut tool_message = ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(content),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
             output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
-        })];
+        };
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+        let records = crate::privacy::records::declared_file_records(
+            &gcx,
+            outcome.matches.iter().map(PathBuf::from),
+        )?;
+        crate::privacy::records::merge_records(&mut tool_message, records);
+        let results = vec![ContextEnum::ChatMessage(tool_message)];
 
         Ok((false, results))
     }

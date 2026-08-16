@@ -261,6 +261,20 @@ fn tool_message(tool_call_id: &String, text: String) -> Vec<ContextEnum> {
     })]
 }
 
+fn tool_message_with_records(
+    gcx: &Arc<crate::global_context::GlobalContext>,
+    tool_call_id: &String,
+    text: String,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> Result<Vec<ContextEnum>, String> {
+    let mut messages = tool_message(tool_call_id, text);
+    let records = crate::privacy::records::declared_file_records(gcx, paths)?;
+    if let Some(ContextEnum::ChatMessage(message)) = messages.first_mut() {
+        crate::privacy::records::merge_records(message, records);
+    }
+    Ok(messages)
+}
+
 fn codegraph_dependency() -> Vec<String> {
     vec!["codegraph".to_string()]
 }
@@ -2654,15 +2668,15 @@ impl Tool for ToolDeadCode {
         let limit = optional_usize_arg(args, "limit", DEAD_CODE_DEFAULT_LIMIT)?
             .clamp(1, DEAD_CODE_MAX_LIMIT);
         let min_confidence = optional_f64_arg(args, "min_confidence", 0.5)?.clamp(0.0, 1.0);
-        let path = optional_string_arg(args, "path")?;
-        let path = match path {
-            Some(path) => Some(resolve_codegraph_filter_path(ccx.clone(), &path).await?),
+        let requested_path = optional_string_arg(args, "path")?;
+        let path = match requested_path.as_ref() {
+            Some(path) => Some(resolve_codegraph_filter_path(ccx.clone(), path).await?),
             None => None,
         };
         let roots = codegraph_project_roots(ccx.clone()).await?;
         let gcx = ccx.lock().await.app.gcx.clone();
         let report = dead_code_report_with_roots(
-            gcx,
+            gcx.clone(),
             limit,
             path.as_deref(),
             min_confidence,
@@ -2677,19 +2691,39 @@ impl Tool for ToolDeadCode {
         );
         Ok((
             false,
-            tool_message(
-                tool_call_id,
-                ToolJson::new(
-                    "dead_code",
-                    summary,
-                    DeadCodeToolResponse {
-                        report,
-                        shown,
-                        total_candidates,
-                    },
-                )
-                .to_text(),
-            ),
+            match requested_path {
+                Some(requested_path) => {
+                    crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+                    tool_message_with_records(
+                        &gcx,
+                        tool_call_id,
+                        ToolJson::new(
+                            "dead_code",
+                            summary,
+                            DeadCodeToolResponse {
+                                report,
+                                shown,
+                                total_candidates,
+                            },
+                        )
+                        .to_text(),
+                        [PathBuf::from(requested_path)],
+                    )?
+                }
+                None => tool_message(
+                    tool_call_id,
+                    ToolJson::new(
+                        "dead_code",
+                        summary,
+                        DeadCodeToolResponse {
+                            report,
+                            shown,
+                            total_candidates,
+                        },
+                    )
+                    .to_text(),
+                ),
+            },
         ))
     }
 
@@ -2754,6 +2788,8 @@ impl Tool for ToolCodeHealth {
         let resolved_file = resolve_codegraph_file(ccx.clone(), &requested_file_path).await?;
         let file_path = resolved_file.indexed_path;
         let gcx = ccx.lock().await.app.gcx.clone();
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+        let mut record_paths = vec![resolved_file.read_path.clone()];
         let text = crate::files_in_workspace::get_file_text_from_memory_or_disk(
             gcx.clone(),
             &resolved_file.read_path,
@@ -2763,6 +2799,7 @@ impl Tool for ToolCodeHealth {
         let coverage = match args.get("coverage_file") {
             Some(Value::String(cov_path)) if !cov_path.trim().is_empty() => {
                 let resolved_coverage = resolve_codegraph_file(ccx.clone(), cov_path).await?;
+                record_paths.push(resolved_coverage.read_path.clone());
                 let rope = crate::files_in_workspace::get_file_text_from_memory_or_disk(
                     gcx.clone(),
                     &resolved_coverage.read_path,
@@ -2849,7 +2886,8 @@ impl Tool for ToolCodeHealth {
             };
             return Ok((
                 false,
-                tool_message(
+                tool_message_with_records(
+                    &gcx,
                     tool_call_id,
                     ToolJson::new(
                         "code_health",
@@ -2860,7 +2898,8 @@ impl Tool for ToolCodeHealth {
                         data,
                     )
                     .to_text(),
-                ),
+                    record_paths.clone(),
+                )?,
             ));
         }
 
@@ -3021,10 +3060,12 @@ impl Tool for ToolCodeHealth {
         };
         Ok((
             false,
-            tool_message(
+            tool_message_with_records(
+                &gcx,
                 tool_call_id,
                 ToolJson::new("code_health", summary, data).to_text(),
-            ),
+                record_paths,
+            )?,
         ))
     }
 
@@ -4012,6 +4053,8 @@ impl Tool for ToolSecurityScan {
         let resolved_file = resolve_codegraph_file(ccx.clone(), &requested_file_path).await?;
         let file_path = resolved_file.indexed_path;
         let gcx = ccx.lock().await.app.gcx.clone();
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+        let record_path = resolved_file.read_path.clone();
         let text = crate::files_in_workspace::get_file_text_from_memory_or_disk(
             gcx.clone(),
             &resolved_file.read_path,
@@ -4037,7 +4080,8 @@ impl Tool for ToolSecurityScan {
             };
             return Ok((
                 false,
-                tool_message(
+                tool_message_with_records(
+                    &gcx,
                     tool_call_id,
                     ToolJson::new(
                         "security_scan",
@@ -4047,7 +4091,8 @@ impl Tool for ToolSecurityScan {
                         data,
                     )
                     .to_text(),
-                ),
+                    [record_path.clone()],
+                )?,
             ));
         }
 
@@ -4073,10 +4118,12 @@ impl Tool for ToolSecurityScan {
             format!("Security scan for `{requested_file_path}` found {finding_count} findings");
         Ok((
             false,
-            tool_message(
+            tool_message_with_records(
+                &gcx,
                 tool_call_id,
                 ToolJson::new("security_scan", summary, data).to_text(),
-            ),
+                [record_path],
+            )?,
         ))
     }
 
@@ -4138,6 +4185,7 @@ impl Tool for ToolPrBlast {
             resolved_changed_files.push(resolve_codegraph_filter_path(ccx.clone(), path).await?);
         }
         let gcx = ccx.lock().await.app.gcx.clone();
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
         let service = gcx
             .codegraph
             .lock()
@@ -4180,10 +4228,12 @@ impl Tool for ToolPrBlast {
         );
         Ok((
             false,
-            tool_message(
+            tool_message_with_records(
+                &gcx,
                 tool_call_id,
                 ToolJson::new("pr_blast", summary, data).to_text(),
-            ),
+                changed_files.into_iter().map(PathBuf::from),
+            )?,
         ))
     }
 

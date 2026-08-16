@@ -542,15 +542,23 @@ impl Tool for ToolRegexSearch {
             format_related_memories_section(&cards, None)
         };
 
+        let matched_paths = all_search_results
+            .iter()
+            .map(|file| PathBuf::from(&file.file_name))
+            .collect::<Vec<_>>();
         let mut results = vec_context_file_to_context_tools(all_search_results);
-        results.push(ContextEnum::ChatMessage(ChatMessage {
+        let mut tool_message = ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(format!("{}{}", all_content, related_section)),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
             output_filter: Some(OutputFilter::no_limits()), // Already compressed internally
             ..Default::default()
-        }));
+        };
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+        let records = crate::privacy::records::declared_file_records(&gcx, matched_paths)?;
+        crate::privacy::records::merge_records(&mut tool_message, records);
+        results.push(ContextEnum::ChatMessage(tool_message));
 
         Ok((false, results))
     }

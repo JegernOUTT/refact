@@ -17,8 +17,8 @@ pub async fn postprocess_tool_results(
     existing_messages: &[ChatMessage],
     truncation_exempt_tool_call_ids: &std::collections::HashSet<String>,
 ) -> Vec<ChatMessage> {
-    refact_postprocessing::pp_tool_results::postprocess_tool_results(
-        Arc::new(GcxPPContext(gcx)),
+    let mut messages = refact_postprocessing::pp_tool_results::postprocess_tool_results(
+        Arc::new(GcxPPContext(gcx.clone())),
         tokenizer,
         tool_messages,
         context_files,
@@ -27,5 +27,9 @@ pub async fn postprocess_tool_results(
         existing_messages,
         truncation_exempt_tool_call_ids,
     )
-    .await
+    .await;
+    if let Err(error) = crate::privacy::records::attach_declared_output_files(&gcx, &mut messages) {
+        tracing::error!("failed to attach file privacy records: {error}");
+    }
+    messages
 }
