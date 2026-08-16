@@ -4055,6 +4055,7 @@ version = "0.1.0"
 dependencies = [
  "headless_chrome",
  "refact-chat-api",
+ "refact-core",
  "refact-integrations",
  "serde",
  "serde_json",

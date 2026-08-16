@@ -6,10 +6,14 @@
 </head>
 <body>
   <button id="confirm">Open confirm</button>
+  <button id="prompt">Open prompt</button>
   <output id="result"></output>
   <script>
     document.querySelector('#confirm').addEventListener('click', () => {
       document.querySelector('#result').textContent = confirm('Continue with fixture?') ? 'confirmed' : 'dismissed';
+    });
+    document.querySelector('#prompt').addEventListener('click', () => {
+      document.querySelector('#result').textContent = prompt('Name for fixture?', 'visitor') ?? 'dismissed';
     });
   </script>
 </body>

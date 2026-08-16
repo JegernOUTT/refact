@@ -377,7 +377,12 @@ impl Tool for ToolChrome {
              with an `action` field (snake_case) and action-specific fields. \
              Set `attach_screenshot` to true to include a policy-sized screenshot in the transactional report; \
              it defaults to false and page-changing batches capture automatically. \
-             Example steps: {{\"action\": \"open_tab\", \"device\": \"desktop\"}}, \
+             JavaScript dialogs auto-dismiss when unarmed, except beforeunload is accepted so \
+             navigation or close can proceed. A `handle_dialog` step with `accept` and optional \
+             `prompt_text` arms the next dialog; unlike Playwright's event listener, it cannot \
+             handle an already-open dialog. \
+             Example steps: {{\"action\": \"handle_dialog\", \"accept\": true, \"prompt_text\": \"answer\"}}, \
+             {{\"action\": \"open_tab\", \"device\": \"desktop\"}}, \
              {{\"action\": \"navigate\", \"url\": \"https://example.com\"}}, \
              {{\"action\": \"screenshot\"}}. \
              Locators use a `by` field (css/id/name/text/label/role/xpath/placeholder/autocomplete/test_id) and a `value` field \
@@ -434,7 +439,7 @@ impl Tool for ToolChrome {
                                                 "wait_for_network_idle", "wait_for_element_hidden", "wait_for_element_stable", "wait_seconds",
                                                 "get_text", "get_html", "get_attribute", "extract_links", "extract_table",
                                                 "dom_snapshot", "accessibility_snapshot", "screenshot", "screenshot_element",
-                                                "eval", "styles", "tab_log", "dismiss_overlays", "highlight_element"
+                                                "eval", "styles", "tab_log", "handle_dialog", "dismiss_overlays", "highlight_element"
                                             ]
                                         },
                                         "url": {"type": "string", "description": "URL for navigate action"},

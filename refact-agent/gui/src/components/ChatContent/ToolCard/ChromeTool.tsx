@@ -358,6 +358,19 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     return typedResult.page_errors.join("\n");
   }, [typedResult]);
 
+  const typedDialogsBlock = useMemo(() => {
+    if (!typedResult?.dialogs?.length) return null;
+    return typedResult.dialogs
+      .map((dialog) => {
+        const handling = dialog.automatic ? `auto-${dialog.action}` : dialog.action;
+        const defaultValue = dialog.default_value
+          ? ` (default: ${dialog.default_value})`
+          : "";
+        return `[${dialog.type}] ${handling}: ${dialog.message}${defaultValue}`;
+      })
+      .join("\n");
+  }, [typedResult]);
+
   const reportScreenshot = typedResult?.screenshot
     ? `data:${typedResult.screenshot.mime};base64,${typedResult.screenshot.data}`
     : null;
@@ -435,6 +448,17 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
           <Box className={styles.logContent}>
             <ShikiCodeBlock showLineNumbers={false}>
               {typedPageErrorsBlock}
+            </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
+
+      {typedDialogsBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Dialogs</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedDialogsBlock}
             </ShikiCodeBlock>
           </Box>
         </Box>

@@ -230,6 +230,7 @@ fn execute_steps_with_world(
         stabilized: false,
         console: vec![],
         page_errors: vec![],
+        dialogs: vec![],
         screenshot: None,
     }
 }
@@ -241,6 +242,7 @@ pub fn is_tab_management_step(step: &BrowserStep) -> bool {
             | BrowserStep::CloseTab
             | BrowserStep::SwitchTab { .. }
             | BrowserStep::ListTabs
+            | BrowserStep::HandleDialog { .. }
     )
 }
 
@@ -391,7 +393,7 @@ pub async fn execute_request_with_runtime(
     } else {
         (None, None, false, None)
     };
-    let (console, page_errors) = {
+    let (console, page_errors, dialogs) = {
         let mut rt = runtime_arc.lock().await;
         rt.drain_raw_events();
         let mut console = rt
@@ -405,7 +407,8 @@ pub async fn execute_request_with_runtime(
             .map(|entry| entry.text.clone())
             .collect();
         console.retain(|entry| entry.level != "page_error");
-        (console, page_errors)
+        let dialogs = rt.dialog_manager.take_reports();
+        (console, page_errors, dialogs)
     };
 
     Ok(ExecutionReport {
@@ -416,6 +419,7 @@ pub async fn execute_request_with_runtime(
         stabilized,
         console,
         page_errors,
+        dialogs,
         screenshot,
     })
 }
@@ -552,6 +556,20 @@ pub fn execute_steps_with_runtime(
                 StepResult::success(idx, format!("Listed {} tabs", tab_list.len()))
                     .with_data(serde_json::json!({"tabs": tab_list}))
             }
+            BrowserStep::HandleDialog {
+                accept,
+                prompt_text,
+            } => match runtime.dialog_manager.arm(*accept, prompt_text.clone()) {
+                Ok(()) => StepResult::success(
+                    idx,
+                    if *accept {
+                        "Armed acceptance for the next dialog"
+                    } else {
+                        "Armed dismissal for the next dialog"
+                    },
+                ),
+                Err(error) => StepResult::failure(idx, "HandleDialog", error),
+            },
             other => match &current_tab {
                 Some(tab) => execute_single_step(
                     tab,
@@ -588,6 +606,7 @@ pub fn execute_steps_with_runtime(
         Some(tab) => (Some(tab.get_url()), tab.get_title().ok()),
         None => (None, None),
     };
+    let dialogs = runtime.dialog_manager.take_reports();
     ExecutionReport {
         ok: all_ok,
         steps: results,
@@ -596,6 +615,7 @@ pub fn execute_steps_with_runtime(
         stabilized: false,
         console: vec![],
         page_errors: vec![],
+        dialogs,
         screenshot: None,
     }
 }
@@ -627,10 +647,11 @@ fn execute_single_step(
         BrowserStep::OpenTab { .. }
         | BrowserStep::CloseTab
         | BrowserStep::SwitchTab { .. }
-        | BrowserStep::ListTabs => StepResult::failure(
+        | BrowserStep::ListTabs
+        | BrowserStep::HandleDialog { .. } => StepResult::failure(
             idx,
-            "Tab management step",
-            "Use execute_steps_with_runtime() for tab management",
+            "Runtime management step",
+            "Use execute_steps_with_runtime() for runtime management",
         ),
 
         BrowserStep::Click { locator } => step_locator_action(tab, world, idx, locator, "click"),

@@ -1,4 +1,5 @@
 mod actionability;
+pub mod dialogs;
 pub mod forms;
 mod frames;
 mod handles;
@@ -17,6 +18,7 @@ pub use actionability::{
     ActionabilityTimeouts, CallLog, Clock, Deadline, LocatorOutcome, RequiredStates, SystemClock,
     TimeoutError, TimeoutKind, required_states,
 };
+pub use dialogs::{DialogDecision, DialogManager, DialogResponse};
 pub use handles::{
     CheckedState, ElementHandle, ElementState, ElementStateName, HandleError, HandleRegistry,
 };
@@ -400,6 +402,7 @@ pub struct BrowserRuntime {
     pub attached_chat_id: Option<String>,
     pub browser: Browser,
     pub world_manager: WorldManager,
+    pub dialog_manager: DialogManager,
     pub active_tab_target_id: Option<String>,
     pub recording_tab_target_id: Option<String>,
     pub profile_dir: PathBuf,
@@ -471,6 +474,7 @@ impl BrowserRuntime {
             attached_chat_id: None,
             browser,
             world_manager: WorldManager::default(),
+            dialog_manager: DialogManager::default(),
             active_tab_target_id: None,
             recording_tab_target_id: None,
             profile_dir,
@@ -505,6 +509,7 @@ impl BrowserRuntime {
             attached_chat_id: None,
             browser,
             world_manager: WorldManager::default(),
+            dialog_manager: DialogManager::default(),
             active_tab_target_id: None,
             recording_tab_target_id: None,
             profile_dir: PathBuf::new(),
@@ -905,6 +910,7 @@ pub fn setup_recording_for_tab(
     runtime: &mut BrowserRuntime,
     tab: &headless_chrome::Tab,
 ) -> Result<(), String> {
+    runtime.dialog_manager.install(tab)?;
     runtime.world_manager.ensure_utility_world(tab)?;
     inject_recorder_into_tab(
         tab,

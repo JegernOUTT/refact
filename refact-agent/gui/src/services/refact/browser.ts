@@ -218,6 +218,14 @@ export type BrowserReportScreenshot = {
   data: string;
 };
 
+export type BrowserDialogInfo = {
+  type: "alert" | "confirm" | "prompt" | "beforeunload";
+  message: string;
+  default_value: string;
+  action: "accepted" | "dismissed";
+  automatic: boolean;
+};
+
 export type BrowserExecutionStep = {
   step_index: number;
   ok: boolean;
@@ -238,6 +246,7 @@ export type BrowserActionResponse = {
   stabilized?: boolean;
   console?: BrowserConsoleEntry[];
   page_errors?: string[];
+  dialogs?: BrowserDialogInfo[];
   screenshot?: BrowserReportScreenshot | null;
 };
 

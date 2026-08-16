@@ -95,6 +95,22 @@ describe("ChromeTool", () => {
           { timestamp: 1, level: "Log", text: "loaded transactional state" },
         ],
         page_errors: ["ReferenceError: fixtureFailure is not defined"],
+        dialogs: [
+          {
+            type: "prompt",
+            message: "Name for fixture?",
+            default_value: "visitor",
+            action: "accepted",
+            automatic: false,
+          },
+          {
+            type: "confirm",
+            message: "Continue with fixture?",
+            default_value: "",
+            action: "dismissed",
+            automatic: true,
+          },
+        ],
       }),
     });
 
@@ -114,6 +130,7 @@ describe("ChromeTool", () => {
     expect(screen.getByText("Page State")).toBeInTheDocument();
     expect(screen.getByText("Console")).toBeInTheDocument();
     expect(screen.getByText("Page Errors")).toBeInTheDocument();
+    expect(screen.getByText("Dialogs")).toBeInTheDocument();
     expect(
       screen.getByText((text) => text.includes("DOM stabilized: No")),
     ).toBeInTheDocument();
@@ -123,6 +140,16 @@ describe("ChromeTool", () => {
     expect(
       screen.getByText((text) =>
         text.includes("fixtureFailure is not defined"),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) =>
+        text.includes("[prompt] accepted: Name for fixture? (default: visitor)"),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) =>
+        text.includes("[confirm] auto-dismissed: Continue with fixture?"),
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText("Execution Report")).not.toBeInTheDocument();

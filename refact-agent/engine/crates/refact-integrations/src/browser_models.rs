@@ -289,6 +289,12 @@ pub enum BrowserStep {
 
     TabLog,
 
+    HandleDialog {
+        accept: bool,
+        #[serde(default)]
+        prompt_text: Option<String>,
+    },
+
     DismissOverlays,
     HighlightElement {
         locator: BrowserLocator,
@@ -426,8 +432,36 @@ pub struct ExecutionReport {
     pub console: Vec<ConsoleEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub page_errors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dialogs: Vec<DialogInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<BrowserScreenshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DialogType {
+    Alert,
+    Confirm,
+    Prompt,
+    Beforeunload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DialogAction {
+    Accepted,
+    Dismissed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DialogInfo {
+    #[serde(rename = "type")]
+    pub dialog_type: DialogType,
+    pub message: String,
+    pub default_value: String,
+    pub action: DialogAction,
+    pub automatic: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -763,6 +797,22 @@ mod tests {
     }
 
     #[test]
+    fn test_step_handle_dialog_serde() {
+        let json_str = r#"{"action": "handle_dialog", "accept": true, "prompt_text": "answer"}"#;
+        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
+        match step {
+            BrowserStep::HandleDialog {
+                accept,
+                prompt_text,
+            } => {
+                assert!(accept);
+                assert_eq!(prompt_text.as_deref(), Some("answer"));
+            }
+            _ => panic!("Expected HandleDialog"),
+        }
+    }
+
+    #[test]
     fn test_step_dismiss_overlays_serde() {
         let json_str = r#"{"action": "dismiss_overlays"}"#;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
@@ -877,11 +927,21 @@ mod tests {
             stabilized: true,
             console: vec![],
             page_errors: vec![],
+            dialogs: vec![DialogInfo {
+                dialog_type: DialogType::Prompt,
+                message: "Enter password=[REDACTED]".to_string(),
+                default_value: "default".to_string(),
+                action: DialogAction::Accepted,
+                automatic: false,
+            }],
             screenshot: None,
         };
         let json = serde_json::to_value(&report).unwrap();
         assert!(json["ok"].as_bool().unwrap());
         assert_eq!(json["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(json["dialogs"][0]["type"], "prompt");
+        assert_eq!(json["dialogs"][0]["action"], "accepted");
+        assert_eq!(json["dialogs"][0]["automatic"], false);
         let parsed: ExecutionReport = serde_json::from_value(json).unwrap();
         assert!(parsed.ok);
     }

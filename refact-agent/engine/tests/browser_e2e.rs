@@ -323,6 +323,18 @@ fn returned_text(report: &refact_lsp::integrations::browser_models::ExecutionRep
         .unwrap_or("")
 }
 
+fn returned_eval_string(
+    report: &refact_lsp::integrations::browser_models::ExecutionReport,
+) -> &str {
+    report
+        .steps
+        .last()
+        .and_then(|step| step.data.as_ref())
+        .and_then(|data| data.get("value"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+}
+
 #[tokio::test]
 async fn fixture_server_starts_and_serves_page() {
     let server = FixtureServer::start().await.unwrap();
@@ -1427,24 +1439,103 @@ async fn nested_shadow_dom_button_and_input_are_actionable() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn dialog_fixture_records_confirmed_result() {
-    let Some(case) = BrowserCase::start("dialog.html").await else {
+async fn dialog_fixture_auto_dismisses_confirm_and_reports_it() {
+    let Some(mut case) = BrowserCase::start("dialog.html").await else {
         return;
     };
-    case.tab
-        .evaluate("window.confirm = () => true", false)
-        .unwrap();
-    let report = execute_fixture_steps(
-        &case.tab,
-        &[
-            BrowserStep::Click {
-                locator: BrowserLocator::css("#confirm"),
-            },
-            text_step("#result"),
-        ],
-    );
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let report = execute_request_with_runtime(
+        runtime,
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::Eval {
+                    expression: "document.querySelector('#confirm').click(); 'clicked'".to_string(),
+                },
+                BrowserStep::Eval {
+                    expression: "document.querySelector('#result').textContent".to_string(),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
     assert!(report.ok, "dialog fixture click failed: {report:?}");
-    assert_eq!(returned_text(&report), "confirmed");
+    assert_eq!(returned_eval_string(&report), "dismissed");
+    assert_eq!(report.dialogs.len(), 1);
+    assert!(report.dialogs[0].automatic);
+    assert_eq!(
+        report.dialogs[0].action,
+        refact_lsp::integrations::browser_models::DialogAction::Dismissed
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
+    let Some(mut case) = BrowserCase::start("dialog.html").await else {
+        return;
+    };
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let accept_report = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::HandleDialog {
+                    accept: true,
+                    prompt_text: None,
+                },
+                BrowserStep::Eval {
+                    expression: "document.querySelector('#confirm').click(); 'clicked'".to_string(),
+                },
+                BrowserStep::Eval {
+                    expression: "document.querySelector('#result').textContent".to_string(),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(accept_report.ok, "accepted dialog failed: {accept_report:?}");
+    assert_eq!(returned_eval_string(&accept_report), "confirmed");
+    assert!(!accept_report.dialogs[0].automatic);
+
+    let prompt_report = execute_request_with_runtime(
+        runtime,
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::HandleDialog {
+                    accept: true,
+                    prompt_text: Some("Pixel".to_string()),
+                },
+                BrowserStep::Eval {
+                    expression: "document.querySelector('#prompt').click(); 'clicked'".to_string(),
+                },
+                BrowserStep::Eval {
+                    expression: "document.querySelector('#result').textContent".to_string(),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(prompt_report.ok, "prompt dialog failed: {prompt_report:?}");
+    assert_eq!(returned_eval_string(&prompt_report), "Pixel");
+    assert_eq!(prompt_report.dialogs.len(), 1);
+    assert_eq!(prompt_report.dialogs[0].default_value, "visitor");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

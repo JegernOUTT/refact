@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 refact-chat-api = { path = "../refact-chat-api" }
+refact-core = { path = "../refact-core" }
 refact-integrations = { path = "../refact-integrations" }
 headless_chrome = "1.0.16"
 serde.workspace = true
