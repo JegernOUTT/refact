@@ -2,6 +2,7 @@ mod actionability;
 mod handles;
 mod injected_source;
 mod keyboard;
+mod mouse;
 mod us_keyboard_layout;
 mod world;
 
@@ -18,6 +19,11 @@ pub use injected_source::{INJECTED_BUNDLE, wrapped_bootstrap};
 pub use keyboard::{
     CdpKeyboardDispatcher, KeyEventPayload, KeyEventType, Keyboard, KeyboardDispatch,
     KeyboardDispatcher, KeyboardModifier, modifier_bitmask,
+};
+pub use mouse::{
+    CdpMouseDispatcher, ContentQuad, MainFrameCssPoint, MainFrameCssViewport, Mouse, MouseButton,
+    MouseDispatch, MouseDispatcher, MouseError, MouseEventPayload, MouseEventType, ScrollStrategy,
+    TouchEventPayload, TouchEventType, clickable_point_from_quads,
 };
 pub use us_keyboard_layout::{
     KEYPAD_LOCATION, KeyDefinition, KeyDescription, ShiftedKeyDefinition, US_KEYBOARD_LAYOUT,

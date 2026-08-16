@@ -134,6 +134,10 @@ impl<D: KeyboardDispatcher> Keyboard<D> {
         }
     }
 
+    pub fn modifier_bitmask(&self) -> u32 {
+        modifier_bitmask(&self.pressed_modifiers)
+    }
+
     pub fn down(&mut self, key: &str) -> Result<(), String> {
         let description = self.key_description(key)?;
         let auto_repeat = self.pressed_keys.contains(description.code);

@@ -15,12 +15,12 @@ use hyper::body::Bytes;
 use refact_core::image_policy::ImagePolicy;
 use refact_lsp::call_validation::ChatContent;
 use refact_lsp::chat::browser_context::maybe_insert_browser_context;
-use refact_lsp::integrations::browser_controller::execute_steps;
+use refact_lsp::integrations::browser_controller::execute_steps as execute_fixture_steps_with_policy;
 use refact_lsp::integrations::browser_controller::execute_steps as execute_steps_with_policy;
 use refact_lsp::integrations::browser_models::{BrowserLocator, BrowserStep};
 use refact_lsp::refact_browser::{
-    BrowserRuntime, CdpKeyboardDispatcher, CheckedState, HandleError, Keyboard,
-    UTILITY_WORLD_NAME,
+    BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
+    Mouse, UTILITY_WORLD_NAME,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -31,7 +31,7 @@ fn execute_fixture_steps(
     tab: &Tab,
     steps: &[BrowserStep],
 ) -> refact_lsp::integrations::browser_models::ExecutionReport {
-    execute_steps(tab, steps, &ImagePolicy::browser_capture())
+    execute_fixture_steps_with_policy(tab, steps, &ImagePolicy::browser_capture())
 }
 
 const FIXTURE_PAGES: &[&str] = &[
@@ -379,7 +379,10 @@ async fn navigated_fixture_context_contains_screenshot_image() {
         .expect("navigated page must produce browser context");
 
     assert!(!oversize);
-    assert_eq!(context.event.extra["event"]["payload"]["page_changed"], true);
+    assert_eq!(
+        context.event.extra["event"]["payload"]["page_changed"],
+        true
+    );
     let ChatContent::Multimodal(elements) = context
         .screenshot
         .expect("enabled page change must attach a screenshot")
@@ -610,6 +613,43 @@ async fn hover_reveals_css_menu() {
         ],
     );
     assert!(report.ok, "hover should use real pointer input: {report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn cdp_mouse_hover_reveals_css_only_menu() {
+    let Some(mut case) = BrowserCase::start("hover-menu.html").await else {
+        return;
+    };
+    case.setup_world();
+    let handle = case
+        .runtime
+        .world_manager
+        .call_injected_handles(
+            &case.tab,
+            "resolveAll",
+            json!([{"by":"css","value":"#trigger"}]),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let point = CdpMouseDispatcher::new(&case.tab)
+        .clickable_point(&handle)
+        .unwrap();
+    let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(&case.tab));
+    let mut mouse = Mouse::new(CdpMouseDispatcher::new(&case.tab), &keyboard);
+    mouse.hover(point.x, point.y).unwrap();
+    let display = case
+        .tab
+        .evaluate(
+            "getComputedStyle(document.querySelector('#menu')).display",
+            false,
+        )
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(display, "block");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
