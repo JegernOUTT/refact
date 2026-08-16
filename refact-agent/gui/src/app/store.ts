@@ -89,6 +89,8 @@ import { dashboardSlice } from "../features/DaemonDashboard/dashboardSlice";
 import { filesApi } from "../services/refact/files";
 import { filesPanelSlice } from "../features/Workspace/FilesPanel";
 import { gitPanelSlice } from "../features/Workspace/GitPanel";
+import { privacyApi } from "../services/refact/privacy";
+import { privacySlice } from "../features/Privacy/privacySlice";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -153,6 +155,7 @@ const rootReducer = combineSlices(
     [memoryEnrichmentApi.reducerPath]: memoryEnrichmentApi.reducer,
     [buddyApi.reducerPath]: buddyApi.reducer,
     [filesApi.reducerPath]: filesApi.reducer,
+    [privacyApi.reducerPath]: privacyApi.reducer,
   },
   historySlice,
   buddySlice,
@@ -174,6 +177,7 @@ const rootReducer = combineSlices(
   dashboardSlice,
   filesPanelSlice,
   gitPanelSlice,
+  privacySlice,
 );
 
 const rootPersistConfig = {
@@ -291,6 +295,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           memoryEnrichmentApi.middleware,
           buddyApi.middleware,
           filesApi.middleware,
+          privacyApi.middleware,
         )
         .prepend(historyMiddleware.middleware)
         .prepend(listenerMiddleware.middleware);
