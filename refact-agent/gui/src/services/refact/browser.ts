@@ -390,6 +390,19 @@ export type BrowserRouteInterception = {
   redirect_hop: boolean;
 };
 
+export type BrowserContextSummary = {
+  viewport?: string;
+  locale?: string;
+  timezone?: string;
+  color_scheme?: string;
+  permissions?: string[];
+  cookie_count: number;
+  local_storage_count: number;
+  session_storage_count: number;
+  offline: boolean;
+  http_credentials: boolean;
+};
+
 export type BrowserActionResponse = {
   ok: boolean;
   steps: BrowserExecutionStep[];
@@ -406,6 +419,7 @@ export type BrowserActionResponse = {
   new_tabs?: BrowserReportTab[];
   active_routes?: BrowserRouteInfo[];
   intercepted_requests?: BrowserRouteInterception[];
+  context?: BrowserContextSummary | null;
   screenshot?: BrowserReportScreenshot | null;
 };
 

@@ -702,6 +702,93 @@ pub enum BrowserStep {
     },
     ListRoutes,
 
+    SetViewport {
+        width: u32,
+        height: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_scale_factor: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_mobile: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        has_touch: Option<bool>,
+    },
+    EmulateMedia {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color_scheme: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reduced_motion: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forced_colors: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contrast: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media: Option<String>,
+    },
+    SetLocale {
+        locale: String,
+    },
+    SetTimezone {
+        timezone: String,
+    },
+    SetUserAgent {
+        user_agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accept_language: Option<String>,
+    },
+    SetGeolocation {
+        latitude: f64,
+        longitude: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accuracy: Option<f64>,
+    },
+    SetOffline {
+        offline: bool,
+    },
+    SetExtraHttpHeaders {
+        headers: BTreeMap<String, String>,
+    },
+    GetCookies {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        urls: Option<Vec<String>>,
+    },
+    SetCookies {
+        cookies: Vec<BrowserCookie>,
+    },
+    ClearCookies {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    GetStorage {
+        kind: BrowserStorageKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
+    },
+    SetStorage {
+        kind: BrowserStorageKind,
+        items: Vec<BrowserStorageItem>,
+    },
+    ClearStorage {
+        kind: BrowserStorageKind,
+    },
+    StorageState,
+    SetStorageState {
+        state: BrowserStorageState,
+    },
+    GrantPermissions {
+        permissions: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
+    },
+    ClearPermissions,
+    SetHttpCredentials {
+        username: String,
+        password: String,
+    },
+
     Click {
         locator: BrowserLocator,
     },
@@ -960,6 +1047,25 @@ impl BrowserStep {
         "route",
         "unroute",
         "list_routes",
+        "set_viewport",
+        "emulate_media",
+        "set_locale",
+        "set_timezone",
+        "set_user_agent",
+        "set_geolocation",
+        "set_offline",
+        "set_extra_http_headers",
+        "get_cookies",
+        "set_cookies",
+        "clear_cookies",
+        "get_storage",
+        "set_storage",
+        "clear_storage",
+        "storage_state",
+        "set_storage_state",
+        "grant_permissions",
+        "clear_permissions",
+        "set_http_credentials",
         "click",
         "click_if_exists",
         "hover",
@@ -1176,7 +1282,92 @@ pub struct ExecutionReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub intercepted_requests: Vec<RouteInterception>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<BrowserContextSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<BrowserScreenshot>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserContextSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_scheme: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<String>,
+    #[serde(default)]
+    pub cookie_count: usize,
+    #[serde(default)]
+    pub local_storage_count: usize,
+    #[serde(default)]
+    pub session_storage_count: usize,
+    #[serde(default)]
+    pub offline: bool,
+    #[serde(default)]
+    pub http_credentials: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserStorageKind {
+    Local,
+    Session,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserStorageItem {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BrowserCookieSameSite {
+    Strict,
+    Lax,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrowserCookie {
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub domain: String,
+    #[serde(default = "default_cookie_path")]
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<f64>,
+    #[serde(default)]
+    pub http_only: bool,
+    #[serde(default)]
+    pub secure: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_site: Option<BrowserCookieSameSite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+fn default_cookie_path() -> String {
+    "/".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrowserStorageOrigin {
+    pub origin: String,
+    #[serde(default)]
+    pub local_storage: Vec<BrowserStorageItem>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BrowserStorageState {
+    #[serde(default)]
+    pub cookies: Vec<BrowserCookie>,
+    #[serde(default)]
+    pub origins: Vec<BrowserStorageOrigin>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1332,6 +1523,50 @@ pub struct TabInfo {
 mod tests {
     use super::*;
 
+    #[test]
+    fn context_cookie_and_storage_state_serde_round_trip() {
+        let state = BrowserStorageState {
+            cookies: vec![BrowserCookie {
+                name: "session".to_string(),
+                value: "secret".to_string(),
+                domain: "example.test".to_string(),
+                path: "/".to_string(),
+                expires: Some(1_900_000_000.0),
+                http_only: true,
+                secure: true,
+                same_site: Some(BrowserCookieSameSite::Lax),
+                url: None,
+            }],
+            origins: vec![BrowserStorageOrigin {
+                origin: "https://example.test".to_string(),
+                local_storage: vec![BrowserStorageItem {
+                    name: "logged_in".to_string(),
+                    value: "true".to_string(),
+                }],
+            }],
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["origins"][0]["local_storage"][0]["name"], "logged_in");
+        assert_eq!(
+            serde_json::from_value::<BrowserStorageState>(json).unwrap(),
+            state
+        );
+    }
+
+    #[test]
+    fn context_step_serde_round_trip_masks_nothing_in_typed_input() {
+        let step = BrowserStep::SetHttpCredentials {
+            username: "user".to_string(),
+            password: "secret".to_string(),
+        };
+        let json = serde_json::to_value(&step).unwrap();
+        assert_eq!(json["action"], "set_http_credentials");
+        assert!(matches!(
+            serde_json::from_value::<BrowserStep>(json).unwrap(),
+            BrowserStep::SetHttpCredentials { .. }
+        ));
+    }
+
     fn all_browser_steps() -> Vec<BrowserStep> {
         let locator = || BrowserLocator::reference("e1");
         vec![
@@ -1361,6 +1596,72 @@ mod tests {
             },
             BrowserStep::Unroute { pattern: None },
             BrowserStep::ListRoutes,
+            BrowserStep::SetViewport {
+                width: 390,
+                height: 844,
+                device_scale_factor: Some(3.0),
+                is_mobile: Some(true),
+                has_touch: Some(true),
+            },
+            BrowserStep::EmulateMedia {
+                color_scheme: Some("dark".to_string()),
+                reduced_motion: None,
+                forced_colors: None,
+                contrast: None,
+                media: None,
+            },
+            BrowserStep::SetLocale {
+                locale: "ja-JP".to_string(),
+            },
+            BrowserStep::SetTimezone {
+                timezone: "Asia/Tokyo".to_string(),
+            },
+            BrowserStep::SetUserAgent {
+                user_agent: "agent".to_string(),
+                accept_language: None,
+            },
+            BrowserStep::SetGeolocation {
+                latitude: 1.0,
+                longitude: 2.0,
+                accuracy: None,
+            },
+            BrowserStep::SetOffline { offline: false },
+            BrowserStep::SetExtraHttpHeaders {
+                headers: BTreeMap::new(),
+            },
+            BrowserStep::GetCookies { urls: None },
+            BrowserStep::SetCookies {
+                cookies: Vec::new(),
+            },
+            BrowserStep::ClearCookies {
+                name: None,
+                domain: None,
+                path: None,
+            },
+            BrowserStep::GetStorage {
+                kind: BrowserStorageKind::Local,
+                origin: None,
+            },
+            BrowserStep::SetStorage {
+                kind: BrowserStorageKind::Local,
+                items: Vec::new(),
+            },
+            BrowserStep::ClearStorage {
+                kind: BrowserStorageKind::Session,
+            },
+            BrowserStep::StorageState,
+            BrowserStep::SetStorageState {
+                state: BrowserStorageState::default(),
+            },
+            BrowserStep::GrantPermissions {
+                permissions: vec!["geolocation".to_string()],
+                origin: None,
+            },
+            BrowserStep::ClearPermissions,
+            BrowserStep::SetHttpCredentials {
+                username: "user".to_string(),
+                password: "secret".to_string(),
+            },
             BrowserStep::Click { locator: locator() },
             BrowserStep::ClickIfExists { locator: locator() },
             BrowserStep::Hover { locator: locator() },
@@ -2281,6 +2582,7 @@ mod tests {
             new_tabs: vec![],
             active_routes: vec![],
             intercepted_requests: vec![],
+            context: None,
             screenshot: None,
         };
         let json = serde_json::to_value(&report).unwrap();

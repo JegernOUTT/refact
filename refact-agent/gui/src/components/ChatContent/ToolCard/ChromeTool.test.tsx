@@ -111,6 +111,18 @@ describe("ChromeTool", () => {
             is_navigation_request: false,
           },
         ],
+        context: {
+          viewport: "390x844 @3x mobile touch",
+          locale: "ja-JP",
+          timezone: "Asia/Tokyo",
+          color_scheme: "dark",
+          permissions: ["geolocation"],
+          cookie_count: 2,
+          local_storage_count: 1,
+          session_storage_count: 0,
+          offline: false,
+          http_credentials: true,
+        },
         locator_handlers: [
           {
             name: "dismiss_overlays",
@@ -206,6 +218,16 @@ describe("ChromeTool", () => {
     expect(screen.getByText("Page State")).toBeInTheDocument();
     expect(screen.getByText("Console")).toBeInTheDocument();
     expect(screen.getByText("Page Errors")).toBeInTheDocument();
+    expect(screen.getByText("Context")).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("390x844 @3x mobile touch")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("cookies: 2")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("HTTP credentials: configured")),
+    ).toBeInTheDocument();
     const networkTrigger = screen.getByRole("button", { name: "Network (1)" });
     expect(networkTrigger).toHaveAttribute("aria-expanded", "false");
     await user.click(networkTrigger);

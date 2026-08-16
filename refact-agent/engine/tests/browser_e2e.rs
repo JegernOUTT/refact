@@ -22,8 +22,8 @@ use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
     AccessibilitySnapshotOptions, BrowserActionRequest, BrowserLoadState, BrowserLocator,
-    BrowserStep, FillStrategy, LocatorHandlerAction, RouteHandler, SessionPolicy, TabTarget,
-    UrlPattern,
+    BrowserCookie, BrowserCookieSameSite, BrowserStep, BrowserStorageItem, BrowserStorageKind,
+    FillStrategy, LocatorHandlerAction, RouteHandler, SessionPolicy, TabTarget, UrlPattern,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -61,6 +61,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "slow-network.html",
     "popup.html",
     "route-target.html",
+    "context-probe.html",
     "upload.html",
     "download.html",
     "contenteditable.html",
@@ -336,6 +337,152 @@ impl BrowserCase {
             .call_injected(&self.tab, "version", json!([]))
             .unwrap()
     }
+}
+
+#[tokio::test]
+async fn context_state_roundtrips_and_reaches_adopted_popup() {
+    if !e2e_enabled() {
+        print_skip();
+        return;
+    }
+    let server = FixtureServer::start().await.unwrap();
+    let profile = tempdir().unwrap();
+    let mut browser = launch_browser(&profile);
+    let tab = browser.browser.new_tab().unwrap();
+    browser.set_active_tab_target_id(tab.get_target_id().to_string());
+    let mut case = BrowserCase {
+        runtime: browser,
+        _profile: profile,
+        server,
+        tab,
+    };
+    case.tab
+        .call_method(Page::Navigate {
+            url: case.server.url("context-probe.html"),
+            referrer: None,
+            transition_Type: None,
+            frame_id: None,
+            referrer_policy: None,
+        })
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let report = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::SetViewport {
+                    width: 412,
+                    height: 732,
+                    device_scale_factor: Some(2.0),
+                    is_mobile: Some(true),
+                    has_touch: Some(true),
+                },
+                BrowserStep::EmulateMedia {
+                    color_scheme: Some("dark".to_string()),
+                    reduced_motion: None,
+                    forced_colors: None,
+                    contrast: None,
+                    media: None,
+                },
+                BrowserStep::SetLocale {
+                    locale: "ja-JP".to_string(),
+                },
+                BrowserStep::SetTimezone {
+                    timezone: "Asia/Tokyo".to_string(),
+                },
+                BrowserStep::SetCookies {
+                    cookies: vec![BrowserCookie {
+                        name: "session".to_string(),
+                        value: "logged-in".to_string(),
+                        domain: String::new(),
+                        path: "/".to_string(),
+                        expires: None,
+                        http_only: false,
+                        secure: false,
+                        same_site: Some(BrowserCookieSameSite::Lax),
+                        url: Some(case.server.url("context-probe.html")),
+                    }],
+                },
+                BrowserStep::SetStorage {
+                    kind: BrowserStorageKind::Local,
+                    items: vec![BrowserStorageItem {
+                        name: "logged_in".to_string(),
+                        value: "true".to_string(),
+                    }],
+                },
+                BrowserStep::Reload,
+                BrowserStep::WaitForPopup {
+                    timeout_ms: Some(5_000),
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#popup"),
+                },
+                BrowserStep::Eval {
+                    expression: "({language:navigator.language,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,dark:matchMedia('(prefers-color-scheme: dark)').matches,width:innerWidth,height:innerHeight,cookie:document.cookie,localStorage:Object.fromEntries(Object.entries(localStorage))})".to_string(),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(report.ok, "context steps failed: {report:?}");
+    assert_eq!(report.new_tabs.len(), 1);
+    let probe = report.steps.last().unwrap().data.as_ref().unwrap();
+    assert_eq!(probe["width"], 412);
+    assert_eq!(probe["dark"], true);
+    assert_eq!(probe["language"], "ja-JP");
+    assert_eq!(probe["timezone"], "Asia/Tokyo");
+    assert_eq!(probe["localStorage"]["logged_in"], "true");
+    assert!(probe["cookie"]
+        .as_str()
+        .unwrap()
+        .contains("session=logged-in"));
+
+    let state = {
+        let runtime = runtime.lock().await;
+        let tab = runtime.get_active_tab().unwrap();
+        refact_lsp::refact_browser::context_state::storage_state(&tab).unwrap()
+    };
+    assert_eq!(
+        state
+            .cookies
+            .iter()
+            .find(|cookie| cookie.name == "session")
+            .unwrap()
+            .value,
+        "logged-in"
+    );
+    assert_eq!(state.origins[0].local_storage[0].value, "true");
+
+    let fresh_profile = tempdir().unwrap();
+    let mut fresh_runtime = launch_browser(&fresh_profile);
+    let fresh_tab = fresh_runtime.browser.new_tab().unwrap();
+    fresh_runtime.set_active_tab_target_id(fresh_tab.get_target_id().to_string());
+    refact_lsp::refact_browser::setup_recording_for_tab(&mut fresh_runtime, &fresh_tab).unwrap();
+    refact_lsp::refact_browser::context_state::set_storage_state(&fresh_tab, &state).unwrap();
+    fresh_tab
+        .navigate_to(&case.server.url("context-probe.html"))
+        .and_then(|tab| tab.wait_until_navigated())
+        .unwrap();
+    let restored = fresh_tab
+        .evaluate(
+            "({cookie:document.cookie,loggedIn:localStorage.getItem('logged_in')})",
+            false,
+        )
+        .unwrap()
+        .value
+        .unwrap();
+    assert!(restored["cookie"]
+        .as_str()
+        .unwrap()
+        .contains("session=logged-in"));
+    assert_eq!(restored["loggedIn"], "true");
 }
 
 fn text_step(selector: &str) -> BrowserStep {

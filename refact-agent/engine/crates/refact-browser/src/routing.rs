@@ -90,7 +90,11 @@ impl RouteRegistry {
         std::mem::take(&mut self.state.lock().unwrap().interceptions)
     }
 
-    pub fn enable_for_tab(self: &std::sync::Arc<Self>, tab: &Tab) -> Result<(), String> {
+    pub fn enable_for_tab(
+        self: &std::sync::Arc<Self>,
+        tab: &Tab,
+        handle_auth_requests: bool,
+    ) -> Result<(), String> {
         let registry = self.clone();
         let interceptor: std::sync::Arc<dyn RequestInterceptor + Send + Sync> =
             std::sync::Arc::new(move |_, _, event: Fetch::events::RequestPausedEvent| {
@@ -110,7 +114,7 @@ impl RouteRegistry {
             resource_Type: None,
             request_stage: Some(Fetch::RequestStage::Request),
         }];
-        tab.enable_fetch(Some(&patterns), Some(true))
+        tab.enable_fetch(Some(&patterns), Some(handle_auth_requests))
             .map(|_| ())
             .map_err(|error| format!("Failed to enable request routing: {error}"))
     }

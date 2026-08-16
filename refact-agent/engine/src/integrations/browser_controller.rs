@@ -584,6 +584,7 @@ fn execute_steps_with_world(
         new_tabs: vec![],
         active_routes: vec![],
         intercepted_requests: vec![],
+        context: None,
         screenshot: None,
     }
 }
@@ -598,6 +599,302 @@ pub fn is_tab_management_step(step: &BrowserStep) -> bool {
             | BrowserStep::HandleDialog { .. }
             | BrowserStep::ExpectFileChooser { .. }
     )
+}
+
+fn is_context_management_step(step: &BrowserStep) -> bool {
+    matches!(
+        step,
+        BrowserStep::SetViewport { .. }
+            | BrowserStep::EmulateMedia { .. }
+            | BrowserStep::SetLocale { .. }
+            | BrowserStep::SetTimezone { .. }
+            | BrowserStep::SetUserAgent { .. }
+            | BrowserStep::SetGeolocation { .. }
+            | BrowserStep::SetOffline { .. }
+            | BrowserStep::SetExtraHttpHeaders { .. }
+            | BrowserStep::GetCookies { .. }
+            | BrowserStep::SetCookies { .. }
+            | BrowserStep::ClearCookies { .. }
+            | BrowserStep::GetStorage { .. }
+            | BrowserStep::SetStorage { .. }
+            | BrowserStep::ClearStorage { .. }
+            | BrowserStep::StorageState
+            | BrowserStep::SetStorageState { .. }
+            | BrowserStep::GrantPermissions { .. }
+            | BrowserStep::ClearPermissions
+            | BrowserStep::SetHttpCredentials { .. }
+    )
+}
+
+fn apply_context_to_tabs(runtime: &BrowserRuntime) -> Result<(), String> {
+    for tab in runtime
+        .browser
+        .get_tabs()
+        .lock()
+        .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default()
+    {
+        runtime.context_state.apply_to_tab(&tab)?;
+    }
+    Ok(())
+}
+
+fn context_summary(runtime: &BrowserRuntime) -> BrowserContextSummary {
+    let Some(tab) = runtime.get_active_tab() else {
+        return runtime.context_state.summary(0, 0, 0);
+    };
+    let cookies = refact_browser::context_state::get_cookies(&tab, None)
+        .map(|cookies| cookies.len())
+        .unwrap_or_default();
+    let local = refact_browser::context_state::get_storage(&tab, BrowserStorageKind::Local, None)
+        .map(|items| items.len())
+        .unwrap_or_default();
+    let session =
+        refact_browser::context_state::get_storage(&tab, BrowserStorageKind::Session, None)
+            .map(|items| items.len())
+            .unwrap_or_default();
+    runtime.context_state.summary(cookies, local, session)
+}
+
+fn execute_context_management_step(
+    runtime: &mut BrowserRuntime,
+    step: &BrowserStep,
+    idx: usize,
+) -> StepResult {
+    let result: Result<StepResult, String> = (|| match step {
+        BrowserStep::SetViewport {
+            width,
+            height,
+            device_scale_factor,
+            is_mobile,
+            has_touch,
+        } => {
+            runtime.context_state.viewport = Some(refact_browser::ViewportState {
+                width: *width,
+                height: *height,
+                device_scale_factor: device_scale_factor.unwrap_or(1.0),
+                is_mobile: is_mobile.unwrap_or(false),
+                has_touch: has_touch.unwrap_or(false),
+            });
+            apply_context_to_tabs(runtime)?;
+            Ok(StepResult::success(
+                idx,
+                format!("Set viewport to {width}x{height}"),
+            ))
+        }
+        BrowserStep::EmulateMedia {
+            color_scheme,
+            reduced_motion,
+            forced_colors,
+            contrast,
+            media,
+        } => {
+            runtime.context_state.media = refact_browser::MediaState {
+                color_scheme: color_scheme.clone(),
+                reduced_motion: reduced_motion.clone(),
+                forced_colors: forced_colors.clone(),
+                contrast: contrast.clone(),
+                media: media.clone(),
+            };
+            apply_context_to_tabs(runtime)?;
+            Ok(StepResult::success(idx, "Applied media emulation"))
+        }
+        BrowserStep::SetLocale { locale } => {
+            runtime.context_state.locale = Some(locale.clone());
+            apply_context_to_tabs(runtime)?;
+            Ok(StepResult::success(idx, format!("Set locale to {locale}")))
+        }
+        BrowserStep::SetTimezone { timezone } => {
+            runtime.context_state.timezone = Some(timezone.clone());
+            apply_context_to_tabs(runtime)?;
+            Ok(StepResult::success(
+                idx,
+                format!("Set timezone to {timezone}"),
+            ))
+        }
+        BrowserStep::SetUserAgent {
+            user_agent,
+            accept_language,
+        } => {
+            runtime.context_state.user_agent = Some((user_agent.clone(), accept_language.clone()));
+            apply_context_to_tabs(runtime)?;
+            Ok(StepResult::success(idx, "Set user agent"))
+        }
+        BrowserStep::SetGeolocation {
+            latitude,
+            longitude,
+            accuracy,
+        } => {
+            runtime.context_state.geolocation =
+                Some((*latitude, *longitude, accuracy.unwrap_or(0.0)));
+            apply_context_to_tabs(runtime)?;
+            Ok(StepResult::success(idx, "Set geolocation"))
+        }
+        BrowserStep::SetOffline { offline } => {
+            runtime.context_state.offline = *offline;
+            apply_context_to_tabs(runtime)?;
+            Ok(StepResult::success(
+                idx,
+                if *offline {
+                    "Went offline"
+                } else {
+                    "Went online"
+                },
+            ))
+        }
+        BrowserStep::SetExtraHttpHeaders { headers } => {
+            runtime.context_state.extra_http_headers = headers.clone();
+            apply_context_to_tabs(runtime)?;
+            Ok(StepResult::success(
+                idx,
+                format!("Set {} extra HTTP header(s)", headers.len()),
+            ))
+        }
+        BrowserStep::GetCookies { urls } => {
+            let cookies = refact_browser::context_state::get_cookies(
+                runtime
+                    .get_active_tab()
+                    .ok_or_else(|| "No active tab in browser runtime".to_string())?
+                    .as_ref(),
+                urls.clone(),
+            )?;
+            Ok(
+                StepResult::success(idx, format!("Read {} cookie(s)", cookies.len())).with_data(
+                    serde_json::json!({
+                        "cookies": refact_browser::context_state::mask_cookies(&cookies)
+                    }),
+                ),
+            )
+        }
+        BrowserStep::SetCookies { cookies } => {
+            refact_browser::context_state::set_cookies(
+                runtime
+                    .get_active_tab()
+                    .ok_or_else(|| "No active tab in browser runtime".to_string())?
+                    .as_ref(),
+                cookies,
+            )?;
+            Ok(StepResult::success(
+                idx,
+                format!("Set {} cookie(s)", cookies.len()),
+            ))
+        }
+        BrowserStep::ClearCookies { name, domain, path } => {
+            let cleared = refact_browser::context_state::clear_cookies(
+                runtime
+                    .get_active_tab()
+                    .ok_or_else(|| "No active tab in browser runtime".to_string())?
+                    .as_ref(),
+                name.as_deref(),
+                domain.as_deref(),
+                path.as_deref(),
+            )?;
+            Ok(StepResult::success(
+                idx,
+                format!("Cleared {cleared} cookie(s)"),
+            ))
+        }
+        BrowserStep::GetStorage { kind, origin } => {
+            let items = refact_browser::context_state::get_storage(
+                runtime
+                    .get_active_tab()
+                    .ok_or_else(|| "No active tab in browser runtime".to_string())?
+                    .as_ref(),
+                *kind,
+                origin.as_deref(),
+            )?;
+            let masked = items
+                .iter()
+                .map(|item| BrowserStorageItem {
+                    name: item.name.clone(),
+                    value: "[REDACTED]".to_string(),
+                })
+                .collect::<Vec<_>>();
+            Ok(
+                StepResult::success(idx, format!("Read {} storage item(s)", items.len()))
+                    .with_data(serde_json::json!({"items": masked})),
+            )
+        }
+        BrowserStep::SetStorage { kind, items } => {
+            refact_browser::context_state::set_storage(
+                runtime
+                    .get_active_tab()
+                    .ok_or_else(|| "No active tab in browser runtime".to_string())?
+                    .as_ref(),
+                *kind,
+                items,
+            )?;
+            Ok(StepResult::success(
+                idx,
+                format!("Set {} storage item(s)", items.len()),
+            ))
+        }
+        BrowserStep::ClearStorage { kind } => {
+            refact_browser::context_state::clear_storage(
+                runtime
+                    .get_active_tab()
+                    .ok_or_else(|| "No active tab in browser runtime".to_string())?
+                    .as_ref(),
+                *kind,
+            )?;
+            Ok(StepResult::success(idx, "Cleared storage"))
+        }
+        BrowserStep::StorageState => {
+            let state = refact_browser::context_state::storage_state(
+                runtime
+                    .get_active_tab()
+                    .ok_or_else(|| "No active tab in browser runtime".to_string())?
+                    .as_ref(),
+            )?;
+            let masked = refact_browser::context_state::mask_storage_state(&state);
+            Ok(StepResult::success(idx, "Captured storage state")
+                .with_data(serde_json::json!({"state": masked})))
+        }
+        BrowserStep::SetStorageState { state } => {
+            refact_browser::context_state::set_storage_state(
+                runtime
+                    .get_active_tab()
+                    .ok_or_else(|| "No active tab in browser runtime".to_string())?
+                    .as_ref(),
+                state,
+            )?;
+            Ok(StepResult::success(idx, "Restored storage state"))
+        }
+        BrowserStep::GrantPermissions {
+            permissions,
+            origin,
+        } => {
+            refact_browser::context_state::grant_permissions(
+                runtime
+                    .get_active_tab()
+                    .ok_or_else(|| "No active tab in browser runtime".to_string())?
+                    .as_ref(),
+                permissions,
+                origin.clone(),
+            )?;
+            runtime.context_state.permissions = permissions.clone();
+            Ok(StepResult::success(
+                idx,
+                format!("Granted {} permission(s)", permissions.len()),
+            ))
+        }
+        BrowserStep::ClearPermissions => {
+            refact_browser::context_state::clear_permissions(
+                runtime
+                    .get_active_tab()
+                    .ok_or_else(|| "No active tab in browser runtime".to_string())?
+                    .as_ref(),
+            )?;
+            runtime.context_state.permissions.clear();
+            Ok(StepResult::success(idx, "Cleared permissions"))
+        }
+        BrowserStep::SetHttpCredentials { username, password } => {
+            runtime.set_http_credentials(username.clone(), password.clone())?;
+            Ok(StepResult::success(idx, "Set HTTP credentials"))
+        }
+        _ => unreachable!(),
+    })();
+    result.unwrap_or_else(|error| StepResult::failure(idx, "Browser context", error))
 }
 
 fn execute_route_management_step(
@@ -805,6 +1102,9 @@ pub async fn execute_request_with_runtime(
         ) {
             let mut rt = runtime_arc.lock().await;
             execute_route_management_step(&mut rt, step, idx).unwrap()
+        } else if is_context_management_step(step) {
+            let mut rt = runtime_arc.lock().await;
+            execute_context_management_step(&mut rt, step, idx)
         } else if is_tab_management_step(step) {
             let step_report = tokio::task::block_in_place(|| {
                 let mut rt = runtime_arc.blocking_lock();
@@ -1096,6 +1396,10 @@ pub async fn execute_request_with_runtime(
         new_tabs,
         active_routes,
         intercepted_requests,
+        context: {
+            let runtime = runtime_arc.lock().await;
+            Some(context_summary(&runtime))
+        },
         screenshot,
     })
 }
@@ -1193,24 +1497,13 @@ pub fn execute_steps_with_runtime(
                         Some("tablet") => (834, 1112, 2.0, true),
                         _ => (1440, 900, 2.0, false),
                     };
-                    let _ = new_tab.call_method(
-                        headless_chrome::protocol::cdp::Emulation::SetDeviceMetricsOverride {
-                            width: w,
-                            height: h,
-                            device_scale_factor: dpr,
-                            mobile,
-                            screen_width: None,
-                            screen_height: None,
-                            position_x: None,
-                            position_y: None,
-                            dont_set_visible_size: None,
-                            screen_orientation: None,
-                            viewport: None,
-                            display_feature: None,
-                            device_posture: None,
-                            scale: None,
-                        },
-                    );
+                    runtime.context_state.viewport = Some(refact_browser::ViewportState {
+                        width: w,
+                        height: h,
+                        device_scale_factor: dpr,
+                        is_mobile: mobile,
+                        has_touch: mobile,
+                    });
                     if let Err(error) =
                         crate::integrations::browser_runtime::setup_recording_for_tab(
                             runtime, &new_tab,
@@ -1233,6 +1526,7 @@ pub fn execute_steps_with_runtime(
                             new_tabs,
                             active_routes: runtime.route_registry.list(),
                             intercepted_requests: runtime.route_registry.drain_interceptions(),
+                            context: Some(context_summary(runtime)),
                             screenshot: None,
                         };
                     }
@@ -1344,6 +1638,9 @@ pub fn execute_steps_with_runtime(
             | BrowserStep::Unroute { .. }
             | BrowserStep::ListRoutes) => {
                 execute_route_management_step(runtime, step, idx).unwrap()
+            }
+            step if is_context_management_step(step) => {
+                execute_context_management_step(runtime, step, idx)
             }
             BrowserStep::WaitForPopup { timeout_ms } => {
                 let before = runtime.known_tab_ids();
@@ -1542,6 +1839,7 @@ pub fn execute_steps_with_runtime(
         new_tabs,
         active_routes: runtime.route_registry.list(),
         intercepted_requests: runtime.route_registry.drain_interceptions(),
+        context: Some(context_summary(runtime)),
         screenshot: None,
     }
 }
@@ -2026,6 +2324,25 @@ fn execute_single_step(
         | BrowserStep::Route { .. }
         | BrowserStep::Unroute { .. }
         | BrowserStep::ListRoutes
+        | BrowserStep::SetViewport { .. }
+        | BrowserStep::EmulateMedia { .. }
+        | BrowserStep::SetLocale { .. }
+        | BrowserStep::SetTimezone { .. }
+        | BrowserStep::SetUserAgent { .. }
+        | BrowserStep::SetGeolocation { .. }
+        | BrowserStep::SetOffline { .. }
+        | BrowserStep::SetExtraHttpHeaders { .. }
+        | BrowserStep::GetCookies { .. }
+        | BrowserStep::SetCookies { .. }
+        | BrowserStep::ClearCookies { .. }
+        | BrowserStep::GetStorage { .. }
+        | BrowserStep::SetStorage { .. }
+        | BrowserStep::ClearStorage { .. }
+        | BrowserStep::StorageState
+        | BrowserStep::SetStorageState { .. }
+        | BrowserStep::GrantPermissions { .. }
+        | BrowserStep::ClearPermissions
+        | BrowserStep::SetHttpCredentials { .. }
         | BrowserStep::HandleDialog { .. } => StepResult::failure(
             idx,
             "Runtime management step",

@@ -91,6 +91,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, or `wait_for_selector` for genuine synchronization.\n",
     "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, styles, tab_log.\n",
     "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, or continue modifications; unroute removes one pattern or all routes; list_routes returns active routes. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. Page-level routes may not observe requests served by a service worker.\n",
+    "Context: set_viewport, emulate_media, set_locale, set_timezone, set_user_agent, set_geolocation, set_offline, and set_extra_http_headers persist across adopted tabs and popups. Cookie state uses get_cookies, set_cookies, clear_cookies. Web storage uses get_storage, set_storage, clear_storage with kind local or session. storage_state and set_storage_state use Playwright's {cookies,origins:[{origin,local_storage}]} login-reuse shape. grant_permissions and clear_permissions control origin permissions. set_http_credentials shares the lazy Fetch path with routing. Cookie, storage, and credential values are redacted in reports.\n",
     "Files: set_input_files, expect_file_chooser, wait_for_download.\n",
     "Dialogs: handle_dialog arms the next dialog with `accept` and optional `prompt_text`; unarmed dialogs auto-dismiss except beforeunload, which is accepted.\n",
     "Advanced: eval, add_locator_handler, remove_locator_handler, dismiss_overlays, highlight_element, and fixed-delay wait_seconds. Locator handlers use `{type:\"click\"}` or `{type:\"steps\",steps:[...]}`.\n",
@@ -278,6 +279,104 @@ fn browser_step_schema_with_actions(
     properties.insert("url_or_pattern".to_string(), url_pattern_schema());
     properties.insert("pattern".to_string(), url_pattern_schema());
     properties.insert("save_as".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "width".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 1}),
+    );
+    properties.insert(
+        "height".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 1}),
+    );
+    properties.insert(
+        "device_scale_factor".to_string(),
+        serde_json::json!({"type": "number", "minimum": 0}),
+    );
+    properties.insert(
+        "is_mobile".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    properties.insert(
+        "has_touch".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    properties.insert(
+        "color_scheme".to_string(),
+        serde_json::json!({"type": "string", "enum": ["light", "dark", "no-preference"]}),
+    );
+    properties.insert(
+        "reduced_motion".to_string(),
+        serde_json::json!({"type": "string", "enum": ["reduce", "no-preference"]}),
+    );
+    properties.insert(
+        "forced_colors".to_string(),
+        serde_json::json!({"type": "string", "enum": ["active", "none"]}),
+    );
+    properties.insert(
+        "contrast".to_string(),
+        serde_json::json!({"type": "string", "enum": ["more", "less", "custom", "no-preference"]}),
+    );
+    properties.insert("media".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert("locale".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "timezone".to_string(),
+        serde_json::json!({"type": "string"}),
+    );
+    properties.insert(
+        "user_agent".to_string(),
+        serde_json::json!({"type": "string"}),
+    );
+    properties.insert(
+        "accept_language".to_string(),
+        serde_json::json!({"type": "string"}),
+    );
+    properties.insert(
+        "latitude".to_string(),
+        serde_json::json!({"type": "number"}),
+    );
+    properties.insert(
+        "longitude".to_string(),
+        serde_json::json!({"type": "number"}),
+    );
+    properties.insert(
+        "accuracy".to_string(),
+        serde_json::json!({"type": "number", "minimum": 0}),
+    );
+    properties.insert(
+        "offline".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    properties.insert(
+        "headers".to_string(),
+        serde_json::json!({"type": "object", "additionalProperties": {"type": "string"}}),
+    );
+    properties.insert(
+        "urls".to_string(),
+        serde_json::json!({"type": "array", "items": {"type": "string"}}),
+    );
+    properties.insert(
+        "cookies".to_string(),
+        serde_json::json!({"type": "array", "items": {"type": "object"}}),
+    );
+    properties.insert("domain".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert("path".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "kind".to_string(),
+        serde_json::json!({"type": "string", "enum": ["local", "session"]}),
+    );
+    properties.insert("origin".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert("items".to_string(), serde_json::json!({"type": "array", "items": {"type": "object", "required": ["name", "value"]}}));
+    properties.insert(
+        "permissions".to_string(),
+        serde_json::json!({"type": "array", "items": {"type": "string"}}),
+    );
+    properties.insert(
+        "username".to_string(),
+        serde_json::json!({"type": "string"}),
+    );
+    properties.insert(
+        "password".to_string(),
+        serde_json::json!({"type": "string"}),
+    );
     properties.insert("name".to_string(), serde_json::json!({"type": "string"}));
     properties.insert(
         "times".to_string(),

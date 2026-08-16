@@ -402,7 +402,17 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
 
   const typedStepsBlock = useMemo(() => {
     if (!typedArgs) return null;
-    return JSON.stringify(typedArgs, null, 2);
+    return JSON.stringify(
+      typedArgs,
+      function (key, value) {
+        if (key === "password") return "[REDACTED]";
+        if (key === "value" && typeof this?.name === "string") {
+          return "[REDACTED]";
+        }
+        return value;
+      },
+      2,
+    );
   }, [typedArgs]);
 
   const typedResultsBlock = useMemo(() => {
@@ -537,6 +547,29 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       .join("\n");
   }, [typedResult]);
 
+  const typedContextBlock = useMemo(() => {
+    const context = typedResult?.context;
+    if (!context) return null;
+    const identity = [
+      context.viewport,
+      context.locale,
+      context.timezone,
+      context.color_scheme,
+    ].filter(Boolean);
+    const permissions = context.permissions?.length
+      ? `permissions: ${context.permissions.join(", ")}`
+      : "permissions: none";
+    return [
+      identity.join(" · "),
+      permissions,
+      `cookies: ${context.cookie_count} · local storage: ${context.local_storage_count} · session storage: ${context.session_storage_count}`,
+      context.offline ? "offline" : null,
+      context.http_credentials ? "HTTP credentials: configured" : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }, [typedResult]);
+
   const reportScreenshot = typedResult?.screenshot
     ? `data:${typedResult.screenshot.mime};base64,${typedResult.screenshot.data}`
     : null;
@@ -620,6 +653,17 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       )}
 
       <NetworkPanel entries={typedResult?.network} />
+
+      {typedContextBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Context</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedContextBlock}
+            </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
 
       {typedRoutesBlock && (
         <Box className={styles.section}>

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Context Probe</title>
+  </head>
+  <body>
+    <button id="popup" onclick="window.open(location.href, '_blank')">Popup</button>
+    <pre id="probe"></pre>
+    <script>
+      document.getElementById("probe").textContent = JSON.stringify({
+        language: navigator.language,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        dark: matchMedia("(prefers-color-scheme: dark)").matches,
+        width: innerWidth,
+        height: innerHeight,
+        cookie: document.cookie,
+        localStorage: Object.fromEntries(Object.entries(localStorage)),
+      });
+    </script>
+  </body>
+</html>

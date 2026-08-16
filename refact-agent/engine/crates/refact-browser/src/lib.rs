@@ -1,4 +1,5 @@
 mod actionability;
+pub mod context_state;
 pub mod dialogs;
 pub mod files;
 pub mod forms;
@@ -26,6 +27,7 @@ pub use actionability::{
     required_states,
 };
 pub use dialogs::{DialogDecision, DialogManager, DialogResponse};
+pub use context_state::{ContextState, MediaState, ViewportState};
 pub use handles::{
     CheckedState, ElementHandle, ElementState, ElementStateName, HandleError, HandleRegistry,
 };
@@ -449,6 +451,7 @@ pub struct BrowserRuntime {
     pub buffers: BrowserBuffers,
     pub network_monitor: Arc<NetworkMonitorHandle>,
     pub route_registry: Arc<RouteRegistry>,
+    pub context_state: ContextState,
     pub idle_timeout: Duration,
     pub is_connected: bool,
     pub last_activity: Instant,
@@ -535,6 +538,7 @@ impl BrowserRuntime {
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
             route_registry: Arc::new(RouteRegistry::default()),
+            context_state: ContextState::default(),
             idle_timeout,
             is_connected: true,
             last_activity: Instant::now(),
@@ -583,6 +587,7 @@ impl BrowserRuntime {
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
             route_registry: Arc::new(RouteRegistry::default()),
+            context_state: ContextState::default(),
             idle_timeout,
             is_connected: true,
             last_activity: Instant::now(),
@@ -612,7 +617,10 @@ impl BrowserRuntime {
                 .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
                 .unwrap_or_default();
             for tab in tabs {
-                if let Err(error) = self.route_registry.enable_for_tab(&tab) {
+                if let Err(error) = self
+                    .route_registry
+                    .enable_for_tab(&tab, self.context_state.http_credentials.is_some())
+                {
                     self.route_registry.remove(Some(&pattern));
                     for enabled_tab in self
                         .browser
@@ -636,7 +644,10 @@ impl BrowserRuntime {
     ) -> Result<usize, String> {
         let previous_routes = self.route_registry.snapshot();
         let removed = self.route_registry.remove(pattern);
-        if removed > 0 && self.route_registry.is_empty() {
+        if removed > 0
+            && self.route_registry.is_empty()
+            && self.context_state.http_credentials.is_none()
+        {
             let tabs = self
                 .browser
                 .get_tabs()
@@ -658,7 +669,10 @@ impl BrowserRuntime {
                     .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
                     .unwrap_or_default()
                 {
-                    if let Err(error) = self.route_registry.enable_for_tab(&tab) {
+                    if let Err(error) = self
+                        .route_registry
+                        .enable_for_tab(&tab, self.context_state.http_credentials.is_some())
+                    {
                         errors.push(error);
                     }
                 }
@@ -666,6 +680,25 @@ impl BrowserRuntime {
             }
         }
         Ok(removed)
+    }
+
+    pub fn set_http_credentials(
+        &mut self,
+        username: String,
+        password: String,
+    ) -> Result<(), String> {
+        self.context_state.http_credentials = Some((username, password));
+        for tab in self
+            .browser
+            .get_tabs()
+            .lock()
+            .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+        {
+            self.context_state.apply_to_tab(&tab)?;
+            self.route_registry.enable_for_tab(&tab, true)?;
+        }
+        Ok(())
     }
 
     pub fn reattach(&mut self, chat_id: &str) {
@@ -849,7 +882,7 @@ fn tab_opener(
 
 impl Drop for BrowserRuntime {
     fn drop(&mut self) {
-        if !self.route_registry.is_empty() {
+        if !self.route_registry.is_empty() || self.context_state.http_credentials.is_some() {
             if let Ok(tabs) = self.browser.get_tabs().lock() {
                 for tab in tabs.iter() {
                     let _ = self.route_registry.disable_for_tab(tab);
@@ -1295,8 +1328,11 @@ pub fn setup_recording_for_tab(
         runtime.network_monitor.clone(),
         runtime.buffers.raw_network_entries.clone(),
     )?;
-    if !runtime.route_registry.is_empty() {
-        runtime.route_registry.enable_for_tab(tab)?;
+    runtime.context_state.apply_to_tab(tab)?;
+    if !runtime.route_registry.is_empty() || runtime.context_state.http_credentials.is_some() {
+        runtime
+            .route_registry
+            .enable_for_tab(tab, runtime.context_state.http_credentials.is_some())?;
     }
     let target_id = tab.get_target_id().to_string();
     register_adopted_tab(&mut runtime.adopted_tab_target_ids, target_id.clone());
@@ -1966,10 +2002,10 @@ mod tests {
         }
     }
 
-    // Device emulation must preserve the three product presets and mobile flags at the controller boundary.
     #[test]
     fn differentiator_15_device_presets_keep_dimensions_dpr_and_mobile_flags() {
         let source = include_str!("../../../src/integrations/browser_controller.rs");
+        let context = include_str!("context_state.rs");
 
         for preset in [
             "Some(\"mobile\") => (390, 844, 3.0, true)",
@@ -1978,9 +2014,10 @@ mod tests {
         ] {
             assert!(source.contains(preset), "controller lacks {preset}");
         }
-        assert!(source.contains("SetDeviceMetricsOverride"));
+        assert!(source.contains("runtime.context_state.viewport = Some"));
         assert!(source.contains("device_scale_factor: dpr"));
-        assert!(source.contains("mobile,"));
+        assert!(source.contains("is_mobile: mobile"));
+        assert!(context.contains("SetDeviceMetricsOverride"));
     }
 
     #[test]
