@@ -299,4 +299,21 @@ mod tests {
             assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
         }
     }
+
+    #[test]
+    fn injected_bundle_contains_playwright_selector_generator() {
+        for marker in [
+            "generateLocator\", {",
+            "generateSelector(runtime, element, options)",
+            "buildNoTextCandidates",
+            "buildTextCandidates",
+            "cssFallback",
+            "kCSSFallbackScore",
+        ] {
+            assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
+        }
+        let notice = include_str!("../injected/NOTICE.md");
+        assert!(notice.contains("src/vendor/injected/selectorGenerator.ts"));
+        assert!(notice.contains("packages/injected/src/selectorGenerator.ts"));
+    }
 }

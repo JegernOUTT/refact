@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Locator generator fixture</title>
+  </head>
+  <body>
+    <button data-generator-case="test-id" data-qa="primary-save">Save primary</button>
+    <button data-generator-case="text-button">Publish changes</button>
+
+    <section aria-label="First action group">
+      <button>Continue</button>
+    </section>
+    <section aria-label="Target action group">
+      <button data-generator-case="chained">Continue</button>
+    </section>
+    <section aria-label="Last action group">
+      <button>Continue</button>
+    </section>
+
+    <label>
+      Account name
+      <input data-generator-case="label" />
+    </label>
+
+    <div data-generator-case="structural-parent">
+      <span></span>
+      <span></span>
+      <span></span>
+      <span></span>
+      <span></span>
+      <span></span>
+      <span data-generator-case="structural"></span>
+    </div>
+  </body>
+</html>

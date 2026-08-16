@@ -60,6 +60,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "hostile-globals.html",
     "hit-target.html",
     "selectors.html",
+    "generator.html",
 ];
 
 fn execute_steps(
@@ -1966,6 +1967,66 @@ async fn aria_refs_reuse_invalidate_and_resolve_latest_snapshot_elements() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn generated_locators_follow_preferences_and_round_trip() {
+    let Some(mut case) = BrowserCase::start("generator.html").await else {
+        return;
+    };
+    case.setup_world();
+    let cases = [
+        ("test-id", Some("internal:testid=[data-qa=")),
+        ("text-button", Some("internal:role=button[name=")),
+        ("chained", Some(">>")),
+        ("label", Some("internal:role=textbox[name=")),
+        ("structural", Some("nth-child")),
+    ];
+    for (case_name, expected_fragment) in cases {
+        let target = case
+            .runtime
+            .world_manager
+            .call_injected_handles(
+                &case.tab,
+                "querySelectorAll",
+                json!([format!("css=[data-generator-case={case_name:?}]")]),
+            )
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let locator = case
+            .runtime
+            .world_manager
+            .generate_locator(
+                &case.tab,
+                &target,
+                refact_lsp::refact_browser::LocatorGenerationOptions {
+                    test_id_attribute_name: "data-qa".to_string(),
+                },
+            )
+            .unwrap();
+        if let Some(expected_fragment) = expected_fragment {
+            assert!(
+                locator.contains(expected_fragment),
+                "locator {locator:?} for {case_name} did not contain {expected_fragment:?}"
+            );
+        }
+        let resolved = case
+            .runtime
+            .world_manager
+            .call_injected_handles(&case.tab, "querySelectorAll", json!([locator.clone()]))
+            .unwrap();
+        assert_eq!(resolved.len(), 1, "locator {locator:?} must be unique");
+        assert_eq!(
+            resolved[0].backend_node_id, target.backend_node_id,
+            "locator {locator:?} must resolve to its source element"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn get_by_locators_match_playwright_semantics() {
+    use refact_lsp::integrations::browser_models::LocatorStrategy;
+
 async fn get_by_locators_match_playwright_semantics() {
     let Some(mut case) = BrowserCase::start("getby.html").await else {
         return;
@@ -2011,6 +2072,15 @@ async fn get_by_locators_match_playwright_semantics() {
     let custom = refact_lsp::refact_browser::test_id_locator("custom-card", "data-qa");
     assert_eq!(resolve(serde_json::to_value(custom).unwrap()).len(), 1);
 
+    let regex = LocatorStrategy::Text {
+        value: "does not matter".to_string(),
+        exact: true,
+        regex: Some(refact_lsp::integrations::browser_models::LocatorRegex {
+            source: "unique\\s+text".to_string(),
+            flags: "i".to_string(),
+        }),
+    };
+    assert_eq!(resolve(serde_json::to_value(BrowserLocator { strategy: regex, nth: None, within: None }).unwrap()).len(), 1);
     let regex: BrowserLocator = serde_json::from_value(json!({
         "by": "text",
         "value": "does not matter",

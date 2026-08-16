@@ -1769,18 +1769,20 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
         LocatorStrategy::Css { value } => format!("css={}", value),
         LocatorStrategy::Id { value } => format!("id={}", value),
         LocatorStrategy::Name { value } => format!("name={}", value),
-        LocatorStrategy::TestId { value } => format!("testid={}", value),
-        LocatorStrategy::Placeholder { value } => format!("placeholder={}", value),
+        LocatorStrategy::TestId { value, .. } => format!("testid={}", value),
+        LocatorStrategy::Placeholder { value, .. } => format!("placeholder={}", value),
+        LocatorStrategy::AltText { value, .. } => format!("alt_text={}", value),
+        LocatorStrategy::Title { value, .. } => format!("title={}", value),
         LocatorStrategy::Autocomplete { value } => format!("autocomplete={}", value),
-        LocatorStrategy::Text { value, exact } => {
+        LocatorStrategy::Text { value, exact, .. } => {
             if *exact {
                 format!("text=\"{}\"", value)
             } else {
                 format!("text~\"{}\"", value)
             }
         }
-        LocatorStrategy::Label { value } => format!("label={}", value),
-        LocatorStrategy::Role { role, name } => match name {
+        LocatorStrategy::Label { value, .. } => format!("label={}", value),
+        LocatorStrategy::Role { role, name, .. } => match name {
             Some(n) => format!("role={}[{}]", role, n),
             None => format!("role={}", role),
         },
@@ -1834,6 +1836,7 @@ mod tests {
             strategy: LocatorStrategy::Text {
                 value: "Submit".to_string(),
                 exact: true,
+                regex: None,
             },
             nth: None,
             within: None,
@@ -1847,6 +1850,7 @@ mod tests {
             strategy: LocatorStrategy::Text {
                 value: "Sub".to_string(),
                 exact: false,
+                regex: None,
             },
             nth: None,
             within: None,

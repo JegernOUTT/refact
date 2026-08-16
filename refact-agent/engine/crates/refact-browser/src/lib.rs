@@ -6,6 +6,7 @@ mod handles;
 mod hit_target;
 mod injected_source;
 mod keyboard;
+mod locator_gen;
 mod locators;
 mod mouse;
 mod refs;
@@ -38,6 +39,7 @@ pub use keyboard::{
     CdpKeyboardDispatcher, KeyEventPayload, KeyEventType, Keyboard, KeyboardDispatch,
     KeyboardDispatcher, KeyboardModifier, modifier_bitmask,
 };
+pub use locator_gen::LocatorGenerationOptions;
 pub use locators::{DEFAULT_TEST_ID_ATTRIBUTE, test_id_locator};
 pub use mouse::{
     CdpMouseDispatcher, ContentQuad, MainFrameCssPoint, MainFrameCssViewport, Mouse, MouseButton,

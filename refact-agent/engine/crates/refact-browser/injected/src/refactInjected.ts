@@ -41,6 +41,7 @@ import {
   elementMatchesText,
   elementText,
   getElementLabels,
+  matchesAttributePart,
   type ElementText,
   type TextMatcher,
 } from './vendor/injected/selectorUtils';
@@ -479,9 +480,11 @@ export function bootstrapRefactInjected(
 import { SelectorEvaluatorImpl, sortInDOMOrder } from './vendor/injected/selectorEvaluator';
 import { kLayoutSelectorNames, layoutSelectorScore } from './vendor/injected/layoutSelectorUtils';
 import { XPathEngine } from './vendor/injected/xpathSelectorEngine';
+import { generateSelector, type GenerateSelectorOptions } from './vendor/injected/selectorGenerator';
 import type { SelectorEngine, SelectorRoot } from './vendor/injected/selectorEngine';
 import {
   parseSelector,
+  parseAttributeSelector,
   stringifySelector,
   type NestedSelectorBody,
   type ParsedSelector,
@@ -499,6 +502,65 @@ const selectorEngines = new Map<string, SelectorEngine>([
   }],
   ['xpath', XPathEngine],
 ]);
+
+function createInternalTextMatcher(selector: string): TextMatcher {
+  if (selector.startsWith('/') && selector.lastIndexOf('/') > 0) {
+    const lastSlash = selector.lastIndexOf('/');
+    const expression = new RegExp(selector.slice(1, lastSlash), selector.slice(lastSlash + 1));
+    return text => matchesRegExp(expression, text.full);
+  }
+  const exact = selector.endsWith('s');
+  const value = normalizeWhiteSpace(JSON.parse(selector.slice(0, -1)) as string);
+  if (exact)
+    return text => text.normalized === value;
+  const folded = value.toLowerCase();
+  return text => text.normalized.toLowerCase().includes(folded);
+}
+
+function createInternalAttributeEngine(testId: boolean): SelectorEngine {
+  return {
+    queryAll(root: SelectorRoot, selector: string): Element[] {
+      const parsed = parseAttributeSelector(selector, true);
+      if (parsed.name || parsed.attributes.length !== 1)
+        throw new Error(`Malformed ${testId ? 'test id' : 'attribute'} selector: ${selector}`);
+      const attribute = parsed.attributes[0];
+      const names = testId ? attribute.name.split(',') : [attribute.name];
+      return queryDescendantsPiercingShadow(root as Document | Element).filter(element =>
+        names.some(name => {
+          const value = element.getAttribute(name);
+          return value !== null && matchesAttributePart(value, attribute);
+        }),
+      );
+    },
+  };
+}
+
+selectorEngines.set('internal:role', createRoleEngine(true));
+selectorEngines.set('internal:text', {
+  queryAll(root: SelectorRoot, selector: string): Element[] {
+    const matcher = createInternalTextMatcher(selector);
+    return queryAllPiercingShadow(root as Document | Element).filter(element =>
+      elementMatchesText(selectorEvaluator._cacheText, element, matcher) === 'self',
+    );
+  },
+});
+selectorEngines.set('internal:has-text', {
+  queryAll(root: SelectorRoot, selector: string): Element[] {
+    if (!(root instanceof Element))
+      return [];
+    return createInternalTextMatcher(selector)(elementText(selectorEvaluator._cacheText, root)) ? [root] : [];
+  },
+});
+selectorEngines.set('internal:label', {
+  queryAll(root: SelectorRoot, selector: string): Element[] {
+    const matcher = createInternalTextMatcher(selector);
+    return queryDescendantsPiercingShadow(root as Document | Element).filter(element =>
+      getElementLabels(selectorEvaluator._cacheText, element).some(matcher),
+    );
+  },
+});
+selectorEngines.set('internal:attr', createInternalAttributeEngine(false));
+selectorEngines.set('internal:testid', createInternalAttributeEngine(true));
 
 function querySelectorPart(part: ParsedSelectorPart, root: SelectorRoot): Element[] {
   const engine = selectorEngines.get(part.name);
@@ -541,7 +603,12 @@ function queryParsedSelector(selector: ParsedSelector, root: SelectorQueryScope)
   try {
     let roots = new Set<Element>([root as Element]);
     for (const part of selector.parts) {
-      if (part.name === 'internal:has') {
+      if (part.name === 'nth') {
+        const index = Number(part.body);
+        roots = Number.isInteger(index) && index >= 0 && index < roots.size
+          ? new Set([[...roots][index]])
+          : new Set();
+      } else if (part.name === 'internal:has') {
         roots = new Set([...roots].filter(element =>
           queryParsedSelector((part.body as NestedSelectorBody).parsed, element).length > 0,
         ));
@@ -609,5 +676,21 @@ Object.defineProperty(RefactInjected.prototype, 'resolveAriaRef', {
     if (!result.element.isConnected)
       throw new Error(`REF_DETACHED: ref ${reference} is detached; take a fresh snapshot`);
     return result.element;
+  },
+});
+
+Object.defineProperty(RefactInjected.prototype, 'generateLocator', {
+  value(element: Element, options: GenerateSelectorOptions): string {
+    if (!element.isConnected)
+      throw new Error('Element is not attached to the DOM');
+    const runtime = {
+      _evaluator: selectorEvaluator,
+      parseSelector,
+      querySelector: (selector: ParsedSelector, root: Document | Element) =>
+        queryParsedSelector(selector, root)[0],
+      querySelectorAll: (selector: ParsedSelector, root: Document | Element) =>
+        queryParsedSelector(selector, root),
+    };
+    return generateSelector(runtime, element, options).selector;
   },
 });
