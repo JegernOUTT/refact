@@ -3,6 +3,41 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::{Arc, Mutex};
 
+use headless_chrome::Tab;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::world::WorldManager;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ElementStateName {
+    Visible,
+    Enabled,
+    Editable,
+    Checked,
+    Unchecked,
+    Mixed,
+    Stable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckedState {
+    Checked,
+    Unchecked,
+    Mixed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ElementState {
+    pub visible: bool,
+    pub enabled: bool,
+    pub editable: Option<bool>,
+    pub checked: Option<CheckedState>,
+    pub stable: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ElementHandle {
     pub object_id: String,
@@ -30,6 +65,43 @@ impl Display for HandleError {
 }
 
 impl Error for HandleError {}
+
+impl WorldManager {
+    pub fn element_state(
+        &self,
+        tab: &Tab,
+        handle: &ElementHandle,
+        state: ElementStateName,
+    ) -> Result<Value, HandleError> {
+        let state = serde_json::to_value(state).map_err(|error| {
+            HandleError::Protocol(format!(
+                "Failed to serialize browser element state: {error}"
+            ))
+        })?;
+        self.call_function_on(
+            tab,
+            handle,
+            "function(state) { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.elementState(this, state); }",
+            vec![state],
+        )
+    }
+
+    pub fn element_states(
+        &self,
+        tab: &Tab,
+        handle: &ElementHandle,
+    ) -> Result<ElementState, HandleError> {
+        let value = self.call_function_on(
+            tab,
+            handle,
+            "function() { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.elementStates(this); }",
+            Vec::new(),
+        )?;
+        serde_json::from_value(value).map_err(|error| {
+            HandleError::Protocol(format!("Failed to parse browser element states: {error}"))
+        })
+    }
+}
 
 #[derive(Default)]
 struct RegistryState {
@@ -206,5 +278,45 @@ mod tests {
             vec!["first", "second"]
         );
         assert_eq!(registry.len("tab"), 0);
+    }
+
+    #[test]
+    fn element_state_serde_preserves_optional_and_mixed_values() {
+        let state = ElementState {
+            visible: true,
+            enabled: false,
+            editable: Some(false),
+            checked: Some(CheckedState::Mixed),
+            stable: true,
+        };
+        let value = serde_json::to_value(&state).unwrap();
+        assert_eq!(value["checked"], "mixed");
+        assert_eq!(
+            serde_json::from_value::<ElementState>(value).unwrap(),
+            state
+        );
+
+        let unsupported: ElementState = serde_json::from_value(serde_json::json!({
+            "visible": false,
+            "enabled": true,
+            "editable": null,
+            "checked": null,
+            "stable": false
+        }))
+        .unwrap();
+        assert_eq!(unsupported.editable, None);
+        assert_eq!(unsupported.checked, None);
+    }
+
+    #[test]
+    fn element_state_names_use_injected_wire_values() {
+        assert_eq!(
+            serde_json::to_value(ElementStateName::Unchecked).unwrap(),
+            "unchecked"
+        );
+        assert_eq!(
+            serde_json::to_value(ElementStateName::Stable).unwrap(),
+            "stable"
+        );
     }
 }

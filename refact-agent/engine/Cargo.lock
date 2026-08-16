@@ -4056,6 +4056,7 @@ dependencies = [
  "headless_chrome",
  "refact-chat-api",
  "refact-integrations",
+ "serde",
  "serde_json",
  "tracing",
  "uuid",

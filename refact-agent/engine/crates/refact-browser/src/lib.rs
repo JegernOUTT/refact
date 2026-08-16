@@ -4,7 +4,9 @@ mod keyboard;
 mod us_keyboard_layout;
 mod world;
 
-pub use handles::{ElementHandle, HandleError, HandleRegistry};
+pub use handles::{
+    CheckedState, ElementHandle, ElementState, ElementStateName, HandleError, HandleRegistry,
+};
 pub use injected_source::{INJECTED_BUNDLE, wrapped_bootstrap};
 pub use keyboard::{
     CdpKeyboardDispatcher, KeyEventPayload, KeyEventType, Keyboard, KeyboardDispatch,

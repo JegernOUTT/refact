@@ -1,4 +1,4 @@
-// @refact-injected-hash 181b5f86b5764801f689d4c9bb3bf73f5aa85a25c84859004b51348313fdb7c9
+// @refact-injected-hash 5ea0a673aa7d5a725593d9f7434ab60651e511cfdffe0607be4b4bfa8e8cab74
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -10,6 +10,174 @@ __export(refactInjected_exports, {
   bootstrapRefactInjected: () => bootstrapRefactInjected
 });
 module.exports = __toCommonJS(refactInjected_exports);
+
+// src/vendor/injected/domUtils.ts
+var globalOptions = {};
+function parentElementOrShadowHost(element) {
+  if (element.parentElement)
+    return element.parentElement;
+  if (!element.parentNode)
+    return;
+  if (element.parentNode.nodeType === 11 && element.parentNode.host)
+    return element.parentNode.host;
+}
+function getElementComputedStyle(element, pseudo) {
+  const cache = pseudo === "::before" ? cacheStyleBefore : pseudo === "::after" ? cacheStyleAfter : cacheStyle;
+  if (cache && cache.has(element))
+    return cache.get(element);
+  const style = element.ownerDocument && element.ownerDocument.defaultView ? element.ownerDocument.defaultView.getComputedStyle(element, pseudo) : void 0;
+  cache == null ? void 0 : cache.set(element, style);
+  return style;
+}
+function isElementStyleVisibilityVisible(element, style) {
+  const cached = cacheStyleVisibility == null ? void 0 : cacheStyleVisibility.get(element);
+  if (cached !== void 0)
+    return cached;
+  const result = computeElementStyleVisibilityVisible(element, style);
+  cacheStyleVisibility == null ? void 0 : cacheStyleVisibility.set(element, result);
+  return result;
+}
+function computeElementStyleVisibilityVisible(element, style) {
+  style = style != null ? style : getElementComputedStyle(element);
+  if (!style)
+    return true;
+  if (Element.prototype.checkVisibility && globalOptions.browserNameForWorkarounds !== "webkit") {
+    if (!element.checkVisibility())
+      return false;
+  } else {
+    const detailsOrSummary = element.closest("details,summary");
+    if (detailsOrSummary !== element && (detailsOrSummary == null ? void 0 : detailsOrSummary.nodeName) === "DETAILS" && !detailsOrSummary.open)
+      return false;
+  }
+  if (style.visibility !== "visible")
+    return false;
+  return true;
+}
+function computeBox(element) {
+  const style = getElementComputedStyle(element);
+  if (!style)
+    return { visible: true, inline: false };
+  const cursor = style.cursor;
+  if (style.display === "contents") {
+    for (let child = element.firstChild; child; child = child.nextSibling) {
+      if (child.nodeType === 1 && isElementVisible(child))
+        return { visible: true, inline: false, cursor };
+      if (child.nodeType === 3 && isVisibleTextNode(child))
+        return { visible: true, inline: true, cursor };
+    }
+    return { visible: false, inline: false, cursor };
+  }
+  if (!isElementStyleVisibilityVisible(element, style))
+    return { cursor, visible: false, inline: false };
+  const rect = element.getBoundingClientRect();
+  return { cursor, visible: rect.width > 0 && rect.height > 0, inline: style.display === "inline" };
+}
+function isElementVisible(element) {
+  return computeBox(element).visible;
+}
+function isVisibleTextNode(node) {
+  const range = node.ownerDocument.createRange();
+  range.selectNode(node);
+  const rect = range.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+function elementSafeTagName(element) {
+  const tagName = element.tagName;
+  if (typeof tagName === "string") {
+    const firstCharCode = tagName.charCodeAt(0);
+    if (firstCharCode >= 97 && firstCharCode <= 122)
+      return tagName.toUpperCase();
+    return tagName;
+  }
+  if (element instanceof HTMLFormElement)
+    return "FORM";
+  return element.tagName.toUpperCase();
+}
+var ariaReadonlyRoles = ["checkbox", "combobox", "grid", "gridcell", "listbox", "radiogroup", "slider", "spinbutton", "textbox", "columnheader", "rowheader", "searchbox", "switch", "treegrid"];
+function getAriaDisabled(element) {
+  return isNativelyDisabled(element) || hasAriaDisabledInChain(element);
+}
+function isNativelyDisabled(element) {
+  const isNativeFormControl = ["BUTTON", "INPUT", "SELECT", "TEXTAREA", "OPTION", "OPTGROUP"].includes(elementSafeTagName(element));
+  return isNativeFormControl && (element.hasAttribute("disabled") || belongsToDisabledOptGroup(element) || belongsToDisabledFieldSet(element));
+}
+function belongsToDisabledOptGroup(element) {
+  return elementSafeTagName(element) === "OPTION" && !!element.closest("OPTGROUP[DISABLED]");
+}
+function belongsToDisabledFieldSet(element) {
+  const fieldSetElement = element.closest("FIELDSET[DISABLED]");
+  if (!fieldSetElement)
+    return false;
+  const legendElement = fieldSetElement.querySelector(":scope > LEGEND");
+  return !legendElement || !legendElement.contains(element);
+}
+function hasAriaDisabledInChain(element) {
+  const attribute = (element.getAttribute("aria-disabled") || "").toLowerCase();
+  if (attribute === "true")
+    return true;
+  if (attribute === "false")
+    return false;
+  const parent = parentElementOrShadowHost(element);
+  return parent ? hasAriaDisabledInChain(parent) : false;
+}
+function getReadonly(element) {
+  const tagName = elementSafeTagName(element);
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(tagName))
+    return element.hasAttribute("readonly");
+  const role = explicitAriaRole(element);
+  if (ariaReadonlyRoles.includes(role))
+    return element.getAttribute("aria-readonly") === "true";
+  if (element.isContentEditable)
+    return false;
+  if (element.hasAttribute("contenteditable"))
+    return true;
+  return "error";
+}
+function explicitAriaRole(element) {
+  const explicit = (element.getAttribute("role") || "").split(" ").map((role) => role.trim()).find((role) => ariaReadonlyRoles.includes(role));
+  if (explicit)
+    return explicit;
+  const tagName = elementSafeTagName(element);
+  if (tagName === "TEXTAREA")
+    return "textbox";
+  if (tagName === "SELECT")
+    return "combobox";
+  if (tagName === "INPUT") {
+    const type = element.type;
+    if (type === "checkbox")
+      return "checkbox";
+    if (type === "search")
+      return "searchbox";
+    if (type === "range")
+      return "slider";
+    if (type === "number")
+      return "spinbutton";
+    if (!["button", "submit", "reset", "image", "file", "hidden", "radio"].includes(type))
+      return "textbox";
+  }
+  return "";
+}
+function getCheckedState(element) {
+  const tagName = elementSafeTagName(element);
+  if (tagName === "INPUT" && element.indeterminate)
+    return "mixed";
+  if (tagName === "INPUT" && ["checkbox", "radio"].includes(element.type))
+    return element.checked ? "checked" : "unchecked";
+  const checked = element.getAttribute("aria-checked");
+  if (checked === "true")
+    return "checked";
+  if (checked === "mixed")
+    return "mixed";
+  if (checked === "false")
+    return "unchecked";
+  return null;
+}
+var cacheStyle;
+var cacheStyleBefore;
+var cacheStyleAfter;
+var cacheStyleVisibility;
+
+// src/refactInjected.ts
 var injectedInstanceName = "__refact_injected__";
 var bindingName = "__refact_binding";
 var RefactInjected = class {
@@ -113,6 +281,87 @@ var RefactInjected = class {
     if (locator.nth !== void 0)
       elements = elements.length > locator.nth ? [elements[locator.nth]] : [];
     return elements;
+  }
+  async elementState(element, state) {
+    this.ensureConnected(element);
+    if (state === "visible") {
+      const visible = isElementVisible(element);
+      return { visible, matches: visible };
+    }
+    if (state === "enabled") {
+      const enabled = !getAriaDisabled(element);
+      return { enabled, matches: enabled };
+    }
+    if (state === "editable") {
+      const editable = this.editableState(element);
+      if (editable === null)
+        throw new Error("Element is not an <input>, <textarea>, <select> or [contenteditable] and does not have a role allowing [aria-readonly]");
+      return { editable, matches: editable };
+    }
+    if (state === "checked" || state === "unchecked" || state === "mixed") {
+      const checked = getCheckedState(element);
+      if (checked === null)
+        throw new Error("Not a checkbox or radio button");
+      return {
+        checked,
+        matches: state === "checked" ? checked === "checked" : state === "unchecked" ? checked === "unchecked" : checked === "mixed"
+      };
+    }
+    if (state === "stable") {
+      const stable = await this.checkElementIsStable(element);
+      return { stable, matches: stable };
+    }
+    throw new Error(`Unexpected element state "${state}"`);
+  }
+  async elementStates(element) {
+    this.ensureConnected(element);
+    return {
+      visible: isElementVisible(element),
+      enabled: !getAriaDisabled(element),
+      editable: this.editableState(element),
+      checked: getCheckedState(element),
+      stable: await this.checkElementIsStable(element)
+    };
+  }
+  editableState(element) {
+    const readonly = getReadonly(element);
+    return readonly === "error" ? null : !getAriaDisabled(element) && !readonly;
+  }
+  ensureConnected(element) {
+    if (!element || !element.isConnected)
+      throw new Error("Element is not attached to the DOM");
+  }
+  async checkElementIsStable(element) {
+    const requestAnimationFrame = this.builtinSnapshot.requestAnimationFrame;
+    const performanceNow = this.builtinSnapshot.performanceNow;
+    let lastRect;
+    let lastTime = 0;
+    return await new Promise((resolve, reject) => {
+      const check = () => {
+        try {
+          this.ensureConnected(element);
+          const time = performanceNow();
+          if (lastTime && time - lastTime < 15) {
+            requestAnimationFrame(check);
+            return;
+          }
+          lastTime = time;
+          const clientRect = element.getBoundingClientRect();
+          const rect = { x: clientRect.x, y: clientRect.y, width: clientRect.width, height: clientRect.height };
+          if (lastRect) {
+            resolve(
+              rect.x === lastRect.x && rect.y === lastRect.y && rect.width === lastRect.width && rect.height === lastRect.height
+            );
+            return;
+          }
+          lastRect = rect;
+          requestAnimationFrame(check);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      requestAnimationFrame(check);
+    });
   }
   dispatchBinding(name, payload) {
     const global = this.global;

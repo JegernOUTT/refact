@@ -170,6 +170,99 @@ export function elementSafeTagName(element: Element) {
   return element.tagName.toUpperCase();
 }
 
+const ariaReadonlyRoles = ['checkbox', 'combobox', 'grid', 'gridcell', 'listbox', 'radiogroup', 'slider', 'spinbutton', 'textbox', 'columnheader', 'rowheader', 'searchbox', 'switch', 'treegrid'];
+
+export type CheckedState = 'checked' | 'unchecked' | 'mixed';
+
+export function getAriaDisabled(element: Element): boolean {
+  return isNativelyDisabled(element) || hasAriaDisabledInChain(element);
+}
+
+function isNativelyDisabled(element: Element): boolean {
+  const isNativeFormControl = ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OPTGROUP'].includes(elementSafeTagName(element));
+  return isNativeFormControl && (element.hasAttribute('disabled') || belongsToDisabledOptGroup(element) || belongsToDisabledFieldSet(element));
+}
+
+function belongsToDisabledOptGroup(element: Element): boolean {
+  return elementSafeTagName(element) === 'OPTION' && !!element.closest('OPTGROUP[DISABLED]');
+}
+
+function belongsToDisabledFieldSet(element: Element): boolean {
+  const fieldSetElement = element.closest('FIELDSET[DISABLED]');
+  if (!fieldSetElement)
+    return false;
+  const legendElement = fieldSetElement.querySelector(':scope > LEGEND');
+  return !legendElement || !legendElement.contains(element);
+}
+
+function hasAriaDisabledInChain(element: Element): boolean {
+  const attribute = (element.getAttribute('aria-disabled') || '').toLowerCase();
+  if (attribute === 'true')
+    return true;
+  if (attribute === 'false')
+    return false;
+  const parent = parentElementOrShadowHost(element);
+  return parent ? hasAriaDisabledInChain(parent) : false;
+}
+
+export function getReadonly(element: Element): boolean | 'error' {
+  const tagName = elementSafeTagName(element);
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tagName))
+    return element.hasAttribute('readonly');
+  const role = explicitAriaRole(element);
+  if (ariaReadonlyRoles.includes(role))
+    return element.getAttribute('aria-readonly') === 'true';
+  if ((element as HTMLElement).isContentEditable)
+    return false;
+  if (element.hasAttribute('contenteditable'))
+    return true;
+  return 'error';
+}
+
+function explicitAriaRole(element: Element): string {
+  const explicit = (element.getAttribute('role') || '')
+      .split(' ')
+      .map(role => role.trim())
+      .find(role => ariaReadonlyRoles.includes(role));
+  if (explicit)
+    return explicit;
+  const tagName = elementSafeTagName(element);
+  if (tagName === 'TEXTAREA')
+    return 'textbox';
+  if (tagName === 'SELECT')
+    return 'combobox';
+  if (tagName === 'INPUT') {
+    const type = (element as HTMLInputElement).type;
+    if (type === 'checkbox')
+      return 'checkbox';
+    if (type === 'search')
+      return 'searchbox';
+    if (type === 'range')
+      return 'slider';
+    if (type === 'number')
+      return 'spinbutton';
+    if (!['button', 'submit', 'reset', 'image', 'file', 'hidden', 'radio'].includes(type))
+      return 'textbox';
+  }
+  return '';
+}
+
+export function getCheckedState(element: Element): CheckedState | null {
+  const tagName = elementSafeTagName(element);
+  if (tagName === 'INPUT' && (element as HTMLInputElement).indeterminate)
+    return 'mixed';
+  if (tagName === 'INPUT' && ['checkbox', 'radio'].includes((element as HTMLInputElement).type))
+    return (element as HTMLInputElement).checked ? 'checked' : 'unchecked';
+  const checked = element.getAttribute('aria-checked');
+  if (checked === 'true')
+    return 'checked';
+  if (checked === 'mixed')
+    return 'mixed';
+  if (checked === 'false')
+    return 'unchecked';
+  return null;
+}
+
 let cacheStyle: Map<Element, CSSStyleDeclaration | undefined> | undefined;
 let cacheStyleBefore: Map<Element, CSSStyleDeclaration | undefined> | undefined;
 let cacheStyleAfter: Map<Element, CSSStyleDeclaration | undefined> | undefined;

@@ -19,7 +19,8 @@ use refact_lsp::integrations::browser_controller::execute_steps;
 use refact_lsp::integrations::browser_controller::execute_steps as execute_steps_with_policy;
 use refact_lsp::integrations::browser_models::{BrowserLocator, BrowserStep};
 use refact_lsp::refact_browser::{
-    BrowserRuntime, CdpKeyboardDispatcher, HandleError, Keyboard, UTILITY_WORLD_NAME,
+    BrowserRuntime, CdpKeyboardDispatcher, CheckedState, HandleError, Keyboard,
+    UTILITY_WORLD_NAME,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -37,6 +38,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "delayed-button.html",
     "overlay.html",
     "moving-target.html",
+    "states.html",
     "controlled-input.html",
     "iframe-form.html",
     "shadow-dom.html",
@@ -678,6 +680,102 @@ async fn handle_is_invalidated_after_navigation() {
         )
         .unwrap_err();
     assert!(matches!(error, HandleError::Invalidated { .. }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn element_states_match_playwright_predicates() {
+    let Some(mut case) = BrowserCase::start("states.html").await else {
+        return;
+    };
+    case.setup_world();
+    let selectors = [
+        "#disabled-button",
+        "#aria-disabled",
+        "#fieldset-disabled",
+        "#readonly-input",
+        "#aria-readonly",
+        "#contenteditable-false",
+        "#checked",
+        "#unchecked",
+        "#mixed",
+        "#opacity-zero",
+        "#display-none",
+    ];
+    let mut states = Vec::new();
+    for selector in selectors {
+        let handle = case
+            .runtime
+            .world_manager
+            .call_injected_handles(
+                &case.tab,
+                "resolveAll",
+                json!([{"by":"css","value":selector}]),
+            )
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        states.push(
+            case.runtime
+                .world_manager
+                .element_states(&case.tab, &handle)
+                .unwrap(),
+        );
+    }
+
+    assert!(!states[0].enabled);
+    assert!(!states[1].enabled);
+    assert!(!states[2].enabled);
+    assert_eq!(states[3].editable, Some(false));
+    assert_eq!(states[4].editable, Some(false));
+    assert_eq!(states[5].editable, Some(false));
+    assert_eq!(states[6].checked, Some(CheckedState::Checked));
+    assert_eq!(states[7].checked, Some(CheckedState::Unchecked));
+    assert_eq!(states[8].checked, Some(CheckedState::Mixed));
+    assert!(states[9].visible);
+    assert!(!states[10].visible);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn moving_target_stability_predicate_reports_each_probe() {
+    let Some(mut case) = BrowserCase::start("moving-target.html").await else {
+        return;
+    };
+    case.setup_world();
+    let handle = case
+        .runtime
+        .world_manager
+        .call_injected_handles(
+            &case.tab,
+            "resolveAll",
+            json!([{"by":"css","value":"#moving"}]),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    case.tab
+        .evaluate(
+            "const element = document.querySelector('#moving'); element.style.animation = 'none'; void element.offsetWidth; element.style.animation = 'travel 1.5s linear forwards';",
+            false,
+        )
+        .unwrap();
+
+    let moving = case
+        .runtime
+        .world_manager
+        .element_states(&case.tab, &handle)
+        .unwrap();
+    assert!(!moving.stable);
+    tokio::time::sleep(Duration::from_millis(1_700)).await;
+    let settled = case
+        .runtime
+        .world_manager
+        .element_states(&case.tab, &handle)
+        .unwrap();
+    assert!(settled.stable);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

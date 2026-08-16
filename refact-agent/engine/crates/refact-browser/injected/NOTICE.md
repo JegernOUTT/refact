@@ -6,7 +6,7 @@ This directory contains source adapted from [Microsoft Playwright](https://githu
 
 | Local file | Upstream file | Commit | Local modifications |
 |---|---|---|---|
-| `src/vendor/injected/domUtils.ts` | `packages/injected/src/domUtils.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | None. |
+| `src/vendor/injected/domUtils.ts` | `packages/injected/src/domUtils.ts`, `packages/injected/src/roleUtils.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Includes only the disabled, readonly, and checked helpers required by element-state predicates; full role computation remains omitted. |
 | `src/vendor/injected/selectorUtils.ts` | `packages/injected/src/selectorUtils.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports; the role-dependent label helper is omitted until the role implementation is vendored. |
 | `src/vendor/injected/utilityScript.ts` | `packages/injected/src/utilityScript.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports. |
 | `src/vendor/injected/bindingsController.ts` | `packages/injected/src/bindingsController.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports. |

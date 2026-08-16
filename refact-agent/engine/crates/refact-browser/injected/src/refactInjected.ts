@@ -14,7 +14,25 @@
  * limitations under the License.
  */
 
+import {
+  type CheckedState,
+  getAriaDisabled,
+  getCheckedState,
+  getReadonly,
+  isElementVisible,
+} from './vendor/injected/domUtils';
+
 type RefactBuiltins = Readonly<Record<string, unknown>>;
+
+type ElementStateName = 'visible' | 'enabled' | 'editable' | 'checked' | 'unchecked' | 'mixed' | 'stable';
+
+type ElementStates = Readonly<{
+  visible: boolean;
+  enabled: boolean;
+  editable: boolean | null;
+  checked: CheckedState | null;
+  stable: boolean;
+}>;
 
 type RefactLocator = Readonly<{
   by: string;
@@ -141,6 +159,95 @@ export class RefactInjected {
     if (locator.nth !== undefined)
       elements = elements.length > locator.nth ? [elements[locator.nth]] : [];
     return elements;
+  }
+
+  async elementState(element: Element, state: ElementStateName): Promise<Record<string, unknown>> {
+    this.ensureConnected(element);
+    if (state === 'visible') {
+      const visible = isElementVisible(element);
+      return { visible, matches: visible };
+    }
+    if (state === 'enabled') {
+      const enabled = !getAriaDisabled(element);
+      return { enabled, matches: enabled };
+    }
+    if (state === 'editable') {
+      const editable = this.editableState(element);
+      if (editable === null)
+        throw new Error('Element is not an <input>, <textarea>, <select> or [contenteditable] and does not have a role allowing [aria-readonly]');
+      return { editable, matches: editable };
+    }
+    if (state === 'checked' || state === 'unchecked' || state === 'mixed') {
+      const checked = getCheckedState(element);
+      if (checked === null)
+        throw new Error('Not a checkbox or radio button');
+      return {
+        checked,
+        matches: state === 'checked' ? checked === 'checked' : state === 'unchecked' ? checked === 'unchecked' : checked === 'mixed',
+      };
+    }
+    if (state === 'stable') {
+      const stable = await this.checkElementIsStable(element);
+      return { stable, matches: stable };
+    }
+    throw new Error(`Unexpected element state "${state}"`);
+  }
+
+  async elementStates(element: Element): Promise<ElementStates> {
+    this.ensureConnected(element);
+    return {
+      visible: isElementVisible(element),
+      enabled: !getAriaDisabled(element),
+      editable: this.editableState(element),
+      checked: getCheckedState(element),
+      stable: await this.checkElementIsStable(element),
+    };
+  }
+
+  private editableState(element: Element): boolean | null {
+    const readonly = getReadonly(element);
+    return readonly === 'error' ? null : !getAriaDisabled(element) && !readonly;
+  }
+
+  private ensureConnected(element: Element): void {
+    if (!element || !element.isConnected)
+      throw new Error('Element is not attached to the DOM');
+  }
+
+  private async checkElementIsStable(element: Element): Promise<boolean> {
+    const requestAnimationFrame = this.builtinSnapshot.requestAnimationFrame as (callback: FrameRequestCallback) => number;
+    const performanceNow = this.builtinSnapshot.performanceNow as () => number;
+    let lastRect: { x: number; y: number; width: number; height: number } | undefined;
+    let lastTime = 0;
+    return await new Promise<boolean>((resolve, reject) => {
+      const check = () => {
+        try {
+          this.ensureConnected(element);
+          const time = performanceNow();
+          if (lastTime && time - lastTime < 15) {
+            requestAnimationFrame(check);
+            return;
+          }
+          lastTime = time;
+          const clientRect = element.getBoundingClientRect();
+          const rect = { x: clientRect.x, y: clientRect.y, width: clientRect.width, height: clientRect.height };
+          if (lastRect) {
+            resolve(
+              rect.x === lastRect.x &&
+              rect.y === lastRect.y &&
+              rect.width === lastRect.width &&
+              rect.height === lastRect.height,
+            );
+            return;
+          }
+          lastRect = rect;
+          requestAnimationFrame(check);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      requestAnimationFrame(check);
+    });
   }
 
   dispatchBinding(name: string, payload: unknown): void {

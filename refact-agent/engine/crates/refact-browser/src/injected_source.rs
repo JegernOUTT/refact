@@ -54,6 +54,42 @@ mod tests {
     }
 
     #[test]
+    fn injected_bundle_contains_element_state_predicates() {
+        for marker in [
+            "elementState(element, state)",
+            "elementStates(element)",
+            "isElementVisible",
+            "getAriaDisabled",
+            "getReadonly",
+            "getCheckedState",
+        ] {
+            assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
+        }
+    }
+
+    #[test]
+    fn injected_bundle_contains_playwright_editable_error_verbatim() {
+        assert!(INJECTED_BUNDLE.contains(
+            "Element is not an <input>, <textarea>, <select> or [contenteditable] and does not have a role allowing [aria-readonly]"
+        ));
+    }
+
+    #[test]
+    fn injected_bundle_contains_stability_guards() {
+        for marker in [
+            "time - lastTime < 15",
+            "rect.x === lastRect.x",
+            "rect.y === lastRect.y",
+            "rect.width === lastRect.width",
+            "rect.height === lastRect.height",
+            "this.builtinSnapshot.requestAnimationFrame",
+            "this.builtinSnapshot.performanceNow",
+        ] {
+            assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
+        }
+    }
+
+    #[test]
     fn injected_bundle_has_source_hash_header() {
         let hash = INJECTED_BUNDLE
             .lines()

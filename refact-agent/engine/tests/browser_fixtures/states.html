@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Element states</title>
+  <style>
+    #opacity-zero { opacity: 0; width: 20px; height: 20px; }
+    #display-none { display: none; }
+  </style>
+</head>
+<body>
+  <button id="disabled-button" disabled>Disabled</button>
+  <div id="aria-disabled" role="button" aria-disabled="true">ARIA disabled</div>
+  <fieldset disabled><input id="fieldset-disabled"></fieldset>
+  <input id="readonly-input" readonly>
+  <div id="aria-readonly" role="textbox" aria-readonly="true">ARIA readonly</div>
+  <div id="contenteditable-false" contenteditable="false">Not editable</div>
+  <input id="checked" type="checkbox" checked>
+  <input id="unchecked" type="checkbox">
+  <div id="mixed" role="checkbox" aria-checked="mixed">Mixed</div>
+  <div id="opacity-zero">Transparent</div>
+  <div id="display-none">Hidden</div>
+</body>
+</html>
