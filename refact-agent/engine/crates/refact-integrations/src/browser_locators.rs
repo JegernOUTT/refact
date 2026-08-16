@@ -1,25 +1,42 @@
 use crate::browser_models::{BrowserLocator, ElementInfo, FieldKind, LocatorStrategy};
 
 pub fn to_css_selector(locator: &BrowserLocator) -> Option<String> {
+    if locator.locator.is_some()
+        || locator.filter.is_some()
+        || locator.and.is_some()
+        || locator.or.is_some()
+        || locator.first.is_some()
+        || locator.last.is_some()
+    {
+        return None;
+    }
     let base = match &locator.strategy {
         LocatorStrategy::Css { value } => value.clone(),
         LocatorStrategy::Id { value } => format!("#{}", css_escape_ident(value)),
         LocatorStrategy::Name { value } => format!("[name={}]", css_escape_attr_value(value)),
-        LocatorStrategy::TestId { value } => {
+        LocatorStrategy::TestId { value, exact: None, regex: None, attribute: None } => {
             format!("[data-testid={}]", css_escape_attr_value(value))
         }
-        LocatorStrategy::Placeholder { value } => {
+        LocatorStrategy::Placeholder { value, exact: None, regex: None } => {
             format!("[placeholder={}]", css_escape_attr_value(value))
         }
         LocatorStrategy::Autocomplete { value } => {
             format!("[autocomplete={}]", css_escape_attr_value(value))
         }
-        LocatorStrategy::Role { role, name: None } => {
+        LocatorStrategy::Role {
+            role, name: None, description: None, exact: None, name_regex: None,
+            description_regex: None, checked: None, pressed: None, selected: None,
+            expanded: None, disabled: None, level: None, include_hidden: None,
+        } => {
             format!("[role={}]", css_escape_attr_value(role))
         }
         LocatorStrategy::Text { .. } => return None,
         LocatorStrategy::Label { .. } => return None,
-        LocatorStrategy::Role { name: Some(_), .. } => return None,
+        LocatorStrategy::AltText { .. } => return None,
+        LocatorStrategy::Title { .. } => return None,
+        LocatorStrategy::TestId { .. } => return None,
+        LocatorStrategy::Placeholder { .. } => return None,
+        LocatorStrategy::Role { .. } => return None,
         LocatorStrategy::Xpath { .. } => return None,
     };
 
@@ -69,6 +86,16 @@ fn css_escape_attr_value(s: &str) -> String {
 }
 
 pub fn generate_resolve_js(locator: &BrowserLocator) -> String {
+    if locator.locator.is_some()
+        || locator.filter.is_some()
+        || locator.and.is_some()
+        || locator.or.is_some()
+        || locator.first.is_some()
+        || locator.last.is_some()
+        || locator.nth.is_some_and(|index| index < 0)
+    {
+        return injected_browser_locator_find_js(locator, true);
+    }
     let find_code = generate_find_js(&locator.strategy);
     let scope_code = match &locator.within {
         Some(sel) => format!(
@@ -101,6 +128,16 @@ pub fn generate_resolve_js(locator: &BrowserLocator) -> String {
 }
 
 pub fn generate_find_fragment_js(locator: &BrowserLocator) -> String {
+    if locator.locator.is_some()
+        || locator.filter.is_some()
+        || locator.and.is_some()
+        || locator.or.is_some()
+        || locator.first.is_some()
+        || locator.last.is_some()
+        || locator.nth.is_some_and(|index| index < 0)
+    {
+        return injected_browser_locator_find_js(locator, false);
+    }
     let find_code = generate_find_js(&locator.strategy);
     let nth_code = match locator.nth {
         Some(n) => format!(
@@ -118,6 +155,17 @@ pub fn generate_find_fragment_js(locator: &BrowserLocator) -> String {
         ),
         None => format!("var scope = document;\n  {find_code}\n  {nth_code}"),
     }
+}
+
+fn injected_browser_locator_find_js(locator: &BrowserLocator, return_element: bool) -> String {
+    let locator = serde_json::to_string(locator).expect("browser locators serialize");
+    let tail = if return_element { "return elements[0];" } else { "" };
+    format!(
+        "var injected = globalThis.__refact_injected__;\n\
+         if (!injected) throw new Error('RefactInjected is not installed');\n\
+         var elements = injected.resolveAll({locator});\n\
+         {tail}"
+    )
 }
 
 #[cfg(test)]
@@ -151,6 +199,8 @@ fn generate_find_js(strategy: &LocatorStrategy) -> String {
         }
         LocatorStrategy::TestId { .. } => injected_locator_find_js(strategy),
         LocatorStrategy::Placeholder { .. } => injected_locator_find_js(strategy),
+        LocatorStrategy::AltText { .. } => injected_locator_find_js(strategy),
+        LocatorStrategy::Title { .. } => injected_locator_find_js(strategy),
         LocatorStrategy::Autocomplete { value } => {
             format!(
                 "var elements = Array.from(scope.querySelectorAll('[autocomplete=' + JSON.stringify({}) + ']'));",
@@ -638,6 +688,12 @@ mod tests {
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         };
         let css = to_css_selector(&loc).unwrap();
         assert_eq!(css, "[autocomplete=\"email\"]");
@@ -662,9 +718,16 @@ mod tests {
             strategy: LocatorStrategy::Text {
                 value: "Submit".to_string(),
                 exact: false,
+                regex: None,
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         };
         assert_eq!(to_css_selector(&loc), None);
     }
@@ -683,6 +746,12 @@ mod tests {
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         };
         assert_eq!(to_css_selector(&loc), None);
     }
@@ -695,6 +764,12 @@ mod tests {
             },
             nth: None,
             within: Some("#search-form".to_string()),
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         };
         let css = to_css_selector(&loc).unwrap();
         assert_eq!(css, "#search-form [name=\"q\"]");
@@ -793,9 +868,16 @@ mod tests {
             strategy: LocatorStrategy::Text {
                 value: "Submit".to_string(),
                 exact: true,
+                regex: None,
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         };
         let js = generate_resolve_js(&loc);
         assert!(js.contains("resolveAll"));
@@ -808,9 +890,16 @@ mod tests {
             strategy: LocatorStrategy::Text {
                 value: "Sub".to_string(),
                 exact: false,
+                regex: None,
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         };
         let js = generate_resolve_js(&loc);
         assert!(js.contains("resolveAll"));
@@ -825,6 +914,12 @@ mod tests {
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         };
         let js = generate_resolve_js(&loc);
         assert!(js.contains("document.evaluate"));
@@ -839,6 +934,12 @@ mod tests {
             },
             nth: Some(2),
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         };
         let js = generate_resolve_js(&loc);
         assert!(js.contains("elements[2]"));
@@ -852,6 +953,12 @@ mod tests {
             },
             nth: None,
             within: Some("#form".to_string()),
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         };
         let js = generate_resolve_js(&loc);
         assert!(js.contains("querySelector"));

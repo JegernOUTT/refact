@@ -58,6 +58,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "contenteditable.html",
     "hover-menu.html",
     "strict-multi.html",
+    "compose.html",
     "hostile-globals.html",
     "hit-target.html",
     "selectors.html",
@@ -984,6 +985,10 @@ async fn strict_multi_click_errors() {
         !report.ok,
         "strict click must reject multiple matches: {report:?}"
     );
+    let error = report.steps[0].error.as_deref().unwrap_or_default();
+    assert!(error.contains("css=.duplicate"), "{error}");
+    assert!(error.contains("resolved to 3 elements"), "{error}");
+    assert!(error.contains("<button class=\"duplicate\""), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -998,6 +1003,12 @@ async fn handle_clicks_second_strict_match() {
         },
         nth: Some(1),
         within: None,
+        locator: None,
+        filter: None,
+        and: None,
+        or: None,
+        first: None,
+        last: None,
     };
     let report = execute_steps(
         &case.tab,
@@ -2159,6 +2170,7 @@ async fn generated_locators_follow_preferences_and_round_trip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn get_by_locators_match_playwright_semantics() {
+    use refact_lsp::integrations::browser_models::LocatorStrategy;
     let Some(mut case) = BrowserCase::start("getby.html").await else {
         return;
     };
@@ -2203,6 +2215,15 @@ async fn get_by_locators_match_playwright_semantics() {
     let custom = refact_lsp::refact_browser::test_id_locator("custom-card", "data-qa");
     assert_eq!(resolve(serde_json::to_value(custom).unwrap()).len(), 1);
 
+    let regex = LocatorStrategy::Text {
+        value: "does not matter".to_string(),
+        exact: true,
+        regex: Some(refact_lsp::integrations::browser_models::LocatorRegex {
+            source: "unique\\s+text".to_string(),
+            flags: "i".to_string(),
+        }),
+    };
+    assert_eq!(resolve(serde_json::to_value(BrowserLocator { strategy: regex, nth: None, within: None, locator: None, filter: None, and: None, or: None, first: None, last: None }).unwrap()).len(), 1);
     let regex: BrowserLocator = serde_json::from_value(json!({
         "by": "text",
         "value": "does not matter",
@@ -2211,4 +2232,60 @@ async fn get_by_locators_match_playwright_semantics() {
     }))
     .unwrap();
     assert_eq!(resolve(serde_json::to_value(regex).unwrap()).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn composed_locators_match_playwright_semantics() {
+    let Some(mut case) = BrowserCase::start("compose.html").await else {
+        return;
+    };
+    case.setup_world();
+
+    let resolve_ids = |locator: serde_json::Value| {
+        case.runtime
+            .world_manager
+            .call_injected_handles(&case.tab, "resolveAll", json!([locator]))
+            .unwrap()
+            .iter()
+            .map(|handle| {
+                case.runtime
+                    .world_manager
+                    .call_function_on(&case.tab, handle, "function() { return this.id || this.getAttribute('data-testid'); }", vec![])
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(resolve_ids(json!({"by":"css","value":"[data-testid=alpha-card]","locator":{"by":"role","role":"button","name":"Open"}})), vec!["alpha-open".to_string()]);
+    assert_eq!(resolve_ids(json!({"by":"css","value":".card","filter":{"has_text":"Beta archived"},"locator":{"by":"css","value":"button"}})), vec!["beta-open".to_string()]);
+    assert_eq!(resolve_ids(json!({"by":"css","value":".card","filter":{"has":{"by":"css","value":".ready"}}})), vec!["alpha-card".to_string()]);
+    assert_eq!(resolve_ids(json!({"by":"css","value":".card","filter":{"has_not":{"by":"css","value":".ready"},"has_not_text":{"source":"archived","flags":"i"},"visible":true}})), vec!["gamma-card".to_string()]);
+    assert_eq!(resolve_ids(json!({"by":"css","value":".card","and":{"by":"css","value":".featured"}})), vec!["alpha-card".to_string()]);
+    assert_eq!(resolve_ids(json!({"by":"test_id","value":"gamma-card","or":{"by":"test_id","value":"alpha-card"}})), vec!["alpha-card".to_string(), "gamma-card".to_string()]);
+    assert_eq!(resolve_ids(json!({"by":"css","value":".card-action","first":true})), vec!["alpha-open".to_string()]);
+    assert_eq!(resolve_ids(json!({"by":"css","value":".card-action","last":true})), vec!["hidden-open".to_string()]);
+    assert_eq!(resolve_ids(json!({"by":"css","value":".card-action","nth":1})), vec!["beta-open".to_string()]);
+
+    let nth_match = case.runtime.world_manager.call_injected_handles(&case.tab, "querySelectorAll", json!(["css=:nth-match(.card-action, 1)"])).unwrap();
+    let nth_match_id = case.runtime.world_manager.call_function_on(&case.tab, &nth_match[0], "function() { return this.id; }", vec![]).unwrap();
+    assert_eq!(nth_match_id, json!("alpha-open"));
+
+    let ambiguous_or = execute_steps(&case.tab, &[BrowserStep::Click {
+        locator: serde_json::from_value(json!({"by":"test_id","value":"alpha-card","locator":{"by":"css","value":"button"},"or":{"by":"test_id","value":"fallback"}})).unwrap(),
+    }]);
+    assert!(!ambiguous_or.ok);
+    assert!(ambiguous_or.steps[0].error.as_deref().unwrap_or_default().contains("resolved to 2 elements"));
+
+    assert_eq!(resolve_ids(json!({"by":"css","value":".card-action"})).len(), 4);
+
+    let multi = execute_steps(&case.tab, &[BrowserStep::ExtractLinks {
+        locator: Some(BrowserLocator::css(".card")),
+        limit: None,
+    }]);
+    assert!(multi.ok, "multi-element extract_links failed: {multi:?}");
+    assert_eq!(multi.steps[0].data.as_ref().unwrap()["total"], json!(2));
 }

@@ -1,4 +1,4 @@
-// @refact-injected-hash 90113681cd92eda9ce9581a9e8558eac7ffa1cd4bc2d06b8af5bb85409a2cae4
+// @refact-injected-hash bf6dd0587abce2d850b382a0355492cf7eeeb9a3c082f030e1597fb8c261f490
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -5021,6 +5021,28 @@ function serializeRoleSelector(locator) {
   add("pressed", locator.pressed);
   return `${role}${attributes.join("")}`;
 }
+function matchesLocatorText(element, matcher) {
+  const text = elementText(/* @__PURE__ */ new Map(), element).normalized;
+  if (typeof matcher === "string")
+    return text.toLowerCase().includes(normalizeWhiteSpace(matcher).toLowerCase());
+  return matchesRegExp(createLocatorRegExp(matcher), text);
+}
+function applyLocatorIndex(elements, locator) {
+  const selectors = Number(locator.nth !== void 0) + Number(locator.first === true) + Number(locator.last === true);
+  if (selectors > 1)
+    throw new Error("Locator can use only one of nth, first, or last");
+  if (!elements.length)
+    return elements;
+  if (locator.first)
+    return [elements[0]];
+  if (locator.last)
+    return [elements[elements.length - 1]];
+  if (locator.nth !== void 0) {
+    const index = locator.nth < 0 ? elements.length + locator.nth : locator.nth;
+    return index >= 0 && index < elements.length ? [elements[index]] : [];
+  }
+  return elements;
+}
 var RefactInjected = class {
   constructor(global, builtins) {
     this.global = global;
@@ -5042,6 +5064,8 @@ var RefactInjected = class {
     const scope = scopeOverride != null ? scopeOverride : locator.within ? document.querySelector(locator.within) : document;
     if (!scope)
       throw new Error("Scope selector not found");
+    if (scopeOverride && locator.within)
+      throw new Error("Nested relative locators cannot use within");
     let elements;
     switch (locator.by) {
       case "css":
@@ -5118,9 +5142,51 @@ var RefactInjected = class {
       default:
         throw new Error(`Unknown locator strategy: ${locator.by}`);
     }
-    if (locator.nth !== void 0)
-      elements = elements.length > locator.nth ? [elements[locator.nth]] : [];
-    return elements;
+    if (locator.filter) {
+      const filter = locator.filter;
+      elements = elements.filter((element) => {
+        if (filter.visible !== void 0 && isElementVisible(element) !== filter.visible)
+          return false;
+        if (filter.has_text !== void 0 && !matchesLocatorText(element, filter.has_text))
+          return false;
+        if (filter.has_not_text !== void 0 && matchesLocatorText(element, filter.has_not_text))
+          return false;
+        if (filter.has && !this.resolveAll(filter.has, element).length)
+          return false;
+        if (filter.has_not && this.resolveAll(filter.has_not, element).length)
+          return false;
+        return true;
+      });
+    }
+    if (locator.locator) {
+      const chained = /* @__PURE__ */ new Set();
+      for (const element of elements) {
+        for (const inner of this.resolveAll(locator.locator, element))
+          chained.add(inner);
+      }
+      elements = sortInDOMOrder(chained);
+    }
+    if (locator.and) {
+      const other = new Set(this.resolveAll(locator.and, scope));
+      elements = elements.filter((element) => other.has(element));
+    }
+    if (locator.or)
+      elements = sortInDOMOrder(/* @__PURE__ */ new Set([...elements, ...this.resolveAll(locator.or, scope)]));
+    return applyLocatorIndex(elements, locator);
+  }
+  extractLinks(locator, limit) {
+    const roots = this.resolveAll(locator);
+    const links = [];
+    let total = 0;
+    for (const root of roots) {
+      const anchors = root.matches("a[href]") ? [root] : Array.from(root.querySelectorAll("a[href]"));
+      total += anchors.length;
+      for (const anchor of anchors) {
+        if (links.length < limit)
+          links.push({ url: anchor.href, text: (anchor.innerText || "").trim().substring(0, 200) });
+      }
+    }
+    return { ok: true, links, total };
   }
   async elementState(element, state) {
     this.ensureConnected(element);

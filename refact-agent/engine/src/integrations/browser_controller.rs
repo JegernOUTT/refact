@@ -116,21 +116,33 @@ fn resolve_element(
     world: &WorldManager,
     locator: &BrowserLocator,
 ) -> Result<ResolvedElement, String> {
-    let locator = serde_json::to_value(locator)
+    let locator_value = serde_json::to_value(locator)
         .map_err(|error| format!("Failed to serialize browser locator: {error}"))?;
     let mut handles = world
-        .call_injected_handles(tab, "resolveAll", serde_json::json!([locator]))
+        .call_injected_handles(tab, "resolveAll", serde_json::json!([locator_value]))
         .map_err(|error| error.to_string())?;
     if handles.is_empty() {
         return Err("Element not found".to_string());
     }
     if handles.len() > 1 {
         let count = handles.len();
+        let previews = handles
+            .iter()
+            .take(5)
+            .filter_map(|handle| {
+                world.call_function_on(
+                    tab,
+                    handle,
+                    "function() { return this.outerHTML.substring(0, 200); }",
+                    Vec::new(),
+                ).ok().and_then(|value| value.as_str().map(str::to_string))
+            })
+            .collect::<Vec<_>>();
         for handle in &handles {
             let _ = world.release_handle(tab, handle);
         }
-        return Err(format!(
-            "Strict mode violation: locator resolved to {count} elements"
+        return Err(refact_browser::strict_mode_violation(
+            &describe_locator(locator), count, &previews,
         ));
     }
     let handle = handles.remove(0);
@@ -1827,12 +1839,11 @@ fn step_extract_links(
     let effective_limit = limit.unwrap_or(50).min(MAX_EXTRACT_LINKS);
     let js = browser_locators::js_extract_links(effective_limit);
     let result = match locator {
-        Some(locator) => match resolve_element(tab, world, locator) {
-            Ok(info) => call_handle_json(tab, world, &info.handle, &js),
-            Err(error) => {
-                return StepResult::failure(idx, "Extract links: resolution failed", error)
-            }
-        },
+        Some(locator) => serde_json::to_value(locator)
+            .map_err(|error| format!("Failed to serialize browser locator: {error}"))
+            .and_then(|locator| world.call_injected(
+                tab, "extractLinks", serde_json::json!([locator, effective_limit]),
+            )),
         None => eval_js_ok(tab, &js),
     };
     match result {
@@ -2300,12 +2311,14 @@ fn step_highlight_element(
 }
 
 pub fn describe_locator(locator: &BrowserLocator) -> String {
-    match &locator.strategy {
+    let mut description = match &locator.strategy {
         LocatorStrategy::Css { value } => format!("css={}", value),
         LocatorStrategy::Id { value } => format!("id={}", value),
         LocatorStrategy::Name { value } => format!("name={}", value),
         LocatorStrategy::TestId { value, .. } => format!("testid={}", value),
         LocatorStrategy::Placeholder { value, .. } => format!("placeholder={}", value),
+        LocatorStrategy::AltText { value, .. } => format!("alt_text={}", value),
+        LocatorStrategy::Title { value, .. } => format!("title={}", value),
         LocatorStrategy::Autocomplete { value } => format!("autocomplete={}", value),
         LocatorStrategy::Text { value, exact, .. } => {
             if *exact {
@@ -2320,7 +2333,27 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
             None => format!("role={}", role),
         },
         LocatorStrategy::Xpath { value } => format!("xpath={}", value),
+    };
+    if let Some(inner) = &locator.locator {
+        description = format!("{description}.locator({})", describe_locator(inner));
     }
+    if locator.filter.is_some() {
+        description.push_str(".filter(...)");
+    }
+    if let Some(other) = &locator.and {
+        description = format!("{description}.and({})", describe_locator(other));
+    }
+    if let Some(other) = &locator.or {
+        description = format!("{description}.or({})", describe_locator(other));
+    }
+    if locator.first == Some(true) {
+        description.push_str(".first()");
+    } else if locator.last == Some(true) {
+        description.push_str(".last()");
+    } else if let Some(index) = locator.nth {
+        description.push_str(&format!(".nth({index})"));
+    }
+    description
 }
 
 #[cfg(test)]

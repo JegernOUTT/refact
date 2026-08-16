@@ -45,7 +45,7 @@ pub use locator_handlers::{
     LocatorHandlerProbe, LocatorHandlerRegistry, MAX_LOCATOR_HANDLER_STEPS,
 };
 pub use locator_gen::LocatorGenerationOptions;
-pub use locators::{DEFAULT_TEST_ID_ATTRIBUTE, test_id_locator};
+pub use locators::{DEFAULT_TEST_ID_ATTRIBUTE, strict_mode_violation, test_id_locator};
 pub use mouse::{
     CdpMouseDispatcher, ContentQuad, MainFrameCssPoint, MainFrameCssViewport, Mouse, MouseButton,
     MouseDispatch, MouseDispatcher, MouseError, MouseEventPayload, MouseEventType, ScrollStrategy,

@@ -82,13 +82,19 @@ const MAX_CACHED_LOG_LINES: usize = 1000;
 fn browser_locator_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": "Element locator. Text-like locators use value plus optional exact or regex {source, flags}. Role locators use role plus accessible-name, description, state, level, and visibility filters. Test-id locators may set attribute (default data-testid).",
+        "description": "Composable element locator. Add locator to query a nested locator under every outer match; filter supports has, has_not, has_text, has_not_text, and visible; and intersects while or unions in DOM order. first and last select endpoints. nth is zero-based and accepts -1 for the last match; Playwright CSS :nth-match is one-based. within remains a legacy CSS scope; prefer locator.",
         "required": ["by"],
         "properties": {
             "by": {"type": "string", "enum": ["css", "id", "name", "text", "label", "role", "xpath", "placeholder", "alt_text", "title", "autocomplete", "test_id"]},
             "value": {"type": "string", "description": "Selector value for all strategies except role"},
-            "nth": {"type": "integer", "description": "0-based index when multiple elements match"},
-            "within": {"type": "string", "description": "CSS selector to scope the search within"},
+            "nth": {"type": "integer", "description": "Zero-based match index; -1 selects the last match. CSS :nth-match is one-based."},
+            "within": {"type": "string", "description": "Deprecated CSS scope kept for compatibility; use locator for chaining"},
+            "locator": {"type": "object", "description": "Relative locator evaluated under each outer match"},
+            "filter": {"type": "object", "description": "Candidate filter with has/has_not relative locators, has_text/has_not_text string or regex, and visible"},
+            "and": {"type": "object", "description": "Locator whose matches intersect this locator"},
+            "or": {"type": "object", "description": "Locator whose matches union with this locator in DOM order"},
+            "first": {"type": "boolean", "description": "Select the first match"},
+            "last": {"type": "boolean", "description": "Select the last match"},
             "exact": {"type": "boolean", "description": "Case-sensitive whole-string match; regex ignores it"},
             "regex": {"type": "object", "description": "JavaScript RegExp {source, flags}"},
             "attribute": {"type": "string", "description": "Test-id attribute; defaults to data-testid"},

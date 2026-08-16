@@ -2,8 +2,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::browser_types::ConsoleEntry;
 
-const EXTENDED_LOCATOR_PREFIX: &str = "\0refact-getby:";
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocatorRegex {
     pub source: String,
@@ -26,24 +24,81 @@ pub enum AriaMixedState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LocatorStrategy {
-    Css { value: String },
-    Id { value: String },
-    Name { value: String },
-    TestId { value: String },
-    Placeholder { value: String },
-    Autocomplete { value: String },
-    Text { value: String, exact: bool },
-    Label { value: String },
-    Role { role: String, name: Option<String> },
-    Xpath { value: String },
+    Css {
+        value: String,
+    },
+    Id {
+        value: String,
+    },
+    Name {
+        value: String,
+    },
+    TestId {
+        value: String,
+        exact: Option<bool>,
+        regex: Option<LocatorRegex>,
+        attribute: Option<String>,
+    },
+    Placeholder {
+        value: String,
+        exact: Option<bool>,
+        regex: Option<LocatorRegex>,
+    },
+    AltText {
+        value: String,
+        exact: Option<bool>,
+        regex: Option<LocatorRegex>,
+    },
+    Title {
+        value: String,
+        exact: Option<bool>,
+        regex: Option<LocatorRegex>,
+    },
+    Autocomplete {
+        value: String,
+    },
+    Text {
+        value: String,
+        exact: bool,
+        regex: Option<LocatorRegex>,
+    },
+    Label {
+        value: String,
+        exact: Option<bool>,
+        regex: Option<LocatorRegex>,
+    },
+    Role {
+        role: String,
+        name: Option<String>,
+        description: Option<String>,
+        exact: Option<bool>,
+        name_regex: Option<LocatorRegex>,
+        description_regex: Option<LocatorRegex>,
+        checked: Option<AriaCheckedState>,
+        pressed: Option<AriaCheckedState>,
+        selected: Option<bool>,
+        expanded: Option<bool>,
+        disabled: Option<bool>,
+        level: Option<u32>,
+        include_hidden: Option<bool>,
+    },
+    Xpath {
+        value: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "snake_case")]
 enum LocatorWire {
-    Css { value: String },
-    Id { value: String },
-    Name { value: String },
+    Css {
+        value: String,
+    },
+    Id {
+        value: String,
+    },
+    Name {
+        value: String,
+    },
     TestId {
         value: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,7 +129,9 @@ enum LocatorWire {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         regex: Option<LocatorRegex>,
     },
-    Autocomplete { value: String },
+    Autocomplete {
+        value: String,
+    },
     Text {
         value: String,
         #[serde(default, skip_serializing_if = "is_false")]
@@ -116,23 +173,14 @@ enum LocatorWire {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         include_hidden: Option<bool>,
     },
-    Xpath { value: String },
+    Xpath {
+        value: String,
+    },
 }
 
-fn encode_extended(wire: &LocatorWire) -> String {
-    format!(
-        "{EXTENDED_LOCATOR_PREFIX}{}",
-        serde_json::to_string(wire).expect("locator wire serializes")
-    )
-}
-
-fn decode_extended(value: &str) -> Option<LocatorWire> {
-    value
-        .strip_prefix(EXTENDED_LOCATOR_PREFIX)
-        .and_then(|json| serde_json::from_str(json).ok())
-}
-
-pub fn locator_strategy_from_wire(value: serde_json::Value) -> Result<LocatorStrategy, serde_json::Error> {
+pub fn locator_strategy_from_wire(
+    value: serde_json::Value,
+) -> Result<LocatorStrategy, serde_json::Error> {
     serde_json::from_value(value)
 }
 
@@ -142,65 +190,103 @@ impl Serialize for LocatorStrategy {
         S: Serializer,
     {
         let wire = match self {
-            Self::Css { value } => decode_extended(value).unwrap_or_else(|| LocatorWire::Css {
+            Self::Css { value } => LocatorWire::Css {
                 value: value.clone(),
-            }),
+            },
             Self::Id { value } => LocatorWire::Id {
                 value: value.clone(),
             },
             Self::Name { value } => LocatorWire::Name {
                 value: value.clone(),
             },
-            Self::TestId { value } => {
-                decode_extended(value).unwrap_or_else(|| LocatorWire::TestId {
-                    value: value.clone(),
-                    exact: None,
-                    regex: None,
-                    attribute: None,
-                })
-            }
-            Self::Placeholder { value } => {
-                decode_extended(value).unwrap_or_else(|| LocatorWire::Placeholder {
-                    value: value.clone(),
-                    exact: None,
-                    regex: None,
-                })
-            }
+            Self::TestId {
+                value,
+                exact,
+                regex,
+                attribute,
+            } => LocatorWire::TestId {
+                value: value.clone(),
+                exact: *exact,
+                regex: regex.clone(),
+                attribute: attribute.clone(),
+            },
+            Self::Placeholder {
+                value,
+                exact,
+                regex,
+            } => LocatorWire::Placeholder {
+                value: value.clone(),
+                exact: *exact,
+                regex: regex.clone(),
+            },
+            Self::AltText {
+                value,
+                exact,
+                regex,
+            } => LocatorWire::AltText {
+                value: value.clone(),
+                exact: *exact,
+                regex: regex.clone(),
+            },
+            Self::Title {
+                value,
+                exact,
+                regex,
+            } => LocatorWire::Title {
+                value: value.clone(),
+                exact: *exact,
+                regex: regex.clone(),
+            },
             Self::Autocomplete { value } => LocatorWire::Autocomplete {
                 value: value.clone(),
             },
-            Self::Text { value, exact } => {
-                decode_extended(value).unwrap_or_else(|| LocatorWire::Text {
-                    value: value.clone(),
-                    exact: *exact,
-                    regex: None,
-                })
-            }
-            Self::Label { value } => {
-                decode_extended(value).unwrap_or_else(|| LocatorWire::Label {
-                    value: value.clone(),
-                    exact: None,
-                    regex: None,
-                })
-            }
-            Self::Role { role, name } => name
-                .as_deref()
-                .and_then(decode_extended)
-                .unwrap_or_else(|| LocatorWire::Role {
-                    role: role.clone(),
-                    name: name.clone(),
-                    description: None,
-                    exact: None,
-                    name_regex: None,
-                    description_regex: None,
-                    checked: None,
-                    pressed: None,
-                    selected: None,
-                    expanded: None,
-                    disabled: None,
-                    level: None,
-                    include_hidden: None,
-                }),
+            Self::Text {
+                value,
+                exact,
+                regex,
+            } => LocatorWire::Text {
+                value: value.clone(),
+                exact: *exact,
+                regex: regex.clone(),
+            },
+            Self::Label {
+                value,
+                exact,
+                regex,
+            } => LocatorWire::Label {
+                value: value.clone(),
+                exact: *exact,
+                regex: regex.clone(),
+            },
+            Self::Role {
+                role,
+                name,
+                description,
+                exact,
+                name_regex,
+                description_regex,
+                checked,
+                pressed,
+                selected,
+                expanded,
+                disabled,
+                level,
+                include_hidden,
+            } => LocatorWire::Role {
+                role: role.clone(),
+                name: name.clone(),
+                description: description.clone(),
+                exact: *exact,
+                name_regex: name_regex.clone(),
+                description_regex: description_regex.clone(),
+                checked: *checked,
+                pressed: *pressed,
+                selected: *selected,
+                expanded: *expanded,
+                disabled: *disabled,
+                level: *level,
+                include_hidden: *include_hidden,
+            },
             Self::Xpath { value } => LocatorWire::Xpath {
                 value: value.clone(),
             },
@@ -224,111 +310,111 @@ impl<'de> Deserialize<'de> for LocatorStrategy {
                 exact,
                 regex,
                 attribute,
-            } => {
-                if exact.is_none() && regex.is_none() && attribute.is_none() {
-                    Self::TestId { value }
-                } else {
-                    let wire = LocatorWire::TestId {
-                        value,
-                        exact,
-                        regex,
-                        attribute,
-                    };
-                    Self::TestId {
-                        value: encode_extended(&wire),
-                    }
-                }
-            }
+            } => Self::TestId {
+                value,
+                exact,
+                regex,
+                attribute,
+            },
             LocatorWire::Placeholder {
                 value,
                 exact,
                 regex,
-            } => {
-                if exact.is_none() && regex.is_none() {
-                    Self::Placeholder { value }
-                } else {
-                    let wire = LocatorWire::Placeholder {
-                        value,
-                        exact,
-                        regex,
-                    };
-                    Self::Placeholder {
-                        value: encode_extended(&wire),
-                    }
-                }
-            }
-            wire @ LocatorWire::AltText { .. } | wire @ LocatorWire::Title { .. } => Self::Css {
-                value: encode_extended(&wire),
+            } => Self::Placeholder {
+                value,
+                exact,
+                regex,
+            },
+            LocatorWire::AltText {
+                value,
+                exact,
+                regex,
+            } => Self::AltText {
+                value,
+                exact,
+                regex,
+            },
+            LocatorWire::Title {
+                value,
+                exact,
+                regex,
+            } => Self::Title {
+                value,
+                exact,
+                regex,
             },
             LocatorWire::Autocomplete { value } => Self::Autocomplete { value },
             LocatorWire::Text {
                 value,
                 exact,
                 regex,
-            } => {
-                if regex.is_none() {
-                    Self::Text { value, exact }
-                } else {
-                    let wire = LocatorWire::Text {
-                        value,
-                        exact,
-                        regex,
-                    };
-                    Self::Text {
-                        value: encode_extended(&wire),
-                        exact,
-                    }
-                }
-            }
+            } => Self::Text {
+                value,
+                exact,
+                regex,
+            },
             LocatorWire::Label {
                 value,
                 exact,
                 regex,
-            } => {
-                if exact.is_none() && regex.is_none() {
-                    Self::Label { value }
-                } else {
-                    let wire = LocatorWire::Label {
-                        value,
-                        exact,
-                        regex,
-                    };
-                    Self::Label {
-                        value: encode_extended(&wire),
-                    }
-                }
-            }
-            wire @ LocatorWire::Role { .. } => {
-                let LocatorWire::Role { ref role, .. } = wire else {
-                    unreachable!()
-                };
-                let role = role.clone();
-                let plain_name = match &wire {
-                    LocatorWire::Role {
-                        name,
-                        description: None,
-                        exact: None,
-                        name_regex: None,
-                        description_regex: None,
-                        checked: None,
-                        pressed: None,
-                        selected: None,
-                        expanded: None,
-                        disabled: None,
-                        level: None,
-                        include_hidden: None,
-                        ..
-                    } => Some(name.clone()),
-                    _ => None,
-                };
-                Self::Role {
-                    role,
-                    name: plain_name.unwrap_or_else(|| Some(encode_extended(&wire))),
-                }
-            }
+            } => Self::Label {
+                value,
+                exact,
+                regex,
+            },
+            LocatorWire::Role {
+                role,
+                name,
+                description,
+                exact,
+                name_regex,
+                description_regex,
+                checked,
+                pressed,
+                selected,
+                expanded,
+                disabled,
+                level,
+                include_hidden,
+            } => Self::Role {
+                role,
+                name,
+                description,
+                exact,
+                name_regex,
+                description_regex,
+                checked,
+                pressed,
+                selected,
+                expanded,
+                disabled,
+                level,
+                include_hidden,
+            },
             LocatorWire::Xpath { value } => Self::Xpath { value },
         })
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum LocatorTextMatcher {
+    Text(String),
+    Regex(LocatorRegex),
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LocatorFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has: Option<Box<BrowserLocator>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_not: Option<Box<BrowserLocator>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_text: Option<LocatorTextMatcher>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_not_text: Option<LocatorTextMatcher>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -336,9 +422,21 @@ pub struct BrowserLocator {
     #[serde(flatten)]
     pub strategy: LocatorStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nth: Option<usize>,
+    pub nth: Option<isize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub within: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<Box<BrowserLocator>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<LocatorFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub and: Option<Box<BrowserLocator>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub or: Option<Box<BrowserLocator>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<bool>,
 }
 
 impl BrowserLocator {
@@ -349,6 +447,12 @@ impl BrowserLocator {
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         }
     }
 
@@ -360,6 +464,12 @@ impl BrowserLocator {
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         }
     }
 
@@ -371,6 +481,12 @@ impl BrowserLocator {
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         }
     }
 
@@ -379,9 +495,17 @@ impl BrowserLocator {
         Self {
             strategy: LocatorStrategy::Label {
                 value: label.to_string(),
+                exact: None,
+                regex: None,
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         }
     }
 
@@ -390,9 +514,17 @@ impl BrowserLocator {
         Self {
             strategy: LocatorStrategy::Placeholder {
                 value: ph.to_string(),
+                exact: None,
+                regex: None,
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         }
     }
 
@@ -402,9 +534,26 @@ impl BrowserLocator {
             strategy: LocatorStrategy::Role {
                 role: role.to_string(),
                 name: name.map(|s| s.to_string()),
+                description: None,
+                exact: None,
+                name_regex: None,
+                description_regex: None,
+                checked: None,
+                pressed: None,
+                selected: None,
+                expanded: None,
+                disabled: None,
+                level: None,
+                include_hidden: None,
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         }
     }
 
@@ -413,9 +562,18 @@ impl BrowserLocator {
         Self {
             strategy: LocatorStrategy::TestId {
                 value: tid.to_string(),
+                exact: None,
+                regex: None,
+                attribute: None,
             },
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         }
     }
 }
@@ -915,7 +1073,7 @@ mod tests {
         let json_str = r#"{"by": "text", "value": "Submit Form", "exact": true}"#;
         let loc: BrowserLocator = serde_json::from_str(json_str).unwrap();
         match &loc.strategy {
-            LocatorStrategy::Text { value, exact } => {
+            LocatorStrategy::Text { value, exact, .. } => {
                 assert_eq!(value, "Submit Form");
                 assert!(*exact);
             }
@@ -1018,6 +1176,39 @@ mod tests {
         let json = serde_json::to_value(&loc).unwrap();
         assert!(json.get("nth").is_none());
         assert!(json.get("within").is_none());
+    }
+
+    #[test]
+    fn composed_locator_wire_round_trips() {
+        let json = serde_json::json!({
+            "by": "css",
+            "value": ".card",
+            "locator": {"by": "role", "role": "button", "name": "Open"},
+            "filter": {
+                "has": {"by": "css", "value": ".ready"},
+                "has_not": {"by": "css", "value": ".disabled"},
+                "has_text": "Alpha",
+                "has_not_text": {"source": "archived", "flags": "i"},
+                "visible": true
+            },
+            "and": {"by": "css", "value": ".featured"},
+            "or": {"by": "test_id", "value": "fallback"},
+            "last": true
+        });
+        let locator: BrowserLocator = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(locator).unwrap(), json);
+    }
+
+    #[test]
+    fn first_last_and_signed_nth_round_trip() {
+        for json in [
+            serde_json::json!({"by":"css","value":"li","first":true}),
+            serde_json::json!({"by":"css","value":"li","last":true}),
+            serde_json::json!({"by":"css","value":"li","nth":-1}),
+        ] {
+            let locator: BrowserLocator = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(locator).unwrap(), json);
+        }
     }
 
     #[test]

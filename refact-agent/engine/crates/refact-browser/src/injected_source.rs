@@ -287,6 +287,18 @@ mod tests {
     }
 
     #[test]
+    fn injected_bundle_contains_locator_composition_and_strict_previews() {
+        for marker in [
+            "applyLocatorIndex",
+            "matchesLocatorText",
+            "filter.has_not_text",
+            "sortInDOMOrder",
+        ] {
+            assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
+        }
+    }
+
+    #[test]
     fn injected_bundle_contains_get_by_locator_engines() {
         for marker in [
             "createRoleEngine",

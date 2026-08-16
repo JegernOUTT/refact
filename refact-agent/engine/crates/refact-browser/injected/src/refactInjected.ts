@@ -45,6 +45,7 @@ import {
   type ElementText,
   type TextMatcher,
 } from './vendor/injected/selectorUtils';
+import { sortInDOMOrder } from './vendor/injected/selectorEvaluator';
 import { normalizeWhiteSpace } from './vendor/isomorphic/stringUtils';
 
 type ElementStateName = 'visible' | 'enabled' | 'editable' | 'checked' | 'unchecked' | 'mixed' | 'stable';
@@ -55,6 +56,18 @@ type ElementStates = Readonly<{
   editable: boolean | null;
   checked: CheckedState | null;
   stable: boolean;
+}>;
+
+type LocatorRegex = Readonly<{ source: string; flags?: string }>;
+
+type LocatorTextMatcher = string | LocatorRegex;
+
+type LocatorFilter = Readonly<{
+  has?: RefactLocator;
+  has_not?: RefactLocator;
+  has_text?: LocatorTextMatcher;
+  has_not_text?: LocatorTextMatcher;
+  visible?: boolean;
 }>;
 
 type RefactLocator = Readonly<{
@@ -77,9 +90,13 @@ type RefactLocator = Readonly<{
   attribute?: string;
   nth?: number;
   within?: string;
+  locator?: RefactLocator;
+  filter?: LocatorFilter;
+  and?: RefactLocator;
+  or?: RefactLocator;
+  first?: boolean;
+  last?: boolean;
 }>;
-
-type LocatorRegex = Readonly<{ source: string; flags?: string }>;
 
 const injectedInstanceName = '__refact_injected__';
 const bindingName = '__refact_binding';
@@ -178,6 +195,30 @@ function serializeRoleSelector(locator: RefactLocator): string {
   return `${role}${attributes.join('')}`;
 }
 
+function matchesLocatorText(element: Element, matcher: LocatorTextMatcher): boolean {
+  const text = elementText(new Map<Element | ShadowRoot, ElementText>(), element).normalized;
+  if (typeof matcher === 'string')
+    return text.toLowerCase().includes(normalizeWhiteSpace(matcher).toLowerCase());
+  return matchesRegExp(createLocatorRegExp(matcher), text);
+}
+
+function applyLocatorIndex(elements: Element[], locator: RefactLocator): Element[] {
+  const selectors = Number(locator.nth !== undefined) + Number(locator.first === true) + Number(locator.last === true);
+  if (selectors > 1)
+    throw new Error('Locator can use only one of nth, first, or last');
+  if (!elements.length)
+    return elements;
+  if (locator.first)
+    return [elements[0]];
+  if (locator.last)
+    return [elements[elements.length - 1]];
+  if (locator.nth !== undefined) {
+    const index = locator.nth < 0 ? elements.length + locator.nth : locator.nth;
+    return index >= 0 && index < elements.length ? [elements[index]] : [];
+  }
+  return elements;
+}
+
 export class RefactInjected {
   private readonly global: typeof globalThis;
   private readonly builtinSnapshot: RefactBuiltins;
@@ -206,6 +247,8 @@ export class RefactInjected {
     const scope = scopeOverride ?? (locator.within ? document.querySelector(locator.within) : document);
     if (!scope)
       throw new Error('Scope selector not found');
+    if (scopeOverride && locator.within)
+      throw new Error('Nested relative locators cannot use within');
     let elements: Element[];
     switch (locator.by) {
       case 'css':
@@ -282,9 +325,54 @@ export class RefactInjected {
       default:
         throw new Error(`Unknown locator strategy: ${locator.by}`);
     }
-    if (locator.nth !== undefined)
-      elements = elements.length > locator.nth ? [elements[locator.nth]] : [];
-    return elements;
+    if (locator.filter) {
+      const filter = locator.filter;
+      elements = elements.filter(element => {
+        if (filter.visible !== undefined && isElementVisible(element) !== filter.visible)
+          return false;
+        if (filter.has_text !== undefined && !matchesLocatorText(element, filter.has_text))
+          return false;
+        if (filter.has_not_text !== undefined && matchesLocatorText(element, filter.has_not_text))
+          return false;
+        if (filter.has && !this.resolveAll(filter.has, element).length)
+          return false;
+        if (filter.has_not && this.resolveAll(filter.has_not, element).length)
+          return false;
+        return true;
+      });
+    }
+    if (locator.locator) {
+      const chained = new Set<Element>();
+      for (const element of elements) {
+        for (const inner of this.resolveAll(locator.locator, element))
+          chained.add(inner);
+      }
+      elements = sortInDOMOrder(chained);
+    }
+    if (locator.and) {
+      const other = new Set(this.resolveAll(locator.and, scope));
+      elements = elements.filter(element => other.has(element));
+    }
+    if (locator.or)
+      elements = sortInDOMOrder(new Set([...elements, ...this.resolveAll(locator.or, scope)]));
+    return applyLocatorIndex(elements, locator);
+  }
+
+  extractLinks(locator: RefactLocator, limit: number): Record<string, unknown> {
+    const roots = this.resolveAll(locator);
+    const links: Array<{ url: string; text: string }> = [];
+    let total = 0;
+    for (const root of roots) {
+      const anchors = root.matches('a[href]')
+        ? [root as HTMLAnchorElement]
+        : Array.from(root.querySelectorAll<HTMLAnchorElement>('a[href]'));
+      total += anchors.length;
+      for (const anchor of anchors) {
+        if (links.length < limit)
+          links.push({ url: anchor.href, text: (anchor.innerText || '').trim().substring(0, 200) });
+      }
+    }
+    return { ok: true, links, total };
   }
 
   async elementState(element: Element, state: ElementStateName): Promise<Record<string, unknown>> {

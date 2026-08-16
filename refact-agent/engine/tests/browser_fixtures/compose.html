@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Locator composition</title>
+  <style>
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <article class="card featured" data-testid="alpha-card">
+    <h2>Alpha</h2>
+    <span class="status ready">Ready</span>
+    <a href="/alpha">Alpha docs</a>
+    <button id="alpha-open" class="card-action primary" onclick="document.querySelector('#result').textContent = 'alpha'">Open</button>
+  </article>
+  <article class="card archived" data-testid="beta-card">
+    <h2>Beta archived</h2>
+    <button id="beta-open" class="card-action" onclick="document.querySelector('#result').textContent = 'beta'">Open</button>
+  </article>
+  <article class="card" data-testid="gamma-card">
+    <h2>Gamma</h2>
+    <a href="/gamma">Gamma docs</a>
+    <button id="gamma-open" class="card-action secondary" onclick="document.querySelector('#result').textContent = 'gamma'">Open</button>
+  </article>
+  <article class="card hidden" data-testid="hidden-card">
+    <h2>Hidden</h2>
+    <button id="hidden-open" class="card-action">Open</button>
+  </article>
+  <button id="fallback" data-testid="fallback" onclick="document.querySelector('#result').textContent = 'fallback'">Fallback</button>
+  <output id="result"></output>
+</body>
+</html>
