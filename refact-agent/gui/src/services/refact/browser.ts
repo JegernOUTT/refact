@@ -226,6 +226,13 @@ export type BrowserDialogInfo = {
   automatic: boolean;
 };
 
+export type LocatorHandlerFiring = {
+  name: string;
+  action: string;
+  outcome: string;
+  ok: boolean;
+};
+
 export type BrowserExecutionStep = {
   step_index: number;
   ok: boolean;
@@ -246,6 +253,7 @@ export type BrowserActionResponse = {
   stabilized?: boolean;
   console?: BrowserConsoleEntry[];
   page_errors?: string[];
+  locator_handlers?: LocatorHandlerFiring[];
   dialogs?: BrowserDialogInfo[];
   screenshot?: BrowserReportScreenshot | null;
 };

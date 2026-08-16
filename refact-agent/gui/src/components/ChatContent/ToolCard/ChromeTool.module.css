@@ -19,3 +19,37 @@
 .sectionLabel {
   composes: sectionLabel from "./ToolCardBody.module.css";
 }
+
+.handlerList {
+  composes: resultPanel from "./ToolCardBody.module.css";
+  display: grid;
+  gap: var(--rf-space-1);
+  font-size: var(--rf-text-1);
+}
+
+.handlerRow {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.handlerRow[data-status="error"] {
+  padding-inline-start: var(--rf-space-2);
+  border-inline-start: var(--rf-hairline) solid var(--rf-color-danger);
+}
+
+.handlerStatus {
+  color: var(--rf-color-success);
+}
+
+.handlerRow[data-status="error"] .handlerStatus {
+  color: var(--rf-color-danger);
+}
+
+.handlerName {
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
+}
+
+.handlerDetail {
+  color: var(--rf-color-muted);
+}

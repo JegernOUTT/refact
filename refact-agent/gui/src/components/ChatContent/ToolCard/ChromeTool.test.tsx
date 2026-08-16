@@ -95,6 +95,20 @@ describe("ChromeTool", () => {
           { timestamp: 1, level: "Log", text: "loaded transactional state" },
         ],
         page_errors: ["ReferenceError: fixtureFailure is not defined"],
+        locator_handlers: [
+          {
+            name: "dismiss_overlays",
+            action: "click",
+            outcome: "Cookie banner dismissed",
+            ok: true,
+          },
+          {
+            name: "close_interstitial",
+            action: "press Escape",
+            outcome: "Interstitial remained visible",
+            ok: false,
+          },
+        ],
         dialogs: [
           {
             type: "prompt",
@@ -130,6 +144,7 @@ describe("ChromeTool", () => {
     expect(screen.getByText("Page State")).toBeInTheDocument();
     expect(screen.getByText("Console")).toBeInTheDocument();
     expect(screen.getByText("Page Errors")).toBeInTheDocument();
+    expect(screen.getByText("Locator Handlers")).toBeInTheDocument();
     expect(screen.getByText("Dialogs")).toBeInTheDocument();
     expect(
       screen.getByText((text) => text.includes("DOM stabilized: No")),
@@ -142,9 +157,29 @@ describe("ChromeTool", () => {
         text.includes("fixtureFailure is not defined"),
       ),
     ).toBeInTheDocument();
+    expect(screen.getByText("dismiss_overlays")).toBeInTheDocument();
+    expect(screen.getByText("Action: click")).toBeInTheDocument();
+    expect(
+      screen.getByText("Outcome: Cookie banner dismissed"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("close_interstitial")).toBeInTheDocument();
+    expect(screen.getByText("Action: press Escape")).toBeInTheDocument();
+    expect(
+      screen.getByText("Outcome: Interstitial remained visible"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Succeeded").parentElement).toHaveAttribute(
+      "data-status",
+      "success",
+    );
+    expect(screen.getByText("Failed").parentElement).toHaveAttribute(
+      "data-status",
+      "error",
+    );
     expect(
       screen.getByText((text) =>
-        text.includes("[prompt] accepted: Name for fixture? (default: visitor)"),
+        text.includes(
+          "[prompt] accepted: Name for fixture? (default: visitor)",
+        ),
       ),
     ).toBeInTheDocument();
     expect(
@@ -199,5 +234,6 @@ describe("ChromeTool", () => {
     expect(screen.getByText(/Browser/i)).toBeInTheDocument();
     expect(screen.getAllByText(/example.com/).length).toBeGreaterThan(0);
     expect(screen.getByText(/1 screenshot/)).toBeInTheDocument();
+    expect(screen.queryByText("Locator Handlers")).not.toBeInTheDocument();
   });
 });

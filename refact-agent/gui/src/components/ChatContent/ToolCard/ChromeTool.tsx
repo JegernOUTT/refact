@@ -358,11 +358,18 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     return typedResult.page_errors.join("\n");
   }, [typedResult]);
 
+  const typedLocatorHandlers = useMemo(() => {
+    if (!typedResult?.locator_handlers?.length) return null;
+    return typedResult.locator_handlers;
+  }, [typedResult]);
+
   const typedDialogsBlock = useMemo(() => {
     if (!typedResult?.dialogs?.length) return null;
     return typedResult.dialogs
       .map((dialog) => {
-        const handling = dialog.automatic ? `auto-${dialog.action}` : dialog.action;
+        const handling = dialog.automatic
+          ? `auto-${dialog.action}`
+          : dialog.action;
         const defaultValue = dialog.default_value
           ? ` (default: ${dialog.default_value})`
           : "";
@@ -449,6 +456,35 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
             <ShikiCodeBlock showLineNumbers={false}>
               {typedPageErrorsBlock}
             </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
+
+      {typedLocatorHandlers && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Locator Handlers</Box>
+          <Box className={styles.handlerList}>
+            {typedLocatorHandlers.map((handler, index) => (
+              <Flex
+                key={`${handler.name}-${index}`}
+                align="baseline"
+                gap="2"
+                wrap="wrap"
+                className={styles.handlerRow}
+                data-status={handler.ok ? "success" : "error"}
+              >
+                <Box className={styles.handlerStatus}>
+                  {handler.ok ? "Succeeded" : "Failed"}
+                </Box>
+                <Box className={styles.handlerName}>{handler.name}</Box>
+                <Box className={styles.handlerDetail}>
+                  Action: {handler.action}
+                </Box>
+                <Box className={styles.handlerDetail}>
+                  Outcome: {handler.outcome}
+                </Box>
+              </Flex>
+            ))}
           </Box>
         </Box>
       )}
