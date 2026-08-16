@@ -381,6 +381,7 @@ fn build_subagent_prompt(
 # Constraints
 - Maximum steps: {max_steps}
 - Read-only: do NOT attempt to modify files
+- Do not quote guarded file contents verbatim in the final report
 - Use `tasks_set` to publish progress
 - End with the Status report described in your system prompt"#
     )

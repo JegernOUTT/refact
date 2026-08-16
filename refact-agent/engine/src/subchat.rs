@@ -34,6 +34,7 @@ use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
 use crate::stats::event::{canonicalize_mode_for_stats, split_model_provider, LlmCallEvent};
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeReference;
+use refact_privacy::{Destination, DestinationId, DestinationKind, PrivacyAudited};
 
 const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 1;
 const MAX_EMPTY_CHOICE_RETRIES: usize = 2;
@@ -43,6 +44,7 @@ const PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS: usize = 512;
 const PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED: &str = "\n...[truncated]";
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output and all retry attempts failed.";
+const GUARDED_REPORT_INSTRUCTION: &str = "Guarded file contents may be used to complete the task, but do not quote or reproduce them verbatim in the final report.";
 
 fn partial_output_stream_error_message(original: &str) -> String {
     format!(
@@ -489,6 +491,90 @@ pub struct SubchatResult {
     /// Intentionally public API - callers may use it for trajectory linking.
     #[allow(dead_code)]
     pub chat_id: Option<String>,
+}
+
+struct AuditedSubchatReport(Vec<refact_privacy::FileRecord>);
+
+impl PrivacyAudited for AuditedSubchatReport {
+    fn privacy_records(&self) -> Vec<refact_privacy::FileRecord> {
+        self.0.clone()
+    }
+}
+
+fn unique_privacy_records(messages: &[ChatMessage]) -> Vec<refact_privacy::FileRecord> {
+    refact_privacy::records_from_messages(messages)
+        .into_iter()
+        .fold(Vec::new(), |mut records, record| {
+            if !records.contains(&record) {
+                records.push(record);
+            }
+            records
+        })
+}
+
+fn subagent_destination(model_id: &str) -> Destination {
+    let id = model_id
+        .split_once('/')
+        .map_or(model_id, |(provider, _)| provider);
+    Destination {
+        id: DestinationId(id.to_string()),
+        kind: DestinationKind::SubagentModel,
+        display_name: model_id.to_string(),
+    }
+}
+
+fn gate_subchat_boundary(
+    gcx: &Arc<GlobalContext>,
+    messages: &[ChatMessage],
+    model_id: &str,
+) -> Result<(), String> {
+    let records = unique_privacy_records(messages);
+    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+    refact_privacy::clear(
+        AuditedSubchatReport(records),
+        &subagent_destination(model_id),
+        &policy,
+    )
+    .map(|_| ())
+    .map_err(|refusal| refusal.model_facing().to_string())
+}
+
+fn prepare_subchat_messages(
+    gcx: &Arc<GlobalContext>,
+    messages: Vec<ChatMessage>,
+    model_id: &str,
+) -> Result<Vec<ChatMessage>, String> {
+    gate_subchat_boundary(gcx, &messages, model_id)?;
+    if refact_privacy::records_from_messages(&messages).is_empty() {
+        return Ok(messages);
+    }
+
+    let mut prepared = Vec::with_capacity(messages.len() + 1);
+    prepared.push(ChatMessage::new(
+        "system".to_string(),
+        GUARDED_REPORT_INSTRUCTION.to_string(),
+    ));
+    prepared.extend(messages);
+    Ok(prepared)
+}
+
+fn apply_subchat_report_policy(
+    policy: &refact_privacy::SubagentPolicy,
+    messages: &mut [ChatMessage],
+) {
+    let Some(report_index) = messages
+        .iter()
+        .rposition(|message| message.role == "assistant")
+    else {
+        return;
+    };
+    let records = unique_privacy_records(messages);
+    messages[report_index].extra.remove("privacy");
+    if policy.report_declassifies {
+        return;
+    }
+
+    crate::privacy::records::merge_records(&mut messages[report_index], records);
 }
 
 fn scale_subchat_budget(value: usize, new_n_ctx: usize, old_n_ctx: usize) -> usize {
@@ -1088,6 +1174,7 @@ pub async fn run_subchat(
         .unwrap_or_else(|| format!("subchat-{}", Uuid::new_v4()));
 
     let messages = sanitize_messages_for_new_thread(&messages);
+    let messages = prepare_subchat_messages(&gcx, messages, &config.model)?;
     if config.stateful {
         let thread = stateful_thread_from_config(&chat_id, &config);
         save_trajectory_as(gcx.clone(), &thread, &messages).await;
@@ -1137,13 +1224,22 @@ pub async fn run_subchat(
         ))
         .await
     };
-    let current_messages = match current_messages_result {
+    let mut current_messages = match current_messages_result {
         Ok(messages) => messages,
         Err(e) => {
             clear_unbound_openai_codex_websocket_session(&chat_id).await;
             return Err(e);
         }
     };
+
+    let subagent_policy = gcx
+        .privacy_policy_load
+        .read()
+        .unwrap()
+        .policy
+        .subagents
+        .clone();
+    apply_subchat_report_policy(&subagent_policy, &mut current_messages);
 
     if config.stateful {
         let mut thread = stateful_thread_from_config(&chat_id, &config);
@@ -2377,13 +2473,15 @@ async fn subchat_single_internal(
 #[cfg(test)]
 mod subchat_tests {
     use super::{
-        apply_subchat_reactive_compaction, emit_parent_compaction_diagnostics,
+        apply_subchat_reactive_compaction, apply_subchat_report_policy,
+        emit_parent_compaction_diagnostics, gate_subchat_boundary,
         parent_compaction_diagnostic_status, parent_thread_worktree, parse_subchat_cache_control,
-        partial_output_stream_error_message, register_stateful_subchat_worktree,
-        resolve_subchat_config_with_parent, resolve_subchat_model, resolve_subchat_params,
-        resolve_subchat_worktree, safe_context_limit_error_for_log,
-        should_compact_context_limit_error, stateful_thread_from_config, SubchatConfig,
-        ToolsPolicy, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        partial_output_stream_error_message, prepare_subchat_messages,
+        register_stateful_subchat_worktree, resolve_subchat_config_with_parent,
+        resolve_subchat_model, resolve_subchat_params, resolve_subchat_worktree,
+        safe_context_limit_error_for_log, should_compact_context_limit_error,
+        stateful_thread_from_config, SubchatConfig, ToolsPolicy, GUARDED_REPORT_INSTRUCTION,
+        PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
@@ -2403,6 +2501,10 @@ mod subchat_tests {
     use crate::llm::params::CacheControl;
     use crate::worktrees::types::WorktreeMeta;
     use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
+    use refact_privacy::{
+        Attribution, FileRecord, PolicyLoad, PrivacyPolicy, PrivacyRecord, ShellBehavior,
+        SubagentPolicy, Zone,
+    };
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -2536,6 +2638,159 @@ mod subchat_tests {
         let mut caps_state = caps_state.write().await;
         caps_state.caps = Some(Arc::new(caps));
         caps_state.last_attempted_ts = now;
+    }
+
+    fn privacy_record(path: &str, zone: &str) -> FileRecord {
+        FileRecord {
+            path: path.to_string(),
+            zone: zone.to_string(),
+            attribution: Attribution::Declared,
+        }
+    }
+
+    fn message_with_privacy(role: &str, content: &str, records: Vec<FileRecord>) -> ChatMessage {
+        let mut message = ChatMessage::new(role.to_string(), content.to_string());
+        message.extra.insert(
+            "privacy".to_string(),
+            serde_json::to_value(PrivacyRecord { files: records }).unwrap(),
+        );
+        message
+    }
+
+    fn install_privacy_policy(
+        gcx: &Arc<crate::global_context::GlobalContext>,
+        allowed_destination: &str,
+        report_declassifies: bool,
+    ) {
+        *gcx.privacy_policy_load.write().unwrap() = PolicyLoad {
+            policy: Arc::new(PrivacyPolicy {
+                blocked: Vec::new(),
+                zones: vec![
+                    Zone {
+                        name: "secrets".to_string(),
+                        patterns: vec![".env*".to_string()],
+                        send_to: vec![allowed_destination.to_string()],
+                        on_shell_read: ShellBehavior::Withhold,
+                    },
+                    Zone {
+                        name: "normal".to_string(),
+                        patterns: vec!["*".to_string()],
+                        send_to: vec!["*".to_string()],
+                        on_shell_read: ShellBehavior::Withhold,
+                    },
+                ],
+                subagents: SubagentPolicy {
+                    report_declassifies,
+                },
+            }),
+            error: None,
+            source_paths: Vec::new(),
+        };
+    }
+
+    #[tokio::test]
+    async fn subchat_privacy_in_gate_checks_subagent_model_destination() {
+        let gcx = make_test_gcx().await;
+        install_privacy_policy(&gcx, "trusted", true);
+        let messages = vec![message_with_privacy(
+            "user",
+            "guarded context",
+            vec![privacy_record(".env", "secrets")],
+        )];
+
+        let error = gate_subchat_boundary(&gcx, &messages, "untrusted/model").unwrap_err();
+
+        assert_eq!(
+            error,
+            "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry."
+        );
+    }
+
+    #[tokio::test]
+    async fn subchat_privacy_out_gate_checks_parent_model_destination() {
+        let gcx = make_test_gcx().await;
+        install_privacy_policy(&gcx, "child", false);
+        let mut messages = vec![
+            message_with_privacy(
+                "tool",
+                "guarded result",
+                vec![privacy_record(".env", "secrets")],
+            ),
+            ChatMessage::new("assistant".to_string(), "safe report".to_string()),
+        ];
+        let policy = gcx
+            .privacy_policy_load
+            .read()
+            .unwrap()
+            .policy
+            .subagents
+            .clone();
+        apply_subchat_report_policy(&policy, &mut messages);
+
+        let error = gate_subchat_boundary(&gcx, &messages[1..], "parent/model").unwrap_err();
+
+        assert!(error.starts_with("Output withheld by user privacy policy"));
+    }
+
+    #[test]
+    fn subchat_report_declassifies_by_default() {
+        let mut messages = vec![
+            message_with_privacy(
+                "tool",
+                "guarded result",
+                vec![privacy_record(".env", "secrets")],
+            ),
+            message_with_privacy(
+                "assistant",
+                "final report",
+                vec![privacy_record("generated.txt", "normal")],
+            ),
+        ];
+
+        apply_subchat_report_policy(&SubagentPolicy::default(), &mut messages);
+
+        assert!(!messages[1].extra.contains_key("privacy"));
+    }
+
+    #[test]
+    fn subchat_report_inherits_union_when_declassification_is_disabled() {
+        let secret = privacy_record(".env", "secrets");
+        let normal = privacy_record("src/lib.rs", "normal");
+        let mut messages = vec![
+            message_with_privacy("tool", "first", vec![secret.clone(), normal.clone()]),
+            message_with_privacy("tool", "second", vec![secret.clone()]),
+            ChatMessage::new("assistant".to_string(), "final report".to_string()),
+        ];
+
+        apply_subchat_report_policy(
+            &SubagentPolicy {
+                report_declassifies: false,
+            },
+            &mut messages,
+        );
+
+        let report: PrivacyRecord =
+            serde_json::from_value(messages[2].extra["privacy"].clone()).unwrap();
+        assert_eq!(report.files, vec![secret, normal]);
+    }
+
+    #[tokio::test]
+    async fn guarded_subchat_context_gets_non_quotation_instruction() {
+        let gcx = make_test_gcx().await;
+        install_privacy_policy(&gcx, "trusted", true);
+        let messages = vec![message_with_privacy(
+            "user",
+            "guarded context",
+            vec![privacy_record(".env", "secrets")],
+        )];
+
+        let prepared = prepare_subchat_messages(&gcx, messages, "trusted/model").unwrap();
+
+        assert_eq!(prepared[0].role, "system");
+        assert_eq!(
+            prepared[0].content.content_text_only(),
+            GUARDED_REPORT_INSTRUCTION
+        );
     }
 
     #[test]
