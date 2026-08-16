@@ -90,6 +90,11 @@ describe("ChromeTool", () => {
         ],
         url: "https://example.com",
         title: "Example",
+        stabilized: false,
+        console: [
+          { timestamp: 1, level: "Log", text: "loaded transactional state" },
+        ],
+        page_errors: ["ReferenceError: fixtureFailure is not defined"],
       }),
     });
 
@@ -106,7 +111,21 @@ describe("ChromeTool", () => {
     expect(screen.getByText(/Browser action/i)).toBeInTheDocument();
     expect(screen.getByText("Request")).toBeInTheDocument();
     expect(screen.getByText("Results")).toBeInTheDocument();
-    expect(screen.getByText("Execution Report")).toBeInTheDocument();
+    expect(screen.getByText("Page State")).toBeInTheDocument();
+    expect(screen.getByText("Console")).toBeInTheDocument();
+    expect(screen.getByText("Page Errors")).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("DOM stabilized: No")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("loaded transactional state")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) =>
+        text.includes("fixtureFailure is not defined"),
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Execution Report")).not.toBeInTheDocument();
     expect(
       screen.getAllByText((text) =>
         text.includes("Navigated to https://example.com"),

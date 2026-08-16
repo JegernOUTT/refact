@@ -150,6 +150,7 @@ pub struct BrowserBuffers {
     pub agent_action_buffer: Vec<AgentActionEntry>,
     pub last_send_action_cursor: usize,
     pub last_send_console_cursor: usize,
+    pub last_report_console_cursor: usize,
     pub last_send_network_cursor: usize,
     pub last_send_mutation_cursor: usize,
     pub last_timeline_action_cursor: usize,
@@ -176,6 +177,7 @@ impl BrowserBuffers {
             agent_action_buffer: Vec::new(),
             last_send_action_cursor: 0,
             last_send_console_cursor: 0,
+            last_report_console_cursor: 0,
             last_send_network_cursor: 0,
             last_send_mutation_cursor: 0,
             last_timeline_action_cursor: 0,
@@ -200,7 +202,16 @@ impl BrowserBuffers {
         let console = std::mem::take(&mut *self.raw_console_entries.lock().unwrap());
         for e in console {
             self.console_buffer.push(e);
-            enforce_buffer_limit(&mut self.console_buffer, &mut self.last_send_console_cursor);
+            if self.console_buffer.len() > MAX_BUFFER_SIZE {
+                let excess = self.console_buffer.len() - MAX_BUFFER_SIZE;
+                self.console_buffer.drain(..excess);
+                self.last_send_console_cursor =
+                    self.last_send_console_cursor.saturating_sub(excess);
+                self.last_report_console_cursor =
+                    self.last_report_console_cursor.saturating_sub(excess);
+                self.last_timeline_console_cursor =
+                    self.last_timeline_console_cursor.saturating_sub(excess);
+            }
         }
         let network = std::mem::take(&mut *self.raw_network_entries.lock().unwrap());
         for e in network {
@@ -275,6 +286,10 @@ impl BrowserBuffers {
 
     pub fn flush_console_buffer(&mut self) -> Vec<ConsoleEntry> {
         flush_buffer_since(&self.console_buffer, &mut self.last_send_console_cursor)
+    }
+
+    pub fn flush_report_console(&mut self) -> Vec<ConsoleEntry> {
+        flush_buffer_since(&self.console_buffer, &mut self.last_report_console_cursor)
     }
 
     pub fn flush_network_buffer(&mut self) -> Vec<NetworkEntry> {
@@ -765,9 +780,41 @@ pub fn setup_console_capture(
 ) -> Result<(), String> {
     tab.enable_log()
         .map_err(|e| format!("Failed to enable log: {}", e))?;
+    tab.enable_runtime()
+        .map_err(|e| format!("Failed to enable runtime: {}", e))?;
 
-    tab.add_event_listener(Arc::new(move |event: &Event| {
-        if let Event::LogEntryAdded(e) = event {
+    tab.add_event_listener(Arc::new(move |event: &Event| match event {
+        Event::RuntimeConsoleAPICalled(e) => {
+            let text = e
+                .params
+                .args
+                .iter()
+                .map(|arg| {
+                    arg.value
+                        .as_ref()
+                        .map(|value| match value {
+                            serde_json::Value::String(text) => text.clone(),
+                            other => other.to_string(),
+                        })
+                        .or_else(|| arg.description.clone())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let entry = ConsoleEntry {
+                timestamp: normalize_timestamp_ms(e.params.timestamp),
+                level: format!("{:?}", e.params.Type),
+                text,
+            };
+            if let Ok(mut buf) = console_buffer.lock() {
+                buf.push(entry);
+                if buf.len() > MAX_BUFFER_SIZE {
+                    let excess = buf.len() - MAX_BUFFER_SIZE;
+                    buf.drain(..excess);
+                }
+            }
+        }
+        Event::LogEntryAdded(e) => {
             let entry = ConsoleEntry {
                 timestamp: normalize_timestamp_ms(e.params.entry.timestamp),
                 level: format!("{:?}", e.params.entry.level),
@@ -781,6 +828,26 @@ pub fn setup_console_capture(
                 }
             }
         }
+        Event::RuntimeExceptionThrown(e) => {
+            let details = &e.params.exception_details;
+            let error = details
+                .exception
+                .as_ref()
+                .and_then(|exception| exception.description.clone())
+                .unwrap_or_else(|| details.text.clone());
+            if let Ok(mut buf) = console_buffer.lock() {
+                buf.push(ConsoleEntry {
+                    timestamp: normalize_timestamp_ms(e.params.timestamp),
+                    level: "page_error".to_string(),
+                    text: error,
+                });
+                if buf.len() > MAX_BUFFER_SIZE {
+                    let excess = buf.len() - MAX_BUFFER_SIZE;
+                    buf.drain(..excess);
+                }
+            }
+        }
+        _ => {}
     }))
     .map_err(|e| format!("Failed to add console listener: {}", e))?;
 
@@ -1106,6 +1173,20 @@ mod tests {
         assert_eq!(flushed.len(), 1);
         let flushed2 = buf.flush_console_buffer();
         assert_eq!(flushed2.len(), 0);
+    }
+
+    #[test]
+    fn report_console_cursor_is_independent() {
+        let mut buf = make_test_buffers();
+        buf.console_buffer.push(ConsoleEntry {
+            timestamp: 1.0,
+            level: "log".to_string(),
+            text: "password=hunter2".to_string(),
+        });
+
+        assert_eq!(buf.flush_report_console().len(), 1);
+        assert!(buf.flush_report_console().is_empty());
+        assert_eq!(buf.flush_console_buffer().len(), 1);
     }
 
     #[test]

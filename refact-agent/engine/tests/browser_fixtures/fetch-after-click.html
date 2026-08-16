@@ -13,6 +13,7 @@
       const response = await fetch('/slow-echo?ms=400');
       const value = await response.json();
       document.querySelector('#result').textContent = `echo ${value.echo} after ${value.delay_ms}ms`;
+      console.log(`slow echo settled after ${value.delay_ms}ms`);
     });
   </script>
 </body>

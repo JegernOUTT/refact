@@ -375,6 +375,8 @@ impl Tool for ToolChrome {
              \n\
              Preferred `request` input: pass a JSON object with a `steps` array. Each step is a JSON object \
              with an `action` field (snake_case) and action-specific fields. \
+             Set `attach_screenshot` to true to include a policy-sized screenshot in the transactional report; \
+             it defaults to false and page-changing batches capture automatically. \
              Example steps: {{\"action\": \"open_tab\", \"device\": \"desktop\"}}, \
              {{\"action\": \"navigate\", \"url\": \"https://example.com\"}}, \
              {{\"action\": \"screenshot\"}}. \
@@ -404,6 +406,7 @@ impl Tool for ToolChrome {
                         "description": "Typed browser action request.",
                         "properties": {
                             "session": {"type": "string", "enum": ["shared_default"]},
+                            "attach_screenshot": {"type": "boolean", "description": "Include a policy-sized screenshot in the report. Defaults to false; page-changing batches capture automatically."},
                             "target": {
                                 "type": "object",
                                 "properties": {
@@ -940,24 +943,39 @@ fn format_controller_report(
             log.push(msg);
         }
 
-        if let Some(ref data) = result.data {
-            if let (Some(mime), Some(b64_data)) = (
-                data.get("mime").and_then(|v| v.as_str()),
-                data.get("data").and_then(|v| v.as_str()),
-            ) {
-                if mime.starts_with("image/") {
-                    match resize_screenshot_b64(b64_data, mime, image_policy) {
-                        Ok((resized, resized_mime)) => {
-                            if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
-                                multimodal.push(el);
+        if report.screenshot.is_none() {
+            if let Some(ref data) = result.data {
+                if let (Some(mime), Some(b64_data)) = (
+                    data.get("mime").and_then(|v| v.as_str()),
+                    data.get("data").and_then(|v| v.as_str()),
+                ) {
+                    if mime.starts_with("image/") {
+                        match resize_screenshot_b64(b64_data, mime, image_policy) {
+                            Ok((resized, resized_mime)) => {
+                                if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
+                                    multimodal.push(el);
+                                }
                             }
+                            Err(e) => log.push(format!("Screenshot processing: {}", e)),
                         }
-                        Err(e) => log.push(format!("Screenshot processing: {}", e)),
                     }
                 }
             }
+        }
 
+        if let Some(ref data) = result.data {
             format_step_data(data, &mut log);
+        }
+    }
+
+    if let Some(screenshot) = &report.screenshot {
+        match resize_screenshot_b64(&screenshot.data, &screenshot.mime, image_policy) {
+            Ok((resized, resized_mime)) => {
+                if let Ok(element) = MultimodalElement::new(resized_mime, resized) {
+                    multimodal.push(element);
+                }
+            }
+            Err(error) => log.push(format!("Screenshot processing: {error}")),
         }
     }
 
@@ -988,20 +1006,30 @@ fn execution_report_to_multimodal(
         .map_err(|e| format!("Failed to pretty-print browser report: {}", e))?;
     content.push(MultimodalElement::new("text".to_string(), text_pretty)?);
 
-    for result in &report.steps {
-        if let Some(ref data) = result.data {
-            if let (Some(mime), Some(b64_data)) = (
-                data.get("mime").and_then(|v| v.as_str()),
-                data.get("data").and_then(|v| v.as_str()),
-            ) {
-                if mime.starts_with("image/") {
-                    let (resized, resized_mime) =
-                        resize_screenshot_b64(b64_data, mime, image_policy)?;
-                    if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
-                        content.push(el);
+    if report.screenshot.is_none() {
+        for result in &report.steps {
+            if let Some(ref data) = result.data {
+                if let (Some(mime), Some(b64_data)) = (
+                    data.get("mime").and_then(|v| v.as_str()),
+                    data.get("data").and_then(|v| v.as_str()),
+                ) {
+                    if mime.starts_with("image/") {
+                        let (resized, resized_mime) =
+                            resize_screenshot_b64(b64_data, mime, image_policy)?;
+                        if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
+                            content.push(el);
+                        }
                     }
                 }
             }
+        }
+    }
+
+    if let Some(screenshot) = &report.screenshot {
+        let (resized, resized_mime) =
+            resize_screenshot_b64(&screenshot.data, &screenshot.mime, image_policy)?;
+        if let Ok(element) = MultimodalElement::new(resized_mime, resized) {
+            content.push(element);
         }
     }
 

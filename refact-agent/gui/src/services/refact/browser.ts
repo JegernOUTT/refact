@@ -203,7 +203,19 @@ export type BrowserActionRequest = {
   chat_id: string;
   session?: "shared_default";
   target?: BrowserTabTarget;
+  attach_screenshot?: boolean;
   steps: BrowserStep[];
+};
+
+export type BrowserConsoleEntry = {
+  timestamp: number;
+  level: string;
+  text: string;
+};
+
+export type BrowserReportScreenshot = {
+  mime: string;
+  data: string;
 };
 
 export type BrowserExecutionStep = {
@@ -223,6 +235,10 @@ export type BrowserActionResponse = {
   steps: BrowserExecutionStep[];
   url?: string | null;
   title?: string | null;
+  stabilized?: boolean;
+  console?: BrowserConsoleEntry[];
+  page_errors?: string[];
+  screenshot?: BrowserReportScreenshot | null;
 };
 
 export const browserApi = createApi({

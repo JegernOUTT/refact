@@ -17,7 +17,10 @@ use refact_lsp::call_validation::ChatContent;
 use refact_lsp::chat::browser_context::maybe_insert_browser_context;
 use refact_lsp::integrations::browser_controller::execute_steps as execute_fixture_steps_with_policy;
 use refact_lsp::integrations::browser_controller::execute_steps as execute_steps_with_policy;
-use refact_lsp::integrations::browser_models::{BrowserLocator, BrowserStep};
+use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
+use refact_lsp::integrations::browser_models::{
+    BrowserActionRequest, BrowserLocator, BrowserStep, SessionPolicy, TabTarget,
+};
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
     HitTargetController, HitTargetResult, Mouse, MouseButton, UTILITY_WORLD_NAME,
@@ -325,6 +328,58 @@ async fn fixture_server_starts_and_serves_page() {
         .unwrap();
     assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
     assert!(response.text().await.unwrap().contains("Delayed button"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn transactional_report_settles_fetch_and_returns_console_once() {
+    let Some(mut case) = BrowserCase::start("fetch-after-click.html").await else {
+        return;
+    };
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let request = BrowserActionRequest {
+        session: SessionPolicy::SharedDefault,
+        target: TabTarget::Active,
+        attach_screenshot: false,
+        steps: vec![BrowserStep::Eval {
+            expression: "document.querySelector('#fetch').click()".to_string(),
+        }],
+    };
+
+    let report =
+        execute_request_with_runtime(runtime.clone(), request, &ImagePolicy::browser_capture())
+            .await
+            .unwrap();
+    assert!(report.ok, "click failed: {report:?}");
+    assert!(report.stabilized);
+    assert!(report
+        .url
+        .as_deref()
+        .is_some_and(|url| url.ends_with("fetch-after-click.html")));
+    assert!(report
+        .console
+        .iter()
+        .any(|entry| entry.text.contains("slow echo settled after 400ms")));
+    assert_eq!(
+        execute_request_with_runtime(
+            runtime,
+            BrowserActionRequest {
+                session: SessionPolicy::SharedDefault,
+                target: TabTarget::Active,
+                attach_screenshot: false,
+                steps: vec![],
+            },
+            &ImagePolicy::browser_capture(),
+        )
+        .await
+        .unwrap()
+        .console
+        .iter()
+        .filter(|entry| entry.text.contains("slow echo settled after 400ms"))
+        .count(),
+        0
+    );
 }
 
 #[test]

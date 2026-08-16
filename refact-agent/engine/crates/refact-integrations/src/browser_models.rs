@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::browser_types::ConsoleEntry;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "by", rename_all = "snake_case")]
 pub enum LocatorStrategy {
@@ -316,6 +318,8 @@ pub struct BrowserActionRequest {
     pub session: SessionPolicy,
     #[serde(default)]
     pub target: TabTarget,
+    #[serde(default)]
+    pub attach_screenshot: bool,
     pub steps: Vec<BrowserStep>,
 }
 
@@ -416,6 +420,20 @@ pub struct ExecutionReport {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default)]
+    pub stabilized: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub console: Vec<ConsoleEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub page_errors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<BrowserScreenshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserScreenshot {
+    pub mime: String,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -788,6 +806,7 @@ mod tests {
         let req: BrowserActionRequest = serde_json::from_str(json_str).unwrap();
         assert_eq!(req.session, SessionPolicy::SharedDefault);
         assert_eq!(req.target, TabTarget::Active);
+        assert!(!req.attach_screenshot);
     }
 
     #[test]
@@ -855,6 +874,10 @@ mod tests {
             ],
             url: Some("https://example.com".to_string()),
             title: Some("Example".to_string()),
+            stabilized: true,
+            console: vec![],
+            page_errors: vec![],
+            screenshot: None,
         };
         let json = serde_json::to_value(&report).unwrap();
         assert!(json["ok"].as_bool().unwrap());

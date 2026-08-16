@@ -123,7 +123,8 @@ function isBrowserActionResponse(
   return (
     isRecord(value) &&
     typeof value.ok === "boolean" &&
-    Array.isArray(value.steps)
+    Array.isArray(value.steps) &&
+    (typeof value.stabilized === "boolean" || value.stabilized === undefined)
   );
 }
 
@@ -322,7 +323,8 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     );
   }, [typedArgs, stats, maybeResult, images]);
 
-  const icon = images.length > 0 ? <Image /> : <Monitor />;
+  const icon =
+    images.length > 0 || typedResult?.screenshot ? <Image /> : <Monitor />;
 
   const typedStepsBlock = useMemo(() => {
     if (!typedArgs) return null;
@@ -336,8 +338,29 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
 
   const typedDiagnosticsBlock = useMemo(() => {
     if (!typedResult) return null;
-    return JSON.stringify(typedResult, null, 2);
+    const lines = [
+      typedResult.title ? `Title: ${typedResult.title}` : null,
+      typedResult.url ? `URL: ${typedResult.url}` : null,
+      `DOM stabilized: ${typedResult.stabilized === false ? "No" : "Yes"}`,
+    ];
+    return lines.filter((line): line is string => line !== null).join("\n");
   }, [typedResult]);
+
+  const typedConsoleBlock = useMemo(() => {
+    if (!typedResult?.console?.length) return null;
+    return typedResult.console
+      .map((entry) => `[${entry.level}] ${entry.text}`)
+      .join("\n");
+  }, [typedResult]);
+
+  const typedPageErrorsBlock = useMemo(() => {
+    if (!typedResult?.page_errors?.length) return null;
+    return typedResult.page_errors.join("\n");
+  }, [typedResult]);
+
+  const reportScreenshot = typedResult?.screenshot
+    ? `data:${typedResult.screenshot.mime};base64,${typedResult.screenshot.data}`
+    : null;
 
   return (
     <ToolCard
@@ -367,6 +390,12 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         </Flex>
       )}
 
+      {reportScreenshot && (
+        <Flex py="2" gap="2" wrap="wrap">
+          <DialogImage src={reportScreenshot} fallback="" size="8" />
+        </Flex>
+      )}
+
       {typedResultsBlock && (
         <Box className={styles.section}>
           <Box className={styles.sectionLabel}>Results</Box>
@@ -380,10 +409,32 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
 
       {typedDiagnosticsBlock && (
         <Box className={styles.section}>
-          <Box className={styles.sectionLabel}>Execution Report</Box>
+          <Box className={styles.sectionLabel}>Page State</Box>
           <Box className={styles.logContent}>
             <ShikiCodeBlock showLineNumbers={false}>
               {typedDiagnosticsBlock}
+            </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
+
+      {typedConsoleBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Console</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedConsoleBlock}
+            </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
+
+      {typedPageErrorsBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Page Errors</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedPageErrorsBlock}
             </ShikiCodeBlock>
           </Box>
         </Box>

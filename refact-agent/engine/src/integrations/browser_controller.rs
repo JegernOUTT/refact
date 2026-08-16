@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use headless_chrome::Tab;
 use headless_chrome::protocol::cdp::Page;
 use tokio::sync::Mutex as AMutex;
@@ -12,7 +13,7 @@ use crate::integrations::browser_locators::{
 use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
 use refact_browser::{CdpKeyboardDispatcher, ElementHandle, Keyboard, WorldManager};
-use refact_core::image_policy::{ImageFormat, ImagePolicy};
+use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
 const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
@@ -42,6 +43,8 @@ fn clamp_wait_seconds(requested: f64) -> f64 {
 }
 
 const DEFAULT_POLL_INTERVAL_MS: u64 = 200;
+const REPORT_STABILIZATION_TIMEOUT_MS: u64 = 3_000;
+const REPORT_STABILITY_INTERVAL_MS: u64 = 200;
 
 #[allow(dead_code)]
 pub fn resolve_tab(runtime: &BrowserRuntime, target: &TabTarget) -> Result<Arc<Tab>, String> {
@@ -224,6 +227,10 @@ fn execute_steps_with_world(
         steps: results,
         url: Some(tab.get_url()),
         title: tab.get_title().ok(),
+        stabilized: false,
+        console: vec![],
+        page_errors: vec![],
+        screenshot: None,
     }
 }
 
@@ -292,6 +299,10 @@ pub async fn execute_request_with_runtime(
         }
     }
 
+    let initial_url = {
+        let rt = runtime_arc.lock().await;
+        rt.get_active_tab().map(|tab| tab.get_url())
+    };
     let mut current_tab = {
         let rt = runtime_arc.lock().await;
         rt.get_active_tab()
@@ -304,6 +315,9 @@ pub async fn execute_request_with_runtime(
     let mut all_ok = true;
 
     for (idx, step) in request.steps.iter().enumerate() {
+        if let Some(tab) = &current_tab {
+            let _ = tab.evaluate(NETWORK_INFLIGHT_TRACKER_JS, false);
+        }
         let mut result = if is_tab_management_step(step) {
             let step_report = tokio::task::block_in_place(|| {
                 let mut rt = runtime_arc.blocking_lock();
@@ -352,14 +366,46 @@ pub async fn execute_request_with_runtime(
         results.push(result);
     }
 
-    let (url, title) = if let Some(tab) = current_tab {
-        (Some(tab.get_url()), tab.get_title().ok())
+    let active_tab = match current_tab {
+        Some(tab) => Some(tab),
+        None => runtime_arc.lock().await.get_active_tab(),
+    };
+    let (url, title, stabilized, screenshot) = if let Some(tab) = active_tab {
+        let stabilized = tokio::task::block_in_place(|| {
+            wait_for_report_stability(&tab, &world, REPORT_STABILIZATION_TIMEOUT_MS)
+        });
+        let url = tab.get_url();
+        let page_changed = initial_url.as_deref() != Some(url.as_str());
+        let capture_requested = request.attach_screenshot
+            || page_changed
+            || request
+                .steps
+                .iter()
+                .any(|step| matches!(step, BrowserStep::Screenshot));
+        let screenshot = if capture_requested {
+            tokio::task::block_in_place(|| capture_report_screenshot(&tab, image_policy).ok())
+        } else {
+            None
+        };
+        (Some(url), tab.get_title().ok(), stabilized, screenshot)
     } else {
-        let rt = runtime_arc.lock().await;
-        match rt.get_active_tab() {
-            Some(tab) => (Some(tab.get_url()), tab.get_title().ok()),
-            None => (None, None),
-        }
+        (None, None, false, None)
+    };
+    let (console, page_errors) = {
+        let mut rt = runtime_arc.lock().await;
+        rt.drain_raw_events();
+        let mut console = rt
+            .flush_report_console()
+            .into_iter()
+            .map(mask_console_entry)
+            .collect::<Vec<_>>();
+        let page_errors = console
+            .iter()
+            .filter(|entry| entry.level == "page_error")
+            .map(|entry| entry.text.clone())
+            .collect();
+        console.retain(|entry| entry.level != "page_error");
+        (console, page_errors)
     };
 
     Ok(ExecutionReport {
@@ -367,6 +413,10 @@ pub async fn execute_request_with_runtime(
         steps: results,
         url,
         title,
+        stabilized,
+        console,
+        page_errors,
+        screenshot,
     })
 }
 
@@ -543,6 +593,10 @@ pub fn execute_steps_with_runtime(
         steps: results,
         url,
         title,
+        stabilized: false,
+        console: vec![],
+        page_errors: vec![],
+        screenshot: None,
     }
 }
 
@@ -1110,6 +1164,99 @@ fn poll_condition(
     }
 }
 
+fn wait_for_report_stability(tab: &Tab, world: &WorldManager, timeout_ms: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    if poll_until_deadline(tab, "document.readyState !== 'loading'", deadline).is_err() {
+        return false;
+    }
+    let _ = tab.evaluate(NETWORK_INFLIGHT_TRACKER_JS, false);
+    if wait_for_network_quiet_until(tab, deadline).is_err() {
+        return false;
+    }
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let max_checks = (remaining.as_millis() / REPORT_STABILITY_INTERVAL_MS as u128) as usize;
+    html_stabilizes_with(
+        max_checks.max(1),
+        || {
+            world.eval_in_utility(
+                tab,
+                "document.documentElement ? document.documentElement.outerHTML : ''",
+            )
+        },
+        || std::thread::sleep(Duration::from_millis(REPORT_STABILITY_INTERVAL_MS)),
+    )
+}
+
+fn html_stabilizes_with<F, S>(max_checks: usize, mut sample: F, mut sleep: S) -> bool
+where
+    F: FnMut() -> Result<serde_json::Value, String>,
+    S: FnMut(),
+{
+    let mut previous: Option<serde_json::Value> = None;
+    for _ in 0..max_checks {
+        let current = match sample() {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        if previous.as_ref() == Some(&current) {
+            return true;
+        }
+        previous = Some(current);
+        sleep();
+    }
+    false
+}
+
+fn poll_until_deadline(tab: &Tab, js_condition: &str, deadline: Instant) -> Result<(), String> {
+    loop {
+        if eval_js_value(tab, js_condition)
+            .ok()
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("Timed out".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(REPORT_STABILITY_INTERVAL_MS));
+    }
+}
+
+fn wait_for_network_quiet_until(tab: &Tab, deadline: Instant) -> Result<(), String> {
+    let snapshot_js = r#"(function() {
+  return window.__refact_inflight_installed ? (window.__refact_inflight | 0) : 0;
+})()"#;
+    let quiet_window = Duration::from_millis(NETWORK_IDLE_WINDOW_MS);
+    let mut quiet_since: Option<Instant> = None;
+    loop {
+        let inflight = eval_js_value(tab, snapshot_js)
+            .ok()
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
+        if inflight == 0 {
+            if quiet_since.is_some_and(|since| since.elapsed() >= quiet_window) {
+                return Ok(());
+            }
+            quiet_since.get_or_insert_with(Instant::now);
+        } else {
+            quiet_since = None;
+        }
+        if Instant::now() >= deadline {
+            return Err("Timed out".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(REPORT_STABILITY_INTERVAL_MS));
+    }
+}
+
+fn mask_console_entry(
+    mut entry: refact_integrations::browser_types::ConsoleEntry,
+) -> refact_integrations::browser_types::ConsoleEntry {
+    entry.text = refact_core::string_utils::redact_sensitive(&entry.text);
+    entry
+}
+
 fn step_wait_for_selector(
     tab: &Tab,
     idx: usize,
@@ -1569,6 +1716,18 @@ pub fn capture_viewport_screenshot(
 ) -> Result<(String, String), String> {
     let (format, mime, quality) = capture_options(policy);
     capture_viewport_screenshot_as(tab, format, mime, quality)
+}
+
+fn capture_report_screenshot(tab: &Tab, policy: &ImagePolicy) -> Result<BrowserScreenshot, String> {
+    let (data, mime) = capture_viewport_screenshot_png(tab)?;
+    let bytes = base64::prelude::BASE64_STANDARD
+        .decode(data)
+        .map_err(|error| format!("Screenshot decode failed: {error}"))?;
+    let (resized, mime) = resize_to_policy(&bytes, &mime, policy)?;
+    Ok(BrowserScreenshot {
+        mime,
+        data: base64::prelude::BASE64_STANDARD.encode(resized),
+    })
 }
 
 fn capture_viewport_screenshot_as(
@@ -2285,6 +2444,39 @@ mod tests {
             assert!(js.starts_with("(function()"));
             assert!(js.contains("JSON.stringify"));
         }
+    }
+
+    #[test]
+    fn console_report_text_is_redacted() {
+        let entry = mask_console_entry(refact_integrations::browser_types::ConsoleEntry {
+            timestamp: 1.0,
+            level: "error".to_string(),
+            text: "password=hunter2".to_string(),
+        });
+
+        assert_eq!(entry.text, "password=[REDACTED]");
+    }
+
+    #[test]
+    fn html_stability_gate_returns_false_after_max_checks() {
+        let mut value = 0;
+        let stabilized = html_stabilizes_with(
+            3,
+            || {
+                value += 1;
+                Ok(serde_json::json!(value))
+            },
+            || {},
+        );
+
+        assert!(!stabilized);
+    }
+
+    #[test]
+    fn html_stability_gate_accepts_two_equal_samples() {
+        let stabilized = html_stabilizes_with(2, || Ok(serde_json::json!("stable")), || {});
+
+        assert!(stabilized);
     }
 
     #[test]
