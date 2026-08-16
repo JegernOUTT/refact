@@ -1,9 +1,16 @@
+mod actionability;
 mod handles;
 mod injected_source;
 mod keyboard;
 mod us_keyboard_layout;
 mod world;
 
+pub use actionability::{
+    ACTION_RETRY_BACKOFF_MS, LOCATOR_RETRY_BACKOFF_MS, ActionKind, ActionabilityDiagnostic,
+    ActionabilityDriver, ActionabilityEngine, ActionabilityError, ActionabilitySuccess,
+    ActionabilityTimeouts, CallLog, Clock, Deadline, LocatorOutcome, RequiredStates, SystemClock,
+    TimeoutError, TimeoutKind, required_states,
+};
 pub use handles::{
     CheckedState, ElementHandle, ElementState, ElementStateName, HandleError, HandleRegistry,
 };
