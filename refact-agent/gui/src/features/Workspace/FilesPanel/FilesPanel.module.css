@@ -119,9 +119,17 @@
 }
 
 .treeName {
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.zoneDot {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding-inline-start: var(--rf-space-2);
 }
 
 .treeNotice {

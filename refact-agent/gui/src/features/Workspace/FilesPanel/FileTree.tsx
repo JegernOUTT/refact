@@ -1,4 +1,5 @@
 import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
+import { ContextMenu } from "@radix-ui/themes";
 import {
   ChevronDown,
   ChevronRight,
@@ -21,13 +22,22 @@ import {
   ErrorState,
   Icon,
   LoadingState,
+  StatusDot,
+  Tooltip,
   VirtualList,
+  type StatusDotStatus,
 } from "../../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
 import {
   useGetFilesTreeQuery,
   type FilesTreeEntry,
 } from "../../../services/refact/files";
+import {
+  type PrivacyDestination,
+  type PrivacyZone,
+  useGetPrivacyPolicyQuery,
+  useUpdatePrivacyPolicyMutation,
+} from "../../../services/refact/privacy";
 import {
   collapseDirectory,
   expandDirectory,
@@ -43,7 +53,9 @@ import {
 import { selectFocusedChatWorkspaceRoot } from "../workspaceSlice";
 import {
   flattenVisibleTree,
+  movePathToPrivacyZone,
   parentDirectoryPath,
+  privacyZoneForPath,
   type TreeChildrenByPath,
   type VisibleTreeEntry,
 } from "./fileTreeModel";
@@ -51,6 +63,31 @@ import { fileTypeIcon } from "./fileTypeIcon";
 import styles from "./FilesPanel.module.css";
 
 const VIRTUALIZE_THRESHOLD = 200;
+
+const zoneStatus = (zone: PrivacyZone): StatusDotStatus => {
+  if (zone.name === "blocked") return "error";
+  if (zone.name === "secrets") return "warning";
+  if (zone.name === "normal") return "idle";
+  return "running";
+};
+
+const zoneTooltip = (
+  zone: PrivacyZone,
+  destinations: PrivacyDestination[],
+): string => {
+  const allowed = zone.send_to.includes("*")
+    ? "All destinations"
+    : zone.send_to.length === 0
+      ? "None"
+      : zone.send_to
+          .map(
+            (id) =>
+              destinations.find((destination) => destination.id === id)
+                ?.display_name ?? id,
+          )
+          .join(", ");
+  return `Zone: ${zone.name}. Allowed destinations: ${allowed}.`;
+};
 
 const errorStatus = (error: unknown): number | string | null => {
   const candidate = error as FetchBaseQueryError | undefined;
@@ -92,12 +129,22 @@ const TreeRow = ({
   selected,
   rowId,
   onActivate,
+  privacyZone,
+  privacyDestinations,
+  privacyZones,
+  privacySaving,
+  onMoveToZone,
 }: {
   entry: VisibleTreeEntry;
   expanded: boolean;
   selected: boolean;
   rowId: string;
   onActivate: (entry: VisibleTreeEntry) => void;
+  privacyZone: PrivacyZone | null;
+  privacyDestinations: PrivacyDestination[];
+  privacyZones: PrivacyZone[];
+  privacySaving: boolean;
+  onMoveToZone: (entry: VisibleTreeEntry, zoneName: string) => void;
 }) => {
   const isDirectory = entry.kind === "dir";
   const EntryIcon = isDirectory
@@ -105,8 +152,9 @@ const TreeRow = ({
       ? FolderOpen
       : Folder
     : fileTypeIcon(entry.name);
+  const movableZones = isDirectory ? [] : privacyZones;
 
-  return (
+  const row = (
     <button
       aria-expanded={isDirectory ? expanded : undefined}
       aria-selected={selected}
@@ -144,7 +192,46 @@ const TreeRow = ({
         tone={isDirectory ? "accent" : "muted"}
       />
       <span className={styles.treeName}>{entry.name}</span>
+      {privacyZone ? (
+        <Tooltip
+          content={zoneTooltip(privacyZone, privacyDestinations)}
+          delayDuration={0}
+        >
+          <span className={styles.zoneDot}>
+            <StatusDot
+              aria-hidden="true"
+              data-zone={privacyZone.name}
+              size="small"
+              status={zoneStatus(privacyZone)}
+            />
+          </span>
+        </Tooltip>
+      ) : null}
     </button>
+  );
+
+  if (!privacyZone || movableZones.length === 0) return row;
+
+  return (
+    <ContextMenu.Root>
+      <ContextMenu.Trigger>{row}</ContextMenu.Trigger>
+      <ContextMenu.Content>
+        <ContextMenu.Sub>
+          <ContextMenu.SubTrigger>Move to zone</ContextMenu.SubTrigger>
+          <ContextMenu.SubContent>
+            {movableZones.map((zone) => (
+              <ContextMenu.Item
+                disabled={privacySaving || zone.name === privacyZone.name}
+                key={zone.name}
+                onSelect={() => onMoveToZone(entry, zone.name)}
+              >
+                {zone.name}
+              </ContextMenu.Item>
+            ))}
+          </ContextMenu.SubContent>
+        </ContextMenu.Sub>
+      </ContextMenu.Content>
+    </ContextMenu.Root>
   );
 };
 
@@ -156,6 +243,9 @@ export function FileTree() {
   const selectedPath = useAppSelector(selectFilesPanelSelectedPath);
   const showIgnored = useAppSelector(selectShowIgnored);
   const contextRoot = useAppSelector(selectFocusedChatWorkspaceRoot);
+  const privacyPolicyQuery = useGetPrivacyPolicyQuery(undefined);
+  const [updatePrivacyPolicy, privacyUpdateState] =
+    useUpdatePrivacyPolicyMutation();
   const [loadedContextRoot, setLoadedContextRoot] = useState(contextRoot);
   const [childrenByPath, setChildrenByPath] = useState<TreeChildrenByPath>({});
   const {
@@ -219,6 +309,17 @@ export function FileTree() {
       treeRef.current?.focus();
     },
     [dispatch],
+  );
+
+  const moveEntryToZone = useCallback(
+    (entry: VisibleTreeEntry, zoneName: string) => {
+      const policy = privacyPolicyQuery.data?.policy;
+      if (!policy) return;
+      void updatePrivacyPolicy(
+        movePathToPrivacyZone(policy, entry.path, zoneName),
+      );
+    },
+    [privacyPolicyQuery.data?.policy, updatePrivacyPolicy],
   );
 
   const handleKeyDown = useCallback(
@@ -309,6 +410,15 @@ export function FileTree() {
       selected={selectedPath === entry.path}
       rowId={rowId(entry.path)}
       onActivate={activateEntry}
+      privacyZone={
+        privacyPolicyQuery.data
+          ? privacyZoneForPath(entry.path, privacyPolicyQuery.data.policy)
+          : null
+      }
+      privacyDestinations={privacyPolicyQuery.data?.destinations ?? []}
+      privacyZones={privacyPolicyQuery.data?.policy.zones ?? []}
+      privacySaving={privacyUpdateState.isLoading}
+      onMoveToZone={moveEntryToZone}
     />
   );
 

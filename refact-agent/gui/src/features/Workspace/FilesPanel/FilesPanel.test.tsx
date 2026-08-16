@@ -13,6 +13,7 @@ import {
 import { server } from "../../../utils/mockServer";
 import { setProjectStorageNamespace } from "../../../utils/chatUiPersistence";
 import { filesApi, type FilesTreeEntry } from "../../../services/refact/files";
+import type { PrivacyPolicyResponse } from "../../../services/refact/privacy";
 import { applyChatEvent } from "../../Chat/Thread";
 import { FilesPanel } from "./FilesPanel";
 import { FileViewer } from "./FileViewer";
@@ -33,6 +34,25 @@ import type { WorktreeMeta } from "../../../services/refact/worktrees";
 const rootPath = "/workspace";
 const sourcePath = `${rootPath}/src`;
 const filePath = `${sourcePath}/main.ts`;
+
+const privacyResponse: PrivacyPolicyResponse = {
+  policy: {
+    blocked: [],
+    zones: [
+      {
+        name: "normal",
+        patterns: ["**"],
+        send_to: ["*"],
+        on_shell_read: "withhold",
+      },
+    ],
+    subagents: { report_declassifies: true },
+  },
+  destinations: [],
+  match_counts: { normal: 0 },
+  error: null,
+  source_paths: [],
+};
 
 const worktree = (id: string): WorktreeMeta => ({
   id,
@@ -96,6 +116,9 @@ const readResponse = (overrides: Record<string, unknown> = {}) => ({
 
 describe("FilesPanel", () => {
   beforeEach(() => {
+    server.use(
+      http.get("*/v1/privacy/policy", () => HttpResponse.json(privacyResponse)),
+    );
     setProjectStorageNamespace("files-panel-test");
     vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(
       () => undefined,
