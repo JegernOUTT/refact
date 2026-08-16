@@ -881,7 +881,11 @@ pub enum BrowserLoadState {
 #[serde(untagged)]
 pub enum UrlPattern {
     Text(String),
-    Regex { source: String, flags: String },
+    Regex {
+        source: String,
+        #[serde(default)]
+        flags: String,
+    },
 }
 
 fn default_true() -> bool {
@@ -890,6 +894,62 @@ fn default_true() -> bool {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+impl BrowserStep {
+    pub const ACTION_NAMES: &'static [&'static str] = &[
+        "navigate",
+        "reload",
+        "go_back",
+        "go_forward",
+        "open_tab",
+        "close_tab",
+        "switch_tab",
+        "list_tabs",
+        "click",
+        "click_if_exists",
+        "hover",
+        "focus",
+        "blur",
+        "scroll_to",
+        "press_key",
+        "fill",
+        "clear",
+        "select_option",
+        "check",
+        "uncheck",
+        "set_input_files",
+        "expect_file_chooser",
+        "wait_for_selector",
+        "wait_for_navigation",
+        "wait_for_url",
+        "wait_for_text",
+        "wait_for_network_idle",
+        "wait_for_load_state",
+        "wait_for_request",
+        "wait_for_response",
+        "wait_for_download",
+        "wait_for_element_hidden",
+        "wait_for_element_stable",
+        "wait_seconds",
+        "get_text",
+        "get_html",
+        "get_attribute",
+        "extract_links",
+        "extract_table",
+        "dom_snapshot",
+        "accessibility_snapshot",
+        "screenshot",
+        "screenshot_element",
+        "eval",
+        "styles",
+        "tab_log",
+        "add_locator_handler",
+        "remove_locator_handler",
+        "handle_dialog",
+        "dismiss_overlays",
+        "highlight_element",
+    ];
 }
 
 #[allow(dead_code)]
@@ -1176,6 +1236,168 @@ pub struct TabInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn all_browser_steps() -> Vec<BrowserStep> {
+        let locator = || BrowserLocator::reference("e1");
+        vec![
+            BrowserStep::Navigate {
+                url: "https://example.com".to_string(),
+            },
+            BrowserStep::Reload,
+            BrowserStep::GoBack,
+            BrowserStep::GoForward,
+            BrowserStep::OpenTab {
+                device: Some("desktop".to_string()),
+            },
+            BrowserStep::CloseTab,
+            BrowserStep::SwitchTab {
+                tab: TabTarget::Active,
+            },
+            BrowserStep::ListTabs,
+            BrowserStep::Click { locator: locator() },
+            BrowserStep::ClickIfExists { locator: locator() },
+            BrowserStep::Hover { locator: locator() },
+            BrowserStep::Focus { locator: locator() },
+            BrowserStep::Blur { locator: locator() },
+            BrowserStep::ScrollTo { locator: locator() },
+            BrowserStep::PressKey {
+                key: "Enter".to_string(),
+                modifiers: vec!["Ctrl".to_string()],
+            },
+            BrowserStep::Fill {
+                locator: locator(),
+                text: "hi".to_string(),
+                clear_first: true,
+                verify: true,
+            },
+            BrowserStep::Clear {
+                locator: locator(),
+                verify: true,
+            },
+            BrowserStep::SelectOption {
+                locator: locator(),
+                value: "one".to_string(),
+            },
+            BrowserStep::Check { locator: locator() },
+            BrowserStep::Uncheck { locator: locator() },
+            BrowserStep::SetInputFiles {
+                locator: locator(),
+                paths: vec!["/tmp/file".to_string()],
+            },
+            BrowserStep::ExpectFileChooser {
+                paths: vec!["/tmp/file".to_string()],
+            },
+            BrowserStep::WaitForSelector {
+                locator: locator(),
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::WaitForNavigation {
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::WaitForUrl {
+                contains: "/done".to_string(),
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::WaitForText {
+                text: "done".to_string(),
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::WaitForNetworkIdle {
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::WaitForLoadState {
+                state: BrowserLoadState::Load,
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::WaitForRequest {
+                url_or_pattern: UrlPattern::Text("/api".to_string()),
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::WaitForResponse {
+                url_or_pattern: UrlPattern::Regex {
+                    source: "/api".to_string(),
+                    flags: "i".to_string(),
+                },
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::WaitForDownload {
+                timeout_ms: Some(1_000),
+                save_as: Some("file.txt".to_string()),
+            },
+            BrowserStep::WaitForElementHidden {
+                locator: locator(),
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::WaitForElementStable {
+                locator: locator(),
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::WaitSeconds { seconds: 0.1 },
+            BrowserStep::GetText { locator: locator() },
+            BrowserStep::GetHtml { locator: locator() },
+            BrowserStep::GetAttribute {
+                locator: locator(),
+                attribute: "href".to_string(),
+            },
+            BrowserStep::ExtractLinks {
+                locator: Some(locator()),
+                limit: Some(10),
+            },
+            BrowserStep::ExtractTable { locator: locator() },
+            BrowserStep::DomSnapshot {
+                selector: "main".to_string(),
+                max_chars: Some(1_000),
+            },
+            BrowserStep::AccessibilitySnapshot {
+                options: AccessibilitySnapshotOptions::default(),
+            },
+            BrowserStep::Screenshot,
+            BrowserStep::ScreenshotElement { locator: locator() },
+            BrowserStep::Eval {
+                expression: "document.title".to_string(),
+            },
+            BrowserStep::Styles {
+                locator: locator(),
+                property_filter: Some("color".to_string()),
+            },
+            BrowserStep::TabLog,
+            BrowserStep::AddLocatorHandler {
+                name: "overlay".to_string(),
+                locator: locator(),
+                handler: LocatorHandlerAction::Click,
+                times: Some(1),
+                no_wait_after: false,
+            },
+            BrowserStep::RemoveLocatorHandler {
+                name: "overlay".to_string(),
+            },
+            BrowserStep::HandleDialog {
+                accept: true,
+                prompt_text: Some("answer".to_string()),
+            },
+            BrowserStep::DismissOverlays,
+            BrowserStep::HighlightElement { locator: locator() },
+        ]
+    }
+
+    #[test]
+    fn browser_step_action_names_cover_every_variant() {
+        let serialized = all_browser_steps()
+            .into_iter()
+            .map(|step| {
+                serde_json::to_value(step).unwrap()["action"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let declared = BrowserStep::ACTION_NAMES
+            .iter()
+            .map(|action| action.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(declared, serialized);
+    }
 
     #[test]
     fn test_locator_css_serde() {
@@ -1556,6 +1778,18 @@ mod tests {
                 url_or_pattern: UrlPattern::Regex { source, flags },
                 timeout_ms: None
             } if source == "/api/.*" && flags == "i"
+        ));
+
+        let request: BrowserStep = serde_json::from_str(
+            r#"{"action":"wait_for_request","url_or_pattern":{"source":"/api/.*"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            BrowserStep::WaitForRequest {
+                url_or_pattern: UrlPattern::Regex { source, flags },
+                timeout_ms: None
+            } if source == "/api/.*" && flags.is_empty()
         ));
     }
 

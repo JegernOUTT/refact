@@ -2534,6 +2534,70 @@ async fn production_snapshot_and_ref_actions_share_one_batch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn tool_contract_canonical_ref_batch_executes_end_to_end() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    case.tab
+        .evaluate(
+            "document.querySelector('button').addEventListener('click', () => document.body.dataset.saved = 'yes')",
+            false,
+        )
+        .unwrap();
+    let snapshot = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::AccessibilitySnapshot {
+            options: AccessibilitySnapshotOptions::default(),
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(snapshot.ok, "snapshot failed: {snapshot:?}");
+    let nodes = snapshot.steps[0].data.as_ref().unwrap()["nodes"]
+        .as_array()
+        .unwrap();
+    let reference = |name: &str| {
+        nodes
+            .iter()
+            .find(|node| node["name"].as_str() == Some(name))
+            .and_then(|node| node["ref"].as_str())
+            .unwrap_or_else(|| panic!("snapshot lacks ref for {name}: {nodes:?}"))
+            .to_string()
+    };
+    let request: BrowserActionRequest = serde_json::from_value(json!({
+        "steps": [
+            {"action":"accessibility_snapshot"},
+            {"action":"click","locator":{"by":"ref","value":reference("Save")}},
+            {"action":"fill","locator":{"by":"ref","value":reference("Search")},"text":"hi"}
+        ]
+    }))
+    .unwrap();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let report = execute_request_with_runtime(
+        runtime,
+        request,
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.ok, "canonical ref batch failed: {report:?}");
+    assert_eq!(report.steps.len(), 3);
+    assert!(
+        report.steps[1].summary.to_ascii_lowercase().contains("click"),
+        "unexpected click summary: {:?}",
+        report.steps[1]
+    );
+    assert!(
+        report.steps[2].summary.to_ascii_lowercase().contains("fill"),
+        "unexpected fill summary: {:?}",
+        report.steps[2]
+    );
+    assert_eq!(report.steps[2].verified, Some(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn production_ref_errors_distinguish_stale_and_navigation_generations() {
     let Some(mut case) = BrowserCase::start("snapshot.html").await else {
         return;

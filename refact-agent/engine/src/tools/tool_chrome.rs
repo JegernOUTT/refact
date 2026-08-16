@@ -71,7 +71,6 @@ pub struct SettingsChrome {
 #[derive(Default)]
 pub struct ToolChrome {
     pub settings_chrome: SettingsChrome,
-    pub supports_clicks: bool,
     pub config_path: String,
 }
 
@@ -79,10 +78,42 @@ pub struct ToolChrome {
 
 const MAX_CACHED_LOG_LINES: usize = 1000;
 
-fn browser_locator_schema() -> serde_json::Value {
+const LOCATOR_HANDLER_STEP_ACTIONS: &[&str] =
+    crate::integrations::browser_models::BrowserStep::ACTION_NAMES;
+
+const CHROME_DESCRIPTION: &str = concat!(
+    "Ref-first batched browser automation. Prefer the typed `request`: ONE call can carry many steps, unlike one-action-per-call servers. ",
+    "Take `accessibility_snapshot`, read its `[ref=eN]` handles, then act with `locator.by=ref`; refs come from the most recent snapshot. ",
+    "Canonical batch: {\"steps\":[{\"action\":\"accessibility_snapshot\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]} Pass this object as `request`; e5/e7 stand for handles minted by the latest snapshot.\n",
+    "Core: navigate, reload, go_back, go_forward, open_tab, close_tab, switch_tab, list_tabs, click, click_if_exists, hover, focus, blur, scroll_to, press_key.\n",
+    "Forms: fill, clear, select_option, check, uncheck.\n",
+    "Waiting: wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. ",
+    "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, or `wait_for_selector` for genuine synchronization.\n",
+    "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, styles, tab_log.\n",
+    "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report.\n",
+    "Files: set_input_files, expect_file_chooser, wait_for_download.\n",
+    "Dialogs: handle_dialog arms the next dialog with `accept` and optional `prompt_text`; unarmed dialogs auto-dismiss except beforeunload, which is accepted.\n",
+    "Advanced: eval, add_locator_handler, remove_locator_handler, dismiss_overlays, highlight_element, and fixed-delay wait_seconds. Locator handlers use `{type:\"click\"}` or `{type:\"steps\",steps:[...]}`.\n",
+    "Locator fallback vocabulary: ref; role with name/description, exact or regex, and checked/pressed/selected/expanded/disabled/level/include_hidden filters; test_id with configurable `attribute`; text, label, placeholder, alt_text, title, css, xpath, id, name, and autocomplete. ",
+    "Compose with zero-based `nth` (-1 is last), first/last, locator, filter (has/has_not/has_text/has_not_text/visible), and/or, or an outermost-first `frames` chain. Non-selecting actions are strict: ambiguous locators fail loudly with the match count. Same-process frames are supported; out-of-process frames fail explicitly.\n",
+    "Set `attach_screenshot=true` for a policy-sized screenshot; page-changing batches capture automatically. The legacy newline-separated `commands` input remains accepted but is deprecated; new callers must use `request.steps`."
+);
+
+fn locator_regex_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": "Ref-first element address or composable fallback locator. Use by=ref with a value from the latest accessibility_snapshot whenever available. Add frames for an outermost-first chain of iframe-owner locators; same-process frames are supported and out-of-process frames fail explicitly. Add locator to query a nested locator under every outer match; filter supports has, has_not, has_text, has_not_text, and visible; and intersects while or unions in DOM order. first and last select endpoints. nth is zero-based and accepts -1 for the last match; Playwright CSS :nth-match is one-based. within remains a legacy CSS scope; prefer locator.",
+        "required": ["source"],
+        "properties": {
+            "source": {"type": "string"},
+            "flags": {"type": "string"}
+        }
+    })
+}
+
+fn browser_locator_schema() -> serde_json::Value {
+    let mut schema = serde_json::json!({
+        "type": "object",
+        "description": "Ref-first element address or composable fallback locator. Ambiguous strict actions fail with the match count.",
         "required": ["by"],
         "properties": {
             "by": {"type": "string", "enum": ["ref", "css", "id", "name", "text", "label", "role", "xpath", "placeholder", "alt_text", "title", "autocomplete", "test_id"]},
@@ -90,27 +121,239 @@ fn browser_locator_schema() -> serde_json::Value {
             "frames": {"type": "array", "items": {"type": "object"}, "description": "Outermost-first iframe-owner locator chain. Each owner must resolve to exactly one iframe or frame element."},
             "nth": {"type": "integer", "description": "Zero-based match index; -1 selects the last match. CSS :nth-match is one-based."},
             "within": {"type": "string", "description": "Deprecated CSS scope kept for compatibility; use locator for chaining"},
-            "locator": {"type": "object", "description": "Relative locator evaluated under each outer match"},
-            "filter": {"type": "object", "description": "Candidate filter with has/has_not relative locators, has_text/has_not_text string or regex, and visible"},
-            "and": {"type": "object", "description": "Locator whose matches intersect this locator"},
-            "or": {"type": "object", "description": "Locator whose matches union with this locator in DOM order"},
+            "locator": {"type": "object", "description": "Nested BrowserLocator evaluated under each outer match"},
+            "filter": {
+                "type": "object",
+                "properties": {
+                    "has": {"type": "object", "description": "Relative BrowserLocator required under the candidate"},
+                    "has_not": {"type": "object", "description": "Relative BrowserLocator forbidden under the candidate"},
+                    "has_text": {"oneOf": [{"type": "string"}, {"type": "object", "required": ["source"], "properties": {"source": {"type": "string"}, "flags": {"type": "string"}}}]},
+                    "has_not_text": {"oneOf": [{"type": "string"}, {"type": "object", "required": ["source"], "properties": {"source": {"type": "string"}, "flags": {"type": "string"}}}]},
+                    "visible": {"type": "boolean"}
+                }
+            },
+            "and": {"type": "object", "description": "BrowserLocator whose matches intersect this locator"},
+            "or": {"type": "object", "description": "BrowserLocator whose matches union with this locator in DOM order"},
             "first": {"type": "boolean", "description": "Select the first match"},
             "last": {"type": "boolean", "description": "Select the last match"},
             "exact": {"type": "boolean", "description": "Case-sensitive whole-string match; regex ignores it"},
-            "regex": {"type": "object", "description": "JavaScript RegExp {source, flags}"},
             "attribute": {"type": "string", "description": "Test-id attribute; defaults to data-testid"},
             "role": {"type": "string", "description": "ARIA role"},
             "name": {"type": "string", "description": "Accessible name"},
             "description": {"type": "string", "description": "Accessible description"},
-            "name_regex": {"type": "object", "description": "Accessible-name JavaScript RegExp {source, flags}"},
-            "description_regex": {"type": "object", "description": "Accessible-description JavaScript RegExp {source, flags}"},
-            "checked": {"description": "Checked state boolean or mixed"},
-            "pressed": {"description": "Pressed state boolean or mixed"},
+            "checked": {"oneOf": [{"type": "boolean"}, {"type": "string", "enum": ["mixed"]}]},
+            "pressed": {"oneOf": [{"type": "boolean"}, {"type": "string", "enum": ["mixed"]}]},
             "selected": {"type": "boolean"},
             "expanded": {"type": "boolean"},
             "disabled": {"type": "boolean"},
             "level": {"type": "integer"},
             "include_hidden": {"type": "boolean"}
+        }
+    });
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("locator properties are present");
+    properties.insert("regex".to_string(), locator_regex_schema());
+    properties.insert("name_regex".to_string(), locator_regex_schema());
+    properties.insert("description_regex".to_string(), locator_regex_schema());
+    schema
+}
+
+fn tab_target_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+            "type": {"type": "string", "enum": ["active", "id"]},
+            "id": {"type": "string", "description": "Required when type is id"}
+        }
+    })
+}
+
+fn url_pattern_schema() -> serde_json::Value {
+    serde_json::json!({
+        "oneOf": [
+            {"type": "string"},
+            {
+                "type": "object",
+                "required": ["source"],
+                "properties": {
+                    "source": {"type": "string"},
+                    "flags": {"type": "string"}
+                }
+            }
+        ]
+    })
+}
+
+fn browser_step_schema_with_actions(
+    actions: &[&str],
+    include_locator_handler: bool,
+) -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        "action".to_string(),
+        serde_json::json!({
+            "type": "string",
+            "description": "Browser action in snake_case",
+            "enum": actions
+        }),
+    );
+    properties.insert("url".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "device".to_string(),
+        serde_json::json!({"type": "string", "enum": ["desktop", "mobile", "tablet"]}),
+    );
+    properties.insert("tab".to_string(), tab_target_schema());
+    properties.insert("locator".to_string(), browser_locator_schema());
+    properties.insert("root".to_string(), browser_locator_schema());
+    properties.insert("text".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert("key".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "modifiers".to_string(),
+        serde_json::json!({"type": "array", "items": {"type": "string", "enum": ["Alt", "Ctrl", "Meta", "Shift"]}}),
+    );
+    properties.insert(
+        "expression".to_string(),
+        serde_json::json!({"type": "string"}),
+    );
+    properties.insert(
+        "selector".to_string(),
+        serde_json::json!({"type": "string", "description": "CSS selector for dom_snapshot"}),
+    );
+    properties.insert(
+        "contains".to_string(),
+        serde_json::json!({"type": "string"}),
+    );
+    properties.insert("value".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "attribute".to_string(),
+        serde_json::json!({"type": "string"}),
+    );
+    properties.insert("seconds".to_string(), serde_json::json!({"type": "number"}));
+    properties.insert(
+        "timeout_ms".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 0}),
+    );
+    properties.insert(
+        "limit".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 0}),
+    );
+    properties.insert(
+        "clear_first".to_string(),
+        serde_json::json!({"type": "boolean", "description": "Defaults to true"}),
+    );
+    properties.insert(
+        "verify".to_string(),
+        serde_json::json!({"type": "boolean", "description": "Defaults to true for fill and clear"}),
+    );
+    properties.insert(
+        "max_chars".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 0}),
+    );
+    properties.insert(
+        "property_filter".to_string(),
+        serde_json::json!({"type": "string"}),
+    );
+    properties.insert(
+        "mode".to_string(),
+        serde_json::json!({"type": "string", "enum": ["ai", "default"], "description": "Accessibility snapshot mode; defaults to ai"}),
+    );
+    properties.insert(
+        "refs".to_string(),
+        serde_json::json!({"type": "boolean", "description": "Mint refs in accessibility_snapshot; defaults to true in ai mode"}),
+    );
+    properties.insert(
+        "boxes".to_string(),
+        serde_json::json!({"type": "boolean", "description": "Include element boxes in accessibility_snapshot"}),
+    );
+    properties.insert(
+        "paths".to_string(),
+        serde_json::json!({"type": "array", "items": {"type": "string"}}),
+    );
+    properties.insert(
+        "state".to_string(),
+        serde_json::json!({"type": "string", "enum": ["domcontentloaded", "load", "networkidle"]}),
+    );
+    properties.insert("url_or_pattern".to_string(), url_pattern_schema());
+    properties.insert("save_as".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert("name".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "times".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 1}),
+    );
+    properties.insert(
+        "no_wait_after".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    properties.insert("accept".to_string(), serde_json::json!({"type": "boolean"}));
+    properties.insert(
+        "prompt_text".to_string(),
+        serde_json::json!({"type": "string"}),
+    );
+    if include_locator_handler {
+        properties.insert("handler".to_string(), locator_handler_schema());
+    }
+    serde_json::json!({
+        "type": "object",
+        "required": ["action"],
+        "properties": properties
+    })
+}
+
+fn locator_handler_schema() -> serde_json::Value {
+    serde_json::json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "required": ["type"],
+                "properties": {"type": {"type": "string", "enum": ["click"]}}
+            },
+            {
+                "type": "object",
+                "required": ["type", "steps"],
+                "properties": {
+                    "type": {"type": "string", "enum": ["steps"]},
+                    "steps": {
+                        "type": "array",
+                        "items": browser_step_schema_with_actions(LOCATOR_HANDLER_STEP_ACTIONS, false)
+                    }
+                }
+            }
+        ]
+    })
+}
+
+fn browser_request_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Typed batched browser request",
+        "required": ["steps"],
+        "properties": {
+            "session": {"type": "string", "enum": ["shared_default"]},
+            "attach_screenshot": {"type": "boolean", "description": "Include a policy-sized screenshot; page-changing batches capture automatically"},
+            "target": tab_target_schema(),
+            "steps": {
+                "type": "array",
+                "items": browser_step_schema_with_actions(
+                    crate::integrations::browser_models::BrowserStep::ACTION_NAMES,
+                    true,
+                )
+            }
+        }
+    })
+}
+
+fn chrome_input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "request": browser_request_schema(),
+            "commands": {
+                "type": "string",
+                "description": "Deprecated compatibility-only newline-separated browser commands; use request.steps",
+                "deprecated": true
+            }
         }
     })
 }
@@ -377,157 +620,6 @@ impl Tool for ToolChrome {
     }
 
     fn tool_description(&self) -> ToolDesc {
-        let mut supported_commands = vec![
-            "open_tab <tab_id> <desktop|mobile|tablet>",
-            "navigate_to <tab_id> <uri>",
-            "scroll_to <tab_id> <element_selector>",
-            "screenshot <tab_id>",
-            "html <tab_id> <element_selector>",
-            "reload <tab_id>",
-            "press_key <tab_id> <KeyName> [<Alt|Ctrl|Meta|Shift>,...]",
-            "type_text_at <tab_id> <text>",
-            "fill_field <tab_id> <selector> <text>",
-            "tab_log <tab_id>",
-            "eval <tab_id> <expression>",
-            "styles <tab_id> <element_selector> [--filter <property_filter>]",
-            "wait_for <tab_id> <0.5-10>",
-            "click_at_element <tab_id> <element_selector>",
-            "wait_for_selector <tab_id> <element_selector>",
-            "wait_for_navigation <tab_id>",
-            "list_tabs",
-            "close_tab <tab_id>",
-        ];
-        if self.supports_clicks {
-            supported_commands.extend(vec!["click_at_point <tab_id> <x> <y>"]);
-        }
-        let description = format!(
-            "A web browser for automation. One or several commands separated by newline. \
-             The <tab_id> is an integer, for example 10, for you to identify the tab later. \
-             Use wait_for_selector or wait_for_navigation to synchronize with page loading. \
-             Supported commands:\n{}\n\
-             The `commands` input is compatibility-only; prefer the typed `request` input for new callers.\n\
-             Selectors and expressions can contain any characters — no quoting needed for most commands. \
-             For `fill_field`, quote the selector when it contains spaces, e.g. `fill_field 1 \"form input[name=q]\" hello`. \
-             For multiline expressions use heredoc: eval <tab_id> <<EOF\\n...\\nEOF\nBlank lines and lines starting with // or # are ignored.\n\
-             \n\
-             Preferred `request` input: pass a JSON object with a `steps` array. Each step is a JSON object \
-             with an `action` field (snake_case) and action-specific fields. \
-             Set `attach_screenshot` to true to include a policy-sized screenshot in the transactional report; \
-             it defaults to false and page-changing batches capture automatically. \
-             JavaScript dialogs auto-dismiss when unarmed, except beforeunload is accepted so \
-             navigation or close can proceed. A `handle_dialog` step with `accept` and optional \
-             `prompt_text` arms the next dialog; unlike Playwright's event listener, it cannot \
-             handle an already-open dialog. \
-             Example steps: {{\"action\": \"handle_dialog\", \"accept\": true, \"prompt_text\": \"answer\"}}, \
-             {{\"action\": \"open_tab\", \"device\": \"desktop\"}}, \
-             {{\"action\": \"navigate\", \"url\": \"https://example.com\"}}, \
-             {{\"action\": \"screenshot\"}}. \
-             `add_locator_handler` requires `name`, `locator`, and `handler`; handler is \
-             {{\"type\":\"click\"}} or {{\"type\":\"steps\",\"steps\":[...]}} and accepts optional `times` and `no_wait_after`. \
-             `remove_locator_handler` requires `name`. \
-             Take an `accessibility_snapshot` and prefer its refs in later steps from the same batch. \
-             Locators use a `by` field (ref/css/id/name/text/label/role/xpath/placeholder/alt_text/title/autocomplete/test_id) and a `value` field \
-             (except role locators which use `role` and optional `name` instead of `value`). \
-             Text-like locators accept `exact` or a JavaScript `regex` object with `source` and optional `flags`; regex ignores exact. \
-             Role locators use `role` with accessible-name/description and ARIA-state filters. Test-id locators accept a custom `attribute` and default to `data-testid`. \
-             A locator may include `frames`, an outermost-first array of iframe-owner locators; same-process frames are supported and out-of-process frames fail explicitly.",
-            supported_commands.join("\n"));
-        let mut input_schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "commands": {
-                        "type": "string",
-                        "description": "Compatibility-only legacy newline-separated browser commands. Prefer `request`.",
-                        "deprecated": true
-                    },
-                    "request": {
-                        "type": "object",
-                        "description": "Typed browser action request.",
-                        "properties": {
-                            "session": {"type": "string", "enum": ["shared_default"]},
-                            "attach_screenshot": {"type": "boolean", "description": "Include a policy-sized screenshot in the report. Defaults to false; page-changing batches capture automatically."},
-                            "target": {
-                                "type": "object",
-                                "properties": {
-                                    "type": {"type": "string", "enum": ["active", "id"]},
-                                    "id": {"type": "string"}
-                                },
-                                "required": ["type"]
-                            },
-                            "steps": {
-                                "type": "array",
-                                "description": "List of browser steps. Each step must have an 'action' field (snake_case).",
-                                "items": {
-                                    "type": "object",
-                                    "required": ["action"],
-                                    "properties": {
-                                        "action": {
-                                            "type": "string",
-                                            "description": "The browser action to perform.",
-                                            "enum": [
-                                                "navigate", "reload", "go_back", "go_forward",
-                                                "open_tab", "close_tab", "switch_tab", "list_tabs",
-                                                "click", "click_if_exists", "hover", "focus", "blur", "scroll_to",
-                                                "press_key", "fill", "clear", "select_option", "check", "uncheck",
-                                                "wait_for_selector", "wait_for_navigation", "wait_for_url", "wait_for_text",
-                                                "wait_for_network_idle", "wait_for_element_hidden", "wait_for_element_stable", "wait_seconds",
-                                                "get_text", "get_html", "get_attribute", "extract_links", "extract_table",
-                                                "dom_snapshot", "accessibility_snapshot", "screenshot", "screenshot_element",
-                                                "eval", "styles", "tab_log", "add_locator_handler", "remove_locator_handler", "handle_dialog", "dismiss_overlays", "highlight_element"
-                                            ]
-                                        },
-                                        "url": {"type": "string", "description": "URL for navigate action"},
-                                        "device": {"type": "string", "enum": ["desktop", "mobile", "tablet"], "description": "Device type for open_tab"},
-                                        "tab": {
-                                            "type": "object",
-                                            "description": "Tab target for switch_tab",
-                                            "properties": {
-                                                "type": {"type": "string", "enum": ["active", "id"]},
-                                                "id": {"type": "string", "description": "Required when type is 'id'"}
-                                            },
-                                            "required": ["type"]
-                                        },
-                                        "locator": browser_locator_schema(),
-                                        "text": {"type": "string", "description": "Text for fill/wait_for_text actions"},
-                                        "key": {"type": "string", "description": "Key name for press_key (e.g. Enter, Tab, Escape)"},
-                                        "modifiers": {"type": "array", "items": {"type": "string"}, "description": "Modifiers for press_key: Alt, Ctrl, Meta, Shift"},
-                                        "expression": {"type": "string", "description": "JavaScript expression for eval action"},
-                                        "selector": {"type": "string", "description": "CSS selector for dom_snapshot action"},
-                                        "contains": {"type": "string", "description": "URL substring to match in wait_for_url"},
-                                        "value": {"type": "string", "description": "Option value for select_option"},
-                                        "attribute": {"type": "string", "description": "Attribute name for get_attribute"},
-                                        "seconds": {"type": "number", "description": "Seconds to wait for wait_seconds"},
-                                        "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds"},
-                                        "limit": {"type": "integer", "description": "Max results for extract_links"},
-                                        "clear_first": {"type": "boolean", "description": "Clear field before filling (default true)"},
-                                        "verify": {"type": "boolean", "description": "Verify fill result (default true)"},
-                                        "max_chars": {"type": "integer", "description": "Max characters for dom_snapshot or accessibility_snapshot"},
-                                        "property_filter": {"type": "string", "description": "CSS property filter for styles action"}
-                                    }
-                                }
-                            }
-                        },
-                        "required": ["steps"]
-                    }
-            }
-        });
-        let step_properties = input_schema
-            .pointer_mut("/properties/request/properties/steps/items/properties")
-            .and_then(Value::as_object_mut)
-            .expect("chrome step properties are present");
-        step_properties.insert(
-            "mode".to_string(),
-            serde_json::json!({"type": "string", "enum": ["ai", "default"], "description": "ARIA snapshot mode; defaults to ai"}),
-        );
-        step_properties.insert(
-            "refs".to_string(),
-            serde_json::json!({"type": "boolean", "description": "Mint refs in accessibility_snapshot; defaults to true in ai mode"}),
-        );
-        step_properties.insert(
-            "boxes".to_string(),
-            serde_json::json!({"type": "boolean", "description": "Include element boxes in accessibility_snapshot; defaults to false"}),
-        );
-        step_properties.insert("root".to_string(), browser_locator_schema());
         ToolDesc {
             name: "chrome".to_string(),
             display_name: "Chrome".to_string(),
@@ -537,8 +629,8 @@ impl Tool for ToolChrome {
             },
             experimental: false,
             allow_parallel: false,
-            description,
-            input_schema,
+            description: CHROME_DESCRIPTION.to_string(),
+            input_schema: chrome_input_schema(),
             output_schema: None,
             annotations: None,
         }
@@ -546,6 +638,142 @@ impl Tool for ToolChrome {
 
     fn has_config_path(&self) -> Option<String> {
         Some(self.config_path.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    fn schema_action_names(schema: &Value) -> BTreeSet<String> {
+        schema
+            .pointer("/properties/request/properties/steps/items/properties/action/enum")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn chrome_schema_serializes_and_covers_every_browser_step_variant() {
+        let schema = chrome_input_schema();
+        serde_json::to_string(&schema).unwrap();
+        let model_actions = crate::integrations::browser_models::BrowserStep::ACTION_NAMES
+            .iter()
+            .map(|action| action.to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(schema_action_names(&schema), model_actions);
+    }
+
+    #[test]
+    fn chrome_schema_exposes_current_browser_step_parameters() {
+        let schema = chrome_input_schema();
+        let properties = schema
+            .pointer("/properties/request/properties/steps/items/properties")
+            .and_then(Value::as_object)
+            .unwrap();
+        for field in [
+            "accept",
+            "attribute",
+            "boxes",
+            "clear_first",
+            "contains",
+            "device",
+            "expression",
+            "handler",
+            "key",
+            "limit",
+            "locator",
+            "max_chars",
+            "mode",
+            "modifiers",
+            "name",
+            "no_wait_after",
+            "paths",
+            "prompt_text",
+            "property_filter",
+            "refs",
+            "root",
+            "save_as",
+            "seconds",
+            "selector",
+            "state",
+            "tab",
+            "text",
+            "timeout_ms",
+            "times",
+            "url",
+            "url_or_pattern",
+            "value",
+            "verify",
+        ] {
+            assert!(
+                properties.contains_key(field),
+                "missing schema field {field}"
+            );
+        }
+        assert_eq!(
+            schema.pointer("/properties/commands/deprecated"),
+            Some(&Value::Bool(true))
+        );
+        let url_pattern_required = schema
+            .pointer("/properties/request/properties/steps/items/properties/url_or_pattern/oneOf/1/required")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(url_pattern_required, &[Value::String("source".to_string())]);
+    }
+
+    #[test]
+    fn chrome_description_is_ref_first_batched_and_actionability_aware() {
+        let description = ToolChrome::default().tool_description().description;
+        let canonical = "{\"steps\":[{\"action\":\"accessibility_snapshot\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]}";
+        assert!(description.starts_with("Ref-first batched browser automation."));
+        assert!(description.contains("ONE call can carry many steps"));
+        assert!(description.contains(canonical));
+        assert!(description.contains("refs come from the most recent snapshot"));
+        assert!(description.contains("auto-wait for actionability"));
+        assert!(description.contains("Never use `wait_seconds` for readiness"));
+        assert!(description.contains("wait_for_response"));
+        assert!(description.contains("wait_for_load_state"));
+        assert!(description.contains("wait_for_selector"));
+        assert!(!description.contains("Use `wait_seconds` for readiness"));
+    }
+
+    #[test]
+    fn chrome_description_groups_capabilities_and_documents_locators() {
+        let description = ToolChrome::default().tool_description().description;
+        for heading in [
+            "Core:",
+            "Forms:",
+            "Waiting:",
+            "Inspection:",
+            "Network:",
+            "Files:",
+            "Dialogs:",
+            "Advanced:",
+        ] {
+            assert!(description.contains(heading), "missing heading {heading}");
+        }
+        for locator_term in [
+            "ref;",
+            "role with",
+            "test_id",
+            "text, label, placeholder, alt_text, title, css, xpath",
+            "zero-based `nth`",
+            "filter (has/has_not/has_text/has_not_text/visible)",
+            "outermost-first `frames` chain",
+            "ambiguous locators fail loudly with the match count",
+        ] {
+            assert!(
+                description.contains(locator_term),
+                "missing locator documentation {locator_term}"
+            );
+        }
+        assert!(description.contains("legacy newline-separated `commands` input"));
+        assert!(description.contains("deprecated"));
     }
 }
 
