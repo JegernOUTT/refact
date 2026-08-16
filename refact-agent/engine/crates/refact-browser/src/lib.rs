@@ -1482,6 +1482,143 @@ mod tests {
         assert_eq!(buf.flush_network_buffer().len(), 1);
     }
 
+    // Independent consumers must not hide browser activity from chat context, reports, or timelines.
+    #[test]
+    fn differentiator_09_buffer_cursors_are_independent_for_every_consumer() {
+        let mut buf = make_test_buffers();
+        buf.handle_recorder_event(
+            r##"{"type":"click","selector":"#button","text":"Go","x":1,"y":2,"timestamp":3}"##,
+        );
+        buf.console_buffer.push(ConsoleEntry {
+            timestamp: 4.0,
+            level: "log".to_string(),
+            text: "console event".to_string(),
+        });
+        buf.network_buffer.push(NetworkEntry {
+            timestamp: 5.0,
+            method: "GET".to_string(),
+            url: "https://example.com/data".to_string(),
+            resource_type: "Fetch".to_string(),
+            status: Some(200),
+            ..NetworkEntry::default()
+        });
+
+        assert_eq!(buf.flush_report_console().len(), 1);
+        assert_eq!(buf.flush_report_network().len(), 1);
+        assert_eq!(buf.flush_action_buffer().len(), 1);
+        assert_eq!(buf.flush_console_buffer().len(), 1);
+        assert_eq!(buf.flush_network_buffer().len(), 1);
+        let (actions, console, network) = buf.flush_timeline_events();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(console.len(), 1);
+        assert_eq!(network.len(), 1);
+    }
+
+    // Replay and observability depend on retaining every supported user event plus batched mutations.
+    #[test]
+    fn differentiator_10_live_recorder_script_keeps_complete_event_inventory() {
+        let script = build_recorder_script(true);
+
+        for event in [
+            "type: 'navigation'",
+            "type: 'click'",
+            "type: 'input'",
+            "type: 'keypress'",
+            "type: 'submit'",
+            "type: 'scroll'",
+            "type: 'mutation_summary'",
+        ] {
+            assert!(script.contains(event), "recorder lacks {event}");
+        }
+        assert!(script.contains("new MutationObserver"));
+        assert!(script.contains("}, 500);"));
+    }
+
+    // A closed maximum-z toolbar stays human-visible while preventing page scripts from reaching its controls.
+    #[test]
+    fn differentiator_11_toolbar_script_keeps_closed_shadow_and_event_channel() {
+        for contract in [
+            "attachShadow({ mode: 'closed' })",
+            "z-index:2147483646",
+            "type: 'toolbar_action'",
+            "data-action",
+            "screenshot",
+            "curl",
+            "annotate",
+            "highlight",
+        ] {
+            assert!(
+                TOOLBAR_SCRIPT.contains(contract),
+                "toolbar lacks {contract}"
+            );
+        }
+    }
+
+    // Browser-side detection plus Rust-side remasking must keep secrets out of serialized recorder output.
+    #[test]
+    fn differentiator_12_password_masking_has_two_layers_and_serializes_safely() {
+        let script = build_recorder_script(true);
+        assert!(script.contains("el.type === 'password'"));
+        assert!(script.contains("ac === 'current-password' || ac === 'new-password'"));
+
+        let secret = "serialized-secret";
+        let mut buf = make_test_buffers();
+        buf.handle_recorder_event(&format!(
+            r##"{{"type":"input","selector":"#password","value":"{secret}","masked":true,"timestamp":1}}"##
+        ));
+        let payload = serde_json::to_string(&buf.flush_action_buffer()).unwrap();
+        assert!(!payload.contains(secret), "secret leaked: {payload}");
+        assert!(payload.contains("*****************"));
+    }
+
+    // Page-observable stealth patches must remain separate from isolated automation internals.
+    #[test]
+    fn differentiator_13_stealth_stays_in_main_world_with_required_patches() {
+        let stealth = stealth_init_script();
+        assert_eq!(stealth.world_name, None);
+        assert!(stealth.source.contains("navigator, 'webdriver'"));
+        assert!(stealth.source.contains("window.chrome.runtime"));
+        assert!(stealth.source.contains("params.name === 'notifications'"));
+        assert_eq!(
+            world::utility_init_script().world_name.as_deref(),
+            Some(UTILITY_WORLD_NAME)
+        );
+    }
+
+    // Persistent profiles and explicit ownership transitions keep browser state reusable across chat attachment.
+    #[test]
+    fn differentiator_14_runtime_source_keeps_profile_idle_and_chat_lifecycle() {
+        let source = include_str!("lib.rs");
+
+        for contract in [
+            "user_data_dir: Some(profile_dir.clone())",
+            "Duration::from_secs(600)",
+            "pub fn reattach(&mut self, chat_id: &str)",
+            "pub fn detach(&mut self)",
+            "pub fn is_idle_expired(&self) -> bool",
+            "pub fn touch(&mut self)",
+        ] {
+            assert!(source.contains(contract), "runtime lacks {contract}");
+        }
+    }
+
+    // Device emulation must preserve the three product presets and mobile flags at the controller boundary.
+    #[test]
+    fn differentiator_15_device_presets_keep_dimensions_dpr_and_mobile_flags() {
+        let source = include_str!("../../../src/integrations/browser_controller.rs");
+
+        for preset in [
+            "Some(\"mobile\") => (390, 844, 3.0, true)",
+            "Some(\"tablet\") => (834, 1112, 2.0, true)",
+            "_ => (1440, 900, 2.0, false)",
+        ] {
+            assert!(source.contains(preset), "controller lacks {preset}");
+        }
+        assert!(source.contains("SetDeviceMetricsOverride"));
+        assert!(source.contains("device_scale_factor: dpr"));
+        assert!(source.contains("mobile,"));
+    }
+
     #[test]
     fn test_flush_mutation_summary() {
         let mut buf = make_test_buffers();
