@@ -897,7 +897,10 @@ mod tests {
 
         let req = crate::llm::canonical::LlmRequest::new("gpt-4.1".to_string(), messages);
         let body = OpenAiChatAdapter
-            .build_http(&req, &default_openai_settings())
+            .build_http(
+                &refact_privacy::testing::cleared(req),
+                &default_openai_settings(),
+            )
             .unwrap()
             .body;
         let wire_messages = body["messages"].as_array().unwrap();

@@ -293,14 +293,20 @@ async fn prepare_request(
 
 fn openai_body(req: &LlmRequest, model_name: &str) -> Value {
     OpenAiChatAdapter
-        .build_http(req, &openai_settings(model_name))
+        .build_http(
+            &refact_privacy::testing::cleared(req.clone()),
+            &openai_settings(model_name),
+        )
         .unwrap()
         .body
 }
 
 fn claude_body(req: &LlmRequest, model_name: &str) -> Value {
     AnthropicAdapter
-        .build_http(req, &claude_code_settings(model_name))
+        .build_http(
+            &refact_privacy::testing::cleared(req.clone()),
+            &claude_code_settings(model_name),
+        )
         .unwrap()
         .body
 }
@@ -629,10 +635,16 @@ async fn cache_stability_claude_code_identity_survives_reload_and_reuses_bytes()
     .with_claude_code_identity(loaded.thread.claude_code_identity.clone());
     let req_b = req_a.clone();
     let http_a = AnthropicAdapter
-        .build_http(&req_a, &claude_code_settings("claude-opus-4"))
+        .build_http(
+            &refact_privacy::testing::cleared(req_a),
+            &claude_code_settings("claude-opus-4"),
+        )
         .unwrap();
     let http_b = AnthropicAdapter
-        .build_http(&req_b, &claude_code_settings("claude-opus-4"))
+        .build_http(
+            &refact_privacy::testing::cleared(req_b),
+            &claude_code_settings("claude-opus-4"),
+        )
         .unwrap();
 
     assert_eq!(

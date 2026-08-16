@@ -921,7 +921,7 @@ mod tests {
         };
 
         let body = OpenAiChatAdapter
-            .build_http(&request, &settings)
+            .build_http(&refact_privacy::testing::cleared(request), &settings)
             .unwrap()
             .body;
         let serialized = body["messages"].to_string();
@@ -966,7 +966,7 @@ mod tests {
         };
 
         let body = AnthropicAdapter
-            .build_http(&request, &settings)
+            .build_http(&refact_privacy::testing::cleared(request), &settings)
             .unwrap()
             .body;
         let serialized = body["messages"].to_string();

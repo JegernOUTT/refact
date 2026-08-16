@@ -440,7 +440,10 @@ mod tests {
     fn assert_openai_tool_result_not_preceded_by_hidden_role(messages: Vec<ChatMessage>) {
         let req = crate::llm::canonical::LlmRequest::new("gpt-4.1".to_string(), messages);
         let body = OpenAiChatAdapter
-            .build_http(&req, &default_settings())
+            .build_http(
+                &refact_privacy::testing::cleared(req),
+                &default_settings(),
+            )
             .unwrap()
             .body;
         let wire_messages = body["messages"].as_array().unwrap();

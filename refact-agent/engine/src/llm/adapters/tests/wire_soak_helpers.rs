@@ -85,7 +85,10 @@ pub fn lower_body(
     settings: AdapterSettings,
 ) -> Value {
     let req = LlmRequest::new(settings.model_name.clone(), messages);
-    adapter.build_http(&req, &settings).unwrap().body
+    adapter
+        .build_http(&refact_privacy::testing::cleared(req), &settings)
+        .unwrap()
+        .body
 }
 
 pub fn assert_no_literal_role_strings_in_body(body: &Value) {
