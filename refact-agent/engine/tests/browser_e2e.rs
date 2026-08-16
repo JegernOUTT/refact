@@ -50,6 +50,9 @@ const FIXTURE_PAGES: &[&str] = &[
     "controlled-input.html",
     "form-actions.html",
     "iframe-form.html",
+    "nested-iframe.html",
+    "nested-iframe-outer.html",
+    "nested-iframe-inner.html",
     "shadow-dom.html",
     "dialog.html",
     "fetch-after-click.html",
@@ -1130,6 +1133,7 @@ async fn handle_clicks_second_strict_match() {
         strategy: refact_lsp::integrations::browser_models::LocatorStrategy::Css {
             value: ".duplicate".to_string(),
         },
+        frames: Vec::new(),
         nth: Some(1),
         within: None,
         locator: None,
@@ -1699,13 +1703,20 @@ async fn iframe_form_submit_reaches_same_origin_frame() {
         &case.tab,
         &[
             BrowserStep::Fill {
-                locator: BrowserLocator::css("#frame-name"),
+                locator: BrowserLocator::role("textbox", Some("Name"))
+                    .in_frames(vec![BrowserLocator::css("#form-frame")]),
                 text: "Frame User".to_string(),
                 clear_first: true,
                 verify: true,
             },
+            BrowserStep::WaitForSelector {
+                locator: BrowserLocator::role("button", Some("Submit"))
+                    .in_frames(vec![BrowserLocator::css("#form-frame")]),
+                timeout_ms: Some(2_000),
+            },
             BrowserStep::Click {
-                locator: BrowserLocator::css("#frame-submit"),
+                locator: BrowserLocator::role("button", Some("Submit"))
+                    .in_frames(vec![BrowserLocator::css("#form-frame")]),
             },
             BrowserStep::WaitForText {
                 text: "submitted Frame User".to_string(),
@@ -1714,6 +1725,56 @@ async fn iframe_form_submit_reaches_same_origin_frame() {
         ],
     );
     assert!(report.ok, "same-origin iframe action failed: {report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn nested_iframe_click_and_hidden_wait_use_frame_chain() {
+    let Some(case) = BrowserCase::start("nested-iframe.html").await else {
+        return;
+    };
+    let frames = vec![
+        BrowserLocator::css("#outer-frame"),
+        BrowserLocator::css("#inner-frame"),
+    ];
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::Click {
+                locator: BrowserLocator::role("button", Some("Hide status"))
+                    .in_frames(frames.clone()),
+            },
+            BrowserStep::WaitForElementHidden {
+                locator: BrowserLocator::role("status", None).in_frames(frames),
+                timeout_ms: Some(2_000),
+            },
+        ],
+    );
+
+    assert!(report.ok, "nested iframe action or wait failed: {report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn ambiguous_iframe_owner_reports_strict_violation() {
+    let Some(case) = BrowserCase::start("nested-iframe.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::WaitForSelector {
+            locator: BrowserLocator::role("button", Some("Hide status"))
+                .in_frames(vec![BrowserLocator::css("iframe.owner")]),
+            timeout_ms: Some(2_000),
+        }],
+    );
+
+    assert!(!report.ok, "ambiguous frame owner must fail: {report:?}");
+    assert!(report.steps[0]
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("frame locator resolved to 2 iframe elements"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2672,7 +2733,25 @@ async fn get_by_locators_match_playwright_semantics() {
             flags: "i".to_string(),
         }),
     };
-    assert_eq!(resolve(serde_json::to_value(BrowserLocator { strategy: regex, nth: None, within: None, locator: None, filter: None, and: None, or: None, first: None, last: None }).unwrap()).len(), 1);
+    assert_eq!(
+        resolve(
+            serde_json::to_value(BrowserLocator {
+                strategy: regex,
+                frames: Vec::new(),
+                nth: None,
+                within: None,
+                locator: None,
+                filter: None,
+                and: None,
+                or: None,
+                first: None,
+                last: None
+            })
+            .unwrap()
+        )
+        .len(),
+        1
+    );
     let regex: BrowserLocator = serde_json::from_value(json!({
         "by": "text",
         "value": "does not matter",

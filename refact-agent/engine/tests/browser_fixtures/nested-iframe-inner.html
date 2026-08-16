@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Inner iframe</title>
+</head>
+<body>
+  <button id="hide" type="button">Hide status</button>
+  <div id="status" role="status">Ready</div>
+  <script>
+    document.querySelector('#hide').addEventListener('click', () => {
+      document.querySelector('#status').hidden = true;
+    });
+  </script>
+</body>
+</html>

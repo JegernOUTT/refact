@@ -276,25 +276,36 @@ impl FrameInvalidation {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrameLocatorError {
-    StrictViolation { count: usize },
+    StrictViolation { count: usize, previews: Vec<String> },
     ExpectedFrameElement,
     NoContentFrame,
+    OutOfProcessFrame { frame_id: FrameId },
     Handle(HandleError),
 }
 
 impl Display for FrameLocatorError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::StrictViolation { count } => write!(
-                formatter,
-                "Strict mode violation: frame locator resolved to {count} iframe elements"
-            ),
+            Self::StrictViolation { count, previews } => {
+                write!(
+                    formatter,
+                    "Strict mode violation: frame locator resolved to {count} iframe elements"
+                )?;
+                for (index, preview) in previews.iter().enumerate() {
+                    write!(formatter, "\n{}. {}", index + 1, preview)?;
+                }
+                Ok(())
+            }
             Self::ExpectedFrameElement => {
                 formatter.write_str("Frame locator resolved to an element that is not an iframe")
             }
             Self::NoContentFrame => {
                 formatter.write_str("Frame locator iframe has no attached content frame")
             }
+            Self::OutOfProcessFrame { frame_id } => write!(
+                formatter,
+                "Out-of-process iframe {frame_id} is not supported by this browser connection"
+            ),
             Self::Handle(error) => Display::fmt(error, formatter),
         }
     }
@@ -312,30 +323,83 @@ impl WorldManager {
     pub fn resolve_frame_locator(
         &self,
         tab: &Tab,
-        parent_frame_id: &str,
-        owner_locator: Value,
+        owner_locators: &[Value],
         target_locator: Value,
     ) -> Result<Vec<ElementHandle>, FrameLocatorError> {
-        let owners = self.call_injected_handles_in_frame(
-            tab,
-            parent_frame_id,
-            "resolveAll",
-            Value::Array(vec![owner_locator]),
-        )?;
-        let owner = strict_owner(owners)?;
-        let is_frame = self.call_function_on(
-            tab,
-            &owner,
-            "function() { return this instanceof HTMLIFrameElement || this instanceof HTMLFrameElement; }",
-            Vec::new(),
-        )?;
-        if is_frame != Value::Bool(true) {
+        self.ensure_utility_world(tab)
+            .map_err(|error| FrameLocatorError::Handle(HandleError::Resolution(error)))?;
+        let frame_tree = self.frame_tree(tab.get_target_id()).ok_or_else(|| {
+            FrameLocatorError::Handle(HandleError::Resolution(
+                "Browser utility world has no frame tree".to_string(),
+            ))
+        })?;
+        let mut frame_id = frame_tree
+            .main_frame_id()
+            .ok_or_else(|| {
+                FrameLocatorError::Handle(HandleError::Resolution(
+                    "Browser utility world has no main frame".to_string(),
+                ))
+            })?
+            .to_string();
+
+        for owner_locator in owner_locators {
+            reject_oopif(&frame_tree, &frame_id)?;
+            let owners = self.call_injected_handles_in_frame(
+                tab,
+                &frame_id,
+                "resolveAll",
+                Value::Array(vec![owner_locator.clone()]),
+            )?;
+            let owner = match strict_owner(owners) {
+                Ok(owner) => owner,
+                Err(owners) => {
+                    let previews = owners
+                        .iter()
+                        .take(5)
+                        .filter_map(|owner| {
+                            self.call_function_on(
+                                tab,
+                                owner,
+                                "function() { return this.outerHTML.substring(0, 200); }",
+                                Vec::new(),
+                            )
+                            .ok()
+                            .and_then(|value| value.as_str().map(str::to_string))
+                        })
+                        .collect();
+                    let error = FrameLocatorError::StrictViolation {
+                        count: owners.len(),
+                        previews,
+                    };
+                    for owner in owners {
+                        let _ = self.release_handle(tab, &owner);
+                    }
+                    return Err(error);
+                }
+            };
+            let is_frame = self.call_function_on(
+                tab,
+                &owner,
+                "function() { return this instanceof HTMLIFrameElement || this instanceof HTMLFrameElement; }",
+                Vec::new(),
+            );
+            let is_frame = match is_frame {
+                Ok(is_frame) => is_frame,
+                Err(error) => {
+                    let _ = self.release_handle(tab, &owner);
+                    return Err(error.into());
+                }
+            };
+            if is_frame != Value::Bool(true) {
+                let _ = self.release_handle(tab, &owner);
+                return Err(FrameLocatorError::ExpectedFrameElement);
+            }
+            let content_frame_id = self.content_frame_for_handle(tab, &owner);
             let _ = self.release_handle(tab, &owner);
-            return Err(FrameLocatorError::ExpectedFrameElement);
+            let content_frame_id = content_frame_id?;
+            frame_id = content_frame_id.ok_or(FrameLocatorError::NoContentFrame)?;
         }
-        let frame_id = self.content_frame_for_handle(tab, &owner)?;
-        let _ = self.release_handle(tab, &owner);
-        let frame_id = frame_id.ok_or(FrameLocatorError::NoContentFrame)?;
+        reject_oopif(&frame_tree, &frame_id)?;
         self.call_injected_handles_in_frame(
             tab,
             &frame_id,
@@ -346,11 +410,21 @@ impl WorldManager {
     }
 }
 
-fn strict_owner(mut owners: Vec<ElementHandle>) -> Result<ElementHandle, FrameLocatorError> {
-    if owners.len() != 1 {
-        return Err(FrameLocatorError::StrictViolation {
-            count: owners.len(),
+fn reject_oopif(frame_tree: &FrameTree, frame_id: &str) -> Result<(), FrameLocatorError> {
+    if frame_tree
+        .frame(frame_id)
+        .is_some_and(|frame| frame.session_id.is_some())
+    {
+        return Err(FrameLocatorError::OutOfProcessFrame {
+            frame_id: frame_id.to_string(),
         });
+    }
+    Ok(())
+}
+
+fn strict_owner(mut owners: Vec<ElementHandle>) -> Result<ElementHandle, Vec<ElementHandle>> {
+    if owners.len() != 1 {
+        return Err(owners);
     }
     Ok(owners.remove(0))
 }
@@ -466,8 +540,32 @@ mod tests {
 
     #[test]
     fn frame_locator_owner_is_strict() {
-        let error = strict_owner(vec![handle("first"), handle("second")]).unwrap_err();
-        assert_eq!(error, FrameLocatorError::StrictViolation { count: 2 });
+        let owners = strict_owner(vec![handle("first"), handle("second")]).unwrap_err();
+        assert_eq!(owners.len(), 2);
+
+        let error = FrameLocatorError::StrictViolation {
+            count: owners.len(),
+            previews: vec!["<iframe id=first>".to_string()],
+        };
         assert!(error.to_string().contains("resolved to 2 iframe elements"));
+        assert!(error.to_string().contains("1. <iframe id=first>"));
+    }
+
+    #[test]
+    fn oopif_limitation_is_explicit() {
+        let mut tree = FrameTree::default();
+        tree.attach("main".to_string(), None);
+        tree.process_swap(
+            "child".to_string(),
+            Some("main".to_string()),
+            "session".to_string(),
+        );
+
+        assert_eq!(
+            reject_oopif(&tree, "child"),
+            Err(FrameLocatorError::OutOfProcessFrame {
+                frame_id: "child".to_string()
+            })
+        );
     }
 }

@@ -8,8 +8,7 @@ use headless_chrome::protocol::cdp::Page;
 use tokio::sync::Mutex as AMutex;
 
 use crate::integrations::browser_locators::{
-    self, generate_find_fragment_js, js_string_literal, parse_element_info, to_css_selector,
-    INSPECT_ELEMENT_JS,
+    self, js_string_literal, parse_element_info, INSPECT_ELEMENT_JS,
 };
 use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
@@ -347,9 +346,21 @@ fn resolve_element(
     world: &WorldManager,
     locator: &BrowserLocator,
 ) -> Result<ResolvedElement, String> {
-    let mut handles = match &locator.strategy {
+    let handles = resolve_locator_handles(tab, world, locator)?;
+    let handle = strict_locator_handle(tab, world, locator, handles)?
+        .ok_or_else(|| "Element not found".to_string())?;
+    inspect_resolved_element(tab, world, handle)
+}
+
+fn resolve_locator_handles(
+    tab: &Tab,
+    world: &WorldManager,
+    locator: &BrowserLocator,
+) -> Result<Vec<ElementHandle>, String> {
+    match &locator.strategy {
         LocatorStrategy::Ref { value } => {
-            if locator.nth.is_some()
+            if !locator.frames.is_empty()
+                || locator.nth.is_some()
                 || locator.within.is_some()
                 || locator.locator.is_some()
                 || locator.filter.is_some()
@@ -363,21 +374,47 @@ fn resolve_element(
             let reference = value
                 .parse::<Ref>()
                 .map_err(|error| format!("Invalid browser ref {value}: {error}"))?;
-            vec![world
+            Ok(vec![world
                 .resolve_ref(tab, &reference)
-                .map_err(|error| error.to_string())?]
+                .map_err(|error| error.to_string())?])
         }
         _ => {
-            let locator_value = serde_json::to_value(locator)
-                .map_err(|error| format!("Failed to serialize browser locator: {error}"))?;
-            world
-                .call_injected_handles(tab, "resolveAll", serde_json::json!([locator_value]))
-                .map_err(|error| error.to_string())?
+            let locator_value = locator_without_frames(locator)?;
+            if locator.frames.is_empty() {
+                world
+                    .call_injected_handles(tab, "resolveAll", serde_json::json!([locator_value]))
+                    .map_err(|error| error.to_string())
+            } else {
+                let owners = locator
+                    .frames
+                    .iter()
+                    .map(locator_without_frames)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("Failed to serialize frame locator: {error}"))?;
+                world
+                    .resolve_frame_locator(tab, &owners, locator_value)
+                    .map_err(|error| error.to_string())
+            }
         }
-    };
-    if handles.is_empty() {
-        return Err("Element not found".to_string());
     }
+}
+
+fn locator_without_frames(locator: &BrowserLocator) -> Result<serde_json::Value, String> {
+    let mut locator = serde_json::to_value(locator)
+        .map_err(|error| format!("Failed to serialize browser locator: {error}"))?;
+    locator
+        .as_object_mut()
+        .ok_or_else(|| "Browser locator did not serialize as an object".to_string())?
+        .remove("frames");
+    Ok(locator)
+}
+
+fn strict_locator_handle(
+    tab: &Tab,
+    world: &WorldManager,
+    locator: &BrowserLocator,
+    mut handles: Vec<ElementHandle>,
+) -> Result<Option<ElementHandle>, String> {
     if handles.len() > 1 {
         let count = handles.len();
         let previews = handles
@@ -404,19 +441,41 @@ fn resolve_element(
             &previews,
         ));
     }
-    let handle = handles.remove(0);
+    Ok(handles.pop())
+}
+
+fn inspect_resolved_element(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: ElementHandle,
+) -> Result<ResolvedElement, String> {
     let inspect = format!(
         "function() {{ {INSPECT_ELEMENT_JS} return JSON.stringify(__refact_inspect_element(this, 1)); }}"
     );
-    let val = world
-        .call_function_on(tab, &handle, &inspect, Vec::new())
-        .map_err(|error| error.to_string())?;
+    let val = match world.call_function_on(tab, &handle, &inspect, Vec::new()) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = world.release_handle(tab, &handle);
+            return Err(error.to_string());
+        }
+    };
     let json_str = match val.as_str() {
         Some(s) => s.to_string(),
-        None => serde_json::to_string(&val)
-            .map_err(|e| format!("Failed to serialize resolve result: {}", e))?,
+        None => match serde_json::to_string(&val) {
+            Ok(json) => json,
+            Err(error) => {
+                let _ = world.release_handle(tab, &handle);
+                return Err(format!("Failed to serialize resolve result: {error}"));
+            }
+        },
     };
-    let info = parse_element_info(&json_str)?;
+    let info = match parse_element_info(&json_str) {
+        Ok(info) => info,
+        Err(error) => {
+            let _ = world.release_handle(tab, &handle);
+            return Err(error);
+        }
+    };
     Ok(ResolvedElement { handle, info })
 }
 
@@ -1745,7 +1804,7 @@ fn execute_single_step(
         BrowserStep::WaitForSelector {
             locator,
             timeout_ms,
-        } => step_wait_for_selector(tab, idx, locator, clamp_timeout_ms(*timeout_ms)),
+        } => step_wait_for_selector(tab, world, idx, locator, clamp_timeout_ms(*timeout_ms)),
         BrowserStep::WaitForNavigation { timeout_ms } => {
             step_wait_for_navigation(tab, idx, clamp_timeout_ms(*timeout_ms), pre_step_url)
         }
@@ -1770,11 +1829,11 @@ fn execute_single_step(
         BrowserStep::WaitForElementHidden {
             locator,
             timeout_ms,
-        } => step_wait_for_element_hidden(tab, idx, locator, clamp_timeout_ms(*timeout_ms)),
+        } => step_wait_for_element_hidden(tab, world, idx, locator, clamp_timeout_ms(*timeout_ms)),
         BrowserStep::WaitForElementStable {
             locator,
             timeout_ms,
-        } => step_wait_for_element_stable(tab, idx, locator, clamp_timeout_ms(*timeout_ms)),
+        } => step_wait_for_element_stable(tab, world, idx, locator, clamp_timeout_ms(*timeout_ms)),
         BrowserStep::WaitSeconds { seconds } => {
             step_wait_seconds(idx, clamp_wait_seconds(*seconds))
         }
@@ -2278,23 +2337,21 @@ fn mask_console_entry(
 
 fn step_wait_for_selector(
     tab: &Tab,
+    world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
     timeout_ms: u64,
 ) -> StepResult {
-    let js = match (to_css_selector(locator), locator.nth) {
-        (Some(css), None) => browser_locators::js_check_selector_present(&css),
-        _ => {
-            let find_fragment = generate_find_fragment_js(locator);
-            format!(
-                r#"(function() {{
-  {find_fragment}
-  return elements.length > 0;
-}})()"#
-            )
+    match poll_locator_until(tab, world, locator, timeout_ms, |handles| {
+        if handles.is_empty() {
+            Ok(None)
+        } else {
+            let handle = strict_locator_handle(tab, world, locator, handles)?;
+            Ok(handle.map(|handle| {
+                let _ = world.release_handle(tab, &handle);
+            }))
         }
-    };
-    match poll_condition(tab, &js, timeout_ms, DEFAULT_POLL_INTERVAL_MS) {
+    }) {
         Ok(()) => StepResult::success(
             idx,
             format!("Element found ({})", describe_locator(locator)),
@@ -2372,25 +2429,26 @@ fn step_wait_for_text(tab: &Tab, idx: usize, text: &str, timeout_ms: u64) -> Ste
 
 fn step_wait_for_element_hidden(
     tab: &Tab,
+    world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
     timeout_ms: u64,
 ) -> StepResult {
-    let js = match (to_css_selector(locator), locator.nth) {
-        (Some(css), None) => browser_locators::js_check_element_hidden(&css),
-        _ => {
-            let find_fragment = generate_find_fragment_js(locator);
-            format!(
-                r#"(function() {{
-  {find_fragment}
-  if (elements.length === 0) return true;
-  var r = elements[0].getBoundingClientRect();
-  return r.width === 0 || r.height === 0;
-}})()"#
+    match poll_locator_until(tab, world, locator, timeout_ms, |handles| {
+        let Some(handle) = strict_locator_handle(tab, world, locator, handles)? else {
+            return Ok(Some(()));
+        };
+        let hidden = world
+            .call_function_on(
+                tab,
+                &handle,
+                "function() { const r = this.getBoundingClientRect(); return r.width === 0 || r.height === 0; }",
+                Vec::new(),
             )
-        }
-    };
-    match poll_condition(tab, &js, timeout_ms, DEFAULT_POLL_INTERVAL_MS) {
+            .map_err(|error| error.to_string());
+        let _ = world.release_handle(tab, &handle);
+        hidden.map(|hidden| (hidden == serde_json::Value::Bool(true)).then_some(()))
+    }) {
         Ok(()) => StepResult::success(idx, "Element is hidden".to_string()),
         Err(e) => StepResult::failure(idx, "Wait for element hidden", e),
     }
@@ -2398,38 +2456,50 @@ fn step_wait_for_element_hidden(
 
 fn step_wait_for_element_stable(
     tab: &Tab,
+    world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
     timeout_ms: u64,
 ) -> StepResult {
-    let find_fragment = generate_find_fragment_js(locator);
-    let bbox_js = format!(
-        r#"(function() {{
-  {find_fragment}
-  if (elements.length === 0) return JSON.stringify(null);
-  var r = elements[0].getBoundingClientRect();
-  return JSON.stringify({{x: r.x, y: r.y, w: r.width, h: r.height}});
-}})()"#,
-    );
+    let mut previous = None;
+    match poll_locator_until(tab, world, locator, timeout_ms, |handles| {
+        let Some(handle) = strict_locator_handle(tab, world, locator, handles)? else {
+            previous = None;
+            return Ok(None);
+        };
+        let bbox = world.call_function_on(
+            tab,
+            &handle,
+            "function() { const r = this.getBoundingClientRect(); return {x: r.x, y: r.y, w: r.width, h: r.height}; }",
+            Vec::new(),
+        );
+        let _ = world.release_handle(tab, &handle);
+        let bbox = bbox.map_err(|error| error.to_string())?;
+        let stable = previous.as_ref() == Some(&bbox);
+        previous = Some(bbox);
+        Ok(stable.then_some(()))
+    }) {
+        Ok(()) => StepResult::success(idx, "Element is stable".to_string()),
+        Err(error) => StepResult::failure(idx, "Wait for element stable", error),
+    }
+}
 
+fn poll_locator_until<T>(
+    tab: &Tab,
+    world: &WorldManager,
+    locator: &BrowserLocator,
+    timeout_ms: u64,
+    mut sample: impl FnMut(Vec<ElementHandle>) -> Result<Option<T>, String>,
+) -> Result<T, String> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let mut prev_bbox: Option<String> = None;
-
     loop {
-        let val = eval_js_value(tab, &bbox_js).ok();
-        let bbox_str = val.and_then(|v| v.as_str().map(|s| s.to_string()));
-
-        if let Some(ref current) = bbox_str {
-            if current != "null" {
-                if prev_bbox.as_ref() == Some(current) {
-                    return StepResult::success(idx, "Element is stable".to_string());
-                }
-            }
+        match resolve_locator_handles(tab, world, locator).and_then(&mut sample) {
+            Ok(Some(value)) => return Ok(value),
+            Ok(None) => {}
+            Err(error) => return Err(error),
         }
-        prev_bbox = bbox_str;
-
         if Instant::now() >= deadline {
-            return StepResult::failure(idx, "Wait for element stable", "Timed out");
+            return Err(format!("Timed out after {}ms", timeout_ms));
         }
         std::thread::sleep(Duration::from_millis(DEFAULT_POLL_INTERVAL_MS));
     }
@@ -3174,6 +3244,9 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
     } else if let Some(index) = locator.nth {
         description.push_str(&format!(".nth({index})"));
     }
+    for frame in locator.frames.iter().rev() {
+        description = format!("frame({}).{description}", describe_locator(frame));
+    }
     description
 }
 
@@ -3250,8 +3323,15 @@ mod tests {
                 exact: true,
                 regex: None,
             },
+            frames: Vec::new(),
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         };
         assert_eq!(describe_locator(&loc), "text=\"Submit\"");
     }
@@ -3264,8 +3344,15 @@ mod tests {
                 exact: false,
                 regex: None,
             },
+            frames: Vec::new(),
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         };
         assert_eq!(describe_locator(&loc), "text~\"Sub\"");
     }
@@ -3288,10 +3375,47 @@ mod tests {
             strategy: LocatorStrategy::Xpath {
                 value: "//button".to_string(),
             },
+            frames: Vec::new(),
             nth: None,
             within: None,
+            locator: None,
+            filter: None,
+            and: None,
+            or: None,
+            first: None,
+            last: None,
         };
         assert_eq!(describe_locator(&loc), "xpath=//button");
+    }
+
+    #[test]
+    fn describe_locator_includes_outermost_first_frame_chain() {
+        let locator = BrowserLocator::role("button", Some("Save")).in_frames(vec![
+            BrowserLocator::css("#outer"),
+            BrowserLocator::role("iframe", Some("Editor")),
+        ]);
+
+        assert_eq!(
+            describe_locator(&locator),
+            "frame(css=#outer).frame(role=iframe[Editor]).role=button[Save]"
+        );
+    }
+
+    #[test]
+    fn injected_wait_payload_preserves_role_composition_without_frame_metadata() {
+        let mut locator = BrowserLocator::role("button", Some("Save"))
+            .in_frames(vec![BrowserLocator::css("#editor-frame")]);
+        locator.locator = Some(Box::new(BrowserLocator::css("svg")));
+
+        let payload = locator_without_frames(&locator).unwrap();
+
+        assert_eq!(payload["by"], "role");
+        assert_eq!(payload["name"], "Save");
+        assert_eq!(
+            payload["locator"],
+            serde_json::json!({"by": "css", "value": "svg"})
+        );
+        assert!(payload.get("frames").is_none());
     }
 
     #[test]

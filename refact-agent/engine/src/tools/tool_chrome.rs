@@ -82,11 +82,12 @@ const MAX_CACHED_LOG_LINES: usize = 1000;
 fn browser_locator_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": "Ref-first element address or composable fallback locator. Use by=ref with a value from the latest accessibility_snapshot whenever available. Add locator to query a nested locator under every outer match; filter supports has, has_not, has_text, has_not_text, and visible; and intersects while or unions in DOM order. first and last select endpoints. nth is zero-based and accepts -1 for the last match; Playwright CSS :nth-match is one-based. within remains a legacy CSS scope; prefer locator.",
+        "description": "Ref-first element address or composable fallback locator. Use by=ref with a value from the latest accessibility_snapshot whenever available. Add frames for an outermost-first chain of iframe-owner locators; same-process frames are supported and out-of-process frames fail explicitly. Add locator to query a nested locator under every outer match; filter supports has, has_not, has_text, has_not_text, and visible; and intersects while or unions in DOM order. first and last select endpoints. nth is zero-based and accepts -1 for the last match; Playwright CSS :nth-match is one-based. within remains a legacy CSS scope; prefer locator.",
         "required": ["by"],
         "properties": {
             "by": {"type": "string", "enum": ["ref", "css", "id", "name", "text", "label", "role", "xpath", "placeholder", "alt_text", "title", "autocomplete", "test_id"]},
             "value": {"type": "string", "description": "Snapshot ref such as e12 or f2e7, or selector value for non-role strategies"},
+            "frames": {"type": "array", "items": {"type": "object"}, "description": "Outermost-first iframe-owner locator chain. Each owner must resolve to exactly one iframe or frame element."},
             "nth": {"type": "integer", "description": "Zero-based match index; -1 selects the last match. CSS :nth-match is one-based."},
             "within": {"type": "string", "description": "Deprecated CSS scope kept for compatibility; use locator for chaining"},
             "locator": {"type": "object", "description": "Relative locator evaluated under each outer match"},
@@ -428,7 +429,8 @@ impl Tool for ToolChrome {
              Locators use a `by` field (ref/css/id/name/text/label/role/xpath/placeholder/alt_text/title/autocomplete/test_id) and a `value` field \
              (except role locators which use `role` and optional `name` instead of `value`). \
              Text-like locators accept `exact` or a JavaScript `regex` object with `source` and optional `flags`; regex ignores exact. \
-             Role locators use `role` with accessible-name/description and ARIA-state filters. Test-id locators accept a custom `attribute` and default to `data-testid`.",
+             Role locators use `role` with accessible-name/description and ARIA-state filters. Test-id locators accept a custom `attribute` and default to `data-testid`. \
+             A locator may include `frames`, an outermost-first array of iframe-owner locators; same-process frames are supported and out-of-process frames fail explicitly.",
             supported_commands.join("\n"));
         let mut input_schema = serde_json::json!({
             "type": "object",

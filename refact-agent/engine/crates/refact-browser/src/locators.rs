@@ -10,6 +10,7 @@ pub fn test_id_locator(value: impl Into<String>, attribute: impl Into<String>) -
     }
     BrowserLocator {
         strategy: locator_strategy_from_wire(wire).expect("test id locator wire is valid"),
+        frames: Vec::new(),
         nth: None,
         within: None,
         locator: None,

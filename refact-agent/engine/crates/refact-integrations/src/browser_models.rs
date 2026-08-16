@@ -431,6 +431,8 @@ pub struct LocatorFilter {
 pub struct BrowserLocator {
     #[serde(flatten)]
     pub strategy: LocatorStrategy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<BrowserLocator>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nth: Option<isize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -455,6 +457,7 @@ impl BrowserLocator {
             strategy: LocatorStrategy::Ref {
                 value: reference.to_string(),
             },
+            frames: Vec::new(),
             nth: None,
             within: None,
             locator: None,
@@ -471,6 +474,7 @@ impl BrowserLocator {
             strategy: LocatorStrategy::Css {
                 value: selector.to_string(),
             },
+            frames: Vec::new(),
             nth: None,
             within: None,
             locator: None,
@@ -488,6 +492,7 @@ impl BrowserLocator {
             strategy: LocatorStrategy::Id {
                 value: id.to_string(),
             },
+            frames: Vec::new(),
             nth: None,
             within: None,
             locator: None,
@@ -505,6 +510,7 @@ impl BrowserLocator {
             strategy: LocatorStrategy::Name {
                 value: name.to_string(),
             },
+            frames: Vec::new(),
             nth: None,
             within: None,
             locator: None,
@@ -524,6 +530,7 @@ impl BrowserLocator {
                 exact: None,
                 regex: None,
             },
+            frames: Vec::new(),
             nth: None,
             within: None,
             locator: None,
@@ -543,6 +550,7 @@ impl BrowserLocator {
                 exact: None,
                 regex: None,
             },
+            frames: Vec::new(),
             nth: None,
             within: None,
             locator: None,
@@ -572,6 +580,7 @@ impl BrowserLocator {
                 level: None,
                 include_hidden: None,
             },
+            frames: Vec::new(),
             nth: None,
             within: None,
             locator: None,
@@ -592,6 +601,7 @@ impl BrowserLocator {
                 regex: None,
                 attribute: None,
             },
+            frames: Vec::new(),
             nth: None,
             within: None,
             locator: None,
@@ -601,6 +611,11 @@ impl BrowserLocator {
             first: None,
             last: None,
         }
+    }
+
+    pub fn in_frames(mut self, frames: Vec<BrowserLocator>) -> Self {
+        self.frames = frames;
+        self
     }
 }
 
@@ -1183,6 +1198,27 @@ mod tests {
                 locator
             );
         }
+    }
+
+    #[test]
+    fn frame_chain_round_trips_outermost_first() {
+        let locator = BrowserLocator::role("button", Some("Save")).in_frames(vec![
+            BrowserLocator::css("#outer"),
+            BrowserLocator::role("iframe", Some("Editor")),
+        ]);
+        let value = serde_json::to_value(&locator).unwrap();
+
+        assert_eq!(
+            value["frames"],
+            serde_json::json!([
+                {"by": "css", "value": "#outer"},
+                {"by": "role", "role": "iframe", "name": "Editor"}
+            ])
+        );
+        assert_eq!(
+            serde_json::from_value::<BrowserLocator>(value).unwrap(),
+            locator
+        );
     }
 
     #[test]
