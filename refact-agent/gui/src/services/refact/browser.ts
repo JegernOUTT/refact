@@ -293,6 +293,20 @@ export type BrowserAriaSnapshot = {
   generation?: BrowserSnapshotGeneration | null;
 };
 
+export type ActionabilityDiagnostics = {
+  call_log: string[];
+  timed_out: boolean;
+  elapsed_ms?: number;
+  attempts?: number;
+  attached?: boolean;
+  visible?: boolean;
+  stable?: boolean;
+  enabled?: boolean;
+  editable?: boolean;
+  receives_events?: boolean;
+  intercepting_element?: string;
+};
+
 export type BrowserExecutionStep = {
   step_index: number;
   ok: boolean;
@@ -303,6 +317,7 @@ export type BrowserExecutionStep = {
   fill_strategy?: string | null;
   verified?: boolean | null;
   retries: number;
+  actionability?: ActionabilityDiagnostics;
 };
 
 export type BrowserActionResponse = {

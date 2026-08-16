@@ -1,0 +1,97 @@
+.log {
+  composes: resultPanel from "./ToolCardBody.module.css";
+  min-width: 0;
+}
+
+.meta,
+.states {
+  min-width: 0;
+}
+
+.meta {
+  color: var(--rf-color-muted);
+}
+
+.stateResult {
+  font-weight: 500;
+}
+
+.interceptingElement {
+  min-width: 0;
+  padding: var(--rf-space-2);
+  color: var(--rf-color-danger);
+  background: var(--rf-surface-1);
+  border-inline-start: calc(var(--rf-hairline) * 2) solid var(--rf-color-danger);
+  border-radius: var(--rf-radius-ctl);
+  overflow-wrap: anywhere;
+}
+
+.interceptingLabel {
+  margin-block-end: var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-ui);
+  font-weight: 650;
+}
+
+.interceptingElement code {
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+}
+
+.scrollRegion {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  min-width: 0;
+  max-height: calc(var(--rf-control-h-lg) * 7);
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.timeline {
+  display: grid;
+  min-width: 0;
+  gap: 0;
+  margin: 0;
+  padding: var(--rf-space-1);
+  list-style: none;
+}
+
+.timelineItem {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: var(--rf-space-3) minmax(0, 1fr);
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  overflow-wrap: anywhere;
+}
+
+.timelineMarker {
+  position: relative;
+  width: var(--rf-space-2);
+  height: var(--rf-space-2);
+  margin-block-start: var(--rf-space-1);
+  background: currentColor;
+  border-radius: var(--rf-radius-pill);
+}
+
+.timelineItem:not(:last-child) .timelineMarker::after {
+  position: absolute;
+  top: var(--rf-space-2);
+  bottom: calc(var(--rf-space-3) * -1);
+  left: calc(50% - var(--rf-hairline) / 2);
+  width: var(--rf-hairline);
+  background: var(--rf-border);
+  content: "";
+}
+
+.log[data-failed="true"] .timelineItem[data-final="true"] {
+  color: var(--rf-color-danger);
+  font-weight: 700;
+  background: var(--rf-surface-1);
+  border-radius: var(--rf-radius-ctl);
+}

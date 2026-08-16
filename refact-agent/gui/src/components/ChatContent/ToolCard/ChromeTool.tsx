@@ -8,6 +8,7 @@ import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/sel
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall } from "../../../services/refact/types";
 import type {
+  ActionabilityDiagnostics,
   BrowserActionResponse,
   BrowserAriaSnapshot,
   BrowserAriaSnapshotNode,
@@ -16,6 +17,7 @@ import type {
 import { ShikiCodeBlock } from "../../Markdown";
 import { DialogImage } from "../../DialogImage";
 import { AriaSnapshotView } from "./AriaSnapshotView";
+import { ActionabilityLog } from "./ActionabilityLog";
 import styles from "./ChromeTool.module.css";
 
 interface ChromeArgs {
@@ -148,6 +150,46 @@ function parseAriaSnapshot(value: unknown): BrowserAriaSnapshot | null {
         .filter((node): node is BrowserAriaSnapshotNode => node !== null)
     : [];
   return { yaml: value.yaml, nodes };
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function parseActionabilityDiagnostics(
+  value: unknown,
+): ActionabilityDiagnostics | null {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.call_log) ||
+    !value.call_log.every((entry) => typeof entry === "string") ||
+    typeof value.timed_out !== "boolean"
+  ) {
+    return null;
+  }
+
+  return {
+    call_log: value.call_log,
+    timed_out: value.timed_out,
+    elapsed_ms: optionalNumber(value.elapsed_ms),
+    attempts: optionalNumber(value.attempts),
+    attached: optionalBoolean(value.attached),
+    visible: optionalBoolean(value.visible),
+    stable: optionalBoolean(value.stable),
+    enabled: optionalBoolean(value.enabled),
+    editable: optionalBoolean(value.editable),
+    receives_events: optionalBoolean(value.receives_events),
+    intercepting_element:
+      typeof value.intercepting_element === "string"
+        ? value.intercepting_element
+        : undefined,
+  };
 }
 
 function summarizeStep(step: BrowserExecutionStep): string {
@@ -415,6 +457,14 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     });
   }, [typedResult]);
 
+  const typedActionability = useMemo(() => {
+    if (!typedResult) return [];
+    return typedResult.steps.flatMap((step) => {
+      const diagnostics = parseActionabilityDiagnostics(step.actionability);
+      return diagnostics ? [{ step, diagnostics }] : [];
+    });
+  }, [typedResult]);
+
   const typedDialogsBlock = useMemo(() => {
     if (!typedResult?.dialogs?.length) return null;
     return typedResult.dialogs
@@ -558,6 +608,23 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
           <AriaSnapshotView yaml={snapshot.yaml} nodes={snapshot.nodes} />
         </Box>
       ))}
+
+      {typedActionability.length > 0 && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Actionability</Box>
+          <Box className={styles.actionabilityList}>
+            {typedActionability.map(({ step, diagnostics }) => (
+              <ActionabilityLog
+                diagnostics={diagnostics}
+                failed={!step.ok}
+                key={step.step_index}
+                retryCount={step.retries}
+                stepIndex={step.step_index}
+              />
+            ))}
+          </Box>
+        </Box>
+      )}
 
       {typedDialogsBlock && (
         <Box className={styles.section}>

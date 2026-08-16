@@ -27,6 +27,12 @@
   font-size: var(--rf-text-1);
 }
 
+.actionabilityList {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
 .handlerRow {
   min-width: 0;
   overflow-wrap: anywhere;

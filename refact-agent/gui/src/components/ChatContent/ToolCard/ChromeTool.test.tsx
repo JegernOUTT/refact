@@ -316,4 +316,73 @@ describe("ChromeTool", () => {
     expect(screen.getByText(/1 screenshot/)).toBeInTheDocument();
     expect(screen.queryByText("Locator Handlers")).not.toBeInTheDocument();
   });
+
+  test("renders actionability diagnostics for a failed typed step", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-actionability",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: {
+            steps: [
+              {
+                action: "click",
+                locator: { by: "role", value: "button" },
+              },
+            ],
+          },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-actionability",
+      tool_failed: true,
+      content: JSON.stringify({
+        ok: false,
+        steps: [
+          {
+            step_index: 0,
+            ok: false,
+            summary: "Click failed",
+            error: "timed out waiting for element to be stable",
+            retries: 3,
+            actionability: {
+              call_log: [
+                "waiting for locator",
+                "element is not stable",
+                "retrying click action",
+              ],
+              timed_out: true,
+              elapsed_ms: 5031,
+              attempts: 4,
+              attached: true,
+              stable: false,
+            },
+          },
+        ],
+      }),
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+
+    expect(screen.getByText("Actionability")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Step 1 actionability" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("retrying click action")).toBeInTheDocument();
+    expect(screen.getByTestId("actionability-state-editable")).toHaveAttribute(
+      "data-result",
+      "not-checked",
+    );
+  });
 });
