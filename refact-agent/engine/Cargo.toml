@@ -60,6 +60,7 @@ serde_cbor = "0.11.2"
 tempfile = "3.8.1"
 tokenizers = "0.21.0"
 tree-sitter = "0.25"
+tree-sitter-bash = "0.23"
 tree-sitter-cpp = "0.23"
 tree-sitter-java = "0.23"
 tree-sitter-javascript = "0.23"
@@ -250,6 +251,7 @@ refact-context-api = { path = "crates/refact-context-api", features = ["http-cli
 refact-runtime-api = { path = "crates/refact-runtime-api" }
 refact-exec = { path = "crates/refact-exec" }
 refact-sandbox = { path = "crates/refact-sandbox" }
+refact-privacy = { path = "crates/refact-privacy" }
 refact-agents-core = { path = "crates/refact-agents-core" }
 refact-self-update = { path = "crates/refact-self-update" }
 refact-tui = { path = "crates/refact-tui" }
@@ -334,6 +336,7 @@ tracing = "0.1"
 tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tree-sitter = "0.25"
+tree-sitter-bash = { workspace = true }
 tree-sitter-cpp = "0.23"
 tree-sitter-java = "0.23"
 tree-sitter-javascript = "0.23"

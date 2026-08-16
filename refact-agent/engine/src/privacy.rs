@@ -8,6 +8,8 @@ use tracing::error;
 use crate::files_correction::{any_glob_matches_path, canonical_path, get_project_dirs};
 use crate::global_context::GlobalContext;
 
+pub mod heuristic;
+
 pub use refact_core::privacy_types::{FilePrivacyLevel, FilePrivacySettings, PrivacySettings};
 pub use refact_privacy::{PolicyLoad, PrivacyPolicy};
 
