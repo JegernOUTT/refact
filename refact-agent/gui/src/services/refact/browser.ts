@@ -254,6 +254,23 @@ export type BrowserDialogInfo = {
   automatic: boolean;
 };
 
+export type BrowserUploadInfo = {
+  paths: string[];
+  source: "direct" | "file_chooser" | string;
+  in_memory_payloads: boolean;
+};
+
+export type BrowserDownloadInfo = {
+  guid: string;
+  url: string;
+  frame_id: string;
+  suggested_filename: string;
+  local_path: string;
+  received_bytes: number;
+  total_bytes: number;
+  state: "in_progress" | "completed" | "canceled";
+};
+
 export type LocatorHandlerFiring = {
   name: string;
   action: string;
@@ -331,6 +348,8 @@ export type BrowserActionResponse = {
   network?: BrowserNetworkEntry[];
   locator_handlers?: LocatorHandlerFiring[];
   dialogs?: BrowserDialogInfo[];
+  uploads?: BrowserUploadInfo[];
+  downloads?: BrowserDownloadInfo[];
   screenshot?: BrowserReportScreenshot | null;
 };
 

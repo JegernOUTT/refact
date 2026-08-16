@@ -221,6 +221,15 @@ function describeTypedStep(step: Record<string, unknown>): string {
           : "element";
     return `Fill ${by}=${value}`;
   }
+  if (action === "set_input_files" && isRecord(step.locator)) {
+    const count = Array.isArray(step.paths) ? step.paths.length : 0;
+    return `Upload ${count} file${count === 1 ? "" : "s"}`;
+  }
+  if (action === "expect_file_chooser") {
+    const count = Array.isArray(step.paths) ? step.paths.length : 0;
+    return `Arm file chooser for ${count} file${count === 1 ? "" : "s"}`;
+  }
+  if (action === "wait_for_download") return "Wait for download";
   if (
     (action === "click" || action === "scroll_to") &&
     isRecord(step.locator)
@@ -480,6 +489,27 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       .join("\n");
   }, [typedResult]);
 
+  const typedUploadsBlock = useMemo(() => {
+    if (!typedResult?.uploads?.length) return null;
+    return typedResult.uploads
+      .map((upload) => {
+        const paths = upload.paths.join(", ");
+        const payload = upload.in_memory_payloads ? "in-memory" : "host paths";
+        return `${upload.source}: ${paths} (${payload})`;
+      })
+      .join("\n");
+  }, [typedResult]);
+
+  const typedDownloadsBlock = useMemo(() => {
+    if (!typedResult?.downloads?.length) return null;
+    return typedResult.downloads
+      .map((download) => {
+        const size = download.received_bytes || download.total_bytes;
+        return `${download.state}: ${download.suggested_filename} · ${size} B\n  ${download.url}\n  ${download.local_path}`;
+      })
+      .join("\n");
+  }, [typedResult]);
+
   const reportScreenshot = typedResult?.screenshot
     ? `data:${typedResult.screenshot.mime};base64,${typedResult.screenshot.data}`
     : null;
@@ -632,6 +662,28 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
           <Box className={styles.logContent}>
             <ShikiCodeBlock showLineNumbers={false}>
               {typedDialogsBlock}
+            </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
+
+      {typedUploadsBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Uploads</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedUploadsBlock}
+            </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
+
+      {typedDownloadsBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Downloads</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedDownloadsBlock}
             </ShikiCodeBlock>
           </Box>
         </Box>

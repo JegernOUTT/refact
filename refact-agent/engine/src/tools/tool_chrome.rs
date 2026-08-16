@@ -273,10 +273,11 @@ impl Tool for ToolChrome {
                 })?
             };
 
-            match browser_controller::execute_request_with_runtime(
+            match browser_controller::execute_request_with_runtime_validated(
                 runtime_arc,
                 request,
                 &image_policy,
+                gcx.clone(),
             )
             .await
             {

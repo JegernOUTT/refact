@@ -141,6 +141,25 @@ describe("ChromeTool", () => {
             automatic: true,
           },
         ],
+        uploads: [
+          {
+            paths: ["/workspace/fixture.txt"],
+            source: "direct",
+            in_memory_payloads: false,
+          },
+        ],
+        downloads: [
+          {
+            guid: "download-guid",
+            url: "https://example.com/browser-fixture.txt",
+            frame_id: "frame",
+            suggested_filename: "browser-fixture.txt",
+            local_path: "/runtime/download-guid",
+            received_bytes: 25,
+            total_bytes: 25,
+            state: "completed",
+          },
+        ],
       }),
     });
 
@@ -163,6 +182,8 @@ describe("ChromeTool", () => {
     expect(screen.getByText("Network")).toBeInTheDocument();
     expect(screen.getByText("Locator Handlers")).toBeInTheDocument();
     expect(screen.getByText("Dialogs")).toBeInTheDocument();
+    expect(screen.getByText("Uploads")).toBeInTheDocument();
+    expect(screen.getByText("Downloads")).toBeInTheDocument();
     expect(
       screen.getByText((text) => text.includes("DOM stabilized: No")),
     ).toBeInTheDocument();
@@ -213,6 +234,15 @@ describe("ChromeTool", () => {
       screen.getByText((text) =>
         text.includes("[confirm] auto-dismissed: Continue with fixture?"),
       ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("/workspace/fixture.txt")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("browser-fixture.txt · 25 B")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("/runtime/download-guid")),
     ).toBeInTheDocument();
     expect(screen.queryByText("Execution Report")).not.toBeInTheDocument();
     expect(screen.queryByText("ARIA Snapshot")).not.toBeInTheDocument();

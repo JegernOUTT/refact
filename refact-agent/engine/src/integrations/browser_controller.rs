@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,8 @@ use refact_browser::{
     NetworkMonitorHandle, UrlMatcher, WorldManager, DEFAULT_DISMISS_OVERLAYS_HANDLER,
 };
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
+
+use crate::global_context::GlobalContext;
 
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
 const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
@@ -130,19 +133,24 @@ fn resolve_element(
             .iter()
             .take(5)
             .filter_map(|handle| {
-                world.call_function_on(
-                    tab,
-                    handle,
-                    "function() { return this.outerHTML.substring(0, 200); }",
-                    Vec::new(),
-                ).ok().and_then(|value| value.as_str().map(str::to_string))
+                world
+                    .call_function_on(
+                        tab,
+                        handle,
+                        "function() { return this.outerHTML.substring(0, 200); }",
+                        Vec::new(),
+                    )
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
             })
             .collect::<Vec<_>>();
         for handle in &handles {
             let _ = world.release_handle(tab, handle);
         }
         return Err(refact_browser::strict_mode_violation(
-            &describe_locator(locator), count, &previews,
+            &describe_locator(locator),
+            count,
+            &previews,
         ));
     }
     let handle = handles.remove(0);
@@ -259,6 +267,8 @@ fn execute_steps_with_world(
         network: vec![],
         locator_handlers,
         dialogs: vec![],
+        uploads: vec![],
+        downloads: vec![],
         screenshot: None,
     }
 }
@@ -271,6 +281,7 @@ pub fn is_tab_management_step(step: &BrowserStep) -> bool {
             | BrowserStep::SwitchTab { .. }
             | BrowserStep::ListTabs
             | BrowserStep::HandleDialog { .. }
+            | BrowserStep::ExpectFileChooser { .. }
     )
 }
 
@@ -309,6 +320,16 @@ fn execute_step_with_world(
     result
 }
 
+pub async fn execute_request_with_runtime_validated(
+    runtime_arc: Arc<AMutex<BrowserRuntime>>,
+    request: BrowserActionRequest,
+    image_policy: &ImagePolicy,
+    gcx: Arc<GlobalContext>,
+) -> Result<ExecutionReport, String> {
+    validate_upload_paths(gcx, &request).await?;
+    execute_request_with_runtime(runtime_arc, request, image_policy).await
+}
+
 pub async fn execute_request_with_runtime(
     runtime_arc: Arc<AMutex<BrowserRuntime>>,
     request: BrowserActionRequest,
@@ -320,7 +341,6 @@ pub async fn execute_request_with_runtime(
             request.session
         ));
     }
-
     {
         let mut rt = runtime_arc.lock().await;
         rt.touch();
@@ -359,6 +379,14 @@ pub async fn execute_request_with_runtime(
         let rt = runtime_arc.lock().await;
         rt.network_monitor.clone()
     };
+    let download_monitor = {
+        let rt = runtime_arc.lock().await;
+        rt.download_monitor.clone()
+    };
+    let file_chooser_manager = {
+        let rt = runtime_arc.lock().await;
+        rt.file_chooser_manager.clone()
+    };
     let armed_network_waits = request
         .steps
         .iter()
@@ -366,6 +394,7 @@ pub async fn execute_request_with_runtime(
         .filter_map(|(index, step)| match step {
             BrowserStep::WaitForRequest { .. } => Some((index, network_monitor.request_cursor())),
             BrowserStep::WaitForResponse { .. } => Some((index, network_monitor.response_cursor())),
+            BrowserStep::WaitForDownload { .. } => Some((index, download_monitor.cursor())),
             _ => None,
         })
         .collect::<std::collections::HashMap<_, _>>();
@@ -377,7 +406,30 @@ pub async fn execute_request_with_runtime(
         if let Some(tab) = &current_tab {
             let _ = tab.evaluate(NETWORK_INFLIGHT_TRACKER_JS, false);
         }
-        let mut result = if is_tab_management_step(step) {
+        let file_chooser_was_armed = file_chooser_manager.is_armed();
+        let mut result = if let BrowserStep::WaitForDownload {
+            timeout_ms,
+            save_as,
+        } = step
+        {
+            let timeout = Duration::from_millis(clamp_timeout_ms(*timeout_ms));
+            match tokio::task::block_in_place(|| {
+                download_monitor.wait_for_download(
+                    armed_network_waits
+                        .get(&idx)
+                        .copied()
+                        .unwrap_or_else(|| download_monitor.cursor()),
+                    timeout,
+                    save_as.as_deref(),
+                )
+            }) {
+                Ok(download) => {
+                    StepResult::success(idx, format!("Downloaded {}", download.suggested_filename))
+                        .with_data(serde_json::to_value(download).unwrap_or_default())
+                }
+                Err(error) => StepResult::failure(idx, "Wait for download", error),
+            }
+        } else if is_tab_management_step(step) {
             let step_report = tokio::task::block_in_place(|| {
                 let mut rt = runtime_arc.blocking_lock();
                 execute_steps_with_runtime(&mut rt, std::slice::from_ref(step), image_policy)
@@ -417,6 +469,41 @@ pub async fn execute_request_with_runtime(
                 ),
             }
         };
+        if file_chooser_was_armed && matches!(step, BrowserStep::Click { .. }) {
+            if result.ok {
+                result = match &current_tab {
+                    Some(tab) => tokio::task::block_in_place(|| {
+                        let completed = file_chooser_manager
+                            .complete(tab, Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS));
+                        let _ = tab.set_file_chooser_dialog_interception(false, None);
+                        match completed {
+                            Ok(upload) => StepResult::success(
+                                idx,
+                                format!(
+                                    "Selected {} file(s) from file chooser",
+                                    upload.paths.len()
+                                ),
+                            )
+                            .with_data(serde_json::to_value(upload).unwrap_or_default()),
+                            Err(error) => StepResult::failure(idx, "File chooser failed", error),
+                        }
+                    }),
+                    None => StepResult::failure(idx, "File chooser failed", "No active tab"),
+                };
+            } else {
+                file_chooser_manager.disarm();
+                if let Some(tab) = &current_tab {
+                    let _ = tab.set_file_chooser_dialog_interception(false, None);
+                }
+            }
+        }
+        if result.ok && matches!(step, BrowserStep::SetInputFiles { .. }) {
+            if let Some(data) = result.data.clone() {
+                if let Ok(upload) = serde_json::from_value(data) {
+                    file_chooser_manager.record(upload);
+                }
+            }
+        }
         result.step_index = idx;
 
         {
@@ -465,7 +552,7 @@ pub async fn execute_request_with_runtime(
     } else {
         (None, None, false, None)
     };
-    let (console, page_errors, network, dialogs) = {
+    let (console, page_errors, network, dialogs, uploads, downloads) = {
         let mut rt = runtime_arc.lock().await;
         rt.drain_raw_events();
         let mut console = rt
@@ -481,7 +568,9 @@ pub async fn execute_request_with_runtime(
         console.retain(|entry| entry.level != "page_error");
         let network = rt.flush_report_network();
         let dialogs = rt.dialog_manager.take_reports();
-        (console, page_errors, network, dialogs)
+        let uploads = rt.file_chooser_manager.take_uploads();
+        let downloads = rt.download_monitor.take_report();
+        (console, page_errors, network, dialogs, uploads, downloads)
     };
 
     Ok(ExecutionReport {
@@ -495,8 +584,64 @@ pub async fn execute_request_with_runtime(
         network,
         locator_handlers,
         dialogs,
+        uploads,
+        downloads,
         screenshot,
     })
+}
+
+async fn validate_upload_paths(
+    gcx: Arc<GlobalContext>,
+    request: &BrowserActionRequest,
+) -> Result<(), String> {
+    for path in request.steps.iter().flat_map(|step| match step {
+        BrowserStep::SetInputFiles { paths, .. } | BrowserStep::ExpectFileChooser { paths } => {
+            paths.as_slice()
+        }
+        _ => &[],
+    }) {
+        let path = PathBuf::from(path);
+        crate::files_correction::check_if_its_inside_a_workspace_or_config(gcx.clone(), &path)
+            .await
+            .map_err(|error| format!("Upload path is not allowed: {error}"))?;
+        let canonical = path
+            .canonicalize()
+            .map_err(|_| format!("Upload path does not exist: {}", path.display()))?;
+        if canonical.is_file() {
+            crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &canonical)
+                .await
+                .map_err(|error| format!("Upload path is blocked by privacy rules: {error}"))?;
+        } else if canonical.is_dir() {
+            for entry in walkdir::WalkDir::new(&canonical) {
+                let entry = entry.map_err(|error| {
+                    format!(
+                        "Failed to inspect upload directory {}: {error}",
+                        canonical.display()
+                    )
+                })?;
+                if entry.file_type().is_symlink() {
+                    return Err(format!(
+                        "Upload directories cannot contain symbolic links: {}",
+                        entry.path().display()
+                    ));
+                }
+                if entry.file_type().is_file() {
+                    crate::files_in_workspace::check_file_privacy_for_send(
+                        gcx.clone(),
+                        &entry.path().to_path_buf(),
+                    )
+                    .await
+                    .map_err(|error| format!("Upload path is blocked by privacy rules: {error}"))?;
+                }
+            }
+        } else {
+            return Err(format!(
+                "Upload path is not a file or directory: {}",
+                canonical.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn execute_steps_with_runtime(
@@ -514,6 +659,14 @@ pub fn execute_steps_with_runtime(
     let mut locator_handlers = Vec::new();
     let mut all_ok = true;
     let mut pre_step_url: Option<String> = current_tab.as_ref().map(|t| t.get_url());
+    let armed_download_waits = steps
+        .iter()
+        .enumerate()
+        .filter_map(|(index, step)| match step {
+            BrowserStep::WaitForDownload { .. } => Some((index, runtime.download_monitor.cursor())),
+            _ => None,
+        })
+        .collect::<std::collections::HashMap<_, _>>();
 
     for (idx, step) in steps.iter().enumerate() {
         let result = match step {
@@ -647,17 +800,90 @@ pub fn execute_steps_with_runtime(
                 ),
                 Err(error) => StepResult::failure(idx, "HandleDialog", error),
             },
+            BrowserStep::ExpectFileChooser { paths } => {
+                let Some(tab) = &current_tab else {
+                    all_ok = false;
+                    results.push(StepResult::failure(
+                        idx,
+                        "Expect file chooser",
+                        "No active tab",
+                    ));
+                    break;
+                };
+                match runtime.file_chooser_manager.arm(paths).and_then(|_| {
+                    tab.set_file_chooser_dialog_interception(true, None)
+                        .map_err(|error| error.to_string())
+                }) {
+                    Ok(()) => StepResult::success(idx, "Armed the next file chooser"),
+                    Err(error) => {
+                        runtime.file_chooser_manager.disarm();
+                        StepResult::failure(idx, "Expect file chooser", error)
+                    }
+                }
+            }
+            BrowserStep::WaitForDownload {
+                timeout_ms,
+                save_as,
+            } => match runtime.download_monitor.wait_for_download(
+                armed_download_waits
+                    .get(&idx)
+                    .copied()
+                    .unwrap_or_else(|| runtime.download_monitor.cursor()),
+                Duration::from_millis(clamp_timeout_ms(*timeout_ms)),
+                save_as.as_deref(),
+            ) {
+                Ok(download) => {
+                    StepResult::success(idx, format!("Downloaded {}", download.suggested_filename))
+                        .with_data(serde_json::to_value(download).unwrap_or_default())
+                }
+                Err(error) => StepResult::failure(idx, "Wait for download", error),
+            },
             other => match &current_tab {
-                Some(tab) => execute_single_step(
-                    tab,
-                    &runtime.world_manager,
-                    other,
-                    idx,
-                    pre_step_url.as_deref(),
-                    image_policy,
-                    Some(&handlers),
-                    &mut locator_handlers,
-                ),
+                Some(tab) => {
+                    let chooser_was_armed = runtime.file_chooser_manager.is_armed();
+                    let mut result = execute_single_step(
+                        tab,
+                        &runtime.world_manager,
+                        other,
+                        idx,
+                        pre_step_url.as_deref(),
+                        image_policy,
+                        Some(&handlers),
+                        &mut locator_handlers,
+                    );
+                    if chooser_was_armed && matches!(other, BrowserStep::Click { .. }) {
+                        if result.ok {
+                            let completed = runtime
+                                .file_chooser_manager
+                                .complete(tab, Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS));
+                            let _ = tab.set_file_chooser_dialog_interception(false, None);
+                            result = match completed {
+                                Ok(upload) => StepResult::success(
+                                    idx,
+                                    format!(
+                                        "Selected {} file(s) from file chooser",
+                                        upload.paths.len()
+                                    ),
+                                )
+                                .with_data(serde_json::to_value(upload).unwrap_or_default()),
+                                Err(error) => {
+                                    StepResult::failure(idx, "File chooser failed", error)
+                                }
+                            };
+                        } else {
+                            runtime.file_chooser_manager.disarm();
+                            let _ = tab.set_file_chooser_dialog_interception(false, None);
+                        }
+                    }
+                    if result.ok && matches!(other, BrowserStep::SetInputFiles { .. }) {
+                        if let Some(data) = result.data.clone() {
+                            if let Ok(upload) = serde_json::from_value(data) {
+                                runtime.file_chooser_manager.record(upload);
+                            }
+                        }
+                    }
+                    result
+                }
                 None => StepResult::failure(
                     idx,
                     "No active tab",
@@ -686,6 +912,8 @@ pub fn execute_steps_with_runtime(
         None => (None, None),
     };
     let dialogs = runtime.dialog_manager.take_reports();
+    let uploads = runtime.file_chooser_manager.take_uploads();
+    let downloads = runtime.download_monitor.take_report();
     ExecutionReport {
         ok: all_ok,
         steps: results,
@@ -697,6 +925,8 @@ pub fn execute_steps_with_runtime(
         network: vec![],
         locator_handlers,
         dialogs,
+        uploads,
+        downloads,
         screenshot: None,
     }
 }
@@ -1191,6 +1421,14 @@ fn execute_single_step(
         }
         BrowserStep::Check { locator } => step_check_uncheck(tab, world, idx, locator, true),
         BrowserStep::Uncheck { locator } => step_check_uncheck(tab, world, idx, locator, false),
+        BrowserStep::SetInputFiles { locator, paths } => {
+            step_set_input_files(tab, world, idx, locator, paths)
+        }
+        BrowserStep::ExpectFileChooser { .. } => StepResult::failure(
+            idx,
+            "Expect file chooser",
+            "File chooser flow requires a browser runtime",
+        ),
 
         BrowserStep::WaitForSelector {
             locator,
@@ -1211,7 +1449,8 @@ fn execute_single_step(
         }
         BrowserStep::WaitForLoadState { .. }
         | BrowserStep::WaitForRequest { .. }
-        | BrowserStep::WaitForResponse { .. } => StepResult::failure(
+        | BrowserStep::WaitForResponse { .. }
+        | BrowserStep::WaitForDownload { .. } => StepResult::failure(
             idx,
             "Network wait",
             "Network waits require a browser runtime",
@@ -1280,6 +1519,27 @@ fn execute_single_step(
         BrowserStep::HighlightElement { locator } => {
             step_highlight_element(tab, world, idx, locator)
         }
+    }
+}
+
+fn step_set_input_files(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    paths: &[String],
+) -> StepResult {
+    let resolved = match resolve_element(tab, world, locator) {
+        Ok(resolved) => resolved,
+        Err(error) => return StepResult::failure(idx, "Set input files: resolution failed", error),
+    };
+    match refact_browser::files::set_input_files(tab, world, &resolved.handle, paths, "direct") {
+        Ok(upload) => StepResult::success(
+            idx,
+            format!("Set {} file(s) on <input>", upload.paths.len()),
+        )
+        .with_data(serde_json::to_value(upload).unwrap_or_default()),
+        Err(error) => StepResult::failure(idx, "Set input files failed", error),
     }
 }
 
@@ -1969,9 +2229,13 @@ fn step_extract_links(
     let result = match locator {
         Some(locator) => serde_json::to_value(locator)
             .map_err(|error| format!("Failed to serialize browser locator: {error}"))
-            .and_then(|locator| world.call_injected(
-                tab, "extractLinks", serde_json::json!([locator, effective_limit]),
-            )),
+            .and_then(|locator| {
+                world.call_injected(
+                    tab,
+                    "extractLinks",
+                    serde_json::json!([locator, effective_limit]),
+                )
+            }),
         None => eval_js_ok(tab, &js),
     };
     match result {

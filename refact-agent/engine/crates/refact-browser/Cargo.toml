@@ -12,4 +12,8 @@ regex = "1.9.5"
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

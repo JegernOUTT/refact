@@ -658,6 +658,13 @@ pub enum BrowserStep {
     Uncheck {
         locator: BrowserLocator,
     },
+    SetInputFiles {
+        locator: BrowserLocator,
+        paths: Vec<String>,
+    },
+    ExpectFileChooser {
+        paths: Vec<String>,
+    },
 
     WaitForSelector {
         locator: BrowserLocator,
@@ -696,6 +703,12 @@ pub enum BrowserStep {
         url_or_pattern: UrlPattern,
         #[serde(default)]
         timeout_ms: Option<u64>,
+    },
+    WaitForDownload {
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+        #[serde(default)]
+        save_as: Option<String>,
     },
     WaitForElementHidden {
         locator: BrowserLocator,
@@ -938,8 +951,39 @@ pub struct ExecutionReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub locator_handlers: Vec<LocatorHandlerFiring>,
     pub dialogs: Vec<DialogInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uploads: Vec<UploadInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub downloads: Vec<DownloadInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<BrowserScreenshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadState {
+    InProgress,
+    Completed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DownloadInfo {
+    pub guid: String,
+    pub url: String,
+    pub frame_id: String,
+    pub suggested_filename: String,
+    pub local_path: String,
+    pub received_bytes: u64,
+    pub total_bytes: u64,
+    pub state: DownloadState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UploadInfo {
+    pub paths: Vec<String>,
+    pub source: String,
+    pub in_memory_payloads: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1381,6 +1425,36 @@ mod tests {
     }
 
     #[test]
+    fn test_file_transfer_steps_serde() {
+        let upload: BrowserStep = serde_json::from_str(
+            r##"{"action":"set_input_files","locator":{"by":"css","value":"#file"},"paths":["/workspace/a.txt"]}"##,
+        )
+        .unwrap();
+        assert!(matches!(
+            upload,
+            BrowserStep::SetInputFiles { paths, .. } if paths == vec!["/workspace/a.txt"]
+        ));
+
+        let chooser: BrowserStep = serde_json::from_str(
+            r#"{"action":"expect_file_chooser","paths":["/workspace/a.txt"]}"#,
+        )
+        .unwrap();
+        assert!(matches!(chooser, BrowserStep::ExpectFileChooser { paths } if paths.len() == 1));
+
+        let download: BrowserStep = serde_json::from_str(
+            r#"{"action":"wait_for_download","timeout_ms":9000,"save_as":"saved.txt"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            download,
+            BrowserStep::WaitForDownload {
+                timeout_ms: Some(9000),
+                save_as: Some(name)
+            } if name == "saved.txt"
+        ));
+    }
+
+    #[test]
     fn test_step_extract_links_serde() {
         let json_str = r#"{"action": "extract_links", "limit": 10}"#;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
@@ -1600,6 +1674,21 @@ mod tests {
                 action: DialogAction::Accepted,
                 automatic: false,
             }],
+            uploads: vec![UploadInfo {
+                paths: vec!["/workspace/fixture.txt".to_string()],
+                source: "direct".to_string(),
+                in_memory_payloads: false,
+            }],
+            downloads: vec![DownloadInfo {
+                guid: "download-guid".to_string(),
+                url: "https://example.com/fixture.txt".to_string(),
+                frame_id: "frame".to_string(),
+                suggested_filename: "fixture.txt".to_string(),
+                local_path: "/runtime/download-guid".to_string(),
+                received_bytes: 7,
+                total_bytes: 7,
+                state: DownloadState::Completed,
+            }],
             screenshot: None,
         };
         let json = serde_json::to_value(&report).unwrap();
@@ -1608,6 +1697,8 @@ mod tests {
         assert_eq!(json["dialogs"][0]["type"], "prompt");
         assert_eq!(json["dialogs"][0]["action"], "accepted");
         assert_eq!(json["dialogs"][0]["automatic"], false);
+        assert_eq!(json["uploads"][0]["source"], "direct");
+        assert_eq!(json["downloads"][0]["state"], "completed");
         let parsed: ExecutionReport = serde_json::from_value(json).unwrap();
         assert!(parsed.ok);
     }

@@ -1736,10 +1736,14 @@ pub async fn handle_browser_action(
             )
         })?;
     let image_policy = image_policy_for_chat(&app, &post.chat_id).await;
-    let report =
-        browser_controller::execute_request_with_runtime(runtime_arc, post.request, &image_policy)
-            .await
-            .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+    let report = browser_controller::execute_request_with_runtime_validated(
+        runtime_arc,
+        post.request,
+        &image_policy,
+        app.gcx.clone(),
+    )
+    .await
+    .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
 
     let report_json = serde_json::to_value(&report).unwrap_or_default();
     Ok(json_response(StatusCode::OK, report_json))

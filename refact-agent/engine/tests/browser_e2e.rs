@@ -18,6 +18,7 @@ use refact_lsp::chat::browser_context::maybe_insert_browser_context;
 use refact_lsp::integrations::browser_controller::execute_steps as execute_fixture_steps_with_policy;
 use refact_lsp::integrations::browser_controller::execute_steps as execute_steps_with_policy;
 use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
+use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
     BrowserActionRequest, BrowserLoadState, BrowserLocator, BrowserStep, FillStrategy,
     LocatorHandlerAction, SessionPolicy, TabTarget, UrlPattern,
@@ -1802,6 +1803,88 @@ async fn download_route_sets_attachment_headers() {
         "attachment; filename=browser-fixture.txt"
     );
     assert_eq!(response.text().await.unwrap(), "browser fixture download\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn uploads_visible_hidden_and_file_chooser_inputs() {
+    let Some(mut case) = BrowserCase::start("upload.html").await else {
+        return;
+    };
+    case.setup_world();
+    let file = case._profile.path().join("upload-fixture.txt");
+    std::fs::write(&file, "browser upload fixture\n").unwrap();
+    let path = file.to_string_lossy().into_owned();
+
+    let direct = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::SetInputFiles {
+                locator: BrowserLocator::label("Visible upload"),
+                paths: vec![path.clone()],
+            },
+            BrowserStep::SetInputFiles {
+                locator: BrowserLocator::css("#hidden-file"),
+                paths: vec![path.clone()],
+            },
+            BrowserStep::Eval {
+                expression: "JSON.stringify([document.querySelector('#visible-file').files.length, document.querySelector('#hidden-file').files.length])".to_string(),
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(direct.ok, "direct upload failed: {direct:?}");
+    assert_eq!(direct.uploads.len(), 2);
+    assert_eq!(direct.steps[2].data.as_ref().unwrap()["value"], "[1,1]");
+
+    let chooser = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::ExpectFileChooser {
+                paths: vec![path.clone()],
+            },
+            BrowserStep::Click {
+                locator: BrowserLocator::css("#visible-file"),
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(chooser.ok, "file chooser upload failed: {chooser:?}");
+    assert_eq!(chooser.uploads.len(), 1);
+    assert_eq!(chooser.uploads[0].source, "file_chooser");
+    assert_eq!(chooser.uploads[0].paths, vec![path]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn captures_download_with_suggested_filename_and_runtime_path() {
+    let Some(mut case) = BrowserCase::start("download.html").await else {
+        return;
+    };
+    case.setup_world();
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::Click {
+                locator: BrowserLocator::css("#download"),
+            },
+            BrowserStep::WaitForDownload {
+                timeout_ms: Some(10_000),
+                save_as: Some("saved-fixture.txt".to_string()),
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(report.ok, "download capture failed: {report:?}");
+    assert_eq!(report.downloads.len(), 1);
+    let download = &report.downloads[0];
+    assert_eq!(download.suggested_filename, "browser-fixture.txt");
+    assert!(download.received_bytes > 0);
+    assert!(FsPath::new(&download.local_path).is_file());
+    assert_eq!(
+        std::fs::read_to_string(&download.local_path).unwrap(),
+        "browser fixture download\n"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

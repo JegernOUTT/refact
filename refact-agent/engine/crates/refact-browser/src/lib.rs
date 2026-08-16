@@ -1,5 +1,6 @@
 mod actionability;
 pub mod dialogs;
+pub mod files;
 pub mod forms;
 mod frames;
 mod handles;
@@ -30,6 +31,7 @@ pub use frames::{
     FrameExecutionContext, FrameHandle, FrameId, FrameInvalidation, FrameLocatorError,
     FrameSessionId, FrameTree,
 };
+pub use files::{DownloadMonitor, DownloadTracker, FileChooserManager};
 pub use hit_target::{
     CdpFrameHitTargetDriver, FrameHitTargetDriver, FrameOwnerGeometry, FramePointTranslation,
     FramePointTranslationGeometry, HitTargetController, HitTargetError, HitTargetPoint,
@@ -431,9 +433,12 @@ pub struct BrowserRuntime {
     pub browser: Browser,
     pub world_manager: WorldManager,
     pub dialog_manager: DialogManager,
+    pub file_chooser_manager: Arc<FileChooserManager>,
+    pub download_monitor: Arc<DownloadMonitor>,
     pub active_tab_target_id: Option<String>,
     pub recording_tab_target_id: Option<String>,
     pub profile_dir: PathBuf,
+    pub downloads_dir: PathBuf,
     pub window_bounds: Option<WindowBounds>,
     pub buffers: BrowserBuffers,
     pub network_monitor: Arc<NetworkMonitorHandle>,
@@ -493,6 +498,11 @@ impl BrowserRuntime {
 
         let browser = Browser::new(launch_options).map_err(|e| e.to_string())?;
         let runtime_id = Uuid::new_v4().to_string();
+        let downloads_dir = profile_dir.join("downloads").join(&runtime_id);
+        let download_monitor = Arc::new(DownloadMonitor::connect(
+            &browser.get_ws_url(),
+            downloads_dir.clone(),
+        )?);
 
         info!(
             "BrowserRuntime {} launched with profile {:?}",
@@ -505,9 +515,12 @@ impl BrowserRuntime {
             browser,
             world_manager: WorldManager::default(),
             dialog_manager: DialogManager::default(),
+            file_chooser_manager: Arc::new(FileChooserManager::default()),
+            download_monitor,
             active_tab_target_id: None,
             recording_tab_target_id: None,
             profile_dir,
+            downloads_dir,
             window_bounds,
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
@@ -530,6 +543,10 @@ impl BrowserRuntime {
         let browser = Browser::connect_with_timeout(ws_url.clone(), idle_timeout)
             .map_err(|e| format!("Failed to connect to browser at {}: {}", ws_url, e))?;
         let runtime_id = Uuid::new_v4().to_string();
+        let downloads_dir = std::env::temp_dir()
+            .join("refact-browser-downloads")
+            .join(&runtime_id);
+        let download_monitor = Arc::new(DownloadMonitor::connect(&ws_url, downloads_dir.clone())?);
 
         info!(
             "BrowserRuntime {} connected via WebSocket to {}",
@@ -542,9 +559,12 @@ impl BrowserRuntime {
             browser,
             world_manager: WorldManager::default(),
             dialog_manager: DialogManager::default(),
+            file_chooser_manager: Arc::new(FileChooserManager::default()),
+            download_monitor,
             active_tab_target_id: None,
             recording_tab_target_id: None,
             profile_dir: PathBuf::new(),
+            downloads_dir,
             window_bounds: None,
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
@@ -651,6 +671,12 @@ impl BrowserRuntime {
             }
         }
         tabs_guard.first().cloned()
+    }
+}
+
+impl Drop for BrowserRuntime {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.downloads_dir);
     }
 }
 
@@ -1069,6 +1095,13 @@ pub fn setup_recording_for_tab(
     tab: &headless_chrome::Tab,
 ) -> Result<(), String> {
     runtime.dialog_manager.install(tab)?;
+    let browser_context_id = tab
+        .get_browser_context_id()
+        .map_err(|error| format!("Failed to read browser context for downloads: {error}"))?;
+    runtime
+        .download_monitor
+        .configure_context(browser_context_id.as_deref())?;
+    setup_file_chooser_capture(tab, runtime.file_chooser_manager.clone())?;
     runtime.world_manager.ensure_utility_world(tab)?;
     inject_recorder_into_tab(
         tab,
@@ -1085,6 +1118,25 @@ pub fn setup_recording_for_tab(
     runtime.recording_tab_target_id = Some(target_id.clone());
     runtime.active_tab_target_id = Some(target_id);
     Ok(())
+}
+
+fn setup_file_chooser_capture(
+    tab: &headless_chrome::Tab,
+    manager: Arc<FileChooserManager>,
+) -> Result<(), String> {
+    tab.add_event_listener(Arc::new(move |event: &Event| {
+        if let Event::PageFileChooserOpened(event) = event {
+            manager.opened(
+                event.params.backend_node_id,
+                matches!(
+                    event.params.mode,
+                    Page::FileChooserOpenedEventModeOption::SelectMultiple
+                ),
+            );
+        }
+    }))
+    .map(|_| ())
+    .map_err(|error| format!("Failed to add file chooser listener: {error}"))
 }
 
 pub fn setup_recording_for_runtime(runtime: &mut BrowserRuntime) -> Result<(), String> {

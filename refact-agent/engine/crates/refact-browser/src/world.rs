@@ -381,6 +381,46 @@ impl WorldManager {
         Ok(result.result.value.unwrap_or(Value::Null))
     }
 
+    pub fn call_function_handle_on(
+        &self,
+        tab: &Tab,
+        handle: &ElementHandle,
+        function_declaration: &str,
+    ) -> Result<ElementHandle, HandleError> {
+        self.handles.validate(tab.get_target_id(), handle)?;
+        let result = tab
+            .call_method(Runtime::CallFunctionOn {
+                function_declaration: function_declaration.to_string(),
+                object_id: Some(handle.object_id.clone()),
+                arguments: None,
+                silent: None,
+                return_by_value: Some(false),
+                generate_preview: None,
+                user_gesture: Some(true),
+                await_promise: Some(true),
+                execution_context_id: None,
+                object_group: None,
+                throw_on_side_effect: None,
+                unique_context_id: None,
+                serialization_options: None,
+            })
+            .map_err(|error| {
+                HandleError::Protocol(format!("Failed to retarget browser element: {error}"))
+            })?;
+        if let Some(exception) = result.exception_details {
+            return Err(HandleError::Protocol(exception_message(&exception)));
+        }
+        let object_id = result.result.object_id.ok_or_else(|| {
+            HandleError::Resolution("Element retargeting returned no handle".to_string())
+        })?;
+        self.register_handle(
+            tab,
+            object_id,
+            handle.context_id as Runtime::ExecutionContextId,
+            handle.frame_id.clone(),
+        )
+    }
+
     pub fn resolve_expression_handle(
         &self,
         tab: &Tab,
