@@ -207,8 +207,10 @@ function hasAriaDisabledInChain(element: Element): boolean {
 
 export function getReadonly(element: Element): boolean | 'error' {
   const tagName = elementSafeTagName(element);
-  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tagName))
+  if (['INPUT', 'TEXTAREA'].includes(tagName))
     return element.hasAttribute('readonly');
+  if (tagName === 'SELECT')
+    return ariaReadonlyRoles.includes(explicitAriaRole(element)) && element.getAttribute('aria-readonly') === 'true';
   const role = explicitAriaRole(element);
   if (ariaReadonlyRoles.includes(role))
     return element.getAttribute('aria-readonly') === 'true';

@@ -32,6 +32,21 @@ export type Builtins = {
   AbortSignal: typeof window['AbortSignal'],
 };
 
+export type RefactBuiltins = Readonly<Pick<Builtins,
+  'setTimeout' |
+  'clearTimeout' |
+  'requestAnimationFrame'
+> & {
+  arrayFrom: typeof Array.from,
+  objectKeys: typeof Object.keys,
+  jsonStringify: typeof JSON.stringify,
+  jsonParse: typeof JSON.parse,
+  performanceNow: Performance['now'],
+  Map: MapConstructor,
+  Set: SetConstructor,
+  WeakMap: WeakMapConstructor,
+}>;
+
 export class UtilityScript {
   readonly global: typeof globalThis;
   // Builtins protect injected code from clock emulation.

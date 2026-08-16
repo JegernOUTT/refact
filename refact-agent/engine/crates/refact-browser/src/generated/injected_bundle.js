@@ -1,4 +1,4 @@
-// @refact-injected-hash 5ea0a673aa7d5a725593d9f7434ab60651e511cfdffe0607be4b4bfa8e8cab74
+// @refact-injected-hash b1a34cb5276e4c8f8185341e631b28e333041d9c19a921d52704d1e4988b1216
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -122,8 +122,10 @@ function hasAriaDisabledInChain(element) {
 }
 function getReadonly(element) {
   const tagName = elementSafeTagName(element);
-  if (["INPUT", "TEXTAREA", "SELECT"].includes(tagName))
+  if (["INPUT", "TEXTAREA"].includes(tagName))
     return element.hasAttribute("readonly");
+  if (tagName === "SELECT")
+    return ariaReadonlyRoles.includes(explicitAriaRole(element)) && element.getAttribute("aria-readonly") === "true";
   const role = explicitAriaRole(element);
   if (ariaReadonlyRoles.includes(role))
     return element.getAttribute("aria-readonly") === "true";
@@ -314,14 +316,27 @@ var RefactInjected = class {
     throw new Error(`Unexpected element state "${state}"`);
   }
   async elementStates(element) {
-    this.ensureConnected(element);
     return {
-      visible: isElementVisible(element),
-      enabled: !getAriaDisabled(element),
-      editable: this.editableState(element),
-      checked: getCheckedState(element),
-      stable: await this.checkElementIsStable(element)
+      visible: this.bestEffort(() => element.isConnected && isElementVisible(element), false),
+      enabled: this.bestEffort(() => element.isConnected && !getAriaDisabled(element), false),
+      editable: this.bestEffort(() => element.isConnected ? this.editableState(element) : null, null),
+      checked: this.bestEffort(() => element.isConnected ? getCheckedState(element) : null, null),
+      stable: await this.bestEffortStable(element)
     };
+  }
+  bestEffort(read, fallback) {
+    try {
+      return read();
+    } catch {
+      return fallback;
+    }
+  }
+  async bestEffortStable(element) {
+    try {
+      return element.isConnected && await this.checkElementIsStable(element);
+    } catch {
+      return false;
+    }
   }
   editableState(element) {
     const readonly = getReadonly(element);
@@ -360,7 +375,11 @@ var RefactInjected = class {
           reject(error);
         }
       };
-      requestAnimationFrame(check);
+      try {
+        requestAnimationFrame(check);
+      } catch (error) {
+        reject(error);
+      }
     });
   }
   dispatchBinding(name, payload) {

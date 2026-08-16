@@ -741,6 +741,7 @@ async fn element_states_match_playwright_predicates() {
         "#mixed",
         "#opacity-zero",
         "#display-none",
+        "#readonly-select",
     ];
     let mut states = Vec::new();
     for selector in selectors {
@@ -775,6 +776,7 @@ async fn element_states_match_playwright_predicates() {
     assert_eq!(states[8].checked, Some(CheckedState::Mixed));
     assert!(states[9].visible);
     assert!(!states[10].visible);
+    assert_eq!(states[11].editable, Some(true));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1041,4 +1043,36 @@ async fn download_route_sets_attachment_headers() {
         "attachment; filename=browser-fixture.txt"
     );
     assert_eq!(response.text().await.unwrap(), "browser fixture download\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn element_states_absorb_detachment_between_animation_frames() {
+    let Some(mut case) = BrowserCase::start("states.html").await else {
+        return;
+    };
+    case.setup_world();
+    let handle = case
+        .runtime
+        .world_manager
+        .call_injected_handles(
+            &case.tab,
+            "resolveAll",
+            json!([{"by":"css","value":"#readonly-input"}]),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let states = case
+        .runtime
+        .world_manager
+        .call_function_on(
+            &case.tab,
+            &handle,
+            "function() { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); const states = instance.elementStates(this); requestAnimationFrame(() => this.remove()); return states; }",
+            Vec::new(),
+        )
+        .unwrap();
+    assert_eq!(states["stable"], false);
 }

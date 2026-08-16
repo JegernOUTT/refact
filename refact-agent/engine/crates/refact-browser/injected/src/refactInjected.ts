@@ -21,8 +21,7 @@ import {
   getReadonly,
   isElementVisible,
 } from './vendor/injected/domUtils';
-
-type RefactBuiltins = Readonly<Record<string, unknown>>;
+import type { RefactBuiltins } from './vendor/injected/utilityScript';
 
 type ElementStateName = 'visible' | 'enabled' | 'editable' | 'checked' | 'unchecked' | 'mixed' | 'stable';
 
@@ -194,14 +193,29 @@ export class RefactInjected {
   }
 
   async elementStates(element: Element): Promise<ElementStates> {
-    this.ensureConnected(element);
     return {
-      visible: isElementVisible(element),
-      enabled: !getAriaDisabled(element),
-      editable: this.editableState(element),
-      checked: getCheckedState(element),
-      stable: await this.checkElementIsStable(element),
+      visible: this.bestEffort(() => element.isConnected && isElementVisible(element), false),
+      enabled: this.bestEffort(() => element.isConnected && !getAriaDisabled(element), false),
+      editable: this.bestEffort(() => element.isConnected ? this.editableState(element) : null, null),
+      checked: this.bestEffort(() => element.isConnected ? getCheckedState(element) : null, null),
+      stable: await this.bestEffortStable(element),
     };
+  }
+
+  private bestEffort<T>(read: () => T, fallback: T): T {
+    try {
+      return read();
+    } catch {
+      return fallback;
+    }
+  }
+
+  private async bestEffortStable(element: Element): Promise<boolean> {
+    try {
+      return element.isConnected && await this.checkElementIsStable(element);
+    } catch {
+      return false;
+    }
   }
 
   private editableState(element: Element): boolean | null {
@@ -215,8 +229,8 @@ export class RefactInjected {
   }
 
   private async checkElementIsStable(element: Element): Promise<boolean> {
-    const requestAnimationFrame = this.builtinSnapshot.requestAnimationFrame as (callback: FrameRequestCallback) => number;
-    const performanceNow = this.builtinSnapshot.performanceNow as () => number;
+    const requestAnimationFrame = this.builtinSnapshot.requestAnimationFrame;
+    const performanceNow = this.builtinSnapshot.performanceNow;
     let lastRect: { x: number; y: number; width: number; height: number } | undefined;
     let lastTime = 0;
     return await new Promise<boolean>((resolve, reject) => {
@@ -246,14 +260,18 @@ export class RefactInjected {
           reject(error);
         }
       };
-      requestAnimationFrame(check);
+      try {
+        requestAnimationFrame(check);
+      } catch (error) {
+        reject(error);
+      }
     });
   }
 
   dispatchBinding(name: string, payload: unknown): void {
     const global = this.global as RefactGlobal;
     const binding = global[bindingName];
-    const stringify = this.builtinSnapshot.jsonStringify as (value: unknown) => string;
+    const stringify = this.builtinSnapshot.jsonStringify;
     if (!binding)
       throw new Error(`${bindingName} is not installed`);
     binding(stringify({ name, payload }));
