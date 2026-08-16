@@ -68,7 +68,7 @@ pub use world::{
     WorldManager,
 };
 
-use std::collections::{BTreeMap, hash_map::DefaultHasher};
+use std::collections::{BTreeMap, BTreeSet, HashMap, hash_map::DefaultHasher};
 use std::hash::Hasher;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -438,6 +438,9 @@ pub struct BrowserRuntime {
     pub download_monitor: Arc<DownloadMonitor>,
     pub active_tab_target_id: Option<String>,
     pub recording_tab_target_id: Option<String>,
+    pub adopted_tab_target_ids: Vec<String>,
+    pub tab_openers: HashMap<String, refact_integrations::browser_models::TabOpener>,
+    pub tab_opened_by_step: HashMap<String, usize>,
     pub profile_dir: PathBuf,
     pub downloads_dir: PathBuf,
     pub window_bounds: Option<WindowBounds>,
@@ -520,6 +523,9 @@ impl BrowserRuntime {
             download_monitor,
             active_tab_target_id: None,
             recording_tab_target_id: None,
+            adopted_tab_target_ids: Vec::new(),
+            tab_openers: HashMap::new(),
+            tab_opened_by_step: HashMap::new(),
             profile_dir,
             downloads_dir,
             window_bounds,
@@ -564,6 +570,9 @@ impl BrowserRuntime {
             download_monitor,
             active_tab_target_id: None,
             recording_tab_target_id: None,
+            adopted_tab_target_ids: Vec::new(),
+            tab_openers: HashMap::new(),
+            tab_opened_by_step: HashMap::new(),
             profile_dir: PathBuf::new(),
             downloads_dir,
             window_bounds: None,
@@ -634,20 +643,79 @@ impl BrowserRuntime {
             .get_tabs()
             .lock()
             .map(|tabs| {
-                tabs.iter()
-                    .map(|tab| {
+                self.adopted_tab_target_ids
+                    .iter()
+                    .filter_map(|target_id| {
+                        let tab = tabs.iter().find(|tab| tab.get_target_id() == target_id)?;
                         let target_id = tab.get_target_id().to_string();
-                        refact_integrations::browser_models::TabInfo {
-                            tab_id: target_id.clone(),
+                        Some(refact_integrations::browser_models::TabInfo {
+                            id: target_id.clone(),
                             target_id: target_id.clone(),
                             url: tab.get_url(),
                             title: tab.get_title().unwrap_or_default(),
-                            is_active: active_id == Some(target_id.as_str()),
-                        }
+                            active: active_id == Some(target_id.as_str()),
+                            opener: self.tab_openers.get(&target_id).cloned(),
+                            opened_by_step: self.tab_opened_by_step.get(&target_id).copied(),
+                        })
                     })
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    pub fn known_tab_ids(&self) -> BTreeSet<String> {
+        self.browser
+            .get_tabs()
+            .lock()
+            .map(|tabs| {
+                tabs.iter()
+                    .map(|tab| tab.get_target_id().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn remove_tab_metadata(&mut self, target_id: &str) {
+        self.adopted_tab_target_ids
+            .retain(|adopted| adopted != target_id);
+        self.tab_openers.remove(target_id);
+        self.tab_opened_by_step.remove(target_id);
+    }
+
+    pub fn select_tab_after_close(&mut self, closed_target_id: &str) -> Option<String> {
+        let fallback = tab_fallback_after_close(&mut self.adopted_tab_target_ids, closed_target_id);
+        self.remove_tab_metadata(closed_target_id);
+        if self.active_tab_target_id.as_deref() == Some(closed_target_id) {
+            self.active_tab_target_id = fallback.clone();
+        }
+        if self.recording_tab_target_id.as_deref() == Some(closed_target_id) {
+            self.recording_tab_target_id = fallback.clone();
+        }
+        fallback
+    }
+
+    pub fn reconcile_tabs(&mut self) {
+        let present = self.known_tab_ids();
+        self.adopted_tab_target_ids
+            .retain(|target_id| present.contains(target_id));
+        self.tab_openers
+            .retain(|target_id, _| present.contains(target_id));
+        self.tab_opened_by_step
+            .retain(|target_id, _| present.contains(target_id));
+        if self
+            .active_tab_target_id
+            .as_ref()
+            .is_some_and(|target_id| !present.contains(target_id))
+        {
+            self.active_tab_target_id = self.adopted_tab_target_ids.first().cloned();
+        }
+        if self
+            .recording_tab_target_id
+            .as_ref()
+            .is_some_and(|target_id| !present.contains(target_id))
+        {
+            self.recording_tab_target_id = self.adopted_tab_target_ids.first().cloned();
+        }
     }
 
     pub fn get_active_tab(&self) -> Option<Arc<headless_chrome::Tab>> {
@@ -673,6 +741,34 @@ impl BrowserRuntime {
         }
         tabs_guard.first().cloned()
     }
+}
+
+fn tab_fallback_after_close(adopted: &mut Vec<String>, closed_target_id: &str) -> Option<String> {
+    let closed_index = adopted
+        .iter()
+        .position(|target_id| target_id == closed_target_id)?;
+    adopted.remove(closed_index);
+    if adopted.is_empty() {
+        return None;
+    }
+    adopted
+        .get(closed_index.saturating_sub(1).min(adopted.len() - 1))
+        .cloned()
+}
+
+fn register_adopted_tab(adopted: &mut Vec<String>, target_id: String) -> bool {
+    if adopted.contains(&target_id) {
+        return false;
+    }
+    adopted.push(target_id);
+    true
+}
+
+fn tab_opener(
+    opener_id: Option<String>,
+    frame_id: Option<String>,
+) -> Option<refact_integrations::browser_models::TabOpener> {
+    opener_id.map(|tab_id| refact_integrations::browser_models::TabOpener { tab_id, frame_id })
 }
 
 impl Drop for BrowserRuntime {
@@ -1116,9 +1212,103 @@ pub fn setup_recording_for_tab(
         runtime.buffers.raw_network_entries.clone(),
     )?;
     let target_id = tab.get_target_id().to_string();
-    runtime.recording_tab_target_id = Some(target_id.clone());
-    runtime.active_tab_target_id = Some(target_id);
+    register_adopted_tab(&mut runtime.adopted_tab_target_ids, target_id.clone());
+    if runtime.recording_tab_target_id.is_none() {
+        runtime.recording_tab_target_id = Some(target_id.clone());
+    }
+    if runtime.active_tab_target_id.is_none() {
+        runtime.active_tab_target_id = Some(target_id);
+    }
     Ok(())
+}
+
+pub fn adopt_new_tabs(
+    runtime: &mut BrowserRuntime,
+    opened_by_step: Option<usize>,
+) -> Vec<refact_integrations::browser_models::TabInfo> {
+    runtime.reconcile_tabs();
+    let tabs = runtime
+        .browser
+        .get_tabs()
+        .lock()
+        .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut adopted = Vec::new();
+    for tab in tabs {
+        let target_id = tab.get_target_id().to_string();
+        if runtime.adopted_tab_target_ids.contains(&target_id) {
+            continue;
+        }
+        if let Ok(info) = tab.get_target_info() {
+            if let Some(opener) = tab_opener(info.opener_id, info.opener_frame_id) {
+                runtime.tab_openers.insert(target_id.clone(), opener);
+            }
+        }
+        if let Some(step_index) = opened_by_step {
+            runtime
+                .tab_opened_by_step
+                .insert(target_id.clone(), step_index);
+        }
+        if setup_recording_for_tab(runtime, &tab).is_ok() {
+            if let Some(info) = runtime
+                .list_tab_infos()
+                .into_iter()
+                .find(|info| info.id == target_id)
+            {
+                adopted.push(info);
+            }
+        }
+    }
+    adopted
+}
+
+pub fn wait_for_new_tabs(
+    runtime: &mut BrowserRuntime,
+    baseline: &BTreeSet<String>,
+    opened_by_step: Option<usize>,
+    timeout: Duration,
+) -> Vec<refact_integrations::browser_models::TabInfo> {
+    poll_new_tabs_until(
+        timeout,
+        || {
+            adopt_new_tabs(runtime, opened_by_step);
+            let discovered = runtime
+                .list_tab_infos()
+                .into_iter()
+                .filter(|tab| !baseline.contains(&tab.id))
+                .map(|tab| tab.id)
+                .collect::<Vec<_>>();
+            if let Some(step_index) = opened_by_step {
+                for target_id in &discovered {
+                    runtime
+                        .tab_opened_by_step
+                        .entry(target_id.clone())
+                        .or_insert(step_index);
+                }
+            }
+            runtime
+                .list_tab_infos()
+                .into_iter()
+                .filter(|tab| discovered.contains(&tab.id))
+                .collect()
+        },
+        std::thread::sleep,
+    )
+}
+
+fn poll_new_tabs_until(
+    timeout: Duration,
+    mut discover: impl FnMut() -> Vec<refact_integrations::browser_models::TabInfo>,
+    mut wait: impl FnMut(Duration),
+) -> Vec<refact_integrations::browser_models::TabInfo> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let tabs = discover();
+        if !tabs.is_empty() || Instant::now() >= deadline {
+            return tabs;
+        }
+        wait(Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())));
+    }
 }
 
 fn setup_file_chooser_capture(
@@ -1193,6 +1383,93 @@ pub fn setup_recording_for_runtime(runtime: &mut BrowserRuntime) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tab_info(id: &str) -> refact_integrations::browser_models::TabInfo {
+        refact_integrations::browser_models::TabInfo {
+            id: id.to_string(),
+            target_id: id.to_string(),
+            url: format!("https://example.com/{id}"),
+            title: id.to_string(),
+            active: false,
+            opener: None,
+            opened_by_step: None,
+        }
+    }
+
+    #[test]
+    fn tab_registry_preserves_adoption_and_removal_order() {
+        let mut adopted = Vec::new();
+
+        assert!(register_adopted_tab(&mut adopted, "first".to_string()));
+        assert!(register_adopted_tab(&mut adopted, "second".to_string()));
+        assert!(!register_adopted_tab(&mut adopted, "first".to_string()));
+        assert_eq!(adopted, vec!["first", "second"]);
+
+        assert_eq!(
+            tab_fallback_after_close(&mut adopted, "first"),
+            Some("second".to_string())
+        );
+        assert_eq!(adopted, vec!["second"]);
+    }
+
+    #[test]
+    fn closing_active_tab_uses_preceding_then_next_fallback() {
+        let mut adopted = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+
+        assert_eq!(
+            tab_fallback_after_close(&mut adopted, "second"),
+            Some("first".to_string())
+        );
+        assert_eq!(adopted, vec!["first", "third"]);
+        assert_eq!(
+            tab_fallback_after_close(&mut adopted, "first"),
+            Some("third".to_string())
+        );
+        assert_eq!(tab_fallback_after_close(&mut adopted, "third"), None);
+    }
+
+    #[test]
+    fn opener_association_preserves_target_and_frame() {
+        assert_eq!(
+            tab_opener(Some("parent".to_string()), Some("frame".to_string())),
+            Some(refact_integrations::browser_models::TabOpener {
+                tab_id: "parent".to_string(),
+                frame_id: Some("frame".to_string()),
+            })
+        );
+        assert_eq!(tab_opener(None, Some("frame".to_string())), None);
+    }
+
+    #[test]
+    fn popup_wait_returns_empty_at_timeout() {
+        let mut waits = 0;
+        let tabs = poll_new_tabs_until(Duration::ZERO, Vec::new, |_| waits += 1);
+
+        assert!(tabs.is_empty());
+        assert_eq!(waits, 0);
+    }
+
+    #[test]
+    fn popup_wait_returns_first_discovery() {
+        let mut attempts = 0;
+        let tabs = poll_new_tabs_until(
+            Duration::from_millis(100),
+            || {
+                attempts += 1;
+                (attempts == 2)
+                    .then(|| vec![tab_info("popup")])
+                    .unwrap_or_default()
+            },
+            |_| {},
+        );
+
+        assert_eq!(tabs, vec![tab_info("popup")]);
+        assert_eq!(attempts, 2);
+    }
 
     #[test]
     fn production_pointer_path_uses_actionability_cdp_mouse() {

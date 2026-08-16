@@ -337,6 +337,21 @@ export type BrowserExecutionStep = {
   actionability?: ActionabilityDiagnostics;
 };
 
+export type BrowserTabOpener = {
+  tab_id: string;
+  frame_id?: string | null;
+};
+
+export type BrowserReportTab = {
+  id: string;
+  target_id: string;
+  url: string;
+  title: string;
+  active: boolean;
+  opener?: BrowserTabOpener | null;
+  opened_by_step?: number | null;
+};
+
 export type BrowserActionResponse = {
   ok: boolean;
   steps: BrowserExecutionStep[];
@@ -350,6 +365,7 @@ export type BrowserActionResponse = {
   dialogs?: BrowserDialogInfo[];
   uploads?: BrowserUploadInfo[];
   downloads?: BrowserDownloadInfo[];
+  new_tabs?: BrowserReportTab[];
   screenshot?: BrowserReportScreenshot | null;
 };
 

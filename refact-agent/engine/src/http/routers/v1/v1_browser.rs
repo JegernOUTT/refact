@@ -1690,7 +1690,7 @@ pub async fn handle_browser_status(
                     "title": title,
                     "tab_urls": tab_urls,
                     "tabs": tab_infos.iter().map(|t| serde_json::json!({
-                        "tab_id": t.tab_id,
+                        "tab_id": t.id,
                         "url": t.url,
                         "title": t.title,
                     })).collect::<Vec<_>>(),
@@ -1997,7 +1997,7 @@ async fn browser_frame_emission_task(gcx: Arc<GlobalContext>, chat_id: String, r
                 .list_tab_infos()
                 .into_iter()
                 .map(|t| BrowserTabInfo {
-                    tab_id: t.tab_id,
+                    tab_id: t.id,
                     url: t.url,
                     title: t.title,
                 })

@@ -534,7 +534,7 @@ fn execute_steps_with_world(
 ) -> ExecutionReport {
     let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
 
-    let mut results = Vec::new();
+    let mut results: Vec<StepResult> = Vec::new();
     let handlers = Arc::new(Mutex::new(LocatorHandlerRegistry::default()));
     let mut locator_handlers = Vec::new();
     let mut all_ok = true;
@@ -579,6 +579,7 @@ fn execute_steps_with_world(
         dialogs: vec![],
         uploads: vec![],
         downloads: vec![],
+        new_tabs: vec![],
         screenshot: None,
     }
 }
@@ -587,7 +588,7 @@ pub fn is_tab_management_step(step: &BrowserStep) -> bool {
     matches!(
         step,
         BrowserStep::OpenTab { .. }
-            | BrowserStep::CloseTab
+            | BrowserStep::CloseTab { .. }
             | BrowserStep::SwitchTab { .. }
             | BrowserStep::ListTabs
             | BrowserStep::HandleDialog { .. }
@@ -708,16 +709,34 @@ pub async fn execute_request_with_runtime(
             _ => None,
         })
         .collect::<std::collections::HashMap<_, _>>();
-    let mut results = Vec::new();
+    let initial_tab_ids = {
+        let mut rt = runtime_arc.lock().await;
+        refact_browser::adopt_new_tabs(&mut rt, None);
+        rt.known_tab_ids()
+    };
+    let mut results: Vec<StepResult> = Vec::new();
     let mut locator_handlers = Vec::new();
     let mut all_ok = true;
+    let mut pending_popup_wait: Option<(usize, Instant, u64, std::collections::BTreeSet<String>)> =
+        None;
+    let mut new_tabs = Vec::new();
 
     for (idx, step) in request.steps.iter().enumerate() {
+        let step_tab_ids = runtime_arc.lock().await.known_tab_ids();
         if let Some(tab) = &current_tab {
             let _ = tab.evaluate(NETWORK_INFLIGHT_TRACKER_JS, false);
         }
         let file_chooser_was_armed = file_chooser_manager.is_armed();
-        let mut result = if let BrowserStep::WaitForDownload {
+        let mut result = if let BrowserStep::WaitForPopup { timeout_ms } = step {
+            let baseline = runtime_arc.lock().await.known_tab_ids();
+            pending_popup_wait = Some((
+                results.len(),
+                Instant::now(),
+                clamp_timeout_ms(*timeout_ms),
+                baseline,
+            ));
+            StepResult::success(idx, "Armed popup wait")
+        } else if let BrowserStep::WaitForDownload {
             timeout_ms,
             save_as,
         } = step
@@ -749,6 +768,7 @@ pub async fn execute_request_with_runtime(
                 rt.touch();
                 current_tab = rt.get_active_tab();
             }
+            new_tabs.extend(step_report.new_tabs);
             step_report.steps.into_iter().next().unwrap_or_else(|| {
                 StepResult::failure(idx, "Browser action", "No step result produced")
             })
@@ -821,6 +841,83 @@ pub async fn execute_request_with_runtime(
         }
         result.step_index = idx;
 
+        let resolves_popup_wait = pending_popup_wait.is_some()
+            && !matches!(step, BrowserStep::WaitForPopup { .. })
+            && !is_tab_management_step(step);
+        if !matches!(step, BrowserStep::WaitForPopup { .. }) {
+            if resolves_popup_wait {
+                let (result_index, started, timeout_ms, baseline) = pending_popup_wait.unwrap();
+                let deadline = started + Duration::from_millis(timeout_ms);
+                let popup = loop {
+                    let popup = {
+                        let mut rt = runtime_arc.lock().await;
+                        refact_browser::adopt_new_tabs(&mut rt, Some(idx));
+                        let popup_id = rt
+                            .list_tab_infos()
+                            .into_iter()
+                            .find(|tab| !baseline.contains(&tab.id))
+                            .map(|tab| tab.id);
+                        popup_id.and_then(|tab_id| {
+                            rt.tab_opened_by_step.entry(tab_id.clone()).or_insert(idx);
+                            rt.set_active_tab_target_id(tab_id.clone());
+                            rt.list_tab_infos().into_iter().find(|tab| tab.id == tab_id)
+                        })
+                    };
+                    if let Some(tab) = popup {
+                        break Some(tab);
+                    }
+                    if Instant::now() >= deadline {
+                        break None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                };
+                pending_popup_wait = None;
+                match popup {
+                    Some(tab) => {
+                        new_tabs.push(tab.clone());
+                        if let Some(wait_result) = results.get_mut(result_index) {
+                            wait_result.summary = format!("Popup opened: {}", tab.id);
+                            wait_result.data = Some(serde_json::json!({"tab_id": tab.id}));
+                        }
+                        let rt = runtime_arc.lock().await;
+                        current_tab = rt.get_active_tab();
+                    }
+                    None => {
+                        if let Some(wait_result) = results.get_mut(result_index) {
+                            *wait_result = StepResult::failure(
+                                wait_result.step_index,
+                                "Wait for popup",
+                                format!("Timed out after {timeout_ms}ms"),
+                            );
+                        }
+                        all_ok = false;
+                    }
+                }
+            } else if pending_popup_wait.is_none() {
+                let adopted = {
+                    let mut rt = runtime_arc.lock().await;
+                    if result.ok
+                        && matches!(
+                            step,
+                            BrowserStep::Click { .. } | BrowserStep::ClickIfExists { .. }
+                        )
+                    {
+                        tokio::task::block_in_place(|| {
+                            refact_browser::wait_for_new_tabs(
+                                &mut rt,
+                                &step_tab_ids,
+                                Some(idx),
+                                Duration::from_millis(500),
+                            )
+                        })
+                    } else {
+                        refact_browser::adopt_new_tabs(&mut rt, Some(idx))
+                    }
+                };
+                new_tabs.extend(adopted);
+            }
+        }
+
         {
             let mut rt = runtime_arc.lock().await;
             rt.touch();
@@ -835,7 +932,34 @@ pub async fn execute_request_with_runtime(
             break;
         }
         results.push(result);
+        if !all_ok {
+            break;
+        }
     }
+
+    if let Some((result_index, _, timeout_ms, _)) = pending_popup_wait.take() {
+        if let Some(wait_result) = results.get_mut(result_index) {
+            *wait_result = StepResult::failure(
+                wait_result.step_index,
+                "Wait for popup",
+                format!("Timed out after {timeout_ms}ms"),
+            );
+        }
+        all_ok = false;
+    }
+
+    {
+        let mut rt = runtime_arc.lock().await;
+        refact_browser::adopt_new_tabs(&mut rt, None);
+        new_tabs.extend(
+            rt.list_tab_infos()
+                .into_iter()
+                .filter(|tab| !initial_tab_ids.contains(&tab.id)),
+        );
+    }
+    new_tabs.retain(|tab| !initial_tab_ids.contains(&tab.id));
+    let mut seen_new_tabs = std::collections::HashSet::new();
+    new_tabs.retain(|tab| seen_new_tabs.insert(tab.id.clone()));
 
     let active_tab = match current_tab {
         Some(tab) => Some(tab),
@@ -901,6 +1025,7 @@ pub async fn execute_request_with_runtime(
         dialogs,
         uploads,
         downloads,
+        new_tabs,
         screenshot,
     })
 }
@@ -964,12 +1089,15 @@ pub fn execute_steps_with_runtime(
     steps: &[BrowserStep],
     image_policy: &ImagePolicy,
 ) -> ExecutionReport {
+    refact_browser::adopt_new_tabs(runtime, None);
+    let initial_tab_ids = runtime.known_tab_ids();
     let mut current_tab: Option<Arc<Tab>> = runtime.get_active_tab();
     if let Some(ref tab) = current_tab {
         let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
     }
 
-    let mut results = Vec::new();
+    let mut results: Vec<StepResult> = Vec::new();
+    let mut new_tabs = Vec::new();
     let handlers = runtime.locator_handlers.clone();
     let mut locator_handlers = Vec::new();
     let mut all_ok = true;
@@ -984,8 +1112,9 @@ pub fn execute_steps_with_runtime(
         .collect::<std::collections::HashMap<_, _>>();
 
     for (idx, step) in steps.iter().enumerate() {
+        let step_tab_ids = runtime.known_tab_ids();
         let result = match step {
-            BrowserStep::OpenTab { device } => match runtime.browser.new_tab() {
+            BrowserStep::OpenTab { device, url } => match runtime.browser.new_tab() {
                 Ok(new_tab) => {
                     let device_label = device.as_deref().unwrap_or("desktop");
                     let target_id = new_tab.get_target_id().to_string();
@@ -1012,42 +1141,80 @@ pub fn execute_steps_with_runtime(
                             scale: None,
                         },
                     );
-                    let _ = crate::integrations::browser_runtime::setup_recording_for_tab(
-                        runtime, &new_tab,
-                    );
+                    if let Err(error) =
+                        crate::integrations::browser_runtime::setup_recording_for_tab(
+                            runtime, &new_tab,
+                        )
+                    {
+                        let _ = new_tab.close(false);
+                        return ExecutionReport {
+                            ok: false,
+                            steps: vec![StepResult::failure(idx, "OpenTab", error)],
+                            url: current_tab.as_ref().map(|tab| tab.get_url()),
+                            title: current_tab.as_ref().and_then(|tab| tab.get_title().ok()),
+                            stabilized: false,
+                            console: vec![],
+                            page_errors: vec![],
+                            network: vec![],
+                            locator_handlers,
+                            dialogs: runtime.dialog_manager.take_reports(),
+                            uploads: runtime.file_chooser_manager.take_uploads(),
+                            downloads: runtime.download_monitor.take_report(),
+                            new_tabs,
+                            screenshot: None,
+                        };
+                    }
+                    let navigation_error = url.as_ref().and_then(|url| {
+                        new_tab
+                            .navigate_to(url)
+                            .err()
+                            .map(|error| error.to_string())
+                    });
+                    if navigation_error.is_none() && url.is_some() {
+                        let _ = new_tab.wait_until_navigated();
+                    }
                     let _ = new_tab.evaluate(INSPECT_ELEMENT_JS, false);
                     current_tab = Some(new_tab);
                     runtime.set_active_tab_target_id(target_id.clone());
-                    StepResult::success(
-                        idx,
-                        format!(
-                            "Opened new {} tab ({})",
-                            device_label,
-                            &target_id[..8.min(target_id.len())]
-                        ),
-                    )
-                    .with_data(serde_json::json!({"target_id": target_id}))
+                    if let Some(error) = navigation_error {
+                        StepResult::failure(idx, "OpenTab", error)
+                    } else {
+                        StepResult::success(
+                            idx,
+                            format!(
+                                "Opened new {} tab ({})",
+                                device_label,
+                                &target_id[..8.min(target_id.len())]
+                            ),
+                        )
+                        .with_data(serde_json::json!({"tab_id": target_id}))
+                    }
                 }
                 Err(e) => StepResult::failure(idx, "OpenTab", &format!("Failed: {}", e)),
             },
-            BrowserStep::CloseTab => {
-                let tab = match &current_tab {
-                    Some(t) => t.clone(),
-                    None => {
-                        all_ok = false;
-                        results.push(StepResult::failure(idx, "CloseTab", "No active tab"));
-                        break;
-                    }
+            BrowserStep::CloseTab { tab: target } => {
+                let tab = match target {
+                    Some(target) => match resolve_tab(runtime, target) {
+                        Ok(tab) => tab,
+                        Err(error) => {
+                            all_ok = false;
+                            results.push(StepResult::failure(idx, "CloseTab", error));
+                            break;
+                        }
+                    },
+                    None => match &current_tab {
+                        Some(tab) => tab.clone(),
+                        None => {
+                            all_ok = false;
+                            results.push(StepResult::failure(idx, "CloseTab", "No active tab"));
+                            break;
+                        }
+                    },
                 };
                 let target_id = tab.get_target_id().to_string();
                 match tab.close(false) {
                     Ok(_) => {
-                        if runtime.recording_tab_target_id.as_deref() == Some(&target_id) {
-                            runtime.recording_tab_target_id = None;
-                        }
-                        if runtime.active_tab_target_id().as_deref() == Some(target_id.as_str()) {
-                            runtime.active_tab_target_id = None;
-                        }
+                        runtime.select_tab_after_close(&target_id);
                         current_tab = runtime.get_active_tab();
                         StepResult::success(
                             idx,
@@ -1100,6 +1267,29 @@ pub fn execute_steps_with_runtime(
                     .collect::<Vec<_>>();
                 StepResult::success(idx, format!("Listed {} tabs", tab_list.len()))
                     .with_data(serde_json::json!({"tabs": tab_list}))
+            }
+            BrowserStep::WaitForPopup { timeout_ms } => {
+                let before = runtime.known_tab_ids();
+                let timeout_ms = clamp_timeout_ms(*timeout_ms);
+                let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+                loop {
+                    let adopted = refact_browser::adopt_new_tabs(runtime, Some(idx));
+                    if let Some(tab) = adopted.into_iter().find(|tab| !before.contains(&tab.id)) {
+                        runtime.set_active_tab_target_id(tab.id.clone());
+                        current_tab = runtime.get_active_tab();
+                        new_tabs.push(tab.clone());
+                        break StepResult::success(idx, format!("Popup opened: {}", tab.id))
+                            .with_data(serde_json::json!({"tab_id": tab.id}));
+                    }
+                    if Instant::now() >= deadline {
+                        break StepResult::failure(
+                            idx,
+                            "Wait for popup",
+                            format!("Timed out after {timeout_ms}ms"),
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
             }
             BrowserStep::HandleDialog {
                 accept,
@@ -1224,6 +1414,21 @@ pub fn execute_steps_with_runtime(
             }
         }
         pre_step_url = current_tab.as_ref().map(|t| t.get_url());
+        if result.ok
+            && matches!(
+                step,
+                BrowserStep::Click { .. } | BrowserStep::ClickIfExists { .. }
+            )
+        {
+            new_tabs.extend(refact_browser::wait_for_new_tabs(
+                runtime,
+                &step_tab_ids,
+                Some(idx),
+                Duration::from_millis(500),
+            ));
+        } else {
+            new_tabs.extend(refact_browser::adopt_new_tabs(runtime, Some(idx)));
+        }
         results.push(result);
     }
 
@@ -1234,6 +1439,16 @@ pub fn execute_steps_with_runtime(
     let dialogs = runtime.dialog_manager.take_reports();
     let uploads = runtime.file_chooser_manager.take_uploads();
     let downloads = runtime.download_monitor.take_report();
+    refact_browser::adopt_new_tabs(runtime, None);
+    new_tabs.extend(
+        runtime
+            .list_tab_infos()
+            .into_iter()
+            .filter(|tab| !initial_tab_ids.contains(&tab.id)),
+    );
+    new_tabs.retain(|tab| !initial_tab_ids.contains(&tab.id));
+    let mut seen_new_tabs = std::collections::HashSet::new();
+    new_tabs.retain(|tab| seen_new_tabs.insert(tab.id.clone()));
     ExecutionReport {
         ok: all_ok,
         steps: results,
@@ -1247,6 +1462,7 @@ pub fn execute_steps_with_runtime(
         dialogs,
         uploads,
         downloads,
+        new_tabs,
         screenshot: None,
     }
 }
@@ -1724,9 +1940,10 @@ fn execute_single_step(
         BrowserStep::GoForward => step_nav_js(tab, idx, "history.forward()", "Navigated forward"),
 
         BrowserStep::OpenTab { .. }
-        | BrowserStep::CloseTab
+        | BrowserStep::CloseTab { .. }
         | BrowserStep::SwitchTab { .. }
         | BrowserStep::ListTabs
+        | BrowserStep::WaitForPopup { .. }
         | BrowserStep::HandleDialog { .. } => StepResult::failure(
             idx,
             "Runtime management step",

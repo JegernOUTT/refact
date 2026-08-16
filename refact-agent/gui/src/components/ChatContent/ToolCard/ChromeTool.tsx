@@ -489,6 +489,22 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       .join("\n");
   }, [typedResult]);
 
+  const typedNewTabsBlock = useMemo(() => {
+    if (!typedResult?.new_tabs?.length) return null;
+    return typedResult.new_tabs
+      .map((tab) => {
+        const opener = tab.opener
+          ? ` · opener ${tab.opener.tab_id}${tab.opener.frame_id ? ` frame ${tab.opener.frame_id}` : ""}`
+          : "";
+        const step =
+          tab.opened_by_step === undefined || tab.opened_by_step === null
+            ? ""
+            : ` · step ${tab.opened_by_step + 1}`;
+        return `${tab.active ? "Active" : "Opened"}: ${tab.title || tab.url}\n  ${tab.url}\n  ${tab.id}${opener}${step}`;
+      })
+      .join("\n");
+  }, [typedResult]);
+
   const reportScreenshot = typedResult?.screenshot
     ? `data:${typedResult.screenshot.mime};base64,${typedResult.screenshot.data}`
     : null;
@@ -654,6 +670,17 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
           <Box className={styles.logContent}>
             <ShikiCodeBlock showLineNumbers={false}>
               {typedDownloadsBlock}
+            </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
+
+      {typedNewTabsBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>New Tabs</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedNewTabsBlock}
             </ShikiCodeBlock>
           </Box>
         </Box>

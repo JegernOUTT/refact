@@ -674,12 +674,21 @@ pub enum BrowserStep {
     OpenTab {
         #[serde(default)]
         device: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
     },
-    CloseTab,
+    CloseTab {
+        #[serde(default)]
+        tab: Option<TabTarget>,
+    },
     SwitchTab {
         tab: TabTarget,
     },
     ListTabs,
+    WaitForPopup {
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
 
     Click {
         locator: BrowserLocator,
@@ -906,6 +915,7 @@ impl BrowserStep {
         "close_tab",
         "switch_tab",
         "list_tabs",
+        "wait_for_popup",
         "click",
         "click_if_exists",
         "hover",
@@ -1116,6 +1126,7 @@ pub struct ExecutionReport {
     pub uploads: Vec<UploadInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub downloads: Vec<DownloadInfo>,
+    pub new_tabs: Vec<TabInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<BrowserScreenshot>,
 }
@@ -1223,14 +1234,24 @@ pub struct ElementBBox {
     pub height: f64,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TabInfo {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TabOpener {
     pub tab_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TabInfo {
+    pub id: String,
     pub target_id: String,
     pub url: String,
     pub title: String,
-    pub is_active: bool,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opener: Option<TabOpener>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened_by_step: Option<usize>,
 }
 
 #[cfg(test)]
@@ -1248,12 +1269,16 @@ mod tests {
             BrowserStep::GoForward,
             BrowserStep::OpenTab {
                 device: Some("desktop".to_string()),
+                url: Some("https://example.com/new".to_string()),
             },
-            BrowserStep::CloseTab,
+            BrowserStep::CloseTab { tab: None },
             BrowserStep::SwitchTab {
                 tab: TabTarget::Active,
             },
             BrowserStep::ListTabs,
+            BrowserStep::WaitForPopup {
+                timeout_ms: Some(1_000),
+            },
             BrowserStep::Click { locator: locator() },
             BrowserStep::ClickIfExists { locator: locator() },
             BrowserStep::Hover { locator: locator() },
@@ -2134,6 +2159,7 @@ mod tests {
                 total_bytes: 7,
                 state: DownloadState::Completed,
             }],
+            new_tabs: vec![],
             screenshot: None,
         };
         let json = serde_json::to_value(&report).unwrap();
@@ -2178,14 +2204,20 @@ mod tests {
     #[test]
     fn test_tab_info_serde() {
         let ti = TabInfo {
-            tab_id: "1".to_string(),
+            id: "1".to_string(),
             target_id: "ABC123".to_string(),
             url: "https://example.com".to_string(),
             title: "Example".to_string(),
-            is_active: true,
+            active: true,
+            opener: Some(TabOpener {
+                tab_id: "opener".to_string(),
+                frame_id: Some("frame".to_string()),
+            }),
+            opened_by_step: Some(2),
         };
         let json = serde_json::to_value(&ti).unwrap();
-        assert_eq!(json["tab_id"], "1");
-        assert!(json["is_active"].as_bool().unwrap());
+        assert_eq!(json["id"], "1");
+        assert!(json["active"].as_bool().unwrap());
+        assert_eq!(json["opener"]["tab_id"], "opener");
     }
 }

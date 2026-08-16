@@ -62,12 +62,13 @@ pub async fn browser_snapshot_for_chat(
     chat_id: &str,
 ) -> Option<crate::chat::types::BrowserSnapshot> {
     let (runtime_id, runtime_arc) = find_runtime_by_chat_id(app, chat_id).await?;
-    let rt = runtime_arc.lock().await;
+    let mut rt = runtime_arc.lock().await;
+    refact_browser::adopt_new_tabs(&mut rt, None);
     let tabs = rt
         .list_tab_infos()
         .into_iter()
         .map(|t| crate::chat::types::BrowserTabInfo {
-            tab_id: t.tab_id,
+            tab_id: t.id,
             url: t.url,
             title: t.title,
         })
@@ -121,6 +122,8 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
             };
 
             let mut rt = runtime_arc.lock().await;
+
+            refact_browser::adopt_new_tabs(&mut rt, None);
 
             let was_connected = rt.is_connected;
             let still_connected = rt.check_connection();

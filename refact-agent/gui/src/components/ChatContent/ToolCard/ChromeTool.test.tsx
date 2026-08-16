@@ -160,6 +160,17 @@ describe("ChromeTool", () => {
             state: "completed",
           },
         ],
+        new_tabs: [
+          {
+            id: "popup-target",
+            target_id: "popup-target",
+            url: "https://example.com/popup",
+            title: "Popup Fixture",
+            active: true,
+            opener: { tab_id: "primary-target", frame_id: "main-frame" },
+            opened_by_step: 1,
+          },
+        ],
       }),
     });
 
@@ -186,6 +197,13 @@ describe("ChromeTool", () => {
     expect(screen.getByText("Dialogs")).toBeInTheDocument();
     expect(screen.getByText("Uploads")).toBeInTheDocument();
     expect(screen.getByText("Downloads")).toBeInTheDocument();
+    expect(screen.getByText("New Tabs")).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("Popup Fixture")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("opener primary-target")),
+    ).toBeInTheDocument();
     expect(
       screen.getByText((text) => text.includes("DOM stabilized: No")),
     ).toBeInTheDocument();

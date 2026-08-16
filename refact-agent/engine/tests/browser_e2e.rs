@@ -1715,20 +1715,118 @@ async fn legacy_dismiss_overlays_step_still_clears_cookie_banner() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn popup_click_opens_second_tab() {
-    let Some(case) = BrowserCase::start("popup.html").await else {
+    let Some(mut case) = BrowserCase::start("popup.html").await else {
         return;
     };
+    case.setup_world();
     let before = case.runtime.browser.get_tabs().lock().unwrap().len();
-    let report = execute_fixture_steps(
-        &case.tab,
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::Click {
+                locator: BrowserLocator::css("#open"),
+            },
+            BrowserStep::ListTabs,
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(report.ok, "popup click failed: {report:?}");
+    let after = case.runtime.browser.get_tabs().lock().unwrap().len();
+    assert_eq!(after, before + 1);
+    assert_eq!(report.new_tabs.len(), 1);
+    assert_eq!(
+        report.new_tabs[0].opener.as_ref().unwrap().tab_id,
+        case.tab.get_target_id().as_str()
+    );
+    let listed_tabs = report.steps[1].data.as_ref().unwrap()["tabs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(listed_tabs.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn switch_tab_retargets_later_steps() {
+    let Some(mut case) = BrowserCase::start("popup.html").await else {
+        return;
+    };
+    case.setup_world();
+    let popup_report = execute_steps_with_runtime(
+        &mut case.runtime,
         &[BrowserStep::Click {
             locator: BrowserLocator::css("#open"),
         }],
+        &ImagePolicy::browser_capture(),
     );
-    assert!(report.ok, "popup click failed: {report:?}");
-    std::thread::sleep(Duration::from_millis(300));
-    let after = case.runtime.browser.get_tabs().lock().unwrap().len();
-    assert_eq!(after, before + 1);
+    assert!(popup_report.ok, "popup click failed: {popup_report:?}");
+    let popup_id = popup_report.new_tabs[0].id.clone();
+
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::SwitchTab {
+                tab: TabTarget::Id { id: popup_id },
+            },
+            BrowserStep::Eval {
+                expression: "document.querySelector('h1').textContent".to_string(),
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(report.ok, "switch-tab batch failed: {report:?}");
+    assert_eq!(
+        report.steps[1].data.as_ref().unwrap()["value"],
+        "Popup child"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn wait_for_popup_click_and_popup_action_share_one_batch() {
+    let Some(mut case) = BrowserCase::start("popup.html").await else {
+        return;
+    };
+    case.setup_world();
+    let primary_target_id = case.tab.get_target_id().to_string();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let report = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::WaitForPopup {
+                    timeout_ms: Some(5_000),
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#open"),
+                },
+                BrowserStep::Eval {
+                    expression: "document.querySelector('h1').textContent".to_string(),
+                },
+                BrowserStep::CloseTab { tab: None },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.ok, "popup batch failed: {report:?}");
+    assert_eq!(
+        report.steps[0].data.as_ref().unwrap()["tab_id"],
+        report.new_tabs[0].id
+    );
+    assert_eq!(
+        report.steps[2].data.as_ref().unwrap()["value"],
+        "Popup child"
+    );
+    assert_eq!(
+        runtime.lock().await.active_tab_target_id(),
+        Some(primary_target_id.as_str())
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2573,23 +2671,25 @@ async fn tool_contract_canonical_ref_batch_executes_end_to_end() {
     }))
     .unwrap();
     let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
-    let report = execute_request_with_runtime(
-        runtime,
-        request,
-        &ImagePolicy::browser_capture(),
-    )
-    .await
-    .unwrap();
+    let report = execute_request_with_runtime(runtime, request, &ImagePolicy::browser_capture())
+        .await
+        .unwrap();
 
     assert!(report.ok, "canonical ref batch failed: {report:?}");
     assert_eq!(report.steps.len(), 3);
     assert!(
-        report.steps[1].summary.to_ascii_lowercase().contains("click"),
+        report.steps[1]
+            .summary
+            .to_ascii_lowercase()
+            .contains("click"),
         "unexpected click summary: {:?}",
         report.steps[1]
     );
     assert!(
-        report.steps[2].summary.to_ascii_lowercase().contains("fill"),
+        report.steps[2]
+            .summary
+            .to_ascii_lowercase()
+            .contains("fill"),
         "unexpected fill summary: {:?}",
         report.steps[2]
     );
@@ -2881,7 +2981,12 @@ async fn composed_locators_match_playwright_semantics() {
             .map(|handle| {
                 case.runtime
                     .world_manager
-                    .call_function_on(&case.tab, handle, "function() { return this.id || this.getAttribute('data-testid'); }", vec![])
+                    .call_function_on(
+                        &case.tab,
+                        handle,
+                        "function() { return this.id || this.getAttribute('data-testid'); }",
+                        vec![],
+                    )
                     .unwrap()
                     .as_str()
                     .unwrap()
@@ -2890,32 +2995,96 @@ async fn composed_locators_match_playwright_semantics() {
             .collect::<Vec<_>>()
     };
 
-    assert_eq!(resolve_ids(json!({"by":"css","value":"[data-testid=alpha-card]","locator":{"by":"role","role":"button","name":"Open"}})), vec!["alpha-open".to_string()]);
-    assert_eq!(resolve_ids(json!({"by":"css","value":".card","filter":{"has_text":"Beta archived"},"locator":{"by":"css","value":"button"}})), vec!["beta-open".to_string()]);
-    assert_eq!(resolve_ids(json!({"by":"css","value":".card","filter":{"has":{"by":"css","value":".ready"}}})), vec!["alpha-card".to_string()]);
-    assert_eq!(resolve_ids(json!({"by":"css","value":".card","filter":{"has_not":{"by":"css","value":".ready"},"has_not_text":{"source":"archived","flags":"i"},"visible":true}})), vec!["gamma-card".to_string()]);
-    assert_eq!(resolve_ids(json!({"by":"css","value":".card","and":{"by":"css","value":".featured"}})), vec!["alpha-card".to_string()]);
-    assert_eq!(resolve_ids(json!({"by":"test_id","value":"gamma-card","or":{"by":"test_id","value":"alpha-card"}})), vec!["alpha-card".to_string(), "gamma-card".to_string()]);
-    assert_eq!(resolve_ids(json!({"by":"css","value":".card-action","first":true})), vec!["alpha-open".to_string()]);
-    assert_eq!(resolve_ids(json!({"by":"css","value":".card-action","last":true})), vec!["hidden-open".to_string()]);
-    assert_eq!(resolve_ids(json!({"by":"css","value":".card-action","nth":1})), vec!["beta-open".to_string()]);
+    assert_eq!(
+        resolve_ids(
+            json!({"by":"css","value":"[data-testid=alpha-card]","locator":{"by":"role","role":"button","name":"Open"}})
+        ),
+        vec!["alpha-open".to_string()]
+    );
+    assert_eq!(
+        resolve_ids(
+            json!({"by":"css","value":".card","filter":{"has_text":"Beta archived"},"locator":{"by":"css","value":"button"}})
+        ),
+        vec!["beta-open".to_string()]
+    );
+    assert_eq!(
+        resolve_ids(
+            json!({"by":"css","value":".card","filter":{"has":{"by":"css","value":".ready"}}})
+        ),
+        vec!["alpha-card".to_string()]
+    );
+    assert_eq!(
+        resolve_ids(
+            json!({"by":"css","value":".card","filter":{"has_not":{"by":"css","value":".ready"},"has_not_text":{"source":"archived","flags":"i"},"visible":true}})
+        ),
+        vec!["gamma-card".to_string()]
+    );
+    assert_eq!(
+        resolve_ids(json!({"by":"css","value":".card","and":{"by":"css","value":".featured"}})),
+        vec!["alpha-card".to_string()]
+    );
+    assert_eq!(
+        resolve_ids(
+            json!({"by":"test_id","value":"gamma-card","or":{"by":"test_id","value":"alpha-card"}})
+        ),
+        vec!["alpha-card".to_string(), "gamma-card".to_string()]
+    );
+    assert_eq!(
+        resolve_ids(json!({"by":"css","value":".card-action","first":true})),
+        vec!["alpha-open".to_string()]
+    );
+    assert_eq!(
+        resolve_ids(json!({"by":"css","value":".card-action","last":true})),
+        vec!["hidden-open".to_string()]
+    );
+    assert_eq!(
+        resolve_ids(json!({"by":"css","value":".card-action","nth":1})),
+        vec!["beta-open".to_string()]
+    );
 
-    let nth_match = case.runtime.world_manager.call_injected_handles(&case.tab, "querySelectorAll", json!(["css=:nth-match(.card-action, 1)"])).unwrap();
-    let nth_match_id = case.runtime.world_manager.call_function_on(&case.tab, &nth_match[0], "function() { return this.id; }", vec![]).unwrap();
+    let nth_match = case
+        .runtime
+        .world_manager
+        .call_injected_handles(
+            &case.tab,
+            "querySelectorAll",
+            json!(["css=:nth-match(.card-action, 1)"]),
+        )
+        .unwrap();
+    let nth_match_id = case
+        .runtime
+        .world_manager
+        .call_function_on(
+            &case.tab,
+            &nth_match[0],
+            "function() { return this.id; }",
+            vec![],
+        )
+        .unwrap();
     assert_eq!(nth_match_id, json!("alpha-open"));
 
     let ambiguous_or = execute_steps(&case.tab, &[BrowserStep::Click {
         locator: serde_json::from_value(json!({"by":"test_id","value":"alpha-card","locator":{"by":"css","value":"button"},"or":{"by":"test_id","value":"fallback"}})).unwrap(),
     }]);
     assert!(!ambiguous_or.ok);
-    assert!(ambiguous_or.steps[0].error.as_deref().unwrap_or_default().contains("resolved to 2 elements"));
+    assert!(ambiguous_or.steps[0]
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("resolved to 2 elements"));
 
-    assert_eq!(resolve_ids(json!({"by":"css","value":".card-action"})).len(), 4);
+    assert_eq!(
+        resolve_ids(json!({"by":"css","value":".card-action"})).len(),
+        4
+    );
 
-    let multi = execute_steps(&case.tab, &[BrowserStep::ExtractLinks {
-        locator: Some(BrowserLocator::css(".card")),
-        limit: None,
-    }]);
+    let multi = execute_steps(
+        &case.tab,
+        &[BrowserStep::ExtractLinks {
+            locator: Some(BrowserLocator::css(".card")),
+            limit: None,
+        }],
+    );
     assert!(multi.ok, "multi-element extract_links failed: {multi:?}");
     assert_eq!(multi.steps[0].data.as_ref().unwrap()["total"], json!(2));
 }

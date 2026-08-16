@@ -63,9 +63,10 @@ impl LocatorHandler {
                     BrowserStep::AddLocatorHandler { .. }
                         | BrowserStep::RemoveLocatorHandler { .. }
                         | BrowserStep::OpenTab { .. }
-                        | BrowserStep::CloseTab
+                        | BrowserStep::CloseTab { .. }
                         | BrowserStep::SwitchTab { .. }
                         | BrowserStep::ListTabs
+                        | BrowserStep::WaitForPopup { .. }
                 )
             }) {
                 return Err(
