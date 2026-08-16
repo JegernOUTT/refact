@@ -142,7 +142,7 @@ impl Tool for ToolShell {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, exec_registry, abort_flag, execution_scope, chat_id) = {
+        let (gcx, exec_registry, abort_flag, execution_scope, chat_id, derived_privacy_zones) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.app.gcx.clone(),
@@ -150,12 +150,17 @@ impl Tool for ToolShell {
                 ccx_lock.abort_flag.clone(),
                 ccx_lock.execution_scope.clone(),
                 ccx_lock.chat_id.clone(),
+                ccx_lock.derived_privacy_zones.clone(),
             )
         };
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
         let current_model = ccx.lock().await.current_model.clone();
         let destination = crate::privacy::records::provider_destination(&current_model);
-        let observe = crate::privacy::records::shell_observation_needed(&gcx, &destination);
+        let observe = crate::privacy::records::shell_observation_needed_for_session(
+            &gcx,
+            &destination,
+            &derived_privacy_zones,
+        );
         let parsed = parse_args_with_filter(
             gcx.clone(),
             args,
@@ -300,6 +305,7 @@ impl Tool for ToolShell {
                     request_cwd(&result.snapshot),
                     &destination,
                     result.observation,
+                    &derived_privacy_zones,
                     &mut message,
                 )
                 .await?;
@@ -360,6 +366,7 @@ impl Tool for ToolShell {
                 request_cwd(&result.snapshot),
                 &destination,
                 result.observation,
+                &derived_privacy_zones,
                 &mut message,
             )
             .await?;
@@ -429,6 +436,7 @@ async fn apply_shell_privacy(
     cwd: &std::path::Path,
     destination: &refact_privacy::Destination,
     observation: refact_exec::ObservationStatus,
+    derived_zones: &crate::privacy::records::DerivedPrivacyZones,
     message: &mut ChatMessage,
 ) -> Result<(), String> {
     match crate::privacy::records::apply_shell_observation(
@@ -437,6 +445,7 @@ async fn apply_shell_privacy(
         cwd,
         destination,
         observation,
+        derived_zones,
         message,
     )
     .await?

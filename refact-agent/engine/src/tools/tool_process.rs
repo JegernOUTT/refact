@@ -206,7 +206,7 @@ impl Tool for ToolProcessStart {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, exec_registry, execution_scope, chat_id, current_model) = {
+        let (gcx, exec_registry, execution_scope, chat_id, current_model, derived_privacy_zones) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.app.gcx.clone(),
@@ -214,11 +214,16 @@ impl Tool for ToolProcessStart {
                 ccx_lock.execution_scope.clone(),
                 ccx_lock.chat_id.clone(),
                 ccx_lock.current_model.clone(),
+                ccx_lock.derived_privacy_zones.clone(),
             )
         };
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
         let destination = crate::privacy::records::provider_destination(&current_model);
-        let observe = crate::privacy::records::shell_observation_needed(&gcx, &destination);
+        let observe = crate::privacy::records::shell_observation_needed_for_session(
+            &gcx,
+            &destination,
+            &derived_privacy_zones,
+        );
         let parsed = parse_start_args(gcx.clone(), args, execution_scope.as_ref()).await?;
         let mut error_log = Vec::new();
         let env_variables =
@@ -339,6 +344,7 @@ impl Tool for ToolProcessStart {
                 &result.snapshot,
                 &destination,
                 observation,
+                &derived_privacy_zones,
                 &mut result_message,
             )
             .await?;
@@ -489,7 +495,7 @@ impl Tool for ToolProcessRead {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, exec_registry, execution_scope, chat_id, current_model) = {
+        let (gcx, exec_registry, execution_scope, chat_id, current_model, derived_privacy_zones) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.app.gcx.clone(),
@@ -497,6 +503,7 @@ impl Tool for ToolProcessRead {
                 ccx_lock.execution_scope.clone(),
                 ccx_lock.chat_id.clone(),
                 ccx_lock.current_model.clone(),
+                ccx_lock.derived_privacy_zones.clone(),
             )
         };
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
@@ -574,6 +581,7 @@ impl Tool for ToolProcessRead {
                 &snapshot,
                 &destination,
                 observation,
+                &derived_privacy_zones,
                 &mut result_message,
             )
             .await?;
@@ -684,7 +692,7 @@ impl Tool for ToolProcessWait {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, exec_registry, execution_scope, chat_id, current_model) = {
+        let (gcx, exec_registry, execution_scope, chat_id, current_model, derived_privacy_zones) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.app.gcx.clone(),
@@ -692,6 +700,7 @@ impl Tool for ToolProcessWait {
                 ccx_lock.execution_scope.clone(),
                 ccx_lock.chat_id.clone(),
                 ccx_lock.current_model.clone(),
+                ccx_lock.derived_privacy_zones.clone(),
             )
         };
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
@@ -763,6 +772,7 @@ impl Tool for ToolProcessWait {
                 &snapshot,
                 &destination,
                 observation,
+                &derived_privacy_zones,
                 &mut result_message,
             )
             .await?;
@@ -1092,6 +1102,7 @@ async fn apply_process_privacy(
     snapshot: &ExecProcessSnapshot,
     destination: &refact_privacy::Destination,
     observation: refact_exec::ObservationStatus,
+    derived_zones: &crate::privacy::records::DerivedPrivacyZones,
     message: &mut ChatMessage,
 ) -> Result<(), String> {
     let cwd = snapshot
@@ -1106,6 +1117,7 @@ async fn apply_process_privacy(
         cwd,
         destination,
         observation,
+        derived_zones,
         message,
     )
     .await?

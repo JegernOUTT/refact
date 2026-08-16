@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use refact_privacy::{
     Attribution, Destination, DestinationId, DestinationKind, FileRecord, PrivacyRecord,
@@ -20,6 +21,12 @@ pub const SHELL_APPROVAL_MESSAGE: &str =
 pub enum ShellReadDecision {
     Pass,
     Ask,
+}
+
+pub type DerivedPrivacyZones = Arc<RwLock<HashMap<PathBuf, String>>>;
+
+pub fn new_derived_privacy_zones() -> DerivedPrivacyZones {
+    Arc::new(RwLock::new(HashMap::new()))
 }
 
 pub fn provider_destination(model_id: &str) -> Destination {
@@ -54,17 +61,73 @@ pub fn shell_observation_needed(gcx: &Arc<GlobalContext>, destination: &Destinat
     };
     let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
     workspace_files.into_iter().any(|path| {
-        let zone = zone_for_record_path(gcx, &compiled, &path, &mappings);
+        let candidates = record_path_candidates(gcx, &path, &mappings);
+        let zone = compiled.strictest_zone_for_paths(candidates);
         zone.name == "blocked" || !destination.matches_send_to(&zone.send_to)
+    })
+}
+
+pub fn shell_observation_needed_for_session(
+    gcx: &Arc<GlobalContext>,
+    destination: &Destination,
+    derived_zones: &DerivedPrivacyZones,
+) -> bool {
+    if shell_observation_needed(gcx, destination) {
+        return true;
+    }
+    let derived_zone_names = derived_zones
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+    derived_zone_names.iter().any(|name| {
+        name == "blocked"
+            || policy
+                .zones
+                .iter()
+                .find(|zone| zone.name == *name)
+                .is_some_and(|zone| !destination.matches_send_to(&zone.send_to))
     })
 }
 
 fn zone_for_record_path<'a>(
     gcx: &Arc<GlobalContext>,
+    policy: &refact_privacy::PrivacyPolicy,
     compiled: &'a refact_privacy::CompiledPolicy,
     path: &Path,
     mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
-) -> &'a refact_privacy::Zone {
+    derived_zones: &DerivedPrivacyZones,
+) -> String {
+    let candidates = record_path_candidates(gcx, path, mappings);
+    let static_zone = compiled.strictest_zone_for_paths(&candidates);
+    let derived_zone_name = {
+        let derived_zones = derived_zones
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        candidates
+            .iter()
+            .filter_map(|candidate| derived_zones.get(candidate))
+            .min_by_key(|name| zone_destination_count(policy, name))
+            .cloned()
+    };
+    let Some(derived_zone_name) = derived_zone_name else {
+        return static_zone.name.clone();
+    };
+    if zone_destination_count(policy, &derived_zone_name) < destination_count(&static_zone.send_to)
+    {
+        derived_zone_name
+    } else {
+        static_zone.name.clone()
+    }
+}
+
+fn record_path_candidates(
+    gcx: &Arc<GlobalContext>,
+    path: &Path,
+    mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
+) -> Vec<PathBuf> {
     let mut candidates = registered_alias_paths(path, mappings);
     let workspaces = gcx
         .documents_state
@@ -78,7 +141,35 @@ fn zone_for_record_path<'a>(
             .iter()
             .filter_map(move |alias| alias.strip_prefix(workspace).ok().map(Path::to_path_buf))
     }));
-    compiled.strictest_zone_for_paths(candidates)
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn zone_destination_count(policy: &refact_privacy::PrivacyPolicy, name: &str) -> usize {
+    if name == "blocked" {
+        return 0;
+    }
+    policy
+        .zones
+        .iter()
+        .find(|zone| zone.name == name)
+        .map(|zone| destination_count(&zone.send_to))
+        .unwrap_or_else(|| {
+            if name == "normal" {
+                usize::MAX
+            } else {
+                usize::MAX - 1
+            }
+        })
+}
+
+fn destination_count(destinations: &[String]) -> usize {
+    if destinations.iter().any(|destination| destination == "*") {
+        usize::MAX
+    } else {
+        destinations.len()
+    }
 }
 
 pub async fn apply_shell_observation(
@@ -87,11 +178,16 @@ pub async fn apply_shell_observation(
     cwd: &Path,
     destination: &Destination,
     observation: ObservationStatus,
+    derived_zones: &DerivedPrivacyZones,
     message: &mut ChatMessage,
 ) -> Result<ShellReadDecision, String> {
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
     let records = match observation {
-        ObservationStatus::Observed(access) => observed_file_records(gcx, access.reads)?,
+        ObservationStatus::Observed(access) => {
+            let records = observed_file_records_with_derived(gcx, access.reads, derived_zones)?;
+            inherit_observed_write_zones(gcx, &policy, &records, access.writes, derived_zones)?;
+            records
+        }
         ObservationStatus::Unavailable(reason) => {
             let compiled = policy.compile().map_err(|error| error.to_string())?;
             let heuristic =
@@ -256,21 +352,25 @@ fn file_record(
     gcx: &Arc<GlobalContext>,
     path: &Path,
     attribution: Attribution,
+    derived_zones: &DerivedPrivacyZones,
 ) -> Result<FileRecord, String> {
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
     let compiled = policy.compile().map_err(|error| error.to_string())?;
     let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
     Ok(FileRecord {
         path: refact_core::chat_types::normalize_file_name(path.to_string_lossy().into_owned()),
-        zone: zone_for_record_path(gcx, &compiled, path, &mappings)
-            .name
-            .clone(),
+        zone: zone_for_record_path(gcx, &policy, &compiled, path, &mappings, derived_zones),
         attribution,
     })
 }
 
 pub fn declared_file_record(gcx: &Arc<GlobalContext>, path: &Path) -> Result<FileRecord, String> {
-    file_record(gcx, path, Attribution::Declared)
+    file_record(
+        gcx,
+        path,
+        Attribution::Declared,
+        &new_derived_privacy_zones(),
+    )
 }
 
 pub fn declared_file_records(
@@ -291,14 +391,58 @@ pub fn observed_file_records(
     gcx: &Arc<GlobalContext>,
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<Vec<FileRecord>, String> {
+    observed_file_records_with_derived(gcx, paths, &new_derived_privacy_zones())
+}
+
+fn observed_file_records_with_derived(
+    gcx: &Arc<GlobalContext>,
+    paths: impl IntoIterator<Item = PathBuf>,
+    derived_zones: &DerivedPrivacyZones,
+) -> Result<Vec<FileRecord>, String> {
     let mut records = Vec::new();
     for path in paths {
-        let record = file_record(gcx, &path, Attribution::Observed)?;
+        let record = file_record(gcx, &path, Attribution::Observed, derived_zones)?;
         if !records.contains(&record) {
             records.push(record);
         }
     }
     Ok(records)
+}
+
+fn inherit_observed_write_zones(
+    gcx: &Arc<GlobalContext>,
+    policy: &refact_privacy::PrivacyPolicy,
+    reads: &[FileRecord],
+    writes: impl IntoIterator<Item = PathBuf>,
+    derived_zones: &DerivedPrivacyZones,
+) -> Result<(), String> {
+    let Some(zone_name) = reads
+        .iter()
+        .filter(|record| record.zone != "normal")
+        .map(|record| record.zone.as_str())
+        .min_by_key(|name| zone_destination_count(policy, name))
+    else {
+        return Ok(());
+    };
+    let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    let mut derived_zones = derived_zones
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for path in writes {
+        for candidate in record_path_candidates(gcx, &path, &mappings) {
+            let replace = derived_zones
+                .get(&candidate)
+                .map(|current| {
+                    zone_destination_count(policy, zone_name)
+                        < zone_destination_count(policy, current)
+                })
+                .unwrap_or(true);
+            if replace {
+                derived_zones.insert(candidate, zone_name.to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn attach_declared_output_files(
@@ -385,6 +529,7 @@ mod tests {
         let secret = temp.path().join("secret.txt");
         std::fs::write(&secret, "secret").unwrap();
         let gcx = gcx_with_policy(&secret, &[], ShellBehavior::Withhold).await;
+        let derived_zones = new_derived_privacy_zones();
         let mut message = tool_message("secret output");
 
         let decision = apply_shell_observation(
@@ -396,6 +541,7 @@ mod tests {
                 reads: vec![secret.clone()],
                 writes: Vec::new(),
             }),
+            &derived_zones,
             &mut message,
         )
         .await
@@ -422,6 +568,7 @@ mod tests {
         std::fs::write(&secret, "secret").unwrap();
         let gcx = gcx_with_policy(&secret, &["trusted"], ShellBehavior::Withhold).await;
         let destination = provider_destination("trusted/model");
+        let derived_zones = new_derived_privacy_zones();
         let mut message = tool_message("allowed output");
 
         assert!(!shell_observation_needed(&gcx, &destination));
@@ -434,6 +581,7 @@ mod tests {
                 reads: vec![secret],
                 writes: Vec::new(),
             }),
+            &derived_zones,
             &mut message,
         )
         .await
@@ -445,11 +593,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_shell_derived_write_inherits_secret_zone_for_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = temp.path().join("secret.txt");
+        let derived = temp.path().join("derived.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        std::fs::write(&derived, "copy").unwrap();
+        let gcx = gcx_with_policy(&secret, &[], ShellBehavior::Withhold).await;
+        let derived_zones = new_derived_privacy_zones();
+        let destination = provider_destination("untrusted/model");
+        let mut copy_message = tool_message("copied");
+
+        apply_shell_observation(
+            &gcx,
+            "cat secret.txt > derived.txt",
+            temp.path(),
+            &destination,
+            ObservationStatus::Observed(ObservedAccess {
+                reads: vec![secret],
+                writes: vec![derived.clone()],
+            }),
+            &derived_zones,
+            &mut copy_message,
+        )
+        .unwrap();
+
+        gcx.documents_state.workspace_files.lock().unwrap().clear();
+        assert!(shell_observation_needed_for_session(
+            &gcx,
+            &destination,
+            &derived_zones
+        ));
+
+        let mut read_message = tool_message("derived secret");
+        apply_shell_observation(
+            &gcx,
+            "cat derived.txt",
+            temp.path(),
+            &destination,
+            ObservationStatus::Observed(ObservedAccess {
+                reads: vec![derived],
+                writes: Vec::new(),
+            }),
+            &derived_zones,
+            &mut read_message,
+        )
+        .unwrap();
+
+        assert_eq!(read_message.extra["privacy"]["files"][0]["zone"], "secrets");
+        assert_eq!(
+            read_message.content.content_text_only(),
+            SHELL_WITHHELD_MESSAGE
+        );
+
+        let mut other_session_message = tool_message("ordinary output");
+        apply_shell_observation(
+            &gcx,
+            "cat derived.txt",
+            temp.path(),
+            &destination,
+            ObservationStatus::Observed(ObservedAccess {
+                reads: vec![temp.path().join("derived.txt")],
+                writes: Vec::new(),
+            }),
+            &new_derived_privacy_zones(),
+            &mut other_session_message,
+        )
+        .unwrap();
+
+        assert_eq!(
+            other_session_message.extra["privacy"]["files"][0]["zone"],
+            "normal"
+        );
+        assert_eq!(
+            other_session_message.content.content_text_only(),
+            "ordinary output"
+        );
+    }
+
+    #[tokio::test]
     async fn unavailable_observation_is_degraded_and_fail_open() {
         let temp = tempfile::tempdir().unwrap();
         let secret = temp.path().join("secret.txt");
         std::fs::write(&secret, "secret").unwrap();
         let gcx = gcx_with_policy(&secret, &[], ShellBehavior::Withhold).await;
+        let derived_zones = new_derived_privacy_zones();
         let mut message = tool_message("heuristic output");
 
         let decision = apply_shell_observation(
@@ -458,6 +686,7 @@ mod tests {
             temp.path(),
             &provider_destination("untrusted/model"),
             ObservationStatus::Unavailable("ptrace unavailable".to_string()),
+            &derived_zones,
             &mut message,
         )
         .await
@@ -481,6 +710,7 @@ mod tests {
         let secret = temp.path().join("secret.txt");
         std::fs::write(&secret, "secret").unwrap();
         let gcx = gcx_with_policy(&secret, &[], ShellBehavior::Ask).await;
+        let derived_zones = new_derived_privacy_zones();
         let mut message = tool_message("approval output");
 
         let decision = apply_shell_observation(
@@ -492,6 +722,7 @@ mod tests {
                 reads: vec![secret],
                 writes: Vec::new(),
             }),
+            &derived_zones,
             &mut message,
         )
         .await

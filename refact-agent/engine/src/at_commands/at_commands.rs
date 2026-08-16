@@ -1,7 +1,9 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::RwLock as StdRwLock;
 use tokio::sync::mpsc;
 
 use async_trait::async_trait;
@@ -41,6 +43,7 @@ pub struct AtCommandsContext {
     pub current_model: String,
     pub task_meta: Option<TaskMeta>,
     pub execution_scope: Option<ExecutionScope>,
+    pub derived_privacy_zones: Arc<StdRwLock<HashMap<PathBuf, String>>>,
     pub subchat_depth: usize,
 
     pub at_commands: HashMap<String, Arc<dyn AtCommand + Send>>,
@@ -155,6 +158,11 @@ impl AtCommandsContext {
         let (tx, rx) = mpsc::unbounded_channel::<serde_json::Value>();
         let effective_root = root_chat_id.unwrap_or_else(|| chat_id.clone());
         let global_context = app.gcx.clone();
+        let session = app.chat.sessions.read().await.get(&chat_id).cloned();
+        let derived_privacy_zones = match session {
+            Some(session) => session.lock().await.derived_privacy_zones.clone(),
+            None => Arc::new(StdRwLock::new(HashMap::new())),
+        };
         AtCommandsContext {
             global_context,
             app: app.clone(),
@@ -170,6 +178,7 @@ impl AtCommandsContext {
             current_model,
             task_meta,
             execution_scope,
+            derived_privacy_zones,
             subchat_depth: 0,
             at_commands: at_commands_dict(app).await,
             subchat_tool_parameters: IndexMap::new(),

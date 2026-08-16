@@ -13229,6 +13229,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
             chat_id: "test-123".to_string(),
+            derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
                 id: "test-123".to_string(),
                 title: "Test Thread".to_string(),
@@ -13358,6 +13359,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
             chat_id: "skill-test".to_string(),
+            derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
                 id: "skill-test".to_string(),
                 active_skill: Some("my-skill".to_string()),

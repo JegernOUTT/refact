@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::RwLock as StdRwLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Notify, Mutex as AMutex};
 
@@ -258,6 +260,7 @@ impl ExternalReloadPending {
 
 pub struct ChatSession {
     pub chat_id: String,
+    pub derived_privacy_zones: Arc<StdRwLock<HashMap<PathBuf, String>>>,
     pub thread: ThreadParams,
     pub messages: Vec<ChatMessage>,
     pub runtime: RuntimeState,

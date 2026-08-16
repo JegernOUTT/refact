@@ -399,6 +399,7 @@ impl ChatSession {
         let (event_tx, _) = broadcast::channel(limits().event_channel_capacity);
         Self {
             chat_id: chat_id.clone(),
+            derived_privacy_zones: Arc::new(std::sync::RwLock::new(HashMap::new())),
             thread: ThreadParams {
                 id: chat_id,
                 ..Default::default()
@@ -497,6 +498,7 @@ impl ChatSession {
         let (event_tx, _) = broadcast::channel(limits().event_channel_capacity);
         Self {
             chat_id,
+            derived_privacy_zones: Arc::new(std::sync::RwLock::new(HashMap::new())),
             thread,
             messages,
             runtime,
