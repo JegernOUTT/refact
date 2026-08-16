@@ -9,6 +9,7 @@ use crate::transcript::{
     ExecRawCapture, ExecRawOutput, ExecRawRead, ExecTranscript, DEFAULT_SPILL_THRESHOLD_BYTES,
 };
 use crate::spill::SpillTarget;
+use crate::ObservationReader;
 use crate::types::{
     current_timestamp_ms, ExecMode, ExecOutputChunk, ExecOutputStream, ExecProcessFilter,
     ExecProcessId, ExecProcessMeta, ExecProcessSnapshot, ExecReadResult, ExecServiceLookup,
@@ -77,6 +78,7 @@ struct ExecProcessRecord {
     raw_capture: Option<ExecRawCapture>,
     child: Option<tokio::process::Child>,
     runtime: Option<ExecProcessRuntime>,
+    observation: Option<ObservationReader>,
     process_group_isolated: bool,
 }
 
@@ -103,6 +105,7 @@ impl ExecProcessRecord {
             raw_capture,
             child: None,
             runtime: None,
+            observation: None,
             process_group_isolated: false,
         }
     }
@@ -510,6 +513,30 @@ impl ExecRegistry {
         }
         records.insert(process_id, record);
         Ok(snapshot)
+    }
+
+    pub async fn set_observation_reader(
+        &self,
+        process_id: &ExecProcessId,
+        observation: ObservationReader,
+    ) -> Result<(), String> {
+        let mut records = self.records.lock().await;
+        let record = records
+            .get_mut(process_id)
+            .ok_or_else(|| format!("process not found: {process_id}"))?;
+        record.observation = Some(observation);
+        Ok(())
+    }
+
+    pub async fn observation_reader(
+        &self,
+        process_id: &ExecProcessId,
+    ) -> Option<ObservationReader> {
+        self.records
+            .lock()
+            .await
+            .get(process_id)
+            .and_then(|record| record.observation.clone())
     }
 
     // Already-spawned child attachment is test-only; any production exec-module caller added later

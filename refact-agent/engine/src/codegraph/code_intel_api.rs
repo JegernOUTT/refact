@@ -270,22 +270,47 @@ pub struct SecurityScanResponse {
 }
 
 #[derive(Serialize)]
-pub struct OverviewCommunity { pub label: String, pub member_count: usize, pub cohesion: f64 }
+pub struct OverviewCommunity {
+    pub label: String,
+    pub member_count: usize,
+    pub cohesion: f64,
+}
 
 #[derive(Serialize)]
-pub struct OverviewExecutionFlow { pub entry: String, pub reaches: usize, pub depth: usize }
+pub struct OverviewExecutionFlow {
+    pub entry: String,
+    pub reaches: usize,
+    pub depth: usize,
+}
 
 #[derive(Serialize)]
-pub struct OverviewDeadSymbol { pub name: String, pub path: String, pub reason: String, pub confidence: f64 }
+pub struct OverviewDeadSymbol {
+    pub name: String,
+    pub path: String,
+    pub reason: String,
+    pub confidence: f64,
+}
 
 #[derive(Serialize)]
-pub struct CallGraphEdge { pub caller: String, pub callee: String }
+pub struct CallGraphEdge {
+    pub caller: String,
+    pub callee: String,
+}
 
 #[derive(Serialize)]
-pub struct CoverageSummary { pub label: String, pub line_pct: f64, pub branch_pct: f64, pub files_below_50: usize }
+pub struct CoverageSummary {
+    pub label: String,
+    pub line_pct: f64,
+    pub branch_pct: f64,
+    pub files_below_50: usize,
+}
 
 #[derive(Serialize)]
-pub struct CodeMapPageLink { pub target_path: String, pub labels: Vec<String>, pub count: usize }
+pub struct CodeMapPageLink {
+    pub target_path: String,
+    pub labels: Vec<String>,
+    pub count: usize,
+}
 
 #[derive(Serialize)]
 pub struct CodeMapPage {
@@ -301,10 +326,16 @@ pub struct CodeMapPage {
 }
 
 #[derive(Serialize)]
-pub struct CodeMapFileScore { pub path: String, pub score: f64 }
+pub struct CodeMapFileScore {
+    pub path: String,
+    pub score: f64,
+}
 
 #[derive(Serialize)]
-pub struct CodeMapBacklinkHub { pub path: String, pub count: usize }
+pub struct CodeMapBacklinkHub {
+    pub path: String,
+    pub count: usize,
+}
 
 #[derive(Serialize)]
 pub struct CodeWhyDecisionEntry {
@@ -318,7 +349,11 @@ pub struct CodeWhyDecisionEntry {
 }
 
 #[derive(Serialize)]
-pub struct CodeWhyRelation { pub from: String, pub relation: String, pub to: String }
+pub struct CodeWhyRelation {
+    pub from: String,
+    pub relation: String,
+    pub to: String,
+}
 
 #[derive(Serialize)]
 pub struct ToolJson<T: Serialize> {
@@ -330,9 +365,14 @@ pub struct ToolJson<T: Serialize> {
 
 impl<T: Serialize> ToolJson<T> {
     pub fn new(tool: &'static str, summary: impl Into<String>, data: T) -> Self {
-        Self { tool, summary: summary.into(), data }
+        Self {
+            tool,
+            summary: summary.into(),
+            data,
+        }
     }
     pub fn to_text(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}"))
+        serde_json::to_string_pretty(self)
+            .unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}"))
     }
 }

@@ -149,7 +149,7 @@ pub(crate) struct FileReadContext {
     worktree_mappings: Vec<crate::files_correction::RegisteredWorktreePathMapping>,
 }
 
-fn registered_alias_paths(
+pub(crate) fn registered_alias_paths(
     path: &Path,
     mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
 ) -> Vec<PathBuf> {

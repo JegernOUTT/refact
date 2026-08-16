@@ -819,10 +819,14 @@ mod tests {
     #[test]
     fn build_http_omits_privacy_metadata() {
         let mut message = ChatMessage::new("user".to_string(), "hello".to_string());
-        message.extra.insert("privacy".to_string(), json!({"files": []}));
+        message
+            .extra
+            .insert("privacy".to_string(), json!({"files": []}));
         let request = LlmRequest::new("gpt-4".to_string(), vec![message]);
 
-        let http = OpenAiChatAdapter.build_http(&cleared(&request), &default_settings()).unwrap();
+        let http = OpenAiChatAdapter
+            .build_http(&cleared(&request), &default_settings())
+            .unwrap();
 
         assert!(!http.body.to_string().contains("\"privacy\""));
     }
@@ -1518,7 +1522,9 @@ mod tests {
             ("custom_field".to_string(), json!("allowed")),
         ]));
 
-        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &default_settings())
+            .unwrap();
 
         assert_eq!(http.body["model"], "gpt-4");
         assert_ne!(
@@ -1537,7 +1543,9 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "Hi".to_string())],
         );
 
-        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &default_settings())
+            .unwrap();
 
         // User-Agent should use space separator for broadly compatible provider logging.
         let ua = http.headers.get(USER_AGENT).unwrap().to_str().unwrap();

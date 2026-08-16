@@ -117,12 +117,16 @@ impl Collector<'_> {
         } else {
             self.cwd.join(path)
         };
-        if !resolved.exists() || !self.seen.insert(resolved) {
+        if !resolved.exists() || !self.seen.insert(resolved.clone()) {
             return;
         }
 
         self.result.files.push(FileRecord {
-            zone: self.policy.zone_for_path(path).name.clone(),
+            zone: self
+                .policy
+                .strictest_zone_for_paths([path, resolved.as_path()])
+                .name
+                .clone(),
             path: literal,
             attribution: Attribution::Heuristic,
         });

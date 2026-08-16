@@ -3049,11 +3049,9 @@ fn apply_loaded_external_update_to_session(
 fn session_is_passive_child_view(session: &ChatSession) -> bool {
     session.thread.buddy_meta.is_some()
         || (session.thread.parent_id.is_some()
-            && session
-                .thread
-                .link_type
-                .as_deref()
-                .map_or(true, |lt| !matches!(lt, "handoff" | "mode_transition" | "branch")))
+            && session.thread.link_type.as_deref().map_or(true, |lt| {
+                !matches!(lt, "handoff" | "mode_transition" | "branch")
+            }))
 }
 
 fn session_is_stale_refresh_candidate(

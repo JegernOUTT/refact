@@ -1301,10 +1301,7 @@ mod tests {
         let req = crate::llm::LlmRequest::new("gpt-4".to_string(), messages);
 
         let body = OpenAiChatAdapter
-            .build_http(
-                &refact_privacy::testing::cleared(req),
-                &default_settings(),
-            )
+            .build_http(&refact_privacy::testing::cleared(req), &default_settings())
             .unwrap()
             .body;
         let wire_messages = body["messages"].as_array().unwrap();
@@ -1338,10 +1335,7 @@ mod tests {
         let req = crate::llm::LlmRequest::new("gpt-4".to_string(), messages);
 
         let body = OpenAiChatAdapter
-            .build_http(
-                &refact_privacy::testing::cleared(req),
-                &default_settings(),
-            )
+            .build_http(&refact_privacy::testing::cleared(req), &default_settings())
             .unwrap()
             .body;
         let wire_messages = body["messages"].as_array().unwrap();

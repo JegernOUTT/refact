@@ -150,7 +150,9 @@ fn cloud_count_http_parts(
     };
 
     let parts = match kind {
-        CloudTokenizerKind::Anthropic => anthropic_count_http_parts(gcx, req, model_rec, &settings)?,
+        CloudTokenizerKind::Anthropic => {
+            anthropic_count_http_parts(gcx, req, model_rec, &settings)?
+        }
     };
     Ok(Some(parts))
 }
@@ -306,7 +308,10 @@ mod tests {
         }
     }
 
-    fn cleared(request: LlmRequest, model: &BaseModelRecord) -> refact_privacy::Cleared<LlmRequest> {
+    fn cleared(
+        request: LlmRequest,
+        model: &BaseModelRecord,
+    ) -> refact_privacy::Cleared<LlmRequest> {
         let policy = PrivacyPolicy {
             blocked: Vec::new(),
             zones: vec![refact_privacy::Zone {

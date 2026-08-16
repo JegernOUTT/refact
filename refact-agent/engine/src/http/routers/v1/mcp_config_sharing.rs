@@ -359,11 +359,8 @@ async fn write_imported_config(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(error) = tokio::fs::set_permissions(
-            &tmp_path,
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .await
+        if let Err(error) =
+            tokio::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)).await
         {
             let _ = tokio::fs::remove_file(&tmp_path).await;
             return Err(error);
@@ -424,10 +421,7 @@ async fn reload_imported_config(
     if let Some(filename) = std::path::Path::new(path).file_name() {
         let _ = crate::integrations::running_integrations::load_integrations(
             gcx,
-            &[format!(
-                "**/integrations.d/{}",
-                filename.to_string_lossy()
-            )],
+            &[format!("**/integrations.d/{}", filename.to_string_lossy())],
         )
         .await;
     }
@@ -653,9 +647,11 @@ pub async fn handle_v1_mcp_import(
     let mut touched_paths = Vec::new();
     let mut used_names = HashSet::new();
     if !req.overwrite_existing {
-        let mut entries = tokio::fs::read_dir(&integrations_dir).await.map_err(|error| {
-            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-        })?;
+        let mut entries = tokio::fs::read_dir(&integrations_dir)
+            .await
+            .map_err(|error| {
+                ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+            })?;
         while let Some(entry) = entries.next_entry().await.map_err(|error| {
             ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
         })? {
@@ -731,9 +727,7 @@ pub async fn handle_v1_mcp_import(
 
         let config_path_str = config_path.display().to_string();
         touched_paths.push(config_path_str.clone());
-        imported.push(
-            json!({ "config_name": config_name, "config_path": config_path_str }),
-        );
+        imported.push(json!({ "config_name": config_name, "config_path": config_path_str }));
     }
 
     for path in touched_paths {
@@ -922,10 +916,7 @@ mod tests {
 
     #[test]
     fn test_apply_secrets_preserves_dotted_key() {
-        let mut config = HashMap::from([(
-            "env".to_string(),
-            json!({ "FOO.BAR": REDACTED }),
-        )]);
+        let mut config = HashMap::from([("env".to_string(), json!({ "FOO.BAR": REDACTED }))]);
         let secrets = vec![ImportSecret {
             path: vec!["env".to_string(), "FOO.BAR".to_string()],
             value: "dotted-secret".to_string(),

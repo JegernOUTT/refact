@@ -143,9 +143,7 @@ pub fn resolve_port_override(
         return Ok(None);
     };
     raw.parse::<u16>().map(Some).map_err(|_| {
-        format!(
-            "invalid {DAEMON_PORT_ENV} value `{raw}`: expected an integer between 0 and 65535"
-        )
+        format!("invalid {DAEMON_PORT_ENV} value `{raw}`: expected an integer between 0 and 65535")
     })
 }
 
@@ -343,10 +341,7 @@ mod tests {
             resolve_port_override(None, Some("8490")).unwrap(),
             Some(8490)
         );
-        assert_eq!(
-            resolve_port_override(None, Some(" 0 ")).unwrap(),
-            Some(0)
-        );
+        assert_eq!(resolve_port_override(None, Some(" 0 ")).unwrap(), Some(0));
     }
 
     #[test]

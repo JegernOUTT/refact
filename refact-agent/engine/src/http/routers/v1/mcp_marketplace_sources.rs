@@ -93,8 +93,16 @@ async fn load_sources_checked(config_dir: &PathBuf) -> Result<SourcesConfig, Str
             return Ok(default_sources_config())
         }
         Err(err) => {
-            tracing::warn!("failed to read marketplace sources {}: {}", path.display(), err);
-            return Err(format!("read marketplace sources {}: {}", path.display(), err));
+            tracing::warn!(
+                "failed to read marketplace sources {}: {}",
+                path.display(),
+                err
+            );
+            return Err(format!(
+                "read marketplace sources {}: {}",
+                path.display(),
+                err
+            ));
         }
     };
     match serde_yaml::from_str::<SourcesConfig>(&content) {
@@ -148,11 +156,7 @@ async fn save_sources(config_dir: &PathBuf, config: &SourcesConfig) -> Result<()
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(
-            &tmp_path,
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .await;
+        let _ = tokio::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)).await;
     }
     #[cfg(target_os = "windows")]
     {

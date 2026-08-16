@@ -1430,7 +1430,10 @@ mod tests {
 
         let ids: Vec<&str> = result.iter().map(|m| m.tool_call_id.as_str()).collect();
         assert_eq!(ids, vec!["call_0", "call_exempt", "call_2"]);
-        assert!(result[1].content.content_text_only().starts_with("second: "));
+        assert!(result[1]
+            .content
+            .content_text_only()
+            .starts_with("second: "));
         assert!(!result[1]
             .content
             .content_text_only()

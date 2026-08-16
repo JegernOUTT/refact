@@ -583,10 +583,14 @@ mod tests {
     #[test]
     fn build_http_omits_privacy_metadata() {
         let mut message = ChatMessage::new("user".to_string(), "hello".to_string());
-        message.extra.insert("privacy".to_string(), json!({"files": []}));
+        message
+            .extra
+            .insert("privacy".to_string(), json!({"files": []}));
         let request = LlmRequest::new("llama3.1:8b".to_string(), vec![message]);
 
-        let http = OllamaAdapter.build_http(&cleared(&request), &default_settings()).unwrap();
+        let http = OllamaAdapter
+            .build_http(&cleared(&request), &default_settings())
+            .unwrap();
 
         assert!(!http.body.to_string().contains("\"privacy\""));
     }
@@ -802,12 +806,16 @@ mod tests {
         let adapter = OllamaAdapter;
         let messages = vec![ChatMessage::new("user".to_string(), "Hi".to_string())];
         let req = LlmRequest::new("ollama/llama3.1:8b".to_string(), messages.clone());
-        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &default_settings())
+            .unwrap();
         assert!(http.body.get("think").is_none());
 
         let req = LlmRequest::new("ollama/llama3.1:8b".to_string(), messages)
             .with_reasoning(ReasoningIntent::High);
-        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &default_settings())
+            .unwrap();
         assert_eq!(http.body["think"], true);
     }
 

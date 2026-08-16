@@ -585,9 +585,13 @@ mod tests {
             .build()
             .unwrap();
         let logs = Arc::new(AMutex::new(Vec::new()));
-        let result =
-            connect_legacy_sse(client, &format!("http://{}/sse", addr), logs, "redirect_test")
-                .await;
+        let result = connect_legacy_sse(
+            client,
+            &format!("http://{}/sse", addr),
+            logs,
+            "redirect_test",
+        )
+        .await;
         assert!(
             result.is_err(),
             "connect must refuse to follow a cross-origin redirect"

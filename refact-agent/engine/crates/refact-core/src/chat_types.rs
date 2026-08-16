@@ -199,10 +199,22 @@ mod image_header_tests {
 
     #[test]
     fn probes_supported_image_headers() {
-        assert_eq!(probe_image_dimensions(&png_header(4032, 3024)).unwrap(), (4032, 3024));
-        assert_eq!(probe_image_dimensions(&jpeg_header(4032, 3024)).unwrap(), (4032, 3024));
-        assert_eq!(probe_image_dimensions(&webp_header(4032, 3024)).unwrap(), (4032, 3024));
-        assert_eq!(probe_image_dimensions(&gif_header(4032, 3024)).unwrap(), (4032, 3024));
+        assert_eq!(
+            probe_image_dimensions(&png_header(4032, 3024)).unwrap(),
+            (4032, 3024)
+        );
+        assert_eq!(
+            probe_image_dimensions(&jpeg_header(4032, 3024)).unwrap(),
+            (4032, 3024)
+        );
+        assert_eq!(
+            probe_image_dimensions(&webp_header(4032, 3024)).unwrap(),
+            (4032, 3024)
+        );
+        assert_eq!(
+            probe_image_dimensions(&gif_header(4032, 3024)).unwrap(),
+            (4032, 3024)
+        );
     }
 
     #[test]
@@ -216,7 +228,9 @@ mod image_header_tests {
     fn pixel_guard_rejects_oversized_dimensions_before_decode() {
         let bytes = png_header(9000, 9000);
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-        let error = image_reader_from_b64string(&encoded).err().expect("expected pixel-guard rejection");
+        let error = image_reader_from_b64string(&encoded)
+            .err()
+            .expect("expected pixel-guard rejection");
         assert!(error.contains("81000000 pixels"));
     }
 }

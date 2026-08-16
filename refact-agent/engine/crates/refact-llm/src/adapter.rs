@@ -31,8 +31,11 @@ pub struct AdapterSettings {
 }
 
 pub trait LlmWireAdapter: Send + Sync {
-    fn build_http(&self, req: &Cleared<LlmRequest>, settings: &AdapterSettings)
-        -> Result<HttpParts, String>;
+    fn build_http(
+        &self,
+        req: &Cleared<LlmRequest>,
+        settings: &AdapterSettings,
+    ) -> Result<HttpParts, String>;
 
     fn parse_stream_chunk(&self, data: &str) -> Result<Vec<LlmStreamDelta>, StreamParseError>;
 }

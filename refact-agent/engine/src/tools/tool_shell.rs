@@ -152,6 +152,10 @@ impl Tool for ToolShell {
                 ccx_lock.chat_id.clone(),
             )
         };
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+        let current_model = ccx.lock().await.current_model.clone();
+        let destination = crate::privacy::records::provider_destination(&current_model);
+        let observe = crate::privacy::records::shell_observation_needed(&gcx, &destination);
         let parsed = parse_args_with_filter(
             gcx.clone(),
             args,
@@ -223,13 +227,13 @@ impl Tool for ToolShell {
             Ok(policy) => policy,
             Err(error) => {
                 if let Some(audit) = error.audit {
-                    queue_sandbox_audit(gcx, &chat_id, audit).await;
+                    queue_sandbox_audit(gcx.clone(), &chat_id, audit).await;
                 }
                 return Err(error.message);
             }
         };
         if let Some(audit) = policy.audit.clone() {
-            queue_sandbox_audit(gcx, &chat_id, audit).await;
+            queue_sandbox_audit(gcx.clone(), &chat_id, audit).await;
         }
         let sandbox_active = policy.request.sandbox.is_some();
         let sandbox_warning = policy.warning;
@@ -243,7 +247,8 @@ impl Tool for ToolShell {
             .with_owner(owner)
             .with_transcript_limit(SHELL_TRANSCRIPT_MAX_BYTES)
             .with_short_description(short_description)
-            .with_tty(tty);
+            .with_tty(tty)
+            .with_observe(observe);
         if !parsed.run_in_background {
             request = request
                 .with_timeout(Duration::from_secs(timeout))
@@ -278,7 +283,7 @@ impl Tool for ToolShell {
             if !parsed.scope_warnings.is_empty() {
                 out = format!("{}\n{}", parsed.scope_warnings.join("\n"), out);
             }
-            let msg = vec![ContextEnum::ChatMessage(ChatMessage {
+            let mut message = ChatMessage {
                 role: "tool".to_string(),
                 content: ChatContent::SimpleText(out),
                 tool_calls: None,
@@ -287,8 +292,18 @@ impl Tool for ToolShell {
                 output_filter: Some(OutputFilter::no_limits()),
                 extra: exec_extra(&result.snapshot, &read, duration, None, tty),
                 ..Default::default()
-            })];
-            return Ok((false, msg));
+            };
+            if observe {
+                apply_shell_privacy(
+                    &gcx,
+                    &parsed.command,
+                    request_cwd(&result.snapshot),
+                    &destination,
+                    result.observation,
+                    &mut message,
+                )?;
+            }
+            return Ok((false, vec![ContextEnum::ChatMessage(message)]));
         }
         let raw_output = exec_registry
             .read_raw_capture(&result.snapshot.meta.process_id)
@@ -327,7 +342,7 @@ impl Tool for ToolShell {
         append_status_line(&mut out, &result.snapshot.status, duration, timeout);
         append_sandbox_denial_hint(&mut out, sandbox_active);
 
-        let msg = vec![ContextEnum::ChatMessage(ChatMessage {
+        let mut message = ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(out),
             tool_calls: None,
@@ -336,9 +351,19 @@ impl Tool for ToolShell {
             output_filter: Some(OutputFilter::no_limits()),
             extra: exec_extra(&result.snapshot, &read, duration, Some(timeout), tty),
             ..Default::default()
-        })];
+        };
+        if observe {
+            apply_shell_privacy(
+                &gcx,
+                &parsed.command,
+                request_cwd(&result.snapshot),
+                &destination,
+                result.observation,
+                &mut message,
+            )?;
+        }
 
-        Ok((false, msg))
+        Ok((false, vec![ContextEnum::ChatMessage(message)]))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -384,6 +409,36 @@ impl Tool for ToolShell {
 
     fn has_config_path(&self) -> Option<String> {
         Some(self.config_path.clone())
+    }
+}
+
+fn request_cwd(snapshot: &ExecProcessSnapshot) -> &std::path::Path {
+    snapshot
+        .meta
+        .cwd
+        .as_deref()
+        .or(snapshot.meta.owner.workspace.as_deref())
+        .unwrap_or_else(|| std::path::Path::new("."))
+}
+
+fn apply_shell_privacy(
+    gcx: &Arc<GlobalContext>,
+    command: &str,
+    cwd: &std::path::Path,
+    destination: &refact_privacy::Destination,
+    observation: refact_exec::ObservationStatus,
+    message: &mut ChatMessage,
+) -> Result<(), String> {
+    match crate::privacy::records::apply_shell_observation(
+        gcx,
+        command,
+        cwd,
+        destination,
+        observation,
+        message,
+    )? {
+        crate::privacy::records::ShellReadDecision::Pass => Ok(()),
+        crate::privacy::records::ShellReadDecision::Ask => Ok(()),
     }
 }
 

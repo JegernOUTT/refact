@@ -119,8 +119,14 @@ mod tests {
         assert_eq!(projects_json_path(), tempdir.path().join("projects.json"));
         assert_eq!(lock_path(), tempdir.path().join("daemon.lock"));
         assert_eq!(events_jsonl_path(), tempdir.path().join("events.jsonl"));
-        assert_eq!(rotated_events_jsonl_path(), tempdir.path().join("events.jsonl.1"));
-        assert_eq!(daemon_log_path(), tempdir.path().join("logs").join("daemon.log"));
+        assert_eq!(
+            rotated_events_jsonl_path(),
+            tempdir.path().join("events.jsonl.1")
+        );
+        assert_eq!(
+            daemon_log_path(),
+            tempdir.path().join("logs").join("daemon.log")
+        );
         assert_eq!(daemon_config_path(), tempdir.path().join("daemon.yaml"));
     }
 

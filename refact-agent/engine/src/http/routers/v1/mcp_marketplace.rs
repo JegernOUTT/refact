@@ -19,9 +19,7 @@ use crate::http::routers::v1::mcp_marketplace_sources::{
 };
 use crate::integrations::mcp::mcp_naming;
 #[cfg(test)]
-use crate::http::routers::v1::mcp_marketplace_sources::{
-    OFFICIAL_MCP_SOURCE_ID, SMITHERY_SOURCE_ID,
-};
+use crate::http::routers::v1::mcp_marketplace_sources::{OFFICIAL_MCP_SOURCE_ID, SMITHERY_SOURCE_ID};
 
 const BUNDLED_CACHE_TTL_SECS: u64 = 3600;
 const SMITHERY_CACHE_TTL_SECS: u64 = 900;
@@ -1633,7 +1631,10 @@ pub async fn handle_v1_mcp_marketplace_update(
     let merged = merge_recipe_update_yaml(&content, &server, &found_source_id)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let current = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("cannot re-read config: {}", e))
+        ScratchError::new(
+            StatusCode::NOT_FOUND,
+            format!("cannot re-read config: {}", e),
+        )
     })?;
     let (current_source, current_server, _) = parse_marketplace_comments(&current);
     if current != content
@@ -1729,7 +1730,10 @@ pub async fn handle_v1_mcp_marketplace_uninstall(
     .await;
 
     let content = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
-        ScratchError::new(StatusCode::NOT_FOUND, format!("cannot re-read config: {}", e))
+        ScratchError::new(
+            StatusCode::NOT_FOUND,
+            format!("cannot re-read config: {}", e),
+        )
     })?;
     require_marketplace_provenance(&content, "uninstalled")?;
     if content != initial_content {
@@ -1858,8 +1862,7 @@ mod tests {
     fn test_official_registry_cache_key_isolates_fetch_dimensions() {
         let small_page = source_cache_key("official-mcp", "git", None, 1, 10);
         let larger_fetch = source_cache_key("official-mcp", "git", None, 1, 500);
-        let tagged_fetch =
-            source_cache_key("official-mcp", "git", Some("official-mcp"), 1, 10);
+        let tagged_fetch = source_cache_key("official-mcp", "git", Some("official-mcp"), 1, 10);
         let next_page = source_cache_key("official-mcp", "git", None, 2, 10);
         assert_ne!(small_page, larger_fetch);
         assert_ne!(small_page, tagged_fetch);

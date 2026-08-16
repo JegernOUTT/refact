@@ -206,15 +206,19 @@ impl Tool for ToolProcessStart {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, exec_registry, execution_scope, chat_id) = {
+        let (gcx, exec_registry, execution_scope, chat_id, current_model) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.app.gcx.clone(),
                 ccx_lock.app.runtime.exec_registry.clone(),
                 ccx_lock.execution_scope.clone(),
                 ccx_lock.chat_id.clone(),
+                ccx_lock.current_model.clone(),
             )
         };
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+        let destination = crate::privacy::records::provider_destination(&current_model);
+        let observe = crate::privacy::records::shell_observation_needed(&gcx, &destination);
         let parsed = parse_start_args(gcx.clone(), args, execution_scope.as_ref()).await?;
         let mut error_log = Vec::new();
         let env_variables =
@@ -275,13 +279,13 @@ impl Tool for ToolProcessStart {
             Ok(policy) => policy,
             Err(error) => {
                 if let Some(audit) = error.audit {
-                    queue_sandbox_audit(gcx, &chat_id, audit).await;
+                    queue_sandbox_audit(gcx.clone(), &chat_id, audit).await;
                 }
                 return Err(error.message);
             }
         };
         if let Some(audit) = policy.audit.clone() {
-            queue_sandbox_audit(gcx, &chat_id, audit).await;
+            queue_sandbox_audit(gcx.clone(), &chat_id, audit).await;
         }
         let sandbox_active = policy.request.sandbox.is_some();
         let sandbox_warning = policy.warning;
@@ -291,7 +295,8 @@ impl Tool for ToolProcessStart {
             .with_owner(owner)
             .with_transcript_limit(PROCESS_TRANSCRIPT_MAX_BYTES)
             .with_short_description(short_description)
-            .with_tty(tty);
+            .with_tty(tty)
+            .with_observe(observe);
         if let Some(startup_wait) = parsed.startup_wait {
             request = request.with_startup_wait(startup_wait);
         }
@@ -315,12 +320,29 @@ impl Tool for ToolProcessStart {
             &OutputFilter::no_limits(),
         ));
         append_sandbox_denial_hint(&mut content, sandbox_active);
-        Ok(tool_result(
+        let mut result_message = tool_message(
             tool_call_id,
             content,
             Some(exec_extra(&result.snapshot, Some(&read), None, Some(tty))),
             tool_failed_for_status(&result.snapshot.status),
-        ))
+        );
+        if observe {
+            let observation = process_observation_status(
+                exec_registry.as_ref(),
+                &result.snapshot.meta.process_id,
+                false,
+            )
+            .await
+            .unwrap_or(result.observation);
+            apply_process_privacy(
+                &gcx,
+                &result.snapshot,
+                &destination,
+                observation,
+                &mut result_message,
+            )?;
+        }
+        Ok((false, vec![ContextEnum::ChatMessage(result_message)]))
     }
 
     fn tool_description(&self) -> ToolDesc {
@@ -466,18 +488,21 @@ impl Tool for ToolProcessRead {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, exec_registry, execution_scope, chat_id) = {
+        let (gcx, exec_registry, execution_scope, chat_id, current_model) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.app.gcx.clone(),
                 ccx_lock.app.runtime.exec_registry.clone(),
                 ccx_lock.execution_scope.clone(),
                 ccx_lock.chat_id.clone(),
+                ccx_lock.current_model.clone(),
             )
         };
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+        let destination = crate::privacy::records::provider_destination(&current_model);
         let process_id = parse_process_id(args)?;
         let snapshot = authorize_process_access(
-            gcx,
+            gcx.clone(),
             exec_registry.as_ref(),
             execution_scope.as_ref(),
             &chat_id,
@@ -525,7 +550,7 @@ impl Tool for ToolProcessRead {
         } else {
             content.push_str(&format_read_sections(&read, stream, &output_filter));
         }
-        Ok(tool_result(
+        let mut result_message = tool_message(
             tool_call_id,
             content,
             Some(exec_extra(
@@ -535,7 +560,23 @@ impl Tool for ToolProcessRead {
                 None,
             )),
             None,
-        ))
+        );
+        if let Some(observation) = process_observation_status(
+            exec_registry.as_ref(),
+            &process_id,
+            snapshot.status.is_terminal(),
+        )
+        .await
+        {
+            apply_process_privacy(
+                &gcx,
+                &snapshot,
+                &destination,
+                observation,
+                &mut result_message,
+            )?;
+        }
+        Ok((false, vec![ContextEnum::ChatMessage(result_message)]))
     }
 
     fn tool_description(&self) -> ToolDesc {
@@ -641,15 +682,18 @@ impl Tool for ToolProcessWait {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, exec_registry, execution_scope, chat_id) = {
+        let (gcx, exec_registry, execution_scope, chat_id, current_model) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.app.gcx.clone(),
                 ccx_lock.app.runtime.exec_registry.clone(),
                 ccx_lock.execution_scope.clone(),
                 ccx_lock.chat_id.clone(),
+                ccx_lock.current_model.clone(),
             )
         };
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+        let destination = crate::privacy::records::provider_destination(&current_model);
         let process_id = parse_process_id(args)?;
         authorize_process_access(
             gcx.clone(),
@@ -670,7 +714,7 @@ impl Tool for ToolProcessWait {
                 Ok(result) => (result?, false),
                 Err(_) => (
                     authorize_process_access(
-                        gcx,
+                        gcx.clone(),
                         exec_registry.as_ref(),
                         execution_scope.as_ref(),
                         &chat_id,
@@ -699,12 +743,28 @@ impl Tool for ToolProcessWait {
             ProcessStreamSelection::All,
             &OutputFilter::no_limits(),
         ));
-        Ok(tool_result(
+        let mut result_message = tool_message(
             tool_call_id,
             content,
             Some(exec_extra(&snapshot, Some(&read), None, None)),
             tool_failed_for_status(&snapshot.status),
-        ))
+        );
+        if let Some(observation) = process_observation_status(
+            exec_registry.as_ref(),
+            &process_id,
+            snapshot.status.is_terminal(),
+        )
+        .await
+        {
+            apply_process_privacy(
+                &gcx,
+                &snapshot,
+                &destination,
+                observation,
+                &mut result_message,
+            )?;
+        }
+        Ok((false, vec![ContextEnum::ChatMessage(result_message)]))
     }
 
     fn tool_description(&self) -> ToolDesc {
@@ -971,12 +1031,12 @@ fn source(config_path: &str) -> ToolSource {
     }
 }
 
-fn tool_result(
+fn tool_message(
     tool_call_id: &String,
     content: String,
     extra: Option<serde_json::Map<String, Value>>,
     tool_failed: Option<bool>,
-) -> (bool, Vec<ContextEnum>) {
+) -> ChatMessage {
     let mut message = ChatMessage {
         role: "tool".to_string(),
         content: ChatContent::SimpleText(content),
@@ -989,7 +1049,65 @@ fn tool_result(
     if let Some(extra) = extra {
         message.extra = extra;
     }
-    (false, vec![ContextEnum::ChatMessage(message)])
+    message
+}
+
+fn tool_result(
+    tool_call_id: &String,
+    content: String,
+    extra: Option<serde_json::Map<String, Value>>,
+    tool_failed: Option<bool>,
+) -> (bool, Vec<ContextEnum>) {
+    (
+        false,
+        vec![ContextEnum::ChatMessage(tool_message(
+            tool_call_id,
+            content,
+            extra,
+            tool_failed,
+        ))],
+    )
+}
+
+async fn process_observation_status(
+    exec_registry: &ExecRegistry,
+    process_id: &ExecProcessId,
+    terminal: bool,
+) -> Option<refact_exec::ObservationStatus> {
+    let Some(reader) = exec_registry.observation_reader(process_id).await else {
+        return None;
+    };
+    Some(if terminal {
+        reader.wait_status().await
+    } else {
+        reader.status()
+    })
+}
+
+fn apply_process_privacy(
+    gcx: &Arc<GlobalContext>,
+    snapshot: &ExecProcessSnapshot,
+    destination: &refact_privacy::Destination,
+    observation: refact_exec::ObservationStatus,
+    message: &mut ChatMessage,
+) -> Result<(), String> {
+    let cwd = snapshot
+        .meta
+        .cwd
+        .as_deref()
+        .or(snapshot.meta.owner.workspace.as_deref())
+        .unwrap_or_else(|| Path::new("."));
+    match crate::privacy::records::apply_shell_observation(
+        gcx,
+        &snapshot.meta.command,
+        cwd,
+        destination,
+        observation,
+        message,
+    )? {
+        crate::privacy::records::ShellReadDecision::Pass => Ok(()),
+        crate::privacy::records::ShellReadDecision::Ask => Ok(()),
+    }
 }
 
 fn append_sandbox_denial_hint(content: &mut String, sandbox_active: bool) {

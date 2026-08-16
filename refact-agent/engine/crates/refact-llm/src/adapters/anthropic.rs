@@ -1491,10 +1491,14 @@ mod tests {
     #[test]
     fn build_http_omits_privacy_metadata() {
         let mut message = ChatMessage::new("user".to_string(), "hello".to_string());
-        message.extra.insert("privacy".to_string(), json!({"files": []}));
+        message
+            .extra
+            .insert("privacy".to_string(), json!({"files": []}));
         let request = LlmRequest::new("claude-3-sonnet".to_string(), vec![message]);
 
-        let http = AnthropicAdapter.build_http(&cleared(&request), &settings()).unwrap();
+        let http = AnthropicAdapter
+            .build_http(&cleared(&request), &settings())
+            .unwrap();
 
         assert!(!http.body.to_string().contains("\"privacy\""));
     }
@@ -1660,7 +1664,9 @@ mod tests {
         )
         .with_claude_code_identity(Some(identity.clone()));
 
-        let http = adapter.build_http(&cleared(&req), &claude_code_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &claude_code_settings())
+            .unwrap();
 
         assert_eq!(
             http.headers.get("x-claude-code-session-id").unwrap(),
@@ -1689,8 +1695,12 @@ mod tests {
         let req_b = LlmRequest::new("claude_code/claude-sonnet-4".to_string(), messages)
             .with_claude_code_identity(Some(identity));
 
-        let http_a = adapter.build_http(&cleared(&req_a), &claude_code_settings()).unwrap();
-        let http_b = adapter.build_http(&cleared(&req_b), &claude_code_settings()).unwrap();
+        let http_a = adapter
+            .build_http(&cleared(&req_a), &claude_code_settings())
+            .unwrap();
+        let http_b = adapter
+            .build_http(&cleared(&req_b), &claude_code_settings())
+            .unwrap();
 
         assert_eq!(
             http_a.headers.get("x-claude-code-session-id"),
@@ -1980,7 +1990,9 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "test".to_string())],
         );
 
-        let http = adapter.build_http(&cleared(&req_no_reasoning), &settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req_no_reasoning), &settings())
+            .unwrap();
         assert!(http.headers.get("anthropic-beta").is_none());
     }
 
@@ -2466,7 +2478,9 @@ mod tests {
             None,
         );
 
-        let http = adapter.build_http(&cleared(&req), &claude_code_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &claude_code_settings())
+            .unwrap();
 
         assert!(http.body.get("cache_control").is_none());
         let system = http.body["system"].as_array().unwrap();
@@ -2509,7 +2523,9 @@ mod tests {
         )
         .with_reasoning(ReasoningIntent::High);
 
-        let http = adapter.build_http(&cleared(&req), &no_reasoning_settings).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &no_reasoning_settings)
+            .unwrap();
         assert!(http.headers.get("anthropic-beta").is_none());
     }
 
@@ -3197,7 +3213,9 @@ mod tests {
         req_low_max.reasoning = ReasoningIntent::High; // Will use DEFAULT_THINKING_BUDGET
         req_low_max.stream = true;
 
-        let http = adapter.build_http(&cleared(&req_low_max), &settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req_low_max), &settings())
+            .unwrap();
         // Should be adjusted: budget + max(current_max, 1024)
         assert_eq!(http.body["max_tokens"], DEFAULT_THINKING_BUDGET + 4096);
         assert_eq!(
@@ -3214,7 +3232,9 @@ mod tests {
         req_high_max.reasoning = ReasoningIntent::High;
         req_high_max.stream = true;
 
-        let http2 = adapter.build_http(&cleared(&req_high_max), &settings()).unwrap();
+        let http2 = adapter
+            .build_http(&cleared(&req_high_max), &settings())
+            .unwrap();
         // Should remain unchanged
         assert_eq!(http2.body["max_tokens"], 20000);
 
@@ -3227,7 +3247,9 @@ mod tests {
         req_no_thinking.reasoning = ReasoningIntent::Off;
         req_no_thinking.stream = true;
 
-        let http3 = adapter.build_http(&cleared(&req_no_thinking), &settings()).unwrap();
+        let http3 = adapter
+            .build_http(&cleared(&req_no_thinking), &settings())
+            .unwrap();
         assert_eq!(http3.body["max_tokens"], 4096);
         assert!(http3.body.get("thinking").is_none());
     }
@@ -4212,7 +4234,9 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "hi".to_string())],
         )
         .with_reasoning(ReasoningIntent::Medium);
-        let http = adapter.build_http(&cleared(&req), &effort_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &effort_settings())
+            .unwrap();
         assert_eq!(http.body["thinking"]["type"], "adaptive");
         assert_eq!(http.body["thinking"]["display"], "summarized");
         assert!(http.body["thinking"].get("budget_tokens").is_none());
@@ -4229,7 +4253,9 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "hi".to_string())],
         )
         .with_reasoning(ReasoningIntent::BudgetTokens(5000));
-        let http = adapter.build_http(&cleared(&req), &effort_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &effort_settings())
+            .unwrap();
         assert_eq!(http.body["thinking"]["type"], "adaptive");
         assert_eq!(http.body["thinking"]["display"], "summarized");
         assert!(http.body["thinking"].get("budget_tokens").is_none());
@@ -4253,7 +4279,9 @@ mod tests {
         )
         .with_reasoning(ReasoningIntent::Medium)
         .with_extra_body(extra);
-        let http = adapter.build_http(&cleared(&req), &effort_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &effort_settings())
+            .unwrap();
         assert_eq!(http.body["thinking"]["type"], "enabled");
         let beta = http
             .headers

@@ -798,8 +798,17 @@ impl ExecRegistry {
         let observation = observation_setup.start(child.id());
         #[cfg(target_os = "linux")]
         let observation_handle = observation.handle();
+        #[cfg(target_os = "linux")]
+        let observation_reader = request.observe.then(|| observation.reader());
         #[cfg(not(target_os = "linux"))]
         let observation_handle = None;
+        #[cfg(not(target_os = "linux"))]
+        let observation_reader = request.observe.then(|| {
+            let ObservationStatus::Unavailable(reason) = crate::observe::status(true) else {
+                unreachable!("unsupported observer returned observed access")
+            };
+            crate::observe::ObservationReader::unavailable(reason)
+        });
         let child = Arc::new(Mutex::new(RuntimeChild::Tokio(child)));
         let (control_tx, control_rx) = mpsc::channel(8);
         let terminal = Arc::new(Notify::new());
@@ -822,6 +831,10 @@ impl ExecRegistry {
                 ));
             }
             return Err(message);
+        }
+        if let Some(observation_reader) = observation_reader {
+            self.set_observation_reader(&process_id, observation_reader)
+                .await?;
         }
         let stdout_task = pump_output(
             self.clone(),
@@ -930,6 +943,17 @@ impl ExecRegistry {
                 ));
             }
             return Err(message);
+        }
+        if request.observe {
+            let ObservationStatus::Unavailable(reason) = crate::observe::unsupported_status(true)
+            else {
+                unreachable!("unsupported observer returned observed access")
+            };
+            self.set_observation_reader(
+                &process_id,
+                crate::observe::ObservationReader::unavailable(reason),
+            )
+            .await?;
         }
         let stdout_task = pump_blocking_output(
             self.clone(),

@@ -548,9 +548,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                     reason: finish_reason.to_string(),
                 });
                 if let Some(usage) = extract_usage(&json) {
-                    deltas.push(LlmStreamDelta::SetUsage {
-                        usage,
-                    });
+                    deltas.push(LlmStreamDelta::SetUsage { usage });
                 }
                 rehydrate_response_output(&json, &mut deltas, event_type);
                 deltas.push(LlmStreamDelta::Done);
@@ -583,9 +581,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                     reason: finish_reason.to_string(),
                 });
                 if let Some(usage) = extract_usage(&json) {
-                    deltas.push(LlmStreamDelta::SetUsage {
-                        usage,
-                    });
+                    deltas.push(LlmStreamDelta::SetUsage { usage });
                 }
                 rehydrate_response_output(&json, &mut deltas, event_type);
                 deltas.push(LlmStreamDelta::Done);
@@ -602,9 +598,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                         }
                     ]),
                 );
-                deltas.push(LlmStreamDelta::MergeExtra {
-                    extra,
-                });
+                deltas.push(LlmStreamDelta::MergeExtra { extra });
             }
             // Carries response headers such as x-codex-safety-buffering-enabled and
             // x-codex-safety-buffering-faster-model (the internal draft model).
@@ -619,9 +613,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                         }
                     ]),
                 );
-                deltas.push(LlmStreamDelta::MergeExtra {
-                    extra,
-                });
+                deltas.push(LlmStreamDelta::MergeExtra { extra });
             }
 
             // ── Error events ──
@@ -677,9 +669,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                             }
                         ]),
                     );
-                    deltas.push(LlmStreamDelta::MergeExtra {
-                        extra,
-                    });
+                    deltas.push(LlmStreamDelta::MergeExtra { extra });
                 } else {
                     tracing::warn!("Unhandled Responses API event: {}", event_type);
                     // Keep an append-only array in extra (don't overwrite prior events).
@@ -695,9 +685,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                             }
                         ]),
                     );
-                    deltas.push(LlmStreamDelta::MergeExtra {
-                        extra,
-                    });
+                    deltas.push(LlmStreamDelta::MergeExtra { extra });
                     deltas.push(LlmStreamDelta::AddServerContentBlock {
                         block: json!({
                             "type": "unhandled_openai_responses_event",
@@ -713,9 +701,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
         // This handles both top-level and nested "response" wrapper fields
         let extra = extract_extra_fields(&json);
         if !extra.is_empty() {
-            deltas.push(LlmStreamDelta::MergeExtra {
-                extra,
-            });
+            deltas.push(LlmStreamDelta::MergeExtra { extra });
         }
 
         Ok(deltas)
@@ -958,9 +944,7 @@ fn tool_choice_to_responses(choice: &CanonicalToolChoice) -> Value {
         CanonicalToolChoice::Auto => json!("auto"),
         CanonicalToolChoice::None => json!("none"),
         CanonicalToolChoice::Required => json!("required"),
-        CanonicalToolChoice::Function {
-            name,
-        } => json!({"type": "function", "name": name}),
+        CanonicalToolChoice::Function { name } => json!({"type": "function", "name": name}),
     }
 }
 
@@ -1161,9 +1145,7 @@ fn push_response_id(json: &Value, deltas: &mut Vec<LlmStreamDelta>) {
     if let Some(response_id) = response_id {
         let mut extra = serde_json::Map::new();
         extra.insert("openai_response_id".to_string(), json!(response_id));
-        deltas.push(LlmStreamDelta::MergeExtra {
-            extra,
-        });
+        deltas.push(LlmStreamDelta::MergeExtra { extra });
     }
 }
 
@@ -1325,10 +1307,14 @@ mod tests {
     #[test]
     fn build_http_omits_privacy_metadata() {
         let mut message = ChatMessage::new("user".to_string(), "hello".to_string());
-        message.extra.insert("privacy".to_string(), json!({"files": []}));
+        message
+            .extra
+            .insert("privacy".to_string(), json!({"files": []}));
         let request = LlmRequest::new("gpt-4.1".to_string(), vec![message]);
 
-        let http = OpenAiResponsesAdapter.build_http(&cleared(&request), &default_settings()).unwrap();
+        let http = OpenAiResponsesAdapter
+            .build_http(&cleared(&request), &default_settings())
+            .unwrap();
 
         assert!(!http.body.to_string().contains("\"privacy\""));
     }
@@ -1654,7 +1640,9 @@ mod tests {
         );
         req.previous_response_id = Some("resp_123".to_string());
 
-        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &default_settings())
+            .unwrap();
 
         assert_eq!(http.body["previous_response_id"], "resp_123");
         assert_eq!(
@@ -1671,7 +1659,9 @@ mod tests {
             vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
         );
 
-        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &default_settings())
+            .unwrap();
         assert_eq!(
             http.body["store"], true,
             "Responses API should default to store=true"
@@ -1688,7 +1678,9 @@ mod tests {
         req.params.temperature = Some(0.5);
         req.params.top_p = Some(0.9);
 
-        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &default_settings())
+            .unwrap();
 
         assert!(
             http.body.get("max_output_tokens").is_some(),
@@ -1807,9 +1799,7 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::AppendContent {
-                text, ..
-            } => assert_eq!(text, "Hello"),
+            LlmStreamDelta::AppendContent { text, .. } => assert_eq!(text, "Hello"),
             _ => panic!("expected AppendContent"),
         }
     }
@@ -1912,9 +1902,7 @@ mod tests {
                 .any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })),
             "codex.rate_limits should not create a visible server block"
         );
-        if let Some(LlmStreamDelta::MergeExtra {
-            extra,
-        }) = deltas
+        if let Some(LlmStreamDelta::MergeExtra { extra }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::MergeExtra { .. }))
         {
@@ -1939,9 +1927,7 @@ mod tests {
                 .any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })),
             "codex.response.metadata should not create a visible server block"
         );
-        let Some(LlmStreamDelta::MergeExtra {
-            extra,
-        }) = deltas
+        let Some(LlmStreamDelta::MergeExtra { extra }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::MergeExtra { .. }))
         else {
@@ -1973,9 +1959,7 @@ mod tests {
                 .any(|d| matches!(d, LlmStreamDelta::AddServerContentBlock { .. })),
             "unknown codex.* events should never create visible server blocks"
         );
-        let Some(LlmStreamDelta::MergeExtra {
-            extra,
-        }) = deltas
+        let Some(LlmStreamDelta::MergeExtra { extra }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::MergeExtra { .. }))
         else {
@@ -2067,9 +2051,7 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::SetToolCalls {
-                tool_calls,
-            } => {
+            LlmStreamDelta::SetToolCalls { tool_calls } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0]["id"], "call_abc123");
                 assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
@@ -2087,9 +2069,7 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::SetToolCalls {
-                tool_calls,
-            } => {
+            LlmStreamDelta::SetToolCalls { tool_calls } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0]["index"], 0);
                 assert_eq!(tool_calls[0]["function"]["arguments"], "{\"loc");
@@ -2111,9 +2091,7 @@ mod tests {
                 .any(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })),
             "arguments.done should emit FinalizeToolCalls"
         );
-        if let Some(LlmStreamDelta::FinalizeToolCalls {
-            tool_calls,
-        }) = deltas
+        if let Some(LlmStreamDelta::FinalizeToolCalls { tool_calls }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. }))
         {
@@ -2139,9 +2117,7 @@ mod tests {
                 .any(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })),
             "output_item.done (function_call) should emit FinalizeToolCalls"
         );
-        if let Some(LlmStreamDelta::FinalizeToolCalls {
-            tool_calls,
-        }) = deltas
+        if let Some(LlmStreamDelta::FinalizeToolCalls { tool_calls }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. }))
         {
@@ -2165,9 +2141,7 @@ mod tests {
         let tool_calls: Vec<_> = deltas
             .iter()
             .filter_map(|d| match d {
-                LlmStreamDelta::SetToolCalls {
-                    tool_calls,
-                } => Some(tool_calls.clone()),
+                LlmStreamDelta::SetToolCalls { tool_calls } => Some(tool_calls.clone()),
                 _ => None,
             })
             .flatten()
@@ -2197,9 +2171,7 @@ mod tests {
             .find(|d| matches!(d, LlmStreamDelta::SetUsage { .. }));
         assert!(usage_delta.is_some());
         match usage_delta.unwrap() {
-            LlmStreamDelta::SetUsage {
-                usage,
-            } => {
+            LlmStreamDelta::SetUsage { usage } => {
                 assert_eq!(usage.prompt_tokens, 100);
                 assert_eq!(usage.completion_tokens, 50);
                 assert_eq!(usage.total_tokens, 150);
@@ -2220,9 +2192,7 @@ mod tests {
             .find(|d| matches!(d, LlmStreamDelta::SetUsage { .. }));
         assert!(usage_delta.is_some());
         match usage_delta.unwrap() {
-            LlmStreamDelta::SetUsage {
-                usage,
-            } => {
+            LlmStreamDelta::SetUsage { usage } => {
                 assert_eq!(usage.prompt_tokens, 200);
                 assert_eq!(usage.completion_tokens, 100);
                 assert_eq!(usage.total_tokens, 1100);
@@ -2245,9 +2215,7 @@ mod tests {
             .find(|d| matches!(d, LlmStreamDelta::SetUsage { .. }));
         assert!(usage_delta.is_some());
         match usage_delta.unwrap() {
-            LlmStreamDelta::SetUsage {
-                usage,
-            } => {
+            LlmStreamDelta::SetUsage { usage } => {
                 assert_eq!(usage.prompt_tokens, 250);
                 assert_eq!(usage.completion_tokens, 100);
                 assert_eq!(usage.total_tokens, 1100);
@@ -2323,10 +2291,7 @@ mod tests {
         let citations: Vec<_> = deltas
             .iter()
             .filter_map(|d| {
-                if let LlmStreamDelta::AddCitation {
-                    citation,
-                } = d
-                {
+                if let LlmStreamDelta::AddCitation { citation } = d {
                     Some(citation)
                 } else {
                     None
@@ -2375,9 +2340,7 @@ mod tests {
             "Should capture reasoning item as SetThinkingBlocks"
         );
 
-        if let Some(LlmStreamDelta::SetThinkingBlocks {
-            blocks,
-        }) = deltas
+        if let Some(LlmStreamDelta::SetThinkingBlocks { blocks }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. }))
         {
@@ -2394,9 +2357,7 @@ mod tests {
 
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
-        if let Some(LlmStreamDelta::SetThinkingBlocks {
-            blocks,
-        }) = deltas
+        if let Some(LlmStreamDelta::SetThinkingBlocks { blocks }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. }))
         {
@@ -2502,7 +2463,9 @@ mod tests {
         )
         .with_reasoning(crate::params::ReasoningIntent::Medium);
 
-        let http = adapter.build_http(&cleared(&req), &default_settings()).unwrap();
+        let http = adapter
+            .build_http(&cleared(&req), &default_settings())
+            .unwrap();
 
         // Should include reasoning.encrypted_content for multi-turn support
         let include = http.body["include"].as_array().unwrap();
@@ -2633,9 +2596,7 @@ mod tests {
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
         assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::Done)));
-        if let Some(LlmStreamDelta::SetFinishReason {
-            reason,
-        }) = deltas
+        if let Some(LlmStreamDelta::SetFinishReason { reason }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::SetFinishReason { .. }))
         {

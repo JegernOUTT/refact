@@ -44,7 +44,7 @@ impl ObservationReader {
         }
     }
 
-    fn unavailable(reason: impl Into<String>) -> Self {
+    pub(crate) fn unavailable(reason: impl Into<String>) -> Self {
         Self {
             #[cfg(target_os = "linux")]
             handle: None,

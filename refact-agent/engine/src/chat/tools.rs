@@ -75,6 +75,36 @@ fn tool_execution_messages(
     }
 }
 
+pub(crate) const SHELL_PRIVACY_APPROVAL_RULE: &str =
+    "Privacy approval required: command read guarded files";
+
+pub(crate) fn is_shell_privacy_approval(reason: &PauseReason) -> bool {
+    reason.rule == SHELL_PRIVACY_APPROVAL_RULE
+}
+
+pub(crate) fn shell_privacy_approval_reasons(
+    tool_calls: &[ChatToolCall],
+    tool_results: &[ChatMessage],
+) -> Vec<PauseReason> {
+    tool_results
+        .iter()
+        .filter(|message| crate::privacy::records::shell_ask_pending(message))
+        .filter_map(|message| {
+            let tool_call = tool_calls
+                .iter()
+                .find(|tool_call| tool_call.id == message.tool_call_id)?;
+            Some(PauseReason {
+                reason_type: "confirmation".to_string(),
+                tool_name: tool_call.function.name.clone(),
+                command: tool_call.function.name.clone(),
+                rule: SHELL_PRIVACY_APPROVAL_RULE.to_string(),
+                tool_call_id: tool_call.id.clone(),
+                integr_config_path: None,
+            })
+        })
+        .collect()
+}
+
 pub enum ToolStepOutcome {
     NoToolCalls,
     Paused,
@@ -546,6 +576,32 @@ mod tests {
 
         assert_eq!(selected_prepared[0].content.content_text_only(), "prepared");
         assert_eq!(selected_raw[0].content.content_text_only(), "raw");
+    }
+
+    #[test]
+    fn shell_privacy_pending_result_uses_confirmation_pause() {
+        let tool_call = ChatToolCall {
+            id: "tc-shell".to_string(),
+            index: None,
+            function: crate::call_validation::ChatToolFunction {
+                name: "shell".to_string(),
+                arguments: "{}".to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+        };
+        let mut result = ChatMessage::new("tool".to_string(), "pending".to_string());
+        result.tool_call_id = tool_call.id.clone();
+        result.extra.insert(
+            "privacy_shell".to_string(),
+            serde_json::json!({"ask_pending": true}),
+        );
+
+        let reasons = shell_privacy_approval_reasons(&[tool_call], &[result]);
+
+        assert_eq!(reasons.len(), 1);
+        assert!(is_shell_privacy_approval(&reasons[0]));
+        assert_eq!(reasons[0].tool_call_id, "tc-shell");
     }
 
     #[test]
@@ -1558,6 +1614,17 @@ pub async fn process_tool_calls_once(
         result = tool_execution => result,
         _ = wait_for_tool_abort(session_arc.clone(), tool_interrupt_flag) => (Vec::new(), false),
     };
+
+    let privacy_approvals = shell_privacy_approval_reasons(&tools_to_execute, &tool_results);
+    if !privacy_approvals.is_empty() {
+        let mut session = session_arc.lock().await;
+        for result_msg in tool_results {
+            session.add_message(result_msg);
+        }
+        session.drain_post_tool_side_effects();
+        session.set_paused_with_reasons_and_auto_approved(privacy_approvals, Vec::new(), None);
+        return ToolStepOutcome::Paused;
+    }
 
     // Determine tool-requested final state before checking abort, since ask_questions,
     // task_done, and agent_finish set abort_flag=true as part of their normal operation to prevent

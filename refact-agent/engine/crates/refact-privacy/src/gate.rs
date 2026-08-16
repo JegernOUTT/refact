@@ -61,10 +61,30 @@ impl std::error::Error for Refusal {}
 pub fn records_from_messages(messages: &[ChatMessage]) -> Vec<FileRecord> {
     messages
         .iter()
+        .filter(|message| !shell_output_decision_applied(message))
         .filter_map(|message| message.extra.get("privacy"))
         .filter_map(|value| serde_json::from_value::<PrivacyRecord>(value.clone()).ok())
         .flat_map(|record| record.files)
         .collect()
+}
+
+fn shell_output_decision_applied(message: &ChatMessage) -> bool {
+    let shell = message.extra.get("privacy_shell");
+    let decided = shell
+        .and_then(|value| value.get("withheld"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        || shell
+            .and_then(|value| value.get("approved"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+    decided
+        || message
+            .extra
+            .get("privacy_observation")
+            .and_then(|value| value.get("degraded"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
 }
 
 pub fn clear<T: PrivacyAudited>(

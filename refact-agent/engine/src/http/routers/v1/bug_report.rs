@@ -336,12 +336,10 @@ fn parse_log_line(line: &str) -> Option<ParsedLogLine> {
     }
 
     let daemon_header = DAEMON_HEADER.get_or_init(|| {
-        regex::Regex::new(
-            concat!(
-                r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z\s+",
-                r"(ERROR|WARN|INFO|DEBUG|TRACE)\s+([^\s:]+(?:::[^\s:]+)*):"
-            ),
-        )
+        regex::Regex::new(concat!(
+            r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z\s+",
+            r"(ERROR|WARN|INFO|DEBUG|TRACE)\s+([^\s:]+(?:::[^\s:]+)*):"
+        ))
         .expect("valid daemon log regex")
     });
     if let Some(caps) = daemon_header.captures(line) {
@@ -494,7 +492,10 @@ async fn scan_recent_errors(sources: &[ResolvedLogSource], cap: usize) -> Vec<Re
         for line in text.lines() {
             global_position += 1;
             let parsed = parse_log_line(line);
-            if parsed.as_ref().map(|parsed| parsed.is_header).unwrap_or(false)
+            if parsed
+                .as_ref()
+                .map(|parsed| parsed.is_header)
+                .unwrap_or(false)
                 || (current.is_none() && parsed.is_some())
             {
                 if let Some(entry) = current.take() {
@@ -951,10 +952,7 @@ mod tests {
         assert_eq!(errors[0].level, "warn");
         assert_eq!(errors[0].message, "task cron_789 skipped");
         assert_eq!(errors[0].count, 3);
-        assert_eq!(
-            errors[0].location,
-            Some("src/tasks.rs:10".to_string())
-        );
+        assert_eq!(errors[0].location, Some("src/tasks.rs:10".to_string()));
     }
 
     #[tokio::test]

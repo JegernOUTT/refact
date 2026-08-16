@@ -2136,6 +2136,83 @@ async fn handle_tool_decisions(
     session_arc: Arc<AMutex<ChatSession>>,
     decisions: &[ToolDecisionItem],
 ) {
+    let is_shell_privacy_pause = {
+        let session = session_arc.lock().await;
+        session
+            .runtime
+            .pause_reasons
+            .iter()
+            .any(crate::chat::tools::is_shell_privacy_approval)
+    };
+
+    if is_shell_privacy_pause {
+        let should_continue = {
+            let mut session = session_arc.lock().await;
+            let privacy_ids = session
+                .runtime
+                .pause_reasons
+                .iter()
+                .filter(|reason| crate::chat::tools::is_shell_privacy_approval(reason))
+                .map(|reason| reason.tool_call_id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let accepted_ids = decisions
+                .iter()
+                .filter(|decision| {
+                    decision.accepted && privacy_ids.contains(&decision.tool_call_id)
+                })
+                .map(|decision| decision.tool_call_id.clone())
+                .collect::<Vec<_>>();
+            let rejected_ids = decisions
+                .iter()
+                .filter(|decision| {
+                    !decision.accepted && privacy_ids.contains(&decision.tool_call_id)
+                })
+                .map(|decision| decision.tool_call_id.clone())
+                .collect::<Vec<_>>();
+            let decided = accepted_ids
+                .iter()
+                .chain(&rejected_ids)
+                .cloned()
+                .collect::<std::collections::HashSet<_>>();
+            let updates = session
+                .messages
+                .iter()
+                .filter(|message| decided.contains(&message.tool_call_id))
+                .filter_map(|message| {
+                    let mut updated = message.clone();
+                    let accepted = accepted_ids.contains(&message.tool_call_id);
+                    crate::privacy::records::resolve_shell_ask(&mut updated, accepted)
+                        .then_some(updated)
+                })
+                .collect::<Vec<_>>();
+            for updated in updates {
+                let message_id = updated.message_id.clone();
+                session.update_message(&message_id, updated);
+            }
+            session.add_tool_decision_event("approve", accepted_ids, "once");
+            session.add_tool_decision_event("reject", rejected_ids, "once");
+            session.drain_post_tool_side_effects();
+            let remaining = session
+                .runtime
+                .pause_reasons
+                .iter()
+                .filter(|reason| !decided.contains(&reason.tool_call_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            if remaining.is_empty() {
+                session.set_runtime_state(SessionState::Generating, None);
+                true
+            } else {
+                session.set_paused_with_reasons_and_auto_approved(remaining, Vec::new(), None);
+                false
+            }
+        };
+        if should_continue && !aborted_before_start_generation(&session_arc).await {
+            start_generation(app, session_arc).await;
+        }
+        return;
+    }
+
     let is_cache_guard_pause = {
         let session = session_arc.lock().await;
         session
@@ -2313,6 +2390,18 @@ async fn handle_tool_decisions(
             super::tools::ExecuteToolsOptions::default(),
         )
         .await;
+
+        let privacy_approvals =
+            super::tools::shell_privacy_approval_reasons(&tool_calls_to_execute, &tool_results);
+        if !privacy_approvals.is_empty() {
+            let mut session = session_arc.lock().await;
+            for result_msg in tool_results {
+                session.add_message(result_msg);
+            }
+            session.drain_post_tool_side_effects();
+            session.set_paused_with_reasons_and_auto_approved(privacy_approvals, Vec::new(), None);
+            return;
+        }
 
         // Determine tool-requested final state before checking abort.
         // Some tools (ask_questions/task_done/agent_finish) set abort_flag=true as part of
