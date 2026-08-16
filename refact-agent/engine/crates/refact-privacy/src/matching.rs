@@ -119,6 +119,18 @@ impl CompiledPolicy {
         &self.zones[self.normal_index].zone
     }
 
+    pub fn strictest_zone_for_paths<I, P>(&self, paths: I) -> &Zone
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        paths
+            .into_iter()
+            .map(|path| self.zone_for_path(path.as_ref()))
+            .min_by_key(|zone| destination_count(&zone.send_to))
+            .unwrap_or(&self.zones[self.normal_index].zone)
+    }
+
     #[cfg(unix)]
     fn cached_secret_zone(&self, path: &Path) -> Option<usize> {
         let identity = file_identity(path)?;
@@ -139,6 +151,14 @@ impl CompiledPolicy {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.insert(identity, zone_index);
+    }
+}
+
+fn destination_count(destinations: &[String]) -> usize {
+    if destinations.iter().any(|destination| destination == "*") {
+        usize::MAX
+    } else {
+        destinations.len()
     }
 }
 
@@ -198,6 +218,51 @@ mod tests {
         assert_eq!(
             compiled.zone_for_path(Path::new("README.md")).name,
             "normal"
+        );
+    }
+
+    #[test]
+    fn strictest_zone_uses_the_smallest_destination_set() {
+        let policy = policy(vec![
+            zone("restricted", &["restricted/*"], &["provider-a"]),
+            zone("secrets", &["secrets/*"], &[]),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        assert_eq!(
+            compiled
+                .strictest_zone_for_paths([
+                    Path::new("normal/file.rs"),
+                    Path::new("restricted/file.rs"),
+                    Path::new("secrets/file.rs"),
+                ])
+                .name,
+            "secrets"
+        );
+    }
+
+    #[test]
+    fn wildcard_destination_set_is_the_weakest() {
+        let policy = policy(vec![
+            zone("wildcard", &["wildcard/*"], &["*", "provider-a"]),
+            zone(
+                "restricted",
+                &["restricted/*"],
+                &["provider-a", "provider-b"],
+            ),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        assert_eq!(
+            compiled
+                .strictest_zone_for_paths([
+                    Path::new("wildcard/file.rs"),
+                    Path::new("restricted/file.rs"),
+                ])
+                .name,
+            "restricted"
         );
     }
 

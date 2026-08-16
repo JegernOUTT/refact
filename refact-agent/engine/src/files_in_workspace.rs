@@ -172,6 +172,14 @@ fn registered_alias_paths(
     aliases
 }
 
+pub fn strictest_zone_for_path<'a>(
+    policy: &'a refact_privacy::CompiledPolicy,
+    path: &Path,
+    worktree_mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
+) -> &'a refact_privacy::Zone {
+    policy.strictest_zone_for_paths(registered_alias_paths(path, worktree_mappings))
+}
+
 pub(crate) fn check_file_privacy_with_context(
     read_context: &FileReadContext,
     path: &Path,
@@ -2899,6 +2907,46 @@ mod tests {
             .unwrap_err();
 
         assert!(error.contains("privacy"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn strictest_zone_uses_registered_worktree_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = normalized(&temp.path().join("source"));
+        let worktree = normalized(&temp.path().join("worktree"));
+        let source_file = source.join("src").join("lib.rs");
+        let worktree_file = worktree.join("src").join("lib.rs");
+        let policy = refact_privacy::PrivacyPolicy {
+            blocked: Vec::new(),
+            zones: vec![
+                refact_privacy::Zone {
+                    name: "secrets".to_string(),
+                    patterns: vec![worktree_file.to_string_lossy().to_string()],
+                    send_to: Vec::new(),
+                    on_shell_read: refact_privacy::ShellBehavior::Deny,
+                },
+                refact_privacy::Zone {
+                    name: "normal".to_string(),
+                    patterns: vec!["*".to_string()],
+                    send_to: vec!["*".to_string()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                },
+            ],
+            subagents: refact_privacy::SubagentPolicy::default(),
+        }
+        .compile()
+        .unwrap();
+        let mappings = vec![crate::files_correction::RegisteredWorktreePathMapping {
+            root: worktree,
+            source_root: source,
+        }];
+
+        assert_eq!(policy.zone_for_path(&source_file).name, "normal");
+        assert_eq!(policy.zone_for_path(&worktree_file).name, "secrets");
+        assert_eq!(
+            strictest_zone_for_path(&policy, &source_file, &mappings).name,
+            "secrets"
+        );
     }
 
     #[tokio::test]
