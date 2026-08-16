@@ -5,7 +5,7 @@ use std::time::SystemTime;
 use tokio::time::Duration;
 use tracing::error;
 
-use crate::files_correction::{any_glob_matches_path, canonical_path, get_project_dirs};
+use crate::files_correction::{canonical_path, get_project_dirs};
 use crate::global_context::GlobalContext;
 
 pub mod heuristic;
@@ -16,15 +16,18 @@ pub use refact_privacy::{PolicyLoad, PrivacyPolicy};
 const PRIVACY_TOO_OLD: Duration = Duration::from_secs(3);
 
 fn legacy_settings(policy: &PrivacyPolicy, loaded_ts: u64) -> PrivacySettings {
-    let only_send_to_servers_i_control = policy
-        .zones
-        .iter()
-        .filter(|zone| zone.name == "only_send_to_servers_i_control")
-        .flat_map(|zone| zone.patterns.iter().cloned())
-        .collect();
+    let mut blocked = policy.blocked.clone();
+    let mut only_send_to_servers_i_control = Vec::new();
+    for zone in &policy.zones {
+        if zone.send_to.is_empty() {
+            blocked.extend(zone.patterns.iter().cloned());
+        } else if zone.send_to.as_slice() != ["*"] {
+            only_send_to_servers_i_control.extend(zone.patterns.iter().cloned());
+        }
+    }
     PrivacySettings {
         privacy_rules: FilePrivacySettings {
-            blocked: policy.blocked.clone(),
+            blocked,
             only_send_to_servers_I_control: only_send_to_servers_i_control,
         },
         loaded_ts,
@@ -78,18 +81,53 @@ pub async fn load_privacy_if_needed(gcx: Arc<GlobalContext>) -> Arc<PrivacySetti
     new_privacy_settings
 }
 
+fn legacy_patterns(patterns: &[String]) -> Vec<String> {
+    let mut expanded = Vec::with_capacity(patterns.len() * 2);
+    for pattern in patterns {
+        expanded.push(pattern.clone());
+        if !pattern
+            .chars()
+            .any(|character| matches!(character, '*' | '?' | '[' | ']'))
+        {
+            expanded.push(format!("*{pattern}"));
+        }
+    }
+    expanded
+}
+
+fn legacy_policy(privacy_settings: &PrivacySettings) -> PrivacyPolicy {
+    let mut policy = refact_privacy::migrate_legacy(refact_privacy::LegacyPrivacyPolicy {
+        blocked: legacy_patterns(&privacy_settings.privacy_rules.blocked),
+        only_send_to_servers_i_control: legacy_patterns(
+            &privacy_settings
+                .privacy_rules
+                .only_send_to_servers_I_control,
+        ),
+    });
+    if let Some(zone) = policy
+        .zones
+        .iter_mut()
+        .find(|zone| zone.name == "only_send_to_servers_i_control")
+    {
+        zone.send_to.push("legacy_controlled_server".to_string());
+    }
+    policy
+}
+
 fn get_file_privacy_level(privacy_settings: Arc<PrivacySettings>, path: &Path) -> FilePrivacyLevel {
-    if any_glob_matches_path(&privacy_settings.privacy_rules.blocked, path) {
+    let policy = match legacy_policy(&privacy_settings).compile() {
+        Ok(policy) => policy,
+        Err(_) => return FilePrivacyLevel::Blocked,
+    };
+    let zone = policy.zone_for_path(path);
+    if zone.name == "blocked" {
         FilePrivacyLevel::Blocked
-    } else if any_glob_matches_path(
-        &privacy_settings
-            .privacy_rules
-            .only_send_to_servers_I_control,
-        path,
-    ) {
+    } else if zone.send_to.len() == 1 && zone.send_to[0] == "*" {
+        FilePrivacyLevel::AllowToSendAnywhere
+    } else if !zone.send_to.is_empty() {
         FilePrivacyLevel::OnlySendToServersIControl
     } else {
-        FilePrivacyLevel::AllowToSendAnywhere
+        FilePrivacyLevel::Blocked
     }
 }
 
