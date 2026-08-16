@@ -83,7 +83,7 @@ pub fn detect_field_kind(tag: &str, input_type: Option<&str>, content_editable: 
 }
 
 pub fn js_click_element() -> &'static str {
-    r#"(function() {
+    r#"function() {
   var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.scrollIntoView({block: 'center', behavior: 'instant'});
@@ -103,74 +103,74 @@ pub fn js_click_element() -> &'static str {
     el.dispatchEvent(ev);
   }
   return JSON.stringify({ok: true});
-})()"#
+}"#
 }
 
 pub fn js_hover_element() -> &'static str {
-    r#"(function() {
+    r#"function() {
   var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.scrollIntoView({block: 'center', behavior: 'instant'});
   el.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
   el.dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}));
   return JSON.stringify({ok: true});
-})()"#
+}"#
 }
 
 pub fn js_focus_element() -> &'static str {
-    r#"(function() {
+    r#"function() {
   var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.scrollIntoView({block: 'center', behavior: 'instant'});
   el.focus();
   return JSON.stringify({ok: true});
-})()"#
+}"#
 }
 
 pub fn js_blur_element() -> &'static str {
-    r#"(function() {
+    r#"function() {
   var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.blur();
   return JSON.stringify({ok: true});
-})()"#
+}"#
 }
 
 pub fn js_scroll_to_element() -> &'static str {
-    r#"(function() {
+    r#"function() {
   var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.scrollIntoView({block: 'center', behavior: 'smooth'});
   return JSON.stringify({ok: true});
-})()"#
+}"#
 }
 
 pub fn js_get_text() -> &'static str {
-    r#"(function() {
+    r#"function() {
   var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   return JSON.stringify({ok: true, text: el.innerText || ''});
-})()"#
+}"#
 }
 
 pub fn js_get_html() -> &'static str {
-    r#"(function() {
+    r#"function() {
   var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   var html = el.outerHTML;
   if (html.length > 5000) html = html.substring(0, 5000) + '... (truncated)';
   return JSON.stringify({ok: true, html: html});
-})()"#
+}"#
 }
 
 pub fn js_get_attribute(attribute: &str) -> String {
     format!(
-        r#"(function() {{
+        r#"function() {{
   var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   var val = el.getAttribute({});
   return JSON.stringify({{ok: true, value: val}});
-}})()"#,
+}}"#,
         js_string_literal(attribute),
     )
 }
@@ -178,7 +178,7 @@ pub fn js_get_attribute(attribute: &str) -> String {
 pub fn js_extract_links(limit: usize) -> String {
     format!(
         r#"(function() {{
-  var scope = this || document;
+  var scope = document;
   var anchors = Array.from(scope.querySelectorAll('a[href]'));
   var links = anchors.slice(0, {limit}).map(function(a) {{
     return {{url: a.href, text: (a.innerText || '').trim().substring(0, 200)}};
@@ -189,7 +189,7 @@ pub fn js_extract_links(limit: usize) -> String {
 }
 
 pub fn js_extract_table() -> &'static str {
-    r#"(function() {
+    r#"function() {
   var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   var table = (el.tagName === 'TABLE') ? el : el.querySelector('table');
@@ -201,18 +201,18 @@ pub fn js_extract_table() -> &'static str {
     });
   });
   return JSON.stringify({ok: true, rows: data, total_rows: rows.length});
-})()"#
+}"#
 }
 
 pub fn js_highlight_element() -> &'static str {
-    r#"(function() {
+    r#"function() {
   var el = this;
   if (!el) return JSON.stringify({error: 'No resolved element'});
   el.style.outline = '3px solid #E7150D';
   el.style.outlineOffset = '2px';
   setTimeout(function() { el.style.outline = ''; el.style.outlineOffset = ''; }, 3000);
   return JSON.stringify({ok: true});
-})()"#
+}"#
 }
 
 pub fn js_dismiss_overlays() -> &'static str {
@@ -561,6 +561,26 @@ mod tests {
     fn test_js_extract_links_limit() {
         let js = js_extract_links(5);
         assert!(js.contains(".slice(0, 5)"));
+        assert!(js.contains("var scope = document"));
+    }
+
+    #[test]
+    fn handle_bound_scripts_are_function_declarations() {
+        for script in [
+            js_click_element().to_string(),
+            js_hover_element().to_string(),
+            js_focus_element().to_string(),
+            js_blur_element().to_string(),
+            js_scroll_to_element().to_string(),
+            js_get_text().to_string(),
+            js_get_html().to_string(),
+            js_get_attribute("href"),
+            js_extract_table().to_string(),
+            js_highlight_element().to_string(),
+        ] {
+            assert!(script.trim_start().starts_with("function()"));
+            assert!(!script.trim_end().ends_with(")()"));
+        }
     }
 
     #[test]

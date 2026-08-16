@@ -496,15 +496,17 @@ fn resolve_interactable(
     Ok(resolved)
 }
 
+/// Executes a JavaScript function declaration with the element handle bound as `this`.
+///
+/// Callers must pass the declaration itself, never an already-invoked function expression.
 fn call_handle_json(
     tab: &Tab,
     world: &WorldManager,
     handle: &ElementHandle,
-    action_js: &str,
+    function_declaration: &str,
 ) -> Result<serde_json::Value, String> {
-    let function = format!("function() {{ return ({action_js}).call(this); }}");
     let value = world
-        .call_function_on(tab, handle, &function, Vec::new())
+        .call_function_on(tab, handle, function_declaration, Vec::new())
         .map_err(|error| error.to_string())?;
     let result = match value.as_str() {
         Some(json) => serde_json::from_str(json)
@@ -3271,7 +3273,7 @@ fn step_styles(
                 _ => String::new(),
             };
             let js = format!(
-                r#"(function() {{
+                r#"function() {{
   var el = this;
   if (!el) return JSON.stringify({{error: 'No resolved element'}});
   var cs = window.getComputedStyle(el);
@@ -3282,7 +3284,7 @@ fn step_styles(
   props = props{filter};
   if (props.length > 50) props = props.slice(0, 50).concat(['... (' + (props.length - 50) + ' more)']);
   return JSON.stringify({{ok: true, styles: props}});
-}})()"#,
+}}"#,
                 filter = filter_js,
             );
             match call_handle_json(tab, world, &info.handle, &js) {
