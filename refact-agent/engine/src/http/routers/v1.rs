@@ -164,6 +164,7 @@ mod mcp_marketplace_sources;
 mod mcp_oauth;
 mod mcp_server_info;
 mod plugins;
+mod privacy;
 mod project_configs;
 pub mod project_information;
 pub mod scheduler;
@@ -308,6 +309,12 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/config-path", get(handle_v1_config_path))
         .route("/customization", get(handle_v1_customization))
         .route("/project-configs", get(handle_v1_project_configs_get))
+        .route(
+            "/privacy/policy",
+            get(privacy::handle_v1_privacy_policy_get).post(privacy::handle_v1_privacy_policy_post),
+        )
+        .route("/privacy/status", get(privacy::handle_v1_privacy_status))
+        .route("/privacy/inspect", post(privacy::handle_v1_privacy_inspect))
         .route(
             "/project-configs/rescan",
             post(handle_v1_project_configs_rescan),
