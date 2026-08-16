@@ -6,7 +6,7 @@ use headless_chrome::protocol::cdp::types::Event;
 use headless_chrome::protocol::cdp::{DOM, Page, Runtime};
 use serde_json::Value;
 
-use crate::{ElementHandle, HandleError, HandleRegistry, wrapped_bootstrap};
+use crate::{ElementHandle, HandleError, HandleRegistry, RefRegistry, wrapped_bootstrap};
 
 pub const UTILITY_WORLD_NAME: &str = "__refact_utility__";
 pub const BINDING_NAME: &str = "__refact_binding";
@@ -40,6 +40,7 @@ struct WorldState {
 pub struct WorldManager {
     state: Arc<Mutex<WorldState>>,
     handles: HandleRegistry,
+    pub(crate) refs: RefRegistry,
 }
 
 impl WorldManager {
@@ -476,9 +477,11 @@ impl WorldManager {
                 self.context_destroyed(target_id, event.params.execution_context_id)
             }
             Event::RuntimeExecutionContextsCleared(_) => self.contexts_cleared(target_id),
-            Event::PageFrameNavigated(event) => {
-                self.frame_navigated(target_id, &event.params.frame.id)
-            }
+            Event::PageFrameNavigated(event) => self.frame_navigated(
+                target_id,
+                &event.params.frame.id,
+                event.params.frame.parent_id.is_none(),
+            ),
             Event::RuntimeBindingCalled(event) if event.params.name == BINDING_NAME => self
                 .dispatch_binding(
                     target_id,
@@ -643,8 +646,11 @@ impl WorldManager {
         }
     }
 
-    fn frame_navigated(&self, target_id: &str, frame_id: &Page::FrameId) {
+    fn frame_navigated(&self, target_id: &str, frame_id: &Page::FrameId, top_level: bool) {
         let _ = self.handles.frame_navigated(target_id, frame_id);
+        if top_level {
+            self.refs.top_level_navigation(target_id);
+        }
         let mut state = self.state.lock().unwrap();
         let Some(tab) = state.tabs.get_mut(target_id) else {
             return;
@@ -765,7 +771,7 @@ mod tests {
     fn navigation_before_destroy_invalidates_only_old_context() {
         let manager = WorldManager::default();
         manager.record_context(TAB, FRAME.to_string(), 7);
-        manager.frame_navigated(TAB, &FRAME.to_string());
+        manager.frame_navigated(TAB, &FRAME.to_string(), true);
         manager.context_destroyed(TAB, 7);
         manager.record_context(TAB, FRAME.to_string(), 8);
         assert_eq!(manager.context_for_frame(TAB, &FRAME.to_string()), Some(8));

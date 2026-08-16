@@ -279,4 +279,10 @@ mod tests {
         assert!(INJECTED_BUNDLE.contains("renderAriaSnapshotAsYaml"));
         assert!(INJECTED_BUNDLE.contains("ariaSnapshot(element"));
     }
+
+    #[test]
+    fn injected_bundle_contains_latest_snapshot_ref_resolution() {
+        assert!(INJECTED_BUNDLE.contains("resolveAriaRef"));
+        assert!(INJECTED_BUNDLE.contains("REF_DETACHED"));
+    }
 }

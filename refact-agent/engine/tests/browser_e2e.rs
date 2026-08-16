@@ -1487,6 +1487,8 @@ async fn aria_snapshot_serializes_composed_tree_and_distills_generics() {
     ]
     .map(|line| yaml.find(line).unwrap());
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
 async fn selector_evaluator_matches_text_visibility_and_global_nth() {
     let Some(mut case) = BrowserCase::start("selectors.html").await else {
         return;
@@ -1632,4 +1634,129 @@ async fn selector_evaluator_matches_and_sorts_layout_relations() {
             .collect::<Vec<_>>();
         assert_eq!(ids, expected_ids, "selector {selector}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn aria_refs_reuse_invalidate_and_resolve_latest_snapshot_elements() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    case.tab
+        .evaluate(
+            "document.querySelector('button').addEventListener('click', () => document.body.dataset.saved = 'yes')",
+            false,
+        )
+        .unwrap();
+    let options = refact_lsp::refact_browser::SnapshotOptions {
+        mode: refact_lsp::refact_browser::SnapshotMode::Ai,
+        refs: true,
+        ..Default::default()
+    };
+    let first = case
+        .runtime
+        .world_manager
+        .aria_snapshot(&case.tab, None, options.clone())
+        .unwrap();
+    assert!(first.yaml.contains("[ref=e"));
+    let save_ref = first
+        .nodes
+        .iter()
+        .find(|node| node.name.as_deref() == Some("Save"))
+        .and_then(|node| node.reference.as_deref())
+        .unwrap()
+        .parse::<refact_lsp::refact_browser::Ref>()
+        .unwrap();
+    let search_ref = first
+        .nodes
+        .iter()
+        .find(|node| node.name.as_deref() == Some("Search"))
+        .and_then(|node| node.reference.as_deref())
+        .unwrap()
+        .parse::<refact_lsp::refact_browser::Ref>()
+        .unwrap();
+    let save_handle = case
+        .runtime
+        .world_manager
+        .resolve_ref(&case.tab, &save_ref)
+        .unwrap();
+    case.runtime
+        .world_manager
+        .call_function_on(
+            &case.tab,
+            &save_handle,
+            "function() { this.click(); }",
+            vec![],
+        )
+        .unwrap();
+    assert_eq!(
+        case.tab
+            .evaluate("document.body.dataset.saved", false)
+            .unwrap()
+            .value
+            .unwrap(),
+        json!("yes")
+    );
+    assert!(case
+        .runtime
+        .world_manager
+        .resolve_ref(&case.tab, &search_ref)
+        .is_ok());
+
+    let unchanged = case
+        .runtime
+        .world_manager
+        .aria_snapshot(&case.tab, None, options.clone())
+        .unwrap();
+    let reused = unchanged
+        .nodes
+        .iter()
+        .find(|node| node.name.as_deref() == Some("Save"))
+        .and_then(|node| node.reference.as_deref())
+        .unwrap();
+    assert_eq!(reused, save_ref.to_string());
+
+    case.tab
+        .evaluate(
+            "document.querySelector('button').setAttribute('aria-label', 'Save changed')",
+            false,
+        )
+        .unwrap();
+    let renamed = case
+        .runtime
+        .world_manager
+        .aria_snapshot(&case.tab, None, options.clone())
+        .unwrap();
+    let renamed_ref = renamed
+        .nodes
+        .iter()
+        .find(|node| node.name.as_deref() == Some("Save changed"))
+        .and_then(|node| node.reference.as_deref())
+        .unwrap()
+        .parse::<refact_lsp::refact_browser::Ref>()
+        .unwrap();
+    assert_ne!(renamed_ref, save_ref);
+    assert!(matches!(
+        case.runtime.world_manager.resolve_ref(&case.tab, &save_ref),
+        Err(refact_lsp::refact_browser::RefError::Stale { .. })
+    ));
+
+    case.tab
+        .evaluate("document.querySelector('button').remove()", false)
+        .unwrap();
+    assert!(matches!(
+        case.runtime
+            .world_manager
+            .resolve_ref(&case.tab, &renamed_ref),
+        Err(refact_lsp::refact_browser::RefError::Detached { .. })
+    ));
+
+    case.navigate("delayed-button.html");
+    assert!(matches!(
+        case.runtime
+            .world_manager
+            .resolve_ref(&case.tab, &search_ref),
+        Err(refact_lsp::refact_browser::RefError::GenerationMismatch { .. })
+    ));
 }

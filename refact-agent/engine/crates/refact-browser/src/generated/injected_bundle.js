@@ -1,4 +1,4 @@
-// @refact-injected-hash 9282c0ae5d7f8c38fa048f305f72cbc1f3e8dc5e329eef525726315c2b9a3a3b
+// @refact-injected-hash 563a082ebbc1d005323fe4f7f75a908200ca7f292a27566a4497d71514c68877
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -4423,5 +4423,43 @@ function queryParsedSelector(selector, root) {
 Object.defineProperty(RefactInjected.prototype, "querySelectorAll", {
   value(selectorChain, scope) {
     return queryParsedSelector(parseSelector(selectorChain), scope != null ? scope : globalThis.document);
+  }
+});
+var _lastAriaSnapshotForQuery = /* @__PURE__ */ new WeakMap();
+Object.defineProperty(RefactInjected.prototype, "ariaSnapshot", {
+  value(element, options) {
+    var _a;
+    const root = (_a = element != null ? element : globalThis.document.body) != null ? _a : globalThis.document.documentElement;
+    if (!root.isConnected)
+      throw new Error("Element is not connected to a document");
+    const tree = generateAriaTree(root, options);
+    const { json } = renderAriaTreeAsJSON(tree, options);
+    _lastAriaSnapshotForQuery.set(this, tree.info);
+    const nodes = [];
+    if (options.boxes || options.refs) {
+      const visit = (node) => {
+        var _a2;
+        if (typeof node === "string")
+          return;
+        if (node.ref || node.box)
+          nodes.push({ role: node.role, name: node.name, ref: node.ref, box: node.box });
+        for (const child of (_a2 = node.children) != null ? _a2 : [])
+          visit(child);
+      };
+      for (const node of json)
+        visit(node);
+    }
+    return { yaml: renderAriaSnapshotAsYaml(json), nodes };
+  }
+});
+Object.defineProperty(RefactInjected.prototype, "resolveAriaRef", {
+  value(reference) {
+    var _a;
+    const result = (_a = _lastAriaSnapshotForQuery.get(this)) == null ? void 0 : _a.get(reference);
+    if (!result)
+      throw new Error(`REF_UNKNOWN: ref ${reference} is unknown; take a fresh snapshot`);
+    if (!result.element.isConnected)
+      throw new Error(`REF_DETACHED: ref ${reference} is detached; take a fresh snapshot`);
+    return result.element;
   }
 });

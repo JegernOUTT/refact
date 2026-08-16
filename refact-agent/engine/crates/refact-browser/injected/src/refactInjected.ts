@@ -463,3 +463,41 @@ Object.defineProperty(RefactInjected.prototype, 'querySelectorAll', {
     return queryParsedSelector(parseSelector(selectorChain), scope ?? globalThis.document);
   },
 });
+
+const _lastAriaSnapshotForQuery = new WeakMap<RefactInjected, Map<string, { element: Element, nameFromContentRefs: string[] }>>();
+
+Object.defineProperty(RefactInjected.prototype, 'ariaSnapshot', {
+  value(this: RefactInjected, element: Element | null, options: AriaTreeOptions): Record<string, unknown> {
+    const root = element ?? globalThis.document.body ?? globalThis.document.documentElement;
+    if (!root.isConnected)
+      throw new Error('Element is not connected to a document');
+    const tree = generateAriaTree(root, options);
+    const { json } = renderAriaTreeAsJSON(tree, options);
+    _lastAriaSnapshotForQuery.set(this, tree.info);
+    const nodes: Record<string, unknown>[] = [];
+    if (options.boxes || options.refs) {
+      const visit = (node: (typeof json)[number] | string) => {
+        if (typeof node === 'string')
+          return;
+        if (node.ref || node.box)
+          nodes.push({ role: node.role, name: node.name, ref: node.ref, box: node.box });
+        for (const child of node.children ?? [])
+          visit(child);
+      };
+      for (const node of json)
+        visit(node);
+    }
+    return { yaml: renderAriaSnapshotAsYaml(json), nodes };
+  },
+});
+
+Object.defineProperty(RefactInjected.prototype, 'resolveAriaRef', {
+  value(this: RefactInjected, reference: string): Element {
+    const result = _lastAriaSnapshotForQuery.get(this)?.get(reference);
+    if (!result)
+      throw new Error(`REF_UNKNOWN: ref ${reference} is unknown; take a fresh snapshot`);
+    if (!result.element.isConnected)
+      throw new Error(`REF_DETACHED: ref ${reference} is detached; take a fresh snapshot`);
+    return result.element;
+  },
+});
