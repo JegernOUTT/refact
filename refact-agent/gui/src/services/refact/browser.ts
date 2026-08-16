@@ -261,12 +261,44 @@ export type LocatorHandlerFiring = {
   ok: boolean;
 };
 
+export type BrowserSnapshotBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type BrowserAriaSnapshotNode = {
+  role: string;
+  name?: string | null;
+  ref?: string | null;
+  box?: BrowserSnapshotBox | null;
+};
+
+export type BrowserSnapshotGeneration = {
+  document_generation: number;
+  frame_generation: number;
+  refs: Record<
+    string,
+    {
+      role: string;
+      name?: string | null;
+    }
+  >;
+};
+
+export type BrowserAriaSnapshot = {
+  yaml: string;
+  nodes: BrowserAriaSnapshotNode[];
+  generation?: BrowserSnapshotGeneration | null;
+};
+
 export type BrowserExecutionStep = {
   step_index: number;
   ok: boolean;
   summary: string;
   error?: string | null;
-  data?: Record<string, unknown> | null;
+  data?: Record<string, unknown> | BrowserAriaSnapshot | null;
   field_kind?: string | null;
   fill_strategy?: string | null;
   verified?: boolean | null;

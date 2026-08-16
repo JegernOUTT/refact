@@ -1,0 +1,170 @@
+.view {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.toolbar {
+  min-width: 0;
+}
+
+.searchIcon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.searchInput {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.nodeCount {
+  flex: 0 0 auto;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  white-space: nowrap;
+}
+
+.scrollRegion {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  min-width: 0;
+  max-height: calc(var(--rf-control-h-lg) * 8);
+  overflow-y: auto;
+  overflow-x: hidden;
+  color: var(--rf-color-muted);
+  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+}
+
+.tree {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2xs);
+  margin: 0;
+  padding: var(--rf-space-1);
+  list-style: none;
+}
+
+.tree .tree {
+  padding-block: 0;
+  padding-inline-start: var(--rf-space-4);
+}
+
+.treeItem {
+  min-width: 0;
+}
+
+.nodeRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-inline-start: calc(var(--rf-hairline) * 2) solid transparent;
+  border-radius: var(--rf-radius-ctl);
+}
+
+.treeItem[data-has-ref="true"] > .nodeRow {
+  background: var(--rf-color-accent-soft);
+  border-inline-start-color: var(--rf-color-accent);
+}
+
+.nodeRow[data-match="true"] {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-3);
+  box-shadow: inset 0 0 0 var(--rf-hairline) var(--rf-color-accent);
+}
+
+.nodeToggle {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  width: var(--rf-control-h-sm);
+  height: var(--rf-control-h-sm);
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--rf-radius-ctl);
+  cursor: pointer;
+}
+
+.nodeToggle:hover {
+  background: var(--rf-surface-2);
+}
+
+.nodeToggle:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.nodeToggle:disabled {
+  cursor: default;
+}
+
+.nodeToggle svg {
+  transition: transform var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.nodeToggle[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
+.nodeSpacer {
+  width: var(--rf-control-h-sm);
+  flex: 0 0 auto;
+}
+
+.nodeContent {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.role {
+  color: var(--rf-color-fg);
+}
+
+.name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--rf-color-muted);
+}
+
+.refBadge {
+  font-family: var(--rf-font-mono);
+}
+
+.properties {
+  min-width: 0;
+  padding: 0 var(--rf-space-2) var(--rf-space-1)
+    calc(var(--rf-control-h-sm) + var(--rf-space-3));
+}
+
+.property {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+}
+
+.emptyState {
+  margin: 0;
+  padding: var(--rf-space-3);
+  color: var(--rf-color-muted);
+}
+
+.showAllButton {
+  margin: var(--rf-space-1) var(--rf-space-2) var(--rf-space-2);
+}
+
+.fallback {
+  composes: resultPanel from "./ToolCardBody.module.css";
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nodeToggle svg {
+    transition: none;
+  }
+}

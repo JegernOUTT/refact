@@ -215,6 +215,7 @@ describe("ChromeTool", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText("Execution Report")).not.toBeInTheDocument();
+    expect(screen.queryByText("ARIA Snapshot")).not.toBeInTheDocument();
     expect(
       screen.getAllByText((text) =>
         text.includes("Navigated to https://example.com"),
@@ -225,6 +226,58 @@ describe("ChromeTool", () => {
         text.includes("Filled <input> with 5 chars"),
       ).length,
     ).toBeGreaterThan(0);
+  });
+
+  test("renders ARIA snapshot step data as a structured tree", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-aria-snapshot",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: { steps: [{ action: "snapshot" }] },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-aria-snapshot",
+      content: JSON.stringify({
+        ok: true,
+        steps: [
+          {
+            step_index: 0,
+            ok: true,
+            summary: "ARIA snapshot captured",
+            retries: 0,
+            data: {
+              yaml: '- button "Save" [ref=e1]',
+              nodes: [{ role: "button", name: "Save", ref: "e1" }],
+              generation: {
+                document_generation: 1,
+                frame_generation: 1,
+                refs: {},
+              },
+            },
+          },
+        ],
+      }),
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+
+    expect(screen.getByText("ARIA Snapshot")).toBeInTheDocument();
+    expect(screen.getByText("button")).toBeInTheDocument();
+    expect(screen.getByText("“Save”")).toBeInTheDocument();
+    expect(screen.getByText("ref=e1")).toBeInTheDocument();
   });
 
   test("falls back to legacy command summary and text log", async () => {

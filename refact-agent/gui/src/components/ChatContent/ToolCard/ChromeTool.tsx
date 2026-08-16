@@ -9,10 +9,13 @@ import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall } from "../../../services/refact/types";
 import type {
   BrowserActionResponse,
+  BrowserAriaSnapshot,
+  BrowserAriaSnapshotNode,
   BrowserExecutionStep,
 } from "../../../services/refact/browser";
 import { ShikiCodeBlock } from "../../Markdown";
 import { DialogImage } from "../../DialogImage";
+import { AriaSnapshotView } from "./AriaSnapshotView";
 import styles from "./ChromeTool.module.css";
 
 interface ChromeArgs {
@@ -126,6 +129,25 @@ function isBrowserActionResponse(
     Array.isArray(value.steps) &&
     (typeof value.stabilized === "boolean" || value.stabilized === undefined)
   );
+}
+
+function parseAriaSnapshotNode(value: unknown): BrowserAriaSnapshotNode | null {
+  if (!isRecord(value) || typeof value.role !== "string") return null;
+  return {
+    role: value.role,
+    name: typeof value.name === "string" ? value.name : null,
+    ref: typeof value.ref === "string" ? value.ref : null,
+  };
+}
+
+function parseAriaSnapshot(value: unknown): BrowserAriaSnapshot | null {
+  if (!isRecord(value) || typeof value.yaml !== "string") return null;
+  const nodes = Array.isArray(value.nodes)
+    ? value.nodes
+        .map(parseAriaSnapshotNode)
+        .filter((node): node is BrowserAriaSnapshotNode => node !== null)
+    : [];
+  return { yaml: value.yaml, nodes };
 }
 
 function summarizeStep(step: BrowserExecutionStep): string {
@@ -385,6 +407,14 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     return typedResult.locator_handlers;
   }, [typedResult]);
 
+  const typedAriaSnapshots = useMemo(() => {
+    if (!typedResult) return [];
+    return typedResult.steps.flatMap((step) => {
+      const snapshot = parseAriaSnapshot(step.data);
+      return snapshot ? [{ stepIndex: step.step_index, snapshot }] : [];
+    });
+  }, [typedResult]);
+
   const typedDialogsBlock = useMemo(() => {
     if (!typedResult?.dialogs?.length) return null;
     return typedResult.dialogs
@@ -521,6 +551,13 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
           </Box>
         </Box>
       )}
+
+      {typedAriaSnapshots.map(({ stepIndex, snapshot }) => (
+        <Box className={styles.section} key={stepIndex}>
+          <Box className={styles.sectionLabel}>ARIA Snapshot</Box>
+          <AriaSnapshotView yaml={snapshot.yaml} nodes={snapshot.nodes} />
+        </Box>
+      ))}
 
       {typedDialogsBlock && (
         <Box className={styles.section}>
