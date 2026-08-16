@@ -43,7 +43,11 @@ pub fn merge_message_records<'a>(
     merge_records(message, records);
 }
 
-pub fn declared_file_record(gcx: &Arc<GlobalContext>, path: &Path) -> Result<FileRecord, String> {
+fn file_record(
+    gcx: &Arc<GlobalContext>,
+    path: &Path,
+    attribution: Attribution,
+) -> Result<FileRecord, String> {
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
     let compiled = policy.compile().map_err(|error| error.to_string())?;
     let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
@@ -52,8 +56,12 @@ pub fn declared_file_record(gcx: &Arc<GlobalContext>, path: &Path) -> Result<Fil
         zone: strictest_zone_for_path(&compiled, path, &mappings)
             .name
             .clone(),
-        attribution: Attribution::Declared,
+        attribution,
     })
+}
+
+pub fn declared_file_record(gcx: &Arc<GlobalContext>, path: &Path) -> Result<FileRecord, String> {
+    file_record(gcx, path, Attribution::Declared)
 }
 
 pub fn declared_file_records(
@@ -63,6 +71,20 @@ pub fn declared_file_records(
     let mut records = Vec::new();
     for path in paths {
         let record = declared_file_record(gcx, &path)?;
+        if !records.contains(&record) {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
+pub fn observed_file_records(
+    gcx: &Arc<GlobalContext>,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> Result<Vec<FileRecord>, String> {
+    let mut records = Vec::new();
+    for path in paths {
+        let record = file_record(gcx, &path, Attribution::Observed)?;
         if !records.contains(&record) {
             records.push(record);
         }

@@ -157,7 +157,7 @@ impl Tool for ToolMCP {
             redacted_args
         );
 
-        let (session_logs, session_metrics) = {
+        let (session_logs, session_metrics, observation) = {
             let mut session_locked = session.lock().await;
             let session_downcasted = session_locked
                 .as_any_mut()
@@ -171,6 +171,10 @@ impl Tool for ToolMCP {
             (
                 session_downcasted.logs.clone(),
                 session_downcasted.metrics.clone(),
+                #[cfg(target_os = "linux")]
+                session_downcasted.observation.clone(),
+                #[cfg(not(target_os = "linux"))]
+                None::<refact_exec::ObservationReader>,
             )
         };
 
@@ -213,6 +217,10 @@ impl Tool for ToolMCP {
             }
             p
         };
+        let observed_reads_before = observation
+            .as_ref()
+            .and_then(observed_reads)
+            .unwrap_or_default();
         let result_probably = match timeout(
             Duration::from_secs(self.request_timeout),
             peer.call_tool(call_params),
@@ -353,13 +361,20 @@ impl Tool for ToolMCP {
                     let mut m = session_metrics.lock().await;
                     m.record_call_success(&self.mcp_tool.name, call_start);
                 }
-                ContextEnum::ChatMessage(ChatMessage {
+                let mut message = ChatMessage {
                     role: "tool".to_string(),
                     content,
                     tool_calls: None,
                     tool_call_id: tool_call_id.clone(),
                     ..Default::default()
-                })
+                };
+                attach_mcp_observation(
+                    &gcx,
+                    observation.as_ref(),
+                    &observed_reads_before,
+                    &mut message,
+                );
+                ContextEnum::ChatMessage(message)
             }
             Err(e) => {
                 let error_msg = format!("Failed to call tool: {:?}", e);
@@ -457,9 +472,63 @@ impl Tool for ToolMCP {
     }
 }
 
+fn attach_mcp_observation(
+    gcx: &Arc<crate::global_context::GlobalContext>,
+    observation: Option<&refact_exec::ObservationReader>,
+    observed_reads_before: &std::collections::HashSet<std::path::PathBuf>,
+    message: &mut ChatMessage,
+) {
+    let Some(observation) = observation else {
+        return;
+    };
+    attach_mcp_observation_status(gcx, observation.status(), observed_reads_before, message);
+}
+
+fn attach_mcp_observation_status(
+    gcx: &Arc<crate::global_context::GlobalContext>,
+    status: refact_exec::ObservationStatus,
+    observed_reads_before: &std::collections::HashSet<std::path::PathBuf>,
+    message: &mut ChatMessage,
+) {
+    match status {
+        refact_exec::ObservationStatus::Observed(access) => {
+            let paths = access
+                .reads
+                .into_iter()
+                .filter(|path| !observed_reads_before.contains(path));
+            match crate::privacy::records::observed_file_records(gcx, paths) {
+                Ok(records) => crate::privacy::records::merge_records(message, records),
+                Err(reason) => attach_observation_unavailable(message, reason),
+            }
+        }
+        refact_exec::ObservationStatus::Unavailable(reason) => {
+            attach_observation_unavailable(message, reason)
+        }
+    }
+}
+
+fn observed_reads(
+    observation: &refact_exec::ObservationReader,
+) -> Option<std::collections::HashSet<std::path::PathBuf>> {
+    match observation.status() {
+        refact_exec::ObservationStatus::Observed(access) => {
+            Some(access.reads.into_iter().collect())
+        }
+        refact_exec::ObservationStatus::Unavailable(_) => None,
+    }
+}
+
+fn attach_observation_unavailable(message: &mut ChatMessage, reason: String) {
+    message.extra.insert(
+        "privacy_observation".to_string(),
+        serde_json::json!({"status": "unavailable", "reason": reason}),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use refact_privacy::{PrivacyPolicy, Zone};
     use serde_json::json;
 
     fn make_tool_mcp(schema: serde_json::Value) -> ToolMCP {
@@ -478,6 +547,90 @@ mod tests {
             request_timeout: 30,
             auto_approve: false,
         }
+    }
+
+    #[tokio::test]
+    async fn integr_stdio_observation_unavailable_is_fail_open() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut message = ChatMessage::default();
+
+        attach_mcp_observation_status(
+            &gcx,
+            refact_exec::ObservationStatus::Unavailable("ptrace denied".to_string()),
+            &std::collections::HashSet::new(),
+            &mut message,
+        );
+
+        assert_eq!(
+            message.extra["privacy_observation"],
+            json!({"status": "unavailable", "reason": "ptrace denied"})
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore]
+    async fn integr_stdio_observed_reads_reach_tool_result_records() {
+        if std::env::var_os("REFACT_TEST_PTRACE").is_none() {
+            return;
+        }
+        let probe = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(probe.path(), "probe").unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.privacy_policy_load.write().unwrap() = refact_privacy::PolicyLoad {
+            policy: Arc::new(PrivacyPolicy {
+                blocked: Vec::new(),
+                zones: vec![
+                    Zone {
+                        name: "secrets".to_string(),
+                        patterns: vec![probe.path().to_string_lossy().to_string()],
+                        send_to: Vec::new(),
+                        ..Default::default()
+                    },
+                    Zone {
+                        name: "normal".to_string(),
+                        patterns: vec!["*".to_string()],
+                        send_to: vec!["*".to_string()],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            error: None,
+            source_paths: Vec::new(),
+        };
+        let mut command = tokio::process::Command::new("cat");
+        command.arg(probe.path());
+        command.stdout(std::process::Stdio::null());
+        let setup = refact_exec::ObservationSetup::prepare(&mut command);
+        let mut child = command.spawn().unwrap();
+        let runtime = setup.start_with_external_reaper(child.id());
+        let observation = runtime.reader();
+        let status =
+            tokio::time::timeout(std::time::Duration::from_secs(2), observation.wait_status())
+                .await
+                .unwrap();
+        let exit = child.wait().await.unwrap();
+        assert!(exit.success());
+        assert!(matches!(
+            status,
+            refact_exec::ObservationStatus::Observed(ref access)
+                if access.reads.iter().any(|path| path == probe.path())
+        ));
+
+        let mut message = ChatMessage::default();
+        attach_mcp_observation(
+            &gcx,
+            Some(&observation),
+            &std::collections::HashSet::new(),
+            &mut message,
+        );
+        let records = message.extra["privacy"]["files"].as_array().unwrap();
+        assert!(records.iter().any(|record| {
+            record["path"] == probe.path().to_string_lossy().as_ref()
+                && record["zone"] == "secrets"
+                && record["attribution"] == "observed"
+        }));
     }
 
     fn make_tool_mcp_with_annotations(

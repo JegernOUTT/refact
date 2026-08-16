@@ -13,7 +13,6 @@ use tempfile::NamedTempFile;
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::{IntegrationTrait, IntegrationCommon};
 use super::session_mcp::{McpClientHandler, McpRunningService, SessionMCP, add_log_entry};
-use super::mcp_metrics::SharedMetrics;
 use super::mcp_path_resolution;
 use super::integr_mcp_common::{CommonMCPSettings, MCPTransportInitializer, impl_mcp_integration_trait};
 
@@ -102,15 +101,6 @@ impl MCPTransportInitializer for IntegrationMCPStdio {
             command.env(key, value);
         }
 
-        #[cfg(target_os = "linux")]
-        let session_metrics: Option<SharedMetrics> = {
-            let mut session_locked = session_arc_clone.lock().await;
-            session_locked
-                .as_any_mut()
-                .downcast_mut::<SessionMCP>()
-                .map(|s| s.metrics.clone())
-        };
-
         match NamedTempFile::new().map(|f| f.keep()) {
             Ok(Ok((file, path))) => {
                 {
@@ -129,6 +119,8 @@ impl MCPTransportInitializer for IntegrationMCPStdio {
             Err(e) => tracing::error!("Failed to create stderr file for {debug_name}: {e}"),
         }
 
+        #[cfg(target_os = "linux")]
+        let observation_setup = refact_exec::ObservationSetup::prepare(&mut command);
         let transport = match rmcp::transport::TokioChildProcess::new(command) {
             Ok(t) => t,
             Err(e) => {
@@ -147,9 +139,15 @@ impl MCPTransportInitializer for IntegrationMCPStdio {
         };
 
         #[cfg(target_os = "linux")]
-        if let Some(ref metrics) = session_metrics {
-            if let Some(pid) = read_last_child_pid() {
-                metrics.lock().await.set_pid(pid);
+        {
+            let process_id = transport.id();
+            let observation = observation_setup.start_with_external_reaper(process_id);
+            let mut session_locked = session_arc_clone.lock().await;
+            if let Some(session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                if let Some(process_id) = process_id {
+                    session.metrics.lock().await.set_pid(process_id);
+                }
+                session.observation = Some(observation.reader());
             }
         }
 
@@ -178,17 +176,6 @@ impl MCPTransportInitializer for IntegrationMCPStdio {
             }
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn read_last_child_pid() -> Option<u32> {
-    let self_pid = std::process::id();
-    let path = format!("/proc/{}/task/{}/children", self_pid, self_pid);
-    let content = std::fs::read_to_string(&path).ok()?;
-    content
-        .split_whitespace()
-        .filter_map(|s| s.parse::<u32>().ok())
-        .last()
 }
 
 impl_mcp_integration_trait!(IntegrationMCPStdio, "mcp_stdio_schema.yaml");
@@ -291,6 +278,24 @@ impl IntegrationTrait for IntegrationMCPUnified {
 #[cfg(test)]
 mod unified_tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn integr_stdio_unavailable_observer_does_not_block_spawn() {
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg("exit 0");
+        let setup = refact_exec::ObservationSetup::unavailable("ptrace denied");
+
+        let mut child = command.spawn().unwrap();
+        let observation = setup.start_with_external_reaper(child.id());
+        let status = child.wait().await.unwrap();
+
+        assert!(status.success());
+        assert_eq!(
+            observation.reader().status(),
+            refact_exec::ObservationStatus::Unavailable("ptrace denied".to_string())
+        );
+    }
 
     #[test]
     fn test_unified_transport_choice_url_selects_http() {

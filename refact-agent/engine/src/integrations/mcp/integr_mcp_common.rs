@@ -451,7 +451,9 @@ pub(crate) async fn build_auth_client_for_mcp(
         if let Err(e) = save_tokens_to_config(config_path, &tokens).await {
             tracing::warn!(
                 "Failed to bind legacy OAuth tokens to '{}' for {}: {}",
-                url, debug_name, e
+                url,
+                debug_name,
+                e
             );
         }
     }
@@ -807,6 +809,8 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 connection_status: MCPConnectionStatus::Connecting,
                 last_successful_connection: None,
                 metrics: new_shared_metrics(),
+                #[cfg(target_os = "linux")]
+                observation: None,
                 auth_manager: None,
                 auth_status: MCPAuthStatus::NotApplicable,
                 oauth_refresh_task_handle: None,
@@ -1469,6 +1473,8 @@ mod tests {
                 connection_status: status,
                 last_successful_connection: None,
                 metrics: super::super::mcp_metrics::new_shared_metrics(),
+                #[cfg(target_os = "linux")]
+                observation: None,
                 auth_manager: None,
                 auth_status: super::super::session_mcp::MCPAuthStatus::NotApplicable,
                 oauth_refresh_task_handle: None,
@@ -1757,6 +1763,8 @@ mod tests {
                 connection_status: MCPConnectionStatus::Connecting,
                 last_successful_connection: None,
                 metrics: new_shared_metrics(),
+                #[cfg(target_os = "linux")]
+                observation: None,
                 auth_manager: None,
                 auth_status: MCPAuthStatus::NotApplicable,
                 oauth_refresh_task_handle: None,

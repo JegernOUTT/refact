@@ -8,7 +8,9 @@ pub mod transcript;
 pub mod types;
 
 pub use env::build_child_env;
-pub use observe::{ObservationStatus, ObservedAccess};
+pub use observe::{ObservationReader, ObservationStatus, ObservedAccess};
+#[cfg(target_os = "linux")]
+pub use observe::{ObservationRuntime, ObservationSetup};
 pub use registry::{
     ExecRegistry, ExecShutdownCleanupSummary, ProcessCompletionEvent, ProcessCompletionTx,
 };

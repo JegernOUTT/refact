@@ -483,12 +483,8 @@ impl ClientHandler for McpClientHandler {
             let refresh_session_arc = session_arc.clone();
             let task = tokio::spawn(async move {
                 sleep(Duration::from_millis(200)).await;
-                if !refresh_is_current(
-                    &refresh_session_arc,
-                    &refresh_handle_arc,
-                    RefreshKind::Tool,
-                )
-                .await
+                if !refresh_is_current(&refresh_session_arc, &refresh_handle_arc, RefreshKind::Tool)
+                    .await
                 {
                     return;
                 }
@@ -845,6 +841,8 @@ pub struct SessionMCP {
     pub connection_status: MCPConnectionStatus,
     pub last_successful_connection: Option<Instant>,
     pub metrics: SharedMetrics,
+    #[cfg(target_os = "linux")]
+    pub observation: Option<refact_exec::ObservationReader>,
     pub auth_manager: Option<Arc<AMutex<AuthorizationManager>>>,
     pub auth_status: MCPAuthStatus,
     pub oauth_refresh_task_handle: Option<AbortHandle>,
@@ -1017,6 +1015,8 @@ mod tests {
             connection_status: MCPConnectionStatus::Disconnected,
             last_successful_connection: None,
             metrics: new_shared_metrics(),
+            #[cfg(target_os = "linux")]
+            observation: None,
             auth_manager: None,
             auth_status: MCPAuthStatus::NotApplicable,
             oauth_refresh_task_handle: None,

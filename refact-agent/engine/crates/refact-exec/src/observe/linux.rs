@@ -29,7 +29,7 @@ const SYS_OPEN: u32 = libc::SYS_open as u32;
 const SYS_OPEN: u32 = u32::MAX;
 
 #[derive(Debug)]
-pub(crate) struct Setup {
+pub struct Setup {
     requested: bool,
     read_fd: Option<RawFd>,
     write_fd: Option<RawFd>,
@@ -46,7 +46,7 @@ impl Setup {
         }
     }
 
-    pub(crate) fn unavailable(reason: impl Into<String>) -> Self {
+    pub fn unavailable(reason: impl Into<String>) -> Self {
         Self {
             requested: true,
             read_fd: None,
@@ -55,7 +55,7 @@ impl Setup {
         }
     }
 
-    pub(crate) fn prepare(command: &mut tokio::process::Command) -> Self {
+    pub fn prepare(command: &mut tokio::process::Command) -> Self {
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             let _ = command;
@@ -100,7 +100,15 @@ impl Setup {
         }
     }
 
-    pub(crate) fn start(mut self, process_id: Option<u32>) -> Runtime {
+    pub fn start(mut self, process_id: Option<u32>) -> Runtime {
+        self.start_inner(process_id, false)
+    }
+
+    pub fn start_with_external_reaper(mut self, process_id: Option<u32>) -> Runtime {
+        self.start_inner(process_id, true)
+    }
+
+    fn start_inner(&mut self, process_id: Option<u32>, external_reaper: bool) -> Runtime {
         if !self.requested {
             return Runtime::unavailable("disabled");
         }
@@ -132,7 +140,7 @@ impl Setup {
                     fail_open_resume(process_id);
                     return Runtime::unavailable(reason);
                 }
-                start_supervisor(process_id)
+                start_supervisor(process_id, external_reaper)
             }
         }
     }
@@ -174,9 +182,17 @@ impl Handle {
             notified.await;
         }
     }
+
+    pub(super) fn status(&self) -> ObservationStatus {
+        let state = self.shared.state.lock().unwrap();
+        state
+            .status
+            .clone()
+            .unwrap_or_else(|| ObservationStatus::Observed(state.access.clone()))
+    }
 }
 
-pub(crate) struct Runtime {
+pub struct Runtime {
     handle: Option<Handle>,
     unavailable: Option<String>,
 }
@@ -200,6 +216,17 @@ impl Runtime {
         self.handle.clone()
     }
 
+    pub fn reader(&self) -> super::ObservationReader {
+        match &self.handle {
+            Some(handle) => super::ObservationReader::active(handle.clone()),
+            None => super::ObservationReader::unavailable(
+                self.unavailable
+                    .clone()
+                    .unwrap_or_else(|| "backend unavailable".to_string()),
+            ),
+        }
+    }
+
     pub(crate) async fn finish(self, terminal: bool) -> ObservationStatus {
         match self.handle {
             Some(handle) if terminal => handle.wait_status().await,
@@ -218,6 +245,7 @@ impl Runtime {
 struct SharedState {
     exit: Option<Result<Option<i32>, String>>,
     status: Option<ObservationStatus>,
+    access: ObservedAccess,
 }
 
 struct Shared {
@@ -250,6 +278,18 @@ impl Shared {
             self.changed.notify_waiters();
         }
     }
+
+    fn record_access(&self, path: PathBuf, reads: bool, writes: bool) {
+        let mut state = self.state.lock().unwrap();
+        if reads && !state.access.reads.contains(&path) {
+            state.access.reads.push(path.clone());
+            state.access.reads.sort();
+        }
+        if writes && !state.access.writes.contains(&path) {
+            state.access.writes.push(path);
+            state.access.writes.sort();
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -260,6 +300,7 @@ struct PendingOpen {
 
 struct Supervisor {
     root: libc::pid_t,
+    external_reaper: bool,
     tracees: HashSet<libc::pid_t>,
     pending: HashMap<libc::pid_t, PendingOpen>,
     reads: HashSet<PathBuf>,
@@ -269,9 +310,10 @@ struct Supervisor {
 }
 
 impl Supervisor {
-    fn new(root: libc::pid_t, shared: Arc<Shared>) -> Self {
+    fn new(root: libc::pid_t, external_reaper: bool, shared: Arc<Shared>) -> Self {
         Self {
             root,
+            external_reaper,
             tracees: HashSet::from([root]),
             pending: HashMap::new(),
             reads: HashSet::new(),
@@ -282,7 +324,7 @@ impl Supervisor {
     }
 
     fn run(mut self, ready: std::sync::mpsc::SyncSender<Result<(), String>>) {
-        if let Err(reason) = seize_tracee(self.root)
+        if let Err(reason) = seize_tracee(self.root, self.external_reaper)
             .and_then(|_| interrupt_tracee(self.root))
             .and_then(|_| wait_for_initial_stop(self.root))
             .and_then(|_| continue_tracee(self.root, 0))
@@ -361,6 +403,16 @@ impl Supervisor {
 
         let signal = libc::WSTOPSIG(status);
         let event = status >> 16;
+        if event == libc::PTRACE_EVENT_EXIT && self.external_reaper && process_id == self.root {
+            match event_exit_code(process_id) {
+                Ok(exit_code) => self.shared.set_exit(Ok(exit_code)),
+                Err(reason) => self.fail(reason),
+            }
+            self.tracees.remove(&process_id);
+            self.pending.remove(&process_id);
+            detach_stopped(process_id);
+            return;
+        }
         if event == libc::PTRACE_EVENT_SECCOMP {
             match read_open(process_id) {
                 Ok(open) => {
@@ -396,6 +448,8 @@ impl Supervisor {
                 match returned_fd(process_id) {
                     Ok(Some(fd)) => {
                         if let Some(path) = resolve_fd(process_id, fd) {
+                            self.shared
+                                .record_access(path.clone(), open.reads, open.writes);
                             if open.reads {
                                 self.reads.insert(path.clone());
                             }
@@ -450,7 +504,7 @@ impl Supervisor {
     }
 }
 
-fn start_supervisor(root: libc::pid_t) -> Runtime {
+fn start_supervisor(root: libc::pid_t, external_reaper: bool) -> Runtime {
     let shared = Arc::new(Shared::new());
     let handle = Handle {
         shared: shared.clone(),
@@ -458,7 +512,7 @@ fn start_supervisor(root: libc::pid_t) -> Runtime {
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let spawn = std::thread::Builder::new()
         .name(format!("refact-observe-{root}"))
-        .spawn(move || Supervisor::new(root, shared).run(ready_tx));
+        .spawn(move || Supervisor::new(root, external_reaper, shared).run(ready_tx));
     if let Err(error) = spawn {
         fail_open_resume(root);
         return Runtime::unavailable(format!("failed to start observer supervisor: {error}"));
@@ -559,20 +613,25 @@ fn wait_for_initial_stop(process_id: libc::pid_t) -> Result<(), String> {
     }
 }
 
-fn ptrace_options() -> libc::c_int {
-    libc::PTRACE_O_TRACESYSGOOD
+fn ptrace_options(external_reaper: bool) -> libc::c_int {
+    let options = libc::PTRACE_O_TRACESYSGOOD
         | libc::PTRACE_O_TRACESECCOMP
         | libc::PTRACE_O_TRACEFORK
         | libc::PTRACE_O_TRACEVFORK
-        | libc::PTRACE_O_TRACECLONE
+        | libc::PTRACE_O_TRACECLONE;
+    if external_reaper {
+        options | libc::PTRACE_O_TRACEEXIT
+    } else {
+        options
+    }
 }
 
-fn seize_tracee(process_id: libc::pid_t) -> Result<(), String> {
+fn seize_tracee(process_id: libc::pid_t, external_reaper: bool) -> Result<(), String> {
     ptrace_call(
         libc::PTRACE_SEIZE,
         process_id,
         std::ptr::null_mut(),
-        ptrace_options() as usize as *mut libc::c_void,
+        ptrace_options(external_reaper) as usize as *mut libc::c_void,
         "seize tracee",
     )
 }
@@ -644,6 +703,23 @@ fn event_process_id(process_id: libc::pid_t) -> Result<libc::pid_t, String> {
         "read ptrace child event",
     )?;
     Ok(child as libc::pid_t)
+}
+
+fn event_exit_code(process_id: libc::pid_t) -> Result<Option<i32>, String> {
+    let mut status = 0_usize;
+    ptrace_call(
+        libc::PTRACE_GETEVENTMSG,
+        process_id,
+        std::ptr::null_mut(),
+        &mut status as *mut usize as *mut libc::c_void,
+        "read ptrace exit event",
+    )?;
+    let status = status as libc::c_int;
+    Ok(if libc::WIFEXITED(status) {
+        Some(libc::WEXITSTATUS(status))
+    } else {
+        None
+    })
 }
 
 #[cfg(target_arch = "x86_64")]

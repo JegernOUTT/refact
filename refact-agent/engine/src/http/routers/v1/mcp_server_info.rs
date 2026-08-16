@@ -487,6 +487,8 @@ mod tests {
             connection_status: MCPConnectionStatus::Disconnected,
             last_successful_connection: None,
             metrics: new_shared_metrics(),
+            #[cfg(target_os = "linux")]
+            observation: None,
             auth_manager: None,
             auth_status: MCPAuthStatus::NotApplicable,
             oauth_refresh_task_handle: None,
@@ -523,6 +525,8 @@ mod tests {
             connection_status: MCPConnectionStatus::Connected,
             last_successful_connection: None,
             metrics: new_shared_metrics(),
+            #[cfg(target_os = "linux")]
+            observation: None,
             auth_manager: None,
             auth_status: MCPAuthStatus::NotApplicable,
             oauth_refresh_task_handle: None,
