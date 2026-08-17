@@ -68,7 +68,7 @@ fn command_matches_rules_segment_aware(command: &String, rules: &Vec<String>) ->
                 return false;
             }
         };
-        command_matches_pattern(command, &segments, &pattern)
+        !segments.parse_ok || command_matches_pattern(command, &segments, &pattern)
     }) {
         return (true, rule.clone());
     }
@@ -77,11 +77,10 @@ fn command_matches_rules_segment_aware(command: &String, rules: &Vec<String>) ->
 
 fn command_matches_pattern(command: &str, segments: &CommandSegments, pattern: &Pattern) -> bool {
     pattern.matches(command)
-        || (segments.parse_ok
-            && segments.segments.iter().any(|segment| {
-                pattern.matches(&segment_command(segment))
-                    || executable_basename(segment).is_some_and(|name| pattern.matches(name))
-            }))
+        || segments.segments.iter().any(|segment| {
+            pattern.matches(&segment_command(segment))
+                || executable_basename(segment).is_some_and(|name| pattern.matches(name))
+        })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -457,10 +456,87 @@ mod tests {
     }
 
     #[test]
-    fn test_segment_parse_failure_preserves_raw_glob_fallback() {
+    fn test_segment_parse_failure_fails_closed_when_rules_exist() {
         let command = "echo 'unterminated sudo".to_string();
         assert!(command_should_be_denied_segment_aware(&command, &vec!["*sudo".to_string()]).0);
-        assert!(!command_should_be_denied_segment_aware(&command, &vec!["sudo*".to_string()]).0);
+        assert!(command_should_be_denied_segment_aware(&command, &vec!["sudo*".to_string()]).0);
+    }
+
+    #[test]
+    fn test_segment_aware_matching_catches_forwarding_wrappers() {
+        let rules = vec!["sudo*".to_string()];
+        for command in [
+            "command sudo id",
+            "builtin sudo id",
+            "exec sudo id",
+            "env X=1 sudo id",
+            "nohup sudo id",
+            "nice -n 5 sudo id",
+            "ionice -c 3 sudo id",
+            "time sudo id",
+            "timeout 5 sudo id",
+            "stdbuf -o L sudo id",
+            "setsid sudo id",
+            "xargs sudo id",
+            "sudo -- sudo id",
+            "doas -n sudo id",
+            "find . -exec sudo id \\;",
+            "eval 'sudo id'",
+            "sh <<< 'sudo id'",
+            "sh <<'EOF'\nsudo id\nEOF",
+        ] {
+            assert!(
+                command_should_be_denied_segment_aware(&command.to_string(), &rules).0,
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_common_safe_commands_do_not_match_sudo_rule() {
+        let rules = vec!["sudo*".to_string()];
+        for command in ["ls -la", "cargo test", "git status", "npm run build"] {
+            assert!(
+                !command_should_be_denied_segment_aware(&command.to_string(), &rules).0,
+                "{command:?}"
+            );
+            let extracted = extract_command_segments(command);
+            assert!(extracted.parse_ok, "{command:?}");
+            assert!(
+                crate::command_classify::structural_flags(&extracted).is_empty(),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_reported_bypasses_are_denied_or_structurally_confirmed() {
+        let rules = vec!["sudo*".to_string()];
+        let mut deeply_nested = "sudo id".to_string();
+        for _ in 0..=4 {
+            deeply_nested = shell_words::join(["sh", "-c", deeply_nested.as_str()]);
+        }
+        for command in [
+            "command sudo id",
+            "exec sudo id",
+            "env X=1 sudo id",
+            "X=sudo; $X id",
+            "eval \"sudo id\"",
+            "printf 'sudo id\\n' | sh",
+            "sh <<< 'sudo id'",
+            "find . -exec sudo id \\;",
+            "xargs sudo id",
+            "printf 'c3VkbyBpZAo=' | base64 -d | sh",
+            deeply_nested.as_str(),
+            "cmd /C \"sudo id\"",
+            "powershell -Command \"bash -c 'sudo id'\"",
+        ] {
+            let denied = command_should_be_denied_segment_aware(&command.to_string(), &rules).0;
+            let structurally_confirmed =
+                !crate::command_classify::structural_flags(&extract_command_segments(command))
+                    .is_empty();
+            assert!(denied || structurally_confirmed, "{command:?}");
+        }
     }
 
     #[test]
