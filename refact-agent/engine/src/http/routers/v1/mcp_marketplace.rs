@@ -1451,35 +1451,9 @@ async fn write_config_atomically(
     config_path: &std::path::Path,
     content: &str,
 ) -> Result<(), ScratchError> {
-    let tmp_path = config_path.with_extension("yaml.tmp");
-    tokio::fs::write(&tmp_path, content).await.map_err(|e| {
-        ScratchError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("write error: {}", e),
-        )
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)).await;
-    }
-    #[cfg(target_os = "windows")]
-    if config_path.exists() {
-        tokio::fs::remove_file(config_path).await.map_err(|e| {
-            ScratchError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("remove old config error: {}", e),
-            )
-        })?;
-    }
-    tokio::fs::rename(&tmp_path, config_path)
+    crate::integrations::setting_up_integrations::write_config_atomically(config_path, content)
         .await
-        .map_err(|e| {
-            ScratchError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("rename error: {}", e),
-            )
-        })
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 /// Merges the current marketplace recipe into an existing installed config:

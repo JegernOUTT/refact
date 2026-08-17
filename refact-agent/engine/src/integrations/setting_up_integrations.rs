@@ -678,18 +678,21 @@ fn leading_marketplace_comments(existing_text: &str) -> String {
     preserved
 }
 
-async fn write_config_atomically(
+pub async fn write_config_atomically(
     config_path: &std::path::Path,
     contents: &str,
 ) -> Result<(), String> {
-    let tmp_path = config_path.with_extension("tmp");
+    let tmp_path = config_path.with_extension("yaml.tmp");
     async_fs::write(&tmp_path, contents.as_bytes())
         .await
         .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
     #[cfg(unix)]
-    if let Ok(metadata) = async_fs::metadata(config_path).await {
+    {
         use std::os::unix::fs::PermissionsExt;
-        let mode = metadata.permissions().mode() & 0o777;
+        let mode = match async_fs::metadata(config_path).await {
+            Ok(metadata) => metadata.permissions().mode() & 0o777,
+            Err(_) => 0o600,
+        };
         if let Err(e) =
             async_fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(mode)).await
         {
