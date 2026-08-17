@@ -37,13 +37,43 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+pub struct EnrichmentSection {
+    pub enabled: bool,
+    pub model_slot: ModelSlot,
+    pub max_steps: usize,
+    pub tools: Vec<String>,
+    pub prompt: Option<String>,
+    pub n_ctx: Option<usize>,
+    pub max_new_tokens: Option<usize>,
+}
+
+impl Default for EnrichmentSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model_slot: ModelSlot::Light,
+            max_steps: 12,
+            tools: vec![],
+            prompt: None,
+            n_ctx: None,
+            max_new_tokens: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct StaticSection {
     pub enabled: bool,
+    pub agent: EnrichmentSection,
 }
 
 impl Default for StaticSection {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            agent: Default::default(),
+        }
     }
 }
 
@@ -52,6 +82,7 @@ impl Default for StaticSection {
 pub struct DeadCodeSection {
     pub enabled: bool,
     pub min_confidence: f64,
+    pub agent: EnrichmentSection,
 }
 
 impl Default for DeadCodeSection {
@@ -59,6 +90,7 @@ impl Default for DeadCodeSection {
         Self {
             enabled: true,
             min_confidence: 0.7,
+            agent: Default::default(),
         }
     }
 }
@@ -241,10 +273,9 @@ impl Default for GatherSection {
 pub struct ReviewSwarmConfig {
     pub default_depth: String,
     pub max_parallel: usize,
-    pub oneshot_timeout_secs: u64,
-    pub agentic_timeout_secs: u64,
-    pub exec_timeout_secs: u64,
-    pub browser_timeout_secs: u64,
+    pub idle_timeout_secs: u64,
+    pub exec_idle_timeout_secs: u64,
+    pub static_enrichment_prompt: Option<String>,
     pub gather: GatherSection,
     pub verifier: VerifierSection,
     pub s1_security: StaticSection,
@@ -265,12 +296,11 @@ pub struct ReviewSwarmConfig {
 impl Default for ReviewSwarmConfig {
     fn default() -> Self {
         Self {
-            default_depth: "quick".to_string(),
+            default_depth: "normal".to_string(),
             max_parallel: 10,
-            oneshot_timeout_secs: 300,
-            agentic_timeout_secs: 600,
-            exec_timeout_secs: 900,
-            browser_timeout_secs: 900,
+            idle_timeout_secs: 240,
+            exec_idle_timeout_secs: 1800,
+            static_enrichment_prompt: None,
             gather: Default::default(),
             verifier: Default::default(),
             s1_security: Default::default(),
@@ -308,7 +338,7 @@ impl ReviewAgentsConfig {
     pub fn depth_or_default(&self, requested: Option<ReviewDepth>) -> ReviewDepth {
         requested
             .or_else(|| ReviewDepth::parse(&self.swarm.default_depth))
-            .unwrap_or(ReviewDepth::Quick)
+            .unwrap_or(ReviewDepth::Normal)
     }
 }
 
@@ -429,6 +459,24 @@ pub fn agentic_spec(
     spec_from_params(params, model)
 }
 
+pub fn enrichment_spec(
+    base: &SubchatParameters,
+    section: &EnrichmentSection,
+    model: String,
+) -> ExplicitSubchatSpec {
+    let mut params = base.clone();
+    params.subchat_model = model.clone();
+    params.subchat_tokens_for_rag = 0;
+    params.subchat_cache_control = CacheControl::Ephemeral;
+    if let Some(n_ctx) = section.n_ctx {
+        params.subchat_n_ctx = n_ctx;
+    }
+    if let Some(max_new_tokens) = section.max_new_tokens {
+        params.subchat_max_new_tokens = max_new_tokens;
+    }
+    spec_from_params(params, model)
+}
+
 pub fn verifier_spec(section: &VerifierSection, model: String) -> ExplicitSubchatSpec {
     let params = SubchatParameters {
         subchat_model_type: ChatModelType::Thinking,
@@ -464,7 +512,7 @@ mod tests {
     #[test]
     fn tool_review_swarm_config_defaults_are_sane() {
         let cfg = ReviewSwarmConfig::default();
-        assert_eq!(cfg.default_depth, "quick");
+        assert_eq!(cfg.default_depth, "normal");
         assert_eq!(cfg.max_parallel, 10);
         assert_eq!(cfg.l1_diff.ensemble.len(), 3);
         assert!(cfg.a3_execution.allow_execution);
@@ -472,13 +520,23 @@ mod tests {
         assert_eq!(cfg.a1_repo_context.max_steps, 25);
         assert_eq!(cfg.verifier.n_ctx, 64000);
         assert_eq!(cfg.gather.max_files, 60);
+        assert_eq!(cfg.idle_timeout_secs, 240);
+        assert_eq!(cfg.exec_idle_timeout_secs, 1800);
+        assert!(cfg.static_enrichment_prompt.is_none());
+        assert!(cfg.s1_security.agent.enabled);
+        assert_eq!(cfg.s1_security.agent.model_slot, ModelSlot::Light);
+        assert_eq!(cfg.s1_security.agent.max_steps, 12);
+        assert!(cfg.s2_dead_code.agent.enabled);
+        assert!(cfg.s5_dependencies.agent.tools.is_empty());
     }
 
     #[test]
     fn tool_review_swarm_config_parses_from_yaml_extra() {
         let yaml = r#"
-default_depth: standard
+default_depth: deep
 max_parallel: 4
+idle_timeout_secs: 90
+exec_idle_timeout_secs: 600
 l1_diff:
   ensemble: [thinking]
   temperature: 0.3
@@ -490,11 +548,20 @@ a4_browser:
   app_url: "http://localhost:5173"
 s2_dead_code:
   min_confidence: 0.9
+  agent:
+    model_slot: chat
+    max_steps: 5
+s3_duplication:
+  agent:
+    enabled: false
+static_enrichment_prompt: "shared prompt"
 "#;
         let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let cfg: ReviewSwarmConfig = serde_yaml::from_value(value).unwrap();
-        assert_eq!(cfg.default_depth, "standard");
+        assert_eq!(cfg.default_depth, "deep");
         assert_eq!(cfg.max_parallel, 4);
+        assert_eq!(cfg.idle_timeout_secs, 90);
+        assert_eq!(cfg.exec_idle_timeout_secs, 600);
         assert_eq!(cfg.l1_diff.ensemble, vec![ModelSlot::Thinking]);
         assert_eq!(cfg.l1_diff.temperature, Some(0.3));
         assert!(!cfg.a3_execution.base.enabled);
@@ -506,6 +573,15 @@ s2_dead_code:
         );
         assert_eq!(cfg.s2_dead_code.min_confidence, 0.9);
         assert!(cfg.l2_simplicity.enabled);
+        assert_eq!(cfg.s2_dead_code.agent.model_slot, ModelSlot::Chat);
+        assert_eq!(cfg.s2_dead_code.agent.max_steps, 5);
+        assert!(cfg.s2_dead_code.agent.enabled);
+        assert!(!cfg.s3_duplication.agent.enabled);
+        assert!(cfg.s1_security.agent.enabled);
+        assert_eq!(
+            cfg.static_enrichment_prompt.as_deref(),
+            Some("shared prompt")
+        );
     }
 
     #[test]

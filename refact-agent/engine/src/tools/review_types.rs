@@ -2,16 +2,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewDepth {
-    Quick,
-    Standard,
+    Normal,
     Deep,
 }
 
 impl ReviewDepth {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "quick" => Some(Self::Quick),
-            "standard" => Some(Self::Standard),
+            "normal" | "quick" | "standard" => Some(Self::Normal),
             "deep" => Some(Self::Deep),
             _ => None,
         }
@@ -19,8 +17,7 @@ impl ReviewDepth {
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Quick => "quick",
-            Self::Standard => "standard",
+            Self::Normal => "normal",
             Self::Deep => "deep",
         }
     }
@@ -291,7 +288,7 @@ mod tests {
                         output_excerpt: "Finished".to_string(),
                     }],
                 }),
-                depth: Some("standard".to_string()),
+                depth: Some("deep".to_string()),
                 agents: vec![AgentRunReport {
                     agent: "l1_diff".to_string(),
                     model: Some("thinking-model".to_string()),
@@ -322,7 +319,7 @@ mod tests {
         assert_eq!(value["findings"][2]["rank_tier"], "corroborated");
         assert_eq!(value["findings"][0]["sources"][0], "l1_diff@thinking");
         assert_eq!(value["pipeline"]["stages"][0]["status"], "completed");
-        assert_eq!(value["pipeline"]["depth"], "standard");
+        assert_eq!(value["pipeline"]["depth"], "deep");
         assert_eq!(value["pipeline"]["agents"][0]["agent"], "l1_diff");
         assert_eq!(value["pipeline"]["agents"][0]["status"], "ran");
         assert_eq!(value["assumed_intent"], "Ship the parser");
@@ -360,15 +357,13 @@ mod tests {
 
     #[test]
     fn tool_review_depth_parses_known_values_only() {
-        assert_eq!(ReviewDepth::parse("quick"), Some(ReviewDepth::Quick));
-        assert_eq!(
-            ReviewDepth::parse(" Standard "),
-            Some(ReviewDepth::Standard)
-        );
+        assert_eq!(ReviewDepth::parse("normal"), Some(ReviewDepth::Normal));
+        assert_eq!(ReviewDepth::parse("quick"), Some(ReviewDepth::Normal));
+        assert_eq!(ReviewDepth::parse(" Standard "), Some(ReviewDepth::Normal));
         assert_eq!(ReviewDepth::parse("DEEP"), Some(ReviewDepth::Deep));
         assert_eq!(ReviewDepth::parse("max"), None);
-        assert!(ReviewDepth::Quick < ReviewDepth::Standard);
-        assert!(ReviewDepth::Standard < ReviewDepth::Deep);
+        assert_eq!(ReviewDepth::Normal.as_str(), "normal");
+        assert!(ReviewDepth::Normal < ReviewDepth::Deep);
     }
 
     #[test]

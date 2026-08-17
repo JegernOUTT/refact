@@ -2,15 +2,17 @@
 
 ## Overview
 
-The `review(what_to_check, files, depth)` tool runs a Rust-orchestrated, fixed stage graph. `what_to_check` is an optional focus, `files` are seed paths rather than a closed scope, and `depth` is `quick`, `standard`, or `deep`. If omitted, depth defaults to `quick` unless `review_swarm.default_depth` overrides it.
+The `review(what_to_check, files, depth)` tool runs a Rust-orchestrated, fixed stage graph. `what_to_check` is an optional focus, `files` are seed paths rather than a closed scope, and `depth` is `normal` or `deep`. If omitted, depth defaults to `normal` unless `review_swarm.default_depth` overrides it. Legacy `quick` and `standard` values parse as `normal`.
+
+Agents have no wall-clock timeouts. Every agent instance runs behind an idle watchdog fed by its own monitored subchat channel: LLM streaming deltas (including thinking progress, throttled to 750ms), tool-call step markers, and verifier traffic all count as activity. An agent is killed only after `idle_timeout_secs` (default 240, floored at 30) with no observed activity, producing an `idle_timeout:no_activity_for_<N>s` coverage reason; A3 and A4 use `exec_idle_timeout_secs` (default 1800) because long silent test or build commands are normal for them. A killed static enrichment agent falls back to its raw deterministic findings with an `enrichment_idle_timeout:*` reason instead of losing them.
 
 The stages are:
 
 1. **Gather and scope.** A gather subagent expands the supplied files and conversation context into the review scope, changed-file set, and diff context, subject to configured file and token budgets.
 2. **Mechanical preflight.** If `ReviewCommandsConfig` is enabled, its literal argv commands run through the centralized `review_evidence` foreground policy. A non-zero exit or execution failure stops the graph before any review agent runs. If disabled, the stage is recorded as skipped.
-3. **Static swarm.** S1-S6 run concurrently. S1-S5 emit findings; S6 emits file-risk facts used during merge.
-4. **LLM and agentic swarm.** The depth selects fixed one-shot and tool-using agent instances. Concurrency is bounded by `max_parallel`, and each family has a timeout.
-5. **Per-instance evidence and verification.** Each L1-L3 instance plus A1 and A2 independently receives deterministic evidence and blind verification before its output joins the swarm. A3 and A4 collect deterministic evidence but skip the blind verifier because their execution/browser evidence is the verification. The verifier sees the claim and evidence, but not reviewer rationale, prose, or candidate confidence.
+3. **Static swarm.** S1-S6 deterministic scans run concurrently. S1-S5 emit raw findings; S6 emits file-risk facts used during merge. Each S1-S5 scan that produced findings then becomes an enrichment agent: a tool-using subchat that receives the raw findings, searches the codebase with read-only tools (`cat`, `tree`, `glob`, `regex_search`, `symbol_def`, `semantic_search`), and proves, refutes, or enriches every raw hit. Confirmed findings become `verified` with the deterministic fact preserved as evidence, refuted findings are dropped with a `static_refuted:N` marker, untouched raw findings survive unchanged as `unverified`, and up to five directly related new discoveries may be added. Enrichment failure or timeout falls back to the raw findings with an `enrichment_failed`/`enrichment_timeout` coverage reason, so the deterministic signal is never lost.
+4. **LLM and agentic swarm.** The depth selects fixed one-shot and tool-using agent instances. Static enrichment agents join the same bounded wave. Concurrency is bounded by `max_parallel`, and each family has a timeout.
+5. **Per-instance evidence and verification.** Each L1-L3 instance plus A1 and A2 independently receives deterministic evidence and blind verification before its output joins the swarm. A3 and A4 collect deterministic evidence but skip the blind verifier because their execution/browser evidence is the verification. Static enrichment agents also skip the blind verifier: their findings are anchored by the deterministic fact plus the agent's own codebase investigation. The verifier sees the claim and evidence, but not reviewer rationale, prose, or candidate confidence.
 6. **Merge and report.** Rejected findings are removed, nearby duplicates are clustered across agents, risk facts and A3 refutations are applied, stable IDs and rank tiers are assigned, and findings are sorted.
 
 The result is Markdown followed by one fenced `json` block containing the complete `ReviewReport`.
@@ -19,29 +21,28 @@ The result is Markdown followed by one fenced `json` block containing the comple
 
 | Depth | Agents |
 |---|---|
-| `quick` | S1-S6; one `l1_diff@thinking` instance; deterministic evidence and blind verification for that instance. |
-| `standard` | Everything in quick; L1, L2, and L3 ensembles over their configured `chat`, `chat2`, and `thinking` slots; A1 repository-context exploration. |
-| `deep` | Everything in standard; A2 research, A3 execution, and A4 browser review. |
+| `normal` | S1-S6 scans plus their enrichment agents (spawned only when a scan finds something); L1, L2, and L3 ensembles over their configured `chat`, `chat2`, and `thinking` slots; A1 repository-context exploration; A2 research. |
+| `deep` | Everything in normal; A3 test execution and A4 browser review. |
 
-The built-in default is `quick`. Disabled agents, missing prompts, unavailable facilities, and unresolved model slots produce skipped or failed coverage rows.
+The built-in default is `normal`. Disabled agents, missing prompts, unavailable facilities, and unresolved model slots produce skipped or failed coverage rows.
 
 ## Agent roster
 
 | ID | Family | Checks | Evidence emitted | Skip conditions |
 |---|---|---|---|---|
-| `s1_security` | static | CodeGraph security rules over scoped files. | `static_fact` | `disabled`, `codegraph_unavailable` |
-| `s2_dead_code` | static | Cross-file unreachable symbols above `min_confidence`. | `static_fact` | `disabled`, `codegraph_unavailable`, `index_building`, `index_unavailable`, `dead_code_unavailable` |
-| `s3_duplication` | static | Cross-file clone pairs intersecting the scope. | `static_fact` | `disabled`, `codegraph_unavailable` |
-| `s4_test_integrity` | static | Deleted or skipped tests, reduced/weakened assertions, widened tolerances, harness and snapshot changes, and implementation/test literal overlap. | `static_fact` plus `s4:*` markers | `disabled`, `no_diff` |
-| `s5_dependencies` | static | Added Rust, JavaScript, and Python imports absent from an available dependency manifest. | `static_fact` | `disabled`, `no_diff_patch` |
+| `s1_security` | static | CodeGraph security rules over scoped files; enrichment agent judges exploitability, data flow, and fixture-versus-production context. | `static_fact`, plus `excerpt`/`diff_hunk`/`symbol` on enriched findings | `disabled`, `codegraph_unavailable` |
+| `s2_dead_code` | static | Cross-file unreachable symbols above `min_confidence`; enrichment agent searches for dynamic dispatch, registrations, exports, macros, and feature-gated usage before confirming. | `static_fact`, plus deterministic evidence on enriched findings | `disabled`, `codegraph_unavailable`, `index_building`, `index_unavailable`, `dead_code_unavailable` |
+| `s3_duplication` | static | Cross-file clone pairs intersecting the scope; enrichment agent separates true DRY violations from generated code, fixtures, and justified variants, naming the extraction target. | `static_fact`, plus deterministic evidence on enriched findings | `disabled`, `codegraph_unavailable` |
+| `s4_test_integrity` | static | Deleted or skipped tests, reduced/weakened assertions, widened tolerances, harness and snapshot changes, and implementation/test literal overlap; enrichment agent checks whether deleted tests moved, skips are justified, and overlaps are hardcoded expectations. | `static_fact` plus `s4:*` markers, plus deterministic evidence on enriched findings | `disabled`, `no_diff` |
+| `s5_dependencies` | static | Added Rust, JavaScript, and Python imports absent from an available dependency manifest; enrichment agent searches workspace manifests, lockfiles, vendored sources, and path dependencies before confirming a hallucinated dependency. | `static_fact`, plus deterministic evidence on enriched findings | `disabled`, `no_diff_patch` |
 | `s6_git_enrichment` | static | Churn percentile, recent hotspot, fan-in, and ownership/bus-factor risk. It enriches other findings rather than emitting findings. | hot-file `static_fact` added at merge | `disabled`, `no_git_history_or_graph` |
-| `l1_diff` | oneshot | General diff review across all candidate categories. | Deterministic `excerpt`, `diff_hunk`, and `symbol`; reused `command_output` where eligible | `disabled`, `prompt_not_configured`, unusable model slot, timeout/failure |
-| `l2_simplicity` | oneshot | Unjustified complexity, unnecessary abstraction or edits, needless dependencies, duplication, comment slop, and dead scaffolding. | Same deterministic evidence as L1 | depth below standard, `disabled`, `prompt_not_configured`, unusable model slot, timeout/failure |
-| `l3_spec` | oneshot | Reconstructs intent and checks missing requirements, scope creep, contradictions, half-migrations, and misread edge cases. | Same deterministic evidence as L1 | depth below standard, `disabled`, `prompt_not_configured`, unusable model slot, timeout/failure |
-| `a1_repo_context` | agentic | Repository conventions, sibling implementations, end-to-end wiring, cross-module consistency, stale references, and reuse. | Deterministic evidence from candidate locations, followed by blind verification | depth below standard, `disabled`, `prompt_not_configured`, unusable model slot, timeout/failure |
-| `a2_research` | agentic | Internal precedent, external reinvention, third-party API/version correctness, and dependency license or supply-chain concerns. | Deterministic evidence; researched facts summarized in claims | depth below deep, `disabled`, `prompt_not_configured`, unusable model slot, timeout/failure |
-| `a3_execution` | agentic | Builds, checks, related suites, targeted reproductions, mutation probes, reward-hack tests, repeated runs, and boundary/error paths. | `execution_output`, `mutation_probe`, plus deterministic evidence | depth below deep, `disabled`, `execution_disabled`, `prompt_not_configured`, unusable model slot, timeout/failure |
-| `a4_browser` | agentic | Changed UI routes and interactions, console/network failures, desktop/mobile rendering, and basic accessibility. | `console_log`, `screenshot`, plus deterministic evidence | depth below deep, `disabled`, `prompt_not_configured`, `chrome_unavailable`, unusable model slot, timeout/failure |
+| `l1_diff` | oneshot | General diff review across all candidate categories. | Deterministic `excerpt`, `diff_hunk`, and `symbol`; reused `command_output` where eligible | `disabled`, `prompt_not_configured`, unusable model slot, idle-timeout/failure |
+| `l2_simplicity` | oneshot | Unjustified complexity, unnecessary abstraction or edits, needless dependencies, duplication, comment slop, and dead scaffolding. | Same deterministic evidence as L1 | `disabled`, `prompt_not_configured`, unusable model slot, idle-timeout/failure |
+| `l3_spec` | oneshot | Reconstructs intent and checks missing requirements, scope creep, contradictions, half-migrations, and misread edge cases. | Same deterministic evidence as L1 | `disabled`, `prompt_not_configured`, unusable model slot, idle-timeout/failure |
+| `a1_repo_context` | agentic | Repository conventions, sibling implementations, end-to-end wiring, cross-module consistency, stale references, and reuse. | Deterministic evidence from candidate locations, followed by blind verification | `disabled`, `prompt_not_configured`, unusable model slot, idle-timeout/failure |
+| `a2_research` | agentic | Internal precedent, external reinvention, third-party API/version correctness, and dependency license or supply-chain concerns. | Deterministic evidence; researched facts summarized in claims | `disabled`, `prompt_not_configured`, unusable model slot, idle-timeout/failure |
+| `a3_execution` | agentic | Builds, checks, related suites, targeted reproductions, mutation probes, reward-hack tests, repeated runs, and boundary/error paths. | `execution_output`, `mutation_probe`, plus deterministic evidence | depth below deep, `disabled`, `execution_disabled`, `prompt_not_configured`, unusable model slot, idle-timeout/failure |
+| `a4_browser` | agentic | Changed UI routes and interactions, console/network failures, desktop/mobile rendering, and basic accessibility. | `console_log`, `screenshot`, plus deterministic evidence | depth below deep, `disabled`, `prompt_not_configured`, `chrome_unavailable`, unusable model slot, idle-timeout/failure |
 
 ## Candidate envelope and merge
 
@@ -63,7 +64,7 @@ Every LLM agent ends with a candidate envelope. Reviewer rationale is private ge
 }
 ```
 
-A3 may additionally return a top-level `"refuted": ["rf-..."]` array. Agent provenance is stored in `sources` as `agent@slot`, for example `l1_diff@chat2` or `a3_execution@thinking`; static sources use the static agent ID.
+A3 may additionally return a top-level `"refuted": ["rf-..."]` array. Static enrichment agents extend the envelope in two ways: each candidate may carry `"confirms": <1-based raw finding index>` to prove a specific raw hit, and a top-level `"refuted": [{"index": 2, "reason": "..."}]` array disproves raw hits with the evidence the agent found. Agent provenance is stored in `sources` as `agent@slot`, for example `l1_diff@chat2`, `a3_execution@thinking`, or `s1_security@light` for enriched static findings; raw static findings that skipped or survived enrichment untouched keep the plain static agent ID.
 
 Before cross-agent merge, each L1-L3 and A1 instance independently validates scope and ranges, attaches bounded deterministic evidence, and invokes blind verification according to verifier selection rules. A2-A4 validate and attach evidence without blind verification. A verifier verdict is `verified`, `downgraded`, `rejected`, or `needs_human_validation`; rejected candidates are counted in `checks_performed` and then removed.
 
@@ -120,7 +121,7 @@ The JSON shape is:
     "stages": [{"name": "mechanical", "status": "skipped", "reason": "review_commands_disabled"}],
     "stopped_reason": null,
     "mechanical": null,
-    "depth": "quick",
+    "depth": "normal",
     "agents": [{"agent": "l1_diff@thinking", "model": "provider/model", "status": "ran", "candidates": 1, "survived": 1, "duration_ms": 1000, "steps": 1}]
   }
 }
@@ -136,10 +137,11 @@ Top-level `subchat` supplies base model parameters (`stateful`, `model_type`, co
 
 | `review_swarm` area | Knobs |
 |---|---|
-| Scheduling | `default_depth`, `max_parallel`, `oneshot_timeout_secs`, `agentic_timeout_secs`, `exec_timeout_secs`, `browser_timeout_secs` |
+| Scheduling | `default_depth`, `max_parallel`, `idle_timeout_secs`, `exec_idle_timeout_secs` |
 | Gather | `model_slot`, `system_prompt`, `retry_prompt`, `tools`, `max_steps`, `max_files`, `n_ctx`, `max_new_tokens`, `temperature` |
 | Verifier | `model_slot`, `prompt`, `n_ctx`, `max_new_tokens`, `temperature` |
-| S1-S6 | `enabled`; S2 also has `min_confidence`; S6 also has `max_commits` |
+| Static enrichment | shared `static_enrichment_prompt`; per-check `agent` block with `enabled`, `model_slot`, `max_steps`, `tools`, optional `prompt`, `n_ctx`, `max_new_tokens` |
+| S1-S6 | `enabled`; S2 also has `min_confidence`; S6 also has `max_commits`; S1-S5 also carry the `agent` enrichment block |
 | L1-L3 | `enabled`, `ensemble`, optional `prompt`, and optional `n_ctx`, `max_new_tokens`, `tokens_for_rag`, `temperature` overrides |
 | A1-A2 | `enabled`, `model_slot`, `max_steps`, `tools`, optional `prompt`, `n_ctx`, and `max_new_tokens` |
 | A3 | Agentic knobs plus `allow_execution` and `mutation_probe_cap` |

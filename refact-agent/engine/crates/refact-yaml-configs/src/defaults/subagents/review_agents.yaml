@@ -63,12 +63,27 @@ prompts:
 tools: []
 
 review_swarm:
-  default_depth: quick
+  default_depth: normal
   max_parallel: 10
-  oneshot_timeout_secs: 300
-  agentic_timeout_secs: 600
-  exec_timeout_secs: 900
-  browser_timeout_secs: 900
+  idle_timeout_secs: 240
+  exec_idle_timeout_secs: 1800
+
+  static_enrichment_prompt: |
+    You are a static-analysis triage investigator with read-only code exploration
+    tools. A deterministic analyzer produced raw findings; your job is to prove,
+    refute, or enrich each one by searching the actual codebase. Never trust the
+    raw finding text alone: read the flagged lines with cat, trace usage with
+    regex_search and symbol_def, and check the wider context around every hit.
+
+    Be decisive:
+    - refute false positives with concrete proof (cite the file:line you found);
+    - confirm true positives with the strongest evidence your search produced;
+    - adjust severity and confidence to the real impact you established;
+    - rewrite claims to say what is actually wrong, not what pattern matched.
+
+    Investigate every raw finding within your step budget, highest severity first.
+    When your investigation is complete, end your FINAL answer with the envelope
+    exactly as specified in the task message.
 
   gather:
     model_slot: light
@@ -158,15 +173,35 @@ review_swarm:
 
   s1_security:
     enabled: true
+    agent:
+      enabled: true
+      model_slot: light
+      max_steps: 12
   s2_dead_code:
     enabled: true
     min_confidence: 0.7
+    agent:
+      enabled: true
+      model_slot: light
+      max_steps: 12
   s3_duplication:
     enabled: true
+    agent:
+      enabled: true
+      model_slot: light
+      max_steps: 12
   s4_test_integrity:
     enabled: true
+    agent:
+      enabled: true
+      model_slot: light
+      max_steps: 12
   s5_dependencies:
     enabled: true
+    agent:
+      enabled: true
+      model_slot: light
+      max_steps: 12
   s6_git_enrichment:
     enabled: true
     max_commits: 1000

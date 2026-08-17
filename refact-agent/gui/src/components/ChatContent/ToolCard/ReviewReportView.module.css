@@ -1,0 +1,250 @@
+.report {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-3);
+  color: var(--rf-color-fg);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.header {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+}
+
+.headerStrip,
+.findingHeader,
+.chipRow,
+.status,
+.sectionHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.headerStrip {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.truncated,
+.model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.truncated {
+  max-width: min(100%, calc(var(--rf-control-h-lg) * 8));
+}
+
+.mono,
+.fileLink,
+.filePlain,
+.evidencePath,
+.failureOutput,
+.evidenceContent {
+  font-family: var(--rf-font-mono);
+}
+
+.verdict,
+.summary,
+.claim,
+.detailsBody p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.verdict {
+  font-weight: 700;
+}
+
+.summary {
+  color: var(--rf-color-muted);
+}
+
+.dangerCallout,
+.intent {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
+  border-radius: var(--rf-radius-card);
+}
+
+.dangerCallout {
+  color: var(--rf-color-danger);
+  background: color-mix(in oklab, var(--rf-color-danger) 10%, transparent);
+  border: var(--rf-hairline) solid
+    color-mix(in oklab, var(--rf-color-danger) 42%, transparent);
+}
+
+.intent {
+  grid-template-columns: auto minmax(0, 1fr);
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+}
+
+.failedCheck {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.failureOutput,
+.evidenceContent {
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: var(--rf-space-2);
+  overflow: auto;
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border-radius: var(--rf-radius-ctl);
+  font-size: var(--rf-text-1);
+  white-space: pre-wrap;
+}
+
+.evidenceContent {
+  display: -webkit-box;
+  max-height: calc(var(--rf-control-h-lg) * 5);
+  -webkit-box-orient: vertical;
+  overflow: auto;
+}
+
+.section {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.sectionTitle {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: 700 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.findingList,
+.evidenceList {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.finding {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+}
+
+.fileLink,
+.filePlain {
+  min-width: 0;
+  padding: 0;
+  overflow-wrap: anywhere;
+  color: var(--rf-color-muted);
+  background: transparent;
+  border: 0;
+  font-size: var(--rf-text-1);
+  text-align: left;
+}
+
+.fileLink {
+  color: var(--rf-color-accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.filePlain:disabled {
+  cursor: default;
+}
+
+.confidence {
+  margin-inline-start: auto;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  white-space: nowrap;
+}
+
+.claim {
+  font-weight: 600;
+}
+
+.details,
+.checks {
+  min-width: 0;
+  color: var(--rf-color-muted);
+}
+
+.details summary,
+.checks summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.detailsBody {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  padding-block-start: var(--rf-space-2);
+}
+
+.detailsBody > div,
+.evidenceRow {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.detailLabel {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-1);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.evidencePath {
+  min-width: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  overflow-wrap: anywhere;
+}
+
+.status {
+  flex-wrap: nowrap;
+  gap: var(--rf-space-1);
+}
+
+.checks[open] summary {
+  margin-block-end: var(--rf-space-2);
+}
+
+@media (max-width: 640px) {
+  .intent {
+    grid-template-columns: 1fr;
+  }
+
+  .confidence {
+    width: 100%;
+    margin-inline-start: 0;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .dangerCallout {
+    background: var(--rf-surface-2);
+  }
+}

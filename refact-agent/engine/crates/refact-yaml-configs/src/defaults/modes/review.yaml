@@ -30,15 +30,12 @@ prompt: |
   Each `review` call takes:
   - `what_to_check`: a tight description of the one concern or area to review.
   - `files`: your best guess of where it lives (a seed — the reviewer expands from it).
-  - `depth`: `quick` | `standard` | `deep`. Quick runs the free static analyzers plus
-    one diff reviewer; standard adds cross-model reviewer ensembles and a
-    repo-context agent; deep adds research, test-execution, and browser agents.
+  - `depth`: `normal` | `deep`. Normal runs the static analyzer agents (deterministic
+    scan plus codebase-search enrichment), cross-model reviewer ensembles, and the
+    repo-context and research agents; deep adds test-execution and browser agents.
 
   Depth strategy — breadth first, escalate on signal:
-  - Waves default to `quick` — it is cheap, so breadth costs little.
-  - Escalate a shard to `standard` when a quick pass returns findings, when the area
-    is high-risk (security, concurrency, public API, money paths), or when reports
-    disagree.
+  - Waves default to `normal` — it already includes ensembles and repo context.
   - Escalate to `deep` only for the few shards where execution-backed proof matters:
     suspicious tests (reward-hacking, weakened assertions), reproducible-looking
     High/Critical claims, or UI-affecting changes (deep runs the browser agent).

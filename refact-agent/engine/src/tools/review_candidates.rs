@@ -125,7 +125,10 @@ fn normalize_severity(value: &str) -> Option<ReviewSeverity> {
     }
 }
 
-fn validate_candidate(index: usize, value: serde_json::Value) -> Result<CandidateFinding, String> {
+pub(crate) fn validate_candidate(
+    index: usize,
+    value: serde_json::Value,
+) -> Result<CandidateFinding, String> {
     let raw: RawCandidateFinding = serde_json::from_value(value)
         .map_err(|error| format!("candidate {}: {error}", index + 1))?;
     let file = raw.file.trim().to_string();

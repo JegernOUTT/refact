@@ -5,11 +5,12 @@ pub mod dependencies;
 pub mod exec_agent;
 pub mod oneshot;
 pub mod static_checks;
+pub mod static_enrichment;
 pub mod test_integrity;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,8 +22,8 @@ use crate::call_validation::ChatMessage;
 use crate::chat::types::TaskMeta;
 use crate::global_context::GlobalContext;
 use crate::tools::review_agents::config::{
-    agentic_spec, oneshot_spec, slot_model_id, verifier_spec, ModelSlot, OneshotSection,
-    ReviewAgentsConfig,
+    agentic_spec, enrichment_spec, oneshot_spec, slot_model_id, verifier_spec, EnrichmentSection,
+    ModelSlot, OneshotSection, ReviewAgentsConfig,
 };
 use crate::tools::review_agents::exec_agent::ReproTarget;
 use crate::tools::review_agents::oneshot::OneshotInstance;
@@ -111,6 +112,7 @@ impl AgentCtx {
     }
 }
 
+#[derive(Clone)]
 pub struct AgentOutcome {
     pub findings: Vec<ReviewFinding>,
     pub run: AgentRunReport,
@@ -219,21 +221,90 @@ impl Collector {
 
 type BoxedOutcome = Pin<Box<dyn Future<Output = AgentOutcome> + Send>>;
 
-fn bounded(
+const WATCHDOG_POLL_SECS: u64 = 5;
+const MIN_IDLE_TIMEOUT_SECS: u64 = 30;
+
+pub(crate) fn monitor_ctx(
+    ctx: &AgentCtx,
+) -> (AgentCtx, Arc<AtomicU64>, tokio::task::JoinHandle<()>) {
+    let activity = Arc::new(AtomicU64::new(now_ms()));
+    let (monitor_tx, mut monitor_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let parent_tx = ctx.subchat_tx.clone();
+    let stamp = activity.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some(message) = monitor_rx.recv().await {
+            stamp.store(now_ms(), Ordering::Relaxed);
+            let sender = parent_tx.lock().await;
+            let _ = sender.send(message);
+        }
+    });
+    let mut monitored = ctx.clone();
+    monitored.subchat_tx = Arc::new(AMutex::new(monitor_tx));
+    (monitored, activity, forwarder)
+}
+
+fn watched(
     label: String,
     semaphore: Arc<Semaphore>,
-    timeout_secs: u64,
+    idle_timeout_secs: u64,
+    activity: Arc<AtomicU64>,
+    forwarder: tokio::task::JoinHandle<()>,
+    idle_fallback: Option<AgentOutcome>,
+    fut: BoxedOutcome,
+) -> BoxedOutcome {
+    watched_with_params(
+        label,
+        semaphore,
+        idle_timeout_secs.max(MIN_IDLE_TIMEOUT_SECS) * 1000,
+        WATCHDOG_POLL_SECS * 1000,
+        activity,
+        forwarder,
+        idle_fallback,
+        fut,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn watched_with_params(
+    label: String,
+    semaphore: Arc<Semaphore>,
+    idle_limit_ms: u64,
+    poll_ms: u64,
+    activity: Arc<AtomicU64>,
+    forwarder: tokio::task::JoinHandle<()>,
+    mut idle_fallback: Option<AgentOutcome>,
     fut: BoxedOutcome,
 ) -> BoxedOutcome {
     Box::pin(async move {
         let Ok(_permit) = semaphore.acquire_owned().await else {
+            forwarder.abort();
             return AgentOutcome::skipped(&label, "semaphore_closed");
         };
         let started = now_ms();
-        match tokio::time::timeout(Duration::from_secs(timeout_secs.max(30)), fut).await {
-            Ok(outcome) => outcome,
-            Err(_) => AgentOutcome::failed(&label, "timeout", started),
-        }
+        activity.store(started, Ordering::Relaxed);
+        tokio::pin!(fut);
+        let outcome = loop {
+            tokio::select! {
+                outcome = &mut fut => break outcome,
+                _ = tokio::time::sleep(Duration::from_millis(poll_ms.max(1))) => {
+                    let idle_ms = now_ms().saturating_sub(activity.load(Ordering::Relaxed));
+                    if idle_ms <= idle_limit_ms {
+                        continue;
+                    }
+                    let reason = format!("idle_timeout:no_activity_for_{}s", idle_ms / 1000);
+                    break match idle_fallback.take() {
+                        Some(mut outcome) => {
+                            outcome.run.reason = Some(format!("enrichment_{reason}"));
+                            outcome.run.duration_ms = now_ms().saturating_sub(started);
+                            outcome
+                        }
+                        None => AgentOutcome::failed(&label, &reason, started),
+                    };
+                }
+            }
+        };
+        forwarder.abort();
+        outcome
     })
 }
 
@@ -375,9 +446,6 @@ pub async fn run_review_swarm(
         },
     );
     let (enrichment, s6_row) = s6;
-    for outcome in [s1, s2, s3, s4, s5] {
-        collector.absorb(outcome);
-    }
     collector.agents.push(s6_row);
 
     let verifier = match build_verifier(gcx.clone(), &cfg).await {
@@ -391,6 +459,77 @@ pub async fn run_review_swarm(
 
     let semaphore = Arc::new(Semaphore::new(swarm.max_parallel.max(1)));
     let mut wave: Vec<BoxedOutcome> = vec![];
+
+    let static_plans: Vec<(AgentOutcome, &EnrichmentSection)> = vec![
+        (s1, &swarm.s1_security.agent),
+        (s2, &swarm.s2_dead_code.agent),
+        (s3, &swarm.s3_duplication.agent),
+        (s4, &swarm.s4_test_integrity.agent),
+        (s5, &swarm.s5_dependencies.agent),
+    ];
+    for (raw_outcome, section) in static_plans {
+        if raw_outcome.findings.is_empty() || !section.enabled {
+            collector.absorb(raw_outcome);
+            continue;
+        }
+        let agent_id = raw_outcome.run.agent.clone();
+        let slot = section.model_slot;
+        let model = match slot_model_id(gcx.clone(), slot).await {
+            Ok(model) => model,
+            Err(error) => {
+                let mut outcome = raw_outcome;
+                outcome.run.reason = Some(format!("enrichment_skipped:{error}"));
+                collector.absorb(outcome);
+                continue;
+            }
+        };
+        let system_prompt = section
+            .prompt
+            .clone()
+            .filter(|p| !p.trim().is_empty())
+            .or_else(|| {
+                swarm
+                    .static_enrichment_prompt
+                    .clone()
+                    .filter(|p| !p.trim().is_empty())
+            })
+            .unwrap_or_else(|| static_enrichment::DEFAULT_STATIC_ENRICHMENT_PROMPT.to_string());
+        let tools = if section.tools.is_empty() {
+            static_enrichment::STATIC_ENRICH_DEFAULT_TOOLS
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            section.tools.clone()
+        };
+        let label = format!("{agent_id}@{}", slot.label());
+        let idle_fallback = raw_outcome.clone();
+        let input = static_enrichment::StaticEnrichmentInput {
+            agent_id,
+            slot_label: slot.label().to_string(),
+            spec: enrichment_spec(&cfg.base_params, section, model),
+            system_prompt,
+            tools,
+            max_steps: section.max_steps.max(1),
+            raw: raw_outcome,
+        };
+        let (agent_ctx, activity, forwarder) = monitor_ctx(&ctx);
+        let fut: BoxedOutcome = Box::pin(static_enrichment::run_static_enrichment(
+            gcx.clone(),
+            agent_ctx,
+            input,
+            scope.clone(),
+        ));
+        wave.push(watched(
+            label,
+            semaphore.clone(),
+            swarm.idle_timeout_secs,
+            activity,
+            forwarder,
+            Some(idle_fallback),
+            fut,
+        ));
+    }
 
     let oneshot_plans = [
         OneshotPlan {
@@ -415,10 +554,6 @@ pub async fn run_review_swarm(
     ];
 
     for plan in oneshot_plans {
-        let standard_only = plan.agent_id != "l1_diff";
-        if depth == ReviewDepth::Quick && standard_only {
-            continue;
-        }
         if !plan.section.enabled {
             collector.absorb(AgentOutcome::skipped(plan.agent_id, "disabled"));
             continue;
@@ -430,16 +565,11 @@ pub async fn run_review_swarm(
             ));
             continue;
         };
-        let slots: Vec<ModelSlot> = if depth == ReviewDepth::Quick {
-            vec![ModelSlot::Thinking]
-        } else {
-            let mut slots = plan.section.ensemble.clone();
-            slots.dedup();
-            if slots.is_empty() {
-                slots.push(ModelSlot::Thinking);
-            }
-            slots
-        };
+        let mut slots = plan.section.ensemble.clone();
+        slots.dedup();
+        if slots.is_empty() {
+            slots.push(ModelSlot::Thinking);
+        }
         for slot in slots {
             let label = format!("{}@{}", plan.agent_id, slot.label());
             let model = match slot_model_id(gcx.clone(), slot).await {
@@ -455,84 +585,82 @@ pub async fn run_review_swarm(
                 spec: oneshot_spec(&cfg.base_params, plan.section, model),
                 instruction: prompt.clone(),
             };
+            let (agent_ctx, activity, forwarder) = monitor_ctx(&ctx);
             let fut: BoxedOutcome = Box::pin(oneshot::run_oneshot_instance(
                 gcx.clone(),
-                ctx.clone(),
+                agent_ctx,
                 instance,
                 scope.clone(),
                 external_messages.clone(),
                 verifier.clone(),
             ));
-            wave.push(bounded(
+            wave.push(watched(
                 label,
                 semaphore.clone(),
-                swarm.oneshot_timeout_secs,
+                swarm.idle_timeout_secs,
+                activity,
+                forwarder,
+                None,
                 fut,
             ));
         }
     }
 
-    if depth >= ReviewDepth::Standard {
-        let agentic_plans: Vec<(&str, &config::AgenticSection, &[&str], bool)> = vec![
-            (
-                "a1_repo_context",
-                &swarm.a1_repo_context,
-                A1_DEFAULT_TOOLS,
-                true,
-            ),
-            ("a2_research", &swarm.a2_research, A2_DEFAULT_TOOLS, false),
-        ];
-        for (agent_id, section, default_tools, standard) in agentic_plans {
-            if !standard && depth < ReviewDepth::Deep {
-                continue;
-            }
-            if !section.enabled {
-                collector.absorb(AgentOutcome::skipped(agent_id, "disabled"));
-                continue;
-            }
-            let Some(prompt) = section.prompt.clone().filter(|p| !p.trim().is_empty()) else {
-                collector.absorb(AgentOutcome::skipped(agent_id, "prompt_not_configured"));
-                continue;
-            };
-            let slot = section.model_slot;
-            let label = format!("{agent_id}@{}", slot.label());
-            let model = match slot_model_id(gcx.clone(), slot).await {
-                Ok(model) => model,
-                Err(error) => {
-                    collector.absorb(AgentOutcome::skipped(&label, &error));
-                    continue;
-                }
-            };
-            let tools = if section.tools.is_empty() {
-                default_tools.iter().map(|s| s.to_string()).collect()
-            } else {
-                section.tools.clone()
-            };
-            let instance = agentic::AgenticInstance {
-                agent_id: agent_id.to_string(),
-                slot_label: slot.label().to_string(),
-                spec: agentic_spec(&cfg.base_params, section, model),
-                system_prompt: prompt,
-                task_prompt: agentic::build_agent_task_prompt(&scope, None),
-                tools,
-                max_steps: section.max_steps.max(1),
-                title: format!("Review: {agent_id}"),
-                verify: true,
-            };
-            let fut: BoxedOutcome = Box::pin(agentic::run_agentic_instance(
-                gcx.clone(),
-                ctx.clone(),
-                instance,
-                scope.clone(),
-                verifier.clone(),
-            ));
-            wave.push(bounded(
-                label,
-                semaphore.clone(),
-                swarm.agentic_timeout_secs,
-                fut,
-            ));
+    let agentic_plans: Vec<(&str, &config::AgenticSection, &[&str])> = vec![
+        ("a1_repo_context", &swarm.a1_repo_context, A1_DEFAULT_TOOLS),
+        ("a2_research", &swarm.a2_research, A2_DEFAULT_TOOLS),
+    ];
+    for (agent_id, section, default_tools) in agentic_plans {
+        if !section.enabled {
+            collector.absorb(AgentOutcome::skipped(agent_id, "disabled"));
+            continue;
         }
+        let Some(prompt) = section.prompt.clone().filter(|p| !p.trim().is_empty()) else {
+            collector.absorb(AgentOutcome::skipped(agent_id, "prompt_not_configured"));
+            continue;
+        };
+        let slot = section.model_slot;
+        let label = format!("{agent_id}@{}", slot.label());
+        let model = match slot_model_id(gcx.clone(), slot).await {
+            Ok(model) => model,
+            Err(error) => {
+                collector.absorb(AgentOutcome::skipped(&label, &error));
+                continue;
+            }
+        };
+        let tools = if section.tools.is_empty() {
+            default_tools.iter().map(|s| s.to_string()).collect()
+        } else {
+            section.tools.clone()
+        };
+        let instance = agentic::AgenticInstance {
+            agent_id: agent_id.to_string(),
+            slot_label: slot.label().to_string(),
+            spec: agentic_spec(&cfg.base_params, section, model),
+            system_prompt: prompt,
+            task_prompt: agentic::build_agent_task_prompt(&scope, None),
+            tools,
+            max_steps: section.max_steps.max(1),
+            title: format!("Review: {agent_id}"),
+            verify: true,
+        };
+        let (agent_ctx, activity, forwarder) = monitor_ctx(&ctx);
+        let fut: BoxedOutcome = Box::pin(agentic::run_agentic_instance(
+            gcx.clone(),
+            agent_ctx,
+            instance,
+            scope.clone(),
+            verifier.clone(),
+        ));
+        wave.push(watched(
+            label,
+            semaphore.clone(),
+            swarm.idle_timeout_secs,
+            activity,
+            forwarder,
+            None,
+            fut,
+        ));
     }
 
     for outcome in futures::future::join_all(wave).await {
@@ -574,16 +702,20 @@ pub async fn run_review_swarm(
                         repro_targets: build_repro_targets(&collector.findings),
                     };
                     let label = format!("{}@{}", exec_agent::AGENT_ID, slot.label());
+                    let (agent_ctx, activity, forwarder) = monitor_ctx(&ctx);
                     let fut: BoxedOutcome = Box::pin(exec_agent::run_exec_agent(
                         gcx.clone(),
-                        ctx.clone(),
+                        agent_ctx,
                         input,
                         scope.clone(),
                     ));
-                    deep_wave.push(bounded(
+                    deep_wave.push(watched(
                         label,
                         semaphore.clone(),
-                        swarm.exec_timeout_secs,
+                        swarm.exec_idle_timeout_secs,
+                        activity,
+                        forwarder,
+                        None,
                         fut,
                     ));
                 }
@@ -624,16 +756,20 @@ pub async fn run_review_swarm(
                         section: browser_section.clone(),
                     };
                     let label = format!("{}@{}", browser_agent::AGENT_ID, slot.label());
+                    let (agent_ctx, activity, forwarder) = monitor_ctx(&ctx);
                     let fut: BoxedOutcome = Box::pin(browser_agent::run_browser_agent(
                         gcx.clone(),
-                        ctx.clone(),
+                        agent_ctx,
                         input,
                         scope.clone(),
                     ));
-                    deep_wave.push(bounded(
+                    deep_wave.push(watched(
                         label,
                         semaphore.clone(),
-                        swarm.browser_timeout_secs,
+                        swarm.exec_idle_timeout_secs,
+                        activity,
+                        forwarder,
+                        None,
                         fut,
                     ));
                 }
@@ -651,6 +787,12 @@ pub async fn run_review_swarm(
         for outcome in futures::future::join_all(deep_wave).await {
             collector.absorb(outcome);
         }
+    } else {
+        collector.absorb(AgentOutcome::skipped(exec_agent::AGENT_ID, "depth_normal"));
+        collector.absorb(AgentOutcome::skipped(
+            browser_agent::AGENT_ID,
+            "depth_normal",
+        ));
     }
 
     SwarmResult {
@@ -707,6 +849,131 @@ mod tests {
         assert!(targets.iter().all(|t| t.id.starts_with("rf-")));
         assert_eq!(targets[0].claim, "high claim");
         assert_eq!(targets[1].severity, "critical");
+    }
+
+    fn idle_test_parts() -> (Arc<Semaphore>, Arc<AtomicU64>, tokio::task::JoinHandle<()>) {
+        (
+            Arc::new(Semaphore::new(1)),
+            Arc::new(AtomicU64::new(now_ms())),
+            tokio::spawn(async {}),
+        )
+    }
+
+    fn never_finishing() -> BoxedOutcome {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            AgentOutcome::skipped("never", "unreachable")
+        })
+    }
+
+    #[tokio::test]
+    async fn swarm_watchdog_kills_silent_agent_without_fallback() {
+        let (semaphore, activity, forwarder) = idle_test_parts();
+        let outcome = watched_with_params(
+            "l1_diff@chat".to_string(),
+            semaphore,
+            50,
+            10,
+            activity,
+            forwarder,
+            None,
+            never_finishing(),
+        )
+        .await;
+        assert_eq!(outcome.run.status, AgentRunStatus::Failed);
+        assert!(outcome
+            .run
+            .reason
+            .as_deref()
+            .unwrap()
+            .starts_with("idle_timeout:no_activity_for_"));
+    }
+
+    #[tokio::test]
+    async fn swarm_watchdog_returns_raw_fallback_for_static_agents() {
+        let (semaphore, activity, forwarder) = idle_test_parts();
+        let fallback = AgentOutcome::ran(
+            "s1_security",
+            None,
+            2,
+            vec![finding(ReviewSeverity::High, "a.rs", "raw claim")],
+            now_ms(),
+        );
+        let outcome = watched_with_params(
+            "s1_security@light".to_string(),
+            semaphore,
+            50,
+            10,
+            activity,
+            forwarder,
+            Some(fallback),
+            never_finishing(),
+        )
+        .await;
+        assert_eq!(outcome.run.status, AgentRunStatus::Ran);
+        assert_eq!(outcome.findings.len(), 1);
+        assert!(outcome
+            .run
+            .reason
+            .as_deref()
+            .unwrap()
+            .starts_with("enrichment_idle_timeout:"));
+    }
+
+    #[tokio::test]
+    async fn swarm_watchdog_keeps_active_agent_alive_past_idle_limit() {
+        let (semaphore, activity, forwarder) = idle_test_parts();
+        let heartbeat = activity.clone();
+        let fut: BoxedOutcome = Box::pin(async move {
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                heartbeat.store(now_ms(), Ordering::Relaxed);
+            }
+            AgentOutcome::ran("l1_diff@chat", None, 1, vec![], now_ms())
+        });
+        let outcome = watched_with_params(
+            "l1_diff@chat".to_string(),
+            semaphore,
+            100,
+            10,
+            activity,
+            forwarder,
+            None,
+            fut,
+        )
+        .await;
+        assert_eq!(outcome.run.status, AgentRunStatus::Ran);
+        assert!(outcome.run.reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn swarm_monitor_ctx_forwards_messages_and_stamps_activity() {
+        let (parent_tx, mut parent_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let ctx = AgentCtx {
+            tool_call_id: "tc-1".to_string(),
+            subchat_tx: Arc::new(AMutex::new(parent_tx)),
+            abort_flag: Arc::new(AtomicBool::new(false)),
+            depth: 0,
+            task_meta: None,
+            worktree: None,
+            chat_id: "chat".to_string(),
+            root_chat_id: "chat".to_string(),
+        };
+        let (monitored, activity, forwarder) = monitor_ctx(&ctx);
+        activity.store(1, Ordering::Relaxed);
+        monitored
+            .subchat_tx
+            .lock()
+            .await
+            .send(serde_json::json!({"subchat_id": "progress"}))
+            .unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(2), parent_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received["subchat_id"], "progress");
+        assert!(activity.load(Ordering::Relaxed) > 1);
+        forwarder.abort();
     }
 
     #[test]

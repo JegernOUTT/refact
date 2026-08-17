@@ -195,15 +195,7 @@ async fn run_review_pipeline(
                 },
                 review_stage("static_agents", ReviewStageStatus::Completed, None),
                 review_stage("llm_agents", ReviewStageStatus::Completed, None),
-                if depth >= ReviewDepth::Standard {
-                    review_stage("agentic_agents", ReviewStageStatus::Completed, None)
-                } else {
-                    review_stage(
-                        "agentic_agents",
-                        ReviewStageStatus::Skipped,
-                        Some("depth_quick"),
-                    )
-                },
+                review_stage("agentic_agents", ReviewStageStatus::Completed, None),
                 review_stage("merge", ReviewStageStatus::Completed, None),
             ],
             stopped_reason: None,
@@ -304,7 +296,7 @@ fn render_agent_coverage(agents: &[AgentRunReport]) -> String {
 fn render_review_markdown(report: &ReviewReport) -> Result<String, serde_json::Error> {
     let focus = report.scope.focus.as_deref().unwrap_or("not specified");
     let diff_base = report.scope.diff_base.as_deref().unwrap_or("not specified");
-    let depth = report.pipeline.depth.as_deref().unwrap_or("quick");
+    let depth = report.pipeline.depth.as_deref().unwrap_or("normal");
     let verdict = if report.findings.is_empty() {
         report.summary.trim().to_string()
     } else {
@@ -408,7 +400,7 @@ impl Tool for ToolCodeReview {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Perform a thorough multi-agent code review. Optionally pass `what_to_check` (focus/scope), `files` (initial guess of relevant paths \u{2014} the reviewer starts there and finds more), and `depth` (quick = static analyzers + one diff reviewer; standard = + cross-model reviewer ensembles and a repo-context agent; deep = + research, execution, and browser agents). The Markdown result ends with a fenced JSON block containing the full machine-parseable ReviewReport.".to_string(),
+            description: "Perform a thorough multi-agent code review. Optionally pass `what_to_check` (focus/scope), `files` (initial guess of relevant paths \u{2014} the reviewer starts there and finds more), and `depth` (normal = static analyzer agents with codebase-search enrichment, cross-model reviewer ensembles, repo-context and research agents; deep = + test-execution and browser agents). The Markdown result ends with a fenced JSON block containing the full machine-parseable ReviewReport.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -423,8 +415,8 @@ impl Tool for ToolCodeReview {
                     },
                     "depth": {
                         "type": "string",
-                        "enum": ["quick", "standard", "deep"],
-                        "description": "Optional. Which agent families run. Defaults to the configured default depth (quick)."
+                        "enum": ["normal", "deep"],
+                        "description": "Optional. Which agent families run. Defaults to the configured default depth (normal); deep adds test-execution and browser agents."
                     }
                 },
                 "required": [],
@@ -450,11 +442,10 @@ impl Tool for ToolCodeReview {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
         let depth_arg = match args.get("depth").and_then(Value::as_str) {
-            Some(value) if !value.trim().is_empty() => {
-                Some(ReviewDepth::parse(value).ok_or_else(|| {
-                    format!("invalid depth '{value}', expected: quick, standard, deep")
-                })?)
-            }
+            Some(value) if !value.trim().is_empty() => Some(
+                ReviewDepth::parse(value)
+                    .ok_or_else(|| format!("invalid depth '{value}', expected: normal, deep"))?,
+            ),
             _ => None,
         };
         let seed_files: Vec<String> = args
@@ -652,14 +643,14 @@ mod tests {
         let report = mechanical_failure_report(
             scope_summary(),
             mechanical_result(false, 101, "error[E0308]: mismatched types"),
-            ReviewDepth::Standard,
+            ReviewDepth::Deep,
         );
 
         assert_eq!(
             report.pipeline.stopped_reason.as_deref(),
             Some("mechanical_checks_failed")
         );
-        assert_eq!(report.pipeline.depth.as_deref(), Some("standard"));
+        assert_eq!(report.pipeline.depth.as_deref(), Some("deep"));
         assert_eq!(report.pipeline.stages.len(), 5);
         assert_eq!(report.pipeline.stages[0].status, ReviewStageStatus::Failed);
         assert!(report.pipeline.stages[1..]
@@ -703,7 +694,7 @@ mod tests {
                 stages: vec![],
                 stopped_reason: None,
                 mechanical: None,
-                depth: Some("standard".to_string()),
+                depth: Some("normal".to_string()),
                 agents: vec![AgentRunReport {
                     agent: "l1_diff@chat".to_string(),
                     model: Some("some-model".to_string()),
@@ -720,7 +711,7 @@ mod tests {
         let markdown = render_review_markdown(&report).unwrap();
 
         assert!(markdown.starts_with("## Review summary"));
-        assert!(markdown.contains("- Depth: standard"));
+        assert!(markdown.contains("- Depth: normal"));
         assert!(markdown.contains("Assumed intent: Fix the parser."));
         assert!(markdown.contains("## Findings\n\n### corroborated"));
         assert!(markdown.contains(
@@ -743,7 +734,7 @@ mod tests {
             summary: "No surviving findings.".to_string(),
             assumed_intent: None,
             pipeline: ReviewPipelineMetadata {
-                depth: Some("quick".to_string()),
+                depth: Some("normal".to_string()),
                 ..Default::default()
             },
         };
@@ -754,7 +745,7 @@ mod tests {
 
         let markdown = render_review_markdown(&report).unwrap();
 
-        assert!(markdown.contains("- Depth: quick"));
+        assert!(markdown.contains("- Depth: normal"));
         assert!(markdown.contains("- Scope: 1 files"));
         assert!(markdown.contains("Reviewed 1 file. Checks performed: verifier_rejected:2."));
         let json_start = markdown.rfind("```json\n").unwrap() + "```json\n".len();
@@ -784,9 +775,26 @@ mod tests {
             .get("review_swarm")
             .expect("review_swarm section");
         let swarm: ReviewSwarmConfig = serde_yaml::from_value(swarm_value.clone()).unwrap();
-        assert_eq!(swarm.default_depth, "quick");
+        assert_eq!(swarm.default_depth, "normal");
         assert!(swarm.gather.system_prompt.is_some());
         assert!(swarm.verifier.prompt.is_some());
+        let static_prompt = swarm.static_enrichment_prompt.as_deref().unwrap();
+        assert!(static_prompt.contains("static-analysis triage investigator"));
+        assert!(static_prompt.contains("refute false positives"));
+        for agent in [
+            &swarm.s1_security.agent,
+            &swarm.s2_dead_code.agent,
+            &swarm.s3_duplication.agent,
+            &swarm.s4_test_integrity.agent,
+            &swarm.s5_dependencies.agent,
+        ] {
+            assert!(agent.enabled);
+            assert_eq!(
+                agent.model_slot,
+                crate::tools::review_agents::config::ModelSlot::Light
+            );
+            assert_eq!(agent.max_steps, 12);
+        }
         assert!(swarm.l2_simplicity.prompt.is_some());
         assert!(swarm.l3_spec.prompt.is_some());
         assert!(swarm.a1_repo_context.prompt.is_some());
