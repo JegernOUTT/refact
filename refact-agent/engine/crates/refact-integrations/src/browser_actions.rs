@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::browser_models::{BrowserLocator, BrowserStep};
+use crate::browser_models::{BrowserLocator, BrowserScreenshotOptions, BrowserStep};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DeviceType {
@@ -503,7 +503,9 @@ pub fn to_browser_steps(action: &BrowserAction) -> Option<Vec<BrowserStep>> {
         BrowserAction::ScrollTo { selector, .. } => Some(vec![BrowserStep::ScrollTo {
             locator: BrowserLocator::css(selector),
         }]),
-        BrowserAction::Screenshot { .. } => Some(vec![BrowserStep::Screenshot]),
+        BrowserAction::Screenshot { .. } => Some(vec![BrowserStep::Screenshot {
+            options: BrowserScreenshotOptions::default(),
+        }]),
         BrowserAction::Reload { .. } => Some(vec![BrowserStep::Reload]),
         BrowserAction::ClickAtElement { selector, .. } => Some(vec![BrowserStep::Click {
             locator: BrowserLocator::css(selector),
@@ -1161,7 +1163,7 @@ mod tests {
         let action = parse_command("screenshot 1").unwrap();
         let steps = to_browser_steps(&action).unwrap();
         assert_eq!(steps.len(), 1);
-        assert!(matches!(&steps[0], BrowserStep::Screenshot));
+        assert!(matches!(&steps[0], BrowserStep::Screenshot { .. }));
     }
 
     #[test]

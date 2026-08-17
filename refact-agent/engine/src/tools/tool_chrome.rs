@@ -90,12 +90,12 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch.\n",
     "Waiting: wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. ",
     "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, or `wait_for_selector` for genuine synchronization.\n",
-    "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, styles, tab_log.\n",
+    "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, pdf, styles, tab_log. Screenshots support full_page, clip, type, quality, scale, omit_background, animations, caret, mask, mask_color, and style; screenshot_element uses locator or ref. PDF supports Chromium print options and returns an artifact path.\n",
     "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, or continue modifications; unroute removes one pattern or all routes; list_routes returns active routes. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. Page-level routes may not observe requests served by a service worker.\n",
     "Context: set_viewport, emulate_media, set_locale, set_timezone, set_user_agent, set_geolocation, set_offline, and set_extra_http_headers persist across adopted tabs and popups. Cookie state uses get_cookies, set_cookies, clear_cookies. Web storage uses get_storage, set_storage, clear_storage with kind local or session. storage_state and set_storage_state use Playwright's {cookies,origins:[{origin,local_storage}]} login-reuse shape. grant_permissions and clear_permissions control origin permissions. set_http_credentials shares the lazy Fetch path with routing. Cookie, storage, and credential values are redacted in reports.\n",
     "Files: set_input_files, expect_file_chooser, wait_for_download.\n",
     "Dialogs: handle_dialog arms the next dialog with `accept` and optional `prompt_text`; unarmed dialogs auto-dismiss except beforeunload, which is accepted.\n",
-    "Advanced: eval, add_locator_handler, remove_locator_handler, dismiss_overlays, highlight_element, and fixed-delay wait_seconds. Locator handlers use `{type:\"click\"}` or `{type:\"steps\",steps:[...]}`.\n",
+    "Advanced: eval, add_locator_handler, remove_locator_handler, dismiss_overlays, highlight_element, highlight, hide_highlight, annotate, and fixed-delay wait_seconds. highlight accepts locator/ref plus optional style and label; annotate accepts locator/ref plus text. Locator handlers use `{type:\"click\"}` or `{type:\"steps\",steps:[...]}`.\n",
     "Locator fallback vocabulary: ref; role with name/description, exact or regex, and checked/pressed/selected/expanded/disabled/level/include_hidden filters; test_id with configurable `attribute`; text, label, placeholder, alt_text, title, css, xpath, id, name, and autocomplete. ",
     "Compose with zero-based `nth` (-1 is last), first/last, locator, filter (has/has_not/has_text/has_not_text/visible), and/or, or an outermost-first `frames` chain. Non-selecting actions are strict: ambiguous locators fail loudly with the match count. Same-process frames are supported; out-of-process frames fail explicitly.\n",
     "Set `attach_screenshot=true` for a policy-sized screenshot; page-changing batches capture automatically. The legacy newline-separated `commands` input remains accepted but is deprecated; new callers must use `request.steps`."
@@ -310,6 +310,96 @@ fn browser_step_schema_with_actions(
     properties.insert("url_or_pattern".to_string(), url_pattern_schema());
     properties.insert("pattern".to_string(), url_pattern_schema());
     properties.insert("save_as".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "full_page".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    properties.insert(
+        "clip".to_string(),
+        serde_json::json!({
+            "type": "object",
+            "required": ["x", "y", "width", "height"],
+            "properties": {
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "width": {"type": "number", "exclusiveMinimum": 0},
+                "height": {"type": "number", "exclusiveMinimum": 0}
+            }
+        }),
+    );
+    properties.insert(
+        "type".to_string(),
+        serde_json::json!({"type": "string", "enum": ["png", "jpeg", "webp"]}),
+    );
+    properties.insert(
+        "quality".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 0, "maximum": 100}),
+    );
+    properties.insert(
+        "scale".to_string(),
+        serde_json::json!({"description": "Screenshot scale css|device, or numeric PDF scale 0.1-2", "anyOf": [{"type": "string", "enum": ["css", "device"]}, {"type": "number", "minimum": 0.1, "maximum": 2.0}]}),
+    );
+    properties.insert(
+        "omit_background".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    properties.insert(
+        "animations".to_string(),
+        serde_json::json!({"type": "string", "enum": ["allow", "disabled"]}),
+    );
+    properties.insert(
+        "caret".to_string(),
+        serde_json::json!({"type": "string", "enum": ["hide", "initial"]}),
+    );
+    properties.insert(
+        "mask".to_string(),
+        serde_json::json!({"type": "array", "items": browser_locator_schema()}),
+    );
+    properties.insert(
+        "mask_color".to_string(),
+        serde_json::json!({"type": "string"}),
+    );
+    properties.insert("style".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert("label".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "landscape".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    properties.insert(
+        "print_background".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    properties.insert(
+        "format".to_string(),
+        serde_json::json!({"type": "string", "enum": ["Letter", "Legal", "Tabloid", "Ledger", "A0", "A1", "A2", "A3", "A4", "A5", "A6"]}),
+    );
+    properties.insert("width".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert("height".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "margins".to_string(),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "top": {"type": "string"},
+                "right": {"type": "string"},
+                "bottom": {"type": "string"},
+                "left": {"type": "string"}
+            }
+        }),
+    );
+    properties.insert(
+        "page_ranges".to_string(),
+        serde_json::json!({"type": "string"}),
+    );
+    properties.insert(
+        "prefer_css_page_size".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    properties.insert("tagged".to_string(), serde_json::json!({"type": "boolean"}));
+    properties.insert(
+        "outline".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
     properties.insert(
         "width".to_string(),
         serde_json::json!({"type": "integer", "minimum": 1}),
@@ -857,39 +947,61 @@ mod tests {
             .unwrap();
         for field in [
             "accept",
+            "animations",
             "attribute",
             "boxes",
+            "caret",
             "clear_first",
+            "clip",
             "contains",
             "device",
             "expression",
+            "format",
+            "full_page",
             "handler",
+            "height",
             "key",
+            "label",
+            "landscape",
             "limit",
             "locator",
+            "margins",
             "max_chars",
+            "mask",
+            "mask_color",
             "mode",
             "modifiers",
             "name",
             "no_wait_after",
+            "omit_background",
+            "outline",
+            "page_ranges",
             "paths",
             "pattern",
+            "prefer_css_page_size",
+            "print_background",
             "prompt_text",
             "property_filter",
+            "quality",
             "refs",
             "root",
             "save_as",
+            "scale",
             "seconds",
             "selector",
             "state",
+            "style",
             "tab",
+            "tagged",
             "text",
             "timeout_ms",
             "times",
+            "type",
             "url",
             "url_or_pattern",
             "value",
             "verify",
+            "width",
         ] {
             assert!(
                 properties.contains_key(field),
@@ -1446,6 +1558,14 @@ fn format_controller_report(
         }
 
         if let Some(ref data) = result.data {
+            if data["artifact"]["kind"] == "pdf" {
+                if let (Some(path), Some(bytes)) = (
+                    data["artifact"]["path"].as_str(),
+                    data["artifact"]["bytes"].as_u64(),
+                ) {
+                    log.push(format!("PDF artifact: {path} ({bytes} bytes)"));
+                }
+            }
             format_step_data(data, &mut log);
         }
     }
@@ -1483,7 +1603,7 @@ fn execution_report_to_multimodal(
 
     let mut text_report = serde_json::to_value(report)
         .map_err(|e| format!("Failed to serialize browser report: {}", e))?;
-    strip_image_data_for_text(&mut text_report);
+    strip_binary_data_for_text(&mut text_report);
     let text_pretty = serde_json::to_string_pretty(&text_report)
         .map_err(|e| format!("Failed to pretty-print browser report: {}", e))?;
     content.push(MultimodalElement::new("text".to_string(), text_pretty)?);
@@ -1518,15 +1638,15 @@ fn execution_report_to_multimodal(
     Ok(content)
 }
 
-fn strip_image_data_for_text(value: &mut serde_json::Value) {
+fn strip_binary_data_for_text(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
-            let is_image = map
+            let is_binary = map
                 .get("mime")
                 .and_then(|v| v.as_str())
-                .map(|m| m.starts_with("image/"))
+                .map(|mime| mime.starts_with("image/") || mime == "application/pdf")
                 .unwrap_or(false);
-            if is_image {
+            if is_binary {
                 let b64_len = map
                     .get("data")
                     .and_then(|v| v.as_str())
@@ -1545,12 +1665,12 @@ fn strip_image_data_for_text(value: &mut serde_json::Value) {
                 }
             }
             for v in map.values_mut() {
-                strip_image_data_for_text(v);
+                strip_binary_data_for_text(v);
             }
         }
         serde_json::Value::Array(arr) => {
             for v in arr.iter_mut() {
-                strip_image_data_for_text(v);
+                strip_binary_data_for_text(v);
             }
         }
         _ => {}

@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use headless_chrome::Tab;
-use headless_chrome::protocol::cdp::Page;
+use headless_chrome::protocol::cdp::{DOM, Emulation, IO, Page};
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 
@@ -22,6 +22,7 @@ use refact_browser::{
     Ref, ScrollStrategy, SnapshotMode, SnapshotOptions, SystemClock, UrlMatcher, WorldManager,
     DEFAULT_DISMISS_OVERLAYS_HANDLER,
 };
+use refact_browser::artifacts::{pdf_payload, screenshot_capture, ScreenshotMetrics};
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 
 use crate::global_context::GlobalContext;
@@ -1100,6 +1101,16 @@ pub async fn execute_request_with_runtime(
                 }
                 Err(error) => StepResult::failure(idx, "Wait for download", error),
             }
+        } else if let BrowserStep::Pdf { options } = step {
+            let mut rt = runtime_arc.lock().await;
+            let result = match rt.get_active_tab() {
+                Some(tab) => {
+                    tokio::task::block_in_place(|| step_pdf(&tab, idx, options, &rt.artifacts_dir))
+                }
+                None => StepResult::failure(idx, "PDF", "No active tab"),
+            };
+            rt.touch();
+            result
         } else if matches!(
             step,
             BrowserStep::Route { .. } | BrowserStep::Unroute { .. } | BrowserStep::ListRoutes
@@ -1336,7 +1347,7 @@ pub async fn execute_request_with_runtime(
             || request
                 .steps
                 .iter()
-                .any(|step| matches!(step, BrowserStep::Screenshot));
+                .any(|step| matches!(step, BrowserStep::Screenshot { .. }));
         let screenshot = if capture_requested {
             tokio::task::block_in_place(|| capture_report_screenshot(&tab, image_policy).ok())
         } else {
@@ -1724,6 +1735,10 @@ pub fn execute_steps_with_runtime(
                 }
                 Err(error) => StepResult::failure(idx, "Wait for download", error),
             },
+            BrowserStep::Pdf { options } => match &current_tab {
+                Some(tab) => step_pdf(tab, idx, options, &runtime.artifacts_dir),
+                None => StepResult::failure(idx, "PDF", "No active tab"),
+            },
             other => match &current_tab {
                 Some(tab) => {
                     let chooser_was_armed = runtime.file_chooser_manager.is_armed();
@@ -2007,6 +2022,8 @@ fn needs_locator_handler_checkpoint(step: &BrowserStep) -> bool {
             | BrowserStep::ScreenshotElement { .. }
             | BrowserStep::Styles { .. }
             | BrowserStep::HighlightElement { .. }
+            | BrowserStep::Highlight { .. }
+            | BrowserStep::Annotate { .. }
     )
 }
 
@@ -2524,9 +2541,14 @@ fn execute_single_step(
         BrowserStep::AccessibilitySnapshot { options } => {
             step_accessibility_snapshot(tab, world, idx, options)
         }
-        BrowserStep::Screenshot => step_screenshot(tab, idx, image_policy),
-        BrowserStep::ScreenshotElement { locator } => {
-            step_screenshot_element(tab, world, idx, locator, image_policy)
+        BrowserStep::Screenshot { options } => {
+            step_screenshot(tab, world, idx, options, image_policy)
+        }
+        BrowserStep::ScreenshotElement { locator, options } => {
+            step_screenshot_element(tab, world, idx, locator, options, image_policy)
+        }
+        BrowserStep::Pdf { .. } => {
+            StepResult::failure(idx, "PDF", "PDF generation requires a browser runtime")
         }
 
         BrowserStep::Eval { expression } => step_eval(tab, idx, expression),
@@ -2560,7 +2582,24 @@ fn execute_single_step(
             step_dismiss_overlays(tab, idx, handlers, locator_handler_firings, image_policy)
         }
         BrowserStep::HighlightElement { locator } => {
-            step_highlight_element(tab, world, idx, locator)
+            step_highlight(tab, world, idx, locator, None, None, true)
+        }
+        BrowserStep::Highlight {
+            locator,
+            style,
+            label,
+        } => step_highlight(
+            tab,
+            world,
+            idx,
+            locator,
+            style.as_deref(),
+            label.as_deref(),
+            false,
+        ),
+        BrowserStep::HideHighlight => step_hide_highlight(tab, world, idx),
+        BrowserStep::Annotate { locator, text } => {
+            step_highlight(tab, world, idx, locator, None, Some(text), false)
         }
     }
 }
@@ -3976,8 +4015,17 @@ pub fn capture_viewport_screenshot(
     tab: &Tab,
     policy: &ImagePolicy,
 ) -> Result<(String, String), String> {
-    let (format, mime, quality) = capture_options(policy);
-    capture_viewport_screenshot_as(tab, format, mime, quality)
+    let options = BrowserScreenshotOptions {
+        image_type: Some(match policy.format {
+            ImageFormat::Png => BrowserScreenshotType::Png,
+            ImageFormat::Jpeg => BrowserScreenshotType::Jpeg,
+            ImageFormat::Webp => BrowserScreenshotType::Webp,
+        }),
+        quality: policy.quality,
+        ..Default::default()
+    };
+    capture_screenshot(tab, &WorldManager::default(), &options, None, policy)
+        .map(|capture| (capture.data, capture.mime))
 }
 
 fn capture_report_screenshot(tab: &Tab, policy: &ImagePolicy) -> Result<BrowserScreenshot, String> {
@@ -3992,40 +4040,213 @@ fn capture_report_screenshot(tab: &Tab, policy: &ImagePolicy) -> Result<BrowserS
     })
 }
 
-fn capture_viewport_screenshot_as(
-    tab: &Tab,
-    format: Page::CaptureScreenshotFormatOption,
-    mime: &'static str,
-    quality: Option<u8>,
-) -> Result<(String, String), String> {
+pub fn capture_viewport_screenshot_png(tab: &Tab) -> Result<(String, String), String> {
     let result = tab
         .call_method(Page::CaptureScreenshot {
-            format: Some(format),
+            format: Some(Page::CaptureScreenshotFormatOption::Png),
             clip: None,
-            quality: quality.map(|q| q as u32),
+            quality: None,
             from_surface: Some(true),
             capture_beyond_viewport: Some(false),
             optimize_for_speed: None,
         })
         .map_err(|error| error.to_string())?;
-    Ok((result.data, mime.to_string()))
+    Ok((result.data, "image/png".to_string()))
 }
 
-pub fn capture_viewport_screenshot_png(tab: &Tab) -> Result<(String, String), String> {
-    capture_viewport_screenshot_as(
-        tab,
-        Page::CaptureScreenshotFormatOption::Png,
-        "image/png",
-        None,
-    )
+struct PolicyScreenshot {
+    data: String,
+    mime: String,
+    width: u32,
+    height: u32,
+    bytes: usize,
 }
 
-fn step_screenshot(tab: &Tab, idx: usize, policy: &ImagePolicy) -> StepResult {
-    match capture_viewport_screenshot(tab, policy) {
-        Ok((data, mime)) => StepResult::success(idx, "Screenshot captured".to_string()).with_data(
+fn screenshot_metrics(tab: &Tab) -> Result<ScreenshotMetrics, String> {
+    let metrics = tab
+        .call_method(Page::GetLayoutMetrics(None))
+        .map_err(|error| format!("Failed to read screenshot layout metrics: {error}"))?;
+    let device_scale_factor = eval_js_value(tab, "window.devicePixelRatio")
+        .ok()
+        .and_then(|value| value.as_f64())
+        .unwrap_or(1.0);
+    Ok(ScreenshotMetrics {
+        page_x: metrics.visual_viewport.page_x,
+        page_y: metrics.visual_viewport.page_y,
+        viewport_scale: metrics.visual_viewport.scale.max(f64::EPSILON),
+        device_scale_factor,
+        viewport_width: metrics.visual_viewport.client_width,
+        viewport_height: metrics.visual_viewport.client_height,
+        content_width: metrics.content_size.width,
+        content_height: metrics.content_size.height,
+    })
+}
+
+fn capture_screenshot(
+    tab: &Tab,
+    world: &WorldManager,
+    options: &BrowserScreenshotOptions,
+    element: Option<BrowserScreenshotClip>,
+    policy: &ImagePolicy,
+) -> Result<PolicyScreenshot, String> {
+    let metrics = screenshot_metrics(tab)?;
+    let capture = screenshot_capture(options, metrics, element)?;
+    let cleanup = prepare_screenshot(tab, world, options)?;
+    let transparent = options.omit_background;
+    let background_result = if transparent {
+        tab.call_method(Emulation::SetDefaultBackgroundColorOverride {
+            color: Some(DOM::RGBA {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: Some(0.0),
+            }),
+        })
+        .map(|_| ())
+        .map_err(|error| format!("Failed to omit screenshot background: {error}"))
+    } else {
+        Ok(())
+    };
+    let raw = background_result.and_then(|_| {
+        tab.call_method(Page::CaptureScreenshot {
+            format: Some(capture.format),
+            clip: Some(capture.clip),
+            quality: capture.quality,
+            from_surface: Some(true),
+            capture_beyond_viewport: Some(capture.capture_beyond_viewport),
+            optimize_for_speed: None,
+        })
+        .map_err(|error| format!("Screenshot capture failed: {error}"))
+    });
+    let background_cleanup = if transparent {
+        tab.call_method(Emulation::SetDefaultBackgroundColorOverride { color: None })
+            .map(|_| ())
+            .map_err(|error| format!("Failed to restore screenshot background: {error}"))
+    } else {
+        Ok(())
+    };
+    if cleanup {
+        let _ = world.eval_in_utility(tab, "window.__refactScreenshotCleanup?.()");
+    }
+    let raw = raw?;
+    background_cleanup?;
+    let raw_bytes = base64::prelude::BASE64_STANDARD
+        .decode(raw.data)
+        .map_err(|error| format!("Screenshot decode failed: {error}"))?;
+    let capture_policy = policy.clone().with_format(
+        match options.image_type.unwrap_or_default() {
+            BrowserScreenshotType::Png => ImageFormat::Png,
+            BrowserScreenshotType::Jpeg => ImageFormat::Jpeg,
+            BrowserScreenshotType::Webp => ImageFormat::Webp,
+        },
+        options.quality.or(policy.quality),
+    );
+    let (processed, mime) = resize_to_policy(&raw_bytes, capture.mime, &capture_policy)?;
+    let decoded = image::load_from_memory(&processed)
+        .map_err(|error| format!("Processed screenshot decode failed: {error}"))?;
+    Ok(PolicyScreenshot {
+        data: base64::prelude::BASE64_STANDARD.encode(&processed),
+        mime,
+        width: decoded.width(),
+        height: decoded.height(),
+        bytes: processed.len(),
+    })
+}
+
+fn prepare_screenshot(
+    tab: &Tab,
+    world: &WorldManager,
+    options: &BrowserScreenshotOptions,
+) -> Result<bool, String> {
+    let mut boxes = Vec::new();
+    for locator in &options.mask {
+        let handles = resolve_locator_handles(tab, world, locator)?;
+        if handles.is_empty() {
+            continue;
+        }
+        for handle in handles {
+            let value = world
+                .call_function_on(
+                    tab,
+                    &handle,
+                    "function() { const r = this.getBoundingClientRect(); return {x:r.x+scrollX,y:r.y+scrollY,width:r.width,height:r.height}; }",
+                    Vec::new(),
+                )
+                .map_err(|error| error.to_string());
+            let _ = world.release_handle(tab, &handle);
+            boxes.push(value?);
+        }
+    }
+    let hide_caret = options.caret.unwrap_or_default() == BrowserScreenshotCaret::Hide;
+    let disable_animations =
+        options.animations.unwrap_or_default() == BrowserScreenshotAnimations::Disabled;
+    if boxes.is_empty() && options.style.is_none() && !hide_caret && !disable_animations {
+        return Ok(false);
+    }
+    let script = format!(
+        r#"(() => {{
+  window.__refactScreenshotCleanup?.();
+  const root = document.documentElement;
+  const style = document.createElement('style');
+  style.dataset.refactScreenshot = 'true';
+  style.textContent = {} + {} + {};
+  root.appendChild(style);
+  const maskRoot = document.createElement('div');
+  maskRoot.dataset.refactScreenshotMask = 'true';
+  Object.assign(maskRoot.style, {{position:'absolute',left:'0',top:'0',pointerEvents:'none',zIndex:'2147483647'}});
+  const boxes = {};
+  const color = {};
+  for (const box of boxes) {{
+    const mask = document.createElement('div');
+    Object.assign(mask.style, {{position:'absolute',left:box.x+'px',top:box.y+'px',width:box.width+'px',height:box.height+'px',background:color}});
+    maskRoot.appendChild(mask);
+  }}
+  root.appendChild(maskRoot);
+  const animations = {} ? document.getAnimations().map(animation => ({{animation,currentTime:animation.currentTime,playState:animation.playState}})) : [];
+  for (const saved of animations) {{ try {{ saved.animation.finish(); }} catch {{ saved.animation.cancel(); }} }}
+  window.__refactScreenshotCleanup = () => {{
+    style.remove(); maskRoot.remove();
+    for (const saved of animations) {{
+      try {{ saved.animation.currentTime = saved.currentTime; if (saved.playState === 'running') saved.animation.play(); else saved.animation.pause(); }} catch {{}}
+    }}
+    delete window.__refactScreenshotCleanup;
+  }};
+}})()"#,
+        js_string_literal(options.style.as_deref().unwrap_or("")),
+        if hide_caret {
+            js_string_literal("\n*,*::before,*::after{caret-color:transparent!important}")
+        } else {
+            js_string_literal("")
+        },
+        if disable_animations {
+            js_string_literal("\n*,*::before,*::after{transition-delay:0s!important;transition-duration:0s!important;animation-delay:0s!important;animation-duration:0s!important}")
+        } else {
+            js_string_literal("")
+        },
+        serde_json::to_string(&boxes).map_err(|error| error.to_string())?,
+        js_string_literal(options.mask_color.as_deref().unwrap_or("#FF00FF")),
+        disable_animations,
+    );
+    world.eval_in_utility(tab, &script)?;
+    Ok(true)
+}
+
+fn step_screenshot(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    options: &BrowserScreenshotOptions,
+    policy: &ImagePolicy,
+) -> StepResult {
+    match capture_screenshot(tab, world, options, None, policy) {
+        Ok(capture) => StepResult::success(idx, "Screenshot captured").with_data(
             serde_json::json!({
-                "mime": mime,
-                "data": data,
+                "artifact": {"kind": "image", "mime": capture.mime, "data": capture.data, "width": capture.width, "height": capture.height, "bytes": capture.bytes},
+                "mime": capture.mime,
+                "data": capture.data,
+                "width": capture.width,
+                "height": capture.height,
+                "bytes": capture.bytes,
             }),
         ),
         Err(error) => StepResult::failure(idx, "Screenshot failed", error),
@@ -4037,6 +4258,7 @@ fn step_screenshot_element(
     world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
+    options: &BrowserScreenshotOptions,
     policy: &ImagePolicy,
 ) -> StepResult {
     let info = match resolve_element(tab, world, locator) {
@@ -4050,50 +4272,113 @@ fn step_screenshot_element(
             return StepResult::failure(idx, "Screenshot element", "Element has no visible bounds")
         }
     };
-
-    let clip = Page::Viewport {
-        x: bbox.x,
-        y: bbox.y,
-        width: bbox.width,
-        height: bbox.height,
-        scale: 1.0,
+    let metrics = match screenshot_metrics(tab) {
+        Ok(metrics) => metrics,
+        Err(error) => return StepResult::failure(idx, "Screenshot element", error),
     };
 
-    let (format, mime, quality) = capture_options(policy);
-    match tab.call_method(Page::CaptureScreenshot {
-        format: Some(format),
-        clip: Some(clip),
-        quality: quality.map(|q| q as u32),
-        from_surface: Some(true),
-        capture_beyond_viewport: Some(false),
-        optimize_for_speed: None,
-    }) {
-        Ok(result) => StepResult::success(idx, format!("Element screenshot of <{}>", info.tag))
+    let clip = BrowserScreenshotClip {
+        x: metrics.page_x + bbox.x,
+        y: metrics.page_y + bbox.y,
+        width: bbox.width,
+        height: bbox.height,
+    };
+
+    match capture_screenshot(tab, world, options, Some(clip), policy) {
+        Ok(capture) => StepResult::success(idx, format!("Element screenshot of <{}>", info.tag))
             .with_data(serde_json::json!({
-                "mime": mime,
-                "data": result.data,
+                "artifact": {"kind": "image", "mime": capture.mime, "data": capture.data, "width": capture.width, "height": capture.height, "bytes": capture.bytes},
+                "mime": capture.mime,
+                "data": capture.data,
+                "width": capture.width,
+                "height": capture.height,
+                "bytes": capture.bytes,
             })),
-        Err(e) => StepResult::failure(idx, "Element screenshot failed", e.to_string()),
+        Err(e) => StepResult::failure(idx, "Element screenshot failed", e),
     }
 }
 
-fn capture_options(
-    policy: &ImagePolicy,
-) -> (
-    Page::CaptureScreenshotFormatOption,
-    &'static str,
-    Option<u8>,
-) {
-    match policy.format {
-        ImageFormat::Jpeg => (
-            Page::CaptureScreenshotFormatOption::Jpeg,
-            "image/jpeg",
-            policy.quality,
-        ),
-        ImageFormat::Png | ImageFormat::Webp => {
-            (Page::CaptureScreenshotFormatOption::Png, "image/png", None)
+const PDF_INLINE_LIMIT_BYTES: usize = 256 * 1024;
+
+fn step_pdf(
+    tab: &Tab,
+    idx: usize,
+    options: &BrowserPdfOptions,
+    artifacts_dir: &Path,
+) -> StepResult {
+    let result = (|| -> Result<(PathBuf, Vec<u8>), String> {
+        let payload = pdf_payload(options)?;
+        let response = tab
+            .call_method(payload)
+            .map_err(|error| format!("PDF generation failed: {error}"))?;
+        let bytes = if let Some(stream) = response.stream {
+            read_cdp_stream(tab, stream)?
+        } else {
+            base64::prelude::BASE64_STANDARD
+                .decode(response.data)
+                .map_err(|error| format!("PDF decode failed: {error}"))?
+        };
+        std::fs::create_dir_all(artifacts_dir).map_err(|error| {
+            format!(
+                "Failed to create browser artifacts directory {}: {error}",
+                artifacts_dir.display()
+            )
+        })?;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let path = artifacts_dir.join(format!("page-{nonce}-{idx}.pdf"));
+        std::fs::write(&path, &bytes)
+            .map_err(|error| format!("Failed to save PDF artifact {}: {error}", path.display()))?;
+        Ok((path, bytes))
+    })();
+    match result {
+        Ok((path, bytes)) => {
+            let inline = (bytes.len() <= PDF_INLINE_LIMIT_BYTES)
+                .then(|| base64::prelude::BASE64_STANDARD.encode(&bytes));
+            StepResult::success(idx, format!("PDF saved to {}", path.display())).with_data(
+                serde_json::json!({
+                    "artifact": {
+                        "kind": "pdf",
+                        "mime": "application/pdf",
+                        "path": path,
+                        "bytes": bytes.len(),
+                        "data": inline,
+                    }
+                }),
+            )
+        }
+        Err(error) => StepResult::failure(idx, "PDF generation failed", error),
+    }
+}
+
+fn read_cdp_stream(tab: &Tab, stream: IO::StreamHandle) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = tab
+            .call_method(IO::Read {
+                handle: stream.clone(),
+                offset: None,
+                size: Some(64 * 1024),
+            })
+            .map_err(|error| format!("PDF stream read failed: {error}"))?;
+        if chunk.base_64_encoded.unwrap_or(false) {
+            bytes.extend(
+                base64::prelude::BASE64_STANDARD
+                    .decode(chunk.data)
+                    .map_err(|error| format!("PDF stream decode failed: {error}"))?,
+            );
+        } else {
+            bytes.extend_from_slice(chunk.data.as_bytes());
+        }
+        if chunk.eof {
+            break;
         }
     }
+    tab.call_method(IO::Close { handle: stream })
+        .map_err(|error| format!("PDF stream close failed: {error}"))?;
+    Ok(bytes)
 }
 
 fn step_eval(tab: &Tab, idx: usize, expression: &str) -> StepResult {
@@ -4319,23 +4604,68 @@ fn step_dismiss_overlays(
     }
 }
 
-fn step_highlight_element(
+fn step_highlight(
     tab: &Tab,
     world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
+    style: Option<&str>,
+    label: Option<&str>,
+    legacy: bool,
 ) -> StepResult {
-    match resolve_element(tab, world, locator) {
-        Ok(info) => match call_handle_json(
+    let info = match resolve_element(tab, world, locator) {
+        Ok(info) => info,
+        Err(error) => return StepResult::failure(idx, "Highlight: resolution failed", error),
+    };
+    if legacy {
+        return match call_handle_json(
             tab,
             world,
             &info.handle,
             browser_locators::js_highlight_element(),
         ) {
             Ok(_) => StepResult::success(idx, format!("Highlighted <{}>", info.tag)),
-            Err(e) => StepResult::failure(idx, "Highlight failed", e),
-        },
-        Err(e) => StepResult::failure(idx, "Highlight: resolution failed", e),
+            Err(error) => StepResult::failure(idx, "Highlight failed", error),
+        };
+    }
+    let function = format!(
+        r#"function() {{
+  const el = this;
+  if (!el) return JSON.stringify({{error:'No resolved element'}});
+  window.__refactHideHighlights?.();
+  const root = document.createElement('div');
+  root.dataset.refactHighlight = 'true';
+  const shadow = root.attachShadow({{mode:'closed'}});
+  const rect = el.getBoundingClientRect();
+  const frame = document.createElement('div');
+  const base = {{position:'fixed',left:rect.x+'px',top:rect.y+'px',width:rect.width+'px',height:rect.height+'px',boxSizing:'border-box',outline:'3px solid #E7150D',outlineOffset:'2px',pointerEvents:'none',zIndex:'2147483647'}};
+  Object.assign(frame.style, base);
+  frame.style.cssText += {};
+  shadow.appendChild(frame);
+  const label = {};
+  if (label) {{
+    const tag = document.createElement('div');
+    tag.textContent = label;
+    Object.assign(tag.style, {{position:'fixed',left:rect.x+'px',top:Math.max(0,rect.y-24)+'px',padding:'3px 6px',font:'12px sans-serif',color:'white',background:'#E7150D',borderRadius:'3px',pointerEvents:'none',zIndex:'2147483647'}});
+    shadow.appendChild(tag);
+  }}
+  document.documentElement.appendChild(root);
+  window.__refactHideHighlights = () => {{ root.remove(); delete window.__refactHideHighlights; }};
+  return JSON.stringify({{ok:true}});
+}}"#,
+        js_string_literal(style.unwrap_or("")),
+        js_string_literal(label.unwrap_or("")),
+    );
+    match call_handle_json(tab, world, &info.handle, &function) {
+        Ok(_) => StepResult::success(idx, format!("Highlighted <{}>", info.tag)),
+        Err(error) => StepResult::failure(idx, "Highlight failed", error),
+    }
+}
+
+fn step_hide_highlight(tab: &Tab, world: &WorldManager, idx: usize) -> StepResult {
+    match world.eval_in_utility(tab, "window.__refactHideHighlights?.(); true") {
+        Ok(_) => StepResult::success(idx, "Hidden browser highlight annotations"),
+        Err(error) => StepResult::failure(idx, "Hide highlight failed", error),
     }
 }
 

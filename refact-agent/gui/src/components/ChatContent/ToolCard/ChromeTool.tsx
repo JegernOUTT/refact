@@ -1,4 +1,4 @@
-import { Monitor, Image } from "lucide-react";
+import { Monitor, Image, FileText } from "lucide-react";
 import React, { useMemo } from "react";
 import { Box, Flex } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
@@ -13,6 +13,7 @@ import type {
   BrowserAssertionResult,
   BrowserAriaSnapshot,
   BrowserAriaSnapshotNode,
+  BrowserArtifact,
   BrowserExecutionStep,
 } from "../../../services/refact/browser";
 import { ShikiCodeBlock } from "../../Markdown";
@@ -216,6 +217,48 @@ function parseAssertionResult(value: unknown): BrowserAssertionResult | null {
     attempts: value.attempts,
     elapsed_ms: value.elapsed_ms,
   };
+}
+
+function parseBrowserArtifact(value: unknown): BrowserArtifact | null {
+  if (!isRecord(value) || !isRecord(value.artifact)) return null;
+  const artifact = value.artifact;
+  if (
+    artifact.kind === "image" &&
+    typeof artifact.mime === "string" &&
+    artifact.mime.startsWith("image/") &&
+    typeof artifact.data === "string" &&
+    artifact.data !== "<omitted>" &&
+    typeof artifact.width === "number" &&
+    typeof artifact.height === "number" &&
+    typeof artifact.bytes === "number"
+  ) {
+    return {
+      kind: "image",
+      mime: artifact.mime,
+      data: artifact.data,
+      width: artifact.width,
+      height: artifact.height,
+      bytes: artifact.bytes,
+    };
+  }
+  if (
+    artifact.kind === "pdf" &&
+    artifact.mime === "application/pdf" &&
+    typeof artifact.path === "string" &&
+    typeof artifact.bytes === "number" &&
+    (artifact.data === undefined ||
+      artifact.data === null ||
+      typeof artifact.data === "string")
+  ) {
+    return {
+      kind: "pdf",
+      mime: "application/pdf",
+      path: artifact.path,
+      bytes: artifact.bytes,
+      data: artifact.data,
+    };
+  }
+  return null;
 }
 
 function renderAssertionValue(value: unknown): string {
@@ -427,9 +470,6 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     );
   }, [typedArgs, stats, maybeResult, images]);
 
-  const icon =
-    images.length > 0 || typedResult?.screenshot ? <Image /> : <Monitor />;
-
   const typedStepsBlock = useMemo(() => {
     if (!typedArgs) return null;
     return JSON.stringify(
@@ -498,6 +538,14 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     return typedResult.steps.flatMap((step) => {
       const assertion = parseAssertionResult(step.assertion);
       return assertion ? [{ step, assertion }] : [];
+    });
+  }, [typedResult]);
+
+  const typedArtifacts = useMemo(() => {
+    if (!typedResult) return [];
+    return typedResult.steps.flatMap((step) => {
+      const artifact = parseBrowserArtifact(step.data);
+      return artifact ? [{ stepIndex: step.step_index, artifact }] : [];
     });
   }, [typedResult]);
 
@@ -612,6 +660,17 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     ? `data:${typedResult.screenshot.mime};base64,${typedResult.screenshot.data}`
     : null;
 
+  const icon =
+    images.length > 0 ||
+    typedResult?.screenshot ||
+    typedArtifacts.some(({ artifact }) => artifact.kind === "image") ? (
+      <Image />
+    ) : typedArtifacts.length > 0 ? (
+      <FileText />
+    ) : (
+      <Monitor />
+    );
+
   return (
     <ToolCard
       icon={icon}
@@ -644,6 +703,46 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         <Flex py="2" gap="2" wrap="wrap">
           <DialogImage src={reportScreenshot} fallback="" size="8" />
         </Flex>
+      )}
+
+      {typedArtifacts.length > 0 && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Artifacts</Box>
+          <Flex className={styles.artifactList} wrap="wrap">
+            {typedArtifacts.map(({ stepIndex, artifact }) =>
+              artifact.kind === "image" ? (
+                <Box key={`image-${stepIndex}`} className={styles.artifactItem}>
+                  <DialogImage
+                    src={`data:${artifact.mime};base64,${artifact.data}`}
+                    fallback=""
+                    size="8"
+                  />
+                  <Box className={styles.artifactMeta}>
+                    {artifact.width}×{artifact.height} · {artifact.bytes} B
+                  </Box>
+                </Box>
+              ) : (
+                <a
+                  key={`pdf-${stepIndex}`}
+                  className={styles.artifactLink}
+                  href={
+                    artifact.data
+                      ? `data:${artifact.mime};base64,${artifact.data}`
+                      : `file://${artifact.path}`
+                  }
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <FileText aria-hidden="true" />
+                  <span>
+                    PDF · {artifact.bytes} B
+                    <span className={styles.artifactPath}>{artifact.path}</span>
+                  </span>
+                </a>
+              ),
+            )}
+          </Flex>
+        </Box>
       )}
 
       {typedResultsBlock && (

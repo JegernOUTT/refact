@@ -335,12 +335,34 @@ export type BrowserAssertionResult = {
   elapsed_ms: number;
 };
 
+export type BrowserImageArtifact = {
+  kind: "image";
+  mime: string;
+  data: string;
+  width: number;
+  height: number;
+  bytes: number;
+};
+
+export type BrowserPdfArtifact = {
+  kind: "pdf";
+  mime: "application/pdf";
+  path: string;
+  bytes: number;
+  data?: string | null;
+};
+
+export type BrowserArtifact = BrowserImageArtifact | BrowserPdfArtifact;
+
 export type BrowserExecutionStep = {
   step_index: number;
   ok: boolean;
   summary: string;
   error?: string | null;
-  data?: Record<string, unknown> | BrowserAriaSnapshot | null;
+  data?:
+    | (Record<string, unknown> & { artifact?: BrowserArtifact })
+    | BrowserAriaSnapshot
+    | null;
   field_kind?: string | null;
   fill_strategy?: string | null;
   verified?: boolean | null;

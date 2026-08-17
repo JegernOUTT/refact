@@ -10,6 +10,7 @@ use axum::http::{header, HeaderMap, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
+use base64::Engine;
 use headless_chrome::Tab;
 use headless_chrome::protocol::cdp::{Page, Runtime};
 use hyper::body::Bytes;
@@ -22,7 +23,8 @@ use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
     AccessibilitySnapshotOptions, BrowserActionRequest, BrowserCookie, BrowserCookieSameSite,
-    BrowserExpectedText, BrowserExpectation, BrowserLoadState, BrowserLocator, BrowserStep,
+    BrowserExpectedText, BrowserExpectation, BrowserLoadState, BrowserLocator, BrowserPdfOptions,
+    BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
     BrowserStorageItem, BrowserStorageKind, FillStrategy, LocatorHandlerAction, LocatorRegex,
     RouteHandler, SessionPolicy, TabTarget, UrlPattern,
 };
@@ -717,6 +719,155 @@ async fn navigated_fixture_context_contains_screenshot_image() {
         panic!("expected screenshot context");
     };
     assert!(elements.iter().any(|element| element.is_image()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn artifacts_capture_page_clip_element_pdf_and_highlight_lifecycle() {
+    let Some(mut case) = BrowserCase::start("moving-target.html").await else {
+        return;
+    };
+    case.tab
+        .evaluate("document.body.style.minHeight = '1800px'", false)
+        .unwrap();
+    case.setup_world();
+    let snapshot = case
+        .runtime
+        .world_manager
+        .aria_snapshot(
+            &case.tab,
+            None,
+            refact_lsp::refact_browser::SnapshotOptions {
+                mode: refact_lsp::refact_browser::SnapshotMode::Ai,
+                refs: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let moving_ref = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.name.as_deref() == Some("Moving button"))
+        .and_then(|node| node.reference.clone())
+        .unwrap();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let report = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::Screenshot {
+                    options: BrowserScreenshotOptions {
+                        full_page: true,
+                        animations: Some(BrowserScreenshotAnimations::Disabled),
+                        ..Default::default()
+                    },
+                },
+                BrowserStep::Screenshot {
+                    options: BrowserScreenshotOptions {
+                        clip: Some(BrowserScreenshotClip {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 120.0,
+                            height: 80.0,
+                        }),
+                        ..Default::default()
+                    },
+                },
+                BrowserStep::ScreenshotElement {
+                    locator: BrowserLocator::reference(&moving_ref),
+                    options: BrowserScreenshotOptions::default(),
+                },
+                BrowserStep::Screenshot {
+                    options: BrowserScreenshotOptions {
+                        mask: vec![BrowserLocator::css("#moving")],
+                        mask_color: Some("#ff00ff".to_string()),
+                        ..Default::default()
+                    },
+                },
+                BrowserStep::Screenshot {
+                    options: BrowserScreenshotOptions {
+                        clip: Some(BrowserScreenshotClip {
+                            x: 500.0,
+                            y: 500.0,
+                            width: 40.0,
+                            height: 40.0,
+                        }),
+                        omit_background: true,
+                        ..Default::default()
+                    },
+                },
+                BrowserStep::Screenshot {
+                    options: BrowserScreenshotOptions {
+                        animations: Some(BrowserScreenshotAnimations::Disabled),
+                        ..Default::default()
+                    },
+                },
+                BrowserStep::Screenshot {
+                    options: BrowserScreenshotOptions {
+                        animations: Some(BrowserScreenshotAnimations::Disabled),
+                        ..Default::default()
+                    },
+                },
+                BrowserStep::Highlight {
+                    locator: BrowserLocator::css("#moving"),
+                    style: None,
+                    label: Some("Target".to_string()),
+                },
+                BrowserStep::Annotate {
+                    locator: BrowserLocator::css("#moving"),
+                    text: "Review".to_string(),
+                },
+                BrowserStep::HideHighlight,
+                BrowserStep::Pdf {
+                    options: BrowserPdfOptions::default(),
+                },
+            ],
+        },
+        &ImagePolicy::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.ok, "artifact batch failed: {report:?}");
+    let image_at = |step: usize| {
+        let data = report.steps[step].data.as_ref().unwrap();
+        let bytes = base64::prelude::BASE64_STANDARD
+            .decode(data["artifact"]["data"].as_str().unwrap())
+            .unwrap();
+        image::load_from_memory(&bytes).unwrap()
+    };
+    let full = image_at(0);
+    let clip = image_at(1);
+    let element = image_at(2);
+    assert!(full.height() > clip.height());
+    assert!(full.width().max(full.height()) <= ImagePolicy::default().preferred_side);
+    assert!(clip.width() <= 120 && clip.height() <= 80);
+    assert!(element.width() > 0 && element.height() > 0);
+    assert!(image_at(3)
+        .to_rgba8()
+        .pixels()
+        .any(|pixel| pixel.0[0] > 240 && pixel.0[1] < 20 && pixel.0[2] > 240));
+    assert!(image_at(4).to_rgba8().pixels().any(|pixel| pixel.0[3] == 0));
+    assert_eq!(
+        report.steps[5].data.as_ref().unwrap()["artifact"]["data"],
+        report.steps[6].data.as_ref().unwrap()["artifact"]["data"]
+    );
+    let pdf = report.steps[10].data.as_ref().unwrap();
+    assert!(pdf["artifact"]["bytes"].as_u64().unwrap() > 0);
+    assert!(FsPath::new(pdf["artifact"]["path"].as_str().unwrap()).is_file());
+    assert_eq!(
+        case.tab
+            .evaluate(
+                "document.querySelector('[data-refact-highlight]') === null",
+                false
+            )
+            .unwrap()
+            .value,
+        Some(json!(true))
+    );
 }
 
 #[tokio::test]

@@ -1,4 +1,5 @@
 mod actionability;
+pub mod artifacts;
 pub mod assertions;
 pub mod context_state;
 pub mod dialogs;
@@ -448,6 +449,7 @@ pub struct BrowserRuntime {
     pub tab_opened_by_step: HashMap<String, usize>,
     pub profile_dir: PathBuf,
     pub downloads_dir: PathBuf,
+    pub artifacts_dir: PathBuf,
     pub window_bounds: Option<WindowBounds>,
     pub buffers: BrowserBuffers,
     pub network_monitor: Arc<NetworkMonitorHandle>,
@@ -510,6 +512,7 @@ impl BrowserRuntime {
         let browser = Browser::new(launch_options).map_err(|e| e.to_string())?;
         let runtime_id = Uuid::new_v4().to_string();
         let downloads_dir = profile_dir.join("downloads").join(&runtime_id);
+        let artifacts_dir = profile_dir.join("artifacts").join(&runtime_id);
         let download_monitor = Arc::new(DownloadMonitor::connect(
             &browser.get_ws_url(),
             downloads_dir.clone(),
@@ -535,6 +538,7 @@ impl BrowserRuntime {
             tab_opened_by_step: HashMap::new(),
             profile_dir,
             downloads_dir,
+            artifacts_dir,
             window_bounds,
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
@@ -562,6 +566,9 @@ impl BrowserRuntime {
         let downloads_dir = std::env::temp_dir()
             .join("refact-browser-downloads")
             .join(&runtime_id);
+        let artifacts_dir = std::env::temp_dir()
+            .join("refact-browser-artifacts")
+            .join(&runtime_id);
         let download_monitor = Arc::new(DownloadMonitor::connect(&ws_url, downloads_dir.clone())?);
 
         info!(
@@ -584,6 +591,7 @@ impl BrowserRuntime {
             tab_opened_by_step: HashMap::new(),
             profile_dir: PathBuf::new(),
             downloads_dir,
+            artifacts_dir,
             window_bounds: None,
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
@@ -892,6 +900,7 @@ impl Drop for BrowserRuntime {
             self.route_registry.remove(None);
         }
         let _ = std::fs::remove_dir_all(&self.downloads_dir);
+        let _ = std::fs::remove_dir_all(&self.artifacts_dir);
     }
 }
 

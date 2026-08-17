@@ -109,3 +109,45 @@
 .handlerDetail {
   color: var(--rf-color-muted);
 }
+
+.artifactList {
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.artifactItem {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.artifactMeta,
+.artifactPath {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.artifactLink {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  color: var(--rf-color-accent);
+  text-decoration: none;
+}
+
+.artifactLink:hover {
+  text-decoration: underline;
+}
+
+.artifactLink svg {
+  flex: 0 0 auto;
+  width: var(--rf-icon);
+  height: var(--rf-icon);
+}
+
+.artifactPath {
+  display: block;
+  overflow-wrap: anywhere;
+  font-family: var(--rf-font-mono);
+}

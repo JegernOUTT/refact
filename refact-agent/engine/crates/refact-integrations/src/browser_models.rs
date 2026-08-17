@@ -807,6 +807,111 @@ impl AccessibilitySnapshotOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserScreenshotType {
+    #[default]
+    Png,
+    Jpeg,
+    Webp,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserScreenshotScale {
+    Css,
+    #[default]
+    Device,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserScreenshotAnimations {
+    #[default]
+    Allow,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserScreenshotCaret {
+    #[default]
+    Hide,
+    Initial,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct BrowserScreenshotClip {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BrowserScreenshotOptions {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub full_page: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<BrowserScreenshotClip>,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub image_type: Option<BrowserScreenshotType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<BrowserScreenshotScale>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub omit_background: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animations: Option<BrowserScreenshotAnimations>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caret: Option<BrowserScreenshotCaret>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mask: Vec<BrowserLocator>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BrowserPdfMargin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BrowserPdfOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landscape: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub print_background: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margins: Option<BrowserPdfMargin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_ranges: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefer_css_page_size: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tagged: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum BrowserStep {
@@ -1084,9 +1189,18 @@ pub enum BrowserStep {
         #[serde(flatten)]
         options: AccessibilitySnapshotOptions,
     },
-    Screenshot,
+    Screenshot {
+        #[serde(flatten)]
+        options: BrowserScreenshotOptions,
+    },
     ScreenshotElement {
         locator: BrowserLocator,
+        #[serde(flatten)]
+        options: BrowserScreenshotOptions,
+    },
+    Pdf {
+        #[serde(flatten)]
+        options: BrowserPdfOptions,
     },
 
     Eval {
@@ -1121,6 +1235,18 @@ pub enum BrowserStep {
     DismissOverlays,
     HighlightElement {
         locator: BrowserLocator,
+    },
+    Highlight {
+        locator: BrowserLocator,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    HideHighlight,
+    Annotate {
+        locator: BrowserLocator,
+        text: String,
     },
 }
 
@@ -1256,6 +1382,7 @@ impl BrowserStep {
         "accessibility_snapshot",
         "screenshot",
         "screenshot_element",
+        "pdf",
         "eval",
         "styles",
         "tab_log",
@@ -1264,6 +1391,9 @@ impl BrowserStep {
         "handle_dialog",
         "dismiss_overlays",
         "highlight_element",
+        "highlight",
+        "hide_highlight",
+        "annotate",
     ];
 }
 
@@ -1937,8 +2067,16 @@ mod tests {
             BrowserStep::AccessibilitySnapshot {
                 options: AccessibilitySnapshotOptions::default(),
             },
-            BrowserStep::Screenshot,
-            BrowserStep::ScreenshotElement { locator: locator() },
+            BrowserStep::Screenshot {
+                options: BrowserScreenshotOptions::default(),
+            },
+            BrowserStep::ScreenshotElement {
+                locator: locator(),
+                options: BrowserScreenshotOptions::default(),
+            },
+            BrowserStep::Pdf {
+                options: BrowserPdfOptions::default(),
+            },
             BrowserStep::Eval {
                 expression: "document.title".to_string(),
             },
@@ -1963,6 +2101,16 @@ mod tests {
             },
             BrowserStep::DismissOverlays,
             BrowserStep::HighlightElement { locator: locator() },
+            BrowserStep::Highlight {
+                locator: locator(),
+                style: Some("outline: 2px solid red".to_string()),
+                label: Some("Target".to_string()),
+            },
+            BrowserStep::HideHighlight,
+            BrowserStep::Annotate {
+                locator: locator(),
+                text: "Review".to_string(),
+            },
         ]
     }
 
@@ -2488,7 +2636,7 @@ mod tests {
     fn test_step_screenshot_serde() {
         let json_str = r#"{"action": "screenshot"}"#;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        assert!(matches!(step, BrowserStep::Screenshot));
+        assert!(matches!(step, BrowserStep::Screenshot { .. }));
     }
 
     #[test]

@@ -43,6 +43,79 @@ function makeStore(toolMessage: {
 }
 
 describe("ChromeTool", () => {
+  test("renders image and PDF artifacts", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-artifacts",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: {
+            steps: [{ action: "screenshot" }, { action: "pdf" }],
+          },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-artifacts",
+      content: JSON.stringify({
+        ok: true,
+        steps: [
+          {
+            step_index: 0,
+            ok: true,
+            summary: "Screenshot captured",
+            retries: 0,
+            data: {
+              artifact: {
+                kind: "image",
+                mime: "image/png",
+                data: "aW1hZ2U=",
+                width: 320,
+                height: 200,
+                bytes: 1234,
+              },
+            },
+          },
+          {
+            step_index: 1,
+            ok: true,
+            summary: "PDF saved",
+            retries: 0,
+            data: {
+              artifact: {
+                kind: "pdf",
+                mime: "application/pdf",
+                path: "/tmp/refact-browser/page.pdf",
+                bytes: 4096,
+                data: null,
+              },
+            },
+          },
+        ],
+      }),
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+
+    expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    expect(screen.getByText("320×200 · 1234 B")).toBeInTheDocument();
+    const pdf = screen.getByRole("link", { name: /PDF · 4096 B/i });
+    expect(pdf).toHaveAttribute("href", "file:///tmp/refact-browser/page.pdf");
+    expect(
+      screen.getByText("/tmp/refact-browser/page.pdf"),
+    ).toBeInTheDocument();
+  });
+
   test("renders typed browser request and execution report", async () => {
     const user = userEvent.setup();
     const toolCall: ToolCall = {
