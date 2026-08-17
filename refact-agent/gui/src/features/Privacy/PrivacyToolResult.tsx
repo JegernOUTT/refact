@@ -14,12 +14,12 @@ import { selectApiKey, selectConfig } from "../Config/configSlice";
 import { branchFromChat } from "../../services/refact/chatCommands";
 import type { ToolResult } from "../../services/refact/types";
 import {
-  blockedPrivacyFiles,
+  blockedPrivacyFilesFromInspection,
   extractPrivacyFiles,
   extractPrivacyShellMetadata,
   isPrivacyRefusalContent,
   privacyDestinationForModel,
-  useGetPrivacyPolicyQuery,
+  useInspectPrivacyQuery,
 } from "../../services/refact/privacy";
 import { BlockCard } from "./BlockCard";
 import { WithheldOutputCard } from "./WithheldOutputCard";
@@ -45,13 +45,16 @@ export const PrivacyToolResult: React.FC<PrivacyToolResultProps> = ({
   );
   const files = extractPrivacyFiles(result.extra);
   const shell = extractPrivacyShellMetadata(result.extra);
-  const policy = useGetPrivacyPolicyQuery(undefined, {
-    skip: shell !== null,
-  });
   const destination = privacyDestinationForModel(model);
-  const blockedFiles = policy.data
-    ? blockedPrivacyFiles(files, destination, policy.data.policy)
-    : files;
+  const refusal = isPrivacyRefusalContent(result.content);
+  const inspection = useInspectPrivacyQuery(
+    { chat_id: threadId, destination, records: files },
+    { skip: shell !== null || !refusal || !model },
+  );
+  const blockedFiles = blockedPrivacyFilesFromInspection(
+    files,
+    inspection.data,
+  );
 
   const handleSwitchModel = React.useCallback(() => {
     dispatch(push({ name: "default models" }));
@@ -105,7 +108,16 @@ export const PrivacyToolResult: React.FC<PrivacyToolResultProps> = ({
     );
   }
 
-  if (!isPrivacyRefusalContent(result.content)) return null;
+  const awaitingInspection = !inspection.data && !inspection.isError;
+  const inspectionAllowsSend = inspection.data?.sendable === true;
+  if (
+    !refusal ||
+    awaitingInspection ||
+    inspectionAllowsSend ||
+    blockedFiles.length === 0
+  ) {
+    return null;
+  }
 
   return (
     <BlockCard

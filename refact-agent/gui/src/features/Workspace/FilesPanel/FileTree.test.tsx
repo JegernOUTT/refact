@@ -6,7 +6,7 @@ import type { PrivacyPolicyResponse } from "../../../services/refact/privacy";
 import { fireEvent, render, screen, waitFor } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { FilesPanel } from "./FilesPanel";
-import { movePathToPrivacyZone, privacyZoneForPath } from "./fileTreeModel";
+import { movePathToPrivacyZone } from "./fileTreeModel";
 
 const rootPath = "/workspace";
 const secretPath = `${rootPath}/.env`;
@@ -17,7 +17,7 @@ const privacyResponse: PrivacyPolicyResponse = {
     zones: [
       {
         name: "secrets",
-        patterns: [secretPath],
+        patterns: [".env*"],
         send_to: ["trusted"],
         on_shell_read: "withhold",
       },
@@ -55,8 +55,24 @@ const installHandlers = () => {
         path,
         entries:
           path === rootPath
-            ? [{ name: ".env", path: secretPath, kind: "file", size: 7 }]
-            : [{ name: "workspace", path: rootPath, kind: "dir", size: null }],
+            ? [
+                {
+                  name: ".env",
+                  path: secretPath,
+                  kind: "file",
+                  size: 7,
+                  privacy_zone: privacyResponse.policy.zones[0],
+                },
+              ]
+            : [
+                {
+                  name: "workspace",
+                  path: rootPath,
+                  kind: "dir",
+                  size: null,
+                  privacy_zone: privacyResponse.policy.zones[1],
+                },
+              ],
         truncated: false,
       });
     }),
@@ -130,6 +146,51 @@ describe("FileTree privacy zones", () => {
         patterns: [secretPath, "*.ts"],
       },
     ]);
-    expect(privacyZoneForPath(secretPath, moved).name).toBe("normal");
+  });
+
+  it("keeps privacy requests bounded for a large directory", async () => {
+    let treeRequests = 0;
+    let inspectRequests = 0;
+    const normal = privacyResponse.policy.zones[1];
+    server.use(
+      http.get("*/v1/files/tree", ({ request }) => {
+        treeRequests += 1;
+        const path = new URL(request.url).searchParams.get("path") ?? "";
+        return HttpResponse.json({
+          path,
+          entries:
+            path === rootPath
+              ? Array.from({ length: 500 }, (_, index) => ({
+                  name: `file-${index}.txt`,
+                  path: `${rootPath}/file-${index}.txt`,
+                  kind: "file",
+                  size: index,
+                  privacy_zone: normal,
+                }))
+              : [
+                  {
+                    name: "workspace",
+                    path: rootPath,
+                    kind: "dir",
+                    size: null,
+                    privacy_zone: normal,
+                  },
+                ],
+          truncated: false,
+        });
+      }),
+      http.get("*/v1/privacy/policy", () => HttpResponse.json(privacyResponse)),
+      http.post("*/v1/privacy/inspect", () => {
+        inspectRequests += 1;
+        return HttpResponse.json({});
+      }),
+    );
+    const { user } = render(<FilesPanel />);
+    await user.click(
+      await screen.findByRole("treeitem", { name: /workspace/i }),
+    );
+
+    await waitFor(() => expect(treeRequests).toBe(2));
+    expect(inspectRequests).toBe(0);
   });
 });

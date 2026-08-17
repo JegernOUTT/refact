@@ -9,9 +9,10 @@ import {
   selectPrivacyFilesById,
 } from "../Chat/Thread/selectors";
 import {
-  blockedPrivacyFiles,
+  blockedPrivacyFilesFromInspection,
   privacyDestinationForModel,
   useGetPrivacyPolicyQuery,
+  useInspectPrivacyQuery,
 } from "../../services/refact/privacy";
 import { DestinationInspector } from "./DestinationInspector";
 import styles from "./PrivacyChat.module.css";
@@ -28,9 +29,11 @@ export const ChatShield: React.FC<ChatShieldProps> = ({ threadId }) => {
   );
   const policy = useGetPrivacyPolicyQuery(undefined);
   const destination = privacyDestinationForModel(model);
-  const blocked = policy.data
-    ? blockedPrivacyFiles(files, destination, policy.data.policy)
-    : [];
+  const inspection = useInspectPrivacyQuery(
+    { chat_id: threadId, destination, records: files },
+    { skip: !model },
+  );
+  const blocked = blockedPrivacyFilesFromInspection(files, inspection.data);
   const destinations = React.useMemo(() => {
     const candidates = policy.data?.destinations ?? [];
     return candidates.some(
@@ -58,7 +61,7 @@ export const ChatShield: React.FC<ChatShieldProps> = ({ threadId }) => {
               {model}
             </Text>
             <Text className={styles.restriction} as="div" size="1">
-              {policy.isLoading
+              {inspection.isLoading
                 ? "Checking what this model may receive…"
                 : `${blocked.length} ${
                     blocked.length === 1 ? "thing" : "things"

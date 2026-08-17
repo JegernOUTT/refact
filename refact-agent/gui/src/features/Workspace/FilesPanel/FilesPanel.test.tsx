@@ -231,7 +231,13 @@ describe("FilesPanel", () => {
   it("replaces refetched children while keeping the directory expanded", async () => {
     let sourceRequests = 0;
     let sourceEntries: FilesTreeEntry[] = [
-      { name: "main.ts", path: filePath, kind: "file", size: 22 },
+      {
+        name: "main.ts",
+        path: filePath,
+        kind: "file",
+        size: 22,
+        privacy_zone: privacyResponse.policy.zones[0],
+      },
     ];
     server.use(
       http.get("*/v1/files/tree", ({ request }) => {
@@ -272,6 +278,7 @@ describe("FilesPanel", () => {
         path: `${sourcePath}/replacement.ts`,
         kind: "file",
         size: 12,
+        privacy_zone: privacyResponse.policy.zones[0],
       },
     ];
     store.dispatch(
@@ -294,7 +301,13 @@ describe("FilesPanel", () => {
     const renamedFrom = `${sourcePath}/old.ts`;
     const renamedTo = `${testsPath}/new.ts`;
     let sourceEntries: FilesTreeEntry[] = [
-      { name: "old.ts", path: renamedFrom, kind: "file", size: 8 },
+      {
+        name: "old.ts",
+        path: renamedFrom,
+        kind: "file",
+        size: 8,
+        privacy_zone: privacyResponse.policy.zones[0],
+      },
     ];
     let testEntries: FilesTreeEntry[] = [];
     server.use(
@@ -375,7 +388,13 @@ describe("FilesPanel", () => {
 
     sourceEntries = [
       ...sourceEntries,
-      { name: "created.ts", path: createdPath, kind: "file", size: 8 },
+      {
+        name: "created.ts",
+        path: createdPath,
+        kind: "file",
+        size: 8,
+        privacy_zone: privacyResponse.policy.zones[0],
+      },
     ];
     dispatchDiff("1", { file_name: createdPath, file_action: "add" });
     expect(
@@ -391,7 +410,15 @@ describe("FilesPanel", () => {
     );
 
     sourceEntries = [];
-    testEntries = [{ name: "new.ts", path: renamedTo, kind: "file", size: 8 }];
+    testEntries = [
+      {
+        name: "new.ts",
+        path: renamedTo,
+        kind: "file",
+        size: 8,
+        privacy_zone: privacyResponse.policy.zones[0],
+      },
+    ];
     dispatchDiff("3", {
       file_name: renamedFrom,
       file_action: "rename",

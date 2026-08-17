@@ -12,6 +12,8 @@ export type PrivacyZone = {
   on_shell_read: PrivacyShellBehavior;
 };
 
+export type ResolvedPrivacyZone = Omit<PrivacyZone, "patterns">;
+
 export type PrivacyPolicy = {
   blocked: string[];
   zones: PrivacyZone[];
@@ -63,6 +65,7 @@ export type PrivacyFileRecord = {
 export type PrivacyInspectRequest = {
   chat_id: string;
   destination: PrivacyDestination;
+  records: PrivacyFileRecord[];
 };
 
 export type PrivacyBlockedRecord = {
@@ -138,27 +141,18 @@ export function privacyDestinationForModel(model: string): PrivacyDestination {
   };
 }
 
-export function privacyFileIsAllowed(
-  file: PrivacyFileRecord,
-  destination: PrivacyDestination,
-  policy: PrivacyPolicy,
-): boolean {
-  if (file.zone === "blocked") return false;
-  const zone = policy.zones.find((candidate) => candidate.name === file.zone);
-  return (
-    zone?.send_to.some(
-      (allowed) => allowed === "*" || allowed === destination.id,
-    ) ?? false
-  );
-}
-
-export function blockedPrivacyFiles(
+export function blockedPrivacyFilesFromInspection(
   files: PrivacyFileRecord[],
-  destination: PrivacyDestination,
-  policy: PrivacyPolicy,
+  inspection: PrivacyInspectResponse | undefined,
 ): PrivacyFileRecord[] {
-  return files.filter(
-    (file) => !privacyFileIsAllowed(file, destination, policy),
+  if (!inspection) return files;
+  const blocked = new Set(
+    inspection.blocked.map(({ record }) =>
+      [record.path, record.zone, record.attribution].join("\u0000"),
+    ),
+  );
+  return files.filter((file) =>
+    blocked.has([file.path, file.zone, file.attribution].join("\u0000")),
   );
 }
 
@@ -221,17 +215,21 @@ export const privacyApi = createApi({
         return { data: response.data as PrivacyStatusResponse };
       },
     }),
-    inspectPrivacy: builder.mutation<
+    inspectPrivacy: builder.query<
       PrivacyInspectResponse,
       PrivacyInspectRequest
     >({
+      providesTags: ["PRIVACY_POLICY"],
       async queryFn(request, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
         const url = buildApiUrlFromState(state, "/v1/privacy/inspect");
         const response = await baseQuery({
           url,
           method: "POST",
-          body: request,
+          body: {
+            chat_id: request.chat_id,
+            destination: request.destination,
+          },
           ...extraOptions,
         });
         if (response.error) return { error: response.error };
@@ -245,5 +243,5 @@ export const {
   useGetPrivacyPolicyQuery,
   useUpdatePrivacyPolicyMutation,
   useGetPrivacyStatusQuery,
-  useInspectPrivacyMutation,
+  useInspectPrivacyQuery,
 } = privacyApi;

@@ -11,8 +11,11 @@ use serde::{Deserialize, Serialize};
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::files_blocklist::{is_blocklisted, IndexingEverywhere};
-use crate::files_correction::{check_if_its_inside_a_workspace_or_config, get_unscoped_project_dirs};
-use crate::files_in_workspace::check_file_privacy_for_send;
+use crate::files_correction::{
+    check_if_its_inside_a_workspace_or_config, get_unscoped_project_dirs,
+    registered_worktree_path_mappings, RegisteredWorktreePathMapping,
+};
+use crate::files_in_workspace::{check_file_privacy_for_send, strictest_zone_for_path};
 use crate::global_context::GlobalContext;
 
 const DEFAULT_MAX_ENTRIES: usize = 2_000;
@@ -36,6 +39,24 @@ pub struct TreeEntry {
     size: Option<u64>,
     #[serde(default)]
     ignored: bool,
+    privacy_zone: ResolvedPrivacyZone,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResolvedPrivacyZone {
+    name: String,
+    send_to: Vec<String>,
+    on_shell_read: refact_privacy::ShellBehavior,
+}
+
+impl From<refact_privacy::Zone> for ResolvedPrivacyZone {
+    fn from(zone: refact_privacy::Zone) -> Self {
+        Self {
+            name: zone.name,
+            send_to: zone.send_to,
+            on_shell_read: zone.on_shell_read,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -106,8 +127,8 @@ fn clamped_tree_limit(max_entries: Option<usize>) -> usize {
     max_entries.unwrap_or(DEFAULT_MAX_ENTRIES).min(MAX_ENTRIES)
 }
 
-fn hidden_or_heavy_name(name: &str) -> bool {
-    name.starts_with('.') || matches!(name, "node_modules" | "target")
+fn hidden_or_heavy_directory(name: &str, is_dir: bool) -> bool {
+    is_dir && (name.starts_with('.') || matches!(name, "node_modules" | "target"))
 }
 
 fn blocklisted_entry(
@@ -141,10 +162,47 @@ fn sort_entries(entries: &mut [TreeEntry]) {
     });
 }
 
-async fn workspace_root_entries(gcx: Arc<GlobalContext>) -> Result<Vec<TreeEntry>, ScratchError> {
+struct TreePrivacyResolver {
+    policy: refact_privacy::CompiledPolicy,
+    workspace_roots: Vec<PathBuf>,
+    worktree_mappings: Vec<RegisteredWorktreePathMapping>,
+}
+
+impl TreePrivacyResolver {
+    async fn new(gcx: Arc<GlobalContext>) -> Result<Self, ScratchError> {
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+        let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+        let compiled = policy.compile().map_err(|error| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to compile privacy policy: {error}"),
+            )
+        })?;
+        Ok(Self {
+            policy: compiled,
+            workspace_roots: get_unscoped_project_dirs(gcx.clone()).await,
+            worktree_mappings: registered_worktree_path_mappings(gcx.cache_dir.as_path()),
+        })
+    }
+
+    fn zone_for_path(&self, path: &Path) -> ResolvedPrivacyZone {
+        strictest_zone_for_path(
+            &self.policy,
+            path,
+            &self.workspace_roots,
+            &self.worktree_mappings,
+        )
+        .into()
+    }
+}
+
+async fn workspace_root_entries(
+    roots: &[PathBuf],
+    privacy: &TreePrivacyResolver,
+) -> Result<Vec<TreeEntry>, ScratchError> {
     let mut entries = Vec::new();
-    for root in get_unscoped_project_dirs(gcx).await {
-        let canonical = tokio::fs::canonicalize(&root)
+    for root in roots {
+        let canonical = tokio::fs::canonicalize(root)
             .await
             .map(|path| dunce::simplified(&path).to_path_buf())
             .map_err(|error| {
@@ -165,6 +223,7 @@ async fn workspace_root_entries(gcx: Arc<GlobalContext>) -> Result<Vec<TreeEntry
             kind: "dir",
             size: None,
             ignored: false,
+            privacy_zone: privacy.zone_for_path(&canonical),
         });
     }
     sort_entries(&mut entries);
@@ -174,6 +233,7 @@ async fn workspace_root_entries(gcx: Arc<GlobalContext>) -> Result<Vec<TreeEntry
 async fn list_dir_core(
     directory: &Path,
     indexing: &IndexingEverywhere,
+    privacy: &TreePrivacyResolver,
 ) -> Result<Vec<TreeEntry>, ScratchError> {
     let repository = Repository::discover(directory).ok();
     let mut read_dir = tokio::fs::read_dir(directory).await.map_err(|error| {
@@ -194,9 +254,6 @@ async fn list_dir_core(
         )
     })? {
         let name = entry.file_name().to_string_lossy().to_string();
-        if hidden_or_heavy_name(&name) {
-            continue;
-        }
         let file_type = entry.file_type().await.map_err(|error| {
             io_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -210,6 +267,9 @@ async fn list_dir_core(
         }
         let path = entry.path();
         let is_dir = file_type.is_dir();
+        if hidden_or_heavy_directory(&name, is_dir) {
+            continue;
+        }
         if blocklisted_entry(indexing, directory, &path, is_dir) {
             continue;
         }
@@ -247,6 +307,7 @@ async fn list_dir_core(
             kind: if is_dir { "dir" } else { "file" },
             size,
             ignored,
+            privacy_zone: privacy.zone_for_path(&path),
         });
     }
     sort_entries(&mut entries);
@@ -414,8 +475,9 @@ pub async fn handle_v1_files_tree(
     let gcx = app.gcx.clone();
     let limit = clamped_tree_limit(query.max_entries);
     let raw_path = query.path.unwrap_or_default();
+    let privacy = TreePrivacyResolver::new(gcx.clone()).await?;
     if raw_path.is_empty() {
-        let entries = workspace_root_entries(gcx).await?;
+        let entries = workspace_root_entries(&privacy.workspace_roots, &privacy).await?;
         let (entries, truncated) = truncate_entries(entries, limit);
         return Ok(Json(TreeResponse {
             path: String::new(),
@@ -431,7 +493,7 @@ pub async fn handle_v1_files_tree(
         ));
     }
     let indexing = crate::files_blocklist::reload_indexing_everywhere_if_needed(gcx).await;
-    let entries = list_dir_core(&path, &indexing).await?;
+    let entries = list_dir_core(&path, &indexing, &privacy).await?;
     let (entries, truncated) = truncate_entries(entries, limit);
     Ok(Json(TreeResponse {
         path: path.to_string_lossy().to_string(),
@@ -469,6 +531,7 @@ mod tests {
     use hyper::StatusCode;
     use serde_json::Value;
     use tower::ServiceExt;
+    use refact_privacy::{PrivacyPolicy, ShellBehavior, SubagentPolicy, Zone};
 
     use super::{clamped_tree_limit, MAX_CONTENT_BYTES, MAX_ENTRIES};
     use crate::app_state::AppState;
@@ -494,6 +557,14 @@ mod tests {
             },
             loaded_ts: u64::MAX / 2,
         });
+    }
+
+    fn set_privacy_policy(gcx: &Arc<GlobalContext>, policy: PrivacyPolicy) {
+        *gcx.privacy_policy_load.write().unwrap() = refact_privacy::PolicyLoad {
+            policy: Arc::new(policy),
+            error: None,
+            source_paths: Vec::new(),
+        };
     }
 
     fn query_uri(route: &str, pairs: &[(&str, String)]) -> String {
@@ -621,6 +692,61 @@ mod tests {
             .unwrap();
         assert_eq!(ignored["ignored"], true);
         assert_eq!(visible["ignored"], false);
+    }
+
+    #[tokio::test]
+    async fn tree_resolves_dotfile_privacy_zones_with_engine_matching() {
+        let workspace = tempfile::tempdir().unwrap();
+        let secret = workspace.path().join(".env");
+        tokio::fs::write(&secret, "TOKEN=secret").await.unwrap();
+        let (gcx, router) = test_router(&[workspace.path()]).await;
+        *gcx.privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
+            privacy_rules: FilePrivacySettings {
+                only_send_to_servers_I_control: Vec::new(),
+                blocked: Vec::new(),
+            },
+            loaded_ts: u64::MAX / 2,
+        });
+        set_privacy_policy(
+            &gcx,
+            PrivacyPolicy {
+                blocked: Vec::new(),
+                zones: vec![
+                    Zone {
+                        name: "secrets".to_string(),
+                        patterns: vec![".env*".to_string()],
+                        send_to: Vec::new(),
+                        on_shell_read: ShellBehavior::Withhold,
+                    },
+                    Zone {
+                        name: "normal".to_string(),
+                        patterns: vec!["**".to_string()],
+                        send_to: vec!["*".to_string()],
+                        on_shell_read: ShellBehavior::Withhold,
+                    },
+                ],
+                subagents: SubagentPolicy::default(),
+            },
+        );
+
+        let (status, response) = get_json(
+            router,
+            query_uri(
+                "/v1/files/tree",
+                &[("path", workspace.path().to_string_lossy().to_string())],
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let secret = response["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == ".env")
+            .unwrap();
+        assert_eq!(secret["privacy_zone"]["name"], "secrets");
+        assert_eq!(secret["privacy_zone"]["send_to"], serde_json::json!([]));
     }
 
     #[tokio::test]

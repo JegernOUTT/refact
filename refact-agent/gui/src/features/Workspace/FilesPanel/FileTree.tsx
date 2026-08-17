@@ -29,11 +29,13 @@ import {
 } from "../../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
 import {
+  filesApi,
   useGetFilesTreeQuery,
   type FilesTreeEntry,
 } from "../../../services/refact/files";
 import {
   type PrivacyDestination,
+  type ResolvedPrivacyZone,
   type PrivacyZone,
   useGetPrivacyPolicyQuery,
   useUpdatePrivacyPolicyMutation,
@@ -55,7 +57,6 @@ import {
   flattenVisibleTree,
   movePathToPrivacyZone,
   parentDirectoryPath,
-  privacyZoneForPath,
   type TreeChildrenByPath,
   type VisibleTreeEntry,
 } from "./fileTreeModel";
@@ -64,7 +65,7 @@ import styles from "./FilesPanel.module.css";
 
 const VIRTUALIZE_THRESHOLD = 200;
 
-const zoneStatus = (zone: PrivacyZone): StatusDotStatus => {
+const zoneStatus = (zone: ResolvedPrivacyZone): StatusDotStatus => {
   if (zone.name === "blocked") return "error";
   if (zone.name === "secrets") return "warning";
   if (zone.name === "normal") return "idle";
@@ -72,7 +73,7 @@ const zoneStatus = (zone: PrivacyZone): StatusDotStatus => {
 };
 
 const zoneTooltip = (
-  zone: PrivacyZone,
+  zone: ResolvedPrivacyZone,
   destinations: PrivacyDestination[],
 ): string => {
   const allowed = zone.send_to.includes("*")
@@ -140,7 +141,7 @@ const TreeRow = ({
   selected: boolean;
   rowId: string;
   onActivate: (entry: VisibleTreeEntry) => void;
-  privacyZone: PrivacyZone | null;
+  privacyZone: ResolvedPrivacyZone | null;
   privacyDestinations: PrivacyDestination[];
   privacyZones: PrivacyZone[];
   privacySaving: boolean;
@@ -317,9 +318,12 @@ export function FileTree() {
       if (!policy) return;
       void updatePrivacyPolicy(
         movePathToPrivacyZone(policy, entry.path, zoneName),
-      );
+      )
+        .unwrap()
+        .then(() => dispatch(filesApi.util.invalidateTags(["Tree"])))
+        .catch(() => undefined);
     },
-    [privacyPolicyQuery.data?.policy, updatePrivacyPolicy],
+    [dispatch, privacyPolicyQuery.data?.policy, updatePrivacyPolicy],
   );
 
   const handleKeyDown = useCallback(
@@ -410,11 +414,7 @@ export function FileTree() {
       selected={selectedPath === entry.path}
       rowId={rowId(entry.path)}
       onActivate={activateEntry}
-      privacyZone={
-        privacyPolicyQuery.data
-          ? privacyZoneForPath(entry.path, privacyPolicyQuery.data.policy)
-          : null
-      }
+      privacyZone={entry.privacy_zone}
       privacyDestinations={privacyPolicyQuery.data?.destinations ?? []}
       privacyZones={privacyPolicyQuery.data?.policy.zones ?? []}
       privacySaving={privacyUpdateState.isLoading}

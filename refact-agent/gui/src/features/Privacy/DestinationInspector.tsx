@@ -7,7 +7,7 @@ import type {
   PrivacyFileRecord,
   PrivacyInspectResponse,
 } from "../../services/refact/privacy";
-import { useInspectPrivacyMutation } from "../../services/refact/privacy";
+import { useInspectPrivacyQuery } from "../../services/refact/privacy";
 import styles from "./PrivacyChat.module.css";
 
 type DestinationInspectorProps = {
@@ -36,17 +36,15 @@ export const DestinationInspector: React.FC<DestinationInspectorProps> = ({
   onOpenChange,
 }) => {
   const [destination, setDestination] = React.useState(initialDestination);
-  const [inspect, inspection] = useInspectPrivacyMutation();
+  const inspection = useInspectPrivacyQuery(
+    { chat_id: chatId, destination, records: localFiles },
+    { skip: !open },
+  );
 
   React.useEffect(() => {
     if (!open) return;
     setDestination(initialDestination);
   }, [initialDestination, open]);
-
-  React.useEffect(() => {
-    if (!open) return;
-    void inspect({ chat_id: chatId, destination });
-  }, [chatId, destination, inspect, open]);
 
   const handleDestinationChange = React.useCallback(
     (value: string) => {

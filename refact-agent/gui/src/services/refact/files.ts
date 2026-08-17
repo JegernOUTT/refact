@@ -2,6 +2,7 @@ import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 
 import type { RootState } from "../../app/store";
 import { buildApiUrlFromState } from "./apiUrl";
+import type { ResolvedPrivacyZone } from "./privacy";
 
 export type FilesTreeEntry = {
   name: string;
@@ -9,6 +10,7 @@ export type FilesTreeEntry = {
   kind: "dir" | "file";
   size: number | null;
   ignored?: boolean;
+  privacy_zone: ResolvedPrivacyZone;
 };
 
 export type FilesTreeResponse = {

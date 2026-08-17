@@ -60,6 +60,12 @@ const file = {
   attribution: "observed" as const,
 };
 
+const effectiveFile = {
+  path: "derived.txt",
+  zone: "effective:internal+secrets",
+  attribution: "observed" as const,
+};
+
 function installPolicyHandler() {
   server.use(http.get("*/v1/privacy/policy", () => HttpResponse.json(policy)));
 }
@@ -94,9 +100,10 @@ describe("Privacy shield", () => {
           destination,
           sendable: false,
           would_send: [],
-          records: [file],
-          blocked: [{ record_index: 0, record: file }],
-          refusal: "destination untrusted cannot receive message 0 path .env",
+          records: [effectiveFile],
+          blocked: [{ record_index: 0, record: effectiveFile }],
+          refusal:
+            "destination untrusted cannot receive message 0 path derived.txt",
         }),
       ),
     );
@@ -105,7 +112,7 @@ describe("Privacy shield", () => {
         role: "tool",
         tool_call_id: "call-shell",
         content: "withheld",
-        extra: { privacy: { files: [file] } },
+        extra: { privacy: { files: [effectiveFile] } },
       },
     ] as ChatMessages);
 
@@ -126,7 +133,7 @@ describe("Privacy shield", () => {
     expect(
       await screen.findByText("1 records cannot go to this model"),
     ).toBeVisible();
-    expect(screen.getByText(".env")).toBeVisible();
+    expect(screen.getByText("derived.txt")).toBeVisible();
   });
 });
 
@@ -159,6 +166,47 @@ describe("Privacy block card actions", () => {
     );
     expect(onSwitchModel).toHaveBeenCalledOnce();
     expect(onBranchCleanChat).toHaveBeenCalledOnce();
+  });
+
+  it("uses backend truth for an effective-zone refusal", async () => {
+    installPolicyHandler();
+    server.use(
+      http.post("*/v1/privacy/inspect", () =>
+        HttpResponse.json({
+          chat_id: "chat",
+          destination,
+          sendable: false,
+          would_send: [],
+          records: [effectiveFile],
+          blocked: [{ record_index: 1, record: effectiveFile }],
+          refusal:
+            "destination untrusted cannot receive message 1 path derived.txt",
+        }),
+      ),
+    );
+    const call = toolCall("call-effective");
+    const assistant: AssistantMessage = {
+      role: "assistant",
+      message_id: "assistant-effective",
+      content: null,
+      tool_calls: [call],
+    };
+    const tool: ToolMessage = {
+      role: "tool",
+      tool_call_id: "call-effective",
+      content:
+        "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry.",
+      extra: { privacy: { files: [effectiveFile] } },
+    };
+    const chat = chatWithMessages([assistant, tool]);
+
+    render(<ToolContent toolCalls={[call]} />, {
+      preloadedState: { chat },
+    });
+
+    const card = await screen.findByTestId("privacy-block-card");
+    expect(card).toHaveTextContent("derived.txt");
+    expect(card).toHaveTextContent("1 guarded record");
   });
 });
 
