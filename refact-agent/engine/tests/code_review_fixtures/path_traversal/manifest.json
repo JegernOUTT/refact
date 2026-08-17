@@ -9,7 +9,8 @@
       "line_range": { "start": 4, "end": 6 },
       "category": "security",
       "severity": "critical",
-      "description": "An untrusted frog name can escape root with parent path components."
+      "description": "An untrusted frog name can escape root with parent path components.",
+      "marker": "greeting = root / frog_name"
     }
   ]
 }

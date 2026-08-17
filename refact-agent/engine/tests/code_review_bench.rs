@@ -32,6 +32,7 @@ struct SeededDefect {
     category: String,
     severity: ReviewSeverity,
     description: String,
+    marker: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -318,6 +319,7 @@ fn seed(file: &str, start: u32, end: u32, category: &str) -> SeededDefect {
         category: category.to_string(),
         severity: ReviewSeverity::High,
         description: "Seeded frog defect".to_string(),
+        marker: "seeded frog defect".to_string(),
     }
 }
 
@@ -499,6 +501,11 @@ fn fixture_corpus_is_complete_small_and_parseable() {
         .iter()
         .map(|manifest| manifest.scenario.as_str())
         .collect::<HashSet<_>>();
+    let seeded_markers = manifests
+        .iter()
+        .flat_map(|manifest| &manifest.seeded_defects)
+        .map(|defect| defect.marker.as_str())
+        .collect::<Vec<_>>();
 
     assert_eq!(directories.len(), 10);
     assert_eq!(ids.len(), directories.len());
@@ -562,9 +569,32 @@ fn fixture_corpus_is_complete_small_and_parseable() {
             assert!(defect.line_range.start <= defect.line_range.end);
             assert!(defect.line_range.end as usize <= source.lines().count());
             assert!(!defect.description.trim().is_empty());
+            assert!(!defect.marker.trim().is_empty());
+            let defect_source = source
+                .lines()
+                .skip(defect.line_range.start as usize - 1)
+                .take((defect.line_range.end - defect.line_range.start + 1) as usize)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                defect_source.contains(&defect.marker),
+                "{} marker {:?} missing from {}:{}-{}",
+                manifest.id,
+                defect.marker,
+                defect.file,
+                defect.line_range.start,
+                defect.line_range.end
+            );
         }
         if manifest.kind == FixtureKind::Clean {
             assert!(manifest.seeded_defects.is_empty());
+            for marker in &seeded_markers {
+                assert!(
+                    !combined.contains(marker),
+                    "clean fixture {} contains seeded-defect marker {marker:?}",
+                    manifest.id
+                );
+            }
         }
     }
     assert_eq!(category_counts.get("correctness"), Some(&5));

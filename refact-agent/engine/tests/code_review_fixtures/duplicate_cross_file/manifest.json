@@ -9,7 +9,8 @@
       "line_range": { "start": 1, "end": 2 },
       "category": "correctness",
       "severity": "medium",
-      "description": "Whitespace-only names are accepted as empty frog names."
+      "description": "Whitespace-only names are accepted as empty frog names.",
+      "marker": "return raw_name.strip()"
     }
   ]
 }

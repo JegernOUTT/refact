@@ -9,7 +9,8 @@
       "line_range": { "start": 4, "end": 5 },
       "category": "consistency",
       "severity": "high",
-      "description": "This caller passes a keyword-only argument positionally unlike its sibling."
+      "description": "This caller passes a keyword-only argument positionally unlike its sibling.",
+      "marker": "welcome_frog(name, True)"
     }
   ]
 }

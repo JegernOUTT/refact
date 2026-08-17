@@ -185,7 +185,10 @@ fn ensure_command_is_not_empty(request: &ExecSpawnRequest) -> Result<(), String>
     Ok(())
 }
 
-fn launch_parts(request: &ExecSpawnRequest) -> Result<(String, Vec<String>), String> {
+fn launch_parts(
+    request: &ExecSpawnRequest,
+    sandbox_provider: Option<Box<dyn refact_sandbox::SandboxProvider>>,
+) -> Result<(String, Vec<String>), String> {
     ensure_command_is_not_empty(request)?;
     let (program, args) = if let Some(argv) = request.argv.as_ref() {
         (argv[0].clone(), argv[1..].to_vec())
@@ -217,14 +220,17 @@ fn launch_parts(request: &ExecSpawnRequest) -> Result<(String, Vec<String>), Str
         allow_network: spec.allow_network,
     }
     .normalized(&cwd);
-    let (provider, _) = refact_sandbox::select_provider();
+    let provider = sandbox_provider.unwrap_or_else(|| refact_sandbox::select_provider().0);
     provider
         .confine(&spec, &program, &args)
         .map_err(|error| error.to_string())
 }
 
-fn shell_command(request: &ExecSpawnRequest) -> Result<tokio::process::Command, String> {
-    let (program, args) = launch_parts(request)?;
+fn shell_command(
+    request: &ExecSpawnRequest,
+    sandbox_provider: Option<Box<dyn refact_sandbox::SandboxProvider>>,
+) -> Result<tokio::process::Command, String> {
+    let (program, args) = launch_parts(request, sandbox_provider)?;
     let mut command = tokio::process::Command::new(program);
     command.args(args);
     command.kill_on_drop(true);
@@ -238,8 +244,11 @@ fn shell_command(request: &ExecSpawnRequest) -> Result<tokio::process::Command, 
     Ok(command)
 }
 
-fn pty_command(request: &ExecSpawnRequest) -> Result<CommandBuilder, String> {
-    let (program, args) = launch_parts(request)?;
+fn pty_command(
+    request: &ExecSpawnRequest,
+    sandbox_provider: Option<Box<dyn refact_sandbox::SandboxProvider>>,
+) -> Result<CommandBuilder, String> {
+    let (program, args) = launch_parts(request, sandbox_provider)?;
     let mut command = CommandBuilder::new(program);
     command.args(args);
     if let Some(cwd) = request.cwd.as_ref() {
@@ -786,20 +795,38 @@ async fn wait_for_readiness(
 
 impl ExecRegistry {
     pub async fn spawn(&self, request: ExecSpawnRequest) -> Result<ExecSpawnResult, String> {
+        self.spawn_with_seams(
+            request,
+            None,
+            #[cfg(target_os = "linux")]
+            None,
+        )
+        .await
+    }
+
+    async fn spawn_with_seams(
+        &self,
+        request: ExecSpawnRequest,
+        sandbox_provider: Option<Box<dyn refact_sandbox::SandboxProvider>>,
+        #[cfg(target_os = "linux")] observation_setup: Option<Setup>,
+    ) -> Result<ExecSpawnResult, String> {
         if request.tty {
-            return self.spawn_pty(request).await;
+            return self.spawn_pty(request, sandbox_provider).await;
         }
 
-        let mut command = shell_command(&request)?;
+        let mut command = shell_command(&request, sandbox_provider)?;
         #[cfg(target_os = "linux")]
-        let observation_setup = if request.observe {
-            if request.sandbox.is_some() && refact_sandbox::sandbox_status().provider == "bwrap" {
-                Setup::unavailable("bwrap observation is unavailable")
-            } else {
-                Setup::prepare(&mut command)
+        let observation_setup = match observation_setup {
+            Some(setup) => setup,
+            None if request.observe => {
+                if request.sandbox.is_some() && refact_sandbox::sandbox_status().provider == "bwrap"
+                {
+                    Setup::unavailable("bwrap observation is unavailable")
+                } else {
+                    Setup::prepare(&mut command)
+                }
             }
-        } else {
-            Setup::disabled()
+            None => Setup::disabled(),
         };
         let mut command = wrap_command(command);
         let (meta, process_id) = build_process_meta(&request)?;
@@ -937,8 +964,12 @@ impl ExecRegistry {
         ))
     }
 
-    async fn spawn_pty(&self, request: ExecSpawnRequest) -> Result<ExecSpawnResult, String> {
-        let command = pty_command(&request)?;
+    async fn spawn_pty(
+        &self,
+        request: ExecSpawnRequest,
+        sandbox_provider: Option<Box<dyn refact_sandbox::SandboxProvider>>,
+    ) -> Result<ExecSpawnResult, String> {
+        let command = pty_command(&request, sandbox_provider)?;
         let (meta, process_id) = build_process_meta(&request)?;
         let startup_wait = request.startup_wait;
         let (pty_handle, child) =
@@ -1062,6 +1093,30 @@ mod tests {
     #[cfg(unix)]
     use crate::types::ExecEnvPolicy;
     use crate::types::{ExecProcessFilter, ExecSandboxMode, ExecSandboxSpec, ExecStatusKind};
+
+    struct UnusableSandboxProvider;
+
+    impl refact_sandbox::SandboxProvider for UnusableSandboxProvider {
+        fn name(&self) -> &'static str {
+            "injected-unusable"
+        }
+
+        fn probe(&self) -> Enforcement {
+            Enforcement::Unusable
+        }
+
+        fn confine(
+            &self,
+            _spec: &refact_sandbox::ExecSandboxSpec,
+            _program: &str,
+            _args: &[String],
+        ) -> Result<(String, Vec<String>), refact_sandbox::SandboxError> {
+            Err(refact_sandbox::SandboxError::new(
+                self.name(),
+                "forced unavailable provider",
+            ))
+        }
+    }
 
     #[cfg(unix)]
     struct ParentEnvGuard {
@@ -1545,6 +1600,31 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_request_fails_closed_when_provider_is_unusable() {
+        let workspace = tempfile::tempdir().unwrap();
+        let error = match ExecRegistry::new()
+            .spawn_with_seams(
+                ExecSpawnRequest::foreground("echo must-not-run")
+                    .with_cwd(workspace.path())
+                    .with_sandbox(workspace_write_sandbox(workspace.path())),
+                Some(Box::new(UnusableSandboxProvider)),
+                #[cfg(target_os = "linux")]
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("unusable sandbox provider must fail closed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            "sandbox: injected-unusable: forced unavailable provider"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn sandbox_request_fails_closed_on_host_without_provider() {
         if refact_sandbox::sandbox_status().enforcement != Enforcement::Unusable {
             return;
         }
@@ -1562,6 +1642,34 @@ mod tests {
         };
 
         assert!(error.starts_with("sandbox: noop:"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn observation_request_reports_injected_unavailable_state() {
+        let registry = ExecRegistry::new();
+        let result = registry
+            .spawn_with_seams(
+                ExecSpawnRequest::foreground("printf observed").with_observe(true),
+                None,
+                Some(Setup::unavailable("injected observer unavailable")),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.snapshot.status,
+            ExecStatus::Exited { exit_code: Some(0) }
+        );
+        assert_eq!(
+            result.observation,
+            ObservationStatus::Unavailable("injected observer unavailable".to_string())
+        );
+        let reader = registry
+            .observation_reader(&result.snapshot.meta.process_id)
+            .await
+            .unwrap();
+        assert_eq!(reader.status(), result.observation);
     }
 
     #[tokio::test]

@@ -9,7 +9,8 @@
       "line_range": { "start": 6, "end": 6 },
       "category": "correctness",
       "severity": "high",
-      "description": "The inclusive upper bound indexes one element past the end of names."
+      "description": "The inclusive upper bound indexes one element past the end of names.",
+      "marker": "range(len(names) + 1)"
     }
   ]
 }

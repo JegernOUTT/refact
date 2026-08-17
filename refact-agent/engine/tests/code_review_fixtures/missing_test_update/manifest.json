@@ -9,7 +9,8 @@
       "line_range": { "start": 4, "end": 5 },
       "category": "tests",
       "severity": "high",
-      "description": "The test still asserts the old welcome format and fails against the changed formatter."
+      "description": "The test still asserts the old welcome format and fails against the changed formatter.",
+      "marker": "== \"Welcome Pixel\""
     }
   ]
 }

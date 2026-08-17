@@ -9,14 +9,16 @@
       "line_range": { "start": 2, "end": 4 },
       "category": "correctness",
       "severity": "high",
-      "description": "The north loop indexes one frog beyond the list."
+      "description": "The north loop indexes one frog beyond the list.",
+      "marker": "range(len(names) + 1)"
     },
     {
       "file": "south_pond.py",
       "line_range": { "start": 2, "end": 4 },
       "category": "correctness",
       "severity": "high",
-      "description": "The copied south loop indexes one frog beyond the list."
+      "description": "The copied south loop indexes one frog beyond the list.",
+      "marker": "range(len(names) + 1)"
     }
   ]
 }

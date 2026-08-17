@@ -318,7 +318,13 @@ mod tests {
 
     #[tokio::test]
     async fn completion_for_excluded_zone_returns_422() {
-        let (_gcx, app, mut post) = completion_context("denied.rs", &["other"], &["trusted"]).await;
+        let (gcx, app, mut post) = completion_context("denied.rs", &["other"], &["trusted"]).await;
+        let cache = gcx.completions_cache.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = cache.write().unwrap();
+            panic!("poison completion cache");
+        })
+        .join();
 
         let error = handle_v1_code_completion(app, &mut post).await.unwrap_err();
 

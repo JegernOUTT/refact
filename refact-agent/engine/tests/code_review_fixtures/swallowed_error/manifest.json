@@ -9,7 +9,8 @@
       "line_range": { "start": 9, "end": 12 },
       "category": "correctness",
       "severity": "high",
-      "description": "The read error is swallowed and returned as a valid empty welcome note."
+      "description": "The read error is swallowed and returned as a valid empty welcome note.",
+      "marker": "except OSError:\n        return \"\""
     }
   ]
 }

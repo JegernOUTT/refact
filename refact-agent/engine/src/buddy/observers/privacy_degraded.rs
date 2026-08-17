@@ -111,22 +111,42 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
-        let created = AtomicBool::new(false);
+        let created = Arc::new(AtomicBool::new(false));
+        let attempts = (0..32)
+            .map(|_| {
+                let gcx = gcx.clone();
+                let created = created.clone();
+                tokio::spawn(async move {
+                    warn_once_with_flag(gcx, "ptrace unavailable", &created).await
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = futures::future::join_all(attempts).await;
+        let created_chats = results
+            .into_iter()
+            .filter_map(|result| result.unwrap())
+            .collect::<Vec<_>>();
 
-        let first = warn_once_with_flag(gcx.clone(), "ptrace unavailable", &created)
-            .await
-            .expect("first warning fires")
-            .expect("first warning creates a chat");
-        let second = warn_once_with_flag(gcx.clone(), "another reason", &created).await;
-
-        assert!(second.is_none());
+        assert_eq!(created_chats.len(), 1);
+        let first = created_chats
+            .into_iter()
+            .next()
+            .unwrap()
+            .expect("winning warning creates a chat");
         let conversations = crate::chat::trajectories::get_buddy_conversations_dir(gcx.clone())
             .await
             .unwrap();
         let warnings = std::fs::read_dir(conversations)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy() == format!("{first}.json"))
+            .filter(|entry| {
+                let path = entry.path();
+                let Ok(contents) = std::fs::read_to_string(path) else {
+                    return false;
+                };
+                contents.contains("\"workflow_id\": \"privacy_degraded\"")
+                    || contents.contains("\"workflow_id\":\"privacy_degraded\"")
+            })
             .count();
         assert_eq!(warnings, 1);
         let loaded = crate::chat::trajectories::load_trajectory_for_chat(gcx, &first)
