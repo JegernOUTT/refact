@@ -5,9 +5,6 @@ use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile, SamplingPar
 use refact_core::custom_error::first_n_chars;
 use refact_core::provider_types::ImageTokenMode;
 
-const MAX_BROWSER_SCREENSHOTS_ON_WIRE: usize = 3;
-const SUPERSEDED_SCREENSHOT_PLACEHOLDER: &str = "[screenshot omitted, superseded]";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextPressure {
     Low,
@@ -200,38 +197,6 @@ pub fn relocate_tool_results_after_their_calls(messages: &mut Vec<ChatMessage>) 
         messages.push(message);
         if let Some(results) = results_by_owner.remove(&original_idx) {
             messages.extend(results);
-        }
-    }
-}
-
-fn supersede_old_browser_screenshots(messages: &mut [ChatMessage]) {
-    let browser_call_ids: HashSet<String> = messages
-        .iter()
-        .filter_map(|message| message.tool_calls.as_ref())
-        .flatten()
-        .filter(|call| {
-            crate::trajectory_ops::canonical_tool_name_for_preservation(&call.function.name)
-                == "chrome"
-        })
-        .map(|call| call.id.clone())
-        .collect();
-    let mut kept = 0usize;
-    for message in messages.iter_mut().rev() {
-        if !browser_call_ids.contains(&message.tool_call_id) {
-            continue;
-        }
-        let ChatContent::Multimodal(elements) = &mut message.content else {
-            continue;
-        };
-        for element in elements.iter_mut().rev() {
-            if !element.is_image() {
-                continue;
-            }
-            kept += 1;
-            if kept > MAX_BROWSER_SCREENSHOTS_ON_WIRE {
-                element.m_type = "text".to_string();
-                element.m_content = SUPERSEDED_SCREENSHOT_PLACEHOLDER.to_string();
-            }
         }
     }
 }
@@ -621,7 +586,6 @@ pub fn fix_and_limit_messages_history(
     replace_broken_tool_call_messages(&mut mutable_messages, sampling_parameters_to_patch, 16000);
     remove_invalid_tool_calls_and_tool_calls_results(&mut mutable_messages);
     relocate_tool_results_after_their_calls(&mut mutable_messages);
-    supersede_old_browser_screenshots(&mut mutable_messages);
     validate_chat_history_owned(mutable_messages)
 }
 
@@ -779,39 +743,20 @@ mod tests {
     }
 
     #[test]
-    fn wire_history_keeps_only_three_latest_browser_screenshots() {
+    fn wire_history_keeps_all_browser_screenshots() {
         let mut messages = vec![plain_user_msg("inspect")];
         for idx in 0..5 {
             let call_id = format!("chrome-{idx}");
             messages.push(assistant_declaring_named_call(&call_id, "chrome"));
             messages.push(image_tool_result(&call_id, &format!("image-{idx}")));
         }
-        let stored = messages.clone();
         let mut sampling = SamplingParameters::default();
 
         let prepared = fix_and_limit_messages_history(&messages, &mut sampling).unwrap();
 
         assert_eq!(
+            serde_json::to_value(&prepared).unwrap(),
             serde_json::to_value(&messages).unwrap(),
-            serde_json::to_value(&stored).unwrap()
-        );
-        let image_values: Vec<&str> = prepared
-            .iter()
-            .filter_map(|message| match &message.content {
-                ChatContent::Multimodal(elements) => elements.first(),
-                _ => None,
-            })
-            .map(|element| element.m_content.as_str())
-            .collect();
-        assert_eq!(
-            image_values,
-            vec![
-                SUPERSEDED_SCREENSHOT_PLACEHOLDER,
-                SUPERSEDED_SCREENSHOT_PLACEHOLDER,
-                "image-2",
-                "image-3",
-                "image-4",
-            ]
         );
     }
 
