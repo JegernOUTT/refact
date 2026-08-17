@@ -12,11 +12,13 @@ use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::files_blocklist::{is_blocklisted, IndexingEverywhere};
 use crate::files_correction::{
-    check_if_its_inside_a_workspace_or_config, get_unscoped_project_dirs,
+    check_if_its_inside_a_workspace_worktree_or_config, get_unscoped_project_dirs,
     registered_worktree_path_mappings, RegisteredWorktreePathMapping,
 };
 use crate::files_in_workspace::{check_file_privacy_for_send, strictest_zone_for_path};
 use crate::global_context::GlobalContext;
+
+pub const PRIVACY_BLOCKED_PREFIX: &str = "Blocked by privacy rules:";
 
 const DEFAULT_MAX_ENTRIES: usize = 2_000;
 const MAX_ENTRIES: usize = 5_000;
@@ -75,6 +77,21 @@ pub struct ReadQuery {
     line_end: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct WriteRequest {
+    path: String,
+    content: String,
+    #[serde(default)]
+    expected_mtime_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WriteResponse {
+    path: String,
+    size: u64,
+    mtime_ms: u64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ReadResponse {
     path: String,
@@ -110,17 +127,26 @@ async fn validated_existing_path(
             "Path must be absolute".to_string(),
         ));
     }
-    check_if_its_inside_a_workspace_or_config(gcx.clone(), requested)
+    check_if_its_inside_a_workspace_worktree_or_config(gcx.clone(), requested)
         .await
         .map_err(|error| ScratchError::new(StatusCode::FORBIDDEN, error))?;
     let canonical = tokio::fs::canonicalize(requested)
         .await
         .map(|path| dunce::simplified(&path).to_path_buf())
         .map_err(|error| io_error(StatusCode::NOT_FOUND, "resolve path", requested, error))?;
-    check_if_its_inside_a_workspace_or_config(gcx, &canonical)
+    check_if_its_inside_a_workspace_worktree_or_config(gcx, &canonical)
         .await
         .map_err(|error| ScratchError::new(StatusCode::FORBIDDEN, error))?;
     Ok(canonical)
+}
+
+async fn privacy_checked_path(gcx: Arc<GlobalContext>, path: &PathBuf) -> Result<(), ScratchError> {
+    check_file_privacy_for_send(gcx, path).await.map_err(|error| {
+        ScratchError::new(
+            StatusCode::FORBIDDEN,
+            format!("{PRIVACY_BLOCKED_PREFIX} {error}"),
+        )
+    })
 }
 
 fn clamped_tree_limit(max_entries: Option<usize>) -> usize {
@@ -509,20 +535,73 @@ pub async fn handle_v1_files_read(
     validate_line_range(query.line_start, query.line_end)?;
     let requested = PathBuf::from(&query.path);
     let path = validated_existing_path(app.gcx.clone(), &requested).await?;
-    check_file_privacy_for_send(app.gcx.clone(), &requested)
-        .await
-        .map_err(|error| ScratchError::new(StatusCode::FORBIDDEN, error))?;
-    check_file_privacy_for_send(app.gcx, &path)
-        .await
-        .map_err(|error| ScratchError::new(StatusCode::FORBIDDEN, error))?;
+    privacy_checked_path(app.gcx.clone(), &requested).await?;
+    privacy_checked_path(app.gcx, &path).await?;
     Ok(Json(
         read_file_core(&path, query.line_start, query.line_end).await?,
     ))
 }
 
+pub async fn handle_v1_files_write(
+    State(app): State<AppState>,
+    Json(request): Json<WriteRequest>,
+) -> Result<Json<WriteResponse>, ScratchError> {
+    if request.content.len() > MAX_CONTENT_BYTES {
+        return Err(ScratchError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("File content exceeds the {MAX_CONTENT_BYTES} byte editing limit"),
+        ));
+    }
+    let requested = PathBuf::from(&request.path);
+    let path = validated_existing_path(app.gcx.clone(), &requested).await?;
+    privacy_checked_path(app.gcx.clone(), &requested).await?;
+    privacy_checked_path(app.gcx.clone(), &path).await?;
+
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .map_err(|error| io_error(StatusCode::NOT_FOUND, "inspect file", &path, error))?;
+    if !metadata.is_file() {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Path '{}' is not a file", path.display()),
+        ));
+    }
+    if let Some(expected_mtime_ms) = request.expected_mtime_ms {
+        let current_mtime_ms = mtime_ms(&metadata);
+        if current_mtime_ms != expected_mtime_ms {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                format!(
+                    "File '{}' changed on disk since it was loaded",
+                    path.display()
+                ),
+            ));
+        }
+    }
+
+    crate::tools::file_edit::auxiliary::write_file(
+        app.gcx.clone(),
+        &path,
+        &request.content,
+        false,
+        None,
+    )
+    .await
+    .map_err(|error| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .map_err(|error| io_error(StatusCode::INTERNAL_SERVER_ERROR, "inspect file", &path, error))?;
+    Ok(Json(WriteResponse {
+        path: path.to_string_lossy().to_string(),
+        size: metadata.len(),
+        mtime_ms: mtime_ms(&metadata),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -760,6 +839,345 @@ mod tests {
             query_uri(
                 "/v1/files/tree",
                 &[("path", outside.path().to_string_lossy().to_string())],
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    async fn worktree_router(
+        source: &Path,
+        worktree_id: &str,
+    ) -> (PathBuf, SharedGlobalContext, Router) {
+        let cache_dir =
+            std::env::temp_dir().join(format!("refact-files-wt-{}", uuid::Uuid::new_v4()));
+        let config_dir =
+            std::env::temp_dir().join(format!("refact-files-cfg-{}", uuid::Uuid::new_v4()));
+        let hash = refact_worktrees::service::project_hash_for_path(source);
+        let registry_dir = cache_dir.join("worktrees").join(&hash);
+        let worktree_root = registry_dir.join(worktree_id);
+        std::fs::create_dir_all(&worktree_root).unwrap();
+        let registry = refact_worktrees::types::WorktreeRegistry {
+            schema_version: 1,
+            source_workspace_root: source.to_path_buf(),
+            project_hash: hash,
+            records: vec![refact_worktrees::types::WorktreeRegistryRecord {
+                meta: refact_worktrees::types::WorktreeMeta {
+                    id: worktree_id.to_string(),
+                    kind: "chat".to_string(),
+                    root: worktree_root.clone(),
+                    source_workspace_root: source.to_path_buf(),
+                    repo_root: source.to_path_buf(),
+                    branch: Some("refact/chat/test".to_string()),
+                    base_branch: Some("main".to_string()),
+                    base_commit: None,
+                    task_id: None,
+                    card_id: None,
+                    agent_id: None,
+                    enforce: true,
+                },
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                last_seen_at: None,
+                references: Vec::new(),
+                last_known_status: None,
+            }],
+        };
+        std::fs::write(
+            registry_dir.join("index.json"),
+            serde_json::to_string_pretty(&registry).unwrap(),
+        )
+        .unwrap();
+
+        let gcx =
+            crate::global_context::tests::make_test_gcx_with_dirs(cache_dir, config_dir).await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.to_path_buf()];
+        set_privacy(gcx.clone(), Vec::new());
+        let app = AppState::from_gcx(gcx.clone()).await;
+        (
+            worktree_root,
+            gcx,
+            crate::http::routers::make_refact_http_server(app),
+        )
+    }
+
+    async fn post_json(router: Router, uri: &str, body: Value) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn write_updates_file_and_reports_new_mtime() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("main.rs");
+        tokio::fs::write(&path, "fn main() {}\n").await.unwrap();
+        let (_gcx, router) = test_router(&[workspace.path()]).await;
+
+        let (status, response) = post_json(
+            router,
+            "/v1/files/write",
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "content": "fn main() { println!(\"hi\"); }\n",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(response["mtime_ms"].as_u64().is_some());
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "fn main() { println!(\"hi\"); }\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_rejects_stale_expected_mtime() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("main.rs");
+        tokio::fs::write(&path, "original\n").await.unwrap();
+        let (_gcx, router) = test_router(&[workspace.path()]).await;
+
+        let (status, _) = post_json(
+            router,
+            "/v1/files/write",
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "content": "clobbered\n",
+                "expected_mtime_ms": 1,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "original\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_rejects_privacy_blocked_path() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("blocked.secret");
+        tokio::fs::write(&path, "nope\n").await.unwrap();
+        let (gcx, router) = test_router(&[workspace.path()]).await;
+        set_privacy(gcx, vec!["*.secret".to_string()]);
+
+        let (status, _) = post_json(
+            router,
+            "/v1/files/write",
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "content": "leaked\n",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "nope\n");
+    }
+
+    #[tokio::test]
+    async fn write_rejects_path_outside_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = outside.path().join("main.rs");
+        tokio::fs::write(&path, "original\n").await.unwrap();
+        let (_gcx, router) = test_router(&[workspace.path()]).await;
+
+        let (status, _) = post_json(
+            router,
+            "/v1/files/write",
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "content": "clobbered\n",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "original\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_allows_registered_worktree_path() {
+        let source = tempfile::tempdir().unwrap();
+        let (worktree_root, _gcx, router) = worktree_router(source.path(), "wt-write").await;
+        let path = worktree_root.join("main.rs");
+        tokio::fs::write(&path, "old\n").await.unwrap();
+
+        let (status, _) = post_json(
+            router,
+            "/v1/files/write",
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "content": "new\n",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "new\n");
+    }
+
+    #[tokio::test]
+    async fn read_allows_registered_worktree_path() {
+        let source = tempfile::tempdir().unwrap();
+        let (worktree_root, _gcx, router) = worktree_router(source.path(), "wt-read").await;
+        let path = worktree_root.join("main.rs");
+        tokio::fs::write(&path, "fn main() {}\n").await.unwrap();
+
+        let (status, response) = get_json(
+            router,
+            query_uri(
+                "/v1/files/read",
+                &[("path", path.to_string_lossy().to_string())],
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["content"], "fn main() {}\n");
+    }
+
+    #[tokio::test]
+    async fn tree_allows_registered_worktree_path() {
+        let source = tempfile::tempdir().unwrap();
+        let (worktree_root, _gcx, router) = worktree_router(source.path(), "wt-tree").await;
+        tokio::fs::write(worktree_root.join("main.rs"), "fn main() {}\n")
+            .await
+            .unwrap();
+
+        let (status, response) = get_json(
+            router,
+            query_uri(
+                "/v1/files/tree",
+                &[("path", worktree_root.to_string_lossy().to_string())],
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(response["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "main.rs"));
+    }
+
+    #[tokio::test]
+    async fn read_rejects_unregistered_cache_worktree_path() {
+        let source = tempfile::tempdir().unwrap();
+        let (worktree_root, gcx, router) = worktree_router(source.path(), "wt-guard").await;
+        let sibling = worktree_root
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("other-project")
+            .join("wt-unregistered");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let path = sibling.join("secret.rs");
+        tokio::fs::write(&path, "nope\n").await.unwrap();
+        assert!(path.starts_with(gcx.cache_dir.join("worktrees")));
+
+        let (status, _) = get_json(
+            router,
+            query_uri(
+                "/v1/files/read",
+                &[("path", path.to_string_lossy().to_string())],
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn read_rejects_worktree_root_escaping_the_cache_dir() {
+        let source = tempfile::tempdir().unwrap();
+        let escape_target = tempfile::tempdir().unwrap();
+        let path = escape_target.path().join("secret.rs");
+        tokio::fs::write(&path, "secret\n").await.unwrap();
+
+        let cache_dir =
+            std::env::temp_dir().join(format!("refact-files-esc-{}", uuid::Uuid::new_v4()));
+        let config_dir =
+            std::env::temp_dir().join(format!("refact-files-esc-cfg-{}", uuid::Uuid::new_v4()));
+        let hash = refact_worktrees::service::project_hash_for_path(source.path());
+        let registry_dir = cache_dir.join("worktrees").join(&hash);
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        let escaping_root = escape_target.path().to_path_buf();
+        let ascent = "../".repeat(registry_dir.components().count());
+        let relative_id = format!(
+            "{ascent}{}",
+            escaping_root
+                .to_string_lossy()
+                .trim_start_matches(std::path::MAIN_SEPARATOR)
+        );
+        let registry = refact_worktrees::types::WorktreeRegistry {
+            schema_version: 1,
+            source_workspace_root: source.path().to_path_buf(),
+            project_hash: hash,
+            records: vec![refact_worktrees::types::WorktreeRegistryRecord {
+                meta: refact_worktrees::types::WorktreeMeta {
+                    id: relative_id,
+                    kind: "chat".to_string(),
+                    root: escaping_root,
+                    source_workspace_root: source.path().to_path_buf(),
+                    repo_root: source.path().to_path_buf(),
+                    branch: None,
+                    base_branch: None,
+                    base_commit: None,
+                    task_id: None,
+                    card_id: None,
+                    agent_id: None,
+                    enforce: true,
+                },
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                last_seen_at: None,
+                references: Vec::new(),
+                last_known_status: None,
+            }],
+        };
+        std::fs::write(
+            registry_dir.join("index.json"),
+            serde_json::to_string_pretty(&registry).unwrap(),
+        )
+        .unwrap();
+
+        let gcx =
+            crate::global_context::tests::make_test_gcx_with_dirs(cache_dir, config_dir).await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![source.path().to_path_buf()];
+        set_privacy(gcx.clone(), Vec::new());
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let router = crate::http::routers::make_refact_http_server(app);
+
+        let (status, _) = get_json(
+            router,
+            query_uri(
+                "/v1/files/read",
+                &[("path", path.to_string_lossy().to_string())],
             ),
         )
         .await;

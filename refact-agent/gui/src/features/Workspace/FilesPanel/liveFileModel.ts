@@ -11,6 +11,15 @@ const lineCount = (value: string): number => {
     : normalized.split("\n").length;
 };
 
+export const firstChangedLine = (chunks: DiffChunk[]): number =>
+  chunks.reduce(
+    (lowest, chunk) => Math.min(lowest, chunk.line1),
+    Number.MAX_SAFE_INTEGER,
+  );
+
+export const removedLineCount = (chunk: DiffChunk): number =>
+  lineCount(chunk.lines_remove);
+
 export const changedLineNumbers = (chunks: DiffChunk[]): number[] => {
   const lines = new Set<number>();
   for (const chunk of chunks) {

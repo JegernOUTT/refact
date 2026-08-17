@@ -80,7 +80,9 @@ use crate::http::routers::v1::v1_integrations::{
     handle_v1_integrations_mcp_logs,
 };
 use crate::http::routers::v1::file_edit_tools::handle_v1_file_edit_tool_dry_run;
-use crate::http::routers::v1::files::{handle_v1_files_read, handle_v1_files_tree};
+use crate::http::routers::v1::files::{
+    handle_v1_files_read, handle_v1_files_tree, handle_v1_files_write,
+};
 use crate::http::routers::v1::code_edit::handle_v1_code_edit;
 use crate::http::routers::v1::workspace::handle_v1_get_app_searchable_id;
 use crate::chat::{
@@ -396,6 +398,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route("/files/tree", get(handle_v1_files_tree))
         .route("/files/read", get(handle_v1_files_read))
+        .route("/files/write", post(handle_v1_files_write))
         .route("/code-edit", post(handle_v1_code_edit))
         .route("/models", get(handle_v1_models))
         .route("/providers", get(handle_v1_providers_list))

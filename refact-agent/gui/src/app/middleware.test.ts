@@ -441,6 +441,130 @@ describe("workspace routing middleware", () => {
     });
   });
 
+  it("queues edit playback and opens unopened files when live edits are on", async () => {
+    const filePath = "/workspace/src/closed.ts";
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json({
+          path: filePath,
+          content: "new\n",
+          language: "typescript",
+          size: 4,
+          truncated: false,
+          line_start: null,
+          line_end: null,
+          mtime_ms: 1,
+        }),
+      ),
+    );
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a"]),
+      workspace: {
+        tabs: [chatSurface("chat-a")],
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+        liveEditsByChat: { "chat-a": true },
+      },
+    });
+
+    store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "1",
+        type: "message_added",
+        index: 0,
+        message: {
+          role: "diff",
+          tool_call_id: "edit-1",
+          content: JSON.stringify([
+            {
+              file_name: filePath,
+              file_action: "edit",
+              line1: 7,
+              line2: 8,
+              lines_remove: "old\n",
+              lines_add: "new\n",
+            },
+          ]),
+        } as unknown as MessageAddedEvent["message"],
+      }),
+    );
+
+    await waitFor(() => {
+      const player = store.getState().filesPanel.player;
+      expect(player.chatId).toBe("chat-a");
+      expect(player.status).toBe("playing");
+      expect(player.steps).toHaveLength(1);
+      expect(player.steps[0]).toMatchObject({ path: filePath, line: 7 });
+    });
+
+    await waitFor(() => {
+      expect(store.getState().filesPanel.viewerTargets[filePath]).toMatchObject(
+        { path: filePath, line: 7 },
+      );
+    });
+  });
+
+  it("records live updates for unopened files so playback can reveal them", async () => {
+    const filePath = "/workspace/src/never-opened.ts";
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json({
+          path: filePath,
+          content: "new\n",
+          language: "typescript",
+          size: 4,
+          truncated: false,
+          line_start: null,
+          line_end: null,
+          mtime_ms: 1,
+        }),
+      ),
+    );
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a"]),
+      workspace: {
+        tabs: [chatSurface("chat-a")],
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+        liveEditsByChat: { "chat-a": false },
+      },
+    });
+
+    store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "1",
+        type: "message_added",
+        index: 0,
+        message: {
+          role: "diff",
+          tool_call_id: "edit-1",
+          content: JSON.stringify([
+            {
+              file_name: filePath,
+              file_action: "edit",
+              line1: 1,
+              line2: 2,
+              lines_remove: "old\n",
+              lines_add: "new\n",
+            },
+          ]),
+        } as unknown as MessageAddedEvent["message"],
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[filePath],
+      ).toMatchObject({ revision: "1", operation: "write" });
+    });
+    expect(store.getState().filesPanel.player.steps).toHaveLength(0);
+    expect(store.getState().workspace.activeTabId).toBe(chatSurface("chat-a"));
+  });
+
   it("refreshes open files without focus stealing when live edits are off", async () => {
     const filePath = "/workspace/src/open.ts";
     server.use(
@@ -569,6 +693,13 @@ describe("workspace routing middleware", () => {
         viewerTarget: null,
         viewerTargets: {},
         liveUpdatesByChat: {},
+        player: {
+          chatId: null,
+          steps: [],
+          index: 0,
+          status: "idle",
+          speed: 1,
+        },
       },
       gitPanel: {
         contexts: {

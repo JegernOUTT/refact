@@ -29,6 +29,36 @@ export type LiveFileUpdate = {
   authoritative: boolean;
 };
 
+export type EditPlayerStep = {
+  id: string;
+  path: string;
+  revision: string;
+  line: number;
+  chunks: DiffChunk[];
+  operation: "write" | "remove" | "rename";
+  renamedTo?: string;
+};
+
+export type EditPlayerStatus = "idle" | "playing" | "paused";
+
+export type EditPlayerState = {
+  chatId: string | null;
+  steps: EditPlayerStep[];
+  index: number;
+  status: EditPlayerStatus;
+  speed: number;
+};
+
+export const MAX_EDIT_PLAYER_STEPS = 300;
+
+const initialPlayerState: EditPlayerState = {
+  chatId: null,
+  steps: [],
+  index: 0,
+  status: "idle",
+  speed: 1,
+};
+
 export type FilesPanelState = {
   expandedDirectories: string[];
   selectedPath: string | null;
@@ -39,6 +69,7 @@ export type FilesPanelState = {
     string,
     Record<string, LiveFileUpdate | undefined> | undefined
   >;
+  player: EditPlayerState;
 };
 
 const initialState: FilesPanelState = {
@@ -48,6 +79,7 @@ const initialState: FilesPanelState = {
   viewerTarget: null,
   viewerTargets: {},
   liveUpdatesByChat: {},
+  player: initialPlayerState,
 };
 
 const compareRevision = (left: string, right: string): number => {
@@ -200,20 +232,74 @@ export const filesPanelSlice = createSlice({
       const { [action.payload]: _chat, ...otherChats } =
         state.liveUpdatesByChat;
       state.liveUpdatesByChat = otherChats;
+      if (state.player.chatId === action.payload) {
+        state.player = initialPlayerState;
+      }
+    },
+    enqueueEditPlayerSteps: (
+      state,
+      action: PayloadAction<{ chatId: string; steps: EditPlayerStep[] }>,
+    ) => {
+      if (action.payload.steps.length === 0) return;
+      if (state.player.chatId !== action.payload.chatId) {
+        state.player = {
+          ...initialPlayerState,
+          chatId: action.payload.chatId,
+          speed: state.player.speed,
+        };
+      }
+      const known = new Set(state.player.steps.map((step) => step.id));
+      const added = action.payload.steps.filter((step) => !known.has(step.id));
+      if (added.length === 0) return;
+      state.player.steps = [...state.player.steps, ...added];
+      const overflow = state.player.steps.length - MAX_EDIT_PLAYER_STEPS;
+      if (overflow > 0) {
+        state.player.steps = state.player.steps.slice(overflow);
+        state.player.index = Math.max(0, state.player.index - overflow);
+      }
+      if (state.player.status === "idle") {
+        state.player.status = "playing";
+      }
+    },
+    advanceEditPlayer: (state) => {
+      if (state.player.index < state.player.steps.length) {
+        state.player.index += 1;
+      }
+    },
+    seekEditPlayer: (state, action: PayloadAction<number>) => {
+      state.player.index = Math.min(
+        Math.max(0, action.payload),
+        state.player.steps.length,
+      );
+    },
+    setEditPlayerStatus: (state, action: PayloadAction<EditPlayerStatus>) => {
+      state.player.status = action.payload;
+    },
+    setEditPlayerSpeed: (state, action: PayloadAction<number>) => {
+      state.player.speed = action.payload;
+    },
+    resetEditPlayer: (state) => {
+      state.player = { ...initialPlayerState, speed: state.player.speed };
     },
   },
 });
 
 export const {
+  advanceEditPlayer,
   clearLiveFileUpdate,
   clearLiveFileUpdatesForChat,
   collapseDirectory,
   applyLiveFileUpdate,
+  enqueueEditPlayerSteps,
   expandDirectory,
   hydrateShowIgnored,
   markLiveFileUpdateAuthoritative,
+  resetEditPlayer,
   resetFileTree,
+  seekEditPlayer,
   selectTreePath,
+  setEditPlayerSpeed,
+  setEditPlayerStatus,
   setShowIgnored,
   setViewerTarget,
   toggleDirectory,
@@ -354,3 +440,17 @@ export const selectLiveFileUpdate = (
   path: string,
 ): LiveFileUpdate | undefined =>
   chatId ? state.filesPanel.liveUpdatesByChat[chatId]?.[path] : undefined;
+
+export const selectEditPlayer = (state: FilesPanelRootState): EditPlayerState =>
+  state.filesPanel.player;
+
+export const selectActiveEditPlayerStep = (
+  state: FilesPanelRootState,
+): EditPlayerStep | undefined => {
+  const player = state.filesPanel.player;
+  if (player.status === "idle") return undefined;
+  return player.steps[player.index];
+};
+
+export const selectIsEditPlaying = (state: FilesPanelRootState): boolean =>
+  state.filesPanel.player.status === "playing";

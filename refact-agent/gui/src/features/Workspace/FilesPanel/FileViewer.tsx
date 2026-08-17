@@ -1,6 +1,5 @@
-import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
-import { Copy, FileQuestion, RotateCw } from "lucide-react";
-import { useCallback, useEffect, useMemo } from "react";
+import { Copy, FileQuestion, Pencil, RotateCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   Button,
@@ -15,29 +14,36 @@ import {
   useAppSelector,
   useCopyToClipboard,
 } from "../../../hooks";
-import { useReadFileQuery } from "../../../services/refact/files";
+import type { DiffChunk } from "../../../services/refact";
+import {
+  useReadFileQuery,
+  useWriteFileMutation,
+} from "../../../services/refact/files";
 import {
   selectFocusedChatWorktreeRoot,
   selectFocusedWorkspaceChatId,
   setDockOpen,
   setDockSection,
 } from "../workspaceSlice";
+import { EditPlayerControls } from "./EditPlayerControls";
 import {
   expandDirectory,
   isPathWithinWorkspaceRoots,
+  selectActiveEditPlayerStep,
   selectFileViewerTargetByPath,
+  selectIsEditPlaying,
   selectLiveFileUpdate,
   selectTreePath,
 } from "./filesPanelSlice";
 import { pathBasename } from "./fileTreeModel";
+import {
+  errorDetail,
+  isAccessDenied,
+  isPrivacyBlocked,
+} from "./filesPanelErrors";
 import { HighlightedFile } from "./HighlightedFile";
 import { changedLineNumbers } from "./liveFileModel";
 import styles from "./FilesPanel.module.css";
-
-const errorStatus = (error: unknown): number | string | null => {
-  const candidate = error as FetchBaseQueryError | undefined;
-  return candidate?.status ?? null;
-};
 
 type Breadcrumb = {
   label: string;
@@ -45,6 +51,7 @@ type Breadcrumb = {
 };
 
 const EMPTY_ROOTS: string[] = [];
+const EMPTY_CHUNKS: DiffChunk[] = [];
 
 const normalizeBreadcrumbPath = (path: string): string => {
   const normalized = path.replace(/\\/g, "/");
@@ -109,6 +116,11 @@ export function FileViewer({ path }: { path: string }) {
     () => (worktreeRoot ? [worktreeRoot] : configuredWorkspaceRoots),
     [configuredWorkspaceRoots, worktreeRoot],
   );
+  const isPlaying = useAppSelector(selectIsEditPlaying);
+  const activeStep = useAppSelector(selectActiveEditPlayerStep);
+  const playbackStep = activeStep?.path === path ? activeStep : undefined;
+  const [draft, setDraft] = useState<string | null>(null);
+  const [writeFile, writeState] = useWriteFileMutation();
   const target = storedTarget ?? { path };
   const { data, error, isFetching, refetch } = useReadFileQuery({
     path,
@@ -123,10 +135,29 @@ export function FileViewer({ path }: { path: string }) {
   const unavailable =
     liveUpdate?.operation === "remove" || liveUpdate?.operation === "rename";
   const displayedContent = unavailable ? null : data?.content ?? null;
-  const changedLines = useMemo(
-    () => changedLineNumbers(liveUpdate?.chunks ?? []),
-    [liveUpdate],
+  const revealChunks = useMemo(
+    () => playbackStep?.chunks ?? liveUpdate?.chunks ?? EMPTY_CHUNKS,
+    [liveUpdate, playbackStep],
   );
+  const changedLines = useMemo(
+    () => changedLineNumbers(revealChunks),
+    [revealChunks],
+  );
+  const changeRevision = playbackStep
+    ? `${playbackStep.id}`
+    : liveUpdate?.authoritative
+      ? liveUpdate.revision
+      : undefined;
+  const editable =
+    !!data &&
+    !data.binary &&
+    !data.truncated &&
+    data.line_start === null &&
+    data.line_end === null &&
+    !unavailable;
+  const editing = draft !== null;
+  const conflicted =
+    (writeState.error as { status?: number } | undefined)?.status === 409;
 
   useEffect(() => {
     if (!target.line || !data) return;
@@ -137,6 +168,19 @@ export function FileViewer({ path }: { path: string }) {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [data, target.line]);
+
+  const saveDraft = useCallback(async () => {
+    if (draft === null || !data) return;
+    const result = await writeFile({
+      path,
+      content: draft,
+      expectedMtimeMs: data.mtime_ms,
+    });
+    if ("data" in result) {
+      setDraft(null);
+      void refetch();
+    }
+  }, [data, draft, path, refetch, writeFile]);
 
   const openBreadcrumb = useCallback(
     (crumb: Breadcrumb, index: number) => {
@@ -154,7 +198,13 @@ export function FileViewer({ path }: { path: string }) {
     [breadcrumbs.length, dispatch, workspaceRoots],
   );
 
-  const blocked = errorStatus(error) === 403;
+  const blocked = isPrivacyBlocked(error);
+  const unreadableDescription = blocked
+    ? "This file is blocked by privacy rules."
+    : isAccessDenied(error)
+      ? errorDetail(error) ??
+        "This file is outside the directories the workspace worker may read."
+      : "The workspace worker could not read this file.";
   const lineStart = data?.line_start ?? 1;
 
   return (
@@ -178,6 +228,40 @@ export function FileViewer({ path }: { path: string }) {
             </span>
           ))}
         </nav>
+        <EditPlayerControls />
+        {editing ? (
+          <div className={styles.editorActions}>
+            <Button
+              disabled={isPlaying || writeState.isLoading}
+              onClick={() => void saveDraft()}
+              size="sm"
+            >
+              {writeState.isLoading ? "Saving" : "Save"}
+            </Button>
+            <Button onClick={() => setDraft(null)} size="sm" variant="plain">
+              Cancel
+            </Button>
+          </div>
+        ) : (
+          <Tooltip
+            content={
+              isPlaying
+                ? "Editing is locked while edits are playing"
+                : editable
+                  ? "Edit this file"
+                  : "This file cannot be edited here"
+            }
+          >
+            <IconButton
+              aria-label="Edit this file"
+              disabled={!editable || isPlaying}
+              icon={Pencil}
+              onClick={() => setDraft(data?.content ?? "")}
+              size="sm"
+              variant="plain"
+            />
+          </Tooltip>
+        )}
         <Tooltip content="Copy file path">
           <IconButton
             aria-label="Copy file path"
@@ -208,11 +292,7 @@ export function FileViewer({ path }: { path: string }) {
         />
       ) : error && displayedContent === null ? (
         <ErrorState
-          description={
-            blocked
-              ? "This file is blocked by privacy rules."
-              : "The workspace worker could not read this file."
-          }
+          description={unreadableDescription}
           retry={
             <Button
               leftIcon={RotateCw}
@@ -245,18 +325,43 @@ export function FileViewer({ path }: { path: string }) {
               File truncated at 1 MiB
             </div>
           ) : null}
-          <div className={`${styles.codeScroll} scrollX`}>
-            <HighlightedFile
-              content={displayedContent}
-              changedLines={changedLines}
-              changeRevision={
-                liveUpdate?.authoritative ? liveUpdate.revision : undefined
-              }
-              language={data?.language ?? null}
-              lineStart={data ? lineStart : 1}
-              targetLine={target.line}
+          {conflicted ? (
+            <div className={styles.conflictBanner} role="alert">
+              This file changed on disk since it was loaded.
+              <Button
+                onClick={() => {
+                  setDraft(null);
+                  void refetch();
+                }}
+                size="sm"
+                variant="plain"
+              >
+                Reload
+              </Button>
+            </div>
+          ) : null}
+          {editing ? (
+            <textarea
+              aria-label={`Edit ${pathBasename(target.path)}`}
+              className={styles.editor}
+              onChange={(event) => setDraft(event.target.value)}
+              readOnly={isPlaying}
+              spellCheck={false}
+              value={draft}
             />
-          </div>
+          ) : (
+            <div className={`${styles.codeScroll} scrollX`}>
+              <HighlightedFile
+                content={displayedContent}
+                changedLines={changedLines}
+                changeRevision={changeRevision}
+                language={data?.language ?? null}
+                lineStart={data ? lineStart : 1}
+                removedChunks={revealChunks}
+                targetLine={target.line}
+              />
+            </div>
+          )}
         </>
       ) : null}
     </section>

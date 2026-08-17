@@ -1,4 +1,3 @@
-import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
 import { ContextMenu } from "@radix-ui/themes";
 import {
   ChevronDown,
@@ -40,6 +39,11 @@ import {
   useGetPrivacyPolicyQuery,
   useUpdatePrivacyPolicyMutation,
 } from "../../../services/refact/privacy";
+import {
+  errorDetail,
+  isAccessDenied,
+  isPrivacyBlocked,
+} from "./filesPanelErrors";
 import {
   collapseDirectory,
   expandDirectory,
@@ -90,11 +94,6 @@ const zoneTooltip = (
   return `Zone: ${zone.name}. Allowed destinations: ${allowed}.`;
 };
 
-const errorStatus = (error: unknown): number | string | null => {
-  const candidate = error as FetchBaseQueryError | undefined;
-  return candidate?.status ?? null;
-};
-
 const DirectoryLoader = ({
   path,
   onLoaded,
@@ -113,9 +112,11 @@ const DirectoryLoader = ({
   return (
     <div className={styles.treeLoadError} role="alert">
       <span>
-        {errorStatus(error) === 403
+        {isPrivacyBlocked(error)
           ? "Directory blocked by privacy rules"
-          : "Directory could not be loaded"}
+          : isAccessDenied(error)
+            ? "Directory is outside readable project directories"
+            : "Directory could not be loaded"}
       </span>
       <Button onClick={() => void refetch()} size="sm" variant="plain">
         Retry
@@ -381,13 +382,16 @@ export function FileTree() {
   }
 
   if (error && !root) {
-    const blocked = errorStatus(error) === 403;
+    const blocked = isPrivacyBlocked(error);
     return (
       <ErrorState
         description={
           blocked
             ? "This directory is blocked by privacy rules."
-            : "The workspace worker could not load files."
+            : isAccessDenied(error)
+              ? errorDetail(error) ??
+                "This directory is outside the directories the workspace worker may read."
+              : "The workspace worker could not load files."
         }
         retry={
           <Button leftIcon={RotateCw} onClick={() => void refetch()} size="sm">

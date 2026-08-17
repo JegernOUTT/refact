@@ -477,6 +477,32 @@ pub async fn check_if_its_inside_a_workspace_or_config(
     }
 }
 
+pub fn registered_worktree_roots(cache_dir: &Path) -> Vec<PathBuf> {
+    registered_worktree_path_mappings(cache_dir)
+        .into_iter()
+        .map(|mapping| mapping.root)
+        .collect()
+}
+
+pub async fn check_if_its_inside_a_workspace_worktree_or_config(
+    gcx: Arc<GlobalContext>,
+    path: &Path,
+) -> Result<(), String> {
+    let outside_error = match check_if_its_inside_a_workspace_or_config(gcx.clone(), path).await {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    let path = canonicalize_normalized_path(path.to_path_buf());
+    let worktrees_root = canonicalize_normalized_path(gcx.cache_dir.join("worktrees"));
+    if registered_worktree_roots(gcx.cache_dir.as_path())
+        .iter()
+        .any(|root| root.starts_with(&worktrees_root) && path.starts_with(root))
+    {
+        return Ok(());
+    }
+    Err(outside_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

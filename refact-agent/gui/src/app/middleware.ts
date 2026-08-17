@@ -174,11 +174,20 @@ import {
   makeSurfaceKey,
 } from "../features/Workspace/surfaceKey";
 import {
+  advanceEditPlayer,
   applyLiveFileUpdate,
   clearLiveFileUpdate,
   clearLiveFileUpdatesForChat,
+  type EditPlayerStep,
+  enqueueEditPlayerSteps,
   markLiveFileUpdateAuthoritative,
+  openFileInFilesPanel,
+  seekEditPlayer,
+  selectEditPlayer,
+  setEditPlayerStatus,
 } from "../features/Workspace/FilesPanel/filesPanelSlice";
+import { EDIT_PLAYER_STEP_MS } from "../features/Workspace/FilesPanel/editPlayer";
+import { firstChangedLine } from "../features/Workspace/FilesPanel/liveFileModel";
 import { parentDirectoryPath } from "../features/Workspace/FilesPanel/fileTreeModel";
 import { selectActiveGitRoot } from "../features/Workspace/GitPanel/gitPanelSlice";
 import { gitReadApi } from "../services/refact/gitRead";
@@ -579,6 +588,7 @@ startListening({
 
     const chunksByPath = new Map<string, DiffChunk[]>();
     const authoritativeUpdates: { path: string; revision: string }[] = [];
+    const playerSteps: EditPlayerStep[] = [];
     for (const chunk of diffChunks) {
       const chunks = chunksByPath.get(chunk.file_name) ?? [];
       chunksByPath.set(chunk.file_name, [...chunks, chunk]);
@@ -595,23 +605,6 @@ startListening({
           ? "remove"
           : "write";
       const displayedPath = renameChunk?.file_name_rename ?? path;
-      const fileKey = makeSurfaceKey("file", path);
-      const fileIsOpen =
-        state.workspace.tabs.includes(fileKey) ||
-        Object.values(state.workspace.groups).some((group) =>
-          group ? collectTabIds(group.root).includes(fileKey) : false,
-        );
-      const renamedFileIsOpen =
-        displayedPath !== path &&
-        (state.workspace.tabs.includes(makeSurfaceKey("file", displayedPath)) ||
-          Object.values(state.workspace.groups).some((group) =>
-            group
-              ? collectTabIds(group.root).includes(
-                  makeSurfaceKey("file", displayedPath),
-                )
-              : false,
-          ));
-      if (!fileIsOpen && !renamedFileIsOpen && !liveEdits) continue;
 
       listenerApi.dispatch(
         applyLiveFileUpdate({
@@ -625,6 +618,16 @@ startListening({
           },
         }),
       );
+
+      playerSteps.push({
+        id: `${event.chat_id}:${event.seq}:${displayedPath}`,
+        path: displayedPath,
+        revision: event.seq,
+        line: firstChangedLine(chunks),
+        chunks,
+        operation,
+        renamedTo: renameChunk?.file_name_rename ?? undefined,
+      });
 
       if (liveEdits && operation !== "remove") {
         listenerApi.dispatch(
@@ -680,8 +683,16 @@ startListening({
         }
       }
     }
+    const playbackDriven = liveEdits && playerSteps.length > 0;
+    if (playbackDriven) {
+      listenerApi.dispatch(
+        enqueueEditPlayerSteps({ chatId: event.chat_id, steps: playerSteps }),
+      );
+    }
     if (authoritativeUpdates.length === 0) return;
-    await listenerApi.delay(1_800);
+    await listenerApi.delay(
+      playbackDriven ? EDIT_PLAYER_STEP_MS * playerSteps.length + 1_800 : 1_800,
+    );
     for (const update of authoritativeUpdates) {
       listenerApi.dispatch(
         clearLiveFileUpdate({
@@ -690,6 +701,30 @@ startListening({
           revision: update.revision,
         }),
       );
+    }
+  },
+});
+
+startListening({
+  matcher: isAnyOf(enqueueEditPlayerSteps, setEditPlayerStatus, seekEditPlayer),
+  effect: async (_action, listenerApi) => {
+    listenerApi.cancelActiveListeners();
+    for (;;) {
+      const player = selectEditPlayer(listenerApi.getState());
+      if (player.status !== "playing") return;
+      if (player.index >= player.steps.length) return;
+      const step = player.steps[player.index];
+      if (step.operation !== "remove") {
+        listenerApi.dispatch(
+          openFileInFilesPanel({ path: step.path, line: step.line }),
+        );
+      }
+      const speed = player.speed > 0 ? player.speed : 1;
+      await listenerApi.delay(EDIT_PLAYER_STEP_MS / speed);
+      const current = selectEditPlayer(listenerApi.getState());
+      if (current.status !== "playing" || current.steps[current.index] !== step)
+        return;
+      listenerApi.dispatch(advanceEditPlayer());
     }
   },
 });

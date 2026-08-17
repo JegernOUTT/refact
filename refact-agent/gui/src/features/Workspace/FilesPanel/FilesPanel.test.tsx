@@ -19,6 +19,7 @@ import { FilesPanel } from "./FilesPanel";
 import { FileViewer } from "./FileViewer";
 import {
   applyLiveFileUpdate,
+  enqueueEditPlayerSteps,
   markLiveFileUpdateAuthoritative,
   openFileInFilesPanel,
 } from "./filesPanelSlice";
@@ -579,12 +580,145 @@ describe("FilesPanel", () => {
     expect(breadcrumbs).not.toHaveTextContent("worktrees");
   });
 
+  it("saves an edited file with the loaded mtime as the conflict token", async () => {
+    const writes: unknown[] = [];
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () => HttpResponse.json(readResponse())),
+      http.post("*/v1/files/write", async ({ request }) => {
+        writes.push(await request.json());
+        return HttpResponse.json({ path: filePath, size: 6, mtime_ms: 2 });
+      }),
+    );
+    const view = render(<FileViewer path={filePath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: filePath }));
+
+    await view.user.click(
+      await screen.findByRole("button", { name: "Edit this file" }),
+    );
+    const editor = await screen.findByRole("textbox", {
+      name: /Edit main\.ts/,
+    });
+    fireEvent.change(editor, { target: { value: "edited\n" } });
+    await view.user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(writes).toEqual([
+        { path: filePath, content: "edited\n", expected_mtime_ms: 1 },
+      ]);
+    });
+  });
+
+  it("surfaces a save conflict instead of clobbering the file", async () => {
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () => HttpResponse.json(readResponse())),
+      http.post("*/v1/files/write", () =>
+        HttpResponse.json({ detail: "changed on disk" }, { status: 409 }),
+      ),
+    );
+    const view = render(<FileViewer path={filePath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: filePath }));
+
+    await view.user.click(
+      await screen.findByRole("button", { name: "Edit this file" }),
+    );
+    const editor = await screen.findByRole("textbox", {
+      name: /Edit main\.ts/,
+    });
+    fireEvent.change(editor, { target: { value: "edited\n" } });
+    await view.user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(
+      await screen.findByText(/changed on disk since it was loaded/),
+    ).toBeVisible();
+    expect(screen.getByRole("textbox", { name: /Edit main\.ts/ })).toHaveValue(
+      "edited\n",
+    );
+  });
+
+  it("locks editing while edits are playing back", async () => {
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () => HttpResponse.json(readResponse())),
+    );
+    const view = render(<FileViewer path={filePath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: filePath }));
+    view.store.dispatch(
+      enqueueEditPlayerSteps({
+        chatId: "chat-a",
+        steps: [
+          {
+            id: "step-1",
+            path: filePath,
+            revision: "1",
+            line: 2,
+            chunks: [],
+            operation: "write",
+          },
+        ],
+      }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Edit this file" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Pause edit playback" }),
+    ).toBeVisible();
+  });
+
+  it("collapses removed lines and reveals added lines for the playing step", async () => {
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () => HttpResponse.json(readResponse())),
+    );
+    const view = render(<FileViewer path={filePath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: filePath }));
+    view.store.dispatch(
+      enqueueEditPlayerSteps({
+        chatId: "chat-a",
+        steps: [
+          {
+            id: "step-1",
+            path: filePath,
+            revision: "1",
+            line: 2,
+            chunks: [
+              {
+                file_name: filePath,
+                file_action: "edit",
+                line1: 2,
+                line2: 3,
+                lines_remove: "const second = 0;\n",
+                lines_add: "const second = 2;\n",
+              },
+            ],
+            operation: "write",
+          },
+        ],
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        document.querySelector('[data-live-removed="true"]'),
+      ).toHaveTextContent("const second = 0;");
+    });
+    expect(document.querySelector('[data-live-change="true"]')).toHaveAttribute(
+      "data-line-number",
+      "2",
+    );
+  });
+
   it("shows an honest privacy-blocked state", async () => {
     server.use(
       rootHandler(),
-      http.get(
-        "*/v1/files/read",
-        () => new HttpResponse(null, { status: 403 }),
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(
+          { detail: "Blocked by privacy rules: privacy level Blocked" },
+          { status: 403 },
+        ),
       ),
     );
     const view = render(<FileViewer path={filePath} />);
@@ -595,6 +729,26 @@ describe("FilesPanel", () => {
       screen.getByText("This file is blocked by privacy rules."),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "Retry" })).toBeVisible();
+  });
+
+  it("does not blame privacy for a non-privacy access denial", async () => {
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(
+          { detail: "Path 'x' is outside of project directories:\n[]" },
+          { status: 403 },
+        ),
+      ),
+    );
+    const view = render(<FileViewer path={filePath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: filePath }));
+
+    expect(await screen.findByText("File unavailable")).toBeVisible();
+    expect(
+      screen.queryByText("This file is blocked by privacy rules."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/outside of project directories/)).toBeVisible();
   });
 
   it("shows the truncation banner returned by the backend", async () => {

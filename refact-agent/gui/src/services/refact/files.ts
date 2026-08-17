@@ -39,6 +39,18 @@ export type ReadFileResponse = {
   binary?: boolean;
 };
 
+export type WriteFileRequest = {
+  path: string;
+  content: string;
+  expectedMtimeMs?: number;
+};
+
+export type WriteFileResponse = {
+  path: string;
+  size: number;
+  mtime_ms: number;
+};
+
 export const filesApi = createApi({
   reducerPath: "filesApi",
   tagTypes: ["File", "Tree"],
@@ -82,7 +94,29 @@ export const filesApi = createApi({
         { type: "File", id: request.path },
       ],
     }),
+    writeFile: builder.mutation<WriteFileResponse, WriteFileRequest>({
+      queryFn: async (request, api, _extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildApiUrlFromState(state, "/v1/files/write"),
+          method: "POST",
+          body: {
+            path: request.path,
+            content: request.content,
+            expected_mtime_ms: request.expectedMtimeMs,
+          },
+          credentials: "same-origin",
+          redirect: "follow",
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as WriteFileResponse };
+      },
+      invalidatesTags: (_result, _error, request) => [
+        { type: "File", id: request.path },
+      ],
+    }),
   }),
 });
 
-export const { useGetFilesTreeQuery, useReadFileQuery } = filesApi;
+export const { useGetFilesTreeQuery, useReadFileQuery, useWriteFileMutation } =
+  filesApi;
