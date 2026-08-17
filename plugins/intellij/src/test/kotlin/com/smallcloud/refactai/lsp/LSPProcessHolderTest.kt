@@ -696,25 +696,37 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     }
 
     @Test
-    fun testBackendReadyWaitsForInitialize() {
+    fun testBackendReadyWaitsForInitialize() = withBrowserHost("") {
         val root = createTempDir().canonicalPath
-        val holder = TestLspProcessHolder(mockProject(root), FakeDaemonClient()).apply {
+        val fake = FakeDaemonClient().apply {
+            authToken = "startup token/slash"
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake).apply {
             blockInitialize = true
         }
         LSPProcessHolder.BIN_PATH = "/tmp/refact"
         val future = ApplicationManager.getApplication().executeOnPooledThread {
             holder.ensureStartedBlockingForTest("backend-ready-after-init")
         }
+        val expectedUrl = URI(
+            "http://127.0.0.1:8488/p/project-123/?daemon_token=startup%20token%2Fslash"
+        )
         try {
             assertTrue(holder.initializeEntered.await(2, TimeUnit.SECONDS))
             assertEquals(LSPBackendConnectionStatus.STARTING, holder.backendConnectionStatus())
             assertFalse(holder.backendReady())
+            assertTrue(holder.isWorking)
+            assertNotNull(holder.baseUrlOrNull())
+            assertEquals(expectedUrl, holder.browserUrlOrNull())
+            assertNull(holder.embeddedBrowserUrlOrNull())
 
             holder.releaseInitialize.countDown()
             future.get(3, TimeUnit.SECONDS)
 
             assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
             assertTrue(holder.backendReady())
+            assertEquals(expectedUrl, holder.browserUrlOrNull())
+            assertEquals(expectedUrl, holder.embeddedBrowserUrlOrNull())
         } finally {
             holder.releaseInitialize.countDown()
             holder.dispose()
