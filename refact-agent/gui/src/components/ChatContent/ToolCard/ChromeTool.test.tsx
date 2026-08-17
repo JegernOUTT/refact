@@ -107,9 +107,13 @@ describe("ChromeTool", () => {
 
     await user.click(screen.getByText(/Browser action/i));
 
-    expect(screen.getByText("Artifacts")).toBeInTheDocument();
-    expect(screen.getByText("320×200 · 1234 B")).toBeInTheDocument();
-    const pdf = screen.getByRole("link", { name: /PDF · 4096 B/i });
+    const artifactsTrigger = screen.getByRole("button", {
+      name: "Artifacts — 1 screenshot, 1 PDF",
+    });
+    expect(artifactsTrigger).toHaveAttribute("aria-expanded", "false");
+    await user.click(artifactsTrigger);
+    expect(screen.getByText("320×200 · 1.2 KB")).toBeInTheDocument();
+    const pdf = screen.getByRole("link", { name: /Open PDF page.pdf/i });
     expect(pdf).toHaveAttribute("href", "file:///tmp/refact-browser/page.pdf");
     expect(
       screen.getByText("/tmp/refact-browser/page.pdf"),
@@ -307,7 +311,9 @@ describe("ChromeTool", () => {
     expect(screen.getByText("Locator Handlers")).toBeInTheDocument();
     expect(screen.getByText("Dialogs")).toBeInTheDocument();
     expect(screen.getByText("Uploads")).toBeInTheDocument();
-    expect(screen.getByText("Downloads")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Artifacts — 1 download" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("New Tabs")).toBeInTheDocument();
     expect(screen.getByText("Active Routes")).toBeInTheDocument();
     expect(screen.getByText("Intercepted Requests")).toBeInTheDocument();
@@ -377,9 +383,11 @@ describe("ChromeTool", () => {
     expect(
       screen.getByText((text) => text.includes("/workspace/fixture.txt")),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText((text) => text.includes("browser-fixture.txt · 25 B")),
-    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Artifacts — 1 download" }),
+    );
+    expect(screen.getByText("browser-fixture.txt")).toBeInTheDocument();
+    expect(screen.getByText("25 B")).toBeInTheDocument();
     expect(
       screen.getByText((text) => text.includes("/runtime/download-guid")),
     ).toBeInTheDocument();

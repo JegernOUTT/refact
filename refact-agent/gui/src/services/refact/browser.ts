@@ -260,6 +260,8 @@ export type BrowserUploadInfo = {
   in_memory_payloads: boolean;
 };
 
+export type BrowserDownloadState = "in_progress" | "completed" | "canceled";
+
 export type BrowserDownloadInfo = {
   guid: string;
   url: string;
@@ -268,7 +270,7 @@ export type BrowserDownloadInfo = {
   local_path: string;
   received_bytes: number;
   total_bytes: number;
-  state: "in_progress" | "completed" | "canceled";
+  state: BrowserDownloadState;
 };
 
 export type LocatorHandlerFiring = {

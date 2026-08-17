@@ -13,13 +13,13 @@ import type {
   BrowserAssertionResult,
   BrowserAriaSnapshot,
   BrowserAriaSnapshotNode,
-  BrowserArtifact,
   BrowserExecutionStep,
 } from "../../../services/refact/browser";
 import { ShikiCodeBlock } from "../../Markdown";
 import { DialogImage } from "../../DialogImage";
 import { AriaSnapshotView } from "./AriaSnapshotView";
 import { ActionabilityLog } from "./ActionabilityLog";
+import { ArtifactsPanel } from "./ArtifactsPanel";
 import { NetworkPanel } from "./NetworkPanel";
 import styles from "./ChromeTool.module.css";
 
@@ -219,51 +219,9 @@ function parseAssertionResult(value: unknown): BrowserAssertionResult | null {
   };
 }
 
-function parseBrowserArtifact(value: unknown): BrowserArtifact | null {
-  if (!isRecord(value) || !isRecord(value.artifact)) return null;
-  const artifact = value.artifact;
-  if (
-    artifact.kind === "image" &&
-    typeof artifact.mime === "string" &&
-    artifact.mime.startsWith("image/") &&
-    typeof artifact.data === "string" &&
-    artifact.data !== "<omitted>" &&
-    typeof artifact.width === "number" &&
-    typeof artifact.height === "number" &&
-    typeof artifact.bytes === "number"
-  ) {
-    return {
-      kind: "image",
-      mime: artifact.mime,
-      data: artifact.data,
-      width: artifact.width,
-      height: artifact.height,
-      bytes: artifact.bytes,
-    };
-  }
-  if (
-    artifact.kind === "pdf" &&
-    artifact.mime === "application/pdf" &&
-    typeof artifact.path === "string" &&
-    typeof artifact.bytes === "number" &&
-    (artifact.data === undefined ||
-      artifact.data === null ||
-      typeof artifact.data === "string")
-  ) {
-    return {
-      kind: "pdf",
-      mime: "application/pdf",
-      path: artifact.path,
-      bytes: artifact.bytes,
-      data: artifact.data,
-    };
-  }
-  return null;
-}
-
 function renderAssertionValue(value: unknown): string {
   if (typeof value === "string") return value;
-  return JSON.stringify(value, null, 2) ?? "null";
+  return JSON.stringify(value, null, 2);
 }
 
 function summarizeStep(step: BrowserExecutionStep): string {
@@ -474,9 +432,13 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     if (!typedArgs) return null;
     return JSON.stringify(
       typedArgs,
-      function (key, value) {
+      function (
+        this: Record<string, unknown>,
+        key: string,
+        value: unknown,
+      ): unknown {
         if (key === "password") return "[REDACTED]";
-        if (key === "value" && typeof this?.name === "string") {
+        if (key === "value" && typeof this.name === "string") {
           return "[REDACTED]";
         }
         return value;
@@ -544,8 +506,8 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
   const typedArtifacts = useMemo(() => {
     if (!typedResult) return [];
     return typedResult.steps.flatMap((step) => {
-      const artifact = parseBrowserArtifact(step.data);
-      return artifact ? [{ stepIndex: step.step_index, artifact }] : [];
+      const data: unknown = step.data;
+      return isRecord(data) && isRecord(data.artifact) ? [data] : [];
     });
   }, [typedResult]);
 
@@ -571,16 +533,6 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         const paths = upload.paths.join(", ");
         const payload = upload.in_memory_payloads ? "in-memory" : "host paths";
         return `${upload.source}: ${paths} (${payload})`;
-      })
-      .join("\n");
-  }, [typedResult]);
-
-  const typedDownloadsBlock = useMemo(() => {
-    if (!typedResult?.downloads?.length) return null;
-    return typedResult.downloads
-      .map((download) => {
-        const size = download.received_bytes || download.total_bytes;
-        return `${download.state}: ${download.suggested_filename} · ${size} B\n  ${download.url}\n  ${download.local_path}`;
       })
       .join("\n");
   }, [typedResult]);
@@ -659,13 +611,18 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
   const reportScreenshot = typedResult?.screenshot
     ? `data:${typedResult.screenshot.mime};base64,${typedResult.screenshot.data}`
     : null;
+  const hasImageArtifact = typedArtifacts.some(
+    (data) => isRecord(data.artifact) && data.artifact.kind === "image",
+  );
+  const hasArtifacts =
+    typedArtifacts.length > 0 || (typedResult?.downloads?.length ?? 0) > 0;
 
   const icon =
     images.length > 0 ||
-    typedResult?.screenshot ||
-    typedArtifacts.some(({ artifact }) => artifact.kind === "image") ? (
+    Boolean(typedResult?.screenshot) ||
+    hasImageArtifact ? (
       <Image />
-    ) : typedArtifacts.length > 0 ? (
+    ) : hasArtifacts ? (
       <FileText />
     ) : (
       <Monitor />
@@ -705,45 +662,10 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         </Flex>
       )}
 
-      {typedArtifacts.length > 0 && (
-        <Box className={styles.section}>
-          <Box className={styles.sectionLabel}>Artifacts</Box>
-          <Flex className={styles.artifactList} wrap="wrap">
-            {typedArtifacts.map(({ stepIndex, artifact }) =>
-              artifact.kind === "image" ? (
-                <Box key={`image-${stepIndex}`} className={styles.artifactItem}>
-                  <DialogImage
-                    src={`data:${artifact.mime};base64,${artifact.data}`}
-                    fallback=""
-                    size="8"
-                  />
-                  <Box className={styles.artifactMeta}>
-                    {artifact.width}×{artifact.height} · {artifact.bytes} B
-                  </Box>
-                </Box>
-              ) : (
-                <a
-                  key={`pdf-${stepIndex}`}
-                  className={styles.artifactLink}
-                  href={
-                    artifact.data
-                      ? `data:${artifact.mime};base64,${artifact.data}`
-                      : `file://${artifact.path}`
-                  }
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  <FileText aria-hidden="true" />
-                  <span>
-                    PDF · {artifact.bytes} B
-                    <span className={styles.artifactPath}>{artifact.path}</span>
-                  </span>
-                </a>
-              ),
-            )}
-          </Flex>
-        </Box>
-      )}
+      <ArtifactsPanel
+        artifacts={typedArtifacts}
+        downloads={typedResult?.downloads}
+      />
 
       {typedResultsBlock && (
         <Box className={styles.section}>
@@ -948,17 +870,6 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
           <Box className={styles.logContent}>
             <ShikiCodeBlock showLineNumbers={false}>
               {typedUploadsBlock}
-            </ShikiCodeBlock>
-          </Box>
-        </Box>
-      )}
-
-      {typedDownloadsBlock && (
-        <Box className={styles.section}>
-          <Box className={styles.sectionLabel}>Downloads</Box>
-          <Box className={styles.logContent}>
-            <ShikiCodeBlock showLineNumbers={false}>
-              {typedDownloadsBlock}
             </ShikiCodeBlock>
           </Box>
         </Box>

@@ -1,0 +1,105 @@
+.section {
+  composes: section from "./ToolCardBody.module.css";
+}
+
+.panel,
+.group,
+.rowContent {
+  min-width: 0;
+}
+
+.group {
+  display: grid;
+  gap: var(--rf-space-2);
+}
+
+.groupTitle {
+  color: var(--rf-color-muted);
+  text-transform: uppercase;
+}
+
+.screenshotGrid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, var(--rf-overlay-popover-min)), 1fr)
+  );
+  gap: var(--rf-space-2);
+}
+
+.screenshot {
+  display: grid;
+  min-width: 0;
+  justify-items: start;
+  gap: var(--rf-space-1);
+}
+
+.meta {
+  min-width: 0;
+  color: var(--rf-color-muted);
+}
+
+.rows {
+  display: grid;
+  min-width: 0;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
+  border-block-end: var(--rf-hairline) solid var(--rf-border);
+}
+
+.row:last-child {
+  border-block-end: 0;
+}
+
+.row[data-status="error"] {
+  padding-inline-start: var(--rf-space-2);
+  background: var(--rf-surface-1);
+  border-inline-start: calc(var(--rf-hairline) * 2) solid var(--rf-color-danger);
+}
+
+.rowContent {
+  display: grid;
+  gap: var(--rf-space-1);
+}
+
+.primaryLink,
+.url,
+.path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+
+.primaryLink {
+  color: var(--rf-color-fg);
+}
+
+.url {
+  overflow: hidden;
+  color: var(--rf-color-accent);
+  font-size: var(--rf-text-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.path {
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+}
+
+.primaryLink:hover,
+.url:hover,
+.path:hover {
+  text-decoration: underline;
+}
