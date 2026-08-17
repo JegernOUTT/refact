@@ -297,6 +297,7 @@ fn report(findings: Vec<ReviewFinding>, checks_performed: Vec<&str>) -> ReviewRe
         findings,
         checks_performed: checks_performed.into_iter().map(str::to_string).collect(),
         summary: String::new(),
+        pipeline: Default::default(),
     }
 }
 

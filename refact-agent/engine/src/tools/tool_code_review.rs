@@ -7,12 +7,17 @@ use std::collections::HashMap;
 
 use crate::subchat::{run_subchat_once_with_parent, resolve_subchat_params, resolve_subchat_model};
 use crate::tools::code_review_candidates::{parse_candidates_with_reasons, ParsedCandidates};
-use crate::tools::code_review_evidence::{collect_command_evidence, collect_evidence};
+use crate::tools::code_review_evidence::{
+    apply_command_evidence, collect_evidence, collect_mechanical_results,
+};
 use crate::tools::code_review_rank::finalize_review_report;
 use crate::tools::code_review_scope::{
     build_review_scope_with_max_files, validate_review_budget, ReviewScope,
 };
-use crate::tools::code_review_types::{ReviewFinding, ReviewReport, ReviewScopeSummary, ReviewSeverity};
+use crate::tools::code_review_types::{
+    MechanicalResult, ReviewFinding, ReviewPipelineMetadata, ReviewReport, ReviewScopeSummary,
+    ReviewSeverity, ReviewStage, ReviewStageStatus,
+};
 use crate::tools::code_review_verify::{verification_status_label, verify_review_report};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::tools::tool_helpers::{load_code_subagent_config, CodeSubagentConfig};
@@ -57,6 +62,83 @@ impl CandidateStageOutput {
         let Self { report, rationales } = self;
         drop(rationales);
         report
+    }
+}
+
+fn candidate_stage_if_allowed<T>(
+    mechanical: Option<&MechanicalResult>,
+    generate: impl FnOnce() -> T,
+) -> Option<T> {
+    mechanical.is_none_or(|result| result.passed).then(generate)
+}
+
+fn review_stage(name: &str, status: ReviewStageStatus, reason: Option<&str>) -> ReviewStage {
+    ReviewStage {
+        name: name.to_string(),
+        status,
+        reason: reason.map(str::to_string),
+    }
+}
+
+fn mechanical_failure_output(
+    scope: ReviewScopeSummary,
+    mechanical: MechanicalResult,
+) -> CandidateStageOutput {
+    let failed_names = mechanical
+        .checks
+        .iter()
+        .filter(|check| check.exit_status != 0)
+        .map(|check| check.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut report = ReviewReport {
+        scope,
+        findings: vec![],
+        checks_performed: vec![],
+        summary: format!(
+            "Mechanical checks failed ({failed_names}); LLM candidate generation was skipped."
+        ),
+        pipeline: ReviewPipelineMetadata {
+            stages: vec![
+                review_stage(
+                    "mechanical",
+                    ReviewStageStatus::Failed,
+                    Some("one_or_more_checks_failed"),
+                ),
+                review_stage(
+                    "candidates",
+                    ReviewStageStatus::Skipped,
+                    Some("mechanical_checks_failed"),
+                ),
+                review_stage(
+                    "deterministic_evidence",
+                    ReviewStageStatus::Skipped,
+                    Some("pipeline_stopped"),
+                ),
+                review_stage(
+                    "command_evidence",
+                    ReviewStageStatus::Skipped,
+                    Some("pipeline_stopped"),
+                ),
+                review_stage(
+                    "blind_verification",
+                    ReviewStageStatus::Skipped,
+                    Some("pipeline_stopped"),
+                ),
+                review_stage(
+                    "ranking",
+                    ReviewStageStatus::Skipped,
+                    Some("pipeline_stopped"),
+                ),
+            ],
+            stopped_reason: Some("mechanical_checks_failed".to_string()),
+            mechanical: Some(mechanical.clone()),
+        },
+    };
+    apply_command_evidence(&mut report, Some(&mechanical));
+    CandidateStageOutput {
+        report,
+        rationales: vec![],
     }
 }
 
@@ -202,7 +284,7 @@ async fn run_review_pipeline(
     config: &CodeSubagentConfig,
     metering: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<CandidateStageOutput, String> {
-    let (subchat_tx, abort_flag, parent_depth, parent_task_meta, parent_worktree) = {
+    let (subchat_tx, abort_flag, parent_depth, parent_task_meta, parent_worktree, chat_id) = {
         let ccx_lock = ccx.lock().await;
         (
             ccx_lock.subchat_tx.clone(),
@@ -210,129 +292,154 @@ async fn run_review_pipeline(
             ccx_lock.subchat_depth,
             ccx_lock.task_meta.clone(),
             ccx_lock.execution_scope_worktree(),
-        )
-    };
-
-    let prompt = make_review_prompt(
-        gcx.clone(),
-        &subchat_params,
-        &scope,
-        &external_messages,
-        config,
-    )
-    .await?;
-
-    let history: Vec<ChatMessage> = vec![ChatMessage::new("user".to_string(), prompt)];
-
-    let result = run_subchat_once_with_parent(
-        gcx.clone(),
-        "code_review",
-        history,
-        tool_call_id.clone(),
-        subchat_tx.clone(),
-        abort_flag.clone(),
-        parent_depth,
-        parent_task_meta.clone(),
-        parent_worktree.clone(),
-    )
-    .await?;
-    let review_text = get_last_assistant_content(&result.messages);
-
-    let (parsed, fallback_text) = match parse_candidates_with_reasons(&review_text) {
-        Ok(parsed) => {
-            *metering = result.metering;
-            (Some(parsed), review_text)
-        }
-        Err(first_error) => {
-            tracing::info!(
-                "code_review: candidate response malformed ({first_error}), requesting retry"
-            );
-            *metering = result.metering;
-            let mut retry_messages = result.messages;
-            retry_messages.push(ChatMessage::new(
-                "user".to_string(),
-                CANDIDATE_RETRY_PROMPT.to_string(),
-            ));
-            match run_subchat_once_with_parent(
-                gcx.clone(),
-                "code_review",
-                retry_messages,
-                tool_call_id.clone(),
-                subchat_tx,
-                abort_flag,
-                parent_depth,
-                parent_task_meta,
-                parent_worktree,
-            )
-            .await
-            {
-                Ok(retry_result) => {
-                    let retry_text = get_last_assistant_content(&retry_result.messages);
-                    *metering = retry_result.metering;
-                    match parse_candidates_with_reasons(&retry_text) {
-                        Ok(parsed) => (Some(parsed), retry_text),
-                        Err(second_error) => {
-                            tracing::warn!(
-                                "code_review: candidate response malformed after retry: {second_error}"
-                            );
-                            (None, retry_text)
-                        }
-                    }
-                }
-                Err(retry_error) => {
-                    tracing::warn!(
-                        "code_review: candidate format retry failed, using legacy response: {retry_error}"
-                    );
-                    (None, review_text)
-                }
-            }
-        }
-    };
-
-    let filenames: Vec<String> = scope
-        .files
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-
-    let max_candidates = scope.budgets.max_candidates;
-    let scope_summary = ReviewScopeSummary {
-        files_reviewed: filenames,
-        focus: scope.focus.clone(),
-        diff_base: scope.diff_base.clone(),
-    };
-
-    let output = match parsed {
-        Some(parsed) => candidate_stage_output(scope_summary, parsed, max_candidates),
-        None => fallback_candidate_stage_output(scope_summary, fallback_text),
-    };
-    let output = apply_evidence_stage(gcx.clone(), &scope, output).await;
-    let mut report = output.into_report();
-    let (chat_id, worktree_root) = {
-        let ccx_lock = ccx.lock().await;
-        (
             ccx_lock.chat_id.clone(),
-            ccx_lock
-                .execution_scope_worktree()
-                .map(|worktree| worktree.root),
         )
     };
-    let workspace_root = match worktree_root {
-        Some(root) => Some(root),
+
+    let workspace_root = match parent_worktree.as_ref() {
+        Some(worktree) => Some(worktree.root.clone()),
         None => crate::files_correction::get_project_dirs(gcx.clone())
             .await
             .into_iter()
             .next(),
     };
     let chat_mode = chat_mode_for_exec(gcx.clone(), &chat_id).await;
-    collect_command_evidence(
-        gcx.clone(),
-        workspace_root,
-        chat_mode,
-        &chat_id,
-        &mut report,
-    )
-    .await;
+    let mechanical =
+        collect_mechanical_results(gcx.clone(), workspace_root, chat_mode, &chat_id).await;
+
+    let filenames: Vec<String> = scope
+        .files
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let scope_summary = ReviewScopeSummary {
+        files_reviewed: filenames,
+        focus: scope.focus.clone(),
+        diff_base: scope.diff_base.clone(),
+    };
+    let Some(candidate_stage) = candidate_stage_if_allowed(mechanical.as_ref(), || async {
+        let prompt = make_review_prompt(
+            gcx.clone(),
+            &subchat_params,
+            &scope,
+            &external_messages,
+            config,
+        )
+        .await?;
+
+        let history: Vec<ChatMessage> = vec![ChatMessage::new("user".to_string(), prompt)];
+
+        let result = run_subchat_once_with_parent(
+            gcx.clone(),
+            "code_review",
+            history,
+            tool_call_id.clone(),
+            subchat_tx.clone(),
+            abort_flag.clone(),
+            parent_depth,
+            parent_task_meta.clone(),
+            parent_worktree.clone(),
+        )
+        .await?;
+        let review_text = get_last_assistant_content(&result.messages);
+
+        let (parsed, fallback_text) = match parse_candidates_with_reasons(&review_text) {
+            Ok(parsed) => {
+                *metering = result.metering;
+                (Some(parsed), review_text)
+            }
+            Err(first_error) => {
+                tracing::info!(
+                    "code_review: candidate response malformed ({first_error}), requesting retry"
+                );
+                *metering = result.metering;
+                let mut retry_messages = result.messages;
+                retry_messages.push(ChatMessage::new(
+                    "user".to_string(),
+                    CANDIDATE_RETRY_PROMPT.to_string(),
+                ));
+                match run_subchat_once_with_parent(
+                    gcx.clone(),
+                    "code_review",
+                    retry_messages,
+                    tool_call_id.clone(),
+                    subchat_tx,
+                    abort_flag,
+                    parent_depth,
+                    parent_task_meta,
+                    parent_worktree,
+                )
+                .await
+                {
+                    Ok(retry_result) => {
+                        let retry_text = get_last_assistant_content(&retry_result.messages);
+                        *metering = retry_result.metering;
+                        match parse_candidates_with_reasons(&retry_text) {
+                            Ok(parsed) => (Some(parsed), retry_text),
+                            Err(second_error) => {
+                                tracing::warn!(
+                                    "code_review: candidate response malformed after retry: {second_error}"
+                                );
+                                (None, retry_text)
+                            }
+                        }
+                    }
+                    Err(retry_error) => {
+                        tracing::warn!(
+                            "code_review: candidate format retry failed, using legacy response: {retry_error}"
+                        );
+                        (None, review_text)
+                    }
+                }
+            }
+        };
+
+        let max_candidates = scope.budgets.max_candidates;
+        Ok::<CandidateStageOutput, String>(match parsed {
+            Some(parsed) => candidate_stage_output(scope_summary.clone(), parsed, max_candidates),
+            None => fallback_candidate_stage_output(scope_summary.clone(), fallback_text),
+        })
+    }) else {
+        return Ok(mechanical_failure_output(
+            scope_summary,
+            mechanical.expect("failed mechanical result is present"),
+        ));
+    };
+
+    let output = candidate_stage.await?;
+    let output = apply_evidence_stage(gcx.clone(), &scope, output).await;
+    let mut report = output.into_report();
+    apply_command_evidence(&mut report, mechanical.as_ref());
+    report.pipeline = ReviewPipelineMetadata {
+        stages: vec![
+            match mechanical.as_ref() {
+                Some(_) => review_stage("mechanical", ReviewStageStatus::Completed, None),
+                None => review_stage(
+                    "mechanical",
+                    ReviewStageStatus::Skipped,
+                    Some("review_commands_disabled"),
+                ),
+            },
+            review_stage("candidates", ReviewStageStatus::Completed, None),
+            review_stage("deterministic_evidence", ReviewStageStatus::Completed, None),
+            match mechanical.as_ref() {
+                Some(_) => review_stage(
+                    "command_evidence",
+                    ReviewStageStatus::Completed,
+                    Some("reused_mechanical_results"),
+                ),
+                None => review_stage(
+                    "command_evidence",
+                    ReviewStageStatus::Skipped,
+                    Some("review_commands_disabled"),
+                ),
+            },
+            review_stage("blind_verification", ReviewStageStatus::Completed, None),
+            review_stage("ranking", ReviewStageStatus::Completed, None),
+        ],
+        stopped_reason: None,
+        mechanical,
+    };
     verify_review_report(gcx, ccx, tool_call_id, &mut report, metering).await;
     finalize_review_report(&mut report);
     Ok(CandidateStageOutput {
@@ -391,6 +498,7 @@ fn candidate_stage_output(
             findings,
             checks_performed: vec![],
             summary: parsed.summary,
+            pipeline: Default::default(),
         },
         rationales,
     }
@@ -406,6 +514,7 @@ fn fallback_candidate_stage_output(
             findings: vec![],
             checks_performed: vec!["candidates_parse_failed".to_string()],
             summary: reviewer_text,
+            pipeline: Default::default(),
         },
         rationales: vec![],
     }
@@ -700,6 +809,8 @@ mod tests {
     use super::*;
     use crate::tools::code_review_candidates::parse_candidates_with_reasons;
     use crate::tools::code_review_scope::ReviewBudgets;
+    use crate::tools::code_review_types::MechanicalCheck;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn scope_summary() -> ReviewScopeSummary {
         ReviewScopeSummary {
@@ -707,6 +818,79 @@ mod tests {
             focus: None,
             diff_base: None,
         }
+    }
+
+    fn mechanical_result(passed: bool, exit_status: i32, output: &str) -> MechanicalResult {
+        MechanicalResult {
+            passed,
+            checks: vec![MechanicalCheck {
+                name: "cargo check".to_string(),
+                command: vec!["cargo".to_string(), "check".to_string()],
+                exit_status,
+                output_excerpt: output.to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn tool_code_review_disabled_mechanical_stage_runs_candidates() {
+        let invocations = AtomicUsize::new(0);
+
+        let generated = candidate_stage_if_allowed(None, || {
+            invocations.fetch_add(1, Ordering::Relaxed);
+            "candidate output"
+        });
+
+        assert_eq!(generated, Some("candidate output"));
+        assert_eq!(invocations.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn tool_code_review_passing_mechanical_stage_runs_candidates() {
+        let invocations = AtomicUsize::new(0);
+        let mechanical = mechanical_result(true, 0, "Finished");
+
+        let generated = candidate_stage_if_allowed(Some(&mechanical), || {
+            invocations.fetch_add(1, Ordering::Relaxed);
+            "candidate output"
+        });
+
+        assert_eq!(generated, Some("candidate output"));
+        assert_eq!(invocations.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn tool_code_review_failing_mechanical_stage_skips_candidates_and_reports_excerpt() {
+        let invocations = AtomicUsize::new(0);
+        let mechanical = mechanical_result(false, 101, "error[E0308]: mismatched types");
+
+        let generated = candidate_stage_if_allowed(Some(&mechanical), || {
+            invocations.fetch_add(1, Ordering::Relaxed);
+            "candidate output"
+        });
+        let output = mechanical_failure_output(scope_summary(), mechanical);
+
+        assert_eq!(generated, None);
+        assert_eq!(invocations.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            output.report.pipeline.stopped_reason.as_deref(),
+            Some("mechanical_checks_failed")
+        );
+        assert_eq!(
+            output.report.pipeline.stages[1],
+            review_stage(
+                "candidates",
+                ReviewStageStatus::Skipped,
+                Some("mechanical_checks_failed")
+            )
+        );
+        let check = &output.report.pipeline.mechanical.as_ref().unwrap().checks[0];
+        assert_eq!(check.exit_status, 101);
+        assert_eq!(check.output_excerpt, "error[E0308]: mismatched types");
+        assert_eq!(
+            output.report.checks_performed,
+            ["command:cargo_check:exit=101"]
+        );
     }
 
     #[test]
@@ -762,6 +946,7 @@ mod tests {
             }],
             checks_performed: vec!["excerpt_ok".to_string()],
             summary: "One plausible issue.".to_string(),
+            pipeline: Default::default(),
         };
 
         let markdown = render_review_markdown(&report).unwrap();
@@ -783,6 +968,7 @@ mod tests {
             findings: vec![],
             checks_performed: vec!["verifier_rejected:2".to_string()],
             summary: "No surviving findings.".to_string(),
+            pipeline: Default::default(),
         };
         finalize_review_report(&mut report);
 

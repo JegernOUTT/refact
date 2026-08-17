@@ -60,6 +60,46 @@ pub struct ReviewScopeSummary {
     pub diff_base: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MechanicalCheck {
+    pub name: String,
+    pub command: Vec<String>,
+    pub exit_status: i32,
+    pub output_excerpt: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MechanicalResult {
+    pub passed: bool,
+    pub checks: Vec<MechanicalCheck>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStageStatus {
+    Skipped,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewStage {
+    pub name: String,
+    pub status: ReviewStageStatus,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewPipelineMetadata {
+    pub stages: Vec<ReviewStage>,
+    pub stopped_reason: Option<String>,
+    pub mechanical: Option<MechanicalResult>,
+}
+
 /// Structured result of the code review pipeline.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +108,8 @@ pub struct ReviewReport {
     pub findings: Vec<ReviewFinding>,
     pub checks_performed: Vec<String>,
     pub summary: String,
+    #[serde(default)]
+    pub pipeline: ReviewPipelineMetadata,
 }
 
 #[cfg(test)]
@@ -124,6 +166,23 @@ mod tests {
                 .collect(),
             checks_performed: vec!["cargo check".to_string()],
             summary: "Review summary".to_string(),
+            pipeline: ReviewPipelineMetadata {
+                stages: vec![ReviewStage {
+                    name: "mechanical".to_string(),
+                    status: ReviewStageStatus::Completed,
+                    reason: None,
+                }],
+                stopped_reason: None,
+                mechanical: Some(MechanicalResult {
+                    passed: true,
+                    checks: vec![MechanicalCheck {
+                        name: "cargo check".to_string(),
+                        command: vec!["cargo".to_string(), "check".to_string()],
+                        exit_status: 0,
+                        output_excerpt: "Finished".to_string(),
+                    }],
+                }),
+            },
         };
 
         let value = serde_json::to_value(&report).unwrap();
@@ -138,6 +197,11 @@ mod tests {
         assert_eq!(
             value["findings"][4]["verification_status"],
             "needs_human_validation"
+        );
+        assert_eq!(value["pipeline"]["stages"][0]["status"], "completed");
+        assert_eq!(
+            value["pipeline"]["mechanical"]["checks"][0]["exit_status"],
+            0
         );
         assert_eq!(
             serde_json::from_value::<ReviewReport>(value).unwrap(),

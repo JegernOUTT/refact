@@ -544,6 +544,7 @@ mod tests {
             findings,
             checks_performed: vec![],
             summary: "Candidates".to_string(),
+            pipeline: Default::default(),
         }
     }
 

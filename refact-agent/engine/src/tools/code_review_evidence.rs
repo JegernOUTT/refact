@@ -10,7 +10,9 @@ use crate::exec::{ExecOutputStream, ExecStatus};
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::{GlobalContext, ReviewCommandConfig};
 use crate::tools::code_review_scope::ReviewScope;
-use crate::tools::code_review_types::{ReviewEvidence, ReviewFinding, ReviewReport, ReviewSeverity};
+use crate::tools::code_review_types::{
+    MechanicalCheck, MechanicalResult, ReviewEvidence, ReviewFinding, ReviewReport, ReviewSeverity,
+};
 
 const EXCERPT_CONTEXT_LINES: u32 = 5;
 const MAX_EXCERPT_BYTES: usize = 1024;
@@ -21,6 +23,7 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 1536;
 const COMMAND_TRANSCRIPT_BYTES: usize = 64 * 1024;
 const COMMAND_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const TRUNCATION_MARKER: &str = "\n[evidence truncated]";
+const MECHANICAL_EXECUTION_FAILED: i32 = -1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceRejection {
@@ -249,12 +252,19 @@ pub async fn collect_command_evidence(
     chat_id: &str,
     report: &mut ReviewReport,
 ) {
+    let mechanical = collect_mechanical_results(gcx, workspace_root, chat_mode, chat_id).await;
+    apply_command_evidence(report, mechanical.as_ref());
+}
+
+pub async fn collect_mechanical_results(
+    gcx: Arc<GlobalContext>,
+    workspace_root: Option<PathBuf>,
+    chat_mode: Option<ChatMode>,
+    chat_id: &str,
+) -> Option<MechanicalResult> {
     let config = gcx.review_commands_config.clone();
     if !config.enabled {
-        report
-            .checks_performed
-            .push("commands_disabled".to_string());
-        return;
+        return None;
     }
     let commands = config
         .allowlist
@@ -262,22 +272,27 @@ pub async fn collect_command_evidence(
         .take(config.max_commands_per_review)
         .collect::<Vec<_>>();
     if commands.is_empty() {
-        report
-            .checks_performed
-            .push("commands_skipped:no_allowlisted_commands".to_string());
-        return;
+        return Some(MechanicalResult {
+            passed: true,
+            checks: vec![],
+        });
     }
     let Some(workspace_root) = workspace_root else {
-        for command in commands {
-            report.checks_performed.push(format!(
-                "command_skipped:{}:workspace_unavailable",
-                marker_atom(&command.name)
-            ));
-        }
-        return;
+        return Some(MechanicalResult {
+            passed: false,
+            checks: commands
+                .into_iter()
+                .map(|command| MechanicalCheck {
+                    name: command.name.clone(),
+                    command: command.argv.clone(),
+                    exit_status: MECHANICAL_EXECUTION_FAILED,
+                    output_excerpt: "workspace_unavailable".to_string(),
+                })
+                .collect(),
+        });
     };
+    let mut checks = Vec::with_capacity(commands.len());
     for command in commands {
-        let command_name = marker_atom(&command.name);
         match run_review_command(
             gcx.clone(),
             command,
@@ -287,36 +302,69 @@ pub async fn collect_command_evidence(
         )
         .await
         {
-            Ok((exit_code, output)) => {
-                report
-                    .checks_performed
-                    .push(format!("command:{command_name}:exit={exit_code}"));
-                let content = format!(
-                    "command: {}\nexit_code: {exit_code}\noutput:\n{output}",
-                    command.name
-                );
-                for finding in &mut report.findings {
-                    if matches!(
-                        finding.severity,
-                        ReviewSeverity::High | ReviewSeverity::Critical
-                    ) {
-                        finding.evidence.push(ReviewEvidence {
-                            kind: "check".to_string(),
-                            path: None,
-                            line1: None,
-                            line2: None,
-                            content: content.clone(),
-                        });
-                        finding
-                            .checks_performed
-                            .push(format!("command:{command_name}:exit={exit_code}"));
-                    }
-                }
-            }
-            Err(reason) => report.checks_performed.push(format!(
+            Ok((exit_code, output)) => checks.push(MechanicalCheck {
+                name: command.name.clone(),
+                command: command.argv.clone(),
+                exit_status: exit_code,
+                output_excerpt: output,
+            }),
+            Err(reason) => checks.push(MechanicalCheck {
+                name: command.name.clone(),
+                command: command.argv.clone(),
+                exit_status: MECHANICAL_EXECUTION_FAILED,
+                output_excerpt: marker_atom(&reason),
+            }),
+        }
+    }
+    Some(MechanicalResult {
+        passed: checks.iter().all(|check| check.exit_status == 0),
+        checks,
+    })
+}
+
+pub fn apply_command_evidence(report: &mut ReviewReport, mechanical: Option<&MechanicalResult>) {
+    let Some(mechanical) = mechanical else {
+        report
+            .checks_performed
+            .push("commands_disabled".to_string());
+        return;
+    };
+    if mechanical.checks.is_empty() {
+        report
+            .checks_performed
+            .push("commands_skipped:no_allowlisted_commands".to_string());
+        return;
+    }
+    for check in &mechanical.checks {
+        let command_name = marker_atom(&check.name);
+        if check.exit_status == MECHANICAL_EXECUTION_FAILED {
+            report.checks_performed.push(format!(
                 "command_skipped:{command_name}:{}",
-                marker_atom(&reason)
-            )),
+                marker_atom(&check.output_excerpt)
+            ));
+            continue;
+        }
+        let exit_code = check.exit_status;
+        let check_name = format!("command:{command_name}:exit={exit_code}");
+        report.checks_performed.push(check_name.clone());
+        let content = format!(
+            "command: {}\nexit_code: {exit_code}\noutput:\n{}",
+            check.name, check.output_excerpt
+        );
+        for finding in &mut report.findings {
+            if matches!(
+                finding.severity,
+                ReviewSeverity::High | ReviewSeverity::Critical
+            ) {
+                finding.evidence.push(ReviewEvidence {
+                    kind: "check".to_string(),
+                    path: None,
+                    line1: None,
+                    line2: None,
+                    content: content.clone(),
+                });
+                finding.checks_performed.push(check_name.clone());
+            }
         }
     }
 }
@@ -701,6 +749,7 @@ mod tests {
             ],
             checks_performed: vec![],
             summary: "Review".to_string(),
+            pipeline: Default::default(),
         }
     }
 
@@ -928,6 +977,29 @@ mod tests {
             request.request.audit.unwrap().source,
             ExecSource::ReviewEvidence.audit_source()
         );
+    }
+
+    #[tokio::test]
+    async fn tool_code_review_mechanical_policy_rejects_non_argv_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = gcx_for(temp.path()).await;
+
+        let error = build_exec_request(
+            gcx,
+            CommandPolicyInput {
+                source: ExecSource::ReviewEvidence,
+                command: CommandKind::Shell("cargo test; rm -rf workspace"),
+                cwd: Some(temp.path().to_path_buf()),
+                env: HashMap::new(),
+                chat_mode: None,
+                escalation: None,
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+
+        assert_eq!(error.message, "Review evidence commands require argv");
     }
 
     #[tokio::test]

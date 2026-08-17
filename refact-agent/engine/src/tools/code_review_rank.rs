@@ -236,6 +236,7 @@ mod tests {
             findings,
             checks_performed: vec![],
             summary: String::new(),
+            pipeline: Default::default(),
         }
     }
 
