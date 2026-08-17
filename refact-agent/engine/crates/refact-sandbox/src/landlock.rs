@@ -67,6 +67,7 @@ impl SandboxProvider for LandlockProvider {
     ) -> Result<(String, Vec<String>), SandboxError> {
         #[cfg(target_os = "linux")]
         {
+            ensure_supported_spec(spec)?;
             let current_exe = std::env::current_exe().map_err(|error| {
                 SandboxError::new(
                     self.name(),
@@ -131,6 +132,7 @@ fn apply_landlock(spec: &ExecSandboxSpec) -> Result<Enforcement, SandboxError> {
     };
 
     let provider = "landlock";
+    ensure_supported_spec(spec)?;
     let abi = ABI::V9;
     let access_all = AccessFs::from_all(abi);
     let access_read = AccessFs::from_read(abi);
@@ -149,6 +151,8 @@ fn apply_landlock(spec: &ExecSandboxSpec) -> Result<Enforcement, SandboxError> {
             .add_rules(path_beneath_rules(&spec.rw_paths, access_all))
             .map_err(|error| SandboxError::new(provider, error.to_string()))?;
     }
+    // landlock 0.4.7 RulesetCreated::restrict_self calls try_set_no_new_privs before
+    // landlock_restrict_self, which uses prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0).
     let status = ruleset
         .restrict_self()
         .map_err(|error| SandboxError::new(provider, error.to_string()))?;
@@ -159,6 +163,17 @@ fn apply_landlock(spec: &ExecSandboxSpec) -> Result<Enforcement, SandboxError> {
             provider,
             "Landlock is not enforced by this kernel",
         )),
+    }
+}
+
+fn ensure_supported_spec(spec: &ExecSandboxSpec) -> Result<(), SandboxError> {
+    if spec.allow_network {
+        Ok(())
+    } else {
+        Err(SandboxError::new(
+            "landlock",
+            "network isolation is unsupported; use bubblewrap or allow network access explicitly",
+        ))
     }
 }
 
@@ -244,5 +259,21 @@ mod tests {
         let error = run_sandbox_exec_args(&[spec.into()]).unwrap_err();
 
         assert!(error.to_string().contains("missing argv separator"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn landlock_refuses_network_isolation() {
+        let spec = ExecSandboxSpec {
+            mode: SandboxMode::ReadOnly,
+            ro_paths: vec![PathBuf::from("/")],
+            rw_paths: Vec::new(),
+            allow_network: false,
+        };
+
+        let error = LandlockProvider.confine(&spec, "true", &[]).unwrap_err();
+
+        assert_eq!(error.provider, "landlock");
+        assert!(error.reason.contains("network isolation is unsupported"));
     }
 }

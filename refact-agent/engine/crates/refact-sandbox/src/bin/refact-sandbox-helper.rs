@@ -3,8 +3,8 @@ fn main() {
         Some(Ok(())) => unreachable!(),
         Some(Err(error)) => {
             eprintln!("{error}");
-            std::process::exit(125);
+            std::process::exit(refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE);
         }
-        None => std::process::exit(125),
+        None => std::process::exit(refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE),
     }
 }

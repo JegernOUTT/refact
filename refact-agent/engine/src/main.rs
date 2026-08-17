@@ -19,7 +19,7 @@ fn main() {
     if let Some(result) = refact_sandbox::run_sandbox_exec_from_env() {
         if let Err(error) = result {
             eprintln!("{error}");
-            std::process::exit(125);
+            std::process::exit(refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE);
         }
         unreachable!();
     }

@@ -179,6 +179,7 @@ pub enum ExecStatusKind {
     Starting,
     Running,
     Exited,
+    SandboxLauncherFailed,
     Failed,
     Killed,
     TimedOut,
@@ -189,6 +190,7 @@ pub enum ExecStatus {
     Starting,
     Running,
     Exited { exit_code: Option<i32> },
+    SandboxLauncherFailed { exit_code: i32 },
     Failed { message: String },
     Killed,
     TimedOut,
@@ -200,6 +202,7 @@ impl ExecStatus {
             ExecStatus::Starting => ExecStatusKind::Starting,
             ExecStatus::Running => ExecStatusKind::Running,
             ExecStatus::Exited { .. } => ExecStatusKind::Exited,
+            ExecStatus::SandboxLauncherFailed { .. } => ExecStatusKind::SandboxLauncherFailed,
             ExecStatus::Failed { .. } => ExecStatusKind::Failed,
             ExecStatus::Killed => ExecStatusKind::Killed,
             ExecStatus::TimedOut => ExecStatusKind::TimedOut,
@@ -210,6 +213,7 @@ impl ExecStatus {
         matches!(
             self,
             ExecStatus::Exited { .. }
+                | ExecStatus::SandboxLauncherFailed { .. }
                 | ExecStatus::Failed { .. }
                 | ExecStatus::Killed
                 | ExecStatus::TimedOut
@@ -1016,6 +1020,10 @@ mod tests {
             ExecStatusKind::Exited
         );
         assert_eq!(
+            ExecStatus::SandboxLauncherFailed { exit_code: 125 }.kind(),
+            ExecStatusKind::SandboxLauncherFailed
+        );
+        assert_eq!(
             ExecStatus::Failed {
                 message: "nope".to_string()
             }
@@ -1027,6 +1035,7 @@ mod tests {
         assert!(!ExecStatus::Starting.is_terminal());
         assert!(!ExecStatus::Running.is_terminal());
         assert!(ExecStatus::Exited { exit_code: Some(0) }.is_terminal());
+        assert!(ExecStatus::SandboxLauncherFailed { exit_code: 125 }.is_terminal());
         assert!(ExecStatus::Failed {
             message: "nope".to_string()
         }

@@ -183,6 +183,7 @@ fn status_label(status: &ExecStatus) -> &'static str {
         ExecStatus::Starting => "starting",
         ExecStatus::Running => "running",
         ExecStatus::Exited { .. } => "exited",
+        ExecStatus::SandboxLauncherFailed { .. } => "sandbox_launcher_failed",
         ExecStatus::Failed { .. } => "failed",
         ExecStatus::Killed => "killed",
         ExecStatus::TimedOut => "timed_out",

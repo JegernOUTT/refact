@@ -42,6 +42,16 @@ pub struct ExecSpawnResult {
     pub observation: ObservationStatus,
 }
 
+fn status_from_exit(exit_code: Option<i32>, sandboxed: bool) -> ExecStatus {
+    if sandboxed && exit_code == Some(refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE) {
+        ExecStatus::SandboxLauncherFailed {
+            exit_code: refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE,
+        }
+    } else {
+        ExecStatus::Exited { exit_code }
+    }
+}
+
 impl ExecSpawnResult {
     fn new(snapshot: ExecProcessSnapshot, observation: ObservationStatus) -> Self {
         Self {
@@ -562,9 +572,10 @@ async fn status_or_killed(
     child: &Arc<Mutex<RuntimeChild>>,
     #[cfg(target_os = "linux")] observation: &Option<ObservationHandle>,
     #[cfg(not(target_os = "linux"))] observation: &Option<()>,
+    sandboxed: bool,
 ) -> ExecStatus {
     match try_wait_child(child, observation).await {
-        Ok(Some(exit_code)) => ExecStatus::Exited { exit_code },
+        Ok(Some(exit_code)) => status_from_exit(exit_code, sandboxed),
         Ok(None) => ExecStatus::Killed,
         Err(message) => ExecStatus::Failed { message },
     }
@@ -574,9 +585,10 @@ async fn status_or_timed_out(
     child: &Arc<Mutex<RuntimeChild>>,
     #[cfg(target_os = "linux")] observation: &Option<ObservationHandle>,
     #[cfg(not(target_os = "linux"))] observation: &Option<()>,
+    sandboxed: bool,
 ) -> ExecStatus {
     match try_wait_child(child, observation).await {
-        Ok(Some(exit_code)) => ExecStatus::Exited { exit_code },
+        Ok(Some(exit_code)) => status_from_exit(exit_code, sandboxed),
         Ok(None) => ExecStatus::TimedOut,
         Err(message) => ExecStatus::Failed { message },
     }
@@ -590,6 +602,7 @@ async fn monitor_process(
     timeout: Option<Duration>,
     output_drain_timeout: Option<Duration>,
     abort_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    sandboxed: bool,
     #[cfg(target_os = "linux")] observation: Option<ObservationHandle>,
     #[cfg(not(target_os = "linux"))] observation: Option<()>,
     stdout_task: JoinHandle<()>,
@@ -615,22 +628,22 @@ async fn monitor_process(
                     result = wait_child(&child, &observation) => {
                         break (
                             match result {
-                                Ok(exit_code) => ExecStatus::Exited { exit_code },
+                                Ok(exit_code) => status_from_exit(exit_code, sandboxed),
                                 Err(message) => ExecStatus::Failed { message },
                             },
                             None,
                         );
                     }
                     _ = tokio::time::sleep(timeout) => {
-                        break (status_or_timed_out(&child, &observation).await, None);
+                        break (status_or_timed_out(&child, &observation, sandboxed).await, None);
                     }
                     _ = abort_wait => {
-                        break (status_or_killed(&child, &observation).await, None);
+                        break (status_or_killed(&child, &observation, sandboxed).await, None);
                     }
                     command = control_rx.recv() => {
                         match command {
                             Some(ExecProcessCommand::Kill { response }) => {
-                                let status = status_or_killed(&child, &observation).await;
+                                let status = status_or_killed(&child, &observation, sandboxed).await;
                                 break (status, Some(response));
                             }
                             Some(ExecProcessCommand::Finish { status, response }) => {
@@ -642,7 +655,7 @@ async fn monitor_process(
                                 continue;
                             }
                             None => {
-                                let status = status_or_killed(&child, &observation).await;
+                                let status = status_or_killed(&child, &observation, sandboxed).await;
                                 break (status, None);
                             }
                         }
@@ -654,19 +667,19 @@ async fn monitor_process(
                     result = wait_child(&child, &observation) => {
                         break (
                             match result {
-                                Ok(exit_code) => ExecStatus::Exited { exit_code },
+                                Ok(exit_code) => status_from_exit(exit_code, sandboxed),
                                 Err(message) => ExecStatus::Failed { message },
                             },
                             None,
                         );
                     }
                     _ = abort_wait => {
-                        break (status_or_killed(&child, &observation).await, None);
+                        break (status_or_killed(&child, &observation, sandboxed).await, None);
                     }
                     command = control_rx.recv() => {
                         match command {
                             Some(ExecProcessCommand::Kill { response }) => {
-                                let status = status_or_killed(&child, &observation).await;
+                                let status = status_or_killed(&child, &observation, sandboxed).await;
                                 break (status, Some(response));
                             }
                             Some(ExecProcessCommand::Finish { status, response }) => {
@@ -678,7 +691,7 @@ async fn monitor_process(
                                 continue;
                             }
                             None => {
-                                let status = status_or_killed(&child, &observation).await;
+                                let status = status_or_killed(&child, &observation, sandboxed).await;
                                 break (status, None);
                             }
                         }
@@ -689,7 +702,10 @@ async fn monitor_process(
     };
 
     let terminal_status = match terminal_status {
-        ExecStatus::Failed { .. } | ExecStatus::TimedOut | ExecStatus::Killed => {
+        ExecStatus::SandboxLauncherFailed { .. }
+        | ExecStatus::Failed { .. }
+        | ExecStatus::TimedOut
+        | ExecStatus::Killed => {
             if let Err(error) = kill_and_reap_observed(&child, &observation).await {
                 tracing::warn!("exec kill/reap failed for {process_id}: {error}");
             }
@@ -870,6 +886,7 @@ impl ExecRegistry {
             request.timeout,
             request.output_drain_timeout,
             request.abort_flag.clone(),
+            request.sandbox.is_some(),
             observation_handle,
             stdout_task,
             stderr_task,
@@ -983,6 +1000,7 @@ impl ExecRegistry {
             request.timeout,
             request.output_drain_timeout,
             request.abort_flag.clone(),
+            request.sandbox.is_some(),
             None,
             stdout_task,
             stderr_task,
@@ -1689,6 +1707,52 @@ mod tests {
             result.snapshot.status,
             ExecStatus::Exited { exit_code: Some(7) }
         );
+    }
+
+    #[test]
+    fn sandbox_launcher_exit_is_typed() {
+        assert_eq!(
+            status_from_exit(
+                Some(refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE),
+                true
+            ),
+            ExecStatus::SandboxLauncherFailed {
+                exit_code: refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE
+            }
+        );
+        assert_eq!(
+            status_from_exit(
+                Some(refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE),
+                false
+            ),
+            ExecStatus::Exited {
+                exit_code: Some(refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE)
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ordinary_eacces_without_sandbox_is_a_normal_process_exit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let program = temp.path().join("not-executable");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let result = match ExecRegistry::new()
+            .spawn(
+                ExecSpawnRequest::foreground("run non-executable")
+                    .with_argv(vec![program.to_string_lossy().into_owned()]),
+            )
+            .await
+        {
+            Ok(_) => panic!("non-executable command should fail to spawn"),
+            Err(error) => error,
+        };
+
+        assert!(result.contains("Permission denied"), "{result}");
+        assert!(!result.contains("sandbox"), "{result}");
     }
 
     #[tokio::test]

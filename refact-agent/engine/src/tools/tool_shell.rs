@@ -352,7 +352,7 @@ impl Tool for ToolShell {
             }
         }
         append_status_line(&mut out, &result.snapshot.status, duration, timeout);
-        append_sandbox_denial_hint(&mut out, sandbox_active);
+        append_sandbox_denial_hint(&mut out, &result.snapshot.status, sandbox_active);
 
         let mut message = ChatMessage {
             role: "tool".to_string(),
@@ -603,6 +603,7 @@ fn exec_status_label(status: &ExecStatus) -> &'static str {
         ExecStatus::Starting => "starting",
         ExecStatus::Running => "running",
         ExecStatus::Exited { .. } => "exited",
+        ExecStatus::SandboxLauncherFailed { .. } => "sandbox_launcher_failed",
         ExecStatus::Failed { .. } => "failed",
         ExecStatus::Killed => "killed",
         ExecStatus::TimedOut => "timed_out",
@@ -612,6 +613,7 @@ fn exec_status_label(status: &ExecStatus) -> &'static str {
 fn exec_exit_code(status: &ExecStatus) -> Option<i32> {
     match status {
         ExecStatus::Exited { exit_code } => *exit_code,
+        ExecStatus::SandboxLauncherFailed { exit_code } => Some(*exit_code),
         ExecStatus::Starting
         | ExecStatus::Running
         | ExecStatus::Failed { .. }
@@ -631,6 +633,9 @@ fn append_status_line(
             "The command was running {:.3}s, finished with exit code {}\n",
             duration.as_secs_f64(),
             exit_code.unwrap_or_default()
+        )),
+        ExecStatus::SandboxLauncherFailed { exit_code } => out.push_str(&format!(
+            "⚠️ The sandbox launcher failed before the command ran (exit code {exit_code}).\n"
         )),
         ExecStatus::Killed => out.push_str(&format!(
             "⚠️ The command was interrupted by user after {:.3}s (process killed). Output above may be incomplete.\n",
@@ -653,17 +658,22 @@ fn append_status_line(
     }
 }
 
-fn append_sandbox_denial_hint(out: &mut String, sandbox_active: bool) {
+fn append_sandbox_denial_hint(out: &mut String, status: &ExecStatus, sandbox_active: bool) {
     if !sandbox_active {
         return;
     }
+    if matches!(status, ExecStatus::SandboxLauncherFailed { .. }) {
+        out.push_str("Sandbox confinement could not start; the command did not run.\n");
+        return;
+    }
     let lower = out.to_ascii_lowercase();
+    // Command output cannot prove a sandbox denial; this only supplements the typed launcher status.
     if lower.contains("permission denied")
         || lower.contains("operation not permitted")
         || lower.contains("eacces")
         || lower.contains("eperm")
     {
-        out.push_str("Sandbox denied this operation. Retry with escalate:{mode, justification} if wider access is necessary.\n");
+        out.push_str("Command output may indicate a sandbox denial. Retry with escalate:{mode, justification} if wider access is necessary.\n");
     }
 }
 
@@ -679,7 +689,10 @@ fn background_started_output(snapshot: &ExecProcessSnapshot) -> String {
 
 fn tool_failed_for_status(status: &ExecStatus) -> Option<bool> {
     match status {
-        ExecStatus::Failed { .. } | ExecStatus::Killed | ExecStatus::TimedOut => Some(true),
+        ExecStatus::SandboxLauncherFailed { .. }
+        | ExecStatus::Failed { .. }
+        | ExecStatus::Killed
+        | ExecStatus::TimedOut => Some(true),
         ExecStatus::Starting | ExecStatus::Running | ExecStatus::Exited { .. } => None,
     }
 }
@@ -1201,9 +1214,40 @@ mod tests {
     fn sandbox_denial_result_suggests_escalation() {
         let mut output = "sh: cannot create /root/file: Permission denied\n".to_string();
 
-        append_sandbox_denial_hint(&mut output, true);
+        append_sandbox_denial_hint(
+            &mut output,
+            &ExecStatus::Exited { exit_code: Some(1) },
+            true,
+        );
 
         assert!(output.contains("Retry with escalate"));
+    }
+
+    #[test]
+    fn ordinary_eacces_without_sandbox_is_not_reported_as_sandbox_denial() {
+        let mut output = "sh: cannot open file: EACCES\n".to_string();
+
+        append_sandbox_denial_hint(
+            &mut output,
+            &ExecStatus::Exited { exit_code: Some(1) },
+            false,
+        );
+
+        assert!(!output.contains("sandbox denial"));
+    }
+
+    #[test]
+    fn typed_launcher_failure_is_primary_sandbox_signal() {
+        let mut output = String::new();
+
+        append_sandbox_denial_hint(
+            &mut output,
+            &ExecStatus::SandboxLauncherFailed { exit_code: 125 },
+            true,
+        );
+
+        assert!(output.contains("confinement could not start"));
+        assert!(!output.contains("Retry with escalate"));
     }
 
     #[tokio::test]

@@ -11,6 +11,8 @@ mod probe;
 pub use bwrap::BwrapProvider;
 pub use landlock::{run_sandbox_exec_from_env, LandlockProvider};
 
+pub const SANDBOX_LAUNCHER_FAILURE_EXIT_CODE: i32 = 125;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Enforcement {

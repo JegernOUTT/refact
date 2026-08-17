@@ -112,6 +112,25 @@ fn hidden_landlock_output(spec: &ExecSandboxSpec, program: &str, args: &[String]
 }
 
 #[cfg(target_os = "linux")]
+#[test]
+fn landlock_hidden_launcher_refuses_network_isolation() {
+    let spec = ExecSandboxSpec {
+        mode: SandboxMode::ReadOnly,
+        ro_paths: vec![PathBuf::from("/")],
+        rw_paths: Vec::new(),
+        allow_network: false,
+    };
+
+    let output = hidden_landlock_output(&spec, "true", &[]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("network isolation is unsupported"));
+}
+
+#[cfg(target_os = "linux")]
 fn landlock_available() -> bool {
     let spec = ExecSandboxSpec {
         mode: SandboxMode::ReadOnly,

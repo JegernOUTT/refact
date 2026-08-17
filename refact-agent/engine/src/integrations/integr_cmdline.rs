@@ -250,6 +250,7 @@ fn exec_status_label(status: &ExecStatus) -> &'static str {
         ExecStatus::Starting => "starting",
         ExecStatus::Running => "running",
         ExecStatus::Exited { .. } => "exited",
+        ExecStatus::SandboxLauncherFailed { .. } => "sandbox_launcher_failed",
         ExecStatus::Failed { .. } => "failed",
         ExecStatus::Killed => "killed",
         ExecStatus::TimedOut => "timed_out",
@@ -259,6 +260,7 @@ fn exec_status_label(status: &ExecStatus) -> &'static str {
 fn exec_exit_code(status: &ExecStatus) -> Option<i32> {
     match status {
         ExecStatus::Exited { exit_code } => *exit_code,
+        ExecStatus::SandboxLauncherFailed { exit_code } => Some(*exit_code),
         ExecStatus::Starting
         | ExecStatus::Running
         | ExecStatus::Failed { .. }
@@ -278,6 +280,9 @@ fn append_status_line(
             "The command was running {:.3}s, finished with exit code {}\n",
             duration.as_secs_f64(),
             exit_code.unwrap_or_default()
+        )),
+        ExecStatus::SandboxLauncherFailed { exit_code } => out.push_str(&format!(
+            "⚠️ The sandbox launcher failed before the command ran (exit code {exit_code}).\n"
         )),
         ExecStatus::Killed => out.push_str(&format!(
             "⚠️ The command was interrupted by user after {:.3}s (process killed). Output above may be incomplete.\n",
@@ -302,7 +307,10 @@ fn append_status_line(
 
 fn tool_failed_for_status(status: &ExecStatus) -> Option<bool> {
     match status {
-        ExecStatus::Failed { .. } | ExecStatus::Killed | ExecStatus::TimedOut => Some(true),
+        ExecStatus::SandboxLauncherFailed { .. }
+        | ExecStatus::Failed { .. }
+        | ExecStatus::Killed
+        | ExecStatus::TimedOut => Some(true),
         ExecStatus::Starting | ExecStatus::Running | ExecStatus::Exited { .. } => None,
     }
 }

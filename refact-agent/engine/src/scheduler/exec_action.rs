@@ -258,6 +258,7 @@ fn collect_foreground_output(
 fn exec_exit_code(status: &ExecStatus) -> Option<i32> {
     match status {
         ExecStatus::Exited { exit_code } => *exit_code,
+        ExecStatus::SandboxLauncherFailed { exit_code } => Some(*exit_code),
         ExecStatus::Starting
         | ExecStatus::Running
         | ExecStatus::Failed { .. }
@@ -270,7 +271,10 @@ fn command_status_is_success(status: &ExecStatus) -> bool {
     match status {
         ExecStatus::Exited { exit_code } => exit_code.unwrap_or_default() == 0,
         ExecStatus::Starting | ExecStatus::Running => true,
-        ExecStatus::Failed { .. } | ExecStatus::Killed | ExecStatus::TimedOut => false,
+        ExecStatus::SandboxLauncherFailed { .. }
+        | ExecStatus::Failed { .. }
+        | ExecStatus::Killed
+        | ExecStatus::TimedOut => false,
     }
 }
 
@@ -278,6 +282,9 @@ fn append_status_summary(stderr: &mut String, status: &ExecStatus, timeout_secs:
     let summary = match status {
         ExecStatus::Exited { exit_code } => {
             format!("command exited with code {}", exit_code.unwrap_or_default())
+        }
+        ExecStatus::SandboxLauncherFailed { exit_code } => {
+            format!("sandbox launcher failed with code {exit_code}")
         }
         ExecStatus::Failed { message } => format!("command failed: {message}"),
         ExecStatus::Killed => "command was killed".to_string(),

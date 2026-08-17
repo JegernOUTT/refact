@@ -233,6 +233,7 @@ async fn run_review_command(
         ExecStatus::Exited {
             exit_code: Some(exit_code),
         } => Ok((exit_code, tail_content(&output, MAX_COMMAND_OUTPUT_BYTES))),
+        ExecStatus::SandboxLauncherFailed { .. } => Err("sandbox_launcher_failed".to_string()),
         ExecStatus::TimedOut => Err("timeout".to_string()),
         ExecStatus::Failed { .. } => Err("failed".to_string()),
         ExecStatus::Killed => Err("killed".to_string()),

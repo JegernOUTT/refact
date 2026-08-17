@@ -324,7 +324,7 @@ impl Tool for ToolProcessStart {
             ProcessStreamSelection::All,
             &OutputFilter::no_limits(),
         ));
-        append_sandbox_denial_hint(&mut content, sandbox_active);
+        append_sandbox_denial_hint(&mut content, &result.snapshot.status, sandbox_active);
         let mut result_message = tool_message(
             tool_call_id,
             content,
@@ -1127,17 +1127,22 @@ async fn apply_process_privacy(
     }
 }
 
-fn append_sandbox_denial_hint(content: &mut String, sandbox_active: bool) {
+fn append_sandbox_denial_hint(content: &mut String, status: &ExecStatus, sandbox_active: bool) {
     if !sandbox_active {
         return;
     }
+    if matches!(status, ExecStatus::SandboxLauncherFailed { .. }) {
+        content.push_str("Sandbox confinement could not start; the command did not run.\n");
+        return;
+    }
     let lower = content.to_ascii_lowercase();
+    // Command output cannot prove a sandbox denial; this only supplements the typed launcher status.
     if lower.contains("permission denied")
         || lower.contains("operation not permitted")
         || lower.contains("eacces")
         || lower.contains("eperm")
     {
-        content.push_str("Sandbox denied this operation. Retry with escalate:{mode, justification} if wider access is necessary.\n");
+        content.push_str("Command output may indicate a sandbox denial. Retry with escalate:{mode, justification} if wider access is necessary.\n");
     }
 }
 
@@ -1533,6 +1538,7 @@ pub(super) fn status_label(status: &ExecStatus) -> &'static str {
         ExecStatus::Starting => "starting",
         ExecStatus::Running => "running",
         ExecStatus::Exited { .. } => "exited",
+        ExecStatus::SandboxLauncherFailed { .. } => "sandbox_launcher_failed",
         ExecStatus::Failed { .. } => "failed",
         ExecStatus::Killed => "killed",
         ExecStatus::TimedOut => "timed_out",
@@ -1542,6 +1548,7 @@ pub(super) fn status_label(status: &ExecStatus) -> &'static str {
 fn exit_code(status: &ExecStatus) -> Option<i32> {
     match status {
         ExecStatus::Exited { exit_code } => *exit_code,
+        ExecStatus::SandboxLauncherFailed { exit_code } => Some(*exit_code),
         ExecStatus::Starting
         | ExecStatus::Running
         | ExecStatus::Failed { .. }
@@ -1552,7 +1559,10 @@ fn exit_code(status: &ExecStatus) -> Option<i32> {
 
 fn tool_failed_for_status(status: &ExecStatus) -> Option<bool> {
     match status {
-        ExecStatus::Failed { .. } | ExecStatus::Killed | ExecStatus::TimedOut => Some(true),
+        ExecStatus::SandboxLauncherFailed { .. }
+        | ExecStatus::Failed { .. }
+        | ExecStatus::Killed
+        | ExecStatus::TimedOut => Some(true),
         ExecStatus::Starting | ExecStatus::Running | ExecStatus::Exited { .. } => None,
     }
 }
@@ -1660,6 +1670,9 @@ fn format_process_snapshot(title: &str, snapshot: &ExecProcessSnapshot) -> Strin
         .map(|code| code.to_string())
         .unwrap_or_else(|| "<none>".to_string());
     let failure_message = match &snapshot.status {
+        ExecStatus::SandboxLauncherFailed { .. } => {
+            Some("sandbox confinement could not start".to_string())
+        }
         ExecStatus::Failed { message } => Some(message.clone()),
         _ => None,
     };

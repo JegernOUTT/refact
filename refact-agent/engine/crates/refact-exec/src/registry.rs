@@ -177,6 +177,7 @@ fn process_completion_event(snapshot: &ExecProcessSnapshot) -> Option<ProcessCom
 fn status_exit_code(status: &ExecStatus) -> Option<i32> {
     match status {
         ExecStatus::Exited { exit_code } => *exit_code,
+        ExecStatus::SandboxLauncherFailed { exit_code } => Some(*exit_code),
         ExecStatus::Starting
         | ExecStatus::Running
         | ExecStatus::Failed { .. }

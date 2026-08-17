@@ -568,6 +568,12 @@ async fn run_verification_argv_impl(
     let mut output = format!("{stdout}{stderr}");
     let (exit_code, passed) = match &result.snapshot.status {
         ExecStatus::Exited { exit_code } => (*exit_code, exit_code == &Some(0)),
+        ExecStatus::SandboxLauncherFailed { exit_code } => {
+            output.push_str(&format!(
+                "sandbox launcher failed before command execution with exit code {exit_code}"
+            ));
+            (Some(*exit_code), false)
+        }
         ExecStatus::TimedOut => {
             output.push_str(&format!(
                 "command timed out after {} seconds",
