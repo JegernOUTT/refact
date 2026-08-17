@@ -371,10 +371,6 @@ impl<'a, D: MouseDispatcher, K: KeyboardDispatcher> Mouse<'a, D, K> {
         self.state.reset_buttons();
     }
 
-    pub(crate) fn set_position(&mut self, point: MainFrameCssPoint) {
-        self.state.position = point;
-    }
-
     pub fn move_to(&mut self, x: f64, y: f64, steps: usize) -> Result<(), MouseError> {
         if steps == 0 {
             return Err(MouseError::InvalidSteps);

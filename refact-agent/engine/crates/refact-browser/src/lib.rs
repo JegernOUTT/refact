@@ -35,8 +35,8 @@ pub use actionability::{
 };
 pub use dialogs::{DialogDecision, DialogManager, DialogResponse};
 pub use drag::{
-    CdpDragDispatcher, DragDispatcher, DragEventType, FileDropResult, FileDropTarget,
-    drag_and_drop, drop_files, verify_file_drop,
+    CdpDragObserver, DragObserver, FileDropResult, FileDropTarget, drag_and_drop, drop_files,
+    verify_file_drop,
 };
 pub use context_state::{ContextState, MediaState, ViewportState};
 pub use handles::{

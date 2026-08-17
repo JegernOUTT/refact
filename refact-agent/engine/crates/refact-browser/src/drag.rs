@@ -1,185 +1,132 @@
 use std::path::Path;
-use std::sync::{Arc, Weak, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use headless_chrome::Tab;
-use headless_chrome::browser::tab::EventListener;
-use headless_chrome::protocol::cdp::types::Event;
-use headless_chrome::protocol::cdp::Input;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     ElementHandle, KeyboardDispatcher, MainFrameCssPoint, Mouse, MouseButton, MouseDispatcher,
     MouseError, WorldManager,
 };
 
-const DRAG_DATA_TIMEOUT: Duration = Duration::from_secs(5);
 const DRAG_START_DISTANCE: f64 = 10.0;
+const DRAG_MOVE_STEPS: usize = 20;
+const DRAG_SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
+const DRAG_SETTLE_INTERVAL: Duration = Duration::from_millis(25);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DragEventType {
-    Enter,
-    Over,
-    Drop,
-    Cancel,
+const DRAG_WATCH_SETUP: &str = r#"(() => {
+  window.__refactDragCleanup?.();
+  let started = false;
+  let ended = false;
+  const onDragStart = event => { started = !event.defaultPrevented; };
+  const onDragEnd = () => { ended = true; };
+  window.addEventListener('dragstart', onDragStart, {capture:true});
+  window.addEventListener('dragend', onDragEnd, {capture:true});
+  window.__refactDragWatch = () => JSON.stringify({started, ended});
+  window.__refactDragCleanup = () => {
+    window.removeEventListener('dragstart', onDragStart, {capture:true});
+    window.removeEventListener('dragend', onDragEnd, {capture:true});
+    delete window.__refactDragWatch;
+    delete window.__refactDragCleanup;
+  };
+})()"#;
+
+const DRAG_WATCH_POLL: &str = "window.__refactDragWatch?.() ?? \"\"";
+
+const DRAG_WATCH_CLEANUP: &str = "window.__refactDragCleanup?.(); true";
+
+pub trait DragObserver {
+    fn watch(&mut self, source_frame_id: &str) -> Result<(), String>;
+    fn settle(&mut self) -> Result<bool, String>;
 }
 
-pub trait DragDispatcher {
-    fn begin_interception(&mut self, source_frame_id: &str) -> Result<(), String>;
-    fn finish_interception(&mut self) -> Result<Input::DragData, String>;
-    fn dispatch_drag(
-        &mut self,
-        event_type: DragEventType,
-        point: MainFrameCssPoint,
-        data: &Input::DragData,
-        modifiers: u32,
-    ) -> Result<(), String>;
-}
-
-type DragListener = dyn EventListener<Event> + Send + Sync;
-
-pub struct CdpDragDispatcher<'a> {
+pub struct CdpDragObserver<'a> {
     tab: &'a Tab,
     world: &'a WorldManager,
     source_frame_id: Option<String>,
-    receiver: Option<mpsc::Receiver<Input::DragData>>,
-    listener: Option<Weak<DragListener>>,
 }
 
-impl<'a> CdpDragDispatcher<'a> {
+impl<'a> CdpDragObserver<'a> {
     pub fn new(tab: &'a Tab, world: &'a WorldManager) -> Self {
         Self {
             tab,
             world,
             source_frame_id: None,
-            receiver: None,
-            listener: None,
         }
     }
 
-    fn stop_interception(&mut self) -> Result<(), String> {
-        let result = self
-            .tab
-            .call_method(Input::SetInterceptDrags { enabled: false })
-            .map(|_| ())
-            .map_err(|error| format!("Failed to disable browser drag interception: {error}"));
-        if let Some(listener) = self.listener.take() {
-            let _ = self.tab.remove_event_listener(&listener);
+    fn poll(&self, source_frame_id: &str) -> Result<(bool, bool), String> {
+        let value = self
+            .world
+            .eval_in_utility_frame(self.tab, source_frame_id, DRAG_WATCH_POLL)?;
+        let state = value
+            .as_str()
+            .ok_or_else(|| "Browser drag observer returned an invalid result".to_string())?;
+        if state.is_empty() {
+            return Err("Browser drag observer is no longer installed".to_string());
         }
-        result
+        let state: Value = serde_json::from_str(state)
+            .map_err(|error| format!("Invalid browser drag observer state: {error}"))?;
+        Ok((
+            state["started"].as_bool().unwrap_or(false),
+            state["ended"].as_bool().unwrap_or(false),
+        ))
+    }
+
+    fn cleanup(&self, source_frame_id: &str) {
+        let _ = self
+            .world
+            .eval_in_utility_frame(self.tab, source_frame_id, DRAG_WATCH_CLEANUP);
     }
 }
 
-impl DragDispatcher for CdpDragDispatcher<'_> {
-    fn begin_interception(&mut self, source_frame_id: &str) -> Result<(), String> {
-        let setup = r#"(() => {
-  let dragEvent = null;
-  let didStartDrag = Promise.resolve(false);
-  const dragListener = event => { dragEvent = event; };
-  const mouseListener = () => {
-    didStartDrag = new Promise(resolve => {
-      window.addEventListener('dragstart', dragListener, {once:true,capture:true});
-      setTimeout(() => resolve(dragEvent ? !dragEvent.defaultPrevented : false), 0);
-    });
-  };
-  window.addEventListener('mousemove', mouseListener, {once:true,capture:true});
-  window.__refactCleanupDrag = async () => {
-    const result = await didStartDrag;
-    window.removeEventListener('mousemove', mouseListener, {capture:true});
-    window.removeEventListener('dragstart', dragListener, {capture:true});
-    delete window.__refactCleanupDrag;
-    return result;
-  };
-})()"#;
+impl DragObserver for CdpDragObserver<'_> {
+    fn watch(&mut self, source_frame_id: &str) -> Result<(), String> {
         self.world
-            .eval_in_utility_frame(self.tab, source_frame_id, setup)?;
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let listener: Arc<DragListener> = Arc::new(move |event: &Event| {
-            if let Event::InputDragIntercepted(event) = event {
-                let _ = sender.try_send(event.params.data.clone());
-            }
-        });
-        self.listener = Some(self.tab.add_event_listener(listener).map_err(|error| {
-            format!("Failed to listen for intercepted browser drag data: {error}")
-        })?);
-        self.receiver = Some(receiver);
+            .eval_in_utility_frame(self.tab, source_frame_id, DRAG_WATCH_SETUP)?;
         self.source_frame_id = Some(source_frame_id.to_string());
-        self.tab
-            .call_method(Input::SetInterceptDrags { enabled: true })
-            .map(|_| ())
-            .map_err(|error| format!("Failed to enable browser drag interception: {error}"))
+        Ok(())
     }
 
-    fn finish_interception(&mut self) -> Result<Input::DragData, String> {
+    fn settle(&mut self) -> Result<bool, String> {
         let source_frame_id = self
             .source_frame_id
             .take()
-            .ok_or_else(|| "Browser drag interception was not started".to_string())?;
-        let expecting_drag = self
-            .world
-            .eval_in_utility_frame(
-                self.tab,
-                &source_frame_id,
-                "window.__refactCleanupDrag?.() ?? false",
-            )
-            .and_then(|value| {
-                value
-                    .as_bool()
-                    .ok_or_else(|| "Browser drag listener returned an invalid result".to_string())
-            });
-        let received = self
-            .receiver
-            .take()
-            .ok_or_else(|| "Browser drag interception receiver is unavailable".to_string())?
-            .recv_timeout(DRAG_DATA_TIMEOUT)
-            .map_err(|_| "Timed out waiting for intercepted browser drag data".to_string());
-        let stop_result = self.stop_interception();
-        let expecting_drag = expecting_drag?;
-        stop_result?;
-        if !expecting_drag {
-            return Err("Element did not start an HTML5 drag".to_string());
+            .ok_or_else(|| "Browser drag observer was not started".to_string())?;
+        let deadline = Instant::now() + DRAG_SETTLE_TIMEOUT;
+        let mut started = false;
+        loop {
+            let (observed_start, ended) = match self.poll(&source_frame_id) {
+                Ok(state) => state,
+                Err(error) => {
+                    self.cleanup(&source_frame_id);
+                    return Err(error);
+                }
+            };
+            started = started || observed_start;
+            if ended || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(DRAG_SETTLE_INTERVAL);
         }
-        received
-    }
-
-    fn dispatch_drag(
-        &mut self,
-        event_type: DragEventType,
-        point: MainFrameCssPoint,
-        data: &Input::DragData,
-        modifiers: u32,
-    ) -> Result<(), String> {
-        self.tab
-            .call_method(Input::DispatchDragEvent {
-                Type: match event_type {
-                    DragEventType::Enter => Input::DispatchDragEventTypeOption::DragEnter,
-                    DragEventType::Over => Input::DispatchDragEventTypeOption::DragOver,
-                    DragEventType::Drop => Input::DispatchDragEventTypeOption::Drop,
-                    DragEventType::Cancel => Input::DispatchDragEventTypeOption::DragCancel,
-                },
-                x: point.x,
-                y: point.y,
-                data: data.clone(),
-                modifiers: Some(modifiers),
-            })
-            .map(|_| ())
-            .map_err(|error| format!("Failed to dispatch browser drag event: {error}"))
+        self.cleanup(&source_frame_id);
+        Ok(started)
     }
 }
 
-impl Drop for CdpDragDispatcher<'_> {
+impl Drop for CdpDragObserver<'_> {
     fn drop(&mut self) {
-        if self.source_frame_id.is_some() {
-            let _ = self.stop_interception();
+        if let Some(source_frame_id) = self.source_frame_id.take() {
+            self.cleanup(&source_frame_id);
         }
     }
 }
 
-pub fn drag_and_drop<D, K, P>(
+pub fn drag_and_drop<D, K, O>(
     mouse: &mut Mouse<'_, D, K>,
-    protocol: &mut P,
+    observer: &mut O,
     source_frame_id: &str,
     source: MainFrameCssPoint,
     target: MainFrameCssPoint,
@@ -188,44 +135,25 @@ pub fn drag_and_drop<D, K, P>(
 where
     D: MouseDispatcher,
     K: KeyboardDispatcher,
-    P: DragDispatcher,
+    O: DragObserver,
 {
     mouse.move_to(source.x, source.y, 1)?;
     mouse.down(MouseButton::Left, 1)?;
-    protocol
-        .begin_interception(source_frame_id)
+    observer
+        .watch(source_frame_id)
         .map_err(MouseError::Protocol)?;
     let trigger = MainFrameCssPoint {
         x: source.x + DRAG_START_DISTANCE,
         y: source.y,
     };
     mouse.move_to(trigger.x, trigger.y, 1)?;
-    let data = protocol
-        .finish_interception()
-        .map_err(MouseError::Protocol)?;
-    let modifiers = 0;
-    protocol
-        .dispatch_drag(DragEventType::Enter, trigger, &data, modifiers)
-        .map_err(MouseError::Protocol)?;
-    let steps = steps.max(2);
-    let result = (|| {
-        for step in 1..=steps {
-            let progress = step as f64 / steps as f64;
-            let point = MainFrameCssPoint {
-                x: trigger.x + (target.x - trigger.x) * progress,
-                y: trigger.y + (target.y - trigger.y) * progress,
-            };
-            protocol.dispatch_drag(DragEventType::Over, point, &data, modifiers)?;
-            mouse.set_position(point);
-        }
-        protocol.dispatch_drag(DragEventType::Drop, target, &data, modifiers)
-    })();
-    if let Err(error) = result {
-        let _ = protocol.dispatch_drag(DragEventType::Cancel, target, &data, modifiers);
-        mouse.reset_buttons();
-        return Err(MouseError::Protocol(error));
+    mouse.move_to(target.x, target.y, steps.max(DRAG_MOVE_STEPS))?;
+    mouse.up(MouseButton::Left, 1)?;
+    if !observer.settle().map_err(MouseError::Protocol)? {
+        return Err(MouseError::Protocol(
+            "Element did not start an HTML5 drag".to_string(),
+        ));
     }
-    mouse.reset_buttons();
     Ok(())
 }
 
@@ -376,46 +304,32 @@ mod tests {
     #[derive(Clone, Debug, PartialEq)]
     enum Recorded {
         Mouse(crate::MouseDispatch),
-        Intercept(bool),
-        Drag(DragEventType, MainFrameCssPoint),
+        Watch,
+        Settle,
     }
 
     #[derive(Clone)]
-    struct RecordingDispatcher {
+    struct RecordingDriver {
         events: Arc<Mutex<Vec<Recorded>>>,
-        data: Input::DragData,
+        started_drag: bool,
     }
 
-    impl MouseDispatcher for RecordingDispatcher {
+    impl MouseDispatcher for RecordingDriver {
         fn dispatch(&mut self, event: crate::MouseDispatch) -> Result<(), String> {
             self.events.lock().unwrap().push(Recorded::Mouse(event));
             Ok(())
         }
     }
 
-    impl DragDispatcher for RecordingDispatcher {
-        fn begin_interception(&mut self, _source_frame_id: &str) -> Result<(), String> {
-            self.events.lock().unwrap().push(Recorded::Intercept(true));
+    impl DragObserver for RecordingDriver {
+        fn watch(&mut self, _source_frame_id: &str) -> Result<(), String> {
+            self.events.lock().unwrap().push(Recorded::Watch);
             Ok(())
         }
 
-        fn finish_interception(&mut self) -> Result<Input::DragData, String> {
-            self.events.lock().unwrap().push(Recorded::Intercept(false));
-            Ok(self.data.clone())
-        }
-
-        fn dispatch_drag(
-            &mut self,
-            event_type: DragEventType,
-            point: MainFrameCssPoint,
-            _data: &Input::DragData,
-            _modifiers: u32,
-        ) -> Result<(), String> {
-            self.events
-                .lock()
-                .unwrap()
-                .push(Recorded::Drag(event_type, point));
-            Ok(())
+        fn settle(&mut self) -> Result<bool, String> {
+            self.events.lock().unwrap().push(Recorded::Settle);
+            Ok(self.started_drag)
         }
     }
 
@@ -493,77 +407,108 @@ mod tests {
         assert!(error.contains("[]"));
     }
 
-    #[test]
-    fn chromium_drag_sequence_intercepts_then_enters_over_twice_and_drops() {
+    fn run_drag(started_drag: bool) -> (Vec<Recorded>, Result<(), MouseError>, MainFrameCssPoint) {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let dispatcher = RecordingDispatcher {
+        let driver = RecordingDriver {
             events: events.clone(),
-            data: Input::DragData {
-                items: Vec::new(),
-                files: None,
-                drag_operations_mask: 1,
-            },
+            started_drag,
         };
         let keyboard = Keyboard::new(NoopKeyboard);
-        let mut mouse = Mouse::new(dispatcher.clone(), &keyboard);
-        let mut protocol = dispatcher;
+        let mut mouse = Mouse::new(driver.clone(), &keyboard);
+        let mut observer = driver;
 
-        drag_and_drop(
+        let result = drag_and_drop(
             &mut mouse,
-            &mut protocol,
+            &mut observer,
             "main",
             MainFrameCssPoint { x: 10.0, y: 20.0 },
             MainFrameCssPoint { x: 30.0, y: 40.0 },
             1,
-        )
-        .unwrap();
+        );
 
-        let events = events.lock().unwrap();
-        let intercept_on = events
+        let recorded = events.lock().unwrap().clone();
+        let position = mouse.position();
+        (recorded, result, position)
+    }
+
+    fn position_of(
+        events: &[Recorded],
+        predicate: impl Fn(&crate::MouseEventPayload) -> bool,
+    ) -> usize {
+        events
             .iter()
-            .position(|event| *event == Recorded::Intercept(true))
-            .unwrap();
-        let intercept_off = events
-            .iter()
-            .position(|event| *event == Recorded::Intercept(false))
-            .unwrap();
-        let drag_events = events
-            .iter()
-            .filter_map(|event| match event {
-                Recorded::Drag(kind, point) => Some((*kind, *point)),
-                _ => None,
+            .position(|event| match event {
+                Recorded::Mouse(crate::MouseDispatch::Mouse(payload)) => predicate(payload),
+                _ => false,
             })
-            .collect::<Vec<_>>();
-        assert!(intercept_on < intercept_off);
-        let trigger_move = events
+            .unwrap()
+    }
+
+    #[test]
+    fn native_drag_presses_watches_crosses_the_threshold_then_releases_on_the_target() {
+        let (events, result, position) = run_drag(true);
+
+        result.unwrap();
+        let pressed = position_of(&events, |payload| {
+            payload.event_type == crate::MouseEventType::Pressed
+        });
+        let watch = events
             .iter()
-            .position(|event| {
+            .position(|event| *event == Recorded::Watch)
+            .unwrap();
+        let trigger = position_of(&events, |payload| {
+            payload.event_type == crate::MouseEventType::Moved
+                && payload.x == 20.0
+                && payload.y == 20.0
+                && payload.buttons == Some(1)
+        });
+        let released = position_of(&events, |payload| {
+            payload.event_type == crate::MouseEventType::Released
+                && payload.x == 30.0
+                && payload.y == 40.0
+        });
+        let read = events
+            .iter()
+            .position(|event| *event == Recorded::Settle)
+            .unwrap();
+
+        assert!(pressed < watch);
+        assert!(watch < trigger);
+        assert!(trigger < released);
+        assert!(released < read);
+        assert_eq!(position, MainFrameCssPoint { x: 30.0, y: 40.0 });
+    }
+
+    #[test]
+    fn native_drag_travels_to_the_target_in_several_interpolated_moves() {
+        let (events, _, _) = run_drag(true);
+
+        let moves_to_target = events
+            .iter()
+            .filter(|event| {
                 matches!(
                     event,
-                    Recorded::Mouse(crate::MouseDispatch::Mouse(crate::MouseEventPayload {
-                        event_type: crate::MouseEventType::Moved,
-                        x: 20.0,
-                        y: 20.0,
-                        button: Some(MouseButton::Left),
-                        buttons: Some(1),
-                        ..
-                    }))
+                    Recorded::Mouse(crate::MouseDispatch::Mouse(payload))
+                        if payload.event_type == crate::MouseEventType::Moved && payload.y > 20.0
                 )
             })
-            .unwrap();
-        let drag_enter = events
-            .iter()
-            .position(|event| matches!(event, Recorded::Drag(DragEventType::Enter, _)))
-            .unwrap();
-        assert!(intercept_on < trigger_move);
-        assert!(trigger_move < intercept_off);
-        assert!(intercept_off < drag_enter);
-        assert_eq!(drag_events.len(), 4);
-        assert_eq!(drag_events[0].0, DragEventType::Enter);
-        assert_eq!(drag_events[1].0, DragEventType::Over);
-        assert_eq!(drag_events[2].0, DragEventType::Over);
-        assert_eq!(drag_events[3].0, DragEventType::Drop);
-        assert_eq!(drag_events[3].1, MainFrameCssPoint { x: 30.0, y: 40.0 });
-        assert_eq!(mouse.position(), MainFrameCssPoint { x: 30.0, y: 40.0 });
+            .count();
+
+        assert_eq!(moves_to_target, DRAG_MOVE_STEPS);
+    }
+
+    #[test]
+    fn drag_that_never_starts_releases_the_button_and_reports_it() {
+        let (events, result, _) = run_drag(false);
+
+        let error = result.unwrap_err();
+        assert!(
+            matches!(&error, MouseError::Protocol(message) if message == "Element did not start an HTML5 drag")
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Recorded::Mouse(crate::MouseDispatch::Mouse(payload))
+                if payload.event_type == crate::MouseEventType::Released
+        )));
     }
 }

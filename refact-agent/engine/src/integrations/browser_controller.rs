@@ -17,8 +17,8 @@ use crate::integrations::browser_runtime::BrowserRuntime;
 use refact_browser::{
     ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
     ActionabilityExecutionMode, ActionabilityTimeouts, CdpKeyboardDispatcher, CdpMouseDispatcher,
-    CdpDragDispatcher, ElementHandle, HitTargetController, HitTargetPoint, HitTargetResult,
-    Keyboard, LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation, LocatorHandlerProbe,
+    CdpDragObserver, ElementHandle, HitTargetController, HitTargetPoint, HitTargetResult, Keyboard,
+    LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation, LocatorHandlerProbe,
     LocatorHandlerRegistry, ExpectPollResult, LocatorOutcome, Mouse, MouseButton, NetworkLoadState,
     NetworkMonitorHandle, MainFrameCssPoint, MouseState, Ref, ScrollStrategy, SnapshotMode,
     SnapshotOptions, SystemClock, UrlMatcher, WorldManager, DEFAULT_DISMISS_OVERLAYS_HANDLER,
@@ -3773,7 +3773,7 @@ fn step_drag_and_drop(
     let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
     let dispatcher = CdpMouseDispatcher::new(tab);
     let mut mouse = Mouse::from_state(dispatcher, &keyboard, mouse_state.clone());
-    let mut drag = CdpDragDispatcher::new(tab, world);
+    let mut drag = CdpDragObserver::new(tab, world);
     let drag_result = refact_browser::drag_and_drop(
         &mut mouse,
         &mut drag,

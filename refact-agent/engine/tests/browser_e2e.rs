@@ -3415,7 +3415,7 @@ async fn selector_evaluator_preserves_shadow_and_xpath_boundaries() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "headless_chrome 1.0.20 drops Input.dragIntercepted on its non-flattened target transport"]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn html5_drag_and_drop_reaches_page_handler() {
     let Some(mut case) = BrowserCase::start("drag-drop.html").await else {
         return;
@@ -3435,16 +3435,13 @@ async fn html5_drag_and_drop_reaches_page_handler() {
                 target_position: None,
             },
             BrowserStep::Eval {
-                expression: "({dragged:document.querySelector('#target').dataset.dropped,files:document.querySelector('#files').dataset.files})".to_string(),
+                expression: "String(document.querySelector('#target').dataset.dropped)".to_string(),
             },
         ],
         &ImagePolicy::browser_capture(),
     );
     assert!(report.ok, "drag/drop report: {report:?}");
-    assert_eq!(
-        report.steps[2].data.as_ref().unwrap()["value"]["dragged"],
-        "dragged"
-    );
+    assert_eq!(report.steps[2].data.as_ref().unwrap()["value"], "dragged");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3468,17 +3465,13 @@ async fn file_drop_and_coordinate_mouse_reach_page_handlers() {
                 paths: vec![file.to_string_lossy().into_owned()],
             },
             BrowserStep::Eval {
-                expression: "({dragged:document.querySelector('#target').dataset.dropped,files:document.querySelector('#files').dataset.files})".to_string(),
+                expression: "String(document.querySelector('#files').dataset.files)".to_string(),
             },
         ],
         &ImagePolicy::browser_capture(),
     );
     assert!(report.ok, "file drop report: {report:?}");
-    assert_eq!(
-        report.steps[2].data.as_ref().unwrap()["value"]["files"],
-        "drop.txt",
-        "file drop report: {report:?}"
-    );
+    assert_eq!(report.steps[2].data.as_ref().unwrap()["value"], "drop.txt");
 
     case.navigate("canvas-draw.html");
     case.setup_world();
