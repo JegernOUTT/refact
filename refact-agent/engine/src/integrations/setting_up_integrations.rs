@@ -6,7 +6,6 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::fs as async_fs;
-use tokio::io::AsyncWriteExt;
 use crate::custom_error::YamlError;
 use crate::global_context::GlobalContext;
 use crate::files_correction::any_glob_matches_path;
@@ -581,6 +580,9 @@ pub async fn integration_config_get(
                         }
                         let common_settings = integration_box.integr_common();
                         result.integr_values = integration_box.integr_settings_as_json();
+                        if let Some(values) = result.integr_values.as_object_mut() {
+                            values.remove("oauth_tokens");
+                        }
                         result.integr_values["available"]["on_your_laptop"] =
                             common_settings.available.on_your_laptop.into();
                         result.integr_values["available"]["when_isolated"] =
@@ -610,6 +612,98 @@ pub async fn integration_config_get(
         };
     }
     Ok(result)
+}
+
+const OAUTH_TOKENS_FIELD: &str = "oauth_tokens";
+const TRANSPORT_SELECTOR_FIELDS: &[&str] = &["url", "command"];
+
+fn preserve_unknown_fields(
+    config_path: &std::path::Path,
+    existing_text: &str,
+    new_value: &mut serde_yaml::Value,
+) {
+    let existing_value: serde_yaml::Value = match serde_yaml::from_str(existing_text) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let existing_map = match existing_value.as_mapping() {
+        Some(map) => map.clone(),
+        None => return,
+    };
+    let new_map = match new_value.as_mapping_mut() {
+        Some(map) => map,
+        None => return,
+    };
+    let remote_transport = new_map
+        .get(&serde_yaml::Value::String("url".to_string()))
+        .and_then(|value| value.as_str())
+        .is_some_and(|url| !url.trim().is_empty());
+
+    if !remote_transport {
+        let key = serde_yaml::Value::String(OAUTH_TOKENS_FIELD.to_string());
+        if new_map.remove(&key).is_some() {
+            tracing::info!(
+                "dropping stale {} from {}: config no longer uses a remote transport",
+                OAUTH_TOKENS_FIELD,
+                config_path.display()
+            );
+        }
+    }
+
+    for (key, value) in existing_map {
+        if new_map.contains_key(&key) {
+            continue;
+        }
+        let key_name = key.as_str().unwrap_or_default();
+        if key_name == OAUTH_TOKENS_FIELD && !remote_transport {
+            continue;
+        }
+        if TRANSPORT_SELECTOR_FIELDS.contains(&key_name) {
+            continue;
+        }
+        new_map.insert(key, value);
+    }
+}
+
+fn leading_marketplace_comments(existing_text: &str) -> String {
+    let mut preserved = String::new();
+    for line in existing_text.lines() {
+        if line.starts_with("# mcp_marketplace_") {
+            preserved.push_str(line);
+            preserved.push('\n');
+        } else if !line.trim_start().starts_with('#') && !line.trim().is_empty() {
+            break;
+        }
+    }
+    preserved
+}
+
+async fn write_config_atomically(
+    config_path: &std::path::Path,
+    contents: &str,
+) -> Result<(), String> {
+    let tmp_path = config_path.with_extension("tmp");
+    async_fs::write(&tmp_path, contents.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
+    #[cfg(unix)]
+    if let Ok(metadata) = async_fs::metadata(config_path).await {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode() & 0o777;
+        if let Err(e) =
+            async_fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(mode)).await
+        {
+            let _ = async_fs::remove_file(&tmp_path).await;
+            return Err(format!(
+                "Failed to preserve permissions on {}: {}",
+                config_path.display(),
+                e
+            ));
+        }
+    }
+    async_fs::rename(&tmp_path, config_path)
+        .await
+        .map_err(|e| format!("Failed to write {}: {}", config_path.display(), e))
 }
 
 pub async fn integration_config_save(
@@ -647,7 +741,11 @@ pub async fn integration_config_save(
     }
 
     tracing::info!("writing to {}", config_path.display());
-    let sanitized_yaml = serde_yaml::to_value(sanitized_json).unwrap();
+    let existing_text = async_fs::read_to_string(&config_path)
+        .await
+        .unwrap_or_default();
+    let mut sanitized_yaml = serde_yaml::to_value(sanitized_json).unwrap();
+    preserve_unknown_fields(&config_path, &existing_text, &mut sanitized_yaml);
 
     let config_dir = config_path
         .parent()
@@ -656,13 +754,12 @@ pub async fn integration_config_save(
         .await
         .map_err(|e| format!("Failed to create {}: {}", config_dir.display(), e))?;
 
-    let mut file = async_fs::File::create(&config_path)
-        .await
-        .map_err(|e| format!("Failed to create {}: {}", config_path.display(), e))?;
-    let sanitized_yaml_string = serde_yaml::to_string(&sanitized_yaml).unwrap();
-    file.write_all(sanitized_yaml_string.as_bytes())
-        .await
-        .map_err(|e| format!("Failed to write to {}: {}", config_path.display(), e))?;
+    let sanitized_yaml_string = format!(
+        "{}{}",
+        leading_marketplace_comments(&existing_text),
+        serde_yaml::to_string(&sanitized_yaml).unwrap()
+    );
+    write_config_atomically(&config_path, &sanitized_yaml_string).await?;
 
     // If it is an mcp integration, ensure we restart or reconnect to the server
     if config_path
@@ -683,6 +780,208 @@ mod tests {
     use serde_yaml;
     use std::fs::File;
     use std::io::Write;
+
+    fn yaml_key(name: &str) -> serde_yaml::Value {
+        serde_yaml::Value::String(name.to_string())
+    }
+
+    fn access_token_of(value: &serde_yaml::Value) -> Option<String> {
+        value
+            .as_mapping()?
+            .get(&yaml_key("oauth_tokens"))?
+            .as_mapping()?
+            .get(&yaml_key("access_token"))?
+            .as_str()
+            .map(|s| s.to_string())
+    }
+
+    #[test]
+    fn preserve_unknown_fields_restores_omitted_tokens() {
+        let existing = "url: https://mcp.example.com/mcp\noauth_tokens:\n  access_token: kept\n";
+        let mut new_value: serde_yaml::Value =
+            serde_yaml::from_str("url: https://mcp.example.com/mcp\n").unwrap();
+        super::preserve_unknown_fields(
+            std::path::Path::new("/tmp/x.yaml"),
+            existing,
+            &mut new_value,
+        );
+        assert_eq!(access_token_of(&new_value).as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn preserve_unknown_fields_respects_caller_supplied_tokens() {
+        let existing = "url: https://mcp.example.com/mcp\noauth_tokens:\n  access_token: old\n";
+        let mut new_value: serde_yaml::Value = serde_yaml::from_str(
+            "url: https://mcp.example.com/mcp\noauth_tokens:\n  access_token: fresh\n",
+        )
+        .unwrap();
+        super::preserve_unknown_fields(
+            std::path::Path::new("/tmp/x.yaml"),
+            existing,
+            &mut new_value,
+        );
+        assert_eq!(access_token_of(&new_value).as_deref(), Some("fresh"));
+    }
+
+    #[test]
+    fn preserve_unknown_fields_skips_non_remote_transport() {
+        let existing = "url: https://mcp.example.com/mcp\noauth_tokens:\n  access_token: old\n";
+        let mut new_value: serde_yaml::Value =
+            serde_yaml::from_str("command: uvx mcp-server-fetch\n").unwrap();
+        super::preserve_unknown_fields(
+            std::path::Path::new("/tmp/x.yaml"),
+            existing,
+            &mut new_value,
+        );
+        assert_eq!(access_token_of(&new_value), None);
+    }
+
+    #[test]
+    fn preserve_unknown_fields_ignores_malformed_existing_config() {
+        let mut new_value: serde_yaml::Value =
+            serde_yaml::from_str("url: https://mcp.example.com/mcp\n").unwrap();
+        super::preserve_unknown_fields(
+            std::path::Path::new("/tmp/x.yaml"),
+            "\tnot: [valid",
+            &mut new_value,
+        );
+        assert_eq!(access_token_of(&new_value), None);
+    }
+
+    #[test]
+    fn preserve_unknown_fields_keeps_arbitrary_engine_managed_keys() {
+        let existing = "url: https://mcp.example.com/mcp\nsome_future_field:\n  nested: 7\nplain_scalar: kept\n";
+        let mut new_value: serde_yaml::Value =
+            serde_yaml::from_str("url: https://mcp.example.com/mcp\n").unwrap();
+        super::preserve_unknown_fields(
+            std::path::Path::new("/tmp/x.yaml"),
+            existing,
+            &mut new_value,
+        );
+        let map = new_value.as_mapping().unwrap();
+        assert_eq!(
+            map.get(&yaml_key("some_future_field"))
+                .and_then(|v| v.as_mapping())
+                .and_then(|m| m.get(&yaml_key("nested")))
+                .and_then(|v| v.as_u64()),
+            Some(7)
+        );
+        assert_eq!(
+            map.get(&yaml_key("plain_scalar")).and_then(|v| v.as_str()),
+            Some("kept")
+        );
+    }
+
+    #[test]
+    fn preserve_unknown_fields_does_not_override_caller_supplied_keys() {
+        let existing = "url: https://old.example.com/mcp\nextra: old\n";
+        let mut new_value: serde_yaml::Value =
+            serde_yaml::from_str("url: https://new.example.com/mcp\nextra: new\n").unwrap();
+        super::preserve_unknown_fields(
+            std::path::Path::new("/tmp/x.yaml"),
+            existing,
+            &mut new_value,
+        );
+        let map = new_value.as_mapping().unwrap();
+        assert_eq!(
+            map.get(&yaml_key("url")).and_then(|v| v.as_str()),
+            Some("https://new.example.com/mcp")
+        );
+        assert_eq!(
+            map.get(&yaml_key("extra")).and_then(|v| v.as_str()),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn preserve_unknown_fields_never_restores_transport_selectors() {
+        let existing = "url: https://mcp.example.com/mcp\ncommand: old-cmd\nnote: keep-me\n";
+        let mut new_value: serde_yaml::Value =
+            serde_yaml::from_str("command: uvx mcp-server-fetch\n").unwrap();
+        super::preserve_unknown_fields(
+            std::path::Path::new("/tmp/x.yaml"),
+            existing,
+            &mut new_value,
+        );
+        let map = new_value.as_mapping().unwrap();
+        assert!(map.get(&yaml_key("url")).is_none());
+        assert_eq!(
+            map.get(&yaml_key("command")).and_then(|v| v.as_str()),
+            Some("uvx mcp-server-fetch")
+        );
+        assert_eq!(
+            map.get(&yaml_key("note")).and_then(|v| v.as_str()),
+            Some("keep-me")
+        );
+    }
+
+    #[test]
+    fn preserve_unknown_fields_purges_caller_supplied_tokens_on_non_remote() {
+        let existing = "url: https://mcp.example.com/mcp\n";
+        let mut new_value: serde_yaml::Value = serde_yaml::from_str(
+            "command: uvx mcp-server-fetch\noauth_tokens:\n  access_token: supplied\n",
+        )
+        .unwrap();
+        super::preserve_unknown_fields(
+            std::path::Path::new("/tmp/x.yaml"),
+            existing,
+            &mut new_value,
+        );
+        assert_eq!(access_token_of(&new_value), None);
+    }
+
+    #[test]
+    fn leading_marketplace_comments_survives_other_leading_comments() {
+        let existing =
+            "# hand written note\n# mcp_marketplace_source: refact-bundled\ncommand: x\n";
+        assert_eq!(
+            super::leading_marketplace_comments(existing),
+            "# mcp_marketplace_source: refact-bundled\n"
+        );
+    }
+
+    #[test]
+    fn preserve_unknown_fields_purges_stale_tokens_but_keeps_other_keys() {
+        let existing = "url: https://mcp.example.com/mcp\noauth_tokens:\n  access_token: dead\nnote: keep-me\n";
+        let mut new_value: serde_yaml::Value =
+            serde_yaml::from_str("command: uvx mcp-server-fetch\nurl: ''\n").unwrap();
+        super::preserve_unknown_fields(
+            std::path::Path::new("/tmp/x.yaml"),
+            existing,
+            &mut new_value,
+        );
+        assert_eq!(access_token_of(&new_value), None);
+        assert_eq!(
+            new_value
+                .as_mapping()
+                .unwrap()
+                .get(&yaml_key("note"))
+                .and_then(|v| v.as_str()),
+            Some("keep-me")
+        );
+    }
+
+    #[test]
+    fn leading_marketplace_comments_captures_only_the_header() {
+        let existing = "# mcp_marketplace_source: refact-bundled\n# mcp_marketplace_server: fetch\ncommand: uvx mcp-server-fetch\n# mcp_marketplace_recipe_hash: late\n";
+        assert_eq!(
+            super::leading_marketplace_comments(existing),
+            "# mcp_marketplace_source: refact-bundled\n# mcp_marketplace_server: fetch\n"
+        );
+        assert_eq!(super::leading_marketplace_comments("url: https://x\n"), "");
+    }
+
+    #[tokio::test]
+    async fn write_config_atomically_replaces_contents_without_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp_thing.yaml");
+        std::fs::write(&path, "old: 1\n").unwrap();
+        super::write_config_atomically(&path, "new: 2\n")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new: 2\n");
+        assert!(!dir.path().join("mcp_thing.tmp").exists());
+    }
 
     #[tokio::test]
     async fn test_integration_schemas() {

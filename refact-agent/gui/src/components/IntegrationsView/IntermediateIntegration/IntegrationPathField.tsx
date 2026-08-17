@@ -25,7 +25,15 @@ export const IntegrationPathField: React.FC<IntegrationPathFieldProps> = ({
   if (!shouldBeFormatted) {
     return (
       <span className={styles.pathOption}>
-        <RadioGroupPrimitive.Item value={configPath} /> {globalLabel}
+        <RadioGroupPrimitive.Item
+          value={configPath}
+          className={styles.pathRadio}
+        >
+          <RadioGroupPrimitive.Indicator
+            className={styles.pathRadioIndicator}
+          />
+        </RadioGroupPrimitive.Item>{" "}
+        {globalLabel}
       </span>
     );
   }
@@ -35,14 +43,25 @@ export const IntegrationPathField: React.FC<IntegrationPathFieldProps> = ({
   if (!projectInfo) {
     return (
       <span className={styles.pathOption}>
-        <RadioGroupPrimitive.Item value={configPath} /> {projectPath}
+        <RadioGroupPrimitive.Item
+          value={configPath}
+          className={styles.pathRadio}
+        >
+          <RadioGroupPrimitive.Indicator
+            className={styles.pathRadioIndicator}
+          />
+        </RadioGroupPrimitive.Item>{" "}
+        {projectPath}
       </span>
     );
   }
 
   const content = (
     <span className={styles.pathOption}>
-      <RadioGroupPrimitive.Item value={configPath} /> {projectInfo.label}
+      <RadioGroupPrimitive.Item value={configPath} className={styles.pathRadio}>
+        <RadioGroupPrimitive.Indicator className={styles.pathRadioIndicator} />
+      </RadioGroupPrimitive.Item>{" "}
+      {projectInfo.label}
     </span>
   );
 

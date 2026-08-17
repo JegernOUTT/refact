@@ -496,6 +496,7 @@ mod tests {
             oauth_probe: None,
             sampling_session_approved: false,
             active_progress: Vec::new(),
+            last_logged_status: None,
         };
         session.connection_status = MCPConnectionStatus::Connecting;
         assert!(matches!(
@@ -534,6 +535,7 @@ mod tests {
             oauth_probe: None,
             sampling_session_approved: false,
             active_progress: Vec::new(),
+            last_logged_status: None,
         };
         assert_ne!(session.launched_cfg, serde_json::Value::Null);
         session.launched_cfg = serde_json::Value::Null;

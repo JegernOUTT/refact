@@ -284,6 +284,119 @@ describe("MCPOAuth", () => {
     );
   });
 
+  test("reconnects the MCP server once authentication completes", async () => {
+    let oauthStatusRequests = 0;
+    let reconnectCalls = 0;
+    server.use(
+      http.get("*/v1/mcp-server-info", () => {
+        return HttpResponse.json({
+          config_path: CONFIG_PATH,
+          status: { status: "needs_auth" },
+          auth_status: "needs_login",
+          tools: [],
+          resources: [],
+          prompts: [],
+          capabilities: {
+            tools: false,
+            resources: false,
+            prompts: false,
+            sampling: true,
+          },
+          logs_tail: [],
+          metrics: {},
+          active_progress: [],
+        });
+      }),
+      http.post("*/v1/mcp-server-reconnect", () => {
+        reconnectCalls += 1;
+        return HttpResponse.json({ reconnect_triggered: true });
+      }),
+      http.get("*/v1/mcp/oauth/status", () => {
+        oauthStatusRequests += 1;
+        return HttpResponse.json({
+          auth_type: "oauth2_pkce",
+          authenticated: oauthStatusRequests > 1,
+          needs_login: oauthStatusRequests === 1,
+          oauth_available: true,
+          suggested_scopes: [],
+          expires_at: Date.now() + 3600000,
+          scopes: [],
+        });
+      }),
+      http.post("*/v1/integrations-mcp-logs", () => {
+        return HttpResponse.json({ logs: [] });
+      }),
+    );
+
+    render(<MCPServerView configPath={CONFIG_PATH} integrName="http_test" />, {
+      preloadedState: PRELOADED_STATE,
+    });
+
+    await waitFor(
+      () => {
+        expect(screen.getByText("Authenticated")).toBeInTheDocument();
+      },
+      { timeout: 5000 },
+    );
+
+    await waitFor(
+      () => {
+        expect(reconnectCalls).toBeGreaterThanOrEqual(1);
+      },
+      { timeout: 5000 },
+    );
+  });
+
+  test("does not reconnect when the server is already authenticated", async () => {
+    let reconnectCalls = 0;
+    server.use(
+      http.get("*/v1/mcp-server-info", () => {
+        return HttpResponse.json({
+          config_path: CONFIG_PATH,
+          status: { status: "connected" },
+          auth_status: "authenticated",
+          tools: [],
+          resources: [],
+          prompts: [],
+          capabilities: {
+            tools: false,
+            resources: false,
+            prompts: false,
+            sampling: true,
+          },
+          logs_tail: [],
+          metrics: {},
+          active_progress: [],
+        });
+      }),
+      http.post("*/v1/mcp-server-reconnect", () => {
+        reconnectCalls += 1;
+        return HttpResponse.json({ reconnect_triggered: true });
+      }),
+      http.post("*/v1/integrations-mcp-logs", () => {
+        return HttpResponse.json({ logs: [] });
+      }),
+    );
+    mockStatus({
+      auth_type: "oauth2_pkce",
+      authenticated: true,
+      expires_at: Date.now() + 3600000,
+    });
+
+    render(<MCPServerView configPath={CONFIG_PATH} integrName="http_test" />, {
+      preloadedState: PRELOADED_STATE,
+    });
+
+    await waitFor(
+      () => {
+        expect(screen.getByText("Authenticated")).toBeInTheDocument();
+      },
+      { timeout: 5000 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(reconnectCalls).toBe(0);
+  });
+
   test("renders nothing when server needs login but oauth is not available", async () => {
     mockStatus({
       auth_type: "none",

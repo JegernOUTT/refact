@@ -132,9 +132,9 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
   const [reconnect, { isLoading: isReconnecting }] =
     useReconnectMCPServerMutation();
 
-  const handleReconnect = () => {
+  const handleReconnect = React.useCallback(() => {
     void reconnect({ configPath });
-  };
+  }, [reconnect, configPath]);
 
   if (isLoading) {
     return (
@@ -208,18 +208,18 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
 
       <div className={styles.divider} role="separator" />
 
-      <MCPOAuth
-        configPath={configPath}
-        connectionStatus={data.status}
-        authStatus={data.auth_status}
-      />
-
       <div className="rf-stagger">
         <CollapsibleSection
           icon={<Icon icon={Bolt} size="sm" />}
           title="Connection"
           defaultExpanded
         >
+          <MCPOAuth
+            configPath={configPath}
+            connectionStatus={data.status}
+            authStatus={data.auth_status}
+            onAuthenticated={handleReconnect}
+          />
           <MCPConnectionStatus
             status={data.status}
             onReconnect={handleReconnect}

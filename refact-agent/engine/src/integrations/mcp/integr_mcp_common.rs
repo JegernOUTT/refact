@@ -242,6 +242,47 @@ fn build_mcp_tool_boxes(
         .collect()
 }
 
+fn describe_connection_status(status: &MCPConnectionStatus) -> String {
+    match status {
+        MCPConnectionStatus::Connected => "connected".to_string(),
+        MCPConnectionStatus::Connecting => "connecting".to_string(),
+        MCPConnectionStatus::Reconnecting { attempt } => {
+            format!("reconnecting, attempt {}", attempt)
+        }
+        MCPConnectionStatus::Failed { message } => message.clone(),
+        MCPConnectionStatus::Disconnected => "disconnected".to_string(),
+        MCPConnectionStatus::NeedsAuth => "needs authentication".to_string(),
+    }
+}
+
+fn should_log_status_change(session: &mut SessionMCP) -> bool {
+    if session.last_logged_status.as_ref() == Some(&session.connection_status) {
+        return false;
+    }
+    session.last_logged_status = Some(session.connection_status.clone());
+    true
+}
+
+fn log_serving_no_tools_once(session: &mut SessionMCP, session_key: &str, starting: bool) {
+    if !should_log_status_change(session) {
+        return;
+    }
+    let reason = describe_connection_status(&session.connection_status);
+    if starting {
+        tracing::debug!(
+            "MCP {} is still starting ({}) and has no cached tool catalog yet, serving no tools",
+            session_key,
+            reason
+        );
+    } else {
+        tracing::warn!(
+            "MCP {} is unavailable ({}), serving no tools",
+            session_key,
+            reason
+        );
+    }
+}
+
 pub async fn mcp_integr_tools(
     gcx_option: Option<Weak<GlobalContext>>,
     config_path: &str,
@@ -295,53 +336,58 @@ pub async fn mcp_integr_tools(
             session_downcasted.connection_status,
             MCPConnectionStatus::Connecting | MCPConnectionStatus::Reconnecting { .. }
         );
-        match &session_downcasted.mcp_client {
-            Some(mcp_client) if !startup_in_progress => {
-                // Connected (or terminally failed) sessions are authoritative,
-                // including a legitimately empty tool list.
-                build_mcp_tool_boxes(
-                    &session_downcasted.mcp_tools,
-                    config_path,
-                    common,
-                    mcp_common,
-                    mcp_client.clone(),
-                    request_timeout,
-                )
+        if !startup_in_progress {
+            match session_downcasted.mcp_client.clone() {
+                Some(mcp_client) => {
+                    // Connected (or terminally failed) sessions are authoritative,
+                    // including a legitimately empty tool list.
+                    session_downcasted.last_logged_status = None;
+                    build_mcp_tool_boxes(
+                        &session_downcasted.mcp_tools,
+                        config_path,
+                        common,
+                        mcp_common,
+                        mcp_client,
+                        request_timeout,
+                    )
+                }
+                None => {
+                    log_serving_no_tools_once(session_downcasted, &session_key, false);
+                    vec![]
+                }
             }
-            _ if !startup_in_progress => {
-                tracing::error!("No mcp_client for {:?}, strange (2)", session_key);
-                vec![]
-            }
-            _ => {
-                // Startup or reconnect in progress: serve the last known tool
-                // catalog so the model does not lose the server's tools while
-                // it is coming up. Execution before the client is ready fails
-                // gracefully inside ToolMCP::tool_execute.
-                match tool_catalog_cache_get(config_path) {
-                    Some(cached_tools) => {
+        } else {
+            // Startup or reconnect in progress: serve the last known tool
+            // catalog so the model does not lose the server's tools while
+            // it is coming up. Execution before the client is ready fails
+            // gracefully inside ToolMCP::tool_execute.
+            match tool_catalog_cache_get(config_path) {
+                Some(cached_tools) => {
+                    if should_log_status_change(session_downcasted) {
                         tracing::info!(
-                            "serving {} cached MCP tools for {} while the server is starting",
+                            "serving {} cached MCP tools for {} while the server is starting ({})",
                             cached_tools.len(),
-                            session_key
+                            session_key,
+                            describe_connection_status(&session_downcasted.connection_status)
                         );
-                        let placeholder_client: Arc<AMutex<Option<McpRunningService>>> =
-                            session_downcasted
-                                .mcp_client
-                                .clone()
-                                .unwrap_or_else(|| Arc::new(AMutex::new(None)));
-                        build_mcp_tool_boxes(
-                            &cached_tools,
-                            config_path,
-                            common,
-                            mcp_common,
-                            placeholder_client,
-                            request_timeout,
-                        )
                     }
-                    None => {
-                        tracing::error!("No mcp_client for {:?}, strange (2)", session_key);
-                        vec![]
-                    }
+                    let placeholder_client: Arc<AMutex<Option<McpRunningService>>> =
+                        session_downcasted
+                            .mcp_client
+                            .clone()
+                            .unwrap_or_else(|| Arc::new(AMutex::new(None)));
+                    build_mcp_tool_boxes(
+                        &cached_tools,
+                        config_path,
+                        common,
+                        mcp_common,
+                        placeholder_client,
+                        request_timeout,
+                    )
+                }
+                None => {
+                    log_serving_no_tools_once(session_downcasted, &session_key, true);
+                    vec![]
                 }
             }
         }
@@ -766,6 +812,7 @@ fn prepare_mcp_session_for_start(
 ) {
     session.launched_cfg = new_cfg_value;
     session.connection_status = MCPConnectionStatus::Connecting;
+    session.last_logged_status = None;
     if config_changed {
         session.oauth_probe = None;
     }
@@ -818,6 +865,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 oauth_probe: None,
                 sampling_session_approved: false,
                 active_progress: Vec::new(),
+                last_logged_status: None,
             })));
             tracing::info!("MCP START SESSION {:?}", session_key);
             integration_sessions.insert(session_key.clone(), new_session.clone());
@@ -1111,6 +1159,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 session_downcasted.mcp_prompts = prompts;
                 session_downcasted.server_info = server_info;
                 session_downcasted.connection_status = MCPConnectionStatus::Connected;
+                session_downcasted.last_logged_status = None;
                 session_downcasted.last_successful_connection = Some(Instant::now());
                 if let Ok(mut m) = session_downcasted.metrics.try_lock() {
                     m.record_connected();
@@ -1427,6 +1476,7 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
             tool_catalog_cache_store(&mcp_session.config_path, &tools);
             mcp_session.mcp_tools = tools;
             mcp_session.connection_status = MCPConnectionStatus::Connected;
+            mcp_session.last_logged_status = None;
             mcp_session.last_successful_connection = Some(Instant::now());
             mcp_session.metrics.clone()
         };
@@ -1482,8 +1532,53 @@ mod tests {
                 oauth_probe: None,
                 sampling_session_approved: false,
                 active_progress: Vec::new(),
+                last_logged_status: None,
             }) as Box<dyn IntegrationSession>,
         ))
+    }
+
+    #[tokio::test]
+    async fn status_change_logging_is_deduplicated() {
+        let session_arc = make_session_arc(MCPConnectionStatus::Failed {
+            message: "boom".to_string(),
+        });
+        let mut session_locked = session_arc.lock().await;
+        let session = session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap();
+
+        assert!(should_log_status_change(session));
+        assert!(!should_log_status_change(session));
+
+        session.connection_status = MCPConnectionStatus::Reconnecting { attempt: 1 };
+        assert!(should_log_status_change(session));
+        session.connection_status = MCPConnectionStatus::Reconnecting { attempt: 2 };
+        assert!(should_log_status_change(session));
+
+        session.last_logged_status = None;
+        session.connection_status = MCPConnectionStatus::Failed {
+            message: "boom".to_string(),
+        };
+        assert!(should_log_status_change(session));
+    }
+
+    #[test]
+    fn describe_connection_status_reports_failure_message() {
+        assert_eq!(
+            describe_connection_status(&MCPConnectionStatus::Failed {
+                message: "no tokens".to_string(),
+            }),
+            "no tokens"
+        );
+        assert_eq!(
+            describe_connection_status(&MCPConnectionStatus::Reconnecting { attempt: 3 }),
+            "reconnecting, attempt 3"
+        );
+        assert_eq!(
+            describe_connection_status(&MCPConnectionStatus::NeedsAuth),
+            "needs authentication"
+        );
     }
 
     #[test]
@@ -1772,6 +1867,7 @@ mod tests {
                 oauth_probe: None,
                 sampling_session_approved: false,
                 active_progress: Vec::new(),
+                last_logged_status: None,
             }) as Box<dyn IntegrationSession>));
 
         let result = super::build_auth_client_for_mcp(

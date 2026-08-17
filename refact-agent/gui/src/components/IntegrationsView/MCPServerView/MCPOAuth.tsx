@@ -1,19 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { integrationsApi } from "../../../services/refact/integrations";
 import type {
   MCPAuthStatus,
   MCPServerInfo,
 } from "../../../services/refact/mcpServerInfo";
 import { useOpenUrl } from "../../../hooks/useOpenUrl";
-import {
-  Badge,
-  Button,
-  FieldTextarea,
-  Flex,
-  Spinner,
-  Surface,
-  Text,
-} from "../../ui";
+import { Badge, Button, FieldTextarea, Flex, Spinner, Text } from "../../ui";
 import styles from "./MCPOAuth.module.css";
 
 type MCPOAuthProps = {
@@ -21,6 +13,7 @@ type MCPOAuthProps = {
   connectionStatus?: MCPServerInfo["status"];
   authStatus?: MCPAuthStatus;
   pollingIntervalMs?: number;
+  onAuthenticated?: () => void;
 };
 
 function getStatusName(status: unknown): string | null {
@@ -41,6 +34,7 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({
   connectionStatus,
   authStatus,
   pollingIntervalMs = 3000,
+  onAuthenticated,
 }) => {
   const openUrl = useOpenUrl();
 
@@ -69,6 +63,24 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({
       setAuthorizeUrl(null);
     }
   }, [waitingForCallback, status?.authenticated]);
+
+  const wasAuthenticatedRef = useRef<{
+    configPath: string;
+    value: boolean;
+  } | null>(null);
+  useEffect(() => {
+    const authenticated = status?.authenticated;
+    if (authenticated === undefined) return;
+    const previous = wasAuthenticatedRef.current;
+    wasAuthenticatedRef.current = { configPath, value: authenticated };
+    if (
+      previous?.configPath === configPath &&
+      !previous.value &&
+      authenticated
+    ) {
+      onAuthenticated?.();
+    }
+  }, [configPath, status?.authenticated, onAuthenticated]);
 
   useEffect(() => {
     const connectionStatusName = getStatusName(connectionStatus);
@@ -179,12 +191,7 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({
 
   if (status.authenticated) {
     return (
-      <Surface
-        animated="rise"
-        className={styles.container}
-        radius="card"
-        variant="glass"
-      >
+      <div className={styles.container}>
         <Flex direction="column" gap="2">
           <Flex align="center" justify="between" gap="2" wrap="wrap">
             <Flex align="center" gap="2" wrap="wrap">
@@ -212,18 +219,13 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({
             </Text>
           )}
         </Flex>
-      </Surface>
+      </div>
     );
   }
 
   if (waitingForCallback && sessionId && authorizeUrl) {
     return (
-      <Surface
-        animated="rise"
-        className={styles.container}
-        radius="card"
-        variant="glass"
-      >
+      <div className={styles.container}>
         <Flex direction="column" gap="2">
           <Flex align="center" gap="2">
             <Spinner size="sm" />
@@ -282,17 +284,12 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({
             </Text>
           )}
         </Flex>
-      </Surface>
+      </div>
     );
   }
 
   return (
-    <Surface
-      animated="rise"
-      className={styles.container}
-      radius="card"
-      variant="glass"
-    >
+    <div className={styles.container}>
       <Flex direction="column" gap="2">
         {!oauthConfigured && oauthOffered && (
           <Text as="p" size="1" color="gray">
@@ -327,6 +324,6 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({
           </Text>
         )}
       </Flex>
-    </Surface>
+    </div>
   );
 };

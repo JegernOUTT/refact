@@ -53,6 +53,52 @@
   font-size: var(--rf-text-2);
 }
 
+.pathRadio {
+  box-sizing: border-box;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  background: var(--rf-surface-2);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-pill);
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .pathRadio {
+    transition:
+      background var(--rf-dur-med) var(--rf-ease-standard),
+      border-color var(--rf-dur-med) var(--rf-ease-standard);
+  }
+}
+
+.pathRadio:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.pathRadio[data-state="checked"] {
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-color-accent);
+}
+
+.pathRadio[data-disabled] {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.pathRadioIndicator {
+  display: block;
+  width: 8px;
+  height: 8px;
+  background: var(--rf-color-accent);
+  border-radius: var(--rf-radius-pill);
+}
+
 .pathHelp {
   display: inline-flex;
   color: var(--rf-color-muted);

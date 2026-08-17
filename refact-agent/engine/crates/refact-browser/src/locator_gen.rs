@@ -32,14 +32,11 @@ impl WorldManager {
         options: LocatorGenerationOptions,
     ) -> Result<String, HandleError> {
         let options = serde_json::to_value(options).map_err(|error| {
-            HandleError::Protocol(format!("Failed to serialize locator generation options: {error}"))
+            HandleError::Protocol(format!(
+                "Failed to serialize locator generation options: {error}"
+            ))
         })?;
-        let value = self.call_function_on(
-            tab,
-            handle,
-            GENERATE_LOCATOR_FUNCTION,
-            vec![options],
-        )?;
+        let value = self.call_function_on(tab, handle, GENERATE_LOCATOR_FUNCTION, vec![options])?;
         parse_generated_locator(value)
     }
 }
@@ -71,10 +68,8 @@ mod tests {
     #[test]
     fn generated_locator_wrapper_deserializes_string_results() {
         assert_eq!(
-            parse_generated_locator(serde_json::json!(
-                "internal:role=button[name=\"Save\"s]"
-            ))
-            .unwrap(),
+            parse_generated_locator(serde_json::json!("internal:role=button[name=\"Save\"s]"))
+                .unwrap(),
             "internal:role=button[name=\"Save\"s]"
         );
         assert!(matches!(

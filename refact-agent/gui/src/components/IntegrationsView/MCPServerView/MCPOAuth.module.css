@@ -1,7 +1,7 @@
 .container {
   width: 100%;
   min-width: 0;
-  padding: var(--rf-space-3);
+  padding-bottom: var(--rf-space-3);
 }
 
 .accentLink {

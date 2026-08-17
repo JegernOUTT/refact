@@ -852,6 +852,7 @@ pub struct SessionMCP {
     pub oauth_probe: Option<super::mcp_auth::MCPAuthProbeResult>,
     pub sampling_session_approved: bool,
     pub active_progress: Vec<MCPProgressInfo>,
+    pub last_logged_status: Option<MCPConnectionStatus>,
 }
 
 impl IntegrationSession for SessionMCP {
@@ -1024,6 +1025,7 @@ mod tests {
             oauth_probe: None,
             sampling_session_approved: false,
             active_progress: Vec::new(),
+            last_logged_status: None,
         }
     }
 
