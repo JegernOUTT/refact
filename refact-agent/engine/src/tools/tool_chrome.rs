@@ -101,7 +101,9 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Advanced: eval, add_locator_handler, remove_locator_handler, dismiss_overlays, highlight_element, highlight, hide_highlight, annotate, and fixed-delay wait_seconds. highlight accepts locator/ref plus optional style and label; annotate accepts locator/ref plus text. Locator handlers use `{type:\"click\"}` or `{type:\"steps\",steps:[...]}`.\n",
     "Locator fallback vocabulary: ref; role with name/description, exact or regex, and checked/pressed/selected/expanded/disabled/level/include_hidden filters; test_id with configurable `attribute`; text, label, placeholder, alt_text, title, css, xpath, id, name, and autocomplete. ",
     "Compose with zero-based `nth` (-1 is last), first/last, locator, filter (has/has_not/has_text/has_not_text/visible), and/or, or an outermost-first `frames` chain. Non-selecting actions are strict: ambiguous locators fail loudly with the match count. Same-process frames are supported; out-of-process frames fail explicitly.\n",
-    "`attach_screenshot` is tri-state for the policy-sized report screenshot: true = always attach, false = never attach, omitted = attach when the page changed. An explicit `screenshot` step still returns its own image even when false. The legacy newline-separated `commands` input remains accepted but is deprecated; new callers must use `request.steps`."
+    "`attach_screenshot` is tri-state for the policy-sized report screenshot: true = always attach, false = never attach, omitted = attach when the page changed. An explicit `screenshot` step still returns its own image even when false.\n",
+    "`network` controls per-request report volume: `summary` (the default) emits one `method url status bytes ms` line per request, `full` keeps request and response headers, `none` drops per-request entries. Route interception telemetry and the detail returned by wait_for_request and wait_for_response stay visible in every mode. ",
+    "The legacy newline-separated `commands` input remains accepted but is deprecated; new callers must use `request.steps`."
 );
 
 fn locator_regex_schema() -> serde_json::Value {
@@ -691,6 +693,7 @@ fn browser_request_schema() -> serde_json::Value {
         "properties": {
             "session": {"type": "string", "enum": ["shared_default"]},
             "attach_screenshot": {"type": "boolean", "description": "true = always attach, false = never attach, omitted = attach when the page changed"},
+            "network": {"type": "string", "enum": ["none", "summary", "full"], "description": "Per-request report volume. summary (default) emits one `method url status bytes ms` line per request, full keeps request and response headers, none drops per-request entries"},
             "target": tab_target_schema(),
             "steps": {
                 "type": "array",
@@ -1216,6 +1219,25 @@ mod tests {
         assert!(description.contains("`attach_screenshot` is tri-state"));
         assert!(description.contains("false = never attach"));
         assert!(description.contains("omitted = attach when the page changed"));
+    }
+
+    #[test]
+    fn chrome_schema_documents_network_report_volume() {
+        let schema = chrome_input_schema();
+        assert_eq!(
+            schema.pointer("/properties/request/properties/network/enum"),
+            Some(&serde_json::json!(["none", "summary", "full"]))
+        );
+        assert!(schema
+            .pointer("/properties/request/properties/network/description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains("summary (default)")
+                && description.contains("method url status bytes ms")));
+        let description = ToolChrome::default().tool_description().description;
+        assert!(description.contains("`network` controls per-request report volume"));
+        assert!(description.contains("`summary` (the default)"));
+        assert!(description.contains("`none` drops per-request entries"));
+        assert!(description.contains("Route interception telemetry"));
     }
 
     #[test]

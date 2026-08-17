@@ -19,8 +19,8 @@ use refact_lsp::integrations::browser_locators::{parse_element_info, INSPECT_ELE
 use refact_lsp::integrations::browser_models::{
     AccessibilitySnapshotOptions, BrowserActionRequest, BrowserAuthenticatorProtocol,
     BrowserAuthenticatorTransport, BrowserLocator, BrowserStep, ElementInfo, FieldKind,
-    FillStrategy, HarContentPolicy, HarMode, HarNotFound, SessionPolicy, TabTarget, UrlPattern,
-    WebSocketEventKind, WebSocketRouteMode,
+    FillStrategy, HarContentPolicy, HarMode, HarNotFound, NetworkReportMode, SessionPolicy,
+    TabTarget, UrlPattern, WebSocketEventKind, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::{setup_recording_for_tab, BrowserRuntime, UTILITY_WORLD_NAME};
 use refact_lsp::refact_integrations::browser_types::RecorderEvent;
@@ -713,6 +713,7 @@ async fn differentiator_09_tab_log_and_runtime_buffers_keep_independent_cursors(
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::Full,
             steps: vec![
                 BrowserStep::TabLog,
                 BrowserStep::Eval {
@@ -878,6 +879,7 @@ async fn differentiator_12_password_masking_survives_final_serialization() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Fill {
                     locator: BrowserLocator::css("#password"),

@@ -1690,6 +1690,15 @@ impl Default for SessionPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkReportMode {
+    None,
+    #[default]
+    Summary,
+    Full,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserActionRequest {
     #[serde(default)]
@@ -1698,6 +1707,8 @@ pub struct BrowserActionRequest {
     pub target: TabTarget,
     #[serde(default)]
     pub attach_screenshot: Option<bool>,
+    #[serde(default)]
+    pub network: NetworkReportMode,
     pub steps: Vec<BrowserStep>,
 }
 
@@ -1851,6 +1862,8 @@ pub struct ExecutionReport {
     pub page_errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network: Vec<NetworkEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_summary: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub websockets: Vec<WebSocketEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3247,6 +3260,31 @@ mod tests {
     }
 
     #[test]
+    fn test_request_network_mode_defaults_to_summary() {
+        let omitted: BrowserActionRequest = serde_json::from_str(r#"{"steps": []}"#).unwrap();
+        assert_eq!(omitted.network, NetworkReportMode::Summary);
+        assert_eq!(NetworkReportMode::default(), NetworkReportMode::Summary);
+    }
+
+    #[test]
+    fn test_request_network_mode_accepts_every_lowercase_variant() {
+        for (raw, expected) in [
+            ("none", NetworkReportMode::None),
+            ("summary", NetworkReportMode::Summary),
+            ("full", NetworkReportMode::Full),
+        ] {
+            let parsed: BrowserActionRequest =
+                serde_json::from_str(&format!(r#"{{"network": "{raw}", "steps": []}}"#)).unwrap();
+            assert_eq!(parsed.network, expected);
+            assert_eq!(serde_json::to_value(expected).unwrap(), raw);
+        }
+        assert!(serde_json::from_str::<BrowserActionRequest>(
+            r#"{"network": "Full", "steps": []}"#
+        )
+        .is_err());
+    }
+
+    #[test]
     fn test_step_result_success() {
         let r = StepResult::success(0, "Navigated to https://example.com");
         assert!(r.ok);
@@ -3364,6 +3402,7 @@ mod tests {
             console: vec![],
             page_errors: vec![],
             network: vec![],
+            network_summary: vec![],
             websockets: vec![],
             locator_handlers: vec![],
             dialogs: vec![DialogInfo {

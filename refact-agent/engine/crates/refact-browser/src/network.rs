@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use regex::{Regex, RegexBuilder};
 
 use refact_core::string_utils::redact_sensitive;
+use refact_integrations::browser_models::{ExecutionReport, NetworkReportMode};
 use refact_integrations::browser_types::{NetworkEntry, NetworkTiming};
 
 pub const NETWORK_IDLE_MS: u64 = 500;
@@ -696,6 +697,56 @@ pub(crate) fn mask_text(value: &str) -> String {
         .into_owned()
 }
 
+pub fn summarize_network_entry(entry: &NetworkEntry) -> String {
+    let status = entry
+        .status
+        .map(|status| status.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let bytes = entry
+        .transfer_size
+        .or(entry.encoded_data_length)
+        .map(|bytes| format!("{bytes}b"))
+        .unwrap_or_else(|| "-".to_string());
+    let elapsed = entry
+        .timing
+        .as_ref()
+        .and_then(|timing| {
+            timing
+                .response_end
+                .map(|end| (end - timing.start_time) * 1_000.0)
+        })
+        .filter(|elapsed| elapsed.is_finite() && *elapsed >= 0.0)
+        .map(|elapsed| format!("{}ms", elapsed.round()))
+        .unwrap_or_else(|| "-".to_string());
+    let mut line = format!(
+        "{} {} {} {} {}",
+        entry.method, entry.url, status, bytes, elapsed
+    );
+    if let Some(failure) = entry.failure_text.as_deref() {
+        line.push(' ');
+        line.push_str(failure);
+    }
+    line
+}
+
+pub fn apply_network_report_mode(report: &mut ExecutionReport, mode: NetworkReportMode) {
+    match mode {
+        NetworkReportMode::Full => {}
+        NetworkReportMode::Summary => {
+            report.network_summary = report
+                .network
+                .iter()
+                .map(summarize_network_entry)
+                .collect::<Vec<_>>();
+            report.network.clear();
+        }
+        NetworkReportMode::None => {
+            report.network.clear();
+            report.network_summary.clear();
+        }
+    }
+}
+
 fn push_recent(events: &mut VecDeque<SequencedEntry>, entry: SequencedEntry) {
     events.push_back(entry);
     while events.len() > RECENT_EVENT_CAP {
@@ -845,6 +896,113 @@ mod tests {
         );
         assert_eq!(monitor.completed[1].status, Some(200));
         assert_eq!(monitor.completed[1].transfer_size, Some(50));
+    }
+
+    fn reported_entries() -> Vec<NetworkEntry> {
+        let mut monitor = NetworkMonitor::default();
+        let mut started = request("api", "main", "https://x.test/api/items", "Fetch");
+        started
+            .headers
+            .insert("Authorization".to_string(), "Bearer abcdefgh".to_string());
+        monitor.record_request(started);
+        monitor.record_response(response(
+            "api",
+            200,
+            BTreeMap::from([(
+                "content-security-policy".to_string(),
+                "default-src 'self'".to_string(),
+            )]),
+        ));
+        monitor.finish("api", 10.545, Some(1_234));
+        monitor.record_request(request(
+            "blocked",
+            "main",
+            "https://x.test/blocked",
+            "Image",
+        ));
+        monitor.fail("blocked", 10.2, "net::ERR_BLOCKED_BY_CLIENT".to_string());
+        monitor.completed
+    }
+
+    fn report_with_network(network: Vec<NetworkEntry>) -> ExecutionReport {
+        serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "steps": [{
+                "step_index": 0,
+                "ok": true,
+                "summary": "Waited for response",
+                "data": {
+                    "url": "https://x.test/api/items",
+                    "status": 200,
+                    "response_headers": {"content-security-policy": "default-src 'self'"}
+                }
+            }],
+            "dialogs": [],
+            "new_tabs": [],
+            "network": network,
+            "intercepted_requests": [{
+                "url": "https://x.test/blocked",
+                "method": "GET",
+                "pattern": "har-replay",
+                "action": "abort",
+                "reason": "blockedbyclient"
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn summary_mode_renders_one_line_per_request_without_headers() {
+        let mut report = report_with_network(reported_entries());
+        apply_network_report_mode(&mut report, NetworkReportMode::Summary);
+
+        assert!(report.network.is_empty());
+        assert_eq!(
+            report.network_summary,
+            vec![
+                "GET https://x.test/api/items 200 1234b 545ms".to_string(),
+                "GET https://x.test/blocked - - 200ms net::ERR_BLOCKED_BY_CLIENT".to_string(),
+            ]
+        );
+        let payload = serde_json::to_string(&report.network_summary).unwrap();
+        assert!(!payload.contains("content-security-policy"));
+        assert!(!payload.contains("Authorization"));
+    }
+
+    #[test]
+    fn none_mode_drops_entries_but_keeps_interception_and_step_detail() {
+        let mut report = report_with_network(reported_entries());
+        apply_network_report_mode(&mut report, NetworkReportMode::None);
+
+        assert!(report.network.is_empty());
+        assert!(report.network_summary.is_empty());
+        assert_eq!(report.intercepted_requests.len(), 1);
+        assert_eq!(report.intercepted_requests[0].action, "abort");
+        assert_eq!(
+            report.intercepted_requests[0].reason.as_deref(),
+            Some("blockedbyclient")
+        );
+        assert_eq!(report.steps[0].data.as_ref().unwrap()["status"], 200);
+    }
+
+    #[test]
+    fn full_mode_leaves_the_baseline_payload_untouched() {
+        let baseline = report_with_network(reported_entries());
+        let mut report = report_with_network(reported_entries());
+        apply_network_report_mode(&mut report, NetworkReportMode::Full);
+
+        assert_eq!(
+            serde_json::to_value(&report).unwrap(),
+            serde_json::to_value(&baseline).unwrap()
+        );
+        assert!(report.network_summary.is_empty());
+        assert_eq!(report.network.len(), 2);
+        assert!(report.network[0]
+            .request_headers
+            .contains_key("Authorization"));
+        assert!(report.network[0]
+            .response_headers
+            .contains_key("content-security-policy"));
     }
 
     #[test]

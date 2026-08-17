@@ -26,7 +26,8 @@ use refact_lsp::integrations::browser_models::{
     BrowserExpectedText, BrowserExpectation, BrowserLoadState, BrowserLocator, BrowserPdfOptions,
     BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
     BrowserStorageItem, BrowserStorageKind, FillStrategy, LocatorHandlerAction, LocatorRegex,
-    RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind, WebSocketRouteMode,
+    NetworkReportMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
+    WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -380,6 +381,7 @@ async fn context_state_roundtrips_and_reaches_adopted_popup() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::SetViewport {
                     width: 412,
@@ -542,6 +544,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
         session: SessionPolicy::SharedDefault,
         target: TabTarget::Active,
         attach_screenshot: None,
+        network: NetworkReportMode::default(),
         steps: vec![BrowserStep::Eval {
             expression: "document.querySelector('#fetch').click()".to_string(),
         }],
@@ -561,11 +564,11 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
         .console
         .iter()
         .any(|entry| entry.text.contains("slow echo settled after 400ms")));
-    assert!(report.network.iter().any(|entry| {
-        entry.url.contains("/slow-echo")
-            && entry.status == Some(200)
-            && entry.failure_text.is_none()
-    }));
+    assert!(report.network.is_empty());
+    assert!(report
+        .network_summary
+        .iter()
+        .any(|line| { line.contains("/slow-echo") && line.contains(" 200 ") }));
     assert_eq!(
         execute_request_with_runtime(
             runtime,
@@ -573,6 +576,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
                 session: SessionPolicy::SharedDefault,
                 target: TabTarget::Active,
                 attach_screenshot: None,
+                network: NetworkReportMode::default(),
                 steps: vec![],
             },
             &ImagePolicy::browser_capture(),
@@ -601,6 +605,7 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::Full,
             steps: vec![
                 BrowserStep::RemoveLocatorHandler {
                     name: "dismiss_overlays".to_string(),
@@ -811,6 +816,7 @@ async fn artifacts_capture_page_clip_element_pdf_and_highlight_lifecycle() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Screenshot {
                     options: BrowserScreenshotOptions {
@@ -2267,6 +2273,7 @@ async fn locator_handler_clears_cookie_banner_before_click_and_records_firing() 
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::RemoveLocatorHandler {
                     name: "dismiss_overlays".to_string(),
@@ -2322,6 +2329,7 @@ async fn locator_handler_clears_interstitial_that_appears_between_actions() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::RemoveLocatorHandler {
                     name: "dismiss_overlays".to_string(),
@@ -2474,6 +2482,7 @@ async fn wait_for_popup_click_and_popup_action_share_one_batch() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::WaitForPopup {
                     timeout_ms: Some(5_000),
@@ -2524,6 +2533,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::Full,
             steps: vec![
                 BrowserStep::Route {
                     pattern: data_pattern.clone(),
@@ -2562,6 +2572,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Unroute {
                     pattern: Some(data_pattern.clone()),
@@ -2602,6 +2613,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::Full,
             steps: vec![
                 BrowserStep::Unroute { pattern: None },
                 BrowserStep::Route {
@@ -2654,6 +2666,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Unroute { pattern: None },
                 BrowserStep::Eval {
@@ -2684,6 +2697,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Route {
                     pattern: data_pattern,
@@ -2739,6 +2753,7 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::RouteWebSocket {
                     pattern: pattern.clone(),
@@ -2912,6 +2927,7 @@ async fn dialog_fixture_auto_dismisses_confirm_and_reports_it() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Eval {
                     expression: "document.querySelector('#confirm').click(); 'clicked'".to_string(),
@@ -2949,6 +2965,7 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::HandleDialog {
                     accept: true,
@@ -2979,6 +2996,7 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::HandleDialog {
                     accept: true,

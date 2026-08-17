@@ -22,7 +22,7 @@ use refact_browser::{
     LocatorHandlerRegistry, ExpectPollResult, LocatorOutcome, Mouse, MouseButton, NetworkLoadState,
     NetworkMonitorHandle, MainFrameCssPoint, MouseState, Ref, ScrollStrategy, SnapshotMode,
     SnapshotOptions, SystemClock, UrlMatcher, WorldManager, DEFAULT_DISMISS_OVERLAYS_HANDLER,
-    required_states,
+    apply_network_report_mode, required_states,
 };
 use refact_browser::artifacts::{pdf_payload, screenshot_capture, ScreenshotMetrics};
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
@@ -763,6 +763,7 @@ fn execute_steps_with_world(
         console: vec![],
         page_errors: vec![],
         network: vec![],
+        network_summary: vec![],
         websockets: vec![],
         locator_handlers,
         dialogs: vec![],
@@ -1877,7 +1878,7 @@ pub async fn execute_request_with_runtime(
         )
     };
 
-    Ok(ExecutionReport {
+    let mut report = ExecutionReport {
         ok: all_ok,
         steps: results,
         url,
@@ -1886,6 +1887,7 @@ pub async fn execute_request_with_runtime(
         console,
         page_errors,
         network,
+        network_summary: Vec::new(),
         websockets,
         locator_handlers,
         dialogs,
@@ -1899,7 +1901,9 @@ pub async fn execute_request_with_runtime(
             Some(context_summary(&runtime))
         },
         screenshot,
-    })
+    };
+    apply_network_report_mode(&mut report, request.network);
+    Ok(report)
 }
 
 async fn validate_upload_paths(
@@ -2019,6 +2023,7 @@ pub fn execute_steps_with_runtime(
                             console: vec![],
                             page_errors: vec![],
                             network: vec![],
+                            network_summary: vec![],
                             websockets: runtime.websocket_registry.drain_report(),
                             locator_handlers,
                             dialogs: runtime.dialog_manager.take_reports(),
@@ -2350,6 +2355,7 @@ pub fn execute_steps_with_runtime(
         console: vec![],
         page_errors: vec![],
         network: vec![],
+        network_summary: vec![],
         websockets: runtime.websocket_registry.drain_report(),
         locator_handlers,
         dialogs,
