@@ -120,9 +120,11 @@ describe("Privacy shield", () => {
       preloadedState: { chat },
     });
 
+    expect(await screen.findByText("1 item withheld")).toBeVisible();
+    expect(screen.getByText("untrusted/model")).toBeVisible();
     expect(
-      await screen.findByText("1 thing here can't go to untrusted/model"),
-    ).toBeVisible();
+      screen.getByText("1 item here can't go to untrusted/model"),
+    ).toBeInTheDocument();
     await user.click(
       screen.getByRole("button", { name: "Inspect destination" }),
     );

@@ -1,44 +1,80 @@
 .shield {
   display: flex;
   width: 100%;
+  max-width: 100%;
   min-width: 0;
+  box-sizing: border-box;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--rf-space-2);
-  padding: var(--rf-space-2) var(--rf-space-3);
-  color: var(--rf-color-fg);
-  background: var(--rf-surface-glass);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
+  gap: var(--rf-space-xs);
+  padding: var(--rf-space-2xs) var(--rf-space-1);
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  background: transparent;
+  border-radius: var(--rf-radius-ctl);
+  transition:
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    background-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
-.shieldSummary {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: var(--rf-space-2);
+.shield:hover,
+.shield:focus-within {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
 }
 
 .shieldIcon {
   flex: 0 0 auto;
-  color: var(--rf-color-accent);
-}
-
-.shieldCopy {
-  min-width: 0;
 }
 
 .modelName {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
+  color: inherit;
   font-family: var(--rf-font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.restriction {
-  color: var(--rf-color-muted);
+.note {
+  flex: 0 0 auto;
+  overflow: hidden;
+  color: var(--rf-color-faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note::before {
+  content: "·";
+  margin-right: var(--rf-space-xs);
+}
+
+.shieldAlert .note {
+  color: var(--rf-color-warning);
+}
+
+.action {
+  flex: 0 0 auto;
+  margin-left: auto;
+  opacity: var(--rf-motion-opacity-soft);
+  transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.shield:hover .action,
+.shield:focus-within .action {
+  opacity: 1;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  border: 0;
+  clip-path: inset(50%);
 }
 
 .inspector {
@@ -148,23 +184,15 @@
 }
 
 @media (max-width: 520px) {
-  .shield {
-    align-items: flex-start;
-  }
-
-  .shieldSummary,
   .inspectorHeader {
     align-items: flex-start;
-  }
-
-  .inspectorHeader {
     flex-direction: column;
   }
 }
 
-@media (prefers-reduced-transparency: reduce) {
-  .shield {
-    background: var(--rf-surface-2);
-    backdrop-filter: none;
+@media (prefers-reduced-motion: reduce) {
+  .shield,
+  .action {
+    transition: none;
   }
 }

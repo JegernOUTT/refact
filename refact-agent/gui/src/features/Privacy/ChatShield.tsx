@@ -1,8 +1,9 @@
 import React from "react";
 import { Text } from "@radix-ui/themes";
-import { ShieldCheck } from "lucide-react";
+import classNames from "classnames";
+import { ShieldAlert, ShieldCheck } from "lucide-react";
 
-import { Button } from "../../components/ui";
+import { Button, Icon } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   selectModelById,
@@ -46,35 +47,52 @@ export const ChatShield: React.FC<ChatShieldProps> = ({ threadId }) => {
 
   if (!model) return null;
 
+  const withheld = blocked.length;
+  const noun = withheld === 1 ? "item" : "items";
+  const note = inspection.isLoading
+    ? "checking…"
+    : withheld > 0
+      ? `${withheld} ${noun} withheld`
+      : null;
+  const summary = inspection.isLoading
+    ? `Checking what ${model} may receive`
+    : withheld > 0
+      ? `${withheld} ${noun} here can't go to ${model}`
+      : `Everything here can go to ${model}`;
+
   return (
     <>
-      <div className={styles.shield} data-testid="privacy-chat-shield">
-        <div className={styles.shieldSummary}>
-          <ShieldCheck className={styles.shieldIcon} aria-hidden="true" />
-          <div className={styles.shieldCopy}>
-            <Text
-              className={styles.modelName}
-              as="div"
-              size="2"
-              weight="medium"
-            >
-              {model}
-            </Text>
-            <Text className={styles.restriction} as="div" size="1">
-              {inspection.isLoading
-                ? "Checking what this model may receive…"
-                : `${blocked.length} ${
-                    blocked.length === 1 ? "thing" : "things"
-                  } here can't go to ${model}`}
-            </Text>
-          </div>
-        </div>
-        <Button
+      <div
+        className={classNames(
+          styles.shield,
+          withheld > 0 && styles.shieldAlert,
+        )}
+        data-testid="privacy-chat-shield"
+        title={summary}
+      >
+        <Icon
+          className={styles.shieldIcon}
+          icon={withheld > 0 ? ShieldAlert : ShieldCheck}
           size="sm"
-          variant="plain"
+          tone={withheld > 0 ? "warning" : "faint"}
+        />
+        <Text className={styles.modelName} as="span" size="1">
+          {model}
+        </Text>
+        {note !== null && (
+          <Text className={styles.note} as="span" size="1">
+            {note}
+          </Text>
+        )}
+        <span className={styles.srOnly}>{summary}</span>
+        <Button
+          className={styles.action}
+          size="sm"
+          variant="ghost"
+          aria-label="Inspect destination"
           onClick={() => setInspectorOpen(true)}
         >
-          Inspect destination
+          Inspect
         </Button>
       </div>
       <DestinationInspector
