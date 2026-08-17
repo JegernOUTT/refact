@@ -2,9 +2,8 @@ use glob::Pattern;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::command_classify::{
-    executable_basename, extract_command_segments, segment_command, CommandSegments,
-};
+use crate::command_classify::extract_command_segments;
+use crate::command_rules::first_matching_rule;
 
 pub fn command_should_be_confirmed_by_user(
     command: &String,
@@ -60,27 +59,13 @@ pub fn command_should_be_denied_segment_aware(
 
 fn command_matches_rules_segment_aware(command: &String, rules: &Vec<String>) -> (bool, String) {
     let segments = extract_command_segments(command);
-    if let Some(rule) = rules.iter().find(|glob| {
-        let pattern = match Pattern::new(glob) {
-            Ok(pattern) => pattern,
-            Err(error) => {
-                tracing::warn!("Invalid glob pattern '{}': {}", glob, error);
-                return false;
-            }
-        };
-        !segments.parse_ok || command_matches_pattern(command, &segments, &pattern)
-    }) {
-        return (true, rule.clone());
+    if !segments.parse_ok && !rules.is_empty() {
+        return (true, rules[0].clone());
+    }
+    if let Some(rule) = first_matching_rule(command, &segments, rules) {
+        return (true, rule);
     }
     (false, String::new())
-}
-
-fn command_matches_pattern(command: &str, segments: &CommandSegments, pattern: &Pattern) -> bool {
-    pattern.matches(command)
-        || segments.segments.iter().any(|segment| {
-            pattern.matches(&segment_command(segment))
-                || executable_basename(segment).is_some_and(|name| pattern.matches(name))
-        })
 }
 
 #[derive(Clone, Debug, PartialEq)]

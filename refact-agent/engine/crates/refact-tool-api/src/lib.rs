@@ -1,5 +1,7 @@
 pub mod arg_coerce;
 pub mod command_classify;
+pub mod command_risk;
+pub mod command_rules;
 pub mod integration_confirmation;
 pub mod tool_desc;
 pub mod tool_name_alias;
@@ -12,6 +14,11 @@ pub use command_classify::{
     executable_basename, extract_command_segments, segment_command, structural_flags,
     CommandSegments, Segment,
 };
+pub use command_risk::{
+    classify_command, default_catalogue, is_outside_workspace, normalized_flags, RiskContext,
+    RiskEntry, RiskFinding, RiskLevel,
+};
+pub use command_rules::{first_matching_rule, CommandRule, RuleKind};
 pub use integration_confirmation::IntegrationConfirmation;
 pub use tool_desc::{
     command_should_be_confirmed_by_user, command_should_be_confirmed_by_user_segment_aware,

@@ -94,6 +94,7 @@ import { filesApi } from "../services/refact/files";
 import { filesPanelSlice } from "../features/Workspace/FilesPanel/filesPanelSlice";
 import { gitPanelSlice } from "../features/Workspace/GitPanel/gitPanelSlice";
 import { privacyApi } from "../services/refact/privacy";
+import { shellPolicyApi } from "../services/refact/shellPolicy";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -159,6 +160,7 @@ const rootReducer = combineSlices(
     [buddyApi.reducerPath]: buddyApi.reducer,
     [filesApi.reducerPath]: filesApi.reducer,
     [privacyApi.reducerPath]: privacyApi.reducer,
+    [shellPolicyApi.reducerPath]: shellPolicyApi.reducer,
   },
   historySlice,
   buddySlice,
@@ -299,6 +301,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           buddyApi.middleware,
           filesApi.middleware,
           privacyApi.middleware,
+          shellPolicyApi.middleware,
         )
         .prepend(historyMiddleware.middleware)
         .prepend(listenerMiddleware.middleware);

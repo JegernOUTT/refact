@@ -94,6 +94,13 @@ function trimCommand(command: string): string {
   return command.length > 200 ? `${command.slice(0, 200)}...` : command;
 }
 
+const SHELL_TOOL_NAMES = new Set(["shell", "process_start", "shell_service"]);
+
+function isShellConfiguration(reason: ResolvedPauseReason): boolean {
+  const toolName = reason.toolName.trim().toLowerCase();
+  return SHELL_TOOL_NAMES.has(toolName);
+}
+
 export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   pauseReasons,
 }) => {
@@ -152,6 +159,7 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   const maybeIntegrationPath = resolvedReasons.find(
     (r) => r.integr_config_path !== null,
   )?.integr_config_path;
+  const linksToShellSettings = resolvedReasons.some(isShellConfiguration);
 
   const allConfirmation = resolvedReasons.every(
     (r) => r.type === "confirmation",
@@ -265,22 +273,26 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
           </div>
           <div className={styles.ToolConfirmationText}>
             <Markdown color="indigo">{message.concat("\n\n")}</Markdown>
-            {maybeIntegrationPath && (
+            {(linksToShellSettings || maybeIntegrationPath) && (
               <p className={styles.IntegrationHint}>
                 You can modify the ruleset on{" "}
                 <Link
                   onClick={() => {
-                    dispatch(
-                      push({
-                        name: "integrations page",
-                        integrationPath: maybeIntegrationPath,
-                        wasOpenedThroughChat: true,
-                      }),
-                    );
+                    if (linksToShellSettings) {
+                      dispatch(push({ name: "shell settings" }));
+                    } else if (maybeIntegrationPath) {
+                      dispatch(
+                        push({
+                          name: "integrations page",
+                          integrationPath: maybeIntegrationPath,
+                          wasOpenedThroughChat: true,
+                        }),
+                      );
+                    }
                   }}
                   color="indigo"
                 >
-                  Configuration Page
+                  {linksToShellSettings ? "Shell settings" : "Configuration Page"}
                 </Link>
               </p>
             )}

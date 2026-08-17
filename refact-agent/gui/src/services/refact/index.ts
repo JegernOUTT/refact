@@ -33,3 +33,4 @@ export * from "./gitRead";
 export * from "./mcpMarketplace";
 export * from "./extensionsMarketplace";
 export * from "./files";
+export * from "./shellPolicy";

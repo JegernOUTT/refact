@@ -12,10 +12,11 @@ import {
 const ALL_SECTION_IDS: SettingsSectionId[] = SETTINGS_SECTIONS.map((s) => s.id);
 
 describe("isSettingsPage", () => {
-  it("returns true for all 9 settings page names", () => {
+  it("returns true for all 10 settings page names", () => {
     const settingsPages: Page[] = [
       { name: "general settings" },
       { name: "privacy settings" },
+      { name: "shell settings" },
       { name: "providers page" },
       { name: "default models" },
       { name: "customization" },
@@ -64,6 +65,7 @@ describe("settingsPageToSection", () => {
     const cases: [Page, SettingsSectionId][] = [
       [{ name: "general settings" }, "general"],
       [{ name: "privacy settings" }, "privacy"],
+      [{ name: "shell settings" }, "shell"],
       [{ name: "providers page" }, "providers"],
       [{ name: "default models" }, "models"],
       [{ name: "customization" }, "customization"],

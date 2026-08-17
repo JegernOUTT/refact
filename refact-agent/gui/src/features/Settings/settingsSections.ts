@@ -8,12 +8,14 @@ import {
   ShieldCheck,
   Sparkles,
   Store,
+  Terminal,
   Timer,
 } from "lucide-react";
 
 export type SettingsSectionId =
   | "general"
   | "privacy"
+  | "shell"
   | "providers"
   | "models"
   | "customization"
@@ -31,6 +33,7 @@ export interface SettingsSectionDef {
 export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   { id: "general", label: "General", icon: Settings },
   { id: "privacy", label: "Privacy & Access", icon: ShieldCheck },
+  { id: "shell", label: "Shell", icon: Terminal },
   { id: "providers", label: "Providers", icon: Plug },
   { id: "models", label: "Models", icon: Bot },
   { id: "customization", label: "Customization", icon: Paintbrush },

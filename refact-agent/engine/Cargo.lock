@@ -4689,6 +4689,7 @@ version = "0.1.0"
 dependencies = [
  "glob",
  "md5",
+ "regex",
  "serde",
  "serde_json",
  "shell-words",

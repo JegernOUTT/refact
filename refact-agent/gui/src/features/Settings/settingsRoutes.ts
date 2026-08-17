@@ -7,6 +7,8 @@ export function settingsSectionToPage(section: SettingsSectionId): Page {
       return { name: "general settings" };
     case "privacy":
       return { name: "privacy settings" };
+    case "shell":
+      return { name: "shell settings" };
     case "providers":
       return { name: "providers page" };
     case "models":
@@ -30,6 +32,8 @@ export function settingsPageToSection(page: Page): SettingsSectionId | null {
       return "general";
     case "privacy settings":
       return "privacy";
+    case "shell settings":
+      return "shell";
     case "providers page":
       return "providers";
     case "default models":

@@ -33,74 +33,15 @@ use crate::postprocessing::pp_command_output::{
 };
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
 use crate::tools::file_edit::auxiliary::{active_execution_scope, scoped_path_warnings};
+use crate::tools::shell_gate;
 use crate::tools::tools_description::{
-    json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
+    json_schema_from_params, MatchConfirmDeny, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
 use crate::worktrees::scope::ExecutionScope;
 
 const PROCESS_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DISK_READ_MAX_BYTES: usize = 1024 * 1024;
 const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to false.";
-const ASK_USER_DEFAULT: &[&str] = &[
-    "*rm*",
-    "*rmdir*",
-    "*del /s*",
-    "*deltree*",
-    "*mkfs*",
-    "*dd *",
-    "*format*",
-    "*> /dev/*",
-    ":(){ :|:& };:",
-    "*chmod -R*",
-    "*chown -R*",
-    "*chmod 777*",
-    "*chmod a+rwx*",
-    "*git push*",
-    "*git reset --hard*",
-    "curl * | sh",
-    "curl * | bash",
-    "wget * -O - | sh",
-    "wget * -O - | bash",
-    "*apt-get remove*",
-    "*apt-get purge*",
-    "*apt remove*",
-    "*apt purge*",
-    "*yum remove*",
-    "*yum erase*",
-    "*dnf remove*",
-    "*pacman -R*",
-    "*brew uninstall*",
-    "*docker rm*",
-    "*docker rmi*",
-    "*docker system prune*",
-    "*kubectl delete*",
-    "*kill -9*",
-    "*killall*",
-    "*pkill*",
-    "*shutdown*",
-    "*reboot*",
-    "*halt*",
-    "*poweroff*",
-    "*init 0*",
-    "*init 6*",
-    "*systemctl stop*",
-    "*systemctl disable*",
-    "*service * stop",
-    "*truncate -s 0*",
-    "*fdisk*",
-    "*parted*",
-    "*mkswap*",
-    "*swapon*",
-    "*swapoff*",
-    "*mount*",
-    "*umount*",
-    "*crontab -r*",
-    "*history -c*",
-    "*shred*",
-    "*wipe*",
-    "*srm*",
-];
-const DENY_DEFAULT: &[&str] = &["sudo*"];
 
 async fn read_disk_log_tail(path: &std::path::Path) -> Result<(String, bool), String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -384,10 +325,22 @@ impl Tool for ToolProcessStart {
             .command)
     }
 
+    async fn match_against_confirm_deny(
+        &self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        args: &HashMap<String, Value>,
+    ) -> Result<MatchConfirmDeny, String> {
+        let command = self
+            .command_to_match_against_confirm_deny(ccx.clone(), args)
+            .await
+            .map_err(|error| format!("Error getting tool command to match: {error}"))?;
+        shell_gate::gate_tool_call(ccx, command, args).await
+    }
+
     fn confirm_deny_rules(&self) -> Option<IntegrationConfirmation> {
         Some(IntegrationConfirmation {
-            ask_user: ASK_USER_DEFAULT.iter().map(|s| s.to_string()).collect(),
-            deny: DENY_DEFAULT.iter().map(|s| s.to_string()).collect(),
+            ask_user: shell_gate::default_ask_rules(),
+            deny: shell_gate::default_deny_rules(),
         })
     }
 
@@ -963,10 +916,22 @@ impl Tool for ToolShellServiceAlias {
         ))
     }
 
+    async fn match_against_confirm_deny(
+        &self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        args: &HashMap<String, Value>,
+    ) -> Result<MatchConfirmDeny, String> {
+        let command = self
+            .command_to_match_against_confirm_deny(ccx.clone(), args)
+            .await
+            .map_err(|error| format!("Error getting tool command to match: {error}"))?;
+        shell_gate::gate_tool_call(ccx, command, args).await
+    }
+
     fn confirm_deny_rules(&self) -> Option<IntegrationConfirmation> {
         Some(IntegrationConfirmation {
-            ask_user: ASK_USER_DEFAULT.iter().map(|s| s.to_string()).collect(),
-            deny: DENY_DEFAULT.iter().map(|s| s.to_string()).collect(),
+            ask_user: shell_gate::default_ask_rules(),
+            deny: shell_gate::default_deny_rules(),
         })
     }
 
@@ -1023,6 +988,11 @@ fn process_start_input_schema() -> Value {
         "type": "boolean",
         "default": false,
         "description": TTY_DESCRIPTION,
+    });
+    schema["properties"]["needs_confirmation"] = json!({
+        "type": "boolean",
+        "default": false,
+        "description": "Set true when you know this command is destructive, irreversible, or touches something outside the workspace, and you want the user to confirm before it runs. Setting false never skips the normal safety checks."
     });
     schema["properties"]["escalate"] = json!({
         "type": "object",
@@ -1204,8 +1174,9 @@ fn parse_optional_u16(args: &HashMap<String, Value>, name: &str) -> Result<Optio
 
 fn parse_optional_bool(args: &HashMap<String, Value>, name: &str) -> Result<Option<bool>, String> {
     match args.get(name) {
-        Some(Value::Bool(value)) => Ok(Some(*value)),
-        Some(v) => Err(format!("argument `{name}` is not a boolean: {v:?}")),
+        Some(value) => refact_tool_api::coerce_bool(value)
+            .map(Some)
+            .ok_or_else(|| format!("argument `{name}` is not a boolean: {value:?}")),
         None => Ok(Some(false)),
     }
 }
@@ -1246,6 +1217,7 @@ async fn parse_start_args(
     let wait_port = parse_optional_u16(args, "startup_wait_port")?;
     let wait_keyword = parse_optional_string(args, "startup_wait_keyword")?;
     let tty = parse_optional_bool(args, "tty")?;
+    parse_optional_bool(args, "needs_confirmation")?;
     let escalation = escalation_from_args(args)?;
     let readiness = if wait_port.is_some() || wait_keyword.is_some() {
         Some(ExecReadinessProbe {

@@ -111,6 +111,10 @@ export interface PrivacySettingsPage {
   name: "privacy settings";
 }
 
+export interface ShellSettingsPage {
+  name: "shell settings";
+}
+
 export interface BuddyPage {
   name: "buddy";
   draftId?: string;
@@ -151,7 +155,8 @@ export type Page =
   | MarketplaceHubPage
   | BuddyPage
   | GeneralSettingsPage
-  | PrivacySettingsPage;
+  | PrivacySettingsPage
+  | ShellSettingsPage;
 
 export function isIntegrationSetupPage(
   page: Page,

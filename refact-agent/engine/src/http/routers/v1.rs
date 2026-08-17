@@ -171,6 +171,7 @@ mod project_configs;
 pub mod project_information;
 pub mod scheduler;
 mod setup_status;
+mod shell_policy;
 pub mod sidebar;
 mod skills_marketplace;
 mod skills_status;
@@ -1079,6 +1080,19 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/buddy/frontend-error",
             post(buddy_frontend_error::handle_v1_buddy_frontend_error),
+        )
+        .route(
+            "/shell-policy",
+            get(shell_policy::handle_v1_shell_policy_get)
+                .post(shell_policy::handle_v1_shell_policy_post),
+        )
+        .route(
+            "/shell-policy/test",
+            post(shell_policy::handle_v1_shell_policy_test),
+        )
+        .route(
+            "/shell-policy/audit",
+            get(shell_policy::handle_v1_shell_policy_audit),
         );
 
     let rl = buddy_frontend_error::FrontendErrorRateLimiter::new();

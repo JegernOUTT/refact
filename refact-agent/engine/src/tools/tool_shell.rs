@@ -35,8 +35,9 @@ use crate::postprocessing::pp_command_output::{
 };
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
 use crate::tools::file_edit::auxiliary::{active_execution_scope, scoped_path_warnings};
+use crate::tools::shell_gate;
 use crate::tools::tools_description::{
-    json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
+    json_schema_from_params, MatchConfirmDeny, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
 use crate::worktrees::scope::ExecutionScope;
 
@@ -54,67 +55,6 @@ pub struct ToolShell {
     pub config_path: String,
 }
 
-const ASK_USER_DEFAULT: &[&str] = &[
-    "*rm*",
-    "*rmdir*",
-    "*del /s*",
-    "*deltree*",
-    "*mkfs*",
-    "*dd *",
-    "*format*",
-    "*> /dev/*",
-    ":(){ :|:& };:",
-    "*chmod -R*",
-    "*chown -R*",
-    "*chmod 777*",
-    "*chmod a+rwx*",
-    "*git push*",
-    "*git reset --hard*",
-    "curl * | sh",
-    "curl * | bash",
-    "wget * -O - | sh",
-    "wget * -O - | bash",
-    "*apt-get remove*",
-    "*apt-get purge*",
-    "*apt remove*",
-    "*apt purge*",
-    "*yum remove*",
-    "*yum erase*",
-    "*dnf remove*",
-    "*pacman -R*",
-    "*brew uninstall*",
-    "*docker rm*",
-    "*docker rmi*",
-    "*docker system prune*",
-    "*kubectl delete*",
-    "*kill -9*",
-    "*killall*",
-    "*pkill*",
-    "*shutdown*",
-    "*reboot*",
-    "*halt*",
-    "*poweroff*",
-    "*init 0*",
-    "*init 6*",
-    "*systemctl stop*",
-    "*systemctl disable*",
-    "*service * stop",
-    "*truncate -s 0*",
-    "*fdisk*",
-    "*parted*",
-    "*mkswap*",
-    "*swapon*",
-    "*swapoff*",
-    "*mount*",
-    "*umount*",
-    "*crontab -r*",
-    "*history -c*",
-    "*shred*",
-    "*wipe*",
-    "*srm*",
-];
-
-const DENY_DEFAULT: &[&str] = &["sudo*"];
 const MAX_SHELL_TIMEOUT_SECS: u64 = 3600;
 const SHELL_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to false.";
@@ -161,16 +101,19 @@ impl Tool for ToolShell {
             &destination,
             &derived_privacy_zones,
         );
-        let parsed = parse_args_with_filter(
-            gcx.clone(),
-            args,
-            &self.cfg.output_filter,
-            execution_scope.as_ref(),
-        )
-        .await?;
+        let shell_policy = shell_gate::load_policy(gcx.clone()).await;
+        let mut default_filter = self.cfg.output_filter.clone();
+        default_filter.limit_lines = shell_policy.execution.output_limit_lines;
+        default_filter.limit_chars = shell_policy
+            .execution
+            .output_limit_lines
+            .saturating_mul(200);
+        let parsed =
+            parse_args_with_filter(gcx.clone(), args, &default_filter, execution_scope.as_ref())
+                .await?;
         let timeout = parsed
             .timeout
-            .unwrap_or_else(|| self.cfg.timeout.parse::<u64>().unwrap_or(10));
+            .unwrap_or(shell_policy.execution.foreground_timeout_secs);
 
         let mut error_log = Vec::new();
         let env_variables =
@@ -179,10 +122,7 @@ impl Tool for ToolShell {
                 &mut error_log,
             )
             .await;
-        let output_filter = parsed
-            .custom_filter
-            .clone()
-            .unwrap_or_else(|| self.cfg.output_filter.clone());
+        let output_filter = parsed.custom_filter.clone().unwrap_or(default_filter);
         let cwd = match parsed.workdir.clone() {
             Some(workdir) => Some(workdir),
             None => get_active_project_path(gcx.clone()).await,
@@ -414,10 +354,22 @@ impl Tool for ToolShell {
         Ok(command)
     }
 
+    async fn match_against_confirm_deny(
+        &self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        args: &HashMap<String, Value>,
+    ) -> Result<MatchConfirmDeny, String> {
+        let command = self
+            .command_to_match_against_confirm_deny(ccx.clone(), args)
+            .await
+            .map_err(|error| format!("Error getting tool command to match: {error}"))?;
+        shell_gate::gate_tool_call(ccx, command, args).await
+    }
+
     fn confirm_deny_rules(&self) -> Option<IntegrationConfirmation> {
         Some(IntegrationConfirmation {
-            ask_user: ASK_USER_DEFAULT.iter().map(|s| s.to_string()).collect(),
-            deny: DENY_DEFAULT.iter().map(|s| s.to_string()).collect(),
+            ask_user: shell_gate::default_ask_rules(),
+            deny: shell_gate::default_deny_rules(),
         })
     }
 
@@ -482,6 +434,11 @@ fn shell_input_schema() -> Value {
         "type": "boolean",
         "default": false,
         "description": TTY_DESCRIPTION,
+    });
+    schema["properties"]["needs_confirmation"] = json!({
+        "type": "boolean",
+        "default": false,
+        "description": "Set true when you know this command is destructive, irreversible, or touches something outside the workspace, and you want the user to confirm before it runs. Setting false never skips the normal safety checks."
     });
     schema["properties"]["run_in_background"] = json!({
         "type": "boolean",
@@ -835,6 +792,10 @@ async fn parse_args_with_filter(
         ),
         None => Some(false),
     };
+    if let Some(value) = args.get("needs_confirmation") {
+        refact_tool_api::coerce_bool(value)
+            .ok_or_else(|| format!("argument `needs_confirmation` is not a boolean: {value:?}"))?;
+    }
     let run_in_background = match args.get("run_in_background") {
         Some(value) => refact_tool_api::coerce_bool(value)
             .ok_or_else(|| format!("argument `run_in_background` is not a boolean: {value:?}"))?,

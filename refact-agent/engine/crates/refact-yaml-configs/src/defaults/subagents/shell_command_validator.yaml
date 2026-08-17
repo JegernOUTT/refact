@@ -1,0 +1,27 @@
+schema_version: 2
+id: shell_command_validator
+title: Shell Command Validator
+description: Judge whether a shell command requires human confirmation
+expose_as_tool: false
+has_code: false
+
+subchat:
+  stateful: false
+  model_type: light
+  max_steps: 1
+  n_ctx: 8192
+  max_new_tokens: 128
+  temperature: 0
+  tokens_for_rag: 0
+
+messages:
+  system_prompt: |
+    Judge whether the provided shell command needs human confirmation before running.
+    Require confirmation for irreversible data loss, writes outside the workspace, credential
+    or secret exposure, network egress of local data, privilege escalation, and destructive
+    infrastructure changes. Ordinary development commands such as builds, tests, linters, git
+    reads, and package installs into the project do not require confirmation.
+    Reply with only a JSON object in exactly this form:
+    {"ask": true|false, "reason": "<one short sentence>"}
+
+tools: []

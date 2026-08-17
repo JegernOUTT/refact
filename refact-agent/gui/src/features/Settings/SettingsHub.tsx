@@ -16,6 +16,7 @@ import { SchedulerPanel } from "../Scheduler";
 import { Extensions } from "../Extensions";
 import { MarketplaceHub } from "../MarketplaceHub";
 import { PrivacySettingsSection } from "../Privacy";
+import { ShellSettingsSection } from "../Shell";
 import { GeneralSettingsSection } from "./GeneralSettingsSection";
 
 import styles from "./SettingsHub.module.css";
@@ -47,6 +48,8 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
         return <GeneralSettingsSection />;
       case "privacy":
         return <PrivacySettingsSection />;
+      case "shell":
+        return <ShellSettingsSection />;
       case "providers":
         return (
           <Providers
