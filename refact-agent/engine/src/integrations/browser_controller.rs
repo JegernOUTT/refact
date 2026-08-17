@@ -22,6 +22,7 @@ use refact_browser::{
     LocatorHandlerRegistry, ExpectPollResult, LocatorOutcome, Mouse, MouseButton, NetworkLoadState,
     NetworkMonitorHandle, MainFrameCssPoint, MouseState, Ref, ScrollStrategy, SnapshotMode,
     SnapshotOptions, SystemClock, UrlMatcher, WorldManager, DEFAULT_DISMISS_OVERLAYS_HANDLER,
+    required_states,
 };
 use refact_browser::artifacts::{pdf_payload, screenshot_capture, ScreenshotMetrics};
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
@@ -4337,6 +4338,42 @@ fn step_actionable_action_in_mode(
     }
 }
 
+fn click_if_exists_skip_reason(state: &refact_browser::ElementState) -> Option<&'static str> {
+    let required = required_states(ActionKind::Click);
+    if required.visible && !state.visible {
+        Some("element is not visible")
+    } else if required.enabled && !state.enabled {
+        Some("element is not enabled")
+    } else if required.stable && !state.stable {
+        Some("element is not stable")
+    } else {
+        None
+    }
+}
+
+fn probe_click_if_exists(
+    tab: &Tab,
+    world: &WorldManager,
+    locator: &BrowserLocator,
+) -> Result<(), String> {
+    let resolved = match resolve_element_typed(tab, world, locator) {
+        Ok(resolved) => resolved,
+        Err(ResolveElementError::MultipleMatches { count, .. }) => {
+            return Err(format!("locator resolved to {count} elements"));
+        }
+        Err(ResolveElementError::Other(message)) => return Err(message),
+    };
+    let state = world.element_states(tab, &resolved.handle);
+    let _ = world.release_handle(tab, &resolved.handle);
+    match state {
+        Ok(state) => match click_if_exists_skip_reason(&state) {
+            Some(reason) => Err(format!("not actionable, {reason}")),
+            None => Ok(()),
+        },
+        Err(error) => Err(format!("not actionable, {error}")),
+    }
+}
+
 fn step_click_if_exists(
     tab: &Tab,
     world: &WorldManager,
@@ -4346,34 +4383,37 @@ fn step_click_if_exists(
     locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
     image_policy: &ImagePolicy,
 ) -> StepResult {
-    match resolve_element(tab, world, locator) {
-        Ok(info) if info.visible => {
-            let _ = world.release_handle(tab, &info.handle);
-            let result = step_actionable_action(
-                tab,
-                world,
-                idx,
-                locator,
-                "click",
-                ActionKind::Click,
-                handlers,
-                locator_handler_firings,
-                image_policy,
-            );
-            if result.ok {
-                result
-            } else {
-                StepResult {
-                    ok: true,
-                    summary: format!(
-                        "Click failed (non-fatal): {}",
-                        result.error.as_deref().unwrap_or(&result.summary)
-                    ),
-                    ..result
-                }
-            }
+    if let Err(reason) = probe_click_if_exists(tab, world, locator) {
+        return StepResult::success(
+            idx,
+            format!(
+                "Skipped click_if_exists ({}): {reason}",
+                describe_locator(locator)
+            ),
+        );
+    }
+    let result = step_actionable_action(
+        tab,
+        world,
+        idx,
+        locator,
+        "click",
+        ActionKind::Click,
+        handlers,
+        locator_handler_firings,
+        image_policy,
+    );
+    if result.ok {
+        result
+    } else {
+        StepResult {
+            ok: true,
+            summary: format!(
+                "Click failed (non-fatal): {}",
+                result.error.as_deref().unwrap_or(&result.summary)
+            ),
+            ..result
         }
-        _ => StepResult::success(idx, "Element not found or not visible, skipped".to_string()),
     }
 }
 
@@ -4641,6 +4681,10 @@ fn mask_console_entry(
     entry
 }
 
+fn wait_for_selector_matches(handles: &[ElementHandle]) -> Option<usize> {
+    (!handles.is_empty()).then_some(handles.len())
+}
+
 fn step_wait_for_selector(
     tab: &Tab,
     world: &WorldManager,
@@ -4649,18 +4693,16 @@ fn step_wait_for_selector(
     timeout_ms: u64,
 ) -> StepResult {
     match poll_locator_until(tab, world, locator, timeout_ms, |handles| {
-        if handles.is_empty() {
-            Ok(None)
-        } else {
-            let handle = strict_locator_handle(tab, world, locator, handles)?;
-            Ok(handle.map(|handle| {
-                let _ = world.release_handle(tab, &handle);
-            }))
-        }
+        let matched = wait_for_selector_matches(&handles);
+        release_locator_handles(tab, world, &handles);
+        Ok(matched)
     }) {
-        Ok(()) => StepResult::success(
+        Ok(matched) => StepResult::success(
             idx,
-            format!("Element found ({})", describe_locator(locator)),
+            format!(
+                "Element found ({}), {matched} match(es)",
+                describe_locator(locator)
+            ),
         ),
         Err(e) => StepResult::failure(
             idx,
@@ -5916,6 +5958,62 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn actionable_state() -> refact_browser::ElementState {
+        refact_browser::ElementState {
+            visible: true,
+            enabled: true,
+            editable: Some(true),
+            checked: None,
+            stable: true,
+        }
+    }
+
+    fn locator_handles(count: usize) -> Vec<ElementHandle> {
+        (0..count)
+            .map(|index| ElementHandle {
+                object_id: format!("object-{index}"),
+                backend_node_id: None,
+                context_id: 1,
+                frame_id: "main".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn click_if_exists_skips_attached_but_non_actionable_elements() {
+        let mut invisible = actionable_state();
+        invisible.visible = false;
+        let mut disabled = actionable_state();
+        disabled.enabled = false;
+        let mut moving = actionable_state();
+        moving.stable = false;
+
+        assert_eq!(
+            click_if_exists_skip_reason(&invisible),
+            Some("element is not visible")
+        );
+        assert_eq!(
+            click_if_exists_skip_reason(&disabled),
+            Some("element is not enabled")
+        );
+        assert_eq!(
+            click_if_exists_skip_reason(&moving),
+            Some("element is not stable")
+        );
+    }
+
+    #[test]
+    fn click_if_exists_clicks_actionable_elements() {
+        assert_eq!(click_if_exists_skip_reason(&actionable_state()), None);
+    }
+
+    #[test]
+    fn wait_for_selector_is_satisfied_by_multiple_matches() {
+        assert_eq!(wait_for_selector_matches(&locator_handles(13)), Some(13));
+        assert_eq!(wait_for_selector_matches(&locator_handles(1)), Some(1));
+        assert_eq!(wait_for_selector_matches(&locator_handles(0)), None);
+    }
 
     #[test]
     fn omitted_attach_screenshot_captures_when_the_page_changed() {

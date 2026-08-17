@@ -1734,6 +1734,106 @@ async fn strict_multi_click_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn wait_for_selector_accepts_multiple_matches() {
+    let Some(case) = BrowserCase::start("strict-multi.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::WaitForSelector {
+            locator: BrowserLocator::css(".duplicate"),
+            timeout_ms: Some(2_000),
+        }],
+    );
+    assert!(
+        report.ok,
+        "wait for selector must accept multiple matches: {report:?}"
+    );
+    assert!(
+        report.steps[0].summary.contains("3 match(es)"),
+        "{:?}",
+        report.steps[0]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn click_if_exists_skips_attached_invisible_element_without_retry_budget() {
+    let Some(case) = BrowserCase::start("states.html").await else {
+        return;
+    };
+    let prepared = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::Eval {
+            expression: "document.body.insertAdjacentHTML('beforeend', '<button id=\"invisible-button\" style=\"visibility:hidden;width:60px;height:24px\">Invisible</button>')".to_string(),
+        }],
+    );
+    assert!(prepared.ok, "fixture preparation failed: {prepared:?}");
+
+    let baseline_started = std::time::Instant::now();
+    let baseline = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::ClickIfExists {
+            locator: BrowserLocator::css("#never-rendered"),
+        }],
+    );
+    let baseline_elapsed = baseline_started.elapsed();
+    assert!(baseline.ok, "absent element must skip: {baseline:?}");
+
+    let started = std::time::Instant::now();
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::ClickIfExists {
+            locator: BrowserLocator::css("#invisible-button"),
+        }],
+    );
+    let elapsed = started.elapsed();
+
+    assert!(report.ok, "click_if_exists must skip: {report:?}");
+    assert!(
+        report.steps[0]
+            .summary
+            .contains("Skipped click_if_exists (css=#invisible-button)"),
+        "{:?}",
+        report.steps[0]
+    );
+    assert!(
+        report.steps[0].summary.contains("element is not visible"),
+        "{:?}",
+        report.steps[0]
+    );
+    assert!(
+        elapsed < baseline_elapsed + Duration::from_secs(2),
+        "skip burned the retry budget: {elapsed:?} against a {baseline_elapsed:?} baseline"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "skip did not stay below the action retry budget: {elapsed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn click_if_exists_skips_missing_element() {
+    let Some(case) = BrowserCase::start("states.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::ClickIfExists {
+            locator: BrowserLocator::css("#never-rendered"),
+        }],
+    );
+    assert!(report.ok, "missing element must skip: {report:?}");
+    assert!(
+        report.steps[0].summary.contains("Skipped click_if_exists"),
+        "{:?}",
+        report.steps[0]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn handle_clicks_second_strict_match() {
     let Some(case) = BrowserCase::start("strict-multi.html").await else {
         return;
