@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use headless_chrome::Tab;
-use headless_chrome::protocol::cdp::{DOM, Emulation, IO, Page};
+use headless_chrome::protocol::cdp::{DOM, Emulation, IO, Page, types::Event};
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 
@@ -31,6 +32,7 @@ const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
 const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
 const MAX_WAIT_SECONDS: f64 = 60.0;
 const MIN_WAIT_SECONDS: f64 = 0.0;
+const NAVIGATION_LIFECYCLE_EVENT: &str = "load";
 
 const MAX_DOM_SNAPSHOT_CHARS: usize = 100_000;
 const MAX_EXTRACT_LINKS: usize = 500;
@@ -3850,11 +3852,22 @@ fn step_set_input_files(
 }
 
 fn step_navigate(tab: &Tab, idx: usize, url: &str) -> StepResult {
-    match tab.navigate_to(url) {
-        Ok(_) => {
-            let _ = tab.wait_until_navigated();
-            StepResult::success(idx, format!("Navigated to {}", url))
+    match run_and_wait_for_navigation(tab, DEFAULT_WAIT_TIMEOUT_MS, || {
+        let response = tab
+            .call_method(Page::Navigate {
+                url: url.to_string(),
+                referrer: None,
+                transition_Type: None,
+                frame_id: None,
+                referrer_policy: None,
+            })
+            .map_err(|error| format!("CDP Page.navigate failed: {error}"))?;
+        if let Some(error) = response.error_text {
+            return Err(format!("CDP Page.navigate failed: {error}"));
         }
+        Ok((response.frame_id, response.loader_id))
+    }) {
+        Ok(()) => StepResult::success(idx, format!("Navigated to {}", url)),
         Err(e) => StepResult::failure(idx, format!("Navigate to {}", url), e.to_string()),
     }
 }
@@ -3866,6 +3879,72 @@ fn step_nav_js(tab: &Tab, idx: usize, js: &str, success_msg: &str) -> StepResult
             StepResult::success(idx, success_msg.to_string())
         }
         Err(e) => StepResult::failure(idx, success_msg.to_string(), e.to_string()),
+    }
+}
+
+fn run_and_wait_for_navigation(
+    tab: &Tab,
+    timeout_ms: u64,
+    trigger: impl FnOnce() -> Result<(Page::FrameId, Option<String>), String>,
+) -> Result<(), String> {
+    let (sender, receiver) = mpsc::channel();
+    let listener = tab
+        .add_event_listener(Arc::new(move |event: &Event| {
+            if let Event::PageLifecycleEvent(event) = event {
+                if event.params.name == NAVIGATION_LIFECYCLE_EVENT {
+                    let _ = sender.send((
+                        event.params.frame_id.clone(),
+                        event.params.loader_id.clone(),
+                    ));
+                }
+            }
+        }))
+        .map_err(|error| format!("Failed to listen for CDP navigation events: {error}"))?;
+    let result = trigger().and_then(|(frame_id, loader_id)| {
+        wait_for_navigation_event(
+            &receiver,
+            &frame_id,
+            loader_id.as_ref(),
+            Duration::from_millis(timeout_ms),
+        )
+    });
+    let removal = tab
+        .remove_event_listener(&listener)
+        .map_err(|error| format!("Failed to remove CDP navigation listener: {error}"));
+    result.and(removal)
+}
+
+fn wait_for_navigation_event(
+    receiver: &Receiver<(Page::FrameId, String)>,
+    frame_id: &Page::FrameId,
+    loader_id: Option<&String>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let Some(loader_id) = loader_id else {
+        return Ok(());
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining) {
+            Ok((completed_frame, completed_loader))
+                if completed_frame == *frame_id && completed_loader == *loader_id =>
+            {
+                return Ok(())
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(format!(
+                    "Timed out after {}ms waiting for CDP Page.lifecycleEvent({NAVIGATION_LIFECYCLE_EVENT}) for frame {frame_id} and loader {loader_id}",
+                    timeout.as_millis()
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(format!(
+                    "CDP navigation listener disconnected before Page.lifecycleEvent({NAVIGATION_LIFECYCLE_EVENT}) arrived for frame {frame_id} and loader {loader_id}"
+                ));
+            }
+        }
     }
 }
 
@@ -5530,6 +5609,50 @@ mod tests {
     fn timed_out_expect_attempts_exclude_the_first_attempt_from_retries() {
         assert_eq!(expect_retries(2), 1);
         assert_eq!(expect_retries(0), 0);
+    }
+
+    #[test]
+    fn navigation_wait_accepts_event_buffered_before_wait() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(("main".to_string(), "loader".to_string()))
+            .unwrap();
+
+        assert!(wait_for_navigation_event(
+            &receiver,
+            &"main".to_string(),
+            Some(&"loader".to_string()),
+            Duration::ZERO,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn navigation_wait_timeout_names_missing_cdp_event() {
+        let (_sender, receiver) = mpsc::channel();
+
+        let error = wait_for_navigation_event(
+            &receiver,
+            &"main".to_string(),
+            Some(&"loader".to_string()),
+            Duration::ZERO,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Timed out after 0ms"));
+        assert!(error.contains("CDP Page.lifecycleEvent(load)"));
+        assert!(error.contains("frame main"));
+        assert!(error.contains("loader loader"));
+    }
+
+    #[test]
+    fn same_document_navigation_needs_no_load_event() {
+        let (_sender, receiver) = mpsc::channel();
+
+        assert!(
+            wait_for_navigation_event(&receiver, &"main".to_string(), None, Duration::ZERO,)
+                .is_ok()
+        );
     }
 
     #[test]

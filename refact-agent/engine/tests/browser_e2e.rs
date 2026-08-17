@@ -963,8 +963,8 @@ async fn design_tools_measure_marks_contrast_and_visual_changes() {
     );
 }
 
-#[tokio::test]
-#[ignore]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn world_utility_survives_hostile_globals() {
     let Some(mut case) = BrowserCase::start("hostile-globals.html").await else {
         return;
