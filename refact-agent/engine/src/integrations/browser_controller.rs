@@ -1808,12 +1808,14 @@ pub async fn execute_request_with_runtime(
         });
         let url = tab.get_url();
         let page_changed = initial_url.as_deref() != Some(url.as_str());
-        let capture_requested = request.attach_screenshot
-            || page_changed
-            || request
+        let capture_requested = report_screenshot_requested(
+            request.attach_screenshot,
+            page_changed,
+            request
                 .steps
                 .iter()
-                .any(|step| matches!(step, BrowserStep::Screenshot { .. }));
+                .any(|step| matches!(step, BrowserStep::Screenshot { .. })),
+        );
         let screenshot = if capture_requested {
             tokio::task::block_in_place(|| capture_report_screenshot(&tab, image_policy).ok())
         } else {
@@ -5090,6 +5092,17 @@ pub fn capture_viewport_screenshot(
         .map(|capture| (capture.data, capture.mime))
 }
 
+fn report_screenshot_requested(
+    attach_screenshot: Option<bool>,
+    page_changed: bool,
+    has_screenshot_step: bool,
+) -> bool {
+    match attach_screenshot {
+        Some(attach) => attach,
+        None => page_changed || has_screenshot_step,
+    }
+}
+
 fn capture_report_screenshot(tab: &Tab, policy: &ImagePolicy) -> Result<BrowserScreenshot, String> {
     let (data, mime) = capture_viewport_screenshot_png(tab)?;
     let bytes = base64::prelude::BASE64_STANDARD
@@ -5784,6 +5797,29 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_attach_screenshot_captures_when_the_page_changed() {
+        assert!(report_screenshot_requested(None, true, false));
+        assert!(report_screenshot_requested(None, false, true));
+        assert!(!report_screenshot_requested(None, false, false));
+    }
+
+    #[test]
+    fn attach_screenshot_false_never_captures_even_on_navigation() {
+        assert!(!report_screenshot_requested(Some(false), true, false));
+        assert!(!report_screenshot_requested(Some(false), true, true));
+    }
+
+    #[test]
+    fn attach_screenshot_true_captures_without_a_page_change() {
+        assert!(report_screenshot_requested(Some(true), false, false));
+    }
+
+    #[test]
+    fn attach_screenshot_false_suppresses_only_the_report_screenshot() {
+        assert!(!report_screenshot_requested(Some(false), false, true));
+    }
 
     #[test]
     fn matched_expect_attempts_exclude_the_first_attempt_from_retries() {

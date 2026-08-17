@@ -1680,7 +1680,7 @@ pub struct BrowserActionRequest {
     #[serde(default)]
     pub target: TabTarget,
     #[serde(default)]
-    pub attach_screenshot: bool,
+    pub attach_screenshot: Option<bool>,
     pub steps: Vec<BrowserStep>,
 }
 
@@ -3133,7 +3133,22 @@ mod tests {
         let req: BrowserActionRequest = serde_json::from_str(json_str).unwrap();
         assert_eq!(req.session, SessionPolicy::SharedDefault);
         assert_eq!(req.target, TabTarget::Active);
-        assert!(!req.attach_screenshot);
+        assert!(req.attach_screenshot.is_none());
+    }
+
+    #[test]
+    fn test_request_attach_screenshot_is_tri_state() {
+        let omitted: BrowserActionRequest =
+            serde_json::from_str(r#"{"steps": []}"#).unwrap();
+        assert_eq!(omitted.attach_screenshot, None);
+
+        let enabled: BrowserActionRequest =
+            serde_json::from_str(r#"{"attach_screenshot": true, "steps": []}"#).unwrap();
+        assert_eq!(enabled.attach_screenshot, Some(true));
+
+        let suppressed: BrowserActionRequest =
+            serde_json::from_str(r#"{"attach_screenshot": false, "steps": []}"#).unwrap();
+        assert_eq!(suppressed.attach_screenshot, Some(false));
     }
 
     #[test]

@@ -101,7 +101,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Advanced: eval, add_locator_handler, remove_locator_handler, dismiss_overlays, highlight_element, highlight, hide_highlight, annotate, and fixed-delay wait_seconds. highlight accepts locator/ref plus optional style and label; annotate accepts locator/ref plus text. Locator handlers use `{type:\"click\"}` or `{type:\"steps\",steps:[...]}`.\n",
     "Locator fallback vocabulary: ref; role with name/description, exact or regex, and checked/pressed/selected/expanded/disabled/level/include_hidden filters; test_id with configurable `attribute`; text, label, placeholder, alt_text, title, css, xpath, id, name, and autocomplete. ",
     "Compose with zero-based `nth` (-1 is last), first/last, locator, filter (has/has_not/has_text/has_not_text/visible), and/or, or an outermost-first `frames` chain. Non-selecting actions are strict: ambiguous locators fail loudly with the match count. Same-process frames are supported; out-of-process frames fail explicitly.\n",
-    "Set `attach_screenshot=true` for a policy-sized screenshot; page-changing batches capture automatically. The legacy newline-separated `commands` input remains accepted but is deprecated; new callers must use `request.steps`."
+    "`attach_screenshot` is tri-state for the policy-sized report screenshot: true = always attach, false = never attach, omitted = attach when the page changed. An explicit `screenshot` step still returns its own image even when false. The legacy newline-separated `commands` input remains accepted but is deprecated; new callers must use `request.steps`."
 );
 
 fn locator_regex_schema() -> serde_json::Value {
@@ -684,7 +684,7 @@ fn browser_request_schema() -> serde_json::Value {
         "required": ["steps"],
         "properties": {
             "session": {"type": "string", "enum": ["shared_default"]},
-            "attach_screenshot": {"type": "boolean", "description": "Include a policy-sized screenshot; page-changing batches capture automatically"},
+            "attach_screenshot": {"type": "boolean", "description": "true = always attach, false = never attach, omitted = attach when the page changed"},
             "target": tab_target_schema(),
             "steps": {
                 "type": "array",
@@ -1195,6 +1195,42 @@ mod tests {
         }
         assert!(description.contains("legacy newline-separated `commands` input"));
         assert!(description.contains("deprecated"));
+    }
+
+    #[test]
+    fn chrome_schema_documents_tri_state_attach_screenshot() {
+        let schema = chrome_input_schema();
+        assert_eq!(
+            schema
+                .pointer("/properties/request/properties/attach_screenshot/description")
+                .and_then(Value::as_str),
+            Some("true = always attach, false = never attach, omitted = attach when the page changed")
+        );
+        let description = ToolChrome::default().tool_description().description;
+        assert!(description.contains("`attach_screenshot` is tri-state"));
+        assert!(description.contains("false = never attach"));
+        assert!(description.contains("omitted = attach when the page changed"));
+    }
+
+    #[test]
+    fn suppressed_report_screenshot_still_returns_the_explicit_step_screenshot() {
+        const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let step = crate::integrations::browser_models::StepResult::success(0, "Screenshot captured")
+            .with_data(serde_json::json!({
+                "mime": "image/png",
+                "data": TINY_PNG_BASE64,
+            }));
+        let report: ExecutionReport = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "steps": [step],
+            "dialogs": [],
+            "new_tabs": [],
+        }))
+        .unwrap();
+
+        assert!(report.screenshot.is_none());
+        let content = execution_report_to_multimodal(&report, &ImagePolicy::default()).unwrap();
+        assert!(content.iter().any(|element| element.is_image()));
     }
 }
 

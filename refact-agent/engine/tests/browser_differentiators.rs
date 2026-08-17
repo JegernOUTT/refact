@@ -664,7 +664,7 @@ async fn differentiator_09_tab_log_and_runtime_buffers_keep_independent_cursors(
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::TabLog,
                 BrowserStep::Eval {
@@ -829,7 +829,7 @@ async fn differentiator_12_password_masking_survives_final_serialization() {
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::Fill {
                     locator: BrowserLocator::css("#password"),

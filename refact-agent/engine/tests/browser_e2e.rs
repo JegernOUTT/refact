@@ -379,7 +379,7 @@ async fn context_state_roundtrips_and_reaches_adopted_popup() {
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::SetViewport {
                     width: 412,
@@ -541,7 +541,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
     let request = BrowserActionRequest {
         session: SessionPolicy::SharedDefault,
         target: TabTarget::Active,
-        attach_screenshot: false,
+        attach_screenshot: None,
         steps: vec![BrowserStep::Eval {
             expression: "document.querySelector('#fetch').click()".to_string(),
         }],
@@ -572,7 +572,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
             BrowserActionRequest {
                 session: SessionPolicy::SharedDefault,
                 target: TabTarget::Active,
-                attach_screenshot: false,
+                attach_screenshot: None,
                 steps: vec![],
             },
             &ImagePolicy::browser_capture(),
@@ -600,7 +600,7 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::RemoveLocatorHandler {
                     name: "dismiss_overlays".to_string(),
@@ -810,7 +810,7 @@ async fn artifacts_capture_page_clip_element_pdf_and_highlight_lifecycle() {
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::Screenshot {
                     options: BrowserScreenshotOptions {
@@ -2166,7 +2166,7 @@ async fn locator_handler_clears_cookie_banner_before_click_and_records_firing() 
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::RemoveLocatorHandler {
                     name: "dismiss_overlays".to_string(),
@@ -2221,7 +2221,7 @@ async fn locator_handler_clears_interstitial_that_appears_between_actions() {
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::RemoveLocatorHandler {
                     name: "dismiss_overlays".to_string(),
@@ -2373,7 +2373,7 @@ async fn wait_for_popup_click_and_popup_action_share_one_batch() {
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::WaitForPopup {
                     timeout_ms: Some(5_000),
@@ -2423,7 +2423,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::Route {
                     pattern: data_pattern.clone(),
@@ -2461,7 +2461,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::Unroute {
                     pattern: Some(data_pattern.clone()),
@@ -2501,7 +2501,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::Unroute { pattern: None },
                 BrowserStep::Route {
@@ -2553,7 +2553,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::Unroute { pattern: None },
                 BrowserStep::Eval {
@@ -2583,7 +2583,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::Route {
                     pattern: data_pattern,
@@ -2746,7 +2746,7 @@ async fn dialog_fixture_auto_dismisses_confirm_and_reports_it() {
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::Eval {
                     expression: "document.querySelector('#confirm').click(); 'clicked'".to_string(),
@@ -2783,7 +2783,7 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::HandleDialog {
                     accept: true,
@@ -2813,7 +2813,7 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::HandleDialog {
                     accept: true,
