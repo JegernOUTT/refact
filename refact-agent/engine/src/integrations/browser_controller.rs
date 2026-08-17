@@ -1231,7 +1231,8 @@ fn execute_route_management_step(
             )
             .and_then(|replay| runtime.set_har_replay(replay))
             {
-                Ok(()) => StepResult::success(idx, "Added HAR replay route"),
+                Ok(()) => StepResult::success(idx, "Added HAR replay route")
+                    .with_data(serde_json::json!({"routes": runtime.route_registry.list()})),
                 Err(error) => StepResult::failure(idx, "Route from HAR", error),
             },
         ),

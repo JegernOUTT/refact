@@ -1943,6 +1943,14 @@ pub struct BrowserStorageState {
 pub struct RouteInfo {
     pub pattern: UrlPattern,
     pub handler: RouteHandler,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub har: Option<HarRouteInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HarRouteInfo {
+    pub entry_count: usize,
+    pub not_found: HarNotFound,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

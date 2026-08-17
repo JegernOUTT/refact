@@ -120,6 +120,7 @@ pub struct HarReplay {
     entries: Vec<HarEntry>,
     matcher: Option<UrlMatcher>,
     not_found: HarNotFound,
+    label: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,11 +275,29 @@ impl HarReplay {
             .map_err(|error| format!("Failed to read HAR {}: {error}", path.display()))?;
         let file: HarFile = serde_json::from_slice(&bytes)
             .map_err(|error| format!("Invalid HAR {}: {error}", path.display()))?;
+        let label = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy()
+            .into_owned();
         Ok(Self {
             entries: file.log.entries,
             matcher: url_filter.map(matcher_for_pattern).transpose()?,
             not_found,
+            label,
         })
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn not_found(&self) -> HarNotFound {
+        self.not_found
     }
 
     pub fn match_request(&self, method: &str, url: &str) -> Option<RouteHandler> {
@@ -549,6 +568,7 @@ mod tests {
             entries: vec![entry],
             matcher: None,
             not_found: HarNotFound::Abort,
+            label: "page.har".to_string(),
         };
         assert!(matches!(
             replay.match_request("GET", "https://example.test/page?token=secret"),

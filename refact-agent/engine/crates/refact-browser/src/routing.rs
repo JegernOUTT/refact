@@ -6,17 +6,26 @@ use headless_chrome::Tab;
 use headless_chrome::browser::tab::{RequestPausedDecision, RequestInterceptor};
 use headless_chrome::protocol::cdp::{Fetch, Network};
 
-use refact_integrations::browser_models::{RouteHandler, RouteInfo, RouteInterception, UrlPattern};
+use refact_integrations::browser_models::{
+    HarNotFound, HarRouteInfo, RouteHandler, RouteInfo, RouteInterception, UrlPattern,
+};
 
 use crate::har::HarReplay;
 use crate::network::{UrlMatcher, mask_headers, mask_text};
 
 const INTERCEPTION_REPORT_CAP: usize = 1_000;
+const HAR_ROUTE_PATTERN: &str = "har-replay";
 
 #[derive(Clone, Debug)]
 struct RegisteredRoute {
     info: RouteInfo,
     matcher: UrlMatcher,
+}
+
+#[derive(Debug)]
+pub(crate) struct RouteSnapshot {
+    routes: Vec<RouteInfo>,
+    har_replay: Option<HarReplay>,
 }
 
 #[derive(Debug, Default)]
@@ -36,7 +45,11 @@ impl RouteRegistry {
         let matcher = matcher_for_pattern(&pattern)?;
         validate_handler(&handler)?;
         self.state.lock().unwrap().routes.push(RegisteredRoute {
-            info: RouteInfo { pattern, handler },
+            info: RouteInfo {
+                pattern,
+                handler,
+                har: None,
+            },
             matcher,
         });
         Ok(())
@@ -44,12 +57,24 @@ impl RouteRegistry {
 
     pub fn remove(&self, pattern: Option<&UrlPattern>) -> usize {
         let mut state = self.state.lock().unwrap();
-        let previous = state.routes.len();
+        let previous = state.routes.len() + usize::from(state.har_replay.is_some());
         match pattern {
-            Some(pattern) => state.routes.retain(|route| &route.info.pattern != pattern),
-            None => state.routes.clear(),
+            Some(pattern) => {
+                state.routes.retain(|route| &route.info.pattern != pattern);
+                if state
+                    .har_replay
+                    .as_ref()
+                    .is_some_and(|replay| &har_route_pattern(replay) == pattern)
+                {
+                    state.har_replay = None;
+                }
+            }
+            None => {
+                state.routes.clear();
+                state.har_replay = None;
+            }
         }
-        previous - state.routes.len()
+        previous - state.routes.len() - usize::from(state.har_replay.is_some())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -58,34 +83,39 @@ impl RouteRegistry {
     }
 
     pub fn list(&self) -> Vec<RouteInfo> {
-        self.state
-            .lock()
-            .unwrap()
+        let state = self.state.lock().unwrap();
+        state
             .routes
             .iter()
             .map(|route| masked_route_info(&route.info))
+            .chain(state.har_replay.as_ref().map(har_route_info))
             .collect()
     }
 
-    pub(crate) fn snapshot(&self) -> Vec<RouteInfo> {
-        self.state
-            .lock()
-            .unwrap()
+    pub(crate) fn snapshot(&self) -> RouteSnapshot {
+        let state = self.state.lock().unwrap();
+        RouteSnapshot {
+            routes: state
+                .routes
+                .iter()
+                .map(|route| route.info.clone())
+                .collect(),
+            har_replay: state.har_replay.clone(),
+        }
+    }
+
+    pub(crate) fn restore(&self, snapshot: RouteSnapshot) -> Result<(), String> {
+        let registered = snapshot
             .routes
-            .iter()
-            .map(|route| route.info.clone())
-            .collect()
-    }
-
-    pub(crate) fn restore(&self, routes: Vec<RouteInfo>) -> Result<(), String> {
-        let registered = routes
             .into_iter()
             .map(|info| {
                 let matcher = matcher_for_pattern(&info.pattern)?;
                 Ok(RegisteredRoute { info, matcher })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        self.state.lock().unwrap().routes = registered;
+        let mut state = self.state.lock().unwrap();
+        state.routes = registered;
+        state.har_replay = snapshot.har_replay;
         Ok(())
     }
 
@@ -158,7 +188,7 @@ impl RouteRegistry {
             .as_ref()
             .and_then(|replay| replay.match_request(&method, &url))
         {
-            (UrlPattern::Text("har-replay".to_string()), handler)
+            (UrlPattern::Text(HAR_ROUTE_PATTERN.to_string()), handler)
         } else {
             return RequestPausedDecision::Continue(None);
         };
@@ -406,6 +436,32 @@ fn masked_route_info(info: &RouteInfo) -> RouteInfo {
     RouteInfo {
         pattern: mask_pattern(&info.pattern),
         handler,
+        har: info.har.clone(),
+    }
+}
+
+fn har_route_pattern(replay: &HarReplay) -> UrlPattern {
+    UrlPattern::Text(format!("{HAR_ROUTE_PATTERN}:{}", replay.label()))
+}
+
+fn har_route_info(replay: &HarReplay) -> RouteInfo {
+    RouteInfo {
+        pattern: har_route_pattern(replay),
+        handler: match replay.not_found() {
+            HarNotFound::Abort => RouteHandler::Abort {
+                reason: "blockedbyclient".to_string(),
+            },
+            HarNotFound::Fallback => RouteHandler::Continue {
+                url: None,
+                method: None,
+                headers: None,
+                post_data: None,
+            },
+        },
+        har: Some(HarRouteInfo {
+            entry_count: replay.entry_count(),
+            not_found: replay.not_found(),
+        }),
     }
 }
 
@@ -423,8 +479,16 @@ fn mask_pattern(pattern: &UrlPattern) -> UrlPattern {
 mod tests {
     use super::*;
 
+    const HAR_FIXTURE: &str = r#"{"log":{"version":"1.2","creator":{"name":"test","version":"1"},"entries":[{"startedDateTime":"1970-01-01T00:00:00.000Z","time":1.0,"request":{"method":"GET","url":"https://example.com/api","httpVersion":"HTTP/1.1","headers":[],"queryString":[],"cookies":[],"headersSize":-1,"bodySize":0},"response":{"status":200,"statusText":"OK","httpVersion":"HTTP/1.1","headers":[],"cookies":[],"content":{"size":2,"mimeType":"text/plain","text":"ok"},"redirectURL":"","headersSize":-1,"bodySize":2},"cache":{},"timings":{"send":0.0,"wait":0.0,"receive":0.0}}]}}"#;
+
     fn route(pattern: &str, handler: RouteHandler) -> (UrlPattern, RouteHandler) {
         (UrlPattern::Text(pattern.to_string()), handler)
+    }
+
+    fn har_replay(dir: &tempfile::TempDir, name: &str, not_found: HarNotFound) -> HarReplay {
+        let path = dir.path().join(name);
+        std::fs::write(&path, HAR_FIXTURE).unwrap();
+        HarReplay::load(&path, None, not_found).unwrap()
     }
 
     #[test]
@@ -487,6 +551,140 @@ mod tests {
             )
             .is_err());
         assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn har_replay_is_listed_with_not_found_mode_and_entry_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = RouteRegistry::default();
+        registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Abort));
+
+        let listed = registry.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].pattern,
+            UrlPattern::Text("har-replay:page.har".to_string())
+        );
+        let har = listed[0].har.clone().expect("HAR route metadata");
+        assert_eq!(har.entry_count, 1);
+        assert_eq!(har.not_found, HarNotFound::Abort);
+        assert!(matches!(listed[0].handler, RouteHandler::Abort { .. }));
+    }
+
+    #[test]
+    fn unroute_all_clears_har_replay_and_counts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = RouteRegistry::default();
+        let (pattern, handler) = route(
+            "https://example.com/**",
+            RouteHandler::Abort {
+                reason: "blockedbyclient".to_string(),
+            },
+        );
+        registry.add(pattern, handler).unwrap();
+        registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Abort));
+
+        assert_eq!(registry.list().len(), 2);
+        assert_eq!(registry.remove(None), 2);
+        assert!(registry.is_empty());
+        assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn targeted_unroute_removes_only_the_har_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = RouteRegistry::default();
+        let (pattern, handler) = route(
+            "https://example.com/**",
+            RouteHandler::Abort {
+                reason: "blockedbyclient".to_string(),
+            },
+        );
+        registry.add(pattern.clone(), handler).unwrap();
+        registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Fallback));
+
+        assert_eq!(registry.remove(Some(&pattern)), 1);
+        assert!(!registry.is_empty());
+        assert_eq!(registry.list().len(), 1);
+
+        let har_pattern = UrlPattern::Text("har-replay:page.har".to_string());
+        assert_eq!(registry.remove(Some(&har_pattern)), 1);
+        assert!(registry.is_empty());
+        assert_eq!(registry.remove(Some(&har_pattern)), 0);
+    }
+
+    #[test]
+    fn re_registering_har_replay_replaces_the_listed_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = RouteRegistry::default();
+        registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Abort));
+        registry.set_har_replay(har_replay(&dir, "other.har", HarNotFound::Fallback));
+
+        let listed = registry.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].pattern,
+            UrlPattern::Text("har-replay:other.har".to_string())
+        );
+        assert_eq!(
+            listed[0].har.as_ref().unwrap().not_found,
+            HarNotFound::Fallback
+        );
+    }
+
+    #[test]
+    fn har_interception_attribution_stays_har_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = RouteRegistry::default();
+        registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Abort));
+
+        let decision = registry.decide(
+            "one".to_string(),
+            "https://example.com/missing".to_string(),
+            "GET".to_string(),
+            BTreeMap::new(),
+            None,
+            false,
+        );
+        assert!(matches!(decision, RequestPausedDecision::Fail(_)));
+
+        let reports = registry.drain_interceptions();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            reports[0].pattern,
+            UrlPattern::Text("har-replay".to_string())
+        );
+        assert_eq!(reports[0].action, "abort");
+
+        registry.remove(None);
+        let after = registry.decide(
+            "two".to_string(),
+            "https://example.com/missing".to_string(),
+            "GET".to_string(),
+            BTreeMap::new(),
+            None,
+            false,
+        );
+        assert!(matches!(after, RequestPausedDecision::Continue(None)));
+        assert!(registry.drain_interceptions().is_empty());
+    }
+
+    #[test]
+    fn snapshot_and_restore_round_trip_the_har_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = RouteRegistry::default();
+        registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Abort));
+
+        let snapshot = registry.snapshot();
+        assert_eq!(registry.remove(None), 1);
+        assert!(registry.is_empty());
+
+        registry.restore(snapshot).unwrap();
+        assert!(!registry.is_empty());
+        assert_eq!(
+            registry.list()[0].pattern,
+            UrlPattern::Text("har-replay:page.har".to_string())
+        );
     }
 
     #[test]
