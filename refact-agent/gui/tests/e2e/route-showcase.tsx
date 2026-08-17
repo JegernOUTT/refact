@@ -53,6 +53,14 @@ import type {
 } from "../../src/services/refact";
 import type { ConfigItem } from "../../src/services/refact/customization";
 import type { ExtRegistryResponse } from "../../src/services/refact/extensions";
+import type {
+  PrivacyFileRecord,
+  PrivacyInspectResponse,
+  PrivacyPolicyResponse,
+  PrivacyStatusResponse,
+} from "../../src/services/refact/privacy";
+import { BlockCard } from "../../src/features/Privacy/BlockCard";
+import { WithheldOutputCard } from "../../src/features/Privacy/WithheldOutputCard";
 import "../../src/lib/render/web.css";
 
 const now = "2026-06-07T10:00:00Z";
@@ -882,6 +890,72 @@ const cronTasks = [
   },
 ];
 
+const privacyFile: PrivacyFileRecord = {
+  path: ".env",
+  zone: "secrets",
+  attribution: "observed",
+};
+
+const privacyPolicyResponse: PrivacyPolicyResponse = {
+  policy: {
+    blocked: ["*.blocked"],
+    zones: [
+      {
+        name: "secrets",
+        patterns: [".env*"],
+        send_to: ["trusted"],
+        on_shell_read: "withhold",
+      },
+      {
+        name: "normal",
+        patterns: ["**"],
+        send_to: ["*"],
+        on_shell_read: "ask",
+      },
+    ],
+    subagents: { report_declassifies: true },
+  },
+  destinations: [
+    {
+      id: "trusted",
+      kind: "provider",
+      display_name: "Trusted provider",
+    },
+    {
+      id: "build-mcp",
+      kind: "mcp",
+      display_name: "Build MCP",
+    },
+  ],
+  match_counts: { secrets: 2, normal: 7 },
+  error: null,
+  source_paths: ["/workspace/refact/.refact/privacy.yaml"],
+};
+
+const privacyStatusResponse: PrivacyStatusResponse = {
+  platform: "linux",
+  observation: {
+    platform_supported: true,
+    runtime_available: false,
+    last_error: "PTRACE_TRACEME is unavailable",
+  },
+  config_error: null,
+};
+
+const privacyInspectResponse: PrivacyInspectResponse = {
+  chat_id: chatId,
+  destination: {
+    id: "untrusted",
+    kind: "provider",
+    display_name: "untrusted/model",
+  },
+  sendable: false,
+  would_send: [],
+  records: [privacyFile],
+  blocked: [{ record_index: 0, record: privacyFile }],
+  refusal: "destination untrusted cannot receive message 0 path .env",
+};
+
 function jsonResponse(data: unknown) {
   return new Response(JSON.stringify(data), {
     headers: { "Content-Type": "application/json" },
@@ -891,12 +965,26 @@ function jsonResponse(data: unknown) {
 const nativeFetch = window.fetch.bind(window);
 const showcaseCommandLog: unknown[] = [];
 const showcaseClipboardWrites: string[] = [];
+const showcasePrivacyActions: string[] = [];
+type ShowcaseRequest = {
+  path: string;
+  method: string;
+  body: unknown;
+};
+const showcaseRequests: ShowcaseRequest[] = [];
+let privacyPolicy = privacyPolicyResponse.policy;
 (
   window as unknown as { __routeShowcaseCommands: unknown[] }
 ).__routeShowcaseCommands = showcaseCommandLog;
 (
   window as unknown as { __routeShowcaseClipboardWrites: string[] }
 ).__routeShowcaseClipboardWrites = showcaseClipboardWrites;
+(
+  window as unknown as { __routeShowcaseRequests: ShowcaseRequest[] }
+).__routeShowcaseRequests = showcaseRequests;
+(
+  window as unknown as { __routeShowcasePrivacyActions: string[] }
+).__routeShowcasePrivacyActions = showcasePrivacyActions;
 Object.defineProperty(window.navigator, "clipboard", {
   configurable: true,
   value: {
@@ -906,7 +994,7 @@ Object.defineProperty(window.navigator, "clipboard", {
     },
   },
 });
-window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(
     typeof input === "string"
       ? input
@@ -916,6 +1004,22 @@ window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
     window.location.origin,
   );
   const path = url.pathname;
+  const method =
+    init?.method ?? (input instanceof Request ? input.method : "GET");
+  let body: unknown = null;
+  const requestBody = init?.body
+    ? String(init.body)
+    : input instanceof Request
+      ? await input.clone().text()
+      : "";
+  if (requestBody) {
+    try {
+      body = JSON.parse(requestBody);
+    } catch {
+      body = requestBody;
+    }
+  }
+  showcaseRequests.push({ path, method, body });
   if (path.startsWith("/v1/chats/")) {
     if (init?.body) {
       try {
@@ -1155,6 +1259,18 @@ window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
     return Promise.resolve(jsonResponse({ installed: [] }));
   if (path === "/v1/plugins/marketplace/responsive-plugins/plugins")
     return Promise.resolve(jsonResponse(pluginList));
+  if (path === "/v1/privacy/policy") {
+    if (method === "POST" && body && typeof body === "object") {
+      privacyPolicy = body as PrivacyPolicyResponse["policy"];
+    }
+    return Promise.resolve(
+      jsonResponse({ ...privacyPolicyResponse, policy: privacyPolicy }),
+    );
+  }
+  if (path === "/v1/privacy/status")
+    return Promise.resolve(jsonResponse(privacyStatusResponse));
+  if (path === "/v1/privacy/inspect")
+    return Promise.resolve(jsonResponse(privacyInspectResponse));
   return nativeFetch(input, init);
 };
 
@@ -1300,6 +1416,24 @@ const OverlayRegressionSurface = () => {
   );
 };
 
+const PrivacyWithheldSurface = () => (
+  <WithheldOutputCard
+    exitCode={0}
+    files={[privacyFile]}
+    localOnlyOutput="TOKEN=local-secret"
+  />
+);
+
+const PrivacyBlockSurface = () => (
+  <BlockCard
+    model="untrusted/model"
+    step={3}
+    blockedFiles={[privacyFile]}
+    onSwitchModel={() => showcasePrivacyActions.push("switch-model")}
+    onBranchCleanChat={() => showcasePrivacyActions.push("branch-clean-chat")}
+  />
+);
+
 const ShowcaseSurface = () => {
   const currentPage = useSelector((state: RootState) => {
     const page = state.pages[state.pages.length - 1];
@@ -1310,6 +1444,14 @@ const ShowcaseSurface = () => {
 
   if (route === "overlay-regression") {
     return <OverlayRegressionSurface />;
+  }
+
+  if (route === "privacy-withheld") {
+    return <PrivacyWithheldSurface />;
+  }
+
+  if (route === "privacy-block") {
+    return <PrivacyBlockSurface />;
   }
 
   if (chatDndRoute) {

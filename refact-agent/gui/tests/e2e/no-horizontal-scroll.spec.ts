@@ -61,6 +61,10 @@ const routes = [
     path: "/tests/e2e/route-showcase.html?route=settings&settings=general",
   },
   {
+    name: "settings privacy",
+    path: "/tests/e2e/route-showcase.html?route=settings&settings=privacy",
+  },
+  {
     name: "settings providers",
     path: "/tests/e2e/route-showcase.html?route=settings&settings=providers",
   },
