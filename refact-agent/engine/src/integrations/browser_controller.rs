@@ -110,6 +110,22 @@ struct ResolvedElement {
     info: ElementInfo,
 }
 
+enum ResolveElementError {
+    MultipleMatches { count: usize, previews: Vec<String> },
+    Other(String),
+}
+
+impl ResolveElementError {
+    fn into_message(self, locator: &BrowserLocator) -> String {
+        match self {
+            Self::MultipleMatches { count, previews } => {
+                refact_browser::strict_mode_violation(&describe_locator(locator), count, &previews)
+            }
+            Self::Other(message) => message,
+        }
+    }
+}
+
 impl std::ops::Deref for ResolvedElement {
     type Target = ElementInfo;
 
@@ -157,17 +173,18 @@ impl ActionabilityDriver for DragActionabilityDriver<'_> {
         if let Some(resolved) = self.resolved.take() {
             let _ = self.world.release_handle(self.tab, &resolved.handle);
         }
-        match resolve_element(self.tab, self.world, self.locator) {
+        match resolve_element_typed(self.tab, self.world, self.locator) {
             Ok(resolved) => {
                 let preview = element_preview(self.tab, self.world, &resolved.handle);
                 self.resolved = Some(resolved);
                 LocatorOutcome::Found { preview }
             }
-            Err(error) => {
+            Err(ResolveElementError::MultipleMatches { count, previews }) => {
+                LocatorOutcome::MultipleMatches { count, previews }
+            }
+            Err(ResolveElementError::Other(error)) => {
                 if matches!(self.locator.strategy, LocatorStrategy::Ref { .. }) {
                     LocatorOutcome::Error { description: error }
-                } else if let Some(count) = strict_mode_count(&error) {
-                    LocatorOutcome::MultipleMatches { count }
                 } else {
                     LocatorOutcome::NotFound
                 }
@@ -292,17 +309,18 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
 
     fn resolve(&mut self) -> LocatorOutcome {
         self.release_resolved();
-        match resolve_element(self.tab, self.world, self.locator) {
+        match resolve_element_typed(self.tab, self.world, self.locator) {
             Ok(resolved) => {
                 let preview = element_preview(self.tab, self.world, &resolved.handle);
                 self.resolved = Some(resolved);
                 LocatorOutcome::Found { preview }
             }
-            Err(error) => {
+            Err(ResolveElementError::MultipleMatches { count, previews }) => {
+                LocatorOutcome::MultipleMatches { count, previews }
+            }
+            Err(ResolveElementError::Other(error)) => {
                 if matches!(self.locator.strategy, LocatorStrategy::Ref { .. }) {
                     LocatorOutcome::Error { description: error }
-                } else if let Some(count) = strict_mode_count(&error) {
-                    LocatorOutcome::MultipleMatches { count }
                 } else {
                     LocatorOutcome::NotFound
                 }
@@ -453,20 +471,31 @@ fn element_preview(tab: &Tab, world: &WorldManager, handle: &ElementHandle) -> S
         .unwrap_or_else(|| "<element>".to_string())
 }
 
-fn strict_mode_count(error: &str) -> Option<usize> {
-    let (_, suffix) = error.split_once(" resolved to ")?;
-    suffix.split_whitespace().next()?.parse().ok()
-}
-
 fn resolve_element(
     tab: &Tab,
     world: &WorldManager,
     locator: &BrowserLocator,
 ) -> Result<ResolvedElement, String> {
-    let handles = resolve_locator_handles(tab, world, locator)?;
-    let handle = strict_locator_handle(tab, world, locator, handles)?
-        .ok_or_else(|| "Element not found".to_string())?;
-    inspect_resolved_element(tab, world, handle)
+    resolve_element_typed(tab, world, locator).map_err(|error| error.into_message(locator))
+}
+
+fn resolve_element_typed(
+    tab: &Tab,
+    world: &WorldManager,
+    locator: &BrowserLocator,
+) -> Result<ResolvedElement, ResolveElementError> {
+    let handles =
+        resolve_locator_handles(tab, world, locator).map_err(ResolveElementError::Other)?;
+    let handle = match strict_locator_handle_result(tab, world, handles) {
+        StrictLocatorHandle::None => {
+            return Err(ResolveElementError::Other("Element not found".to_string()));
+        }
+        StrictLocatorHandle::One(handle) => handle,
+        StrictLocatorHandle::Multiple { count, previews } => {
+            return Err(ResolveElementError::MultipleMatches { count, previews });
+        }
+    };
+    inspect_resolved_element(tab, world, handle).map_err(ResolveElementError::Other)
 }
 
 fn resolve_locator_handles(
@@ -530,35 +559,66 @@ fn strict_locator_handle(
     tab: &Tab,
     world: &WorldManager,
     locator: &BrowserLocator,
-    mut handles: Vec<ElementHandle>,
+    handles: Vec<ElementHandle>,
 ) -> Result<Option<ElementHandle>, String> {
+    match strict_locator_handle_result(tab, world, handles) {
+        StrictLocatorHandle::None => Ok(None),
+        StrictLocatorHandle::One(handle) => Ok(Some(handle)),
+        StrictLocatorHandle::Multiple { count, previews } => Err(
+            refact_browser::strict_mode_violation(&describe_locator(locator), count, &previews),
+        ),
+    }
+}
+
+enum StrictLocatorHandle {
+    None,
+    One(ElementHandle),
+    Multiple { count: usize, previews: Vec<String> },
+}
+
+fn strict_locator_handle_result(
+    tab: &Tab,
+    world: &WorldManager,
+    mut handles: Vec<ElementHandle>,
+) -> StrictLocatorHandle {
     if handles.len() > 1 {
         let count = handles.len();
-        let previews = handles
-            .iter()
-            .take(5)
-            .filter_map(|handle| {
-                world
-                    .call_function_on(
-                        tab,
-                        handle,
-                        "function() { return this.outerHTML.substring(0, 200); }",
-                        Vec::new(),
-                    )
-                    .ok()
-                    .and_then(|value| value.as_str().map(str::to_string))
-            })
-            .collect::<Vec<_>>();
-        for handle in &handles {
-            let _ = world.release_handle(tab, handle);
-        }
-        return Err(refact_browser::strict_mode_violation(
-            &describe_locator(locator),
-            count,
-            &previews,
-        ));
+        let previews = strict_locator_previews(tab, world, &handles);
+        release_locator_handles(tab, world, &handles);
+        return StrictLocatorHandle::Multiple { count, previews };
     }
-    Ok(handles.pop())
+    handles
+        .pop()
+        .map(StrictLocatorHandle::One)
+        .unwrap_or(StrictLocatorHandle::None)
+}
+
+fn strict_locator_previews(
+    tab: &Tab,
+    world: &WorldManager,
+    handles: &[ElementHandle],
+) -> Vec<String> {
+    handles
+        .iter()
+        .take(5)
+        .filter_map(|handle| {
+            world
+                .call_function_on(
+                    tab,
+                    handle,
+                    "function() { return this.outerHTML.substring(0, 200); }",
+                    Vec::new(),
+                )
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+        })
+        .collect()
+}
+
+fn release_locator_handles(tab: &Tab, world: &WorldManager, handles: &[ElementHandle]) {
+    for handle in handles {
+        let _ = world.release_handle(tab, handle);
+    }
 }
 
 fn inspect_resolved_element(
@@ -3310,10 +3370,10 @@ fn sample_expectation(
             return Ok((true, Value::String("detached".to_string())));
         }
     }
-    if let Some(error) = strict_expectation_error(matcher, handles.len()) {
-        for handle in &handles {
-            let _ = world.release_handle(tab, handle);
-        }
+    if handles.len() > 1 && !matcher.is_multi_element() {
+        let previews = strict_locator_previews(tab, world, &handles);
+        let error = strict_expectation_error(matcher, locator, handles.len(), &previews).unwrap();
+        release_locator_handles(tab, world, &handles);
         return Err(error);
     }
     if let BrowserExpectation::ToHaveValues {
@@ -3354,9 +3414,14 @@ fn sample_expectation(
     sampled
 }
 
-fn strict_expectation_error(matcher: &BrowserExpectation, count: usize) -> Option<String> {
+fn strict_expectation_error(
+    matcher: &BrowserExpectation,
+    locator: &BrowserLocator,
+    count: usize,
+    previews: &[String],
+) -> Option<String> {
     (count > 1 && !matcher.is_multi_element())
-        .then(|| format!("strict mode violation: locator resolved to {count} elements"))
+        .then(|| refact_browser::strict_mode_violation(&describe_locator(locator), count, previews))
 }
 
 fn sample_single_element(
@@ -5485,16 +5550,31 @@ mod tests {
 
     #[test]
     fn single_element_expectations_are_strict_but_array_expectations_are_not() {
-        assert!(strict_expectation_error(&BrowserExpectation::ToBeVisible, 2).is_some());
-        assert!(
-            strict_expectation_error(&BrowserExpectation::ToHaveCount { expected: 2 }, 2).is_none()
-        );
+        let locator = BrowserLocator::css(".duplicate");
+        let error = strict_expectation_error(
+            &BrowserExpectation::ToBeVisible,
+            &locator,
+            2,
+            &["<button class=\"duplicate\">One</button>".to_string()],
+        )
+        .unwrap();
+        assert!(error.contains("css=.duplicate"));
+        assert!(error.contains("<button class=\"duplicate\">"));
+        assert!(strict_expectation_error(
+            &BrowserExpectation::ToHaveCount { expected: 2 },
+            &locator,
+            2,
+            &[],
+        )
+        .is_none());
         assert!(strict_expectation_error(
             &BrowserExpectation::ToHaveValues {
                 expected: vec![BrowserExpectedText::Text("one".to_string())],
                 ignore_case: false,
             },
-            2
+            &locator,
+            2,
+            &[],
         )
         .is_none());
     }

@@ -247,7 +247,7 @@ fn mask_diagnostic_text(message: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionabilityDiagnostic {
     NotFound,
-    MultipleMatches { count: usize },
+    MultipleMatches { count: usize, previews: Vec<String> },
     NotVisible,
     NotStable,
     NotEnabled,
@@ -262,7 +262,7 @@ impl ActionabilityDiagnostic {
     fn log_line(&self) -> String {
         match self {
             Self::NotFound => "locator did not resolve to any element".to_string(),
-            Self::MultipleMatches { count } => {
+            Self::MultipleMatches { count, .. } => {
                 format!("strict mode violation: locator resolved to {count} elements")
             }
             Self::NotVisible => "element is not visible".to_string(),
@@ -277,13 +277,26 @@ impl ActionabilityDiagnostic {
             Self::PrecheckFailed { description } => description.clone(),
         }
     }
+
+    fn display_line(&self) -> String {
+        match self {
+            Self::MultipleMatches { count, previews } => {
+                let previews = previews
+                    .iter()
+                    .map(|preview| mask_diagnostic_text(preview))
+                    .collect::<Vec<_>>();
+                crate::locators::strict_mode_violation_summary(*count, &previews)
+            }
+            _ => self.log_line(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LocatorOutcome {
     Found { preview: String },
     NotFound,
-    MultipleMatches { count: usize },
+    MultipleMatches { count: usize, previews: Vec<String> },
     Error { description: String },
 }
 
@@ -357,7 +370,7 @@ impl Display for ActionabilityError {
                 call_log,
                 ..
             } => {
-                writeln!(formatter, "{}", diagnostic.log_line())?;
+                writeln!(formatter, "{}", diagnostic.display_line())?;
                 if !call_log.entries.is_empty() {
                     writeln!(formatter, "Call log:")?;
                     for entry in &call_log.entries {
@@ -741,9 +754,9 @@ impl<C: Clock> ActionabilityEngine<C> {
                     last_diagnostic = ActionabilityDiagnostic::NotFound;
                     call_log.push(last_diagnostic.log_line());
                 }
-                LocatorOutcome::MultipleMatches { count } => {
+                LocatorOutcome::MultipleMatches { count, previews } => {
                     attached = Some(true);
-                    let diagnostic = ActionabilityDiagnostic::MultipleMatches { count };
+                    let diagnostic = ActionabilityDiagnostic::MultipleMatches { count, previews };
                     call_log.push(diagnostic.log_line());
                     return Err(ActionabilityError::Failed {
                         diagnostic,
@@ -1568,13 +1581,18 @@ mod tests {
         let clock = MockClock::default();
         let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
         let mut driver = MockDriver::new();
-        driver.locator_outcomes = VecDeque::from([LocatorOutcome::MultipleMatches { count: 3 }]);
+        driver.locator_outcomes = VecDeque::from([LocatorOutcome::MultipleMatches {
+            count: 3,
+            previews: vec!["<button>First</button>".to_string()],
+        }]);
 
         let result = engine.execute("button", ActionKind::Click, &mut driver);
+        let message = result.as_ref().unwrap_err().to_string();
+        assert!(message.contains("<button>First</button>"), "{message}");
         assert!(matches!(
             result,
             Err(ActionabilityError::Failed {
-                diagnostic: ActionabilityDiagnostic::MultipleMatches { count: 3 },
+                diagnostic: ActionabilityDiagnostic::MultipleMatches { count: 3, .. },
                 ..
             })
         ));
