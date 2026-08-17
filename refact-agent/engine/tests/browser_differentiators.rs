@@ -541,6 +541,7 @@ async fn differentiator_05_extract_table_returns_structured_rows() {
         &mut case.runtime,
         &[BrowserStep::ExtractTable {
             locator: BrowserLocator::css("table:first-of-type"),
+            limit: None,
         }],
         &ImagePolicy::browser_capture(),
     );
@@ -549,6 +550,20 @@ async fn differentiator_05_extract_table_returns_structured_rows() {
     let data = report.steps[0].data.as_ref().unwrap();
     assert_eq!(data["total_rows"], 2);
     assert_eq!(data["rows"], json!([["Name", "Value"], ["Row", "Data"]]));
+
+    let limited = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::ExtractTable {
+            locator: BrowserLocator::css("table:first-of-type"),
+            limit: Some(1),
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(limited.ok, "limited table extraction failed: {limited:?}");
+    let limited_data = limited.steps[0].data.as_ref().unwrap();
+    assert_eq!(limited_data["total_rows"], 2);
+    assert_eq!(limited_data["rows"], json!([["Name", "Value"]]));
 }
 
 // Verified fallback filling preserves reliable form completion when trusted typing is rejected.

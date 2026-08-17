@@ -36,6 +36,7 @@ const NAVIGATION_LIFECYCLE_EVENT: &str = "load";
 
 const MAX_DOM_SNAPSHOT_CHARS: usize = 100_000;
 const MAX_EXTRACT_LINKS: usize = 500;
+const MAX_EXTRACT_TABLE_ROWS: usize = 100;
 const DEFAULT_ARIA_SNAPSHOT_CHARS: usize = 20_000;
 const MAX_ARIA_SNAPSHOT_CHARS: usize = 100_000;
 
@@ -3136,7 +3137,9 @@ fn execute_single_step(
         BrowserStep::ExtractLinks { locator, limit } => {
             step_extract_links(tab, world, idx, locator.as_ref(), *limit)
         }
-        BrowserStep::ExtractTable { locator } => step_extract_table(tab, world, idx, locator),
+        BrowserStep::ExtractTable { locator, limit } => {
+            step_extract_table(tab, world, idx, locator, *limit)
+        }
         BrowserStep::DomSnapshot {
             selector,
             max_chars,
@@ -5007,11 +5010,22 @@ fn step_extract_links(
     }
 }
 
+fn truncate_table_rows(mut result: Value, limit: Option<usize>) -> Value {
+    let effective_limit = limit
+        .unwrap_or(MAX_EXTRACT_TABLE_ROWS)
+        .min(MAX_EXTRACT_TABLE_ROWS);
+    if let Some(rows) = result.get_mut("rows").and_then(Value::as_array_mut) {
+        rows.truncate(effective_limit);
+    }
+    result
+}
+
 fn step_extract_table(
     tab: &Tab,
     world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
+    limit: Option<usize>,
 ) -> StepResult {
     match resolve_element(tab, world, locator) {
         Ok(info) => match call_handle_json(
@@ -5021,7 +5035,7 @@ fn step_extract_table(
             browser_locators::js_extract_table(),
         ) {
             Ok(result) => StepResult::success(idx, format!("Extracted table from <{}>", info.tag))
-                .with_data(result),
+                .with_data(truncate_table_rows(result, limit)),
             Err(e) => StepResult::failure(idx, "Extract table failed", e),
         },
         Err(e) => StepResult::failure(idx, "Extract table: resolution failed", e),
@@ -5884,6 +5898,47 @@ mod tests {
     fn timed_out_expect_attempts_exclude_the_first_attempt_from_retries() {
         assert_eq!(expect_retries(2), 1);
         assert_eq!(expect_retries(0), 0);
+    }
+
+    #[test]
+    fn extract_table_limit_truncates_rows_and_preserves_total() {
+        let extracted = serde_json::json!({
+            "ok": true,
+            "rows": [["a"], ["b"], ["c"], ["d"], ["e"]],
+            "total_rows": 87,
+        });
+
+        let truncated = truncate_table_rows(extracted, Some(3));
+
+        assert_eq!(truncated["rows"], serde_json::json!([["a"], ["b"], ["c"]]));
+        assert_eq!(truncated["total_rows"], serde_json::json!(87));
+    }
+
+    #[test]
+    fn extract_table_without_limit_keeps_every_extracted_row() {
+        let extracted = serde_json::json!({
+            "ok": true,
+            "rows": [["a"], ["b"]],
+            "total_rows": 2,
+        });
+
+        assert_eq!(truncate_table_rows(extracted.clone(), None), extracted);
+    }
+
+    #[test]
+    fn extract_table_limit_above_the_extraction_cap_is_clamped() {
+        let rows = (0..MAX_EXTRACT_TABLE_ROWS + 20)
+            .map(|index| serde_json::json!([index.to_string()]))
+            .collect::<Vec<_>>();
+        let extracted = serde_json::json!({"ok": true, "rows": rows, "total_rows": 1_000});
+
+        let truncated = truncate_table_rows(extracted, Some(1_000));
+
+        assert_eq!(
+            truncated["rows"].as_array().unwrap().len(),
+            MAX_EXTRACT_TABLE_ROWS
+        );
+        assert_eq!(truncated["total_rows"], serde_json::json!(1_000));
     }
 
     #[test]

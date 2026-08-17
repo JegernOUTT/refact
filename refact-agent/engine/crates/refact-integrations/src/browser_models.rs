@@ -1419,6 +1419,8 @@ pub enum BrowserStep {
     },
     ExtractTable {
         locator: BrowserLocator,
+        #[serde(default)]
+        limit: Option<usize>,
     },
     DomSnapshot {
         selector: String,
@@ -2431,7 +2433,10 @@ mod tests {
                 locator: Some(locator()),
                 limit: Some(10),
             },
-            BrowserStep::ExtractTable { locator: locator() },
+            BrowserStep::ExtractTable {
+                locator: locator(),
+                limit: Some(10),
+            },
             BrowserStep::DomSnapshot {
                 selector: "main".to_string(),
                 max_chars: Some(1_000),
@@ -2976,6 +2981,26 @@ mod tests {
                 assert_eq!(limit, Some(10));
             }
             _ => panic!("Expected ExtractLinks"),
+        }
+    }
+
+    #[test]
+    fn test_step_extract_table_serde() {
+        let json_str = r#"{"action": "extract_table", "locator": {"by": "css", "value": "table"}, "limit": 4}"#;
+        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
+        match step {
+            BrowserStep::ExtractTable { limit, .. } => assert_eq!(limit, Some(4)),
+            _ => panic!("Expected ExtractTable"),
+        }
+    }
+
+    #[test]
+    fn test_step_extract_table_limit_defaults_to_none() {
+        let json_str = r#"{"action": "extract_table", "locator": {"by": "css", "value": "table"}}"#;
+        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
+        match step {
+            BrowserStep::ExtractTable { limit, .. } => assert_eq!(limit, None),
+            _ => panic!("Expected ExtractTable"),
         }
     }
 
