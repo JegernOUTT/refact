@@ -1165,8 +1165,8 @@ fn execute_route_management_step(
                 },
             ))
         }
-        BrowserStep::SendWebSocketMessage { url_pattern, data } => {
-            let result = runtime.websocket_registry.send_to_page(url_pattern, data);
+        BrowserStep::SendWebSocketMessage { pattern, text } => {
+            let result = runtime.websocket_registry.send_to_page(pattern, text);
             let tabs = runtime
                 .browser
                 .get_tabs()
@@ -2411,23 +2411,23 @@ fn execute_runtime_network_step(
             wait_for_load_state(network_monitor, idx, *state, clamp_timeout_ms(*timeout_ms))
         }
         BrowserStep::WaitForRequest {
-            url_or_pattern,
+            pattern,
             timeout_ms,
         } => wait_for_network_entry(
             network_monitor,
             idx,
-            url_or_pattern,
+            pattern,
             armed_cursor.unwrap_or_else(|| network_monitor.request_cursor()),
             clamp_timeout_ms(*timeout_ms),
             false,
         ),
         BrowserStep::WaitForResponse {
-            url_or_pattern,
+            pattern,
             timeout_ms,
         } => wait_for_network_entry(
             network_monitor,
             idx,
-            url_or_pattern,
+            pattern,
             armed_cursor.unwrap_or_else(|| network_monitor.response_cursor()),
             clamp_timeout_ms(*timeout_ms),
             true,
@@ -2779,8 +2779,8 @@ fn bound_handler_step(step: &BrowserStep, deadline: Instant) -> BrowserStep {
         BrowserStep::WaitForNavigation { .. } => BrowserStep::WaitForNavigation {
             timeout_ms: Some(remaining_ms),
         },
-        BrowserStep::WaitForUrl { contains, .. } => BrowserStep::WaitForUrl {
-            contains: contains.clone(),
+        BrowserStep::WaitForUrl { pattern, .. } => BrowserStep::WaitForUrl {
+            pattern: pattern.clone(),
             timeout_ms: Some(remaining_ms),
         },
         BrowserStep::WaitForText { text, .. } => BrowserStep::WaitForText {
@@ -3122,9 +3122,9 @@ fn execute_single_step(
             step_wait_for_navigation(tab, idx, clamp_timeout_ms(*timeout_ms), pre_step_url)
         }
         BrowserStep::WaitForUrl {
-            contains,
+            pattern,
             timeout_ms,
-        } => step_wait_for_url(tab, idx, contains, clamp_timeout_ms(*timeout_ms)),
+        } => step_wait_for_url(tab, idx, pattern, clamp_timeout_ms(*timeout_ms)),
         BrowserStep::WaitForText { text, timeout_ms } => {
             step_wait_for_text(tab, idx, text, clamp_timeout_ms(*timeout_ms))
         }

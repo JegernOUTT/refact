@@ -1029,7 +1029,7 @@ pub enum BrowserMouseButton {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BrowserStep {
     Navigate {
         url: String,
@@ -1076,8 +1076,10 @@ pub enum BrowserStep {
         pattern: Option<UrlPattern>,
     },
     SendWebSocketMessage {
-        url_pattern: UrlPattern,
-        data: String,
+        #[serde(alias = "url_pattern")]
+        pattern: UrlPattern,
+        #[serde(alias = "data")]
+        text: String,
     },
     WaitForWebSocketFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1359,7 +1361,8 @@ pub enum BrowserStep {
         timeout_ms: Option<u64>,
     },
     WaitForUrl {
-        contains: String,
+        #[serde(alias = "contains")]
+        pattern: String,
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
@@ -1378,12 +1381,14 @@ pub enum BrowserStep {
         timeout_ms: Option<u64>,
     },
     WaitForRequest {
-        url_or_pattern: UrlPattern,
+        #[serde(alias = "url_or_pattern")]
+        pattern: UrlPattern,
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
     WaitForResponse {
-        url_or_pattern: UrlPattern,
+        #[serde(alias = "url_or_pattern")]
+        pattern: UrlPattern,
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
@@ -1700,6 +1705,7 @@ pub enum NetworkReportMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BrowserActionRequest {
     #[serde(default)]
     pub session: SessionPolicy,
@@ -2207,8 +2213,8 @@ mod tests {
             },
             BrowserStep::UnrouteWebSocket { pattern: None },
             BrowserStep::SendWebSocketMessage {
-                url_pattern: UrlPattern::Text("wss://example.com/**".to_string()),
-                data: "hello".to_string(),
+                pattern: UrlPattern::Text("wss://example.com/**".to_string()),
+                text: "hello".to_string(),
             },
             BrowserStep::WaitForWebSocketFrame {
                 pattern: None,
@@ -2422,7 +2428,7 @@ mod tests {
                 timeout_ms: Some(1_000),
             },
             BrowserStep::WaitForUrl {
-                contains: "/done".to_string(),
+                pattern: "/done".to_string(),
                 timeout_ms: Some(1_000),
             },
             BrowserStep::WaitForText {
@@ -2437,11 +2443,11 @@ mod tests {
                 timeout_ms: Some(1_000),
             },
             BrowserStep::WaitForRequest {
-                url_or_pattern: UrlPattern::Text("/api".to_string()),
+                pattern: UrlPattern::Text("/api".to_string()),
                 timeout_ms: Some(1_000),
             },
             BrowserStep::WaitForResponse {
-                url_or_pattern: UrlPattern::Regex {
+                pattern: UrlPattern::Regex {
                     source: "/api".to_string(),
                     flags: "i".to_string(),
                 },
@@ -2934,14 +2940,14 @@ mod tests {
 
     #[test]
     fn test_step_wait_for_url_serde() {
-        let json_str = r#"{"action": "wait_for_url", "contains": "/search", "timeout_ms": 5000}"#;
+        let json_str = r#"{"action": "wait_for_url", "pattern": "/search", "timeout_ms": 5000}"#;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
         match step {
             BrowserStep::WaitForUrl {
-                contains,
+                pattern,
                 timeout_ms,
             } => {
-                assert_eq!(contains, "/search");
+                assert_eq!(pattern, "/search");
                 assert_eq!(timeout_ms, Some(5000));
             }
             _ => panic!("Expected WaitForUrl"),
@@ -2963,25 +2969,24 @@ mod tests {
         ));
 
         let response: BrowserStep = serde_json::from_str(
-            r#"{"action":"wait_for_response","url_or_pattern":{"source":"/api/.*","flags":"i"}}"#,
+            r#"{"action":"wait_for_response","pattern":{"source":"/api/.*","flags":"i"}}"#,
         )
         .unwrap();
         assert!(matches!(
             response,
             BrowserStep::WaitForResponse {
-                url_or_pattern: UrlPattern::Regex { source, flags },
+                pattern: UrlPattern::Regex { source, flags },
                 timeout_ms: None
             } if source == "/api/.*" && flags == "i"
         ));
 
-        let request: BrowserStep = serde_json::from_str(
-            r#"{"action":"wait_for_request","url_or_pattern":{"source":"/api/.*"}}"#,
-        )
-        .unwrap();
+        let request: BrowserStep =
+            serde_json::from_str(r#"{"action":"wait_for_request","pattern":{"source":"/api/.*"}}"#)
+                .unwrap();
         assert!(matches!(
             request,
             BrowserStep::WaitForRequest {
-                url_or_pattern: UrlPattern::Regex { source, flags },
+                pattern: UrlPattern::Regex { source, flags },
                 timeout_ms: None
             } if source == "/api/.*" && flags.is_empty()
         ));

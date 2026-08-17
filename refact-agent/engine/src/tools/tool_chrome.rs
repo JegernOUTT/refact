@@ -86,12 +86,13 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Take `accessibility_snapshot`, read its `[ref=eN]` handles, then act with `locator.by=ref`; refs come from the most recent snapshot. ",
     "Canonical batch: {\"steps\":[{\"action\":\"accessibility_snapshot\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]} Pass this object as `request`; e5/e7 stand for handles minted by the latest snapshot.\n",
     "Core: navigate, reload, go_back, go_forward, open_tab, close_tab, switch_tab, list_tabs, click, click_if_exists, hover, focus, blur, scroll_to, press_key, drag_and_drop, and drop_files. drag_and_drop accepts source/target locators or refs plus optional source_position/target_position. open_tab accepts optional device/url; close_tab accepts an optional tab and otherwise closes active. Closing active selects the preceding tab in adoption order, the next tab when closing the first, or leaves no active tab.\n",
-    "Coordinate mouse escape hatch: mouse_move, mouse_down, mouse_up, mouse_click_xy, mouse_drag_xy, and mouse_wheel use main-frame viewport CSS pixels and bypass locator resolution. Use these only for canvas, map, and vision-driven UIs with no addressable element; locator/ref actions remain the default.\n",
+    "Coordinate mouse escape hatch: mouse_move, mouse_down, mouse_up, mouse_click_xy, mouse_drag_xy, and mouse_wheel use main-frame viewport CSS pixels and bypass locator resolution. Use these only for canvas, map, and vision-driven UIs with no addressable element; locator/ref actions remain the default. ",
+    "Locator handlers and overlay auto-dismiss do NOT guard `mouse_*` coordinate actions: an overlay that would be dismissed before a locator action will still swallow a coordinate click.\n",
     "Network: route/unroute/list_routes control HTTP interception. route_web_socket and unroute_web_socket install page-level WebSocket routing; send_web_socket_message supplies mock page messages and wait_for_web_socket_frame waits for observed traffic. start_har_recording and stop_har_recording write a runtime-owned HAR artifact; route_from_har replays it with abort or fallback for misses. HAR output is returned as a path and summary, never inlined.\n",
     "Instrumentation: start_coverage and stop_coverage opt into precise JavaScript and CSS usage tracking and return bounded per-URL summaries plus a full JSON artifact. add_virtual_authenticator enables passkey testing and mints the authenticator id it returns, so never send it an id; remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified address that returned id. Credential ids, private keys, user handles, blobs, and user names are redacted from reports.\n",
     "Forms: fill, clear, select_option, check, uncheck.\n",
     "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch.\n",
-    "Waiting: wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. ",
+    "Waiting: wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. wait_for_url takes a plain substring in `pattern` and matches when the current URL contains it, unlike the glob/regex `pattern` used by route and wait_for_request. ",
     "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, or `wait_for_selector` for genuine synchronization.\n",
     "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, pdf, styles, tab_log. Screenshots support full_page, clip, type, quality, scale, omit_background, animations, caret, mask, mask_color, and style; screenshot_element uses locator or ref. PDF supports Chromium print options and returns an artifact path.\n",
     "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, or continue modifications; unroute removes one pattern or all routes; list_routes returns active routes. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. Page-level routes may not observe requests served by a service worker.\n",
@@ -236,10 +237,6 @@ fn browser_step_schema_with_actions(
     properties.insert(
         "selector".to_string(),
         serde_json::json!({"type": "string", "description": "CSS selector for dom_snapshot"}),
-    );
-    properties.insert(
-        "contains".to_string(),
-        serde_json::json!({"type": "string"}),
     );
     properties.insert("value".to_string(), serde_json::json!({"type": "string"}));
     properties.insert(
@@ -398,7 +395,6 @@ fn browser_step_schema_with_actions(
         "state".to_string(),
         serde_json::json!({"type": "string", "enum": ["domcontentloaded", "load", "networkidle"]}),
     );
-    properties.insert("url_or_pattern".to_string(), url_pattern_schema());
     properties.insert("pattern".to_string(), url_pattern_schema());
     properties.insert("save_as".to_string(), serde_json::json!({"type": "string"}));
     properties.insert(
@@ -1047,7 +1043,6 @@ mod tests {
             "clear_first",
             "click_count",
             "clip",
-            "contains",
             "credential",
             "css",
             "delay",
@@ -1114,7 +1109,6 @@ mod tests {
             "transport",
             "type",
             "url",
-            "url_or_pattern",
             "value",
             "verify",
             "width",
@@ -1131,10 +1125,18 @@ mod tests {
             Some(&Value::Bool(true))
         );
         let url_pattern_required = schema
-            .pointer("/properties/request/properties/steps/items/properties/url_or_pattern/oneOf/1/required")
+            .pointer(
+                "/properties/request/properties/steps/items/properties/pattern/oneOf/1/required",
+            )
             .and_then(Value::as_array)
             .unwrap();
         assert_eq!(url_pattern_required, &[Value::String("source".to_string())]);
+        for legacy_field in ["url_or_pattern", "contains"] {
+            assert!(
+                !properties.contains_key(legacy_field),
+                "legacy field {legacy_field} must not appear in the schema"
+            );
+        }
         let handler_types = schema
             .pointer("/properties/request/properties/steps/items/properties/handler/oneOf/1/oneOf")
             .and_then(Value::as_array)
@@ -1204,6 +1206,20 @@ mod tests {
         }
         assert!(description.contains("legacy newline-separated `commands` input"));
         assert!(description.contains("deprecated"));
+    }
+
+    #[test]
+    fn chrome_description_documents_the_coordinate_handler_bypass_caveat() {
+        let description = ToolChrome::default().tool_description().description;
+        assert!(description.contains(
+            "Locator handlers and overlay auto-dismiss do NOT guard `mouse_*` coordinate actions"
+        ));
+    }
+
+    #[test]
+    fn chrome_description_documents_wait_for_url_substring_semantics() {
+        let description = ToolChrome::default().tool_description().description;
+        assert!(description.contains("wait_for_url takes a plain substring in `pattern`"));
     }
 
     #[test]

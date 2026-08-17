@@ -8,6 +8,7 @@ const MAX_ACTION_SUGGESTIONS: usize = 3;
 const MIN_ACTION_SUGGESTION_SCORE: usize = 3;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BrowserActionRequestEnvelope {
     #[serde(default)]
     session: SessionPolicy,
@@ -108,7 +109,7 @@ mod tests {
             "steps": [
                 {"action": "accessibility_snapshot"},
                 {"action": "click", "locator": {"by": "ref", "value": "e5"}},
-                {"action": "send_web_socket_message", "url_pattern": "wss://example.com/**", "data": "hi"}
+                {"action": "send_web_socket_message", "pattern": "wss://example.com/**", "text": "hi"}
             ]
         })
     }
@@ -119,7 +120,7 @@ mod tests {
             "steps": [
                 {"action": "accessibility_snapshot"},
                 {"action": "click", "locator": {"by": "ref", "value": "e5"}},
-                {"action": "send_web_socket_message", "data": "hi"}
+                {"action": "send_web_socket_message", "text": "hi"}
             ]
         }))
         .unwrap_err();
@@ -128,7 +129,7 @@ mod tests {
             error.starts_with("step[2] (send_web_socket_message): "),
             "unexpected error: {error}"
         );
-        assert!(error.contains("url_pattern"), "unexpected error: {error}");
+        assert!(error.contains("pattern"), "unexpected error: {error}");
         assert!(!error.contains('\n'), "unexpected error: {error}");
     }
 
@@ -196,6 +197,113 @@ mod tests {
                 "expected rejection: {rejected}"
             );
         }
+    }
+
+    #[test]
+    fn renamed_fields_accept_both_canonical_and_legacy_names() {
+        for (canonical, legacy) in [
+            (
+                serde_json::json!({"action": "send_web_socket_message", "pattern": "wss://example.com/**", "text": "hi"}),
+                serde_json::json!({"action": "send_web_socket_message", "url_pattern": "wss://example.com/**", "data": "hi"}),
+            ),
+            (
+                serde_json::json!({"action": "wait_for_url", "pattern": "/done"}),
+                serde_json::json!({"action": "wait_for_url", "contains": "/done"}),
+            ),
+            (
+                serde_json::json!({"action": "wait_for_request", "pattern": "/api"}),
+                serde_json::json!({"action": "wait_for_request", "url_or_pattern": "/api"}),
+            ),
+            (
+                serde_json::json!({"action": "wait_for_response", "pattern": {"source": "/api", "flags": "i"}}),
+                serde_json::json!({"action": "wait_for_response", "url_or_pattern": {"source": "/api", "flags": "i"}}),
+            ),
+        ] {
+            let from_canonical =
+                parse_browser_action_request(serde_json::json!({"steps": [canonical.clone()]}))
+                    .unwrap();
+            let from_legacy =
+                parse_browser_action_request(serde_json::json!({"steps": [legacy.clone()]}))
+                    .unwrap();
+            let canonical_value = serde_json::to_value(&from_canonical).unwrap();
+            assert_eq!(
+                canonical_value,
+                serde_json::to_value(&from_legacy).unwrap(),
+                "alias mismatch for {legacy}"
+            );
+
+            let serialized = serde_json::to_string(&canonical_value).unwrap();
+            for legacy_name in ["url_pattern", "url_or_pattern", "contains", "\"data\""] {
+                assert!(
+                    !serialized.contains(legacy_name),
+                    "serialization must emit canonical names only, got {serialized}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_and_legacy_names_together_are_rejected() {
+        let error = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "wait_for_request", "pattern": "/api", "url_or_pattern": "/api"}]
+        }))
+        .unwrap_err();
+
+        assert!(
+            error.starts_with("step[0] (wait_for_request): "),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("duplicate field"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn unknown_step_fields_are_rejected_with_the_step_index_and_action() {
+        let error = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "navigate", "url": "https://example.com"},
+                {"action": "extract_table", "locator": {"by": "css", "value": "table"}, "limitt": 5}
+            ]
+        }))
+        .unwrap_err();
+
+        assert!(
+            error.starts_with("step[1] (extract_table): "),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("limitt"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected_on_flattened_option_steps() {
+        let error = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "screenshot", "full_page": true, "save_ass": "/tmp/x.png"}]
+        }))
+        .unwrap_err();
+
+        assert!(
+            error.starts_with("step[0] (screenshot): "),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("save_ass"), "unexpected error: {error}");
+
+        parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "screenshot", "full_page": true, "type": "png"}]
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn unknown_batch_envelope_fields_are_rejected() {
+        let error = parse_browser_action_request(serde_json::json!({
+            "steps": [],
+            "netwrok": "full"
+        }))
+        .unwrap_err();
+
+        assert!(error.contains("netwrok"), "unexpected error: {error}");
     }
 
     #[test]

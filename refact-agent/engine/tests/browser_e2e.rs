@@ -625,7 +625,7 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
                     locator: BrowserLocator::css("#load"),
                 },
                 BrowserStep::WaitForResponse {
-                    url_or_pattern: UrlPattern::Regex {
+                    pattern: UrlPattern::Regex {
                         source: "/missing-network-resource$".to_string(),
                         flags: String::new(),
                     },
@@ -2761,8 +2761,8 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
                 },
                 BrowserStep::Navigate { url: page },
                 BrowserStep::SendWebSocketMessage {
-                    url_pattern: pattern.clone(),
-                    data: "mocked-frame".to_string(),
+                    pattern: pattern.clone(),
+                    text: "mocked-frame".to_string(),
                 },
                 BrowserStep::WaitForText {
                     text: "mocked-frame".to_string(),

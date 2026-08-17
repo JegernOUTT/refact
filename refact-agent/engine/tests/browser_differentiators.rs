@@ -891,7 +891,7 @@ async fn differentiator_12_password_masking_survives_final_serialization() {
                     expression: format!("console.error('password={SECRET}'); setTimeout(function(){{ throw new Error('password={SECRET}'); }}, 0); fetch('/slow-echo?ms=50'); 'started'"),
                 },
                 BrowserStep::WaitForResponse {
-                    url_or_pattern: UrlPattern::Text("/slow-echo".to_string()),
+                    pattern: UrlPattern::Text("/slow-echo".to_string()),
                     timeout_ms: Some(2_000),
                 },
             ],
