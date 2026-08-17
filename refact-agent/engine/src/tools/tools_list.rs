@@ -276,6 +276,9 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_codegraph::ToolCodeMap {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_design_system::ToolDesignSystem {
+            config_path: config_path.clone(),
+        }),
     ];
 
     let codebase_change_tools: Vec<Box<dyn Tool + Send>> = vec![

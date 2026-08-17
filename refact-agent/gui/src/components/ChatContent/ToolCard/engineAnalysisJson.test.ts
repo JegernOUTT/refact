@@ -462,6 +462,54 @@ describe("buildAnalysisReport", () => {
     ).toBeNull();
   });
 
+  it("maps design system tokens, components, and drift structurally", () => {
+    const result = report("design_system", {
+      detected: true,
+      scope: "refact-agent/gui",
+      looked_for: ["tokens.css"],
+      scanned_files: 24,
+      scanned_bytes: 2048,
+      scan_truncated: false,
+      token_sources: ["src/styles/tokens.css"],
+      detected_prefixes: ["--rf-"],
+      token_count: 120,
+      token_output_count: 120,
+      tokens_truncated: false,
+      token_categories: { color: 30 },
+      tokens: { color: {} },
+      component_inventory_source: "codegraph+filesystem",
+      component_count: 2,
+      components_truncated: false,
+      components: [
+        {
+          name: "Button",
+          path: "src/components/ui/Button.tsx",
+          exported: true,
+          props: ["variant"],
+          variants: { variant: ["primary", "ghost"] },
+          usage_count: 8,
+          source: "codegraph-generation-4",
+        },
+      ],
+      drift_count: 1,
+      findings_truncated: false,
+      drift: [
+        {
+          kind: "color",
+          value: "#123456",
+          path: "src/Feature.module.css",
+          line: 7,
+          nearest_token: "--rf-color-accent",
+          nearest_value: "#112233",
+        },
+      ],
+    });
+    expect(result.facts).toContainEqual({ key: "Tokens", value: "120" });
+    expect(result.sections[1]?.rows[0]?.title).toBe("Button");
+    expect(result.sections[2]?.rows[0]?.title).toBe("src/Feature.module.css:7");
+    expect(result.sections[2]?.rows[0]?.detail).toContain("--rf-color-accent");
+  });
+
   it.each([
     [
       "ui_probe",

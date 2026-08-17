@@ -181,6 +181,7 @@ const ENGINE_ANALYSIS_TOOLS: ReadonlySet<string> = new Set([
   "codegraph_overview",
   "contrast_audit",
   "dead_code",
+  "design_system",
   "git_risk",
   "image_region",
   "mark_elements",

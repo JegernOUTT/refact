@@ -43,6 +43,7 @@ mod tool_cron_list;
 mod tool_cron_update;
 mod tool_deep_research;
 pub mod tool_delegate;
+mod tool_design_system;
 mod tool_get_goal;
 mod tool_get_plan;
 mod tool_glob;

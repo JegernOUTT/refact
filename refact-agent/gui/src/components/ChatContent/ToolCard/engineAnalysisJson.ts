@@ -67,6 +67,28 @@ export interface VisualDiffResult extends BaseResult {
   regions: Array<Record<string, unknown>>;
   artifact: Record<string, unknown>;
 }
+export interface DesignSystemResult extends BaseResult {
+  detected: boolean;
+  scope: string;
+  looked_for: string[];
+  scanned_files: number;
+  scanned_bytes: number;
+  scan_truncated: boolean;
+  token_sources: string[];
+  detected_prefixes: string[];
+  token_count: number;
+  token_output_count: number;
+  tokens_truncated: boolean;
+  token_categories: Record<string, number>;
+  tokens: Record<string, unknown>;
+  component_inventory_source: string;
+  component_count: number;
+  components_truncated: boolean;
+  components: Array<Record<string, unknown>>;
+  drift_count: number;
+  findings_truncated: boolean;
+  drift: Array<Record<string, unknown>>;
+}
 interface IndexState {
   queued: number;
   cross_file_edges: number;
@@ -1413,6 +1435,98 @@ function designTool(
   return { facts, index: [], sections: [{ title: "Results", rows }] };
 }
 
+function designSystem(value: Record<string, unknown>): Built | null {
+  const detected = bool(value, "detected");
+  const scope = str(value, "scope");
+  const scannedFiles = num(value, "scanned_files");
+  const tokenCount = num(value, "token_count");
+  const componentCount = num(value, "component_count");
+  const driftCount = num(value, "drift_count");
+  const inventorySource = str(value, "component_inventory_source");
+  const tokenSources = strings(value, "token_sources");
+  const components = mapRows(arr(value, "components"), (item) => {
+    const name = str(item, "name");
+    const path = str(item, "path");
+    const usageCount = num(item, "usage_count");
+    const source = str(item, "source");
+    const props = strings(item, "props");
+    if (
+      name === null ||
+      path === null ||
+      usageCount === null ||
+      source === null ||
+      props === null
+    )
+      return null;
+    return {
+      title: name,
+      detail:
+        props.length > 0 ? `Props: ${props.join(", ")}` : "No props detected",
+      lead: `${usageCount} uses`,
+      paths: [path],
+      tags: [source],
+    };
+  });
+  const drift = mapRows(arr(value, "drift"), (item) => {
+    const kind = str(item, "kind");
+    const driftValue = str(item, "value");
+    const path = str(item, "path");
+    const line = num(item, "line");
+    const nearestToken = str(item, "nearest_token");
+    const nearestValue = str(item, "nearest_value");
+    if (kind === null || driftValue === null || path === null || line === null)
+      return null;
+    return {
+      title: `${path}:${line}`,
+      detail:
+        nearestToken === null
+          ? `Hardcoded ${kind}: ${driftValue}`
+          : `Use ${nearestToken}${
+              nearestValue === null ? "" : ` (${nearestValue})`
+            }`,
+      lead: driftValue,
+      paths: [path],
+      tags: [kind],
+      severity: "Medium",
+    };
+  });
+  if (
+    detected === null ||
+    scope === null ||
+    scannedFiles === null ||
+    tokenCount === null ||
+    componentCount === null ||
+    driftCount === null ||
+    inventorySource === null ||
+    !tokenSources ||
+    !components ||
+    !drift
+  )
+    return null;
+  const tokenRows: RowInput[] = tokenSources.map((path) => ({
+    title: path,
+    detail: "Design token source",
+    paths: [path],
+  }));
+  return {
+    facts: [
+      metric("Detected", detected ? "yes" : "no"),
+      metric("Scope", scope),
+      metric("Files scanned", scannedFiles),
+      metric("Tokens", tokenCount),
+      metric("Components", componentCount),
+      metric("Drift findings", driftCount),
+      metric("Inventory", inventorySource),
+    ],
+    index: [],
+    sections: [
+      { title: "Token sources", rows: tokenRows },
+      { title: "Components", rows: components },
+      { title: "Design drift", rows: drift },
+    ],
+  };
+}
+
 export function buildAnalysisReport(
   toolName: string,
   value: unknown,
@@ -1433,6 +1547,7 @@ export function buildAnalysisReport(
   else if (toolName === "code_health") built = health(value);
   else if (toolName === "code_why") built = codeWhy(value);
   else if (toolName === "code_map") built = codeMap(value);
+  else if (toolName === "design_system") built = designSystem(value);
   else if (
     toolName === "ui_probe" ||
     toolName === "mark_elements" ||

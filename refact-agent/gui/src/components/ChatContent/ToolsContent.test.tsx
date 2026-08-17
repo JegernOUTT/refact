@@ -189,6 +189,7 @@ describe("ToolsContent routing", () => {
     "security_scan",
     "pr_blast",
     "dead_code",
+    "design_system",
     "ui_probe",
     "mark_elements",
     "contrast_audit",
