@@ -111,6 +111,13 @@ impl PrivacyPolicy {
 }
 
 impl CompiledPolicy {
+    pub fn zone_named(&self, name: &str) -> Option<&Zone> {
+        self.zones
+            .iter()
+            .find(|compiled| compiled.zone.name == name)
+            .map(|compiled| &compiled.zone)
+    }
+
     pub fn zone_for_path(&self, path: &Path) -> &Zone {
         self.zone_for_path_with_roots(path, std::iter::empty::<&Path>())
     }

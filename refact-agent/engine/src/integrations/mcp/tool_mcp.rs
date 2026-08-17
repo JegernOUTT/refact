@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use async_trait::async_trait;
 use refact_tool_api::coerce_args_to_schema;
-use refact_privacy::{FileRecord, PrivacyAudited, records_from_messages};
+use refact_privacy::{records_from_messages, FileRecord, PrivacyAuditError, PrivacyAudited};
 
 /// Maximum bytes of text content returned from a single MCP tool call.
 /// Prevents runaway context window growth from excessively large tool responses.
@@ -26,11 +26,11 @@ use super::session_mcp::{
 };
 
 struct McpCallAudit {
-    records: Vec<FileRecord>,
+    records: Result<Vec<(usize, FileRecord)>, PrivacyAuditError>,
 }
 
 impl PrivacyAudited for McpCallAudit {
-    fn privacy_records(&self) -> Vec<FileRecord> {
+    fn privacy_records(&self) -> Result<Vec<(usize, FileRecord)>, PrivacyAuditError> {
         self.records.clone()
     }
 }
@@ -77,9 +77,14 @@ fn dispatch_cleared_mcp_call<T>(
     dispatch: impl FnOnce(CallToolRequestParams) -> T,
 ) -> Result<T, String> {
     let mut records = records_from_messages(producing_messages);
-    for record in call_param_records(gcx, &call_params)? {
-        if !records.contains(&record) {
-            records.push(record);
+    if let Ok(indexed_records) = &mut records {
+        for record in call_param_records(gcx, &call_params)? {
+            if !indexed_records
+                .iter()
+                .any(|(_, existing)| existing == &record)
+            {
+                indexed_records.push((producing_messages.len(), record));
+            }
         }
     }
     clear_for_mcp(gcx, McpCallAudit { records }, server_name)

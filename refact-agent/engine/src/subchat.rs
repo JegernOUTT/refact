@@ -34,7 +34,7 @@ use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
 use crate::stats::event::{canonicalize_mode_for_stats, split_model_provider, LlmCallEvent};
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeReference;
-use refact_privacy::{Destination, DestinationId, DestinationKind, PrivacyAudited};
+use refact_privacy::{Destination, DestinationId, DestinationKind, PrivacyAuditError, PrivacyAudited};
 
 const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 1;
 const MAX_EMPTY_CHOICE_RETRIES: usize = 2;
@@ -493,23 +493,29 @@ pub struct SubchatResult {
     pub chat_id: Option<String>,
 }
 
-struct AuditedSubchatReport(Vec<refact_privacy::FileRecord>);
+struct AuditedSubchatReport(Vec<(usize, refact_privacy::FileRecord)>);
 
 impl PrivacyAudited for AuditedSubchatReport {
-    fn privacy_records(&self) -> Vec<refact_privacy::FileRecord> {
-        self.0.clone()
+    fn privacy_records(
+        &self,
+    ) -> Result<Vec<(usize, refact_privacy::FileRecord)>, PrivacyAuditError> {
+        Ok(self.0.clone())
     }
 }
 
-fn unique_privacy_records(messages: &[ChatMessage]) -> Vec<refact_privacy::FileRecord> {
-    refact_privacy::records_from_messages(messages)
-        .into_iter()
-        .fold(Vec::new(), |mut records, record| {
-            if !records.contains(&record) {
-                records.push(record);
-            }
-            records
-        })
+fn unique_privacy_records(
+    messages: &[ChatMessage],
+) -> Result<Vec<(usize, refact_privacy::FileRecord)>, PrivacyAuditError> {
+    refact_privacy::records_from_messages(messages).map(|indexed| {
+        indexed
+            .into_iter()
+            .fold(Vec::new(), |mut records, (message_index, record)| {
+                if !records.iter().any(|(_, existing)| existing == &record) {
+                    records.push((message_index, record));
+                }
+                records
+            })
+    })
 }
 
 fn subagent_destination(model_id: &str) -> Destination {
@@ -528,15 +534,18 @@ fn gate_subchat_boundary(
     messages: &[ChatMessage],
     model_id: &str,
 ) -> Result<(), String> {
-    let records = unique_privacy_records(messages);
+    let records = unique_privacy_records(messages).map_err(|error| error.to_string())?;
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    refact_privacy::clear(
+    let compiled = policy.compile().map_err(|error| error.to_string())?;
+    match refact_privacy::clear(
         AuditedSubchatReport(records),
         &subagent_destination(model_id),
-        &policy,
-    )
-    .map(|_| ())
-    .map_err(|refusal| refusal.model_facing().to_string())
+        &compiled,
+    ) {
+        Ok(_) => Ok(()),
+        Err(refusal) if refusal.offending.is_empty() => Err(refusal.message),
+        Err(refusal) => Err(refusal.model_facing().to_string()),
+    }
 }
 
 fn prepare_subchat_messages(
@@ -545,7 +554,10 @@ fn prepare_subchat_messages(
     model_id: &str,
 ) -> Result<Vec<ChatMessage>, String> {
     gate_subchat_boundary(gcx, &messages, model_id)?;
-    if refact_privacy::records_from_messages(&messages).is_empty() {
+    if refact_privacy::records_from_messages(&messages)
+        .map_err(|error| error.to_string())?
+        .is_empty()
+    {
         return Ok(messages);
     }
 
@@ -561,20 +573,24 @@ fn prepare_subchat_messages(
 fn apply_subchat_report_policy(
     policy: &refact_privacy::SubagentPolicy,
     messages: &mut [ChatMessage],
-) {
+) -> Result<(), PrivacyAuditError> {
     let Some(report_index) = messages
         .iter()
         .rposition(|message| message.role == "assistant")
     else {
-        return;
+        return Ok(());
     };
-    let records = unique_privacy_records(messages);
+    let records = unique_privacy_records(messages)?;
     messages[report_index].extra.remove("privacy");
     if policy.report_declassifies {
-        return;
+        return Ok(());
     }
 
-    crate::privacy::records::merge_records(&mut messages[report_index], records);
+    crate::privacy::records::merge_records(
+        &mut messages[report_index],
+        records.into_iter().map(|(_, record)| record),
+    );
+    Ok(())
 }
 
 fn scale_subchat_budget(value: usize, new_n_ctx: usize, old_n_ctx: usize) -> usize {
@@ -1239,7 +1255,8 @@ pub async fn run_subchat(
         .policy
         .subagents
         .clone();
-    apply_subchat_report_policy(&subagent_policy, &mut current_messages);
+    apply_subchat_report_policy(&subagent_policy, &mut current_messages)
+        .map_err(|error| error.to_string())?;
 
     if config.stateful {
         let mut thread = stateful_thread_from_config(&chat_id, &config);
@@ -2725,7 +2742,7 @@ mod subchat_tests {
             .policy
             .subagents
             .clone();
-        apply_subchat_report_policy(&policy, &mut messages);
+        apply_subchat_report_policy(&policy, &mut messages).unwrap();
 
         let error = gate_subchat_boundary(&gcx, &messages[1..], "parent/model").unwrap_err();
 
@@ -2747,7 +2764,7 @@ mod subchat_tests {
             ),
         ];
 
-        apply_subchat_report_policy(&SubagentPolicy::default(), &mut messages);
+        apply_subchat_report_policy(&SubagentPolicy::default(), &mut messages).unwrap();
 
         assert!(!messages[1].extra.contains_key("privacy"));
     }
@@ -2767,7 +2784,8 @@ mod subchat_tests {
                 report_declassifies: false,
             },
             &mut messages,
-        );
+        )
+        .unwrap();
 
         let report: PrivacyRecord =
             serde_json::from_value(messages[2].extra["privacy"].clone()).unwrap();

@@ -580,7 +580,9 @@ mod tests {
             message.extra["privacy"]["files"][0]["attribution"],
             "observed"
         );
-        assert!(refact_privacy::records_from_messages(&[message]).is_empty());
+        assert!(refact_privacy::records_from_messages(&[message])
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -726,7 +728,9 @@ mod tests {
             "heuristic"
         );
         assert!(!message.extra.contains_key("privacy_shell"));
-        assert!(refact_privacy::records_from_messages(&[message]).is_empty());
+        assert!(refact_privacy::records_from_messages(&[message])
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -759,7 +763,9 @@ mod tests {
         assert!(resolve_shell_ask(&mut message, true));
         assert_eq!(message.content.content_text_only(), "approval output");
         assert!(!shell_ask_pending(&message));
-        assert!(refact_privacy::records_from_messages(&[message]).is_empty());
+        assert!(refact_privacy::records_from_messages(&[message])
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

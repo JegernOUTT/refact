@@ -5,7 +5,8 @@ use axum::extract::State;
 use axum::Json;
 use hyper::StatusCode;
 use refact_privacy::{
-    Destination, DestinationId, DestinationKind, FileRecord, PrivacyAudited, PrivacyPolicy,
+    Destination, DestinationId, DestinationKind, FileRecord, PrivacyAuditError, PrivacyAudited,
+    PrivacyPolicy,
 };
 use serde::{Deserialize, Serialize};
 
@@ -61,12 +62,12 @@ pub struct PrivacyInspectResponse {
 }
 
 struct AuditedMessages {
-    messages: Arc<Vec<ChatMessage>>,
+    records: Result<Vec<(usize, FileRecord)>, PrivacyAuditError>,
 }
 
 impl PrivacyAudited for AuditedMessages {
-    fn privacy_records(&self) -> Vec<FileRecord> {
-        refact_privacy::records_from_messages(&self.messages)
+    fn privacy_records(&self) -> Result<Vec<(usize, FileRecord)>, PrivacyAuditError> {
+        self.records.clone()
     }
 }
 
@@ -116,14 +117,24 @@ pub async fn handle_v1_privacy_inspect(
         ScratchError::new(StatusCode::NOT_FOUND, "Chat session not found".to_string())
     })?;
     let messages = Arc::new(session.lock().await.messages.clone());
-    let records = refact_privacy::records_from_messages(&messages);
+    let indexed_records = refact_privacy::records_from_messages(&messages);
+    let records = indexed_records
+        .as_ref()
+        .map(|records| records.iter().map(|(_, record)| record.clone()).collect())
+        .unwrap_or_default();
     let policy = app.gcx.privacy_policy_load.read().unwrap().policy.clone();
+    let compiled = policy.compile().map_err(|error| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to compile privacy policy: {error}"),
+        )
+    })?;
     let clearance = refact_privacy::clear(
         AuditedMessages {
-            messages: messages.clone(),
+            records: indexed_records,
         },
         &request.destination,
-        &policy,
+        &compiled,
     );
     let sendable_messages = messages
         .iter()
@@ -539,6 +550,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(blocked["sendable"], false);
         assert_eq!(blocked["would_send"], json!([]));
+        assert_eq!(blocked["blocked"][0]["record_index"], 0);
         assert_eq!(blocked["blocked"][0]["record"]["zone"], "secrets");
 
         let (status, allowed) = json_request(

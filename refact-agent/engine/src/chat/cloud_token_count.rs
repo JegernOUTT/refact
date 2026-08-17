@@ -322,6 +322,7 @@ mod tests {
             }],
             subagents: refact_privacy::SubagentPolicy::default(),
         };
+        let compiled = policy.compile().unwrap();
         refact_privacy::clear(
             request,
             &refact_privacy::Destination {
@@ -329,7 +330,7 @@ mod tests {
                 kind: refact_privacy::DestinationKind::Provider,
                 display_name: model.id.clone(),
             },
-            &policy,
+            &compiled,
         )
         .unwrap()
     }

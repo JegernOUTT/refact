@@ -28,8 +28,19 @@ pub(crate) fn clear_for_model<T: PrivacyAudited>(
     value: T,
     model_rec: &BaseModelRecord,
 ) -> Result<Cleared<T>, refact_privacy::Refusal> {
-    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    refact_privacy::clear(value, &Destination::from_model_record(model_rec), &policy)
+    let destination = Destination::from_model_record(model_rec);
+    let policy = gcx
+        .privacy_policy_load
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .policy
+        .clone();
+    let compiled = policy.compile().map_err(|error| refact_privacy::Refusal {
+        destination: destination.clone(),
+        offending: Vec::new(),
+        message: format!("privacy policy failed to compile: {error}"),
+    })?;
+    refact_privacy::clear(value, &destination, &compiled)
 }
 
 pub(crate) fn clear_for_mcp<T: PrivacyAudited>(
@@ -37,18 +48,39 @@ pub(crate) fn clear_for_mcp<T: PrivacyAudited>(
     value: T,
     server_name: &str,
 ) -> Result<Cleared<T>, refact_privacy::Refusal> {
-    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
     let destination = Destination {
         id: DestinationId(server_name.to_string()),
         kind: DestinationKind::Mcp,
         display_name: server_name.to_string(),
     };
-    refact_privacy::clear(value, &destination, &policy)
+    let policy = gcx
+        .privacy_policy_load
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .policy
+        .clone();
+    let compiled = policy.compile().map_err(|error| refact_privacy::Refusal {
+        destination: destination.clone(),
+        offending: Vec::new(),
+        message: format!("privacy policy failed to compile: {error}"),
+    })?;
+    refact_privacy::clear(value, &destination, &compiled)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EmptyAudit;
+
+    impl PrivacyAudited for EmptyAudit {
+        fn privacy_records(
+            &self,
+        ) -> Result<Vec<(usize, refact_privacy::FileRecord)>, refact_privacy::PrivacyAuditError>
+        {
+            Ok(Vec::new())
+        }
+    }
 
     #[test]
     fn model_destination_uses_provider_prefix() {
@@ -62,5 +94,38 @@ mod tests {
         assert_eq!(destination.id.0, "trusted");
         assert_eq!(destination.kind, DestinationKind::Provider);
         assert_eq!(destination.display_name, "trusted/model");
+    }
+
+    #[tokio::test]
+    async fn poisoned_policy_lock_with_invalid_state_fails_closed() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let poison = gcx.clone();
+        let _ = std::thread::spawn(move || {
+            let mut load = poison.privacy_policy_load.write().unwrap();
+            load.policy = std::sync::Arc::new(refact_privacy::PrivacyPolicy {
+                blocked: Vec::new(),
+                zones: vec![refact_privacy::Zone {
+                    name: "normal".to_string(),
+                    patterns: vec!["[".to_string()],
+                    send_to: vec!["*".to_string()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                }],
+                subagents: refact_privacy::SubagentPolicy::default(),
+            });
+            panic!("poison privacy policy lock");
+        })
+        .join();
+        let model = BaseModelRecord {
+            id: "trusted/model".to_string(),
+            ..Default::default()
+        };
+
+        let refusal = match clear_for_model(&gcx, EmptyAudit, &model) {
+            Ok(_) => panic!("invalid recovered policy must fail closed"),
+            Err(refusal) => refusal,
+        };
+
+        assert!(refusal.offending.is_empty());
+        assert!(refusal.message.contains("privacy policy failed to compile"));
     }
 }

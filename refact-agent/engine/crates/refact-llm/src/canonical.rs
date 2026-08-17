@@ -3,7 +3,7 @@ use serde_json::Value;
 
 pub use refact_chat_api::ClaudeCodeIdentity;
 use refact_core::chat_types::{ChatMessage, ChatUsage};
-use refact_privacy::{records_from_messages, FileRecord, PrivacyAudited};
+use refact_privacy::{records_from_messages, FileRecord, PrivacyAuditError, PrivacyAudited};
 use crate::params::{CacheControl, CommonParams, ReasoningIntent};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,7 +34,7 @@ pub struct LlmRequest {
 }
 
 impl PrivacyAudited for LlmRequest {
-    fn privacy_records(&self) -> Vec<FileRecord> {
+    fn privacy_records(&self) -> Result<Vec<(usize, FileRecord)>, PrivacyAuditError> {
         records_from_messages(&self.messages)
     }
 }

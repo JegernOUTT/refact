@@ -4,7 +4,7 @@ use std::ops::Deref;
 use refact_core::chat_types::ChatMessage;
 
 use crate::destination::Destination;
-use crate::policy::PrivacyPolicy;
+use crate::matching::CompiledPolicy;
 use crate::record::{FileRecord, PrivacyRecord};
 
 /// A value that passed the privacy policy for one destination.
@@ -34,8 +34,22 @@ impl<T> Cleared<T> {
 }
 
 pub trait PrivacyAudited {
-    fn privacy_records(&self) -> Vec<FileRecord>;
+    fn privacy_records(&self) -> Result<Vec<(usize, FileRecord)>, PrivacyAuditError>;
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivacyAuditError {
+    pub message_index: usize,
+    pub message: String,
+}
+
+impl fmt::Display for PrivacyAuditError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PrivacyAuditError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
@@ -58,14 +72,33 @@ impl fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-pub fn records_from_messages(messages: &[ChatMessage]) -> Vec<FileRecord> {
-    messages
-        .iter()
-        .filter(|message| !shell_output_decision_applied(message))
-        .filter_map(|message| message.extra.get("privacy"))
-        .filter_map(|value| serde_json::from_value::<PrivacyRecord>(value.clone()).ok())
-        .flat_map(|record| record.files)
-        .collect()
+pub fn records_from_messages(
+    messages: &[ChatMessage],
+) -> Result<Vec<(usize, FileRecord)>, PrivacyAuditError> {
+    let mut records = Vec::new();
+    for (message_index, message) in messages.iter().enumerate() {
+        if shell_output_decision_applied(message) {
+            continue;
+        }
+        let Some(value) = message.extra.get("privacy") else {
+            continue;
+        };
+        let privacy = serde_json::from_value::<PrivacyRecord>(value.clone()).map_err(|error| {
+            PrivacyAuditError {
+                message_index,
+                message: format!(
+                    "message {message_index} contains malformed privacy metadata: {error}"
+                ),
+            }
+        })?;
+        records.extend(
+            privacy
+                .files
+                .into_iter()
+                .map(|record| (message_index, record)),
+        );
+    }
+    Ok(records)
 }
 
 fn shell_output_decision_applied(message: &ChatMessage) -> bool {
@@ -90,12 +123,15 @@ fn shell_output_decision_applied(message: &ChatMessage) -> bool {
 pub fn clear<T: PrivacyAudited>(
     value: T,
     destination: &Destination,
-    policy: &PrivacyPolicy,
+    policy: &CompiledPolicy,
 ) -> Result<Cleared<T>, Refusal> {
-    let offending: Vec<_> = value
-        .privacy_records()
+    let records = value.privacy_records().map_err(|error| Refusal {
+        destination: destination.clone(),
+        offending: Vec::new(),
+        message: error.message,
+    })?;
+    let offending: Vec<_> = records
         .into_iter()
-        .enumerate()
         .filter(|(_, record)| !record_is_allowed(record, destination, policy))
         .collect();
 
@@ -116,13 +152,11 @@ pub fn clear<T: PrivacyAudited>(
 fn record_is_allowed(
     record: &FileRecord,
     destination: &Destination,
-    policy: &PrivacyPolicy,
+    policy: &CompiledPolicy,
 ) -> bool {
     record.zone != "blocked"
         && policy
-            .zones
-            .iter()
-            .find(|zone| zone.name == record.zone)
+            .zone_named(&record.zone)
             .is_some_and(|zone| destination.matches_send_to(&zone.send_to))
 }
 
@@ -134,7 +168,7 @@ mod tests {
 
     use super::*;
     use crate::destination::{DestinationId, DestinationKind};
-    use crate::policy::{ShellBehavior, SubagentPolicy, Zone};
+    use crate::policy::{PrivacyPolicy, ShellBehavior, SubagentPolicy, Zone};
     use crate::record::Attribution;
 
     struct AuditedRecords {
@@ -143,8 +177,8 @@ mod tests {
     }
 
     impl PrivacyAudited for AuditedRecords {
-        fn privacy_records(&self) -> Vec<FileRecord> {
-            self.records.clone()
+        fn privacy_records(&self) -> Result<Vec<(usize, FileRecord)>, PrivacyAuditError> {
+            Ok(self.records.iter().cloned().enumerate().collect())
         }
     }
 
@@ -153,7 +187,7 @@ mod tests {
     }
 
     impl PrivacyAudited for AuditedMessages {
-        fn privacy_records(&self) -> Vec<FileRecord> {
+        fn privacy_records(&self) -> Result<Vec<(usize, FileRecord)>, PrivacyAuditError> {
             records_from_messages(&self.messages)
         }
     }
@@ -195,14 +229,19 @@ mod tests {
         }
     }
 
+    fn compiled(policy: &PrivacyPolicy) -> CompiledPolicy {
+        policy.compile().expect("policy should compile")
+    }
+
     fn message_with_record(path: &str, zone: &str) -> ChatMessage {
+        message_with_records(vec![record(path, zone)])
+    }
+
+    fn message_with_records(files: Vec<FileRecord>) -> ChatMessage {
         let mut message = ChatMessage::new("tool".to_string(), "result".to_string());
         message.extra.insert(
             "privacy".to_string(),
-            serde_json::to_value(PrivacyRecord {
-                files: vec![record(path, zone)],
-            })
-            .expect("privacy record should serialize"),
+            serde_json::to_value(PrivacyRecord { files }).expect("privacy record should serialize"),
         );
         message
     }
@@ -214,24 +253,62 @@ mod tests {
             records: vec![record("src/main.rs", "normal"), record(".env", "secrets")],
         };
 
-        let cleared = clear(audited, &destination("trusted"), &policy())
+        let policy = compiled(&policy());
+        let cleared = clear(audited, &destination("trusted"), &policy)
             .expect("trusted destination should be allowed");
 
         assert_eq!(cleared.value, "payload");
     }
 
     #[test]
-    fn refusal_names_the_first_offending_index_and_path() {
+    fn synthesized_normal_zone_is_allowed_by_clearance() {
+        let policy = compiled(&PrivacyPolicy::default());
+        let classified = policy.zone_for_path(std::path::Path::new("src/main.rs"));
         let audited = AuditedRecords {
             value: "payload".to_string(),
-            records: vec![
-                record("src/main.rs", "normal"),
-                record(".env", "secrets"),
-                record("keys.txt", "secrets"),
-            ],
+            records: vec![record("src/main.rs", &classified.name)],
         };
 
-        let refusal = match clear(audited, &destination("untrusted"), &policy()) {
+        assert_eq!(classified.name, "normal");
+        assert!(clear(audited, &destination("untrusted"), &policy).is_ok());
+    }
+
+    #[test]
+    fn zone_without_destinations_is_still_refused() {
+        let policy = compiled(&PrivacyPolicy {
+            blocked: Vec::new(),
+            zones: vec![Zone {
+                name: "secrets".to_string(),
+                patterns: vec!["**/*.pem".to_string()],
+                send_to: Vec::new(),
+                on_shell_read: ShellBehavior::Withhold,
+            }],
+            subagents: SubagentPolicy::default(),
+        });
+        let audited = AuditedRecords {
+            value: "payload".to_string(),
+            records: vec![record("keys/private.pem", "secrets")],
+        };
+
+        assert!(clear(audited, &destination("untrusted"), &policy).is_err());
+    }
+
+    #[test]
+    fn refusal_names_the_source_message_index_and_path() {
+        let messages = Arc::new(vec![
+            message_with_records(vec![
+                record("src/main.rs", "normal"),
+                record("src/lib.rs", "normal"),
+            ]),
+            message_with_records(vec![
+                record(".env", "secrets"),
+                record("keys.txt", "secrets"),
+            ]),
+        ]);
+        let audited = AuditedMessages { messages };
+
+        let policy = compiled(&policy());
+        let refusal = match clear(audited, &destination("untrusted"), &policy) {
             Ok(_) => panic!("untrusted destination should be refused"),
             Err(refusal) => refusal,
         };
@@ -248,7 +325,8 @@ mod tests {
             records: vec![record(".env", "secrets")],
         };
 
-        let refusal = match clear(audited, &destination("untrusted"), &policy()) {
+        let policy = compiled(&policy());
+        let refusal = match clear(audited, &destination("untrusted"), &policy) {
             Ok(_) => panic!("untrusted destination should be refused"),
             Err(refusal) => refusal,
         };
@@ -270,7 +348,8 @@ mod tests {
             messages: Arc::clone(&messages),
         };
 
-        let refusal = match clear(audited, &destination("untrusted"), &policy()) {
+        let policy = compiled(&policy());
+        let refusal = match clear(audited, &destination("untrusted"), &policy) {
             Ok(_) => panic!("untrusted destination should be refused"),
             Err(refusal) => refusal,
         };
@@ -289,8 +368,72 @@ mod tests {
 
         assert_eq!(
             records_from_messages(&messages),
-            vec![record(".env", "secrets")]
+            Ok(vec![(1, record(".env", "secrets"))])
         );
+    }
+
+    #[test]
+    fn malformed_message_privacy_metadata_fails_closed() {
+        let mut malformed = ChatMessage::new("tool".to_string(), "result".to_string());
+        malformed.extra.insert(
+            "privacy".to_string(),
+            serde_json::json!({ "files": "not-an-array" }),
+        );
+        let audited = AuditedMessages {
+            messages: Arc::new(vec![
+                ChatMessage::new("user".to_string(), "hello".to_string()),
+                malformed,
+            ]),
+        };
+        let policy = compiled(&PrivacyPolicy::default());
+
+        let refusal = match clear(audited, &destination("untrusted"), &policy) {
+            Ok(_) => panic!("malformed privacy metadata must fail closed"),
+            Err(refusal) => refusal,
+        };
+
+        assert!(refusal.message.contains("message 1"));
+        assert!(refusal.message.contains("malformed privacy metadata"));
+    }
+
+    #[test]
+    fn refusal_uses_message_index_for_a_multifile_message() {
+        let messages = Arc::new(vec![message_with_records(vec![
+            record("src/first.rs", "normal"),
+            record("keys/private.pem", "secrets"),
+            record("src/third.rs", "normal"),
+        ])]);
+        let audited = AuditedMessages { messages };
+        let policy = compiled(&policy());
+
+        let refusal = match clear(audited, &destination("untrusted"), &policy) {
+            Ok(_) => panic!("guarded file must be refused"),
+            Err(refusal) => refusal,
+        };
+
+        assert_eq!(refusal.offending[0].0, 0);
+        assert!(refusal.message.contains("message 0"));
+    }
+
+    #[test]
+    fn refusal_message_index_is_not_the_flattened_record_ordinal() {
+        let messages = Arc::new(vec![
+            message_with_records(vec![
+                record("src/first.rs", "normal"),
+                record("src/second.rs", "normal"),
+            ]),
+            message_with_records(vec![record("keys/private.pem", "secrets")]),
+        ]);
+        let audited = AuditedMessages { messages };
+        let policy = compiled(&policy());
+
+        let refusal = match clear(audited, &destination("untrusted"), &policy) {
+            Ok(_) => panic!("guarded file must be refused"),
+            Err(refusal) => refusal,
+        };
+
+        assert_eq!(refusal.offending[0].0, 1);
+        assert!(refusal.message.contains("message 1"));
     }
 
     #[test]
@@ -301,7 +444,8 @@ mod tests {
                 records: vec![record("guarded", zone)],
             };
 
-            assert!(clear(audited, &destination("trusted"), &policy()).is_err());
+            let policy = compiled(&policy());
+            assert!(clear(audited, &destination("trusted"), &policy).is_err());
         }
     }
 }
