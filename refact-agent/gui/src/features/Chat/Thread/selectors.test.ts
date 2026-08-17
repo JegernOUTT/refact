@@ -3,13 +3,21 @@ import type { RootState } from "../../../app/store";
 import {
   selectAutoCompactEnabled,
   selectAutoCompactEnabledById,
+  selectAutoCompressionCap,
+  selectAutoCompressionCapById,
 } from "./selectors";
 
-function makeState(autoCompactEnabled?: boolean): RootState {
+function makeState(
+  autoCompactEnabled?: boolean,
+  autoCompressionCap?: number,
+): RootState {
   const thread =
     autoCompactEnabled === undefined
       ? {}
       : { auto_compact_enabled: autoCompactEnabled };
+  if (autoCompressionCap !== undefined) {
+    Object.assign(thread, { auto_compression_cap: autoCompressionCap });
+  }
 
   return {
     chat: {
@@ -36,5 +44,14 @@ describe("auto compact selectors", () => {
 
     expect(selectAutoCompactEnabled(state)).toBe(false);
     expect(selectAutoCompactEnabledById(state, "chat-1")).toBe(false);
+  });
+});
+
+describe("auto compression cap selectors", () => {
+  it("return the current and scoped thread values", () => {
+    const state = makeState(undefined, 8192);
+
+    expect(selectAutoCompressionCap(state)).toBe(8192);
+    expect(selectAutoCompressionCapById(state, "chat-1")).toBe(8192);
   });
 });

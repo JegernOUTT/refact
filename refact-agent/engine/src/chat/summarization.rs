@@ -1061,12 +1061,97 @@ fn provider_usage_input_tokens(usage: &ChatUsage) -> Option<usize> {
 }
 
 fn recent_provider_usage_input_tokens(messages: &[ChatMessage]) -> Option<usize> {
-    messages.iter().rev().find_map(|message| {
-        if message.role != "assistant" || is_ui_only_message(message) {
-            return None;
+    recent_provider_usage_anchor(messages).map(|(_, tokens)| tokens)
+}
+
+fn recent_provider_usage_anchor(messages: &[ChatMessage]) -> Option<(usize, usize)> {
+    messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| {
+            if message.role != "assistant" || is_ui_only_message(message) {
+                return None;
+            }
+            message
+                .usage
+                .as_ref()
+                .and_then(provider_usage_input_tokens)
+                .map(|tokens| (index, tokens))
+        })
+}
+
+fn effective_auto_compression_cap(
+    model_n_ctx: usize,
+    context_tokens_cap: Option<usize>,
+    auto_compression_cap: Option<usize>,
+) -> usize {
+    [Some(model_n_ctx), context_tokens_cap, auto_compression_cap]
+        .into_iter()
+        .flatten()
+        .filter(|cap| *cap > 0)
+        .min()
+        .unwrap_or(model_n_ctx)
+}
+
+fn provider_visible_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    filter_ui_only_messages(crate::chat::linearize::apply_summarization_linearize(
+        messages.to_vec(),
+    ))
+    .into_iter()
+    .filter(|message| message.role != COMPRESSION_REPORT_ROLE)
+    .collect()
+}
+
+fn approximate_provider_visible_tokens(
+    messages: &[ChatMessage],
+    image_token_mode: refact_core::provider_types::ImageTokenMode,
+) -> usize {
+    refact_chat_history::history_limit::compute_context_budget_for_image_mode(
+        messages,
+        usize::MAX,
+        image_token_mode,
+    )
+    .used_tokens_estimate
+}
+
+async fn current_provider_visible_tokens(
+    gcx: Arc<GlobalContext>,
+    messages: &[ChatMessage],
+    usage_stale: bool,
+    model_rec: &crate::caps::ChatModelRecord,
+) -> usize {
+    let provider_messages = provider_visible_messages(messages);
+    let tokenizer = crate::tokens::cached_tokenizer(gcx, &model_rec.base)
+        .await
+        .ok()
+        .flatten();
+    let estimate = |messages: &[ChatMessage]| {
+        let approximate =
+            approximate_provider_visible_tokens(messages, model_rec.base.image_token_mode);
+        let Some(tokenizer) = tokenizer.clone() else {
+            return approximate;
+        };
+        let serialized = serde_json::to_string(messages).unwrap_or_default();
+        crate::tokens::count_text_tokens_with_fallback(Some(tokenizer), &serialized)
+            .max(approximate)
+    };
+
+    if !usage_stale {
+        if let Some((assistant_index, provider_input_tokens)) =
+            recent_provider_usage_anchor(&provider_messages)
+        {
+            return provider_input_tokens
+                .saturating_add(estimate(&provider_messages[assistant_index..]));
         }
-        message.usage.as_ref().and_then(provider_usage_input_tokens)
-    })
+    }
+    estimate(&provider_messages)
+}
+
+fn compression_may_run_in_session(session: &ChatSession) -> bool {
+    session.runtime.state != SessionState::ExecutingTools
+        && (session.runtime.state != SessionState::Generating
+            || (session.draft_message.is_none() && session.draft_usage.is_none()))
 }
 
 #[cfg(test)]
@@ -1089,6 +1174,7 @@ pub(crate) fn estimated_context_pressure(
     max_pressure(visible_pressure, provider_pressure)
 }
 
+#[cfg(test)]
 pub(crate) fn estimated_provider_context_pressure_with_usage(
     messages: &[ChatMessage],
     effective_n_ctx: usize,
@@ -1108,12 +1194,7 @@ pub(crate) fn estimated_provider_context_pressure_with_usage_for_image_mode(
     usage_stale: bool,
     image_token_mode: refact_core::provider_types::ImageTokenMode,
 ) -> ContextPressure {
-    let provider_messages =
-        crate::chat::linearize::apply_summarization_linearize(messages.to_vec());
-    let provider_messages: Vec<ChatMessage> = filter_ui_only_messages(provider_messages)
-        .into_iter()
-        .filter(|message| message.role != COMPRESSION_REPORT_ROLE)
-        .collect();
+    let provider_messages = provider_visible_messages(messages);
     let provider_pressure =
         refact_chat_history::history_limit::compute_context_budget_for_image_mode(
             &provider_messages,
@@ -2245,6 +2326,7 @@ async fn resolve_summary_model(
     Err(SegmentSummaryFailure::NoModelAvailable)
 }
 
+#[cfg(test)]
 fn effective_n_ctx_for_resolved_summary_model(
     model_n_ctx: usize,
     thread: &crate::chat::types::ThreadParams,
@@ -2764,11 +2846,7 @@ async fn proactive_gate_quiet(
             );
             return None;
         }
-        if matches!(
-            session.runtime.state,
-            SessionState::Generating | SessionState::ExecutingTools
-        ) || session.draft_message.is_some()
-        {
+        if !compression_may_run_in_session(&session) {
             set_compression_status_quiet(
                 &mut session,
                 CompressionPhase::Skipped,
@@ -2797,6 +2875,53 @@ async fn proactive_gate_quiet(
         return None;
     }
 
+    let selected_model_rec = {
+        let result = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+            .await
+            .map_err(|error| error.message)
+            .and_then(|caps| crate::caps::resolve_chat_model(caps, &thread.model));
+        match result {
+            Ok(model) => model,
+            Err(error) => {
+                let mut session = session_arc.lock().await;
+                session.tier1_compaction_disabled = true;
+                set_compression_status_quiet(
+                    &mut session,
+                    CompressionPhase::Failed,
+                    Some(CompressionReason::NoSummaryModel),
+                );
+                warn!("Proactive compression model unavailable: {}", error);
+                return None;
+            }
+        }
+    };
+    let selected_model_n_ctx = if selected_model_rec.base.n_ctx > 0 {
+        selected_model_rec.base.n_ctx
+    } else {
+        crate::chat::config::tokens().default_n_ctx
+    };
+    let effective_cap = effective_auto_compression_cap(
+        selected_model_n_ctx,
+        thread.context_tokens_cap,
+        thread.auto_compression_cap,
+    );
+    let current_used_tokens = current_provider_visible_tokens(
+        gcx.clone(),
+        &raw_messages,
+        usage_stale,
+        &selected_model_rec,
+    )
+    .await;
+    if current_used_tokens < effective_cap {
+        let mut session = session_arc.lock().await;
+        set_compression_status_quiet(
+            &mut session,
+            CompressionPhase::Skipped,
+            Some(CompressionReason::PressureLow),
+        );
+        return None;
+    }
+
     let (model, model_n_ctx) = match resolve_summary_model(gcx, &thread.model).await {
         Ok(value) => value,
         Err(failure) => {
@@ -2817,19 +2942,6 @@ async fn proactive_gate_quiet(
         }
     };
 
-    let effective_n_ctx = effective_n_ctx_for_resolved_summary_model(model_n_ctx, thread);
-    let pressure =
-        estimated_provider_context_pressure_with_usage(&raw_messages, effective_n_ctx, usage_stale);
-    if !matches!(pressure, ContextPressure::High | ContextPressure::Critical) {
-        let mut session = session_arc.lock().await;
-        set_compression_status_quiet(
-            &mut session,
-            CompressionPhase::Skipped,
-            Some(CompressionReason::PressureLow),
-        );
-        return None;
-    }
-
     Some((model, model_n_ctx))
 }
 
@@ -2842,7 +2954,7 @@ async fn run_reserved_segment_summarization(
     resolved_model: Option<(String, usize)>,
 ) -> CompactionOutcome {
     let forced_context_limit = force && reason == Some(CompressionReason::ContextLengthStop);
-    let (attempt, raw_messages, known_insufficient_hashes, usage_stale) = {
+    let (attempt, raw_messages, known_insufficient_hashes) = {
         let mut session = session_arc.lock().await;
         if compression_attempt_active(&session) {
             return CompactionOutcome::NothingToCompact;
@@ -2874,11 +2986,7 @@ async fn run_reserved_segment_summarization(
             emit_compression_skipped(&mut session, CompressionReason::SessionCompactionDisabled);
             return CompactionOutcome::NothingToCompact;
         }
-        if matches!(
-            session.runtime.state,
-            SessionState::Generating | SessionState::ExecutingTools
-        ) || session.draft_message.is_some()
-        {
+        if !compression_may_run_in_session(&session) {
             emit_compression_skipped(&mut session, CompressionReason::NoEligibleSegment);
             if forced_context_limit {
                 append_compression_outcome_event(
@@ -2899,7 +3007,6 @@ async fn run_reserved_segment_summarization(
             attempt,
             session.messages.clone(),
             session.compression_insufficient_hashes.clone(),
-            session.provider_usage_stale,
         )
     };
     let _attempt_guard = CompressionAttemptGuard {
@@ -2936,15 +3043,6 @@ async fn run_reserved_segment_summarization(
             }
         },
     };
-    let effective_n_ctx = effective_n_ctx_for_resolved_summary_model(model_n_ctx, thread);
-    let pressure =
-        estimated_provider_context_pressure_with_usage(&raw_messages, effective_n_ctx, usage_stale);
-    if !force && !matches!(pressure, ContextPressure::High | ContextPressure::Critical) {
-        let mut session = session_arc.lock().await;
-        emit_compression_skipped_if_owned(&mut session, attempt, CompressionReason::PressureLow);
-        return CompactionOutcome::NothingToCompact;
-    }
-
     {
         let mut session = session_arc.lock().await;
         if !emit_compression_running_if_owned(&mut session, attempt) {
@@ -2981,11 +3079,7 @@ async fn run_reserved_segment_summarization(
                     CompactionOutcome::NothingToCompact
                 };
             }
-            if matches!(
-                session.runtime.state,
-                SessionState::Generating | SessionState::ExecutingTools
-            ) || session.draft_message.is_some()
-            {
+            if !compression_may_run_in_session(&session) {
                 break;
             }
             session.messages.clone()
@@ -6664,6 +6758,106 @@ mod tests {
     }
 
     #[test]
+    fn effective_auto_compression_cap_clamps_to_all_positive_limits() {
+        assert_eq!(effective_auto_compression_cap(100_000, None, None), 100_000);
+        assert_eq!(
+            effective_auto_compression_cap(100_000, Some(80_000), Some(60_000)),
+            60_000
+        );
+        assert_eq!(
+            effective_auto_compression_cap(50_000, Some(80_000), Some(60_000)),
+            50_000
+        );
+        assert_eq!(
+            effective_auto_compression_cap(50_000, Some(0), Some(0)),
+            50_000
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_usage_anchors_measurement_before_post_request_growth() {
+        let gcx = make_test_gcx().await;
+        let model = chat_model_record("usage-model", 100_000);
+        let messages = vec![
+            user(&"large fallback ".repeat(10_000)),
+            assistant_with_usage(usage(321, 10, 331, None, None)),
+            user(&"new turn ".repeat(1_000)),
+        ];
+        let measured = current_provider_visible_tokens(gcx, &messages, false, &model).await;
+        assert!(measured > 321);
+        assert!(
+            measured
+                < approximate_provider_visible_tokens(
+                    &provider_visible_messages(&messages),
+                    model.base.image_token_mode,
+                )
+        );
+    }
+
+    #[tokio::test]
+    async fn tokenizer_unavailable_keeps_conservative_fallback() {
+        let gcx = make_test_gcx().await;
+        let mut model = chat_model_record("fallback-model", 100_000);
+        Arc::get_mut(&mut model).unwrap().base.tokenizer = "fake".to_string();
+        let messages = vec![user("fallback text"), assistant("fallback answer")];
+        let visible = provider_visible_messages(&messages);
+        assert_eq!(
+            current_provider_visible_tokens(gcx, &messages, true, &model).await,
+            approximate_provider_visible_tokens(&visible, model.base.image_token_mode)
+        );
+    }
+
+    #[tokio::test]
+    async fn proactive_entrypoint_reaches_reserved_runner_from_pre_stream_generating() {
+        let gcx = make_test_gcx().await;
+        let model_id = "proactive-live-model";
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models
+            .insert(model_id.to_string(), chat_model_record(model_id, 100_000));
+        caps.defaults.chat_light_model = model_id.to_string();
+        install_caps(gcx.clone(), caps).await;
+
+        let mut session = ChatSession::new("proactive-live".to_string());
+        session.runtime.state = SessionState::Generating;
+        session.messages = vec![
+            user("first"),
+            assistant_with_usage(usage(1_000, 10, 1_010, None, None)),
+            user("next"),
+        ];
+        let mut thread = session.thread.clone();
+        thread.model = model_id.to_string();
+        thread.auto_compression_cap = Some(1_000);
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+
+        assert!(!apply_segment_summarization(gcx, &session_arc, &thread, false).await);
+        let session = session_arc.lock().await;
+        assert_eq!(session.compression_attempt_generation, 1);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
+        assert_eq!(
+            session.compression_reason,
+            Some(CompressionReason::NoEligibleSegment)
+        );
+    }
+
+    #[test]
+    fn pre_stream_generating_without_draft_is_compression_eligible() {
+        let mut session = ChatSession::new("pre-stream-generating".to_string());
+        session.runtime.state = SessionState::Generating;
+        session.draft_message = None;
+        assert!(compression_may_run_in_session(&session));
+
+        session.draft_message = Some(assistant("active stream"));
+        assert!(!compression_may_run_in_session(&session));
+        session.draft_message = None;
+        session.draft_usage = Some(usage(1, 0, 1, None, None));
+        assert!(!compression_may_run_in_session(&session));
+        session.runtime.state = SessionState::ExecutingTools;
+        session.draft_usage = None;
+        session.draft_message = None;
+        assert!(!compression_may_run_in_session(&session));
+    }
+
+    #[test]
     fn forced_context_limit_summarization_bypasses_auto_compact_disabled_gate() {
         let mut thread = crate::chat::types::ThreadParams::default();
         thread.auto_compact_enabled = Some(false);
@@ -7949,6 +8143,7 @@ mod tests {
             chat_model_record(light_model, 1_000_000),
         );
         caps.defaults.chat_light_model = light_model.to_string();
+        caps.defaults.chat_default_model = light_model.to_string();
         install_caps(gcx.clone(), caps).await;
         let mut session = ChatSession::new("proactive-quiet".to_string());
         session.messages = vec![

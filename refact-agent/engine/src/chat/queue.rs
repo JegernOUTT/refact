@@ -453,6 +453,20 @@ pub fn apply_setparams_patch(
         }
         // Invalid type (not null, not number) - ignore, keep current value
     }
+    if let Some(cap) = patch.get("auto_compression_cap") {
+        if cap.is_null() {
+            if thread.auto_compression_cap.is_some() {
+                thread.auto_compression_cap = None;
+                changed = true;
+            }
+        } else if let Some(n) = cap.as_u64() {
+            let new_cap = Some(n as usize);
+            if thread.auto_compression_cap != new_cap {
+                thread.auto_compression_cap = new_cap;
+                changed = true;
+            }
+        }
+    }
     if let Some(include) = patch.get("include_project_info").and_then(|v| v.as_bool()) {
         if thread.include_project_info != include {
             thread.include_project_info = include;
@@ -2920,6 +2934,25 @@ mod tests {
         let (changed, _) = apply_setparams_patch(&mut thread, &patch);
         assert!(changed);
         assert!(thread.context_tokens_cap.is_none());
+    }
+
+    #[test]
+    fn test_apply_setparams_auto_compression_cap_set_null_and_invalid() {
+        let mut thread = ThreadParams::default();
+        let (changed, _) =
+            apply_setparams_patch(&mut thread, &json!({"auto_compression_cap": 4096}));
+        assert!(changed);
+        assert_eq!(thread.auto_compression_cap, Some(4096));
+
+        let (changed, _) =
+            apply_setparams_patch(&mut thread, &json!({"auto_compression_cap": "invalid"}));
+        assert!(!changed);
+        assert_eq!(thread.auto_compression_cap, Some(4096));
+
+        let (changed, _) =
+            apply_setparams_patch(&mut thread, &json!({"auto_compression_cap": null}));
+        assert!(changed);
+        assert_eq!(thread.auto_compression_cap, None);
     }
 
     #[test]

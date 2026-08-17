@@ -503,6 +503,14 @@ export const selectMaxTokensById = (state: RootState, chatId: string) =>
 export const selectMaxTokens = (state: RootState) =>
   selectMaxTokensById(state, state.chat.current_thread_id);
 
+export const selectAutoCompressionCapById = (
+  state: RootState,
+  chatId: string,
+) => state.chat.threads[chatId]?.thread.auto_compression_cap;
+
+export const selectAutoCompressionCap = (state: RootState) =>
+  selectAutoCompressionCapById(state, state.chat.current_thread_id);
+
 export const selectParallelToolCallsById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.thread.parallel_tool_calls;
 

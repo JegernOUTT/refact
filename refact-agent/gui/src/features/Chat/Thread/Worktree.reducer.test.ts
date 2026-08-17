@@ -213,6 +213,23 @@ describe("Worktree chat thread reducer", () => {
     );
   });
 
+  test("thread params patch sends auto-compression cap", () => {
+    const thread: ChatThread = {
+      id: "chat-auto-compression-cap",
+      messages: [],
+      model: "gpt-4",
+      mode: "agent",
+      tool_use: "agent",
+      new_chat_suggested: { wasSuggested: false },
+      auto_compression_cap: 96000,
+    };
+
+    expect(buildThreadParamsPatch(thread, true)).toHaveProperty(
+      "auto_compression_cap",
+      96000,
+    );
+  });
+
   test("thread params patch preserves worktree by id only", () => {
     const thread: ChatThread = {
       id: "chat-patch",

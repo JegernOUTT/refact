@@ -43,6 +43,7 @@ async fn create_warning_chat(gcx: Arc<GlobalContext>, reason: &str) -> Result<St
         boost_reasoning: false,
         checkpoints_enabled: false,
         context_tokens_cap: None,
+        auto_compression_cap: None,
         include_project_info: false,
         is_title_generated: true,
         auto_approve_editing_tools: false,

@@ -377,6 +377,8 @@ pub struct ThreadParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
     pub context_tokens_cap: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compression_cap: Option<usize>,
     pub include_project_info: bool,
     pub checkpoints_enabled: bool,
     #[serde(default)]
@@ -445,6 +447,7 @@ impl Default for ThreadParams {
             max_tokens: None,
             parallel_tool_calls: None,
             context_tokens_cap: None,
+            auto_compression_cap: None,
             include_project_info: true,
             checkpoints_enabled: true,
             is_title_generated: false,
@@ -1315,6 +1318,7 @@ mod tests {
         assert!(params.frequency_penalty.is_none());
         assert!(params.max_tokens.is_none());
         assert!(params.parallel_tool_calls.is_none());
+        assert!(params.auto_compression_cap.is_none());
         assert!(params.include_project_info);
         assert!(params.checkpoints_enabled);
         assert!(!params.is_title_generated);
@@ -1394,6 +1398,7 @@ mod tests {
         let params: ThreadParams = serde_json::from_str(json).unwrap();
         assert!(params.auto_compact_enabled.is_none());
         assert!(params.auto_compact_enabled_effective());
+        assert!(params.auto_compression_cap.is_none());
     }
 
     #[test]

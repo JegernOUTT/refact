@@ -159,6 +159,7 @@ impl Tool for ToolBuddyLaunchInvestigation {
             boost_reasoning: false,
             checkpoints_enabled: false,
             context_tokens_cap: None,
+            auto_compression_cap: None,
             include_project_info: true,
             is_title_generated: false,
             auto_approve_editing_tools: false,

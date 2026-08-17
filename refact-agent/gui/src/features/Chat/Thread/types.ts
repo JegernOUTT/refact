@@ -114,6 +114,7 @@ export type ChatThread = {
   frequency_penalty?: number | null;
   /** Maximum tokens for response. null = use backend default */
   max_tokens?: number | null;
+  auto_compression_cap?: number | null;
   /** Whether to allow parallel tool calls. null = use backend default */
   parallel_tool_calls?: boolean | null;
   integration?: IntegrationMeta | null;

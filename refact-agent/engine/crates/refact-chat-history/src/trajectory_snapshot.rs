@@ -17,6 +17,8 @@ pub struct TrajectorySnapshot {
     pub boost_reasoning: bool,
     pub checkpoints_enabled: bool,
     pub context_tokens_cap: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compression_cap: Option<usize>,
     pub include_project_info: bool,
     pub is_title_generated: bool,
     pub auto_approve_editing_tools: bool,
@@ -87,6 +89,7 @@ impl TrajectorySnapshot {
             boost_reasoning: thread.boost_reasoning.unwrap_or(false),
             checkpoints_enabled: thread.checkpoints_enabled,
             context_tokens_cap: thread.context_tokens_cap,
+            auto_compression_cap: thread.auto_compression_cap,
             include_project_info: thread.include_project_info,
             is_title_generated: thread.is_title_generated,
             auto_approve_editing_tools: thread.auto_approve_editing_tools,
@@ -178,6 +181,29 @@ mod tests {
         let decoded: TrajectorySnapshot = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded.goal, Some(goal));
+    }
+
+    #[test]
+    fn trajectory_snapshot_auto_compression_cap_roundtrip_and_legacy_absence() {
+        let mut thread = ThreadParams::default();
+        thread.auto_compression_cap = Some(4096);
+        let snapshot = TrajectorySnapshot::from_thread_parts(
+            "cap-chat".to_string(),
+            &thread,
+            Vec::new(),
+            "2026-06-18T00:00:00Z".to_string(),
+            1,
+        );
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        let decoded: TrajectorySnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(decoded.auto_compression_cap, Some(4096));
+
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap");
+        let legacy: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.auto_compression_cap, None);
     }
 
     #[test]

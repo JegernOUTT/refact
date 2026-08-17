@@ -130,4 +130,29 @@ describe("ChatSettingsDropdown", () => {
       "openai/gpt-4o-mini",
     );
   });
+
+  test("shows model context default and resets auto-compression cap", async () => {
+    const chat = chatStateWithReasoning(false);
+    const runtime = chat.threads[chat.current_thread_id];
+    runtime.thread.auto_compression_cap = 8192;
+    const { user, store } = render(<ChatSettingsDropdown />, {
+      preloadedState: { chat, config },
+    });
+
+    await user.click(await screen.findByRole("button", { name: /openai\/o1/ }));
+    expect(screen.getByText("Auto-compression cap")).toBeInTheDocument();
+    expect(
+      screen.getByText(/selected model's maximum context window/i),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("200K").length).toBeGreaterThan(0);
+
+    await user.click(
+      screen.getByRole("button", { name: "Reset auto-compression cap" }),
+    );
+    expect(
+      store.getState().chat.threads[chat.current_thread_id]?.thread
+        .auto_compression_cap,
+    ).toBeNull();
+    expect(screen.getByText("200K (model maximum)")).toBeInTheDocument();
+  });
 });

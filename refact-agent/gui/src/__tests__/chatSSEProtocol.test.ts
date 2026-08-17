@@ -815,7 +815,7 @@ describe("SSE Protocol - Field Variations", () => {
   });
 
   describe("ThreadParams variations", () => {
-    it("should handle thread with context_tokens_cap set", async () => {
+    it("should handle thread with context and auto-compression caps set", async () => {
       const snapshot: EventEnvelope = {
         chat_id: "test-123",
         seq: "0",
@@ -828,6 +828,7 @@ describe("SSE Protocol - Field Variations", () => {
           tool_use: "agent",
           boost_reasoning: true,
           context_tokens_cap: 8000,
+          auto_compression_cap: 6000,
           include_project_info: false,
           checkpoints_enabled: false,
           is_title_generated: true,
@@ -861,6 +862,7 @@ describe("SSE Protocol - Field Variations", () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(events[0].thread.context_tokens_cap).toBe(8000);
+      expect(events[0].thread.auto_compression_cap).toBe(6000);
       expect(events[0].thread.boost_reasoning).toBe(true);
       expect(events[0].thread.include_project_info).toBe(false);
       expect(events[0].thread.checkpoints_enabled).toBe(false);
@@ -1358,6 +1360,7 @@ describe("SSE Protocol - Edge Cases", () => {
       title: "New Title",
       model: "gpt-4o",
       boost_reasoning: true,
+      auto_compression_cap: null,
       custom_field: "custom_value",
     };
 
@@ -1378,6 +1381,7 @@ describe("SSE Protocol - Edge Cases", () => {
 
     expect(events[0].type).toBe("thread_updated");
     expect((events[0] as any).title).toBe("New Title");
+    expect((events[0] as any).auto_compression_cap).toBeNull();
     expect((events[0] as any).custom_field).toBe("custom_value");
   });
 

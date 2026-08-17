@@ -48,6 +48,7 @@ export type ThreadParams = {
   tool_use: string;
   boost_reasoning: boolean;
   context_tokens_cap: number | null;
+  auto_compression_cap?: number | null;
   include_project_info: boolean;
   checkpoints_enabled: boolean;
   is_title_generated: boolean;

@@ -52,6 +52,7 @@ import {
   setTemperature,
   setFrequencyPenalty,
   setMaxTokens,
+  setAutoCompressionCap,
   setParallelToolCalls,
   closeThread,
   switchToThread,
@@ -893,6 +894,11 @@ export const chatReducer = createReducer(initialState, (builder) => {
     if (rt) rt.thread.max_tokens = action.payload.value;
   });
 
+  builder.addCase(setAutoCompressionCap, (state, action) => {
+    const rt = getRuntime(state, action.payload.chatId);
+    if (rt) rt.thread.auto_compression_cap = action.payload.value;
+  });
+
   builder.addCase(setParallelToolCalls, (state, action) => {
     const rt = getRuntime(state, action.payload.chatId);
     if (rt) rt.thread.parallel_tool_calls = action.payload.value;
@@ -1510,6 +1516,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
           max_tokens:
             typeof event.thread.max_tokens === "number"
               ? event.thread.max_tokens
+              : undefined,
+          auto_compression_cap:
+            typeof event.thread.auto_compression_cap === "number"
+              ? event.thread.auto_compression_cap
               : undefined,
           parallel_tool_calls:
             typeof event.thread.parallel_tool_calls === "boolean"

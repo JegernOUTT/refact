@@ -42,6 +42,7 @@ import {
   setThinkingBudget,
   setTemperature,
   setMaxTokens,
+  setAutoCompressionCap,
   updateChatRuntimeFromSessionState,
   openBuddyChat,
   newBuddyChatAction,
@@ -1834,6 +1835,29 @@ startListening({
       });
     } catch {
       // Silently ignore
+    }
+  },
+});
+
+startListening({
+  actionCreator: setAutoCompressionCap,
+  effect: async (action, listenerApi) => {
+    const state = listenerApi.getState();
+    const apiKey = state.config.apiKey;
+    const chatId = action.payload.chatId;
+
+    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
+
+    try {
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
+        type: "set_params",
+        patch: { auto_compression_cap: action.payload.value },
+      });
+    } catch {
+      return;
     }
   },
 });

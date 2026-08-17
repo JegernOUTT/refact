@@ -311,6 +311,7 @@ mod tests {
             boost_reasoning: false,
             checkpoints_enabled: true,
             context_tokens_cap: None,
+            auto_compression_cap: None,
             include_project_info: true,
             is_title_generated: true,
             auto_approve_editing_tools: false,

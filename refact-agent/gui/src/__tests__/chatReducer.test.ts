@@ -11,6 +11,7 @@ import {
   applyChatEvent,
   setTemperature,
   setMaxTokens,
+  setAutoCompressionCap,
   setChatModel,
   setMaxNewTokens,
 } from "../features/Chat/Thread/actions";
@@ -236,7 +237,9 @@ describe("Chat Thread Reducer - Core Functionality", () => {
       );
 
       expect(state.threads[chatId]?.attached_images).toHaveLength(50);
-      expect(state.threads[chatId]?.error).toBe("Attachment limit reached (50)");
+      expect(state.threads[chatId]?.error).toBe(
+        "Attachment limit reached (50)",
+      );
     });
 
     test("should_remove_image_by_index", () => {
@@ -407,6 +410,56 @@ describe("Chat Thread Reducer - Core Functionality", () => {
         applyChatEvent(snapshotEvent),
       );
       expect(afterSnapshot.threads[chatId]?.thread.max_tokens).toBeUndefined();
+    });
+
+    test("snapshot sets auto compression cap and missing value clears stale state", () => {
+      const withCap = chatReducer(
+        initialState,
+        setAutoCompressionCap({ chatId, value: 4096 }),
+      );
+      const snapshotEvent: ChatEventEnvelope = {
+        chat_id: chatId,
+        seq: "1",
+        type: "snapshot",
+        thread: {
+          id: chatId,
+          title: "Test",
+          model: "gpt-4o",
+          mode: "agent",
+          tool_use: "agent",
+          boost_reasoning: false,
+          include_project_info: true,
+          checkpoints_enabled: false,
+          context_tokens_cap: 8192,
+          auto_compression_cap: 6144,
+          is_title_generated: false,
+        },
+        runtime: {
+          state: "idle",
+          paused: false,
+          error: null,
+          queue_size: 0,
+          pause_reasons: [],
+          queued_items: [],
+        },
+        background_agents: [],
+        messages: [],
+      };
+
+      const afterSet = chatReducer(withCap, applyChatEvent(snapshotEvent));
+      expect(afterSet.threads[chatId]?.thread.auto_compression_cap).toBe(6144);
+
+      const afterClear = chatReducer(
+        afterSet,
+        applyChatEvent({
+          ...snapshotEvent,
+          seq: "2",
+          thread: { ...snapshotEvent.thread, auto_compression_cap: null },
+        }),
+      );
+      expect(
+        afterClear.threads[chatId]?.thread.auto_compression_cap,
+      ).toBeUndefined();
     });
 
     test("snapshot_with_temperature_present_should_apply_backend_value", () => {

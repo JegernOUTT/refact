@@ -55,6 +55,7 @@ export type TrajectoryData = {
   worktree?: WorktreeMeta | null;
   boost_reasoning?: boolean;
   context_tokens_cap?: number;
+  auto_compression_cap?: number;
   include_project_info?: boolean;
   increase_max_tokens?: boolean;
   project_name?: string;
@@ -131,6 +132,7 @@ export function chatThreadToTrajectoryData(
     worktree: thread.worktree,
     boost_reasoning: thread.boost_reasoning,
     context_tokens_cap: thread.context_tokens_cap,
+    auto_compression_cap: thread.auto_compression_cap ?? undefined,
     include_project_info: thread.include_project_info,
     increase_max_tokens: thread.increase_max_tokens,
     project_name: thread.project_name,
@@ -149,6 +151,7 @@ export function trajectoryDataToChatThread(data: TrajectoryData): ChatThread {
     worktree: data.worktree,
     boost_reasoning: data.boost_reasoning ?? false,
     context_tokens_cap: data.context_tokens_cap,
+    auto_compression_cap: data.auto_compression_cap,
     include_project_info: data.include_project_info ?? true,
     increase_max_tokens: data.increase_max_tokens ?? false,
     project_name: data.project_name,

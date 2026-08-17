@@ -13,6 +13,7 @@ import {
   removeChatFromCache,
   setChatModel,
   setMaxNewTokens,
+  setAutoCompressionCap,
   switchToThread,
 } from "../features/Chat/Thread";
 import { setCurrentProjectInfo } from "../features/Chat/currentProject";
@@ -1443,6 +1444,39 @@ describe("handoff_to_mode middleware", () => {
 });
 
 describe("context limit middleware", () => {
+  it.each([
+    [8192, 8192],
+    [null, null],
+  ])("syncs auto compression cap %s to backend", async (value, expected) => {
+    const THREAD_ID = "compression-cap-chat";
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const store = setUpStore({
+      config: { host: "vscode", lspPort: 8001, themeProps: {} },
+      chat: {
+        current_thread_id: THREAD_ID,
+        open_thread_ids: [THREAD_ID],
+        threads: { [THREAD_ID]: makeThread(THREAD_ID) },
+        system_prompt: {},
+        tool_use: "explore" as const,
+        sse_refresh_requested: null,
+        stream_version: 0,
+      },
+    });
+
+    store.dispatch(setAutoCompressionCap({ chatId: THREAD_ID, value }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      type?: string;
+      patch?: Record<string, unknown>;
+    };
+    expect(body.type).toBe("set_params");
+    expect(body.patch).toEqual({ auto_compression_cap: expected });
+  });
+
   it("syncs the selected model context cap to backend", async () => {
     const THREAD_ID = "context-cap-chat";
     const fetchMock = vi

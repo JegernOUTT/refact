@@ -26,10 +26,12 @@ import {
   selectReasoningEffortById,
   selectThinkingBudgetById,
   selectMaxTokensById,
+  selectAutoCompressionCapById,
   setReasoningEffort,
   setThinkingBudget,
   setTemperature,
   setMaxTokens,
+  setAutoCompressionCap,
   useThreadId,
 } from "../../features/Chat/Thread";
 import type { ReasoningEffort } from "../../features/Chat/Thread/types";
@@ -49,6 +51,7 @@ import type { ModelOption, ModelSelectorBadge } from "../ui";
 import styles from "./ChatSettingsDropdown.module.css";
 
 const MIN_OUTPUT_TOKENS = 1024;
+const MIN_COMPRESSION_TOKENS = 1024;
 
 function formatTokens(tokens: number): string {
   if (tokens >= 1000000) {
@@ -168,6 +171,9 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   const threadMaxTokens = useAppSelector((state) =>
     selectMaxTokensById(state, chatId),
   );
+  const threadAutoCompressionCap = useAppSelector((state) =>
+    selectAutoCompressionCapById(state, chatId),
+  );
   const threadReasoningEffort = useAppSelector((state) =>
     selectReasoningEffortById(state, chatId),
   );
@@ -268,6 +274,9 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
     null,
   );
   const [localMaxTokens, setLocalMaxTokens] = useState<number | null>(null);
+  const [localAutoCompressionCap, setLocalAutoCompressionCap] = useState<
+    number | null
+  >(null);
   const displayThinkingBudget = localThinkingBudget ?? threadThinkingBudget;
   const displayMaxTokens = localMaxTokens ?? threadMaxTokens;
   const maxOutputTokens = Math.max(
@@ -280,18 +289,33 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
     Math.max(effectiveMaxTokens, MIN_OUTPUT_TOKENS),
     maxOutputTokens,
   );
+  const maxCompressionTokens = Math.max(
+    selectedModelDetail?.nCtx ?? MIN_COMPRESSION_TOKENS,
+    MIN_COMPRESSION_TOKENS,
+  );
+  const displayAutoCompressionCap =
+    localAutoCompressionCap ?? threadAutoCompressionCap;
+  const clampedAutoCompressionCap = Math.min(
+    Math.max(
+      displayAutoCompressionCap ?? maxCompressionTokens,
+      MIN_COMPRESSION_TOKENS,
+    ),
+    maxCompressionTokens,
+  );
 
   const isStartedChat = messages.length > 0;
 
   useEffect(() => {
     setLocalThinkingBudget(null);
     setLocalMaxTokens(null);
+    setLocalAutoCompressionCap(null);
   }, [chatId]);
 
   useEffect(() => {
     if (!isOpen) {
       setLocalThinkingBudget(null);
       setLocalMaxTokens(null);
+      setLocalAutoCompressionCap(null);
     }
   }, [isOpen]);
 
@@ -336,6 +360,11 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   const handleMaxTokensReset = useCallback(() => {
     dispatch(setMaxTokens({ chatId, value: null }));
     setLocalMaxTokens(null);
+  }, [dispatch, chatId]);
+
+  const handleAutoCompressionCapReset = useCallback(() => {
+    dispatch(setAutoCompressionCap({ chatId, value: null }));
+    setLocalAutoCompressionCap(null);
   }, [dispatch, chatId]);
 
   // Loading state
@@ -474,6 +503,77 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                         onClick={handleMaxTokensReset}
                         disabled={isInteractionDisabled}
                         aria-label="Reset max tokens"
+                      >
+                        <Cross1Icon />
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <Separator size="4" />
+                <div className={styles.section}>
+                  <div className={styles.settingsRow}>
+                    <Text
+                      size="1"
+                      color="gray"
+                      weight="medium"
+                      className={styles.sectionHeader}
+                    >
+                      Auto-compression cap
+                    </Text>
+                    <Text size="1" weight="medium">
+                      {displayAutoCompressionCap == null
+                        ? `${formatTokens(
+                            maxCompressionTokens,
+                          )} (model maximum)`
+                        : clampedAutoCompressionCap}
+                    </Text>
+                  </div>
+                  <Text size="1" color="gray" className={styles.helperText}>
+                    Reset or unset uses the selected model&apos;s maximum
+                    context window.
+                  </Text>
+                  <div
+                    className={classNames(
+                      styles.sliderContainer,
+                      styles.sliderTrack,
+                      threadAutoCompressionCap != null &&
+                        styles.sliderTrackWithReset,
+                    )}
+                  >
+                    <Text size="1" color="gray">
+                      1K
+                    </Text>
+                    <Slider
+                      min={MIN_COMPRESSION_TOKENS}
+                      max={maxCompressionTokens}
+                      step={MIN_COMPRESSION_TOKENS}
+                      value={[clampedAutoCompressionCap]}
+                      onValueChange={(values) =>
+                        setLocalAutoCompressionCap(values[0])
+                      }
+                      onValueCommit={(values) => {
+                        dispatch(
+                          setAutoCompressionCap({
+                            chatId,
+                            value: values[0],
+                          }),
+                        );
+                        setLocalAutoCompressionCap(null);
+                      }}
+                      disabled={isInteractionDisabled}
+                      className={styles.slider}
+                      aria-label="Auto-compression cap"
+                    />
+                    <Text size="1" color="gray">
+                      {formatTokens(maxCompressionTokens)}
+                    </Text>
+                    {threadAutoCompressionCap != null && (
+                      <button
+                        type="button"
+                        className={styles.resetButton}
+                        onClick={handleAutoCompressionCapReset}
+                        disabled={isInteractionDisabled}
+                        aria-label="Reset auto-compression cap"
                       >
                         <Cross1Icon />
                       </button>

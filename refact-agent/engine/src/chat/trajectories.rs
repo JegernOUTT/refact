@@ -1250,6 +1250,7 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "boost_reasoning"
             | "checkpoints_enabled"
             | "context_tokens_cap"
+            | "auto_compression_cap"
             | "include_project_info"
             | "isTitleGenerated"
             | "auto_approve_editing_tools"
@@ -1966,6 +1967,10 @@ async fn load_trajectory_candidate(
             .get("context_tokens_cap")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize),
+        auto_compression_cap: t
+            .get("auto_compression_cap")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize),
         include_project_info: t
             .get("include_project_info")
             .and_then(|v| v.as_bool())
@@ -2328,6 +2333,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         boost_reasoning: false,
         checkpoints_enabled: true,
         context_tokens_cap: None,
+        auto_compression_cap: None,
         include_project_info: true,
         is_title_generated: false,
         auto_approve_editing_tools: true,
@@ -2365,9 +2371,6 @@ pub async fn save_trajectory_as(
     thread: &ThreadParams,
     messages: &[ChatMessage],
 ) {
-    if messages.is_empty() {
-        return;
-    }
     let snapshot = TrajectorySnapshot {
         goal: None,
         goal_ledger: Vec::new(),
@@ -2382,6 +2385,7 @@ pub async fn save_trajectory_as(
         boost_reasoning: thread.boost_reasoning.unwrap_or(false),
         checkpoints_enabled: thread.checkpoints_enabled,
         context_tokens_cap: thread.context_tokens_cap,
+        auto_compression_cap: thread.auto_compression_cap,
         include_project_info: thread.include_project_info,
         is_title_generated: thread.is_title_generated,
         auto_approve_editing_tools: thread.auto_approve_editing_tools,
@@ -2431,6 +2435,7 @@ pub async fn save_trajectory_snapshot(
         && snapshot.buddy_meta.is_none()
         && snapshot.frozen_request_prefix.is_none()
         && snapshot.goal.is_none()
+        && snapshot.auto_compression_cap.is_none()
         && existing_no_meta_path.is_none()
     {
         return Ok(());
@@ -2482,6 +2487,7 @@ pub async fn save_trajectory_snapshot(
         "boost_reasoning": snapshot.boost_reasoning,
         "checkpoints_enabled": snapshot.checkpoints_enabled,
         "context_tokens_cap": snapshot.context_tokens_cap,
+        "auto_compression_cap": snapshot.auto_compression_cap,
         "include_project_info": snapshot.include_project_info,
         "isTitleGenerated": snapshot.is_title_generated,
         "auto_approve_editing_tools": snapshot.auto_approve_editing_tools,
@@ -6192,6 +6198,7 @@ mod tests {
             boost_reasoning: false,
             checkpoints_enabled: true,
             context_tokens_cap: None,
+            auto_compression_cap: None,
             include_project_info: true,
             is_title_generated: true,
             auto_approve_editing_tools: false,
@@ -6952,6 +6959,90 @@ mod tests {
             "investigation"
         );
         assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_compression_cap_survives_real_trajectory_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "auto-compression-cap-roundtrip";
+        let mut snapshot = test_snapshot(
+            chat_id,
+            "Auto compression cap",
+            vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+        );
+        snapshot.auto_compression_cap = Some(96_000);
+
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+        let loaded = load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        assert_eq!(loaded.thread.auto_compression_cap, Some(96_000));
+
+        let path = find_trajectory_path(gcx.clone(), chat_id).await.unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap");
+        tokio::fs::write(&path, serde_json::to_vec(&value).unwrap())
+            .await
+            .unwrap();
+        let legacy = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(legacy.thread.auto_compression_cap, None);
+    }
+
+    #[tokio::test]
+    async fn explicit_auto_compression_cap_makes_empty_chat_save_worthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "empty-chat-auto-compression-cap";
+        let mut snapshot = test_snapshot(chat_id, "Empty capped chat", Vec::new());
+        snapshot.auto_compression_cap = Some(64_000);
+
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert!(loaded.messages.is_empty());
+        assert_eq!(loaded.thread.auto_compression_cap, Some(64_000));
+    }
+
+    #[tokio::test]
+    async fn empty_chat_can_clear_previously_saved_auto_compression_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "empty-chat-clear-auto-compression-cap";
+        let mut thread = ThreadParams {
+            id: chat_id.to_string(),
+            title: "Empty capped chat".to_string(),
+            auto_compression_cap: Some(64_000),
+            ..Default::default()
+        };
+
+        save_trajectory_as(gcx.clone(), &thread, &[]).await;
+        assert_eq!(
+            load_trajectory_for_chat(gcx.clone(), chat_id)
+                .await
+                .unwrap()
+                .thread
+                .auto_compression_cap,
+            Some(64_000)
+        );
+
+        thread.auto_compression_cap = None;
+        save_trajectory_as(gcx.clone(), &thread, &[]).await;
+        assert_eq!(
+            load_trajectory_for_chat(gcx, chat_id)
+                .await
+                .unwrap()
+                .thread
+                .auto_compression_cap,
+            None
+        );
     }
 
     #[tokio::test]
@@ -13244,6 +13335,7 @@ mod tests {
                 max_tokens: None,
                 parallel_tool_calls: None,
                 context_tokens_cap: Some(8000),
+                auto_compression_cap: Some(7000),
                 include_project_info: false,
                 checkpoints_enabled: true,
                 is_title_generated: true,
@@ -13340,6 +13432,7 @@ mod tests {
         assert_eq!(snapshot.mode, "AGENT");
         assert!(snapshot.boost_reasoning);
         assert_eq!(snapshot.context_tokens_cap, Some(8000));
+        assert_eq!(snapshot.auto_compression_cap, Some(7000));
         assert!(!snapshot.include_project_info);
         assert!(snapshot.is_title_generated);
         assert_eq!(snapshot.version, 5);
@@ -14229,6 +14322,7 @@ mod tests {
             boost_reasoning: false,
             checkpoints_enabled: true,
             context_tokens_cap: None,
+            auto_compression_cap: None,
             include_project_info: true,
             is_title_generated: true,
             auto_approve_editing_tools: false,

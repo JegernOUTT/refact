@@ -470,6 +470,7 @@ pub(crate) fn build_agent_thread_params(
         tool_use: "agent".to_string(),
         boost_reasoning: Some(false),
         context_tokens_cap: None,
+        auto_compression_cap: None,
         include_project_info: true,
         checkpoints_enabled: false,
         is_title_generated: true,

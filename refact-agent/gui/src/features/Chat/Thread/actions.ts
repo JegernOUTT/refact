@@ -68,6 +68,8 @@ function buildThreadParamsPatch(
   if ("max_tokens" in thread) patch.max_tokens = thread.max_tokens;
   if (thread.context_tokens_cap !== undefined)
     patch.context_tokens_cap = thread.context_tokens_cap;
+  if ("auto_compression_cap" in thread)
+    patch.auto_compression_cap = thread.auto_compression_cap;
   if ("reasoning_effort" in thread)
     patch.reasoning_effort = thread.reasoning_effort;
   if ("thinking_budget" in thread)
@@ -514,6 +516,11 @@ export const setMaxTokens = createAction<{
   chatId: string;
   value: number | null;
 }>("chatThread/setMaxTokens");
+
+export const setAutoCompressionCap = createAction<{
+  chatId: string;
+  value: number | null;
+}>("chatThread/setAutoCompressionCap");
 
 export const setParallelToolCalls = createAction<{
   chatId: string;
