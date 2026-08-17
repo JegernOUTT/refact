@@ -5531,46 +5531,60 @@ fn read_cdp_stream(tab: &Tab, stream: IO::StreamHandle) -> Result<Vec<u8>, Strin
     Ok(bytes)
 }
 
-fn step_eval(tab: &Tab, idx: usize, expression: &str) -> StepResult {
-    let evaluated = tab
-        .call_method(Runtime::Evaluate {
-            expression: expression.to_string(),
-            return_by_value: Some(true),
-            generate_preview: Some(false),
-            silent: Some(false),
-            await_promise: Some(false),
-            include_command_line_api: Some(false),
+fn eval_invocation_target(
+    object_type: &Runtime::RemoteObjectType,
+    object_id: Option<&String>,
+) -> Option<String> {
+    matches!(object_type, Runtime::RemoteObjectType::Function)
+        .then(|| object_id.cloned())
+        .flatten()
+}
+
+fn invoke_eval_function(tab: &Tab, object_id: String) -> Result<Runtime::RemoteObject, String> {
+    let invoked = tab
+        .call_method(Runtime::CallFunctionOn {
+            function_declaration: "function() { return this(); }".to_string(),
+            object_id: Some(object_id),
+            arguments: None,
+            silent: None,
+            return_by_value: Some(false),
+            generate_preview: Some(true),
             user_gesture: Some(false),
+            await_promise: Some(true),
+            execution_context_id: None,
             object_group: None,
-            context_id: None,
             throw_on_side_effect: None,
-            timeout: None,
-            disable_breaks: None,
-            repl_mode: None,
-            allow_unsafe_eval_blocked_by_csp: None,
             unique_context_id: None,
             serialization_options: None,
         })
-        .map_err(|error| error.to_string());
-    match evaluated {
-        Ok(evaluated) => {
-            if let Some(exception) = evaluated.exception_details {
-                return StepResult::failure(
-                    idx,
-                    "Eval failed",
-                    exception
-                        .exception
-                        .and_then(|exception| exception.description)
-                        .unwrap_or(exception.text),
-                );
-            }
-            let value = evaluated.result.value.unwrap_or(serde_json::Value::Null);
-            let desc = evaluated.result.description.unwrap_or_default();
-            StepResult::success(idx, "Eval completed".to_string())
-                .with_data(serde_json::json!({"value": value, "description": desc}))
-        }
-        Err(error) => StepResult::failure(idx, "Eval failed", error),
+        .map_err(|error| error.to_string())?;
+    if let Some(exception) = invoked.exception_details {
+        return Err(exception
+            .exception
+            .as_ref()
+            .and_then(|value| value.description.as_deref())
+            .unwrap_or(&exception.text)
+            .to_string());
     }
+    Ok(invoked.result)
+}
+
+fn step_eval(tab: &Tab, idx: usize, expression: &str) -> StepResult {
+    let evaluated = match tab.evaluate(expression, false) {
+        Ok(remote) => remote,
+        Err(e) => return StepResult::failure(idx, "Eval failed", e.to_string()),
+    };
+    let remote = match eval_invocation_target(&evaluated.Type, evaluated.object_id.as_ref()) {
+        Some(object_id) => match invoke_eval_function(tab, object_id) {
+            Ok(remote) => remote,
+            Err(error) => return StepResult::failure(idx, "Eval failed", error),
+        },
+        None => evaluated,
+    };
+    let value = remote.value.unwrap_or(serde_json::Value::Null);
+    let desc = remote.description.unwrap_or_default();
+    StepResult::success(idx, "Eval completed".to_string())
+        .with_data(serde_json::json!({"value": value, "description": desc}))
 }
 
 fn step_styles(
@@ -6340,6 +6354,32 @@ mod tests {
             ActionabilityDiagnostic::InterceptsPointerEvents {
                 description: "<div class=overlay>".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn eval_auto_invokes_function_results() {
+        let object_id = "eval-function".to_string();
+        assert_eq!(
+            eval_invocation_target(&Runtime::RemoteObjectType::Function, Some(&object_id)),
+            Some(object_id),
+        );
+    }
+
+    #[test]
+    fn eval_leaves_non_function_results_untouched() {
+        let object_id = "eval-object".to_string();
+        assert_eq!(
+            eval_invocation_target(&Runtime::RemoteObjectType::Number, Some(&object_id)),
+            None,
+        );
+        assert_eq!(
+            eval_invocation_target(&Runtime::RemoteObjectType::Object, Some(&object_id)),
+            None,
+        );
+        assert_eq!(
+            eval_invocation_target(&Runtime::RemoteObjectType::Function, None),
+            None,
         );
     }
 

@@ -2996,6 +2996,67 @@ async fn uploads_visible_hidden_and_file_chooser_inputs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn eval_invokes_function_expressions_and_keeps_plain_expressions() {
+    let Some(case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    let report = execute_steps(
+        &case.tab,
+        &[
+            BrowserStep::Eval {
+                expression: "() => 42".to_string(),
+            },
+            BrowserStep::Eval {
+                expression: "(() => 42)()".to_string(),
+            },
+            BrowserStep::Eval {
+                expression: "async () => 7".to_string(),
+            },
+            BrowserStep::Eval {
+                expression: "(function () { return 5; })".to_string(),
+            },
+            BrowserStep::Eval {
+                expression: "1+1".to_string(),
+            },
+            BrowserStep::Eval {
+                expression: "document.title".to_string(),
+            },
+        ],
+    );
+
+    assert!(report.ok, "eval batch failed: {report:?}");
+    let value = |index: usize| report.steps[index].data.as_ref().unwrap()["value"].clone();
+    assert_eq!(value(0), json!(42));
+    assert_eq!(value(1), json!(42));
+    assert_eq!(value(2), json!(7));
+    assert_eq!(value(3), json!(5));
+    assert_eq!(value(4), json!(2));
+    assert_eq!(value(5), json!("ARIA snapshot fixture"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn eval_surfaces_errors_thrown_by_invoked_functions() {
+    let Some(case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    let report = execute_steps(
+        &case.tab,
+        &[BrowserStep::Eval {
+            expression: "() => { throw new Error(\"eval-boom\") }".to_string(),
+        }],
+    );
+
+    assert!(!report.ok, "throwing eval unexpectedly passed: {report:?}");
+    let error = report.steps[0].error.as_deref().unwrap_or_default();
+    assert!(
+        error.contains("eval-boom"),
+        "unexpected eval error: {error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn captures_download_with_suggested_filename_and_runtime_path() {
     let Some(mut case) = BrowserCase::start("download.html").await else {
         return;
