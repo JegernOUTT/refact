@@ -70,6 +70,7 @@ impl LocatorHandler {
                         | BrowserStep::Route { .. }
                         | BrowserStep::Unroute { .. }
                         | BrowserStep::ListRoutes
+                        | BrowserStep::Reset
                 )
             }) {
                 return Err(
@@ -152,6 +153,12 @@ impl LocatorHandlerRegistry {
 
     pub fn handlers(&self) -> &[LocatorHandler] {
         &self.handlers
+    }
+
+    pub fn reset(&mut self) -> usize {
+        let before = self.handlers.len();
+        *self = Self::default();
+        before.saturating_sub(self.handlers.len())
     }
 
     pub fn get(&self, name: &str) -> Option<LocatorHandler> {
@@ -278,6 +285,37 @@ mod tests {
         .unwrap();
 
         assert!(handler.no_wait_after);
+    }
+
+    #[test]
+    fn reset_removes_registered_handlers_and_restores_the_built_in_handler() {
+        let mut registry = LocatorHandlerRegistry::default();
+        registry.register(click_handler("banner", None));
+        registry.register(click_handler("modal", None));
+
+        assert_eq!(registry.reset(), 2);
+        assert_eq!(registry.handlers().len(), 1);
+        assert_eq!(
+            registry.handlers()[0].name,
+            DEFAULT_DISMISS_OVERLAYS_HANDLER
+        );
+        assert_eq!(registry.reset(), 0);
+    }
+
+    #[test]
+    fn handler_steps_cannot_reset_the_session() {
+        let error = LocatorHandler::registered(
+            "banner".to_string(),
+            BrowserLocator::css("#banner"),
+            LocatorHandlerAction::Steps {
+                steps: vec![BrowserStep::Reset],
+            },
+            None,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("network routes"), "{error}");
     }
 
     #[test]

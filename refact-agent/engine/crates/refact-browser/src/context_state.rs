@@ -95,6 +95,45 @@ impl ContextState {
         Ok(())
     }
 
+    pub fn clear_overrides(&mut self, tabs: &[std::sync::Arc<Tab>]) -> Result<(), String> {
+        self.viewport = None;
+        self.media = MediaState::default();
+        self.locale = None;
+        self.timezone = None;
+        self.user_agent = None;
+        self.geolocation = None;
+        self.offline = false;
+        self.permissions.clear();
+        for tab in tabs {
+            tab.call_method(Emulation::ClearDeviceMetricsOverride(None))
+                .map_err(|error| format!("Failed to clear viewport: {error}"))?;
+            tab.call_method(Emulation::SetTouchEmulationEnabled {
+                enabled: false,
+                max_touch_points: None,
+            })
+            .map_err(|error| format!("Failed to clear touch emulation: {error}"))?;
+            apply_media(tab, &self.media)?;
+            tab.call_method(Emulation::SetLocaleOverride { locale: None })
+                .map_err(|error| format!("Failed to clear locale: {error}"))?;
+            tab.call_method(Emulation::SetTimezoneOverride {
+                timezone_id: String::new(),
+            })
+            .map_err(|error| format!("Failed to clear timezone: {error}"))?;
+            tab.call_method(Emulation::SetUserAgentOverride {
+                user_agent: String::new(),
+                accept_language: None,
+                platform: None,
+                user_agent_metadata: None,
+            })
+            .map_err(|error| format!("Failed to clear user agent: {error}"))?;
+            tab.call_method(Emulation::ClearGeolocationOverride(None))
+                .map_err(|error| format!("Failed to clear geolocation: {error}"))?;
+            apply_offline(tab, self.offline)?;
+            clear_permissions(tab)?;
+        }
+        Ok(())
+    }
+
     pub fn summary(
         &self,
         cookie_count: usize,

@@ -954,7 +954,7 @@ impl Drop for BrowserRuntime {
             .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         self.coverage_manager.cleanup(&tabs);
-        self.webauthn_manager.cleanup(&tabs);
+        let _ = self.webauthn_manager.cleanup(&tabs);
         if !self.route_registry.is_empty() || self.context_state.http_credentials.is_some() {
             for tab in &tabs {
                 let _ = self.route_registry.disable_for_tab(tab);

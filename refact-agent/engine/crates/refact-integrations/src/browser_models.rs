@@ -1103,6 +1103,7 @@ pub enum BrowserStep {
         url_filter: Option<UrlPattern>,
         not_found: HarNotFound,
     },
+    Reset,
 
     StartCoverage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1596,6 +1597,7 @@ impl BrowserStep {
         "start_har_recording",
         "stop_har_recording",
         "route_from_har",
+        "reset",
         "start_coverage",
         "stop_coverage",
         "add_virtual_authenticator",
@@ -2232,6 +2234,7 @@ mod tests {
                 url_filter: None,
                 not_found: HarNotFound::Abort,
             },
+            BrowserStep::Reset,
             BrowserStep::StartCoverage {
                 js: Some(true),
                 css: Some(true),

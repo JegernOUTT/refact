@@ -21,8 +21,8 @@ use refact_browser::{
     LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation, LocatorHandlerProbe,
     LocatorHandlerRegistry, ExpectPollResult, LocatorOutcome, Mouse, MouseButton, NetworkLoadState,
     NetworkMonitorHandle, MainFrameCssPoint, MouseState, Ref, ScrollStrategy, SnapshotMode,
-    SnapshotOptions, SystemClock, UrlMatcher, WorldManager, DEFAULT_DISMISS_OVERLAYS_HANDLER,
-    apply_network_report_mode, required_states,
+    SnapshotOptions, SystemClock, UrlMatcher, WebSocketRegistry, WorldManager,
+    DEFAULT_DISMISS_OVERLAYS_HANDLER, apply_network_report_mode, required_states,
 };
 use refact_browser::artifacts::{pdf_payload, screenshot_capture, ScreenshotMetrics};
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
@@ -1242,6 +1242,95 @@ fn execute_route_management_step(
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BrowserResetCounts {
+    routes: usize,
+    har_replays: usize,
+    websocket_routes: usize,
+    locator_handlers: usize,
+    authenticators: usize,
+}
+
+impl BrowserResetCounts {
+    fn summary(&self) -> String {
+        format!(
+            "Reset: {}, {}, {}, {}, {}, offline off, emulation cleared",
+            counted(self.routes, "route"),
+            counted(self.har_replays, "har replay"),
+            counted(self.websocket_routes, "ws route"),
+            counted(self.locator_handlers, "locator handler"),
+            counted(self.authenticators, "authenticator"),
+        )
+    }
+
+    fn data(&self) -> Value {
+        serde_json::json!({
+            "reset": {
+                "routes": self.routes,
+                "har_replays": self.har_replays,
+                "websocket_routes": self.websocket_routes,
+                "locator_handlers": self.locator_handlers,
+                "authenticators": self.authenticators,
+                "offline": false,
+                "emulation_cleared": true,
+            }
+        })
+    }
+}
+
+fn counted(count: usize, singular: &str) -> String {
+    if count == 1 {
+        format!("{count} {singular}")
+    } else {
+        format!("{count} {singular}s")
+    }
+}
+
+fn reset_sticky_registries(
+    routes: &[RouteInfo],
+    websocket_registry: &WebSocketRegistry,
+    locator_handlers: &Mutex<LocatorHandlerRegistry>,
+    authenticators: usize,
+) -> Result<BrowserResetCounts, String> {
+    let har_replays = routes.iter().filter(|route| route.har.is_some()).count();
+    Ok(BrowserResetCounts {
+        routes: routes.len() - har_replays,
+        har_replays,
+        websocket_routes: websocket_registry.remove_routes(None),
+        locator_handlers: locator_handlers
+            .lock()
+            .map_err(|error| format!("Failed to lock locator handlers: {error}"))?
+            .reset(),
+        authenticators,
+    })
+}
+
+fn execute_reset_step(runtime: &mut BrowserRuntime, idx: usize) -> StepResult {
+    let tabs = runtime
+        .browser
+        .get_tabs()
+        .lock()
+        .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let result: Result<BrowserResetCounts, String> = (|| {
+        let routes = runtime.route_registry.list();
+        runtime.remove_routes(None)?;
+        let authenticators = runtime.webauthn_manager.cleanup(&tabs);
+        let counts = reset_sticky_registries(
+            &routes,
+            &runtime.websocket_registry,
+            &runtime.locator_handlers,
+            authenticators,
+        )?;
+        runtime.context_state.clear_overrides(&tabs)?;
+        Ok(counts)
+    })();
+    match result {
+        Ok(counts) => StepResult::success(idx, counts.summary()).with_data(counts.data()),
+        Err(error) => StepResult::failure(idx, "Reset", error),
+    }
+}
+
 fn is_instrumentation_step(step: &BrowserStep) -> bool {
     matches!(
         step,
@@ -1583,6 +1672,9 @@ pub async fn execute_request_with_runtime(
                     .with_data(serde_json::json!({"frame": frame})),
                 Err(error) => StepResult::failure(idx, "Wait for WebSocket frame", error),
             }
+        } else if matches!(step, BrowserStep::Reset) {
+            let mut rt = runtime_arc.lock().await;
+            execute_reset_step(&mut rt, idx)
         } else if is_instrumentation_step(step) {
             let mut rt = runtime_arc.lock().await;
             execute_instrumentation_step(&mut rt, step, idx)
@@ -2156,6 +2248,7 @@ pub fn execute_steps_with_runtime(
             | BrowserStep::RouteFromHar { .. }) => {
                 execute_route_management_step(runtime, step, idx).unwrap()
             }
+            BrowserStep::Reset => execute_reset_step(runtime, idx),
             step if is_instrumentation_step(step) => {
                 execute_instrumentation_step(runtime, step, idx)
             }
@@ -2888,6 +2981,7 @@ fn execute_single_step(
         | BrowserStep::StartHarRecording { .. }
         | BrowserStep::StopHarRecording
         | BrowserStep::RouteFromHar { .. }
+        | BrowserStep::Reset
         | BrowserStep::StartCoverage { .. }
         | BrowserStep::StopCoverage
         | BrowserStep::AddVirtualAuthenticator { .. }
@@ -6717,6 +6811,148 @@ mod tests {
         let stabilized = html_stabilizes_with(2, || Ok(serde_json::json!("stable")), || {});
 
         assert!(stabilized);
+    }
+
+    fn populated_route_registry() -> refact_browser::RouteRegistry {
+        let registry = refact_browser::RouteRegistry::default();
+        registry
+            .add(
+                UrlPattern::Text("**/api/**".to_string()),
+                RouteHandler::Abort {
+                    reason: "blockedbyclient".to_string(),
+                },
+            )
+            .unwrap();
+        registry
+            .add(
+                UrlPattern::Text("**/assets/**".to_string()),
+                RouteHandler::Abort {
+                    reason: "failed".to_string(),
+                },
+            )
+            .unwrap();
+        registry
+    }
+
+    fn har_replay_route() -> RouteInfo {
+        RouteInfo {
+            pattern: UrlPattern::Text("har-replay".to_string()),
+            handler: RouteHandler::Abort {
+                reason: "blockedbyclient".to_string(),
+            },
+            har: Some(HarRouteInfo {
+                entry_count: 12,
+                not_found: HarNotFound::Abort,
+            }),
+        }
+    }
+
+    fn populated_locator_handlers() -> Mutex<LocatorHandlerRegistry> {
+        let mut registry = LocatorHandlerRegistry::default();
+        for name in ["cookie_banner", "survey_modal", "paywall"] {
+            registry.register(
+                LocatorHandler::registered(
+                    name.to_string(),
+                    BrowserLocator::css("#overlay"),
+                    LocatorHandlerAction::Click,
+                    None,
+                    false,
+                )
+                .unwrap()
+                .unwrap(),
+            );
+        }
+        Mutex::new(registry)
+    }
+
+    #[test]
+    fn reset_clears_every_sticky_registry_and_reports_truthful_counts() {
+        let route_registry = populated_route_registry();
+        let mut routes = route_registry.list();
+        routes.push(har_replay_route());
+        let websocket_registry = WebSocketRegistry::default();
+        websocket_registry
+            .add_route(
+                UrlPattern::Text("wss://example.com/**".to_string()),
+                WebSocketRouteMode::Mock,
+            )
+            .unwrap();
+        let locator_handlers = populated_locator_handlers();
+
+        let counts =
+            reset_sticky_registries(&routes, &websocket_registry, &locator_handlers, 1).unwrap();
+        route_registry.remove(None);
+
+        assert_eq!(
+            counts,
+            BrowserResetCounts {
+                routes: 2,
+                har_replays: 1,
+                websocket_routes: 1,
+                locator_handlers: 3,
+                authenticators: 1,
+            }
+        );
+        assert_eq!(
+            counts.summary(),
+            "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, offline off, emulation cleared"
+        );
+        assert!(route_registry.is_empty());
+        assert_eq!(websocket_registry.route_count(), 0);
+        assert_eq!(
+            locator_handlers
+                .lock()
+                .unwrap()
+                .handlers()
+                .iter()
+                .map(|handler| handler.name.clone())
+                .collect::<Vec<_>>(),
+            vec![DEFAULT_DISMISS_OVERLAYS_HANDLER.to_string()]
+        );
+    }
+
+    #[test]
+    fn reset_on_clean_state_succeeds_with_zero_counts() {
+        let websocket_registry = WebSocketRegistry::default();
+        let locator_handlers = populated_locator_handlers();
+
+        reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0).unwrap();
+        let repeated =
+            reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0).unwrap();
+
+        assert_eq!(repeated, BrowserResetCounts::default());
+        assert_eq!(
+            repeated.summary(),
+            "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, offline off, emulation cleared"
+        );
+        assert_eq!(websocket_registry.route_count(), 0);
+        assert_eq!(locator_handlers.lock().unwrap().handlers().len(), 1);
+    }
+
+    #[test]
+    fn reset_reports_the_cleared_subsystems_as_structured_data() {
+        let counts = BrowserResetCounts {
+            routes: 2,
+            har_replays: 1,
+            websocket_routes: 1,
+            locator_handlers: 3,
+            authenticators: 1,
+        };
+
+        assert_eq!(
+            counts.data(),
+            serde_json::json!({
+                "reset": {
+                    "routes": 2,
+                    "har_replays": 1,
+                    "websocket_routes": 1,
+                    "locator_handlers": 3,
+                    "authenticators": 1,
+                    "offline": false,
+                    "emulation_cleared": true,
+                }
+            })
+        );
     }
 
     #[test]

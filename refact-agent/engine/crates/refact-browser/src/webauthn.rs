@@ -139,12 +139,13 @@ impl WebAuthnManager {
         .map_err(|error| format!("Failed to set virtual authenticator verification: {error}"))
     }
 
-    pub fn cleanup(&self, tabs: &[std::sync::Arc<Tab>]) {
+    pub fn cleanup(&self, tabs: &[std::sync::Arc<Tab>]) -> usize {
         let sessions = self
             .sessions
             .lock()
             .map(|mut sessions| std::mem::take(&mut *sessions))
             .unwrap_or_default();
+        let mut removed = 0;
         for (target_id, session) in sessions {
             let Some(tab) = tabs
                 .iter()
@@ -154,11 +155,13 @@ impl WebAuthnManager {
             };
             for authenticator_id in session.authenticator_ids {
                 let _ = tab.call_method(WebAuthn::RemoveVirtualAuthenticator { authenticator_id });
+                removed += 1;
             }
             if session.enabled {
                 let _ = tab.call_method(WebAuthn::Disable(None));
             }
         }
+        removed
     }
 
     fn ensure_enabled(&self, tab: &Tab) -> Result<(), String> {

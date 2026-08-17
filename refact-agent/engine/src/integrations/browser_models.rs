@@ -296,6 +296,32 @@ mod tests {
     }
 
     #[test]
+    fn reset_takes_no_parameters_and_batches_with_other_steps() {
+        let request =
+            parse_browser_action_request(serde_json::json!({"steps": [{"action": "reset"}]}))
+                .unwrap();
+
+        assert!(matches!(request.steps.as_slice(), [BrowserStep::Reset]));
+        assert_eq!(
+            serde_json::to_value(&request.steps[0]).unwrap(),
+            serde_json::json!({"action": "reset"})
+        );
+
+        let batched = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "route", "pattern": "**/api/**", "handler": {"type": "abort", "reason": "failed"}},
+                {"action": "reset"}
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            batched.steps.as_slice(),
+            [BrowserStep::Route { .. }, BrowserStep::Reset]
+        ));
+    }
+
+    #[test]
     fn unknown_batch_envelope_fields_are_rejected() {
         let error = parse_browser_action_request(serde_json::json!({
             "steps": [],
