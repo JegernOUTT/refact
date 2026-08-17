@@ -3315,7 +3315,8 @@ async fn file_drop_and_coordinate_mouse_reach_page_handlers() {
     assert!(report.ok, "file drop report: {report:?}");
     assert_eq!(
         report.steps[2].data.as_ref().unwrap()["value"]["files"],
-        "drop.txt"
+        "drop.txt",
+        "file drop report: {report:?}"
     );
 
     case.navigate("canvas-draw.html");

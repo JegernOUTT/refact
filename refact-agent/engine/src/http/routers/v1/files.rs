@@ -141,12 +141,14 @@ async fn validated_existing_path(
 }
 
 async fn privacy_checked_path(gcx: Arc<GlobalContext>, path: &PathBuf) -> Result<(), ScratchError> {
-    check_file_privacy_for_send(gcx, path).await.map_err(|error| {
-        ScratchError::new(
-            StatusCode::FORBIDDEN,
-            format!("{PRIVACY_BLOCKED_PREFIX} {error}"),
-        )
-    })
+    check_file_privacy_for_send(gcx, path)
+        .await
+        .map_err(|error| {
+            ScratchError::new(
+                StatusCode::FORBIDDEN,
+                format!("{PRIVACY_BLOCKED_PREFIX} {error}"),
+            )
+        })
 }
 
 fn clamped_tree_limit(max_entries: Option<usize>) -> usize {
@@ -589,9 +591,14 @@ pub async fn handle_v1_files_write(
     .await
     .map_err(|error| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
-    let metadata = tokio::fs::metadata(&path)
-        .await
-        .map_err(|error| io_error(StatusCode::INTERNAL_SERVER_ERROR, "inspect file", &path, error))?;
+    let metadata = tokio::fs::metadata(&path).await.map_err(|error| {
+        io_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "inspect file",
+            &path,
+            error,
+        )
+    })?;
     Ok(Json(WriteResponse {
         path: path.to_string_lossy().to_string(),
         size: metadata.len(),
@@ -1168,8 +1175,7 @@ mod tests {
 
         let gcx =
             crate::global_context::tests::make_test_gcx_with_dirs(cache_dir, config_dir).await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() =
-            vec![source.path().to_path_buf()];
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.path().to_path_buf()];
         set_privacy(gcx.clone(), Vec::new());
         let app = AppState::from_gcx(gcx.clone()).await;
         let router = crate::http::routers::make_refact_http_server(app);

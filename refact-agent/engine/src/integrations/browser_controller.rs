@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use headless_chrome::Tab;
-use headless_chrome::protocol::cdp::{DOM, Emulation, IO, Page, types::Event};
+use headless_chrome::protocol::cdp::{DOM, Emulation, IO, Page, Runtime, types::Event};
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 
@@ -3822,14 +3822,20 @@ fn step_drop_files(
     };
     let outcome = refact_browser::drop_files(tab, world, &resolved.output.1, paths);
     let _ = world.release_handle(tab, &resolved.output.1);
-    match outcome {
-        Ok(true) => StepResult::success(idx, format!("Dropped {} file(s)", paths.len())),
-        Ok(false) => StepResult::failure(
-            idx,
-            "File drop rejected",
-            "Target dragover handler did not call preventDefault()",
-        ),
-        Err(error) => StepResult::failure(idx, "File drop failed", error),
+    let result = match outcome {
+        Ok(result) => result,
+        Err(error) => return StepResult::failure(idx, "File drop failed", error),
+    };
+    let data = serde_json::to_value(&result).unwrap_or_default();
+    match refact_browser::verify_file_drop(&result, paths) {
+        Ok(()) => {
+            StepResult::success(idx, format!("Dropped {} file(s)", paths.len())).with_data(data)
+        }
+        Err(error) => {
+            let mut failure = StepResult::failure(idx, "File drop rejected", error);
+            failure.data = Some(data);
+            failure
+        }
     }
 }
 
@@ -5526,14 +5532,44 @@ fn read_cdp_stream(tab: &Tab, stream: IO::StreamHandle) -> Result<Vec<u8>, Strin
 }
 
 fn step_eval(tab: &Tab, idx: usize, expression: &str) -> StepResult {
-    match tab.evaluate(expression, false) {
-        Ok(remote) => {
-            let value = remote.value.unwrap_or(serde_json::Value::Null);
-            let desc = remote.description.unwrap_or_default();
+    let evaluated = tab
+        .call_method(Runtime::Evaluate {
+            expression: expression.to_string(),
+            return_by_value: Some(true),
+            generate_preview: Some(false),
+            silent: Some(false),
+            await_promise: Some(false),
+            include_command_line_api: Some(false),
+            user_gesture: Some(false),
+            object_group: None,
+            context_id: None,
+            throw_on_side_effect: None,
+            timeout: None,
+            disable_breaks: None,
+            repl_mode: None,
+            allow_unsafe_eval_blocked_by_csp: None,
+            unique_context_id: None,
+            serialization_options: None,
+        })
+        .map_err(|error| error.to_string());
+    match evaluated {
+        Ok(evaluated) => {
+            if let Some(exception) = evaluated.exception_details {
+                return StepResult::failure(
+                    idx,
+                    "Eval failed",
+                    exception
+                        .exception
+                        .and_then(|exception| exception.description)
+                        .unwrap_or(exception.text),
+                );
+            }
+            let value = evaluated.result.value.unwrap_or(serde_json::Value::Null);
+            let desc = evaluated.result.description.unwrap_or_default();
             StepResult::success(idx, "Eval completed".to_string())
                 .with_data(serde_json::json!({"value": value, "description": desc}))
         }
-        Err(e) => StepResult::failure(idx, "Eval failed", e.to_string()),
+        Err(error) => StepResult::failure(idx, "Eval failed", error),
     }
 }
 

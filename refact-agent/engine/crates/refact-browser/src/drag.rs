@@ -7,8 +7,8 @@ use headless_chrome::Tab;
 use headless_chrome::browser::tab::EventListener;
 use headless_chrome::protocol::cdp::types::Event;
 use headless_chrome::protocol::cdp::Input;
-use serde::Serialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::{
     ElementHandle, KeyboardDispatcher, MainFrameCssPoint, Mouse, MouseButton, MouseDispatcher,
@@ -236,12 +236,96 @@ struct FilePayload {
     last_modified: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct FileDropTarget {
+    pub id: String,
+    pub tag: String,
+    pub connected: bool,
+    pub same_document: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct FileDropResult {
+    pub accepted: bool,
+    pub delivered: bool,
+    pub observed_names: Vec<String>,
+    pub mutations: usize,
+    pub target: FileDropTarget,
+}
+
+const DROP_FILES_JS: &str = r#"function(payloads) {
+  const transfer = new DataTransfer();
+  for (const payload of payloads) {
+    const binary = atob(payload.data);
+    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+    transfer.items.add(new File([bytes], payload.name, {lastModified: payload.last_modified}));
+  }
+  const observed_names = Array.from(transfer.files).map(file => file.name);
+  const target = {
+    id: this.id || '',
+    tag: this.tagName || '',
+    connected: this.isConnected === true,
+    same_document: this.ownerDocument === document,
+  };
+  const dispatch = type => {
+    const event = new DragEvent(type, {bubbles:true,cancelable:true,dataTransfer:transfer});
+    this.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  dispatch('dragenter');
+  const accepted = dispatch('dragover');
+  let delivered = false;
+  let mutations = 0;
+  if (accepted) {
+    const observer = new MutationObserver(() => {});
+    observer.observe(this, {attributes:true,childList:true,subtree:true,characterData:true});
+    delivered = dispatch('drop');
+    mutations = observer.takeRecords().length;
+    observer.disconnect();
+  }
+  return {accepted,delivered,mutations,observed_names,target};
+}"#;
+
+pub fn verify_file_drop(result: &FileDropResult, expected: &[String]) -> Result<(), String> {
+    if !result.target.connected || !result.target.same_document {
+        return Err(format!(
+            "Drop target <{}> is not attached to the page document",
+            result.target.tag
+        ));
+    }
+    if !result.accepted {
+        return Err("Target dragover handler did not call preventDefault()".to_string());
+    }
+    let expected_names = expected
+        .iter()
+        .map(|path| {
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path)
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    if result.observed_names != expected_names {
+        return Err(format!(
+            "Dropped files {:?} but the page received {:?}",
+            expected_names, result.observed_names
+        ));
+    }
+    if !result.delivered && result.mutations == 0 {
+        return Err(
+            "Target drop handler did not run: the page produced no observable effect".to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub fn drop_files(
     tab: &Tab,
     world: &WorldManager,
     target: &ElementHandle,
     paths: &[String],
-) -> Result<bool, String> {
+) -> Result<FileDropResult, String> {
     let mut payloads = Vec::with_capacity(paths.len());
     for value in paths {
         let path = Path::new(value)
@@ -273,30 +357,12 @@ pub fn drop_files(
         .call_function_on(
             tab,
             target,
-            r#"function(payloads) {
-  const transfer = new DataTransfer();
-  for (const payload of payloads) {
-    const binary = atob(payload.data);
-    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
-    transfer.items.add(new File([bytes], payload.name, {lastModified: payload.last_modified}));
-  }
-  const dispatch = type => {
-    const event = new DragEvent(type, {bubbles:true,cancelable:true,dataTransfer:transfer});
-    this.dispatchEvent(event);
-    return event.defaultPrevented;
-  };
-  dispatch('dragenter');
-  const accepted = dispatch('dragover');
-  if (accepted) dispatch('drop');
-  return {accepted,dropped:accepted};
-}"#,
+            DROP_FILES_JS,
             vec![serde_json::to_value(payloads).map_err(|error| error.to_string())?],
         )
         .map_err(|error| error.to_string())?;
-    result
-        .get("dropped")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| format!("File drop returned an invalid result: {}", json!(result)))
+    serde_json::from_value(result.clone())
+        .map_err(|_| format!("File drop returned an invalid result: {}", json!(result)))
 }
 
 #[cfg(test)]
@@ -360,6 +426,71 @@ mod tests {
         fn dispatch(&mut self, _event: KeyboardDispatch) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    fn drop_result(accepted: bool, delivered: bool, mutations: usize) -> FileDropResult {
+        FileDropResult {
+            accepted,
+            delivered,
+            observed_names: vec!["drop.txt".to_string()],
+            mutations,
+            target: FileDropTarget {
+                id: "files".to_string(),
+                tag: "DIV".to_string(),
+                connected: true,
+                same_document: true,
+            },
+        }
+    }
+
+    #[test]
+    fn file_drop_verification_accepts_a_page_handler_that_claimed_the_event() {
+        let paths = vec!["/tmp/drop.txt".to_string()];
+        assert!(verify_file_drop(&drop_result(true, true, 0), &paths).is_ok());
+        assert!(verify_file_drop(&drop_result(true, false, 1), &paths).is_ok());
+    }
+
+    #[test]
+    fn file_drop_verification_rejects_a_target_that_never_handled_the_drop() {
+        let error = verify_file_drop(
+            &drop_result(true, false, 0),
+            &vec!["/tmp/drop.txt".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(error.contains("drop handler did not run"));
+    }
+
+    #[test]
+    fn file_drop_verification_rejects_a_target_that_refused_the_dragover() {
+        let error = verify_file_drop(
+            &drop_result(false, false, 0),
+            &vec!["/tmp/drop.txt".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(error.contains("preventDefault()"));
+    }
+
+    #[test]
+    fn file_drop_verification_rejects_a_detached_target() {
+        let mut result = drop_result(true, true, 1);
+        result.target.connected = false;
+
+        let error = verify_file_drop(&result, &vec!["/tmp/drop.txt".to_string()]).unwrap_err();
+
+        assert!(error.contains("not attached to the page document"));
+    }
+
+    #[test]
+    fn file_drop_verification_compares_basenames_and_rejects_missing_files() {
+        let mut result = drop_result(true, true, 1);
+        result.observed_names.clear();
+
+        let error = verify_file_drop(&result, &vec!["/tmp/drop.txt".to_string()]).unwrap_err();
+
+        assert!(error.contains("[\"drop.txt\"]"));
+        assert!(error.contains("[]"));
     }
 
     #[test]

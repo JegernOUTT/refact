@@ -34,7 +34,10 @@ pub use actionability::{
     RequiredStates, SystemClock, TimeoutError, TimeoutKind, required_states,
 };
 pub use dialogs::{DialogDecision, DialogManager, DialogResponse};
-pub use drag::{CdpDragDispatcher, DragDispatcher, DragEventType, drag_and_drop, drop_files};
+pub use drag::{
+    CdpDragDispatcher, DragDispatcher, DragEventType, FileDropResult, FileDropTarget,
+    drag_and_drop, drop_files, verify_file_drop,
+};
 pub use context_state::{ContextState, MediaState, ViewportState};
 pub use handles::{
     CheckedState, ElementHandle, ElementState, ElementStateName, HandleError, HandleRegistry,
