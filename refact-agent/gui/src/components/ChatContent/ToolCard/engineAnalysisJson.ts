@@ -39,19 +39,19 @@ interface BaseResult {
   summary: string;
 }
 export interface UiProbeResult extends BaseResult {
-  matrix: Array<Record<string, unknown>>;
+  matrix: Record<string, unknown>[];
   target_count: number;
   viewport_count: number;
   theme_count: number;
   state_count: number;
 }
 export interface MarkElementsResult extends BaseResult {
-  marks: Array<Record<string, unknown>>;
+  marks: Record<string, unknown>[];
   artifact: Record<string, unknown>;
 }
 export interface ContrastAuditResult extends BaseResult {
-  findings: Array<Record<string, unknown>>;
-  raw_colors: Array<Record<string, unknown>>;
+  findings: Record<string, unknown>[];
+  raw_colors: Record<string, unknown>[];
   thresholds: Record<string, number>;
 }
 export interface ImageRegionResult extends BaseResult {
@@ -64,7 +64,7 @@ export interface VisualDiffResult extends BaseResult {
   baseline_updated: boolean;
   changed_pixels: number;
   changed_percent: number;
-  regions: Array<Record<string, unknown>>;
+  regions: Record<string, unknown>[];
   artifact: Record<string, unknown>;
 }
 export interface DesignSystemResult extends BaseResult {
@@ -84,10 +84,10 @@ export interface DesignSystemResult extends BaseResult {
   component_inventory_source: string;
   component_count: number;
   components_truncated: boolean;
-  components: Array<Record<string, unknown>>;
+  components: Record<string, unknown>[];
   drift_count: number;
   findings_truncated: boolean;
-  drift: Array<Record<string, unknown>>;
+  drift: Record<string, unknown>[];
 }
 interface IndexState {
   queued: number;
