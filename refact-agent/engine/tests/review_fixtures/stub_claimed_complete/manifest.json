@@ -1,0 +1,17 @@
+{
+  "id": "stub_claimed_complete",
+  "kind": "seeded",
+  "scenario": "stub_claimed_complete",
+  "description": "Welcome scheduling must implement the complete behavior promised to pond callers.",
+  "seeded_defects": [
+    {
+      "file": "schedule.py",
+      "line_range": { "start": 3, "end": 5 },
+      "category": "correctness",
+      "severity": "high",
+      "description": "The function claims to build a complete schedule but returns an empty stub value.",
+      "marker": "return []",
+      "expected_check": "l1_diff"
+    }
+  ]
+}

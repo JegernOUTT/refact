@@ -312,6 +312,7 @@ fn is_editing_tool(tool_name: &str) -> bool {
 // fair-share fragment; overall context pressure is handled later by chat
 // compression instead.
 const TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS: &[&str] = &[
+    "review",
     "code_review",
     "subagent",
     "delegate",

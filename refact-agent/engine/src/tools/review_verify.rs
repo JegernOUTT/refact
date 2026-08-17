@@ -1,18 +1,19 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex as AMutex;
 
-use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::ChatMessage;
+use crate::chat::types::TaskMeta;
 use crate::global_context::GlobalContext;
-use crate::subchat::run_subchat_once_with_parent;
-use crate::tools::code_review_types::{
-    ReviewEvidence, ReviewFinding, ReviewReport, ReviewSeverity, VerificationStatus,
-};
+use crate::subchat::{run_subchat_once_with_explicit_params, ExplicitSubchatSpec};
+use crate::tools::review_types::{ReviewEvidence, ReviewFinding, ReviewSeverity, VerificationStatus};
 use crate::tools::subagent_phases::get_last_assistant_content;
+use crate::worktrees::types::WorktreeMeta;
 
 const MAX_BATCH_SIZE: usize = 10;
 const MAX_VERIFIER_CALLS: usize = 3;
@@ -20,6 +21,7 @@ const VERIFIER_PARSE_FAILED: &str = "verifier_parse_failed";
 const VERIFIER_CALL_FAILED: &str = "verifier_call_failed";
 const VERIFIER_BUDGET_EXHAUSTED: &str = "verifier_budget_exhausted";
 const VERIFIER_INCOMPLETE: &str = "verifier_incomplete";
+pub(crate) const VERIFIER_ATTRIBUTION_ID: &str = "review_verifier";
 
 const VERIFIER_RETRY_PROMPT: &str = r#"Your response was malformed. Return exactly one fenced json block and no other text:
 
@@ -93,6 +95,22 @@ impl VerifierCallBudget {
         self.used += 1;
         true
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct VerifierRunner {
+    pub spec: ExplicitSubchatSpec,
+    pub system_prompt: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct VerifyParentCtx {
+    pub tool_call_id: String,
+    pub subchat_tx: Arc<AMutex<UnboundedSender<Value>>>,
+    pub abort_flag: Arc<AtomicBool>,
+    pub depth: usize,
+    pub task_meta: Option<TaskMeta>,
+    pub worktree: Option<WorktreeMeta>,
 }
 
 fn severity_label(severity: &ReviewSeverity) -> &'static str {
@@ -180,7 +198,7 @@ pub(crate) fn parse_verifier_verdicts(
     for verdict in envelope.verdicts {
         if !allowed.contains(&verdict.index) {
             tracing::warn!(
-                "code_review verifier ignored verdict for unknown candidate index {}",
+                "review verifier ignored verdict for unknown candidate index {}",
                 verdict.index
             );
             continue;
@@ -234,7 +252,8 @@ fn missing_verdict_indices(allowed_indices: &[usize], verdicts: &[VerifierVerdic
 }
 
 pub(crate) fn apply_verifier_verdicts(
-    report: &mut ReviewReport,
+    findings: &mut Vec<ReviewFinding>,
+    checks: &mut Vec<String>,
     verdicts: Vec<VerifierVerdict>,
     incomplete_indices: impl IntoIterator<Item = usize>,
 ) {
@@ -245,7 +264,7 @@ pub(crate) fn apply_verifier_verdicts(
     let incomplete_indices = incomplete_indices.into_iter().collect::<HashSet<_>>();
     let mut rejected = 0;
     let mut incomplete = 0;
-    report.findings = std::mem::take(&mut report.findings)
+    *findings = std::mem::take(findings)
         .into_iter()
         .enumerate()
         .filter_map(|(index, mut finding)| {
@@ -259,7 +278,7 @@ pub(crate) fn apply_verifier_verdicts(
                 }
                 return Some(finding);
             };
-            tracing::debug!("code_review verifier candidate {}: {}", index, verdict.note);
+            tracing::debug!("review verifier candidate {}: {}", index, verdict.note);
             match verdict.status {
                 VerifierVerdictStatus::Verified => {
                     finding.verification_status = VerificationStatus::Verified;
@@ -283,14 +302,10 @@ pub(crate) fn apply_verifier_verdicts(
         })
         .collect();
     if rejected > 0 {
-        report
-            .checks_performed
-            .push(format!("verifier_rejected:{rejected}"));
+        checks.push(format!("verifier_rejected:{rejected}"));
     }
     if incomplete > 0 {
-        report
-            .checks_performed
-            .push(format!("{VERIFIER_INCOMPLETE}:{incomplete}"));
+        checks.push(format!("{VERIFIER_INCOMPLETE}:{incomplete}"));
     }
 }
 
@@ -305,7 +320,8 @@ pub(crate) fn verification_status_label(status: &VerificationStatus) -> &'static
 }
 
 fn mark_candidates(
-    report: &mut ReviewReport,
+    findings: &mut [ReviewFinding],
+    checks: &mut Vec<String>,
     indices: impl IntoIterator<Item = usize>,
     status: VerificationStatus,
     marker: &str,
@@ -314,7 +330,7 @@ fn mark_candidates(
     if indices.is_empty() {
         return;
     }
-    for (index, finding) in report.findings.iter_mut().enumerate() {
+    for (index, finding) in findings.iter_mut().enumerate() {
         if indices.contains(&index) {
             finding.verification_status = status.clone();
             if !finding.checks_performed.iter().any(|check| check == marker) {
@@ -322,12 +338,12 @@ fn mark_candidates(
             }
         }
     }
-    if !report.checks_performed.iter().any(|check| check == marker) {
-        report.checks_performed.push(marker.to_string());
+    if !checks.iter().any(|check| check == marker) {
+        checks.push(marker.to_string());
     }
 }
 
-fn merge_metering(
+pub(crate) fn merge_metering(
     target: &mut serde_json::Map<String, Value>,
     source: serde_json::Map<String, Value>,
 ) {
@@ -358,30 +374,36 @@ fn merge_metering(
     }
 }
 
-pub(crate) async fn verify_review_report(
+pub(crate) async fn verify_findings(
     gcx: Arc<GlobalContext>,
-    ccx: Arc<AMutex<AtCommandsContext>>,
-    tool_call_id: String,
-    report: &mut ReviewReport,
+    parent: &VerifyParentCtx,
+    runner: &VerifierRunner,
+    findings: &mut Vec<ReviewFinding>,
+    checks: &mut Vec<String>,
     metering: &mut serde_json::Map<String, Value>,
 ) {
-    let mut batches = build_verifier_batches(&report.findings);
+    let mut batches = build_verifier_batches(findings);
     if batches.is_empty() {
         return;
     }
-    let (subchat_tx, abort_flag, parent_depth, parent_task_meta, parent_worktree) = {
-        let ccx_lock = ccx.lock().await;
-        (
-            ccx_lock.subchat_tx.clone(),
-            ccx_lock.abort_flag.clone(),
-            ccx_lock.subchat_depth,
-            ccx_lock.task_meta.clone(),
-            ccx_lock.execution_scope_worktree(),
-        )
-    };
     let mut budget = VerifierCallBudget::default();
     let mut verdicts = Vec::new();
     let mut incomplete_indices = Vec::new();
+
+    let run_batch = |messages: Vec<ChatMessage>| {
+        run_subchat_once_with_explicit_params(
+            gcx.clone(),
+            VERIFIER_ATTRIBUTION_ID,
+            &runner.spec,
+            messages,
+            parent.tool_call_id.clone(),
+            parent.subchat_tx.clone(),
+            parent.abort_flag.clone(),
+            parent.depth,
+            parent.task_meta.clone(),
+            parent.worktree.clone(),
+        )
+    };
 
     while let Some(batch) = batches.pop_front() {
         if !budget.reserve() {
@@ -390,7 +412,8 @@ pub(crate) async fn verify_review_report(
                 .into_iter()
                 .chain(batches.into_iter().flat_map(|batch| batch.indices));
             mark_candidates(
-                report,
+                findings,
+                checks,
                 exhausted,
                 VerificationStatus::NeedsHumanValidation,
                 VERIFIER_BUDGET_EXHAUSTED,
@@ -398,25 +421,18 @@ pub(crate) async fn verify_review_report(
             break;
         }
         let batch_indices = batch.indices;
-        let history = vec![ChatMessage::new("user".to_string(), batch.prompt)];
-        let first = run_subchat_once_with_parent(
-            gcx.clone(),
-            "code_review_verifier",
-            history,
-            tool_call_id.clone(),
-            subchat_tx.clone(),
-            abort_flag.clone(),
-            parent_depth,
-            parent_task_meta.clone(),
-            parent_worktree.clone(),
-        )
-        .await;
+        let history = vec![
+            ChatMessage::new("system".to_string(), runner.system_prompt.clone()),
+            ChatMessage::new("user".to_string(), batch.prompt),
+        ];
+        let first = run_batch(history).await;
         let first = match first {
             Ok(result) => result,
             Err(error) => {
-                tracing::warn!("code_review verifier call failed: {error}");
+                tracing::warn!("review verifier call failed: {error}");
                 mark_candidates(
-                    report,
+                    findings,
+                    checks,
                     batch_indices,
                     VerificationStatus::Unverified,
                     VERIFIER_CALL_FAILED,
@@ -433,12 +449,13 @@ pub(crate) async fn verify_review_report(
             }
             Err(first_error) => {
                 tracing::info!(
-                    "code_review verifier response malformed ({first_error}), requesting retry"
+                    "review verifier response malformed ({first_error}), requesting retry"
                 );
                 if !budget.reserve() {
                     merge_metering(metering, first.metering);
                     mark_candidates(
-                        report,
+                        findings,
+                        checks,
                         batch_indices,
                         VerificationStatus::Unverified,
                         VERIFIER_PARSE_FAILED,
@@ -450,19 +467,7 @@ pub(crate) async fn verify_review_report(
                     "user".to_string(),
                     VERIFIER_RETRY_PROMPT.to_string(),
                 ));
-                match run_subchat_once_with_parent(
-                    gcx.clone(),
-                    "code_review_verifier",
-                    retry_messages,
-                    tool_call_id.clone(),
-                    subchat_tx.clone(),
-                    abort_flag.clone(),
-                    parent_depth,
-                    parent_task_meta.clone(),
-                    parent_worktree.clone(),
-                )
-                .await
-                {
+                match run_batch(retry_messages).await {
                     Ok(retry) => {
                         let retry_text = get_last_assistant_content(&retry.messages);
                         merge_metering(metering, retry.metering);
@@ -476,10 +481,11 @@ pub(crate) async fn verify_review_report(
                             }
                             Err(second_error) => {
                                 tracing::warn!(
-                                    "code_review verifier response malformed after retry: {second_error}"
+                                    "review verifier response malformed after retry: {second_error}"
                                 );
                                 mark_candidates(
-                                    report,
+                                    findings,
+                                    checks,
                                     batch_indices,
                                     VerificationStatus::Unverified,
                                     VERIFIER_PARSE_FAILED,
@@ -489,9 +495,10 @@ pub(crate) async fn verify_review_report(
                     }
                     Err(error) => {
                         merge_metering(metering, first.metering);
-                        tracing::warn!("code_review verifier retry failed: {error}");
+                        tracing::warn!("review verifier retry failed: {error}");
                         mark_candidates(
-                            report,
+                            findings,
+                            checks,
                             batch_indices,
                             VerificationStatus::Unverified,
                             VERIFIER_CALL_FAILED,
@@ -502,13 +509,13 @@ pub(crate) async fn verify_review_report(
         }
     }
 
-    apply_verifier_verdicts(report, verdicts, incomplete_indices);
+    apply_verifier_verdicts(findings, checks, verdicts, incomplete_indices);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::code_review_types::ReviewScopeSummary;
+    use crate::tools::review_types::RankTier;
 
     fn finding(severity: ReviewSeverity, confidence: f32) -> ReviewFinding {
         ReviewFinding {
@@ -517,6 +524,8 @@ mod tests {
             severity,
             confidence,
             verification_status: VerificationStatus::Unverified,
+            rank_tier: RankTier::Unverified,
+            sources: vec![],
             file: "src/lib.rs".to_string(),
             line1: 4,
             line2: 6,
@@ -534,22 +543,8 @@ mod tests {
         }
     }
 
-    fn report(findings: Vec<ReviewFinding>) -> ReviewReport {
-        ReviewReport {
-            scope: ReviewScopeSummary {
-                files_reviewed: vec!["src/lib.rs".to_string()],
-                focus: None,
-                diff_base: None,
-            },
-            findings,
-            checks_performed: vec![],
-            summary: "Candidates".to_string(),
-            pipeline: Default::default(),
-        }
-    }
-
     #[test]
-    fn tool_code_review_verifier_parses_well_formed_verdicts() {
+    fn tool_review_verifier_parses_well_formed_verdicts() {
         let parsed = parse_verifier_verdicts(
             r#"```json
 {"verdicts":[{"index":0,"status":"verified","confidence":0.6,"note":"Supported."}]}
@@ -565,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_verifier_rejects_malformed_verdicts() {
+    fn tool_review_verifier_rejects_malformed_verdicts() {
         assert!(parse_verifier_verdicts(
             r#"{"verdicts":[{"index":0,"status":"verified","confidence":0.6,"note":"Supported."}]}"#,
             &[0],
@@ -581,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_verifier_marks_missing_and_ignores_unknown_indices() {
+    fn tool_review_verifier_marks_missing_and_ignores_unknown_indices() {
         let parsed = parse_verifier_verdicts(
             r#"```json
 {"verdicts":[{"index":0,"status":"verified","confidence":0.6,"note":"Supported."},{"index":1,"status":"downgraded","confidence":0.5,"note":"Partial."},{"index":99,"status":"rejected","confidence":0.9,"note":"Unknown."}]}
@@ -590,33 +585,34 @@ mod tests {
         )
         .unwrap();
         let missing = missing_verdict_indices(&[0, 1, 2], &parsed);
-        let mut report = report(vec![
+        let mut findings = vec![
             finding(ReviewSeverity::High, 0.9),
             finding(ReviewSeverity::High, 0.8),
             finding(ReviewSeverity::High, 0.7),
-        ]);
+        ];
+        let mut checks = vec![];
 
         assert_eq!(parsed.len(), 2);
         assert_eq!(missing, [2]);
-        apply_verifier_verdicts(&mut report, parsed, missing);
+        apply_verifier_verdicts(&mut findings, &mut checks, parsed, missing);
         assert_eq!(
-            report.findings[0].verification_status,
+            findings[0].verification_status,
             VerificationStatus::Verified
         );
         assert_eq!(
-            report.findings[1].verification_status,
+            findings[1].verification_status,
             VerificationStatus::Downgraded
         );
         assert_eq!(
-            report.findings[2].verification_status,
+            findings[2].verification_status,
             VerificationStatus::NeedsHumanValidation
         );
-        assert_eq!(report.findings[2].checks_performed, [VERIFIER_INCOMPLETE]);
-        assert_eq!(report.checks_performed, ["verifier_incomplete:1"]);
+        assert_eq!(findings[2].checks_performed, [VERIFIER_INCOMPLETE]);
+        assert_eq!(checks, ["verifier_incomplete:1"]);
     }
 
     #[test]
-    fn tool_code_review_verifier_batches_at_ten_and_includes_evidence() {
+    fn tool_review_verifier_batches_at_ten_and_includes_evidence() {
         let findings = (0..25)
             .map(|_| finding(ReviewSeverity::High, 0.9))
             .collect::<Vec<_>>();
@@ -636,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_verifier_trigger_policy_matches_severity_confidence_and_size() {
+    fn tool_review_verifier_trigger_policy_matches_severity_confidence_and_size() {
         assert!(should_verify(&finding(ReviewSeverity::Critical, 1.0), 20));
         assert!(should_verify(&finding(ReviewSeverity::High, 1.0), 20));
         assert!(should_verify(&finding(ReviewSeverity::Medium, 0.69), 20));
@@ -647,13 +643,12 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_verifier_budget_exhaustion_marks_overflow_candidates() {
-        let mut report = report(
-            (0..31)
-                .map(|_| finding(ReviewSeverity::High, 0.9))
-                .collect(),
-        );
-        let batches = build_verifier_batches(&report.findings)
+    fn tool_review_verifier_budget_exhaustion_marks_overflow_candidates() {
+        let mut findings = (0..31)
+            .map(|_| finding(ReviewSeverity::High, 0.9))
+            .collect::<Vec<_>>();
+        let mut checks = vec![];
+        let batches = build_verifier_batches(&findings)
             .into_iter()
             .collect::<Vec<_>>();
         let mut budget = VerifierCallBudget::default();
@@ -663,49 +658,48 @@ mod tests {
         assert!(budget.reserve());
         assert!(!budget.reserve());
         mark_candidates(
-            &mut report,
+            &mut findings,
+            &mut checks,
             batches[3].indices.clone(),
             VerificationStatus::NeedsHumanValidation,
             VERIFIER_BUDGET_EXHAUSTED,
         );
 
         assert_eq!(
-            report.findings[30].verification_status,
+            findings[30].verification_status,
             VerificationStatus::NeedsHumanValidation
         );
-        assert!(report.findings[30]
+        assert!(findings[30]
             .checks_performed
             .contains(&VERIFIER_BUDGET_EXHAUSTED.to_string()));
-        assert!(report
-            .checks_performed
-            .contains(&VERIFIER_BUDGET_EXHAUSTED.to_string()));
+        assert!(checks.contains(&VERIFIER_BUDGET_EXHAUSTED.to_string()));
     }
 
     #[test]
-    fn tool_code_review_verifier_parse_failure_keeps_candidates_unverified() {
-        let mut report = report(vec![finding(ReviewSeverity::High, 0.9)]);
+    fn tool_review_verifier_parse_failure_keeps_candidates_unverified() {
+        let mut findings = vec![finding(ReviewSeverity::High, 0.9)];
+        let mut checks = vec![];
 
         mark_candidates(
-            &mut report,
+            &mut findings,
+            &mut checks,
             [0],
             VerificationStatus::Unverified,
             VERIFIER_PARSE_FAILED,
         );
 
         assert_eq!(
-            report.findings[0].verification_status,
+            findings[0].verification_status,
             VerificationStatus::Unverified
         );
-        assert!(report.findings[0]
+        assert!(findings[0]
             .checks_performed
             .contains(&VERIFIER_PARSE_FAILED.to_string()));
-        assert!(report
-            .checks_performed
-            .contains(&VERIFIER_PARSE_FAILED.to_string()));
+        assert!(checks.contains(&VERIFIER_PARSE_FAILED.to_string()));
     }
 
     #[test]
-    fn tool_code_review_verifier_accumulates_nested_metering() {
+    fn tool_review_verifier_accumulates_nested_metering() {
         let mut metering = serde_json::Map::from_iter([
             ("metering_tokens".to_string(), Value::from(10)),
             (
@@ -730,8 +724,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_verifier_applies_reject_downgrade_verify_and_human_status() {
-        let mut report = report(vec![
+    fn tool_review_verifier_applies_reject_downgrade_verify_and_human_status() {
+        let mut findings = vec![
             finding(ReviewSeverity::Critical, 0.9),
             finding(ReviewSeverity::High, 0.8),
             finding(ReviewSeverity::Medium, 0.7),
@@ -739,9 +733,11 @@ mod tests {
             finding(ReviewSeverity::High, 0.5),
             finding(ReviewSeverity::High, 0.4),
             finding(ReviewSeverity::High, 0.3),
-        ]);
+        ];
+        let mut checks = vec![];
         apply_verifier_verdicts(
-            &mut report,
+            &mut findings,
+            &mut checks,
             vec![
                 VerifierVerdict {
                     index: 0,
@@ -789,20 +785,20 @@ mod tests {
             [],
         );
 
-        assert_eq!(report.findings.len(), 6);
-        assert_eq!(report.findings[0].severity, ReviewSeverity::High);
-        assert_eq!(report.findings[1].severity, ReviewSeverity::Medium);
-        assert_eq!(report.findings[2].severity, ReviewSeverity::Low);
-        assert_eq!(report.findings[3].severity, ReviewSeverity::Low);
+        assert_eq!(findings.len(), 6);
+        assert_eq!(findings[0].severity, ReviewSeverity::High);
+        assert_eq!(findings[1].severity, ReviewSeverity::Medium);
+        assert_eq!(findings[2].severity, ReviewSeverity::Low);
+        assert_eq!(findings[3].severity, ReviewSeverity::Low);
         assert_eq!(
-            report.findings[4].verification_status,
+            findings[4].verification_status,
             VerificationStatus::Verified
         );
-        assert_eq!(report.findings[4].confidence, 0.2);
+        assert_eq!(findings[4].confidence, 0.2);
         assert_eq!(
-            report.findings[5].verification_status,
+            findings[5].verification_status,
             VerificationStatus::NeedsHumanValidation
         );
-        assert_eq!(report.checks_performed, vec!["verifier_rejected:1"]);
+        assert_eq!(checks, vec!["verifier_rejected:1"]);
     }
 }

@@ -1,0 +1,17 @@
+{
+  "id": "weakened_assertion",
+  "kind": "seeded",
+  "scenario": "weakened_assertion",
+  "description": "Welcome-count tests must still verify the exact number of frogs admitted.",
+  "seeded_defects": [
+    {
+      "file": "test_counter.py",
+      "line_range": { "start": 5, "end": 5 },
+      "category": "tests",
+      "severity": "medium",
+      "description": "The assertion only checks for a value and no longer catches the implementation's wrong count.",
+      "marker": "assert result is not None",
+      "expected_check": "s4_test_integrity"
+    }
+  ]
+}

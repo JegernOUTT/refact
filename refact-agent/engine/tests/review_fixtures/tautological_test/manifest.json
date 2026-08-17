@@ -1,0 +1,17 @@
+{
+  "id": "tautological_test",
+  "kind": "seeded",
+  "scenario": "tautological_test",
+  "description": "Welcome-pond area tests must derive expectations independently of production helpers.",
+  "seeded_defects": [
+    {
+      "file": "test_area.py",
+      "line_range": { "start": 5, "end": 6 },
+      "category": "tests",
+      "severity": "medium",
+      "description": "The expected value calls the same helper under test, making the assertion tautological.",
+      "marker": "expected = area(width, height)",
+      "expected_check": "s4_test_integrity"
+    }
+  ]
+}

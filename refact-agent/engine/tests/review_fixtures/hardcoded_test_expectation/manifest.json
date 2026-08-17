@@ -1,0 +1,17 @@
+{
+  "id": "hardcoded_test_expectation",
+  "kind": "seeded",
+  "scenario": "hardcoded_test_expectation",
+  "description": "Welcome tokens must be tested from their requirement rather than copied output.",
+  "seeded_defects": [
+    {
+      "file": "test_tokens.py",
+      "line_range": { "start": 5, "end": 5 },
+      "category": "tests",
+      "severity": "high",
+      "description": "The test hardcodes the implementation's unusual token instead of checking the formula requirement.",
+      "marker": "frog-9271-secret",
+      "expected_check": "s4_test_integrity"
+    }
+  ]
+}

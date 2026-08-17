@@ -56,21 +56,6 @@ fn review_tokens_budget(subchat_params: &SubchatParameters) -> i64 {
     subchat_params.subchat_n_ctx as i64 - required as i64
 }
 
-pub(crate) fn validate_review_budget(subchat_params: &SubchatParameters) -> Result<(), String> {
-    let (extra, required) = review_budget_components(subchat_params);
-    if required < subchat_params.subchat_n_ctx {
-        return Ok(());
-    }
-    Err(format!(
-        "Bad subchat budget: max_new_tokens({}) + tokens_for_rag({}) + extra({}) = {} >= n_ctx({})",
-        subchat_params.subchat_max_new_tokens,
-        subchat_params.subchat_tokens_for_rag,
-        extra,
-        required,
-        subchat_params.subchat_n_ctx
-    ))
-}
-
 fn repo_root_for_scope(gcx: &GlobalContext, paths: &[PathBuf]) -> Option<PathBuf> {
     let workspace_folders = gcx.documents_state.workspace_folders.lock().ok()?.clone();
     paths
@@ -248,7 +233,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_scope_merges_seeds_first_deduplicates_and_caps() {
+    async fn tool_review_scope_merges_seeds_first_deduplicates_and_caps() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let temp = tempfile::tempdir().unwrap();
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
@@ -273,7 +258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_scope_detects_git_changed_files_against_base() {
+    async fn tool_review_scope_detects_git_changed_files_against_base() {
         let temp = tempfile::tempdir().unwrap();
         init_repo(temp.path());
         run_git(temp.path(), &["checkout", "-b", "feature"]);
@@ -301,7 +286,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_scope_supports_non_git_workspace() {
+    async fn tool_review_scope_supports_non_git_workspace() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
@@ -321,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_scope_budget_math_matches_existing_values() {
+    fn tool_review_scope_budget_math_matches_existing_values() {
         let params = subchat_params(10_000, 2_000, 1_000);
 
         assert_eq!(review_tokens_budget(&params), 6_400);

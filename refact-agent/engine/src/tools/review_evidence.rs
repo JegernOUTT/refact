@@ -9,8 +9,8 @@ use crate::exec::command_policy::{
 use crate::exec::{ExecOutputStream, ExecStatus};
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::{GlobalContext, ReviewCommandConfig};
-use crate::tools::code_review_scope::ReviewScope;
-use crate::tools::code_review_types::{
+use crate::tools::review_scope::ReviewScope;
+use crate::tools::review_types::{
     MechanicalCheck, MechanicalResult, ReviewEvidence, ReviewFinding, ReviewReport, ReviewSeverity,
 };
 
@@ -670,8 +670,8 @@ pub async fn collect_evidence(
 mod tests {
     use super::*;
     use crate::global_context::{ReviewCommandConfig, ReviewCommandsConfig};
-    use crate::tools::code_review_scope::ReviewBudgets;
-    use crate::tools::code_review_types::{ReviewSeverity, VerificationStatus};
+    use crate::tools::review_scope::ReviewBudgets;
+    use crate::tools::review_types::{ReviewSeverity, VerificationStatus};
 
     fn finding(file: &Path, line1: u32, line2: u32, claim: &str) -> ReviewFinding {
         ReviewFinding {
@@ -680,6 +680,8 @@ mod tests {
             severity: ReviewSeverity::High,
             confidence: 0.8,
             verification_status: VerificationStatus::Unverified,
+            rank_tier: Default::default(),
+            sources: vec![],
             file: file.to_string_lossy().to_string(),
             line1,
             line2,
@@ -730,7 +732,7 @@ mod tests {
 
     fn report_with_severities() -> ReviewReport {
         ReviewReport {
-            scope: crate::tools::code_review_types::ReviewScopeSummary {
+            scope: crate::tools::review_types::ReviewScopeSummary {
                 files_reviewed: vec!["src/lib.rs".to_string()],
                 focus: None,
                 diff_base: None,
@@ -749,12 +751,13 @@ mod tests {
             ],
             checks_performed: vec![],
             summary: "Review".to_string(),
+            assumed_intent: None,
             pipeline: Default::default(),
         }
     }
 
     #[tokio::test]
-    async fn tool_code_review_evidence_rejects_fabricated_ranges() {
+    async fn tool_review_evidence_rejects_fabricated_ranges() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("sample.rs");
         std::fs::write(
@@ -795,7 +798,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_evidence_rejects_out_of_range_and_out_of_scope_findings() {
+    async fn tool_review_evidence_rejects_out_of_range_and_out_of_scope_findings() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("sample.rs");
         let other = temp.path().join("other.rs");
@@ -823,7 +826,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_evidence_attaches_overlapping_precomputed_diff_hunk() {
+    async fn tool_review_evidence_attaches_overlapping_precomputed_diff_hunk() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("src").join("sample.rs");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -852,7 +855,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_evidence_silently_records_missing_patch_and_codegraph() {
+    async fn tool_review_evidence_silently_records_missing_patch_and_codegraph() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("sample.rs");
         std::fs::write(&file, "fn sample() {}\n").unwrap();
@@ -874,7 +877,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_evidence_attaches_codegraph_symbol_facts() {
+    async fn tool_review_evidence_attaches_codegraph_symbol_facts() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("sample.rs");
         let text = "pub struct TargetSymbol;\npub fn caller() { let _ = TargetSymbol; }\n";
@@ -909,7 +912,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_evidence_caps_total_content_with_marker() {
+    async fn tool_review_evidence_caps_total_content_with_marker() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("sample.rs");
         std::fs::write(&file, format!("{}\n", "x".repeat(5000))).unwrap();
@@ -930,7 +933,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_command_evidence_is_disabled_by_default() {
+    async fn tool_review_command_evidence_is_disabled_by_default() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = gcx_for(temp.path()).await;
         let mut report = report_with_severities();
@@ -952,7 +955,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_command_request_uses_allowlisted_argv_not_finding_text() {
+    async fn tool_review_command_request_uses_allowlisted_argv_not_finding_text() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = gcx_for(temp.path()).await;
         let allowlisted = ReviewCommandConfig {
@@ -980,7 +983,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_mechanical_policy_rejects_non_argv_commands() {
+    async fn tool_review_mechanical_policy_rejects_non_argv_commands() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = gcx_for(temp.path()).await;
 
@@ -1003,7 +1006,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_command_evidence_records_exit_and_only_attaches_to_high_findings() {
+    async fn tool_review_command_evidence_records_exit_and_only_attaches_to_high_findings() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = gcx_with_review_commands(
             temp.path(),
@@ -1035,7 +1038,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn tool_code_review_command_evidence_records_nonzero_exit() {
+    async fn tool_review_command_evidence_records_nonzero_exit() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = gcx_with_review_commands(
             temp.path(),
@@ -1066,7 +1069,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn tool_code_review_command_evidence_skips_timeout() {
+    async fn tool_review_command_evidence_skips_timeout() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = gcx_with_review_commands(
             temp.path(),
@@ -1094,7 +1097,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_command_evidence_skips_unavailable_command() {
+    async fn tool_review_command_evidence_skips_unavailable_command() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = gcx_with_review_commands(
             temp.path(),
@@ -1123,7 +1126,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_command_evidence_respects_command_limit() {
+    async fn tool_review_command_evidence_respects_command_limit() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = gcx_with_review_commands(
             temp.path(),
@@ -1157,10 +1160,10 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_evidence_module_has_no_process_spawns() {
+    fn tool_review_evidence_module_has_no_process_spawns() {
         let sources = [
-            include_str!("code_review_evidence.rs"),
-            include_str!("tool_code_review.rs"),
+            include_str!("review_evidence.rs"),
+            include_str!("tool_review.rs"),
         ];
         let std_process = ["process", "::Command"].concat();
         let tokio_process = ["tokio", "::process"].concat();

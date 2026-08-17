@@ -1,0 +1,17 @@
+{
+  "id": "hallucinated_import",
+  "kind": "seeded",
+  "scenario": "hallucinated_import",
+  "description": "Welcome formatting must use dependencies actually available to the pond.",
+  "seeded_defects": [
+    {
+      "file": "welcome.py",
+      "line_range": { "start": 1, "end": 1 },
+      "category": "correctness",
+      "severity": "high",
+      "description": "The module imports a nonexistent third-party package absent from requirements.",
+      "marker": "import pondtools_pro",
+      "expected_check": "s5_dependencies"
+    }
+  ]
+}

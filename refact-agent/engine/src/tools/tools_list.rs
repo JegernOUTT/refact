@@ -359,7 +359,7 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
                 config_path: config_path.clone(),
             },
         ),
-        Box::new(crate::tools::tool_code_review::ToolCodeReview {
+        Box::new(crate::tools::tool_review::ToolCodeReview {
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_deep_research::ToolDeepResearch {

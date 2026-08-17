@@ -175,7 +175,7 @@ override:
 
     **For complex analysis:** use `strategic_planning()` which automatically gathers relevant files
 
-    **For code review:** use `code_review()` after significant changes
+    **For code review:** use `review()` after significant changes
 
     **Task Progress Tracking:**
     Use `tasks_set` to show progress on multi-step work. This displays a progress widget to the user.

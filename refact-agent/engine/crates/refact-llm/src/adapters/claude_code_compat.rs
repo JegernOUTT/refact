@@ -160,7 +160,7 @@ pub const CC_TOOL_RENAMES: &[(&str, &str)] = &[
     // Orchestration
     ("strategic_planning", "plan"),
     ("deep_research", "research"),
-    ("code_review", "review"),
+    ("review", "review"),
     ("subagent", "subagent"),
     // General task management
     ("tasks_set", "set_tasks"),
@@ -268,7 +268,7 @@ const CC_SYSTEM_REPLACEMENTS: &[(&str, &str)] = &[
     // Orchestration
     ("strategic_planning",       "plan"),
     ("deep_research",            "research"),
-    ("code_review",              "review"),
+    ("review",                   "review"),
     ("subagent",                 "subagent"),
     // Task management
     ("tasks_set",                "set_tasks"),
@@ -939,7 +939,7 @@ mod tests {
         assert_eq!(cc_resolve_tool_name("t_set_tasks"), "tasks_set");
         assert_eq!(cc_resolve_tool_name("t_say"), "buddy_say");
         assert_eq!(cc_resolve_tool_name("t_merge_worktree"), "worktree_merge");
-        assert_eq!(cc_resolve_tool_name("t_review"), "code_review");
+        assert_eq!(cc_resolve_tool_name("t_review"), "review");
         assert_eq!(cc_resolve_tool_name("t_research"), "deep_research");
         assert_eq!(cc_resolve_tool_name("t_save_knowledge"), "create_knowledge");
         assert_eq!(cc_resolve_tool_name("t_hist_search"), "search_trajectories");

@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::Deserialize;
 
-use crate::tools::code_review_types::{ReviewFinding, ReviewSeverity, VerificationStatus};
+use crate::tools::review_types::{ReviewFinding, ReviewSeverity, VerificationStatus};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateFinding {
@@ -25,6 +25,8 @@ impl CandidateFinding {
                 severity: self.severity,
                 confidence: self.confidence,
                 verification_status: VerificationStatus::Unverified,
+                rank_tier: Default::default(),
+                sources: Vec::new(),
                 file: self.file,
                 line1: self.line1,
                 line2: self.line2,
@@ -85,7 +87,7 @@ struct RawCandidateFinding {
     rationale: String,
 }
 
-fn extract_last_json_block(text: &str) -> Result<&str, CandidateParseError> {
+pub(crate) fn extract_last_json_block(text: &str) -> Result<&str, CandidateParseError> {
     let lowercase = text.to_ascii_lowercase();
     let start = lowercase
         .rfind("```json")
@@ -102,7 +104,13 @@ fn normalize_category(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
     matches!(
         normalized.as_str(),
-        "correctness" | "consistency" | "security" | "tests" | "maintainability" | "performance"
+        "correctness"
+            | "consistency"
+            | "security"
+            | "tests"
+            | "maintainability"
+            | "performance"
+            | "spec_compliance"
     )
     .then_some(normalized)
 }
@@ -185,7 +193,7 @@ pub(crate) fn parse_candidates_with_reasons(
     }
 
     for reason in &skipped_reasons {
-        tracing::warn!("code_review: {reason}");
+        tracing::warn!("review: {reason}");
     }
 
     Ok(ParsedCandidates {
@@ -219,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_parse_candidates_accepts_well_formed_output() {
+    fn tool_review_parse_candidates_accepts_well_formed_output() {
         let (summary, candidates) = parse_candidates(&response(&candidate_json(""))).unwrap();
 
         assert_eq!(summary, "Found plausible issues.");
@@ -228,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_parse_candidates_ignores_surrounding_prose() {
+    fn tool_review_parse_candidates_ignores_surrounding_prose() {
         let text = format!("analysis before\n{}\nafter", response(&candidate_json("")));
         let (_, candidates) = parse_candidates(&text).unwrap();
 
@@ -236,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_parse_candidates_uses_last_json_block() {
+    fn tool_review_parse_candidates_uses_last_json_block() {
         let first = response("");
         let second = response(&candidate_json(""));
         let (summary, candidates) = parse_candidates(&format!("{first}\n{second}")).unwrap();
@@ -246,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_parse_candidates_skips_invalid_entries_with_reasons() {
+    fn tool_review_parse_candidates_skips_invalid_entries_with_reasons() {
         let valid = candidate_json("");
         let invalid_lines = candidate_json(",\"line1\":20");
         let invalid_category = candidate_json(",\"category\":\"style\"");
@@ -262,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_parse_candidates_rejects_malformed_output() {
+    fn tool_review_parse_candidates_rejects_malformed_output() {
         assert_eq!(
             parse_candidates("not json").unwrap_err(),
             CandidateParseError::MissingJsonBlock
@@ -274,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_parse_candidates_accepts_empty_candidates() {
+    fn tool_review_parse_candidates_accepts_empty_candidates() {
         let (summary, candidates) = parse_candidates(&response("")).unwrap();
 
         assert_eq!(summary, "Found plausible issues.");
@@ -282,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_parse_candidates_normalizes_and_clamps_values() {
+    fn tool_review_parse_candidates_normalizes_and_clamps_values() {
         let input = candidate_json(
             ",\"category\":\" SECURITY \",\"severity\":\" CRITICAL \",\"confidence\":4.2",
         );
@@ -294,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_candidate_rationale_is_separate_from_review_finding() {
+    fn tool_review_candidate_rationale_is_separate_from_review_finding() {
         let (_, mut candidates) = parse_candidates(&response(&candidate_json(""))).unwrap();
         let (finding, rationale) = candidates.remove(0).into_review_parts();
         let serialized = serde_json::to_string(&finding).unwrap();

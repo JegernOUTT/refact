@@ -667,7 +667,7 @@ pub fn canonical_tool_name_for_preservation(name: &str) -> String {
         "task" => "subagent".to_string(),
         "plan" => "strategic_planning".to_string(),
         "research" => "deep_research".to_string(),
-        "review" => "code_review".to_string(),
+        "code_review" => "review".to_string(),
         _ => base.to_string(),
     }
 }

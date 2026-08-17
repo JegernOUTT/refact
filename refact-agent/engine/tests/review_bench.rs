@@ -3,13 +3,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use refact_lsp::tools::code_review_types::{
+use refact_lsp::tools::review_types::{
     ReviewFinding, ReviewReport, ReviewScopeSummary, ReviewSeverity, VerificationStatus,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-const FIXTURE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/code_review_fixtures");
+const FIXTURE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/review_fixtures");
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +33,8 @@ struct SeededDefect {
     severity: ReviewSeverity,
     description: String,
     marker: String,
+    #[serde(default)]
+    expected_check: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -163,6 +165,32 @@ fn precision_proxy(report: &ReviewReport, manifest: &FixtureManifest) -> f64 {
     matched as f64 / verified.len() as f64
 }
 
+fn corroborated_precision(findings: &[(bool, bool)]) -> (f64, f64) {
+    let corroborated = findings
+        .iter()
+        .filter(|(is_corroborated, _)| *is_corroborated)
+        .collect::<Vec<_>>();
+    let corroborated_precision = if corroborated.is_empty() {
+        1.0
+    } else {
+        corroborated
+            .iter()
+            .filter(|(_, matches_seed)| *matches_seed)
+            .count() as f64
+            / corroborated.len() as f64
+    };
+    let overall_precision = if findings.is_empty() {
+        1.0
+    } else {
+        findings
+            .iter()
+            .filter(|(_, matches_seed)| *matches_seed)
+            .count() as f64
+            / findings.len() as f64
+    };
+    (corroborated_precision, overall_precision)
+}
+
 fn rejected_candidate_count(report: &ReviewReport) -> usize {
     report
         .checks_performed
@@ -277,6 +305,8 @@ fn finding(
         severity,
         confidence: 0.9,
         verification_status: status,
+        rank_tier: Default::default(),
+        sources: vec![],
         file: file.to_string(),
         line1,
         line2,
@@ -298,6 +328,7 @@ fn report(findings: Vec<ReviewFinding>, checks_performed: Vec<&str>) -> ReviewRe
         findings,
         checks_performed: checks_performed.into_iter().map(str::to_string).collect(),
         summary: String::new(),
+        assumed_intent: None,
         pipeline: Default::default(),
     }
 }
@@ -320,6 +351,7 @@ fn seed(file: &str, start: u32, end: u32, category: &str) -> SeededDefect {
         severity: ReviewSeverity::High,
         description: "Seeded frog defect".to_string(),
         marker: "seeded frog defect".to_string(),
+        expected_check: None,
     }
 }
 
@@ -369,6 +401,27 @@ fn metrics_match_only_overlapping_file_and_category() {
         1.0 / 3.0
     );
     assert_eq!(precision_proxy(&candidate_report, &manifest), 1.0 / 3.0);
+}
+
+#[test]
+fn corroborated_findings_have_at_least_overall_precision() {
+    let (corroborated, overall) = corroborated_precision(&[
+        (true, true),
+        (true, true),
+        (false, true),
+        (false, false),
+        (false, false),
+    ]);
+
+    assert!(corroborated >= overall);
+    assert_eq!(corroborated, 1.0);
+    assert_eq!(overall, 3.0 / 5.0);
+}
+
+#[test]
+fn corroborated_precision_uses_perfect_empty_denominators() {
+    assert_eq!(corroborated_precision(&[]), (1.0, 1.0));
+    assert_eq!(corroborated_precision(&[(false, false)]), (1.0, 0.0));
 }
 
 #[test]
@@ -507,14 +560,14 @@ fn fixture_corpus_is_complete_small_and_parseable() {
         .map(|defect| defect.marker.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(directories.len(), 10);
+    assert_eq!(directories.len(), 16);
     assert_eq!(ids.len(), directories.len());
     assert_eq!(
         manifests
             .iter()
             .filter(|item| item.kind == FixtureKind::Seeded)
             .count(),
-        5
+        11
     );
     assert_eq!(
         manifests
@@ -541,6 +594,12 @@ fn fixture_corpus_is_complete_small_and_parseable() {
         "equivalent_logic_reshuffle",
         "same_defect_visible_from_two_files",
         "near_identical_copy_paste_blocks",
+        "hardcoded_test_expectation",
+        "stub_claimed_complete",
+        "hallucinated_import",
+        "weakened_assertion",
+        "reward_hacked_test",
+        "tautological_test",
     ] {
         assert!(scenarios.contains(expected), "missing scenario {expected}");
     }
@@ -570,6 +629,23 @@ fn fixture_corpus_is_complete_small_and_parseable() {
             assert!(defect.line_range.end as usize <= source.lines().count());
             assert!(!defect.description.trim().is_empty());
             assert!(!defect.marker.trim().is_empty());
+            if let Some(expected_check) = &defect.expected_check {
+                assert!(
+                    [
+                        "s4_test_integrity",
+                        "s5_dependencies",
+                        "a3_mutation_probe",
+                        "l1_diff",
+                        "l2_simplicity",
+                        "s1_security",
+                        "s2_dead_code",
+                        "s3_duplication",
+                    ]
+                    .contains(&expected_check.as_str()),
+                    "{} has unknown expected check {expected_check}",
+                    manifest.id
+                );
+            }
             let defect_source = source
                 .lines()
                 .skip(defect.line_range.start as usize - 1)
@@ -597,10 +673,10 @@ fn fixture_corpus_is_complete_small_and_parseable() {
             }
         }
     }
-    assert_eq!(category_counts.get("correctness"), Some(&5));
+    assert_eq!(category_counts.get("correctness"), Some(&7));
     assert_eq!(category_counts.get("security"), Some(&1));
     assert_eq!(category_counts.get("consistency"), Some(&1));
-    assert_eq!(category_counts.get("tests"), Some(&1));
+    assert_eq!(category_counts.get("tests"), Some(&5));
 }
 
 fn source_files(directory: &Path) -> Vec<String> {
@@ -657,7 +733,7 @@ async fn execute_live_review(
                     "id": tool_call_id,
                     "type": "function",
                     "function": {
-                        "name": "code_review",
+                        "name": "review",
                         "arguments": serde_json::to_string(&json!({
                             "what_to_check": manifest.description,
                             "files": source_files(directory),
@@ -700,13 +776,13 @@ async fn execute_live_review(
         .iter()
         .find(|message| message["tool_call_id"] == tool_call_id)
         .and_then(|message| message["content"].as_str())
-        .expect("code_review returns a text tool result");
+        .expect("review returns a text tool result");
     extract_review_report(markdown)
 }
 
 #[tokio::test]
 #[ignore]
-async fn live_code_review_pipeline_benchmark() {
+async fn live_review_pipeline_benchmark() {
     let engine_url = std::env::var("REFACT_CODE_REVIEW_ENGINE_URL")
         .expect("REFACT_CODE_REVIEW_ENGINE_URL must point at a live refact-lsp")
         .trim_end_matches('/')

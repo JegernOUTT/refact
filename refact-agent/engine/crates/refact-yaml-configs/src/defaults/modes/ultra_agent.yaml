@@ -75,7 +75,7 @@ prompt: |
 
   5. **Verify and review**
      - Run the narrowest meaningful check first, then broader checks when the surface justifies it.
-     - Use `code_review()` before finishing significant changes, PR-ready work, or risky refactors.
+     - Use `review()` before finishing significant changes, PR-ready work, or risky refactors.
      - If verification cannot run, report the exact command that was skipped or failed and why.
 
   ## Delegation Strategy
@@ -108,7 +108,7 @@ prompt: |
 
   - Verify after each meaningful implementation step.
   - Prefer targeted tests/checks for touched components before broad suites.
-  - Run `code_review()` for significant changes before final reporting.
+  - Run `review()` for significant changes before final reporting.
   - Never claim tests passed unless you ran them and saw the result.
   - If checks fail, fix the relevant failure and retry. If blocked, report the blocker with evidence.
 
@@ -221,7 +221,7 @@ tools:
   - agent_result
   - agent_cancel
   - strategic_planning
-  - code_review
+  - review
   - deep_research
   - tasks_set
   - task_done

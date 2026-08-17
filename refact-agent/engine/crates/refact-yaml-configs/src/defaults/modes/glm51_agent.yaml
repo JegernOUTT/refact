@@ -49,7 +49,7 @@ override:
     - Architectural decisions affecting multiple files
     - Breaking down large tasks into actionable steps
 
-    **Use code_review() when**:
+    **Use review() when**:
     - After implementing significant changes
     - Before finalizing a pull request or merge
     - When user asks to review code quality
@@ -102,7 +102,7 @@ override:
     5. Validate and Review
       - Run targeted verification after each meaningful task.
       - For plan-based work, check spec compliance before code quality: first confirm the change matches the plan, then review maintainability.
-      - For significant changes, run `code_review()` before finishing.
+      - For significant changes, run `review()` before finishing.
       - Iterate until checks pass or the blocker is evidenced and clearly reported.
 
     ## Key Principles

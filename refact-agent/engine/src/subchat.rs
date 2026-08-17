@@ -327,12 +327,9 @@ pub struct SubchatConfig {
 fn should_stream_thinking_progress(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "deep_research"
-            | "strategic_planning"
-            | "strategic_planning_gather_files"
-            | "code_review"
-            | "code_review_gather_files"
-    )
+        "deep_research" | "strategic_planning" | "strategic_planning_gather_files"
+    ) || tool_name == "review_agents"
+        || tool_name.starts_with("review_")
 }
 
 struct SubchatProgressCollector {
@@ -1110,6 +1107,166 @@ pub async fn resolve_subchat_config_with_parent(
         buddy_meta: None,
         step_progress: None,
     })
+}
+
+#[derive(Debug, Clone)]
+pub struct ExplicitSubchatSpec {
+    pub params: SubchatParameters,
+    pub model: String,
+    pub autonomous_no_confirm: bool,
+}
+
+pub async fn resolve_subchat_config_with_explicit_params(
+    gcx: Arc<GlobalContext>,
+    attribution_id: &str,
+    spec: &ExplicitSubchatSpec,
+    stateful: bool,
+    chat_id: Option<String>,
+    title: Option<String>,
+    parent_id: Option<String>,
+    link_type: Option<String>,
+    root_chat_id: Option<String>,
+    tools: Option<Vec<String>>,
+    max_steps: usize,
+    prepend_system_prompt: bool,
+    mode: String,
+    task_meta: Option<TaskMeta>,
+    worktree: Option<WorktreeMeta>,
+    parent_tool_call_id: Option<String>,
+    parent_subchat_tx: Option<Arc<AMutex<mpsc::UnboundedSender<Value>>>>,
+    abort_flag: Option<Arc<AtomicBool>>,
+    subchat_depth: usize,
+) -> Result<SubchatConfig, String> {
+    use crate::at_commands::at_commands::MAX_SUBCHAT_DEPTH;
+    if max_steps == 0 {
+        return Err("max_steps must be > 0".to_string());
+    }
+    if subchat_depth >= MAX_SUBCHAT_DEPTH {
+        return Err(format!(
+            "subchat depth limit ({}) exceeded",
+            MAX_SUBCHAT_DEPTH
+        ));
+    }
+    if spec.model.trim().is_empty() {
+        return Err(format!(
+            "explicit subchat '{}' requires a resolved model id",
+            attribution_id
+        ));
+    }
+    if spec.params.subchat_n_ctx == 0 {
+        return Err(format!(
+            "subchat_n_ctx must be > 0 for '{}'",
+            attribution_id
+        ));
+    }
+    if spec.params.subchat_max_new_tokens == 0 {
+        return Err(format!(
+            "subchat_max_new_tokens must be > 0 for '{}'",
+            attribution_id
+        ));
+    }
+
+    let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+        .await
+        .map_err(|e| format!("failed to load caps: {:?}", e))?;
+    let model_rec = resolve_chat_model(caps, &spec.model)?;
+    if let Some(reason) = llm_endpoint_unusable_reason(&model_rec.base.endpoint) {
+        return Err(format!(
+            "model '{}' for '{}' is misconfigured: {}",
+            spec.model, attribution_id, reason
+        ));
+    }
+    let mut params = spec.params.clone();
+    normalize_subchat_params_for_model(attribution_id, &mut params, &model_rec);
+
+    let worktree = resolve_subchat_worktree(gcx.clone(), parent_id.as_deref(), worktree).await;
+
+    if let Some(requested_tools) = tools.as_ref().filter(|list| !list.is_empty()) {
+        let known_names: std::collections::HashSet<String> = get_available_tools(gcx.clone())
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect();
+        let unknown: Vec<&String> = requested_tools
+            .iter()
+            .filter(|name| !known_names.contains(*name))
+            .collect();
+        if !unknown.is_empty() {
+            warn!(
+                "subchat '{}' requested tools not present in the registry (check config tool names): {:?}",
+                attribution_id, unknown,
+            );
+        }
+    }
+
+    Ok(SubchatConfig {
+        tool_name: attribution_id.to_string(),
+        stateful,
+        autonomous_no_confirm: spec.autonomous_no_confirm,
+        chat_id,
+        title,
+        parent_id,
+        link_type,
+        root_chat_id,
+        tools: ToolsPolicy::from_option(tools),
+        max_steps,
+        prepend_system_prompt,
+        wrap_up: None,
+        task_meta,
+        worktree,
+        model: model_rec.base.id.clone(),
+        mode,
+        n_ctx: params.subchat_n_ctx,
+        max_new_tokens: params.subchat_max_new_tokens,
+        temperature: params.subchat_temperature,
+        reasoning_effort: params.subchat_reasoning_effort,
+        cache_control: params.subchat_cache_control,
+        parent_tool_call_id,
+        parent_subchat_tx,
+        abort_flag,
+        subchat_depth,
+        final_step_force_answer: false,
+        buddy_meta: None,
+        step_progress: None,
+    })
+}
+
+pub async fn run_subchat_once_with_explicit_params(
+    gcx: Arc<GlobalContext>,
+    attribution_id: &str,
+    spec: &ExplicitSubchatSpec,
+    messages: Vec<ChatMessage>,
+    parent_tool_call_id: String,
+    parent_subchat_tx: Arc<AMutex<mpsc::UnboundedSender<Value>>>,
+    parent_abort_flag: Arc<AtomicBool>,
+    parent_depth: usize,
+    parent_task_meta: Option<TaskMeta>,
+    parent_worktree: Option<WorktreeMeta>,
+) -> Result<SubchatResult, String> {
+    let config = resolve_subchat_config_with_explicit_params(
+        gcx.clone(),
+        attribution_id,
+        spec,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(vec![]),
+        1,
+        false,
+        "agent".to_string(),
+        parent_task_meta,
+        parent_worktree,
+        Some(parent_tool_call_id),
+        Some(parent_subchat_tx),
+        Some(parent_abort_flag),
+        parent_depth + 1,
+    )
+    .await?;
+
+    run_subchat(gcx, messages, config).await
 }
 
 fn has_final_answer(messages: &[ChatMessage]) -> bool {
@@ -3472,7 +3629,7 @@ mod subchat_tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_subchat_params_normalizes_code_review_for_smaller_model() {
+    async fn test_resolve_subchat_params_normalizes_review_agents_for_smaller_model() {
         let gcx = make_test_gcx().await;
         let config_dir = gcx.config_dir.clone();
         global_configs_try_create_all(&config_dir).await.unwrap();
@@ -3493,7 +3650,7 @@ mod subchat_tests {
 
         install_caps(gcx.clone(), caps).await;
 
-        let params = resolve_subchat_params(gcx.clone(), "code_review")
+        let params = resolve_subchat_params(gcx.clone(), "review_agents")
             .await
             .unwrap();
         let extra_budget = (params.subchat_n_ctx as f32 * 0.06) as usize;
@@ -3507,7 +3664,7 @@ mod subchat_tests {
         assert!(
             params.subchat_max_new_tokens + params.subchat_tokens_for_rag + extra_budget
                 < params.subchat_n_ctx,
-            "normalized code_review budget must fit the clamped model context window"
+            "normalized review_agents budget must fit the clamped model context window"
         );
     }
 
@@ -3535,7 +3692,7 @@ mod subchat_tests {
 
         let config = resolve_subchat_config_with_parent(
             gcx,
-            "code_review",
+            "review_agents",
             false,
             None,
             None,
@@ -3734,11 +3891,11 @@ mod subchat_tests {
 
         install_caps(gcx.clone(), caps).await;
 
-        let err = resolve_subchat_params(gcx, "code_review_gather_files")
+        let err = resolve_subchat_params(gcx, "strategic_planning_gather_files")
             .await
             .unwrap_err();
 
-        assert!(err.contains("Light model required by subagent 'code_review_gather_files'"));
+        assert!(err.contains("Light model required by subagent 'strategic_planning_gather_files'"));
         assert!(err.contains("model_type: light"));
         assert!(err.contains("Default model settings"));
     }

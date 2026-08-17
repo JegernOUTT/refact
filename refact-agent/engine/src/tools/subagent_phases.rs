@@ -290,6 +290,25 @@ fn merge_files_with_seeds(seeds: &[String], parsed: Vec<String>, max_files: usiz
     out
 }
 
+pub enum GatherRunner {
+    Registry {
+        subagent_id: String,
+    },
+    Explicit {
+        spec: crate::subchat::ExplicitSubchatSpec,
+    },
+}
+
+pub struct GatherPlan {
+    pub attribution_id: String,
+    pub system_prompt: String,
+    pub retry_prompt: String,
+    pub tools: Vec<String>,
+    pub max_steps: usize,
+    pub max_files: usize,
+    pub runner: GatherRunner,
+}
+
 pub async fn gather_files_phase(
     gcx: Arc<GlobalContext>,
     ccx: Arc<AMutex<AtCommandsContext>>,
@@ -298,27 +317,6 @@ pub async fn gather_files_phase(
     main_config: &CodeSubagentConfig,
     params: &GatherFilesParams<'_>,
 ) -> Result<Vec<PathBuf>, String> {
-    let (
-        parent_chat_id,
-        parent_root_chat_id,
-        parent_subchat_tx,
-        parent_abort_flag,
-        current_depth,
-        parent_task_meta,
-        parent_worktree,
-    ) = {
-        let ccx_lock = ccx.lock().await;
-        (
-            ccx_lock.chat_id.clone(),
-            ccx_lock.root_chat_id.clone(),
-            ccx_lock.subchat_tx.clone(),
-            ccx_lock.abort_flag.clone(),
-            ccx_lock.subchat_depth,
-            ccx_lock.task_meta.clone(),
-            ccx_lock.execution_scope_worktree(),
-        )
-    };
-
     let gather_subagent_id = main_config
         .gather_subagent
         .as_deref()
@@ -367,28 +365,109 @@ pub async fn gather_files_phase(
 
     let max_files = main_config.max_files.unwrap_or(DEFAULT_MAX_FILES);
 
-    let subchat_config = resolve_subchat_config_with_parent(
-        gcx.clone(),
-        gather_subagent_id,
-        true,
-        None,
-        Some(params.title.to_string()),
-        Some(parent_chat_id),
-        Some("gather_files".to_string()),
-        Some(parent_root_chat_id),
-        Some(tools),
+    let plan = GatherPlan {
+        attribution_id: gather_subagent_id.to_string(),
+        system_prompt,
+        retry_prompt,
+        tools,
         max_steps,
-        false,
-        None,
-        "agent".to_string(),
-        parent_task_meta.clone(),
-        parent_worktree.clone(),
-        Some(tool_call_id.clone()),
-        Some(parent_subchat_tx.clone()),
-        Some(parent_abort_flag.clone()),
-        current_depth + 1,
-    )
-    .await?;
+        max_files,
+        runner: GatherRunner::Registry {
+            subagent_id: gather_subagent_id.to_string(),
+        },
+    };
+    gather_files_phase_with_plan(gcx, ccx, external_messages, tool_call_id, params, plan).await
+}
+
+pub async fn gather_files_phase_with_plan(
+    gcx: Arc<GlobalContext>,
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    external_messages: Vec<ChatMessage>,
+    tool_call_id: String,
+    params: &GatherFilesParams<'_>,
+    plan: GatherPlan,
+) -> Result<Vec<PathBuf>, String> {
+    let (
+        parent_chat_id,
+        parent_root_chat_id,
+        parent_subchat_tx,
+        parent_abort_flag,
+        current_depth,
+        parent_task_meta,
+        parent_worktree,
+    ) = {
+        let ccx_lock = ccx.lock().await;
+        (
+            ccx_lock.chat_id.clone(),
+            ccx_lock.root_chat_id.clone(),
+            ccx_lock.subchat_tx.clone(),
+            ccx_lock.abort_flag.clone(),
+            ccx_lock.subchat_depth,
+            ccx_lock.task_meta.clone(),
+            ccx_lock.execution_scope_worktree(),
+        )
+    };
+
+    let GatherPlan {
+        attribution_id,
+        system_prompt,
+        retry_prompt,
+        tools,
+        max_steps,
+        max_files,
+        runner,
+    } = plan;
+
+    let subchat_config = match &runner {
+        GatherRunner::Registry { subagent_id } => {
+            resolve_subchat_config_with_parent(
+                gcx.clone(),
+                subagent_id,
+                true,
+                None,
+                Some(params.title.to_string()),
+                Some(parent_chat_id),
+                Some("gather_files".to_string()),
+                Some(parent_root_chat_id),
+                Some(tools),
+                max_steps,
+                false,
+                None,
+                "agent".to_string(),
+                parent_task_meta.clone(),
+                parent_worktree.clone(),
+                Some(tool_call_id.clone()),
+                Some(parent_subchat_tx.clone()),
+                Some(parent_abort_flag.clone()),
+                current_depth + 1,
+            )
+            .await?
+        }
+        GatherRunner::Explicit { spec } => {
+            crate::subchat::resolve_subchat_config_with_explicit_params(
+                gcx.clone(),
+                &attribution_id,
+                spec,
+                true,
+                None,
+                Some(params.title.to_string()),
+                Some(parent_chat_id),
+                Some("gather_files".to_string()),
+                Some(parent_root_chat_id),
+                Some(tools),
+                max_steps,
+                false,
+                "agent".to_string(),
+                parent_task_meta.clone(),
+                parent_worktree.clone(),
+                Some(tool_call_id.clone()),
+                Some(parent_subchat_tx.clone()),
+                Some(parent_abort_flag.clone()),
+                current_depth + 1,
+            )
+            .await?
+        }
+    };
 
     let mut messages = vec![ChatMessage {
         role: "system".to_string(),
@@ -405,7 +484,7 @@ pub async fn gather_files_phase(
         "tool.subagent_phases",
         json!({
             "phase": "gather_files",
-            "subagent_id": gather_subagent_id,
+            "subagent_id": attribution_id,
             "title": params.title,
             "max_steps": max_steps,
             "max_files": max_files,
@@ -414,7 +493,7 @@ pub async fn gather_files_phase(
         gather_instruction,
     ));
 
-    tracing::info!("{}: starting file-gathering subagent", gather_subagent_id);
+    tracing::info!("{}: starting file-gathering subagent", attribution_id);
     let result = run_subchat(gcx.clone(), messages.clone(), subchat_config).await?;
 
     let response = get_last_assistant_content(&result.messages);
@@ -423,7 +502,7 @@ pub async fn gather_files_phase(
     if files.is_empty() {
         tracing::info!(
             "{}: file list not properly formatted, requesting retry",
-            gather_subagent_id
+            attribution_id
         );
         let mut retry_messages = result.messages.clone();
         retry_messages.push(event(
@@ -431,7 +510,7 @@ pub async fn gather_files_phase(
             "tool.subagent_phases",
             json!({
                 "phase": "gather_files",
-                "subagent_id": gather_subagent_id,
+                "subagent_id": attribution_id,
                 "title": params.title,
                 "max_steps": max_steps,
                 "max_files": max_files,
@@ -440,18 +519,37 @@ pub async fn gather_files_phase(
             retry_prompt,
         ));
 
-        let retry_result = run_subchat_once_with_parent(
-            gcx.clone(),
-            gather_subagent_id,
-            retry_messages,
-            tool_call_id.clone(),
-            parent_subchat_tx.clone(),
-            parent_abort_flag.clone(),
-            current_depth,
-            parent_task_meta.clone(),
-            parent_worktree.clone(),
-        )
-        .await?;
+        let retry_result = match &runner {
+            GatherRunner::Registry { subagent_id } => {
+                run_subchat_once_with_parent(
+                    gcx.clone(),
+                    subagent_id,
+                    retry_messages,
+                    tool_call_id.clone(),
+                    parent_subchat_tx.clone(),
+                    parent_abort_flag.clone(),
+                    current_depth,
+                    parent_task_meta.clone(),
+                    parent_worktree.clone(),
+                )
+                .await?
+            }
+            GatherRunner::Explicit { spec } => {
+                crate::subchat::run_subchat_once_with_explicit_params(
+                    gcx.clone(),
+                    &attribution_id,
+                    spec,
+                    retry_messages,
+                    tool_call_id.clone(),
+                    parent_subchat_tx.clone(),
+                    parent_abort_flag.clone(),
+                    current_depth,
+                    parent_task_meta.clone(),
+                    parent_worktree.clone(),
+                )
+                .await?
+            }
+        };
         let retry_response = get_last_assistant_content(&retry_result.messages);
         files = parse_relevant_files(&retry_response, max_files);
 
@@ -462,7 +560,7 @@ pub async fn gather_files_phase(
 
     let files = merge_files_with_seeds(&params.seed_files, files, max_files);
 
-    tracing::info!("{}: gathered {} files", gather_subagent_id, files.len());
+    tracing::info!("{}: gathered {} files", attribution_id, files.len());
 
     let execution_scope = parent_worktree.as_ref().map(ExecutionScope::from_worktree);
     let mut valid_paths = Vec::new();
@@ -476,11 +574,7 @@ pub async fn gather_files_phase(
                 valid_paths.push(path);
             }
         } else {
-            tracing::warn!(
-                "{}: skipping invalid path: {}",
-                gather_subagent_id,
-                file_str
-            );
+            tracing::warn!("{}: skipping invalid path: {}", attribution_id, file_str);
         }
     }
 
