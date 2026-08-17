@@ -229,6 +229,35 @@ export function PrivacySettingsSection() {
 
   const configError = data.error ?? statusQuery.data?.config_error;
   const observation = statusQuery.data?.observation;
+  const observationDescription = statusQuery.isError
+    ? "Observation status could not be checked."
+    : observation?.platform_supported === false
+      ? `File observation is not implemented on ${
+          statusQuery.data?.platform ?? "this platform"
+        }.`
+      : observation?.runtime_available
+        ? "Tracks files read by shell and process tools."
+        : observation?.last_error ??
+          "No observation attempt has run yet. Runtime availability is unknown.";
+  const observationLabel = statusQuery.isLoading
+    ? "Checking"
+    : statusQuery.isError
+      ? "Status unavailable"
+      : observation?.platform_supported === false
+        ? "Unsupported platform"
+        : observation?.runtime_available
+          ? "Runtime active"
+          : observation?.last_error
+            ? "Degraded attribution"
+            : "Runtime unknown";
+  const observationTone =
+    statusQuery.isError ||
+    observation?.platform_supported === false ||
+    observation?.last_error
+      ? "warning"
+      : observation?.runtime_available
+        ? "success"
+        : "muted";
 
   return (
     <SettingsSection
@@ -255,40 +284,20 @@ export function PrivacySettingsSection() {
         <SettingItem
           className={`${styles.capabilityBanner} rf-enter`}
           title="Shell file observation"
-          description={
-            statusQuery.isError
-              ? "Observation capability could not be checked."
-              : observation?.reason ??
-                "Tracks files read by shell and process tools on this platform."
-          }
+          description={observationDescription}
           control={
-            <Badge
-              tone={
-                statusQuery.isError || observation?.available === false
-                  ? "warning"
-                  : observation?.available
-                    ? "success"
-                    : "muted"
-              }
-              variant="soft"
-            >
+            <Badge tone={observationTone} variant="soft">
               <StatusDot
                 aria-hidden="true"
                 status={
-                  statusQuery.isError || observation?.available === false
+                  observationTone === "warning"
                     ? "warning"
-                    : observation?.available
+                    : observationTone === "success"
                       ? "success"
                       : "in_progress"
                 }
               />
-              {statusQuery.isLoading
-                ? "Checking"
-                : observation?.available
-                  ? `Available on ${
-                      statusQuery.data?.platform ?? "this platform"
-                    }`
-                  : "Degraded attribution"}
+              {observationLabel}
             </Badge>
           }
         />

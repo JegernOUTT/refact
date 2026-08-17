@@ -41,8 +41,9 @@ export type PrivacyPolicyResponse = {
 };
 
 export type PrivacyObservationCapability = {
-  available: boolean;
-  reason: string | null;
+  platform_supported: boolean;
+  runtime_available: boolean;
+  last_error: string | null;
 };
 
 export type PrivacyStatusResponse = {

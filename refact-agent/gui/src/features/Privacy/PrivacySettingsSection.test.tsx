@@ -50,7 +50,11 @@ const response: PrivacyPolicyResponse = {
 
 const status: PrivacyStatusResponse = {
   platform: "linux",
-  observation: { available: true, reason: null },
+  observation: {
+    platform_supported: true,
+    runtime_available: true,
+    last_error: null,
+  },
   config_error: null,
 };
 
@@ -80,7 +84,7 @@ describe("PrivacySettingsSection", () => {
     expect(columns[2]).toHaveTextContent("Build MCP");
     expect(within(grid).getByText("2 matches")).toBeInTheDocument();
     expect(within(grid).getByText("7 matches")).toBeInTheDocument();
-    expect(screen.getByText("Available on linux")).toBeInTheDocument();
+    expect(screen.getByText("Runtime active")).toBeInTheDocument();
     expect(
       screen.getByRole("combobox", {
         name: "Shell read behavior for secrets",
@@ -118,10 +122,11 @@ describe("PrivacySettingsSection", () => {
       ),
       http.get("*/v1/privacy/status", () =>
         HttpResponse.json({
-          platform: "windows",
+          platform: "linux",
           observation: {
-            available: false,
-            reason: "File observation is unavailable on this platform.",
+            platform_supported: true,
+            runtime_available: false,
+            last_error: "PTRACE_TRACEME is unavailable",
           },
           config_error: "privacy.yaml: malformed glob",
         } satisfies PrivacyStatusResponse),
@@ -137,7 +142,33 @@ describe("PrivacySettingsSection", () => {
     ).toHaveTextContent("privacy.yaml: malformed glob");
     expect(screen.getByText("Degraded attribution")).toBeInTheDocument();
     expect(
-      screen.getByText("File observation is unavailable on this platform."),
+      screen.getByText("PTRACE_TRACEME is unavailable"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not claim runtime availability before an observation attempt", async () => {
+    server.use(
+      http.get("*/v1/privacy/policy", () => HttpResponse.json(response)),
+      http.get("*/v1/privacy/status", () =>
+        HttpResponse.json({
+          platform: "linux",
+          observation: {
+            platform_supported: true,
+            runtime_available: false,
+            last_error: null,
+          },
+          config_error: null,
+        } satisfies PrivacyStatusResponse),
+      ),
+    );
+
+    render(<PrivacySettingsSection />);
+
+    expect(await screen.findByText("Runtime unknown")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "No observation attempt has run yet. Runtime availability is unknown.",
+      ),
     ).toBeInTheDocument();
   });
 });

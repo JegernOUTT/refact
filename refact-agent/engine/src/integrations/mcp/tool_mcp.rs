@@ -572,6 +572,7 @@ fn attach_mcp_observation_status(
     observed_reads_before: &std::collections::HashSet<std::path::PathBuf>,
     message: &mut ChatMessage,
 ) {
+    crate::privacy::record_observation_status(gcx, &status);
     match status {
         refact_exec::ObservationStatus::Observed(access)
         | refact_exec::ObservationStatus::Pending(access)

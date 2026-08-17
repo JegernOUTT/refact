@@ -203,6 +203,7 @@ pub async fn apply_shell_observation(
     derived_zones: &DerivedPrivacyZones,
     message: &mut ChatMessage,
 ) -> Result<ShellReadDecision, String> {
+    crate::privacy::record_observation_status(gcx, &observation);
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
     let records = match observation {
         ObservationStatus::Observed(access) => {

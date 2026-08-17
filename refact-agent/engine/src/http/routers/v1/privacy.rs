@@ -27,8 +27,9 @@ pub struct PrivacyPolicyResponse {
 
 #[derive(Debug, Serialize)]
 pub struct PrivacyObservationCapability {
-    pub available: bool,
-    pub reason: Option<String>,
+    pub platform_supported: bool,
+    pub runtime_available: bool,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,9 +98,10 @@ pub async fn handle_v1_privacy_policy_post(
 pub async fn handle_v1_privacy_status(State(app): State<AppState>) -> Json<PrivacyStatusResponse> {
     crate::privacy::load_privacy_if_needed(app.gcx.clone()).await;
     let config_error = app.gcx.privacy_policy_load.read().unwrap().error.clone();
+    let runtime = app.gcx.privacy_observation_runtime.read().unwrap().clone();
     Json(PrivacyStatusResponse {
         platform: std::env::consts::OS.to_string(),
-        observation: observation_capability(),
+        observation: observation_capability(runtime),
         config_error,
     })
 }
@@ -298,41 +300,25 @@ fn destination_key(destination: &Destination) -> (u8, &str) {
     (kind, destination.id.0.as_str())
 }
 
-fn observation_capability() -> PrivacyObservationCapability {
-    #[cfg(all(
+fn observation_capability(
+    runtime: crate::privacy::PrivacyObservationRuntimeState,
+) -> PrivacyObservationCapability {
+    PrivacyObservationCapability {
+        platform_supported: cfg!(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )),
+        runtime_available: runtime.runtime_available,
+        last_error: runtime.last_error,
+    }
+}
+
+#[cfg(test)]
+fn platform_supported_for_tests() -> bool {
+    cfg!(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    {
-        PrivacyObservationCapability {
-            available: true,
-            reason: None,
-        }
-    }
-    #[cfg(all(
-        target_os = "linux",
-        not(any(target_arch = "x86_64", target_arch = "aarch64"))
-    ))]
-    {
-        PrivacyObservationCapability {
-            available: false,
-            reason: Some("Linux observation is unsupported on this architecture".to_string()),
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        PrivacyObservationCapability {
-            available: false,
-            reason: Some("macOS syscall observation unavailable".to_string()),
-        }
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        PrivacyObservationCapability {
-            available: false,
-            reason: Some("backend unavailable".to_string()),
-        }
-    }
+    ))
 }
 
 #[cfg(test)]
@@ -454,6 +440,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn privacy_policy_save_replaces_and_backs_up_malformed_config() {
+        let (_cache, config, app) = test_app().await;
+        let path = config.path().join("privacy.yaml");
+        let malformed = "privacy_rules: [";
+        tokio::fs::write(&path, malformed).await.unwrap();
+        let router = crate::http::routers::make_refact_http_server(app);
+
+        let (status, response) =
+            json_request(router, post_json("/v1/privacy/policy", policy("**/.env"))).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["policy"]["zones"][0]["name"], "secrets");
+        let saved = tokio::fs::read_to_string(&path).await.unwrap();
+        let saved: serde_yaml::Value = serde_yaml::from_str(&saved).unwrap();
+        assert_eq!(saved["privacy_rules"]["zones"][0]["name"], "secrets");
+        let mut backups = tokio::fs::read_dir(config.path()).await.unwrap();
+        let mut backup_paths = Vec::new();
+        while let Some(entry) = backups.next_entry().await.unwrap() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("privacy.yaml.corrupt-") {
+                backup_paths.push(entry.path());
+            }
+        }
+        assert_eq!(backup_paths.len(), 1);
+        assert_eq!(
+            tokio::fs::read_to_string(&backup_paths[0]).await.unwrap(),
+            malformed
+        );
+    }
+
+    #[tokio::test]
     async fn privacy_policy_get_surfaces_last_load_error() {
         let (_cache, config, app) = test_app().await;
         tokio::fs::write(config.path().join("privacy.yaml"), "privacy_rules: [")
@@ -478,7 +495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn privacy_status_reports_platform_capability_and_config_error() {
+    async fn privacy_status_before_observation_is_not_optimistic() {
         let (_cache, config, app) = test_app().await;
         tokio::fs::write(config.path().join("privacy.yaml"), "privacy_rules: [")
             .await
@@ -500,7 +517,39 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("failed to parse"));
-        assert!(response["observation"]["available"].is_boolean());
+        assert_eq!(
+            response["observation"]["platform_supported"],
+            platform_supported_for_tests()
+        );
+        assert_eq!(response["observation"]["runtime_available"], false);
+        assert!(response["observation"]["last_error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn privacy_status_keeps_platform_support_when_runtime_is_unavailable() {
+        let (_cache, _config, app) = test_app().await;
+        crate::privacy::record_observation_status(
+            &app.gcx,
+            &refact_exec::ObservationStatus::Unavailable("ptrace denied".to_string()),
+        );
+        let router = crate::http::routers::make_refact_http_server(app);
+
+        let (status, response) = json_request(
+            router,
+            Request::builder()
+                .uri("/v1/privacy/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            response["observation"]["platform_supported"],
+            platform_supported_for_tests()
+        );
+        assert_eq!(response["observation"]["runtime_available"], false);
+        assert_eq!(response["observation"]["last_error"], "ptrace denied");
     }
 
     #[tokio::test]

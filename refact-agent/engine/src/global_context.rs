@@ -28,7 +28,7 @@ use crate::exec::ExecRegistry;
 use crate::files_in_workspace::DocumentsState;
 use crate::integrations::browser_runtime::BrowserRuntime;
 use crate::integrations::sessions::IntegrationSession;
-use crate::privacy::PrivacySettings;
+use crate::privacy::{PrivacyObservationRuntimeState, PrivacySettings};
 use crate::background_tasks::BackgroundTasksHolder;
 use crate::ext::hooks_runner::HooksConfig;
 use crate::scheduler::SchedulerConfig;
@@ -320,6 +320,7 @@ pub struct GlobalContext {
     pub at_commands_preview_cache: Arc<AMutex<AtCommandsPreviewCache>>,
     pub privacy_settings: Arc<StdRwLock<Arc<PrivacySettings>>>,
     pub privacy_policy_load: Arc<StdRwLock<refact_privacy::PolicyLoad>>,
+    pub privacy_observation_runtime: Arc<StdRwLock<PrivacyObservationRuntimeState>>,
     pub indexing_everywhere: Arc<crate::files_blocklist::IndexingEverywhere>,
     pub integration_sessions:
         Arc<AMutex<HashMap<String, Arc<AMutex<Box<dyn IntegrationSession>>>>>>,
@@ -808,6 +809,9 @@ pub async fn create_global_context(
         at_commands_preview_cache: Arc::new(AMutex::new(AtCommandsPreviewCache::new())),
         privacy_settings: Arc::new(StdRwLock::new(Arc::new(PrivacySettings::default()))),
         privacy_policy_load: Arc::new(StdRwLock::new(refact_privacy::PolicyLoad::default())),
+        privacy_observation_runtime: Arc::new(StdRwLock::new(
+            PrivacyObservationRuntimeState::default(),
+        )),
         indexing_everywhere: Arc::new(crate::files_blocklist::IndexingEverywhere::default()),
         integration_sessions: Arc::new(AMutex::new(HashMap::new())),
         browser_runtimes: Arc::new(AMutex::new(HashMap::new())),
@@ -1084,6 +1088,9 @@ pub mod tests {
             at_commands_preview_cache: Arc::new(AMutex::new(AtCommandsPreviewCache::new())),
             privacy_settings: Arc::new(StdRwLock::new(Arc::new(PrivacySettings::default()))),
             privacy_policy_load: Arc::new(StdRwLock::new(refact_privacy::PolicyLoad::default())),
+            privacy_observation_runtime: Arc::new(StdRwLock::new(
+                PrivacyObservationRuntimeState::default(),
+            )),
             indexing_everywhere: Arc::new(crate::files_blocklist::IndexingEverywhere::default()),
             integration_sessions: Arc::new(AMutex::new(HashMap::new())),
             browser_runtimes: Arc::new(AMutex::new(HashMap::new())),

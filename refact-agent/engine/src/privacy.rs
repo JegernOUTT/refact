@@ -20,6 +20,28 @@ pub use refact_privacy::{PolicyLoad, PrivacyPolicy};
 
 const PRIVACY_TOO_OLD: Duration = Duration::from_secs(3);
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrivacyObservationRuntimeState {
+    pub runtime_available: bool,
+    pub last_error: Option<String>,
+}
+
+pub fn record_observation_status(gcx: &GlobalContext, status: &refact_exec::ObservationStatus) {
+    let state = match status {
+        refact_exec::ObservationStatus::Unavailable(reason) => PrivacyObservationRuntimeState {
+            runtime_available: false,
+            last_error: Some(reason.clone()),
+        },
+        refact_exec::ObservationStatus::Observed(_)
+        | refact_exec::ObservationStatus::Pending(_)
+        | refact_exec::ObservationStatus::Incomplete(_) => PrivacyObservationRuntimeState {
+            runtime_available: true,
+            last_error: None,
+        },
+    };
+    *gcx.privacy_observation_runtime.write().unwrap() = state;
+}
+
 pub async fn warn_observation_degraded_once(gcx: Arc<GlobalContext>, reason: &str) {
     crate::buddy::observers::privacy_degraded::warn_once(gcx, reason).await;
 }
@@ -106,18 +128,17 @@ pub async fn save_privacy_policy(
         .compile()
         .map_err(|error| format!("invalid privacy policy: {error}"))?;
     let path = global_privacy_path(&gcx);
-    let existing = match tokio::fs::read_to_string(&path).await {
-        Ok(content) => serde_yaml::from_str::<Value>(&content)
-            .map_err(|error| format!("failed to parse {}: {error}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Value::Mapping(Mapping::new())
-        }
+    let mut document = match tokio::fs::read_to_string(&path).await {
+        Ok(content) => match serde_yaml::from_str::<Value>(&content) {
+            Ok(Value::Mapping(document)) => document,
+            Ok(_) | Err(_) => {
+                backup_corrupt_privacy_file(&path, &content).await?;
+                Mapping::new()
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Mapping::new(),
         Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
     };
-    let mut document = existing
-        .as_mapping()
-        .cloned()
-        .ok_or_else(|| format!("{} must contain a YAML mapping", path.display()))?;
     document.insert(
         Value::String("privacy_rules".to_string()),
         serde_yaml::to_value(&policy)
@@ -142,6 +163,26 @@ pub async fn save_privacy_policy(
     *gcx.privacy_policy_load.write().unwrap() = loaded;
     *gcx.privacy_settings.write().unwrap() = settings;
     Ok(())
+}
+
+async fn backup_corrupt_privacy_file(path: &Path, content: &str) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("privacy.yaml");
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|error| format!("system clock error: {error}"))?
+        .as_millis();
+    let backup = parent.join(format!(
+        "{file_name}.corrupt-{timestamp}-{}",
+        Uuid::new_v4()
+    ));
+    write_privacy_file(&backup, content).await?;
+    Ok(backup)
 }
 
 async fn write_privacy_file(path: &Path, content: &str) -> Result<(), String> {
