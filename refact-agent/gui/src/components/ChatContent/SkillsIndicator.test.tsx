@@ -68,10 +68,13 @@ describe("SkillsIndicator", () => {
       active_skill: null,
     });
 
-    const { container } = render(<SkillsIndicator chatId="test-chat-id" />, {
-      preloadedState,
-    });
-    expect(container.querySelector('[role="button"]')).toBeNull();
+    const { queryByTestId } = render(
+      <SkillsIndicator chatId="test-chat-id" />,
+      {
+        preloadedState,
+      },
+    );
+    expect(queryByTestId("chat-skills-indicator")).toBeNull();
   });
 
   test("clicking navigates to extensions page", async () => {
@@ -87,15 +90,15 @@ describe("SkillsIndicator", () => {
       { preloadedState },
     );
 
-    const indicator = getByRole("button");
-    await user.click(indicator);
+    const manage = getByRole("button", { name: "Manage skills" });
+    await user.click(manage);
 
     const pages = store.getState().pages;
     const lastPage = pages[pages.length - 1];
     expect(lastPage).toEqual({ name: "extensions", tab: "skills" });
   });
 
-  test("renders active skill badge when active_skill is set", () => {
+  test("renders the active skill name and the available count", () => {
     const preloadedState = makeSkillsState({
       skills_available: 3,
       skills_included: [],
@@ -108,9 +111,12 @@ describe("SkillsIndicator", () => {
       { preloadedState },
     );
 
-    expect(getByRole("button")).toBeTruthy();
+    expect(getByRole("button", { name: "Manage skills" })).toBeTruthy();
     expect(getByText("review-skill")).toBeTruthy();
-    expect(getByText(/Active skill:/)).toBeTruthy();
+    expect(getByText(/3 available/)).toBeTruthy();
+    expect(
+      getByText("review-skill is active, 3 skills available"),
+    ).toBeTruthy();
   });
 
   test("renders only available count when no active skill", () => {
@@ -126,9 +132,10 @@ describe("SkillsIndicator", () => {
       { preloadedState },
     );
 
-    expect(getByRole("button")).toBeTruthy();
-    expect(getByText(/Skills: 4 available/)).toBeTruthy();
-    expect(queryByText(/Active skill:/)).toBeNull();
+    expect(getByRole("button", { name: "Manage skills" })).toBeTruthy();
+    expect(getByText("Skills")).toBeTruthy();
+    expect(getByText(/4 available/)).toBeTruthy();
+    expect(queryByText(/is active/)).toBeNull();
   });
 
   test("renders nothing when no skills available and no active skill", () => {
@@ -139,9 +146,12 @@ describe("SkillsIndicator", () => {
       active_skill: null,
     });
 
-    const { container } = render(<SkillsIndicator chatId="test-chat-id" />, {
-      preloadedState,
-    });
-    expect(container.querySelector('[role="button"]')).toBeNull();
+    const { queryByTestId } = render(
+      <SkillsIndicator chatId="test-chat-id" />,
+      {
+        preloadedState,
+      },
+    );
+    expect(queryByTestId("chat-skills-indicator")).toBeNull();
   });
 });

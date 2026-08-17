@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 pub struct SkillsStatusResponse {
     pub skills_available: usize,
     pub skills_included: Vec<String>,
@@ -26,19 +26,17 @@ pub async fn handle_v1_skills_status(
         let sessions_read = sessions.read().await;
         sessions_read.get(&chat_id).cloned()
     };
-    let Some(session_arc) = session_arc else {
-        return Err(ScratchError::new(
-            StatusCode::NOT_FOUND,
-            format!("chat_id {} not found", chat_id),
-        ));
-    };
-    let session = session_arc.lock().await;
-    let active_skill = session.thread.active_skill.clone();
-    let response = SkillsStatusResponse {
-        skills_available: session.skills_available_count,
-        skills_included: session.skills_included.clone(),
-        skills_enabled: session.skills_available_count > 0,
-        active_skill,
+    let response = match session_arc {
+        Some(session_arc) => {
+            let session = session_arc.lock().await;
+            SkillsStatusResponse {
+                skills_available: session.skills_available_count,
+                skills_included: session.skills_included.clone(),
+                skills_enabled: session.skills_available_count > 0,
+                active_skill: session.thread.active_skill.clone(),
+            }
+        }
+        None => SkillsStatusResponse::default(),
     };
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -49,8 +47,33 @@ pub async fn handle_v1_skills_status(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::Request;
+    use hyper::body::to_bytes;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AMutex;
+    use tower::ServiceExt;
+
     use super::*;
     use crate::chat::types::ChatSession;
+
+    async fn test_router() -> (AppState, axum::Router) {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let router = crate::http::routers::make_refact_http_server(app.clone());
+        (app, router)
+    }
+
+    async fn get_skills_status(router: axum::Router, chat_id: &str) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .uri(format!("/v1/chats/{chat_id}/skills-status"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body()).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
 
     #[test]
     fn test_skills_status_available_count_reflects_loaded_skills() {
@@ -151,5 +174,41 @@ mod tests {
         assert!(session.skills_included.is_empty());
         let skills_enabled = session.skills_available_count > 0;
         assert!(!skills_enabled);
+    }
+
+    #[tokio::test]
+    async fn skills_status_without_live_session_returns_zeroed_defaults() {
+        let (_app, router) = test_router().await;
+
+        let (status, body) = get_skills_status(router, "chat-never-started").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["skills_available"], 0);
+        assert_eq!(body["skills_enabled"], false);
+        assert!(body["skills_included"].as_array().unwrap().is_empty());
+        assert!(body["active_skill"].is_null());
+    }
+
+    #[tokio::test]
+    async fn skills_status_reports_live_session_skills() {
+        let (app, router) = test_router().await;
+        let chat_id = "chat-with-skills";
+        let mut session = ChatSession::new(chat_id.to_string());
+        session.skills_available_count = 2;
+        session.skills_included = vec!["review".to_string()];
+        session.thread.active_skill = Some("review".to_string());
+        app.gcx
+            .chat_sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), Arc::new(AMutex::new(session)));
+
+        let (status, body) = get_skills_status(router, chat_id).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["skills_available"], 2);
+        assert_eq!(body["skills_enabled"], true);
+        assert_eq!(body["skills_included"][0], "review");
+        assert_eq!(body["active_skill"], "review");
     }
 }

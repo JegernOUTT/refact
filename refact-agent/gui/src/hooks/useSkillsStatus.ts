@@ -1,28 +1,10 @@
-import { useEffect, useState } from "react";
 import { useGetSkillsStatusQuery } from "../services/refact/skillsStatus";
 
 export function useSkillsStatus(chatId: string) {
-  const [notFound, setNotFound] = useState(false);
-
-  useEffect(() => {
-    setNotFound(false);
-  }, [chatId]);
-
-  const { data, error } = useGetSkillsStatusQuery(chatId, {
+  const { data } = useGetSkillsStatusQuery(chatId, {
     pollingInterval: 5000,
-    skip: !chatId || notFound,
+    skip: !chatId,
   });
-
-  useEffect(() => {
-    if (
-      error &&
-      "status" in error &&
-      typeof error.status === "number" &&
-      error.status === 404
-    ) {
-      setNotFound(true);
-    }
-  }, [error]);
 
   return {
     skillsEnabled: data?.skills_enabled ?? false,

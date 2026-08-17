@@ -1,9 +1,12 @@
 import React from "react";
-import { Badge, Icon } from "../ui";
+import { Text } from "@radix-ui/themes";
+import classNames from "classnames";
+import { BookOpen } from "lucide-react";
+
+import { Button, Icon } from "../ui";
 import { useAppDispatch } from "../../hooks";
 import { push } from "../../features/Pages/pagesSlice";
 import { useSkillsStatus } from "../../hooks/useSkillsStatus";
-import { BookOpen } from "lucide-react";
 import styles from "./SkillsIndicator.module.css";
 
 export type SkillsIndicatorProps = {
@@ -18,41 +21,53 @@ export const SkillsIndicator: React.FC<SkillsIndicatorProps> = ({ chatId }) => {
     return null;
   }
 
-  const handleClick = () => {
-    dispatch(push({ name: "extensions", tab: "skills" }));
-  };
-
-  const handleKeyDown = (event: React.KeyboardEvent) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      handleClick();
-    }
-  };
+  const noun = skillsAvailable === 1 ? "skill" : "skills";
+  const note = skillsAvailable > 0 ? `${skillsAvailable} available` : null;
+  const summary =
+    activeSkill !== null
+      ? `${activeSkill} is active, ${skillsAvailable} ${noun} available`
+      : `${skillsAvailable} ${noun} available`;
 
   return (
     <div
-      className={styles.indicator}
-      role="button"
-      tabIndex={0}
-      aria-label="Click to manage skills"
-      title="Click to manage skills"
-      onClick={handleClick}
-      onKeyDown={handleKeyDown}
-    >
-      <Icon icon={BookOpen} size="sm" tone="muted" />
-      {activeSkill !== null ? (
-        <>
-          <span className={styles.muted}>Active skill:</span>
-          <Badge tone="accent">{activeSkill}</Badge>
-          {skillsAvailable > 0 && (
-            <span className={styles.muted}>· {skillsAvailable} available</span>
-          )}
-        </>
-      ) : (
-        <span className={styles.muted}>
-          Skills: {skillsAvailable} available
-        </span>
+      className={classNames(
+        styles.indicator,
+        activeSkill !== null && styles.indicatorActive,
       )}
+      data-testid="chat-skills-indicator"
+      title={summary}
+    >
+      <Icon
+        className={styles.icon}
+        icon={BookOpen}
+        size="sm"
+        tone={activeSkill !== null ? "accent" : "faint"}
+      />
+      <Text
+        className={classNames(
+          styles.label,
+          activeSkill !== null && styles.labelMono,
+        )}
+        as="span"
+        size="1"
+      >
+        {activeSkill ?? "Skills"}
+      </Text>
+      {note !== null && (
+        <Text className={styles.note} as="span" size="1">
+          {note}
+        </Text>
+      )}
+      <span className={styles.srOnly}>{summary}</span>
+      <Button
+        className={styles.action}
+        size="sm"
+        variant="ghost"
+        aria-label="Manage skills"
+        onClick={() => dispatch(push({ name: "extensions", tab: "skills" }))}
+      >
+        Manage
+      </Button>
     </div>
   );
 };
