@@ -20,7 +20,7 @@ The policy selects read-only confinement for read-only chat modes and workspace-
 
 ## Command confirmation
 
-Confirmation and denial globs retain full raw-command matching and additionally inspect parsed POSIX command segments. Segment parsing recognizes `;`, `&&`, `||`, `|`, `&`, newlines, command substitutions, subshells, and nested `sh`, `bash`, `zsh`, or `dash` `-c`/`-lc` commands to a depth of four. A glob can match the rejoined segment or the segment executable basename. Windows shell input and parse failures use raw-command matching only.
+Confirmation and denial globs retain full raw-command matching and additionally inspect parsed POSIX command segments. Segment parsing recognizes `;`, `&&`, `||`, `|`, `&`, newlines, command substitutions, subshells, and nested `sh`, `bash`, `zsh`, or `dash` `-c`/`-lc` commands to a depth of four. A glob can match the rejoined segment or the segment executable basename. Windows shell input and parse failures keep raw matching and any partial segments but are classified as `unclassifiable-command`; ambiguity matches the first valid segment-aware deny rule when one exists, otherwise the structural classification requires confirmation.
 
 A network-fetch segment whose stdout is piped directly into `sh`, `bash`, `zsh`, or `dash` produces the structural confirmation rule `pipe-to-shell`. Ordinary pipelines such as `ls | grep sh` do not produce this rule.
 
