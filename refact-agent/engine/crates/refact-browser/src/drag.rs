@@ -16,6 +16,7 @@ use crate::{
 };
 
 const DRAG_DATA_TIMEOUT: Duration = Duration::from_secs(5);
+const DRAG_START_DISTANCE: f64 = 10.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DragEventType {
@@ -195,7 +196,7 @@ where
         .begin_interception(source_frame_id)
         .map_err(MouseError::Protocol)?;
     let trigger = MainFrameCssPoint {
-        x: source.x + 1.0,
+        x: source.x + DRAG_START_DISTANCE,
         y: source.y,
     };
     mouse.move_to(trigger.x, trigger.y, 1)?;
@@ -410,8 +411,10 @@ mod tests {
                     event,
                     Recorded::Mouse(crate::MouseDispatch::Mouse(crate::MouseEventPayload {
                         event_type: crate::MouseEventType::Moved,
-                        x: 11.0,
+                        x: 20.0,
                         y: 20.0,
+                        button: Some(MouseButton::Left),
+                        buttons: Some(1),
                         ..
                     }))
                 )
