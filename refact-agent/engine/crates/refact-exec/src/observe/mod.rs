@@ -20,6 +20,8 @@ pub struct ObservedAccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObservationStatus {
     Observed(ObservedAccess),
+    Pending(ObservedAccess),
+    Incomplete(ObservedAccess),
     Unavailable(String),
 }
 

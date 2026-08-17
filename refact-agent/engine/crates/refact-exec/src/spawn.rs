@@ -697,14 +697,26 @@ async fn monitor_process(
             terminal_status
         }
         ExecStatus::Exited { .. } => {
-            let drain_timeout = output_drain_timeout.unwrap_or(EXIT_PUMP_DRAIN_TIMEOUT);
-            if finish_pumps_with_timeout(stdout_task, stderr_task, drain_timeout).await {
+            #[cfg(target_os = "linux")]
+            let observation_ended_early = observation.as_ref().is_some_and(|observation| {
+                matches!(observation.status(), ObservationStatus::Incomplete(_))
+            });
+            #[cfg(not(target_os = "linux"))]
+            let observation_ended_early = false;
+            if observation_ended_early {
+                stdout_task.abort();
+                stderr_task.abort();
                 terminal_status
             } else {
-                if let Err(error) = kill_and_reap_observed(&child, &observation).await {
-                    tracing::warn!("exec kill/reap after output drain timeout failed for {process_id}: {error}");
+                let drain_timeout = output_drain_timeout.unwrap_or(EXIT_PUMP_DRAIN_TIMEOUT);
+                if finish_pumps_with_timeout(stdout_task, stderr_task, drain_timeout).await {
+                    terminal_status
+                } else {
+                    if let Err(error) = kill_and_reap_observed(&child, &observation).await {
+                        tracing::warn!("exec kill/reap after output drain timeout failed for {process_id}: {error}");
+                    }
+                    pump_drain_timeout_status(drain_timeout)
                 }
-                pump_drain_timeout_status(drain_timeout)
             }
         }
         ExecStatus::Starting | ExecStatus::Running => terminal_status,

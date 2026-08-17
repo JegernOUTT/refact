@@ -176,19 +176,23 @@ impl Handle {
     pub(crate) async fn wait_status(&self) -> ObservationStatus {
         loop {
             let notified = self.shared.changed.notified();
-            if let Some(status) = self.shared.state.lock().unwrap().status.clone() {
+            if let Some(status) = self.shared.status() {
                 return status;
             }
             notified.await;
         }
     }
 
-    pub(super) fn status(&self) -> ObservationStatus {
+    pub(crate) fn status(&self) -> ObservationStatus {
         let state = self.shared.state.lock().unwrap();
-        state
-            .status
-            .clone()
-            .unwrap_or_else(|| ObservationStatus::Observed(state.access.clone()))
+        if let Some(reason) = state.failure.clone() {
+            ObservationStatus::Unavailable(reason)
+        } else {
+            state
+                .status
+                .clone()
+                .unwrap_or_else(|| ObservationStatus::Pending(state.access.clone()))
+        }
     }
 }
 
@@ -230,9 +234,7 @@ impl Runtime {
     pub(crate) async fn finish(self, terminal: bool) -> ObservationStatus {
         match self.handle {
             Some(handle) if terminal => handle.wait_status().await,
-            Some(_) => ObservationStatus::Unavailable(
-                "observation is pending until the process exits".to_string(),
-            ),
+            Some(handle) => handle.status(),
             None => ObservationStatus::Unavailable(
                 self.unavailable
                     .unwrap_or_else(|| "backend unavailable".to_string()),
@@ -246,6 +248,7 @@ struct SharedState {
     exit: Option<Result<Option<i32>, String>>,
     status: Option<ObservationStatus>,
     access: ObservedAccess,
+    failure: Option<String>,
 }
 
 struct Shared {
@@ -272,11 +275,36 @@ impl Shared {
 
     fn set_status(&self, status: ObservationStatus) {
         let mut state = self.state.lock().unwrap();
-        if state.status.is_none() {
+        if state.status.is_none() && state.failure.is_none() {
             state.status = Some(status);
             drop(state);
             self.changed.notify_waiters();
         }
+    }
+
+    fn status(&self) -> Option<ObservationStatus> {
+        let state = self.state.lock().unwrap();
+        state
+            .failure
+            .clone()
+            .map(ObservationStatus::Unavailable)
+            .or_else(|| state.status.clone())
+    }
+
+    fn failure(&self) -> Option<String> {
+        self.state.lock().unwrap().failure.clone()
+    }
+
+    fn fail(&self, reason: String) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.failure.is_some() || state.status.is_some() {
+            return false;
+        }
+        state.failure = Some(reason.clone());
+        state.status = Some(ObservationStatus::Unavailable(reason));
+        drop(state);
+        self.changed.notify_waiters();
+        true
     }
 
     fn record_access(&self, path: PathBuf, reads: bool, writes: bool) {
@@ -305,7 +333,6 @@ struct Supervisor {
     pending: HashMap<libc::pid_t, PendingOpen>,
     reads: HashSet<PathBuf>,
     writes: HashSet<PathBuf>,
-    failure: Option<String>,
     shared: Arc<Shared>,
 }
 
@@ -318,7 +345,6 @@ impl Supervisor {
             pending: HashMap::new(),
             reads: HashSet::new(),
             writes: HashSet::new(),
-            failure: None,
             shared,
         }
     }
@@ -357,61 +383,62 @@ impl Supervisor {
                 }
                 break;
             }
-            self.handle_status(process_id, status);
+            if self.handle_status(process_id, status) {
+                self.release_remaining_tracees();
+                return;
+            }
         }
 
         if self.shared.state.lock().unwrap().exit.is_none() {
             let reason = self
-                .failure
-                .clone()
+                .shared
+                .failure()
                 .unwrap_or_else(|| "observer lost the root process".to_string());
             self.shared.set_exit(Err(reason));
         }
-        let status = match self.failure {
+        let status = match self.shared.failure() {
             Some(reason) => ObservationStatus::Unavailable(reason),
-            None => {
-                let mut reads: Vec<_> = self.reads.into_iter().collect();
-                let mut writes: Vec<_> = self.writes.into_iter().collect();
-                reads.sort();
-                writes.sort();
-                ObservationStatus::Observed(ObservedAccess { reads, writes })
-            }
+            None => ObservationStatus::Observed(self.observed_access()),
         };
         self.shared.set_status(status);
     }
 
-    fn handle_status(&mut self, process_id: libc::pid_t, status: libc::c_int) {
+    fn handle_status(&mut self, process_id: libc::pid_t, status: libc::c_int) -> bool {
         if libc::WIFEXITED(status) {
-            if process_id == self.root {
-                self.shared.set_exit(Ok(Some(libc::WEXITSTATUS(status))));
-            }
             self.tracees.remove(&process_id);
             self.pending.remove(&process_id);
-            return;
+            if self.finish_if_root(process_id) {
+                self.shared.set_exit(Ok(Some(libc::WEXITSTATUS(status))));
+                return true;
+            }
+            return false;
         }
         if libc::WIFSIGNALED(status) {
-            if process_id == self.root {
-                self.shared.set_exit(Ok(None));
-            }
             self.tracees.remove(&process_id);
             self.pending.remove(&process_id);
-            return;
+            if self.finish_if_root(process_id) {
+                self.shared.set_exit(Ok(None));
+                return true;
+            }
+            return false;
         }
         if !libc::WIFSTOPPED(status) {
-            return;
+            return false;
         }
 
         let signal = libc::WSTOPSIG(status);
         let event = status >> 16;
         if event == libc::PTRACE_EVENT_EXIT && self.external_reaper && process_id == self.root {
-            match event_exit_code(process_id) {
-                Ok(exit_code) => self.shared.set_exit(Ok(exit_code)),
-                Err(reason) => self.fail(reason),
+            let exit = event_exit_code(process_id);
+            if let Err(reason) = &exit {
+                self.fail(reason.clone());
             }
             self.tracees.remove(&process_id);
             self.pending.remove(&process_id);
             detach_stopped(process_id);
-            return;
+            self.finish_if_root(process_id);
+            self.shared.set_exit(exit);
+            return true;
         }
         if event == libc::PTRACE_EVENT_SECCOMP {
             match read_open(process_id) {
@@ -424,7 +451,7 @@ impl Supervisor {
                     self.resume_cont(process_id, 0);
                 }
             }
-            return;
+            return false;
         }
         if matches!(
             event,
@@ -437,11 +464,11 @@ impl Supervisor {
                 Err(reason) => self.fail(reason),
             }
             self.resume_cont(process_id, 0);
-            return;
+            return false;
         }
         if event == libc::PTRACE_EVENT_STOP {
             self.resume_cont(process_id, 0);
-            return;
+            return false;
         }
         if signal == libc::SIGTRAP | 0x80 {
             if let Some(open) = self.pending.remove(&process_id) {
@@ -463,7 +490,7 @@ impl Supervisor {
                 }
             }
             self.resume_cont(process_id, 0);
-            return;
+            return false;
         }
 
         let delivered_signal = match signal {
@@ -474,6 +501,54 @@ impl Supervisor {
             self.resume_syscall(process_id, delivered_signal);
         } else {
             self.resume_cont(process_id, delivered_signal);
+        }
+        false
+    }
+
+    fn finish_if_root(&self, process_id: libc::pid_t) -> bool {
+        if process_id != self.root {
+            return false;
+        }
+        let status = match self.shared.failure() {
+            Some(reason) => ObservationStatus::Unavailable(reason),
+            None if self.tracees.is_empty() => ObservationStatus::Observed(self.observed_access()),
+            None => ObservationStatus::Incomplete(self.observed_access()),
+        };
+        self.shared.set_status(status);
+        true
+    }
+
+    fn observed_access(&self) -> ObservedAccess {
+        let mut reads: Vec<_> = self.reads.iter().cloned().collect();
+        let mut writes: Vec<_> = self.writes.iter().cloned().collect();
+        reads.sort();
+        writes.sort();
+        ObservedAccess { reads, writes }
+    }
+
+    fn release_remaining_tracees(&mut self) {
+        self.pending.clear();
+        for process_id in self.tracees.iter().copied() {
+            let _ = continue_tracee(process_id, 0);
+            let _ = interrupt_tracee(process_id);
+        }
+        while !self.tracees.is_empty() {
+            let mut status = 0;
+            let process_id =
+                unsafe { libc::waitpid(-1, &mut status, libc::__WALL | libc::__WNOTHREAD) };
+            if process_id == -1 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return;
+            }
+            if !self.tracees.remove(&process_id) {
+                continue;
+            }
+            if libc::WIFSTOPPED(status) {
+                detach_stopped(process_id);
+            }
         }
     }
 
@@ -494,8 +569,7 @@ impl Supervisor {
     }
 
     fn fail(&mut self, reason: String) {
-        if self.failure.is_none() {
-            self.failure = Some(reason);
+        if self.shared.fail(reason) {
             self.pending.clear();
             for process_id in self.tracees.iter().copied() {
                 let _ = continue_tracee(process_id, 0);
@@ -867,4 +941,24 @@ fn detach_stopped(process_id: libc::pid_t) {
 
 fn is_missing_process_error(reason: &str) -> bool {
     reason.contains("No such process")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn supervisor_failure_is_immediately_unavailable() {
+        let shared = Arc::new(Shared::new());
+        let handle = Handle {
+            shared: shared.clone(),
+        };
+        let mut supervisor = Supervisor::new(0, false, shared);
+
+        supervisor.fail("injected observer failure".to_string());
+
+        let unavailable = ObservationStatus::Unavailable("injected observer failure".to_string());
+        assert_eq!(handle.status(), unavailable);
+        assert_eq!(handle.wait_status().await, unavailable);
+    }
 }

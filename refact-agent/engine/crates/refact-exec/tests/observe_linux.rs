@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use refact_exec::{ExecRegistry, ExecSpawnRequest, ExecStatus, ObservationStatus};
 
@@ -90,6 +90,60 @@ async fn abort_during_observation_leaves_no_stopped_tracee() {
         );
     }
     panic!("tracees survived abort: {survivors:?}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn root_exit_does_not_wait_for_background_descendant() {
+    if !ptrace_tests_enabled() {
+        return;
+    }
+    let started = Instant::now();
+    let marker = format!("REFACT_OBSERVE_DESC_{}", uuid::Uuid::new_v4().simple());
+    let result = ExecRegistry::new()
+        .spawn(
+            ExecSpawnRequest::foreground("sleep 30 &")
+                .with_observe(true)
+                .with_env(&marker, "1")
+                .with_output_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(
+        result.snapshot.status,
+        ExecStatus::Exited { exit_code: Some(0) }
+    );
+    assert!(matches!(
+        result.observation,
+        ObservationStatus::Incomplete(_)
+    ));
+    for process_id in processes_with_marker(&marker) {
+        unsafe {
+            libc::kill(process_id as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn healthy_background_observation_is_pending() {
+    if !ptrace_tests_enabled() {
+        return;
+    }
+    let registry = ExecRegistry::new();
+    let result = registry
+        .spawn(ExecSpawnRequest::background("sleep 30").with_observe(true))
+        .await
+        .unwrap();
+    let process_id = result.snapshot.meta.process_id;
+
+    assert!(matches!(result.observation, ObservationStatus::Pending(_)));
+    let reader = registry.observation_reader(&process_id).await.unwrap();
+    assert!(matches!(reader.status(), ObservationStatus::Pending(_)));
+
+    registry.kill(&process_id).await.unwrap();
 }
 
 fn processes_with_marker(marker: &str) -> Vec<u32> {

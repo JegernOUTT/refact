@@ -299,12 +299,17 @@ impl Tool for ToolShell {
                 ..Default::default()
             };
             if observe {
+                let observation = exec_registry
+                    .observation_reader(&result.snapshot.meta.process_id)
+                    .await
+                    .map(|reader| reader.status())
+                    .unwrap_or(result.observation);
                 apply_shell_privacy(
                     &gcx,
                     &parsed.command,
                     request_cwd(&result.snapshot),
                     &destination,
-                    result.observation,
+                    observation,
                     &derived_privacy_zones,
                     &mut message,
                 )

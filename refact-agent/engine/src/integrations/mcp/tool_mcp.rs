@@ -573,7 +573,9 @@ fn attach_mcp_observation_status(
     message: &mut ChatMessage,
 ) {
     match status {
-        refact_exec::ObservationStatus::Observed(access) => {
+        refact_exec::ObservationStatus::Observed(access)
+        | refact_exec::ObservationStatus::Pending(access)
+        | refact_exec::ObservationStatus::Incomplete(access) => {
             let paths = access
                 .reads
                 .into_iter()
@@ -593,7 +595,9 @@ fn observed_reads(
     observation: &refact_exec::ObservationReader,
 ) -> Option<std::collections::HashSet<std::path::PathBuf>> {
     match observation.status() {
-        refact_exec::ObservationStatus::Observed(access) => {
+        refact_exec::ObservationStatus::Observed(access)
+        | refact_exec::ObservationStatus::Pending(access)
+        | refact_exec::ObservationStatus::Incomplete(access) => {
             Some(access.reads.into_iter().collect())
         }
         refact_exec::ObservationStatus::Unavailable(_) => None,

@@ -210,6 +210,32 @@ pub async fn apply_shell_observation(
             inherit_observed_write_zones(gcx, &policy, &records, access.writes, derived_zones)?;
             records
         }
+        ObservationStatus::Pending(access) => {
+            message.extra.insert(
+                "privacy_observation".to_string(),
+                serde_json::json!({
+                    "status": "pending",
+                    "degraded": false,
+                    "incomplete": true,
+                }),
+            );
+            let records = observed_file_records_with_derived(gcx, access.reads, derived_zones)?;
+            inherit_observed_write_zones(gcx, &policy, &records, access.writes, derived_zones)?;
+            records
+        }
+        ObservationStatus::Incomplete(access) => {
+            message.extra.insert(
+                "privacy_observation".to_string(),
+                serde_json::json!({
+                    "status": "incomplete",
+                    "degraded": false,
+                    "incomplete": true,
+                }),
+            );
+            let records = observed_file_records_with_derived(gcx, access.reads, derived_zones)?;
+            inherit_observed_write_zones(gcx, &policy, &records, access.writes, derived_zones)?;
+            records
+        }
         ObservationStatus::Unavailable(reason) => {
             let compiled = policy.compile().map_err(|error| error.to_string())?;
             let heuristic =
@@ -731,6 +757,32 @@ mod tests {
         assert!(refact_privacy::records_from_messages(&[message])
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_observation_is_not_degraded() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = temp.path().join("secret.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        let gcx = gcx_with_policy(&secret, &[], ShellBehavior::Withhold).await;
+        let derived_zones = new_derived_privacy_zones();
+        let mut message = tool_message("background started");
+
+        let decision = apply_shell_observation(
+            &gcx,
+            "sleep 30",
+            temp.path(),
+            &provider_destination("untrusted/model"),
+            ObservationStatus::Pending(ObservedAccess::default()),
+            &derived_zones,
+            &mut message,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(decision, ShellReadDecision::Pass);
+        assert_eq!(message.extra["privacy_observation"]["status"], "pending");
+        assert_eq!(message.extra["privacy_observation"]["degraded"], false);
     }
 
     #[tokio::test]
