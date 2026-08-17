@@ -329,16 +329,6 @@ fn resolve_sandbox_policy(
         TerminalSecurityMode::SandboxRequired
             if status.enforcement == refact_sandbox::Enforcement::Unusable =>
         {
-            if sandbox_mode == ExecSandboxMode::FullAccess {
-                let warning = format!(
-                    "⚠️ Approved full-access escalation bypassed unavailable sandbox enforcement ({provider}: {probed_enforcement}); command ran unconfined."
-                );
-                return Ok(SandboxPolicyResolution {
-                    sandbox: None,
-                    warning: Some(warning.clone()),
-                    audit: Some(audit("unconfined", warning)),
-                });
-            }
             let message = format!(
                 "sandbox required but unavailable ({provider}: no usable sandbox provider is available) — retry with escalate:{{...}} or ask the user to install bubblewrap"
             );
@@ -526,100 +516,62 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_rollout_mode_matrix_is_honest() {
+    fn sandbox_rollout_mode_and_enforcement_matrix_is_honest() {
+        let modes = [
+            TerminalSecurityMode::Off,
+            TerminalSecurityMode::Audit,
+            TerminalSecurityMode::ApprovalOnly,
+            TerminalSecurityMode::SandboxPreferred,
+            TerminalSecurityMode::SandboxRequired,
+        ];
+        let enforcements = [
+            refact_sandbox::Enforcement::Full,
+            refact_sandbox::Enforcement::Partial,
+            refact_sandbox::Enforcement::Unusable,
+        ];
         let cwd = PathBuf::from("/workspace");
         let roots = vec![cwd.clone()];
-        for mode in [
-            TerminalSecurityMode::Off,
-            TerminalSecurityMode::ApprovalOnly,
-        ] {
-            for enforcement in [
-                refact_sandbox::Enforcement::Full,
-                refact_sandbox::Enforcement::Partial,
-                refact_sandbox::Enforcement::Unusable,
-            ] {
-                let resolution = resolve_sandbox_policy(
+
+        for mode in modes {
+            for enforcement in enforcements {
+                let result = resolve_sandbox_policy(
                     mode,
                     ExecSandboxMode::WorkspaceWrite,
                     status("test", enforcement),
                     &cwd,
                     roots.clone(),
                     ExecSource::ShellTool,
-                )
-                .unwrap();
-                assert!(resolution.sandbox.is_none());
-                assert!(resolution.warning.is_none());
+                );
+                let actual = match result {
+                    Ok(resolution) => (
+                        resolution.sandbox.is_some(),
+                        resolution.warning.is_some(),
+                        resolution.audit.is_some(),
+                        false,
+                    ),
+                    Err(error) => (false, false, error.audit.is_some(), true),
+                };
+                let expected = match mode {
+                    TerminalSecurityMode::Off | TerminalSecurityMode::ApprovalOnly => {
+                        (false, false, false, false)
+                    }
+                    TerminalSecurityMode::Audit => (false, false, true, false),
+                    TerminalSecurityMode::SandboxPreferred
+                        if enforcement == refact_sandbox::Enforcement::Full =>
+                    {
+                        (true, false, false, false)
+                    }
+                    TerminalSecurityMode::SandboxPreferred => (false, true, true, false),
+                    TerminalSecurityMode::SandboxRequired
+                        if enforcement == refact_sandbox::Enforcement::Unusable =>
+                    {
+                        (false, false, true, true)
+                    }
+                    TerminalSecurityMode::SandboxRequired => (true, false, false, false),
+                };
+                assert_eq!(actual, expected, "{mode:?} with {enforcement:?}");
             }
         }
-
-        let audit = resolve_sandbox_policy(
-            TerminalSecurityMode::Audit,
-            ExecSandboxMode::ReadOnly,
-            status("landlock", refact_sandbox::Enforcement::Partial),
-            &cwd,
-            roots.clone(),
-            ExecSource::ShellTool,
-        )
-        .unwrap();
-        assert!(audit.sandbox.is_none());
-        assert_eq!(audit.audit.unwrap().enforcement, "unconfined");
-
-        let preferred_full = resolve_sandbox_policy(
-            TerminalSecurityMode::SandboxPreferred,
-            ExecSandboxMode::WorkspaceWrite,
-            status("bwrap", refact_sandbox::Enforcement::Full),
-            &cwd,
-            roots.clone(),
-            ExecSource::ShellTool,
-        )
-        .unwrap();
-        assert!(preferred_full.sandbox.is_some());
-        assert!(preferred_full.warning.is_none());
-
-        for enforcement in [
-            refact_sandbox::Enforcement::Partial,
-            refact_sandbox::Enforcement::Unusable,
-        ] {
-            let preferred = resolve_sandbox_policy(
-                TerminalSecurityMode::SandboxPreferred,
-                ExecSandboxMode::WorkspaceWrite,
-                status("landlock", enforcement),
-                &cwd,
-                roots.clone(),
-                ExecSource::ShellTool,
-            )
-            .unwrap();
-            assert!(preferred.sandbox.is_none());
-            assert!(preferred.warning.unwrap().contains("ran unconfined"));
-        }
-
-        for enforcement in [
-            refact_sandbox::Enforcement::Full,
-            refact_sandbox::Enforcement::Partial,
-        ] {
-            let required = resolve_sandbox_policy(
-                TerminalSecurityMode::SandboxRequired,
-                ExecSandboxMode::WorkspaceWrite,
-                status("provider", enforcement),
-                &cwd,
-                roots.clone(),
-                ExecSource::ShellTool,
-            )
-            .unwrap();
-            assert!(required.sandbox.is_some());
-        }
-
-        let required_error = resolve_sandbox_policy(
-            TerminalSecurityMode::SandboxRequired,
-            ExecSandboxMode::WorkspaceWrite,
-            status("noop", refact_sandbox::Enforcement::Unusable),
-            &cwd,
-            roots,
-            ExecSource::ShellTool,
-        )
-        .unwrap_err();
-        assert!(required_error.message.contains("sandbox required"));
-        assert_eq!(required_error.audit.unwrap().enforcement, "refused");
     }
 
     #[test]
@@ -666,8 +618,8 @@ mod tests {
     }
 
     #[test]
-    fn approved_full_access_can_bypass_unavailable_required_sandbox_truthfully() {
-        let resolution = resolve_sandbox_policy(
+    fn sandbox_required_rejects_full_access_when_enforcement_is_unusable() {
+        let error = resolve_sandbox_policy(
             TerminalSecurityMode::SandboxRequired,
             ExecSandboxMode::FullAccess,
             status("noop", refact_sandbox::Enforcement::Unusable),
@@ -675,10 +627,9 @@ mod tests {
             vec![PathBuf::from("/workspace")],
             ExecSource::ShellTool,
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert!(resolution.sandbox.is_none());
-        assert!(resolution.warning.unwrap().contains("ran unconfined"));
-        assert_eq!(resolution.audit.unwrap().enforcement, "unconfined");
+        assert!(error.message.contains("sandbox required"));
+        assert_eq!(error.audit.unwrap().enforcement, "refused");
     }
 }

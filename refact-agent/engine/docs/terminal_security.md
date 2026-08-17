@@ -10,7 +10,7 @@
 | `audit` | Runs unconfined and records the sandbox provider and enforcement that would have applied. |
 | `approval_only` | Default. Applies confirmation and denial rules but does not request sandbox confinement. |
 | `sandbox_preferred` | Uses a fully enforcing sandbox; otherwise runs unconfined with an explicit warning and `exec.sandbox` audit event. |
-| `sandbox_required` | Requires a usable sandbox and refuses unconfined execution, except after an approved `full_access` escalation. |
+| `sandbox_required` | Requires a usable sandbox and refuses unconfined execution. |
 
 The policy selects read-only confinement for read-only chat modes and workspace-write confinement for other ordinary commands. Workspace-write grants the configured workspace roots, the working directory, and the platform temporary directory. Full access is available only through an approved escalation.
 
@@ -32,7 +32,7 @@ Centralized execution uses a scrubbed child environment. The platform base allow
 
 Linux selects fully enforcing bubblewrap when available, otherwise Landlock when the kernel reports full or partial enforcement. Other platforms currently report no usable provider. `sandbox_preferred` requires full enforcement before applying confinement; `sandbox_required` accepts a usable provider and fails closed when none exists.
 
-Shell and background-process calls may request `workspace_write` or `full_access` with a non-empty justification. Escalation always requires the existing user confirmation flow, is never auto-approved, and applies to that call only. Requests, refusals, downgrades, and approved unavailable-provider bypasses are recorded as `event(system_notice)` messages from `exec.sandbox`.
+Shell and background-process calls may request `workspace_write` or `full_access` with a non-empty justification. Escalation always requires the existing user confirmation flow, is never auto-approved, and applies to that call only. An escalation cannot bypass an unavailable provider in `sandbox_required` mode. Requests, refusals, and downgrades are recorded as `event(system_notice)` messages from `exec.sandbox`.
 
 ## Direct-spawn inventory
 
