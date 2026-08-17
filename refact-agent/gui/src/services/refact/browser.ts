@@ -388,7 +388,36 @@ export type BrowserPdfArtifact = {
   data?: string | null;
 };
 
-export type BrowserArtifact = BrowserImageArtifact | BrowserPdfArtifact;
+export type BrowserHarArtifact = {
+  kind: "har";
+  mime: "application/json";
+  path: string;
+  bytes: number;
+  entry_count: number;
+};
+
+export type BrowserArtifact =
+  | BrowserImageArtifact
+  | BrowserPdfArtifact
+  | BrowserHarArtifact;
+
+export type BrowserWebSocketEvent = {
+  sequence: number;
+  socket_id: string;
+  url: string;
+  kind:
+    | "created"
+    | "handshake_response"
+    | "frame_sent"
+    | "frame_received"
+    | "closed"
+    | "error";
+  data?: string;
+  opcode?: number;
+  status?: number;
+  error?: string;
+  routed: boolean;
+};
 
 export type BrowserExecutionStep = {
   step_index: number;
@@ -482,6 +511,7 @@ export type BrowserActionResponse = {
   console?: BrowserConsoleEntry[];
   page_errors?: string[];
   network?: BrowserNetworkEntry[];
+  websockets?: BrowserWebSocketEvent[];
   locator_handlers?: LocatorHandlerFiring[];
   dialogs?: BrowserDialogInfo[];
   uploads?: BrowserUploadInfo[];

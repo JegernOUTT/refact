@@ -348,9 +348,14 @@ impl NetworkMonitor {
         }
     }
 
-    fn finish(&mut self, request_id: &str, timestamp: f64, encoded_data_length: Option<u64>) {
+    fn finish(
+        &mut self,
+        request_id: &str,
+        timestamp: f64,
+        encoded_data_length: Option<u64>,
+    ) -> Option<NetworkEntry> {
         let Some(mut request) = self.active.remove(request_id) else {
-            return;
+            return None;
         };
         if let Some(length) = encoded_data_length {
             request.entry.encoded_data_length = Some(length);
@@ -360,12 +365,18 @@ impl NetworkMonitor {
             timing.response_end = Some(timestamp);
         }
         self.finish_inflight(request_id, &request);
-        self.completed.push(request.entry);
+        self.completed.push(request.entry.clone());
+        Some(request.entry)
     }
 
-    fn fail(&mut self, request_id: &str, timestamp: f64, failure_text: String) {
+    fn fail(
+        &mut self,
+        request_id: &str,
+        timestamp: f64,
+        failure_text: String,
+    ) -> Option<NetworkEntry> {
         let Some(mut request) = self.active.remove(request_id) else {
-            return;
+            return None;
         };
         let failure_text = mask_text(&failure_text);
         request.entry.failure_text = Some(match request.entry.failure_text.take() {
@@ -376,12 +387,13 @@ impl NetworkMonitor {
             timing.response_end = Some(timestamp);
         }
         self.finish_inflight(request_id, &request);
-        self.completed.push(request.entry);
+        self.completed.push(request.entry.clone());
+        Some(request.entry)
     }
 
     fn finish_redirect(&mut self, request_id: &str, response: ResponseReceived) {
         self.record_response(response.clone());
-        self.finish(request_id, response.timestamp, response.encoded_data_length);
+        let _ = self.finish(request_id, response.timestamp, response.encoded_data_length);
     }
 
     fn finish_inflight(&mut self, request_id: &str, request: &TrackedRequest) {
@@ -446,20 +458,34 @@ impl NetworkMonitorHandle {
         self.changed.notify_all();
     }
 
-    pub fn loading_finished(&self, request_id: &str, timestamp: f64, length: Option<u64>) {
-        self.state
+    pub fn loading_finished(
+        &self,
+        request_id: &str,
+        timestamp: f64,
+        length: Option<u64>,
+    ) -> Option<NetworkEntry> {
+        let entry = self
+            .state
             .lock()
             .unwrap()
             .finish(request_id, timestamp, length);
         self.changed.notify_all();
+        entry
     }
 
-    pub fn loading_failed(&self, request_id: &str, timestamp: f64, failure_text: String) {
-        self.state
+    pub fn loading_failed(
+        &self,
+        request_id: &str,
+        timestamp: f64,
+        failure_text: String,
+    ) -> Option<NetworkEntry> {
+        let entry = self
+            .state
             .lock()
             .unwrap()
             .fail(request_id, timestamp, failure_text);
         self.changed.notify_all();
+        entry
     }
 
     pub fn drain_completed(&self) -> Vec<NetworkEntry> {

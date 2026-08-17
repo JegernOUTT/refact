@@ -87,6 +87,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Canonical batch: {\"steps\":[{\"action\":\"accessibility_snapshot\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]} Pass this object as `request`; e5/e7 stand for handles minted by the latest snapshot.\n",
     "Core: navigate, reload, go_back, go_forward, open_tab, close_tab, switch_tab, list_tabs, click, click_if_exists, hover, focus, blur, scroll_to, press_key, drag_and_drop, and drop_files. drag_and_drop accepts source/target locators or refs plus optional source_position/target_position. open_tab accepts optional device/url; close_tab accepts an optional tab and otherwise closes active. Closing active selects the preceding tab in adoption order, the next tab when closing the first, or leaves no active tab.\n",
     "Coordinate mouse escape hatch: mouse_move, mouse_down, mouse_up, mouse_click_xy, mouse_drag_xy, and mouse_wheel use main-frame viewport CSS pixels and bypass locator resolution. Use these only for canvas, map, and vision-driven UIs with no addressable element; locator/ref actions remain the default.\n",
+    "Network: route/unroute/list_routes control HTTP interception. route_web_socket and unroute_web_socket install page-level WebSocket routing; send_web_socket_message supplies mock page messages and wait_for_web_socket_frame waits for observed traffic. start_har_recording and stop_har_recording write a runtime-owned HAR artifact; route_from_har replays it with abort or fallback for misses. HAR output is returned as a path and summary, never inlined.\n",
     "Forms: fill, clear, select_option, check, uncheck.\n",
     "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch.\n",
     "Waiting: wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. ",
@@ -1440,7 +1441,7 @@ async fn session_open_tab(
                 let browser_runtimes = browser_runtimes.lock().await;
                 if let Some(rt_arc) = browser_runtimes.get(&chrome_session.runtime_id).cloned() {
                     let mut rt = rt_arc.lock().await;
-                    let _ = setup_recording_for_tab(&mut rt, &runtime_tab);
+                    let _ = setup_recording_for_tab(&mut rt, runtime_tab.clone());
                     rt.set_active_tab_target_id(target_id.clone());
                     rt.recording_tab_target_id = Some(target_id);
                 }

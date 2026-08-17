@@ -4,6 +4,64 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::browser_types::{ConsoleEntry, NetworkEntry};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSocketRouteMode {
+    Mock,
+    ObserveAndModify,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSocketEventKind {
+    Created,
+    HandshakeResponse,
+    FrameSent,
+    FrameReceived,
+    Closed,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebSocketEvent {
+    pub sequence: u64,
+    pub socket_id: String,
+    pub url: String,
+    pub kind: WebSocketEventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opcode: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub routed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarMode {
+    Full,
+    Minimal,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarContentPolicy {
+    Omit,
+    Embed,
+    Attach,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarNotFound {
+    Abort,
+    Fallback,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocatorRegex {
     pub source: String,
@@ -966,6 +1024,41 @@ pub enum BrowserStep {
     },
     ListRoutes,
 
+    RouteWebSocket {
+        pattern: UrlPattern,
+        mode: WebSocketRouteMode,
+    },
+    UnrouteWebSocket {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<UrlPattern>,
+    },
+    SendWebSocketMessage {
+        url_pattern: UrlPattern,
+        data: String,
+    },
+    WaitForWebSocketFrame {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<UrlPattern>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+    },
+
+    StartHarRecording {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        mode: HarMode,
+        content: HarContentPolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url_filter: Option<UrlPattern>,
+    },
+    StopHarRecording,
+    RouteFromHar {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url_filter: Option<UrlPattern>,
+        not_found: HarNotFound,
+    },
+
     SetViewport {
         width: u32,
         height: u32,
@@ -1388,6 +1481,13 @@ impl BrowserStep {
         "route",
         "unroute",
         "list_routes",
+        "route_web_socket",
+        "unroute_web_socket",
+        "send_web_socket_message",
+        "wait_for_web_socket_frame",
+        "start_har_recording",
+        "stop_har_recording",
+        "route_from_har",
         "set_viewport",
         "emulate_media",
         "set_locale",
@@ -1640,6 +1740,8 @@ pub struct ExecutionReport {
     pub page_errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network: Vec<NetworkEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub websockets: Vec<WebSocketEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub locator_handlers: Vec<LocatorHandlerFiring>,
     pub dialogs: Vec<DialogInfo>,
@@ -1967,6 +2069,31 @@ mod tests {
             },
             BrowserStep::Unroute { pattern: None },
             BrowserStep::ListRoutes,
+            BrowserStep::RouteWebSocket {
+                pattern: UrlPattern::Text("wss://example.com/**".to_string()),
+                mode: WebSocketRouteMode::Mock,
+            },
+            BrowserStep::UnrouteWebSocket { pattern: None },
+            BrowserStep::SendWebSocketMessage {
+                url_pattern: UrlPattern::Text("wss://example.com/**".to_string()),
+                data: "hello".to_string(),
+            },
+            BrowserStep::WaitForWebSocketFrame {
+                pattern: None,
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::StartHarRecording {
+                path: Some("page.har".to_string()),
+                mode: HarMode::Full,
+                content: HarContentPolicy::Embed,
+                url_filter: None,
+            },
+            BrowserStep::StopHarRecording,
+            BrowserStep::RouteFromHar {
+                path: "page.har".to_string(),
+                url_filter: None,
+                not_found: HarNotFound::Abort,
+            },
             BrowserStep::SetViewport {
                 width: 390,
                 height: 844,
@@ -2989,6 +3116,7 @@ mod tests {
             console: vec![],
             page_errors: vec![],
             network: vec![],
+            websockets: vec![],
             locator_handlers: vec![],
             dialogs: vec![DialogInfo {
                 dialog_type: DialogType::Prompt,

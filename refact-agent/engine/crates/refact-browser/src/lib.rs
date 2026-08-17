@@ -8,6 +8,7 @@ pub mod files;
 pub mod forms;
 mod frames;
 mod handles;
+pub mod har;
 mod hit_target;
 mod injected_source;
 mod keyboard;
@@ -20,6 +21,7 @@ mod refs;
 mod routing;
 mod snapshot;
 mod us_keyboard_layout;
+pub mod websocket;
 mod world;
 
 pub use actionability::{
@@ -65,6 +67,7 @@ pub use mouse::{
 pub use network::{
     NetworkLoadState, NetworkMonitorHandle, RequestStarted, ResponseReceived, UrlMatcher,
 };
+pub use websocket::{WebSocketRegistry, install_websocket_router};
 pub use refs::{ElementHandleInfo, Ref, RefError, RefParseError, RefRegistry, SnapshotGeneration};
 pub use routing::RouteRegistry;
 pub use snapshot::{AriaSnapshot, SnapshotBox, SnapshotMode, SnapshotNode, SnapshotOptions};
@@ -456,6 +459,8 @@ pub struct BrowserRuntime {
     pub buffers: BrowserBuffers,
     pub network_monitor: Arc<NetworkMonitorHandle>,
     pub route_registry: Arc<RouteRegistry>,
+    pub websocket_registry: Arc<WebSocketRegistry>,
+    pub har_recorder: Arc<har::HarRecorder>,
     pub context_state: ContextState,
     pub mouse_states: HashMap<String, MouseState>,
     pub idle_timeout: Duration,
@@ -546,6 +551,8 @@ impl BrowserRuntime {
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
             route_registry: Arc::new(RouteRegistry::default()),
+            websocket_registry: Arc::new(WebSocketRegistry::default()),
+            har_recorder: Arc::new(har::HarRecorder::default()),
             context_state: ContextState::default(),
             mouse_states: HashMap::new(),
             idle_timeout,
@@ -600,6 +607,8 @@ impl BrowserRuntime {
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
             route_registry: Arc::new(RouteRegistry::default()),
+            websocket_registry: Arc::new(WebSocketRegistry::default()),
+            har_recorder: Arc::new(har::HarRecorder::default()),
             context_state: ContextState::default(),
             mouse_states: HashMap::new(),
             idle_timeout,
@@ -694,6 +703,29 @@ impl BrowserRuntime {
             }
         }
         Ok(removed)
+    }
+
+    pub fn set_har_replay(&mut self, replay: har::HarReplay) -> Result<(), String> {
+        let enable = self.route_registry.is_empty();
+        self.route_registry.set_har_replay(replay);
+        if enable {
+            for tab in self
+                .browser
+                .get_tabs()
+                .lock()
+                .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+            {
+                if let Err(error) = self
+                    .route_registry
+                    .enable_for_tab(&tab, self.context_state.http_credentials.is_some())
+                {
+                    self.route_registry.clear_har_replay();
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn set_http_credentials(
@@ -1159,9 +1191,11 @@ pub fn setup_console_capture(
 }
 
 pub fn setup_network_capture(
-    tab: &headless_chrome::Tab,
+    tab: Arc<headless_chrome::Tab>,
     monitor: Arc<NetworkMonitorHandle>,
     network_buffer: Arc<Mutex<Vec<NetworkEntry>>>,
+    websocket_registry: Arc<WebSocketRegistry>,
+    har_recorder: Arc<har::HarRecorder>,
 ) -> Result<(), String> {
     tab.call_method(Network::Enable {
         max_total_buffer_size: None,
@@ -1189,6 +1223,7 @@ pub fn setup_network_capture(
         }
     }
 
+    let event_tab = tab.clone();
     tab.add_event_listener(Arc::new(move |event: &Event| {
         match event {
             Event::NetworkRequestWillBeSent(event) => {
@@ -1228,16 +1263,67 @@ pub fn setup_network_capture(
                 event.params.request_id.clone(),
                 cdp_headers(&event.params.headers),
             ),
-            Event::NetworkLoadingFinished(event) => monitor.loading_finished(
+            Event::NetworkLoadingFinished(event) => {
+                if let Some(entry) = monitor.loading_finished(
+                    &event.params.request_id,
+                    normalize_timestamp_ms(event.params.timestamp),
+                    Some(event.params.encoded_data_length.max(0.0) as u64),
+                ) {
+                    if har_recorder.begin_body_capture() {
+                        let recorder = har_recorder.clone();
+                        let request_id = event.params.request_id.clone();
+                        let body_tab = event_tab.clone();
+                        std::thread::spawn(move || {
+                            let body = body_tab
+                                .call_method(Network::GetResponseBody { request_id })
+                                .ok()
+                                .map(|response| {
+                                    har::normalize_response_body(
+                                        response.body,
+                                        response.base_64_encoded,
+                                        None,
+                                    )
+                                });
+                            recorder.finish_body_capture(&entry, body);
+                        });
+                    } else {
+                        har_recorder.record(&entry, None);
+                    }
+                }
+            }
+            Event::NetworkLoadingFailed(event) => {
+                if let Some(entry) = monitor.loading_failed(
+                    &event.params.request_id,
+                    normalize_timestamp_ms(event.params.timestamp),
+                    event.params.error_text.clone(),
+                ) {
+                    har_recorder.record(&entry, None);
+                }
+            }
+            Event::NetworkWebSocketCreated(event) => websocket_registry
+                .record_created(event.params.request_id.clone(), event.params.url.clone()),
+            Event::NetworkWebSocketHandshakeResponseReceived(event) => websocket_registry
+                .record_handshake(
+                    &event.params.request_id,
+                    event.params.response.status as u16,
+                ),
+            Event::NetworkWebSocketFrameSent(event) => websocket_registry.record_frame(
                 &event.params.request_id,
-                normalize_timestamp_ms(event.params.timestamp),
-                Some(event.params.encoded_data_length.max(0.0) as u64),
+                true,
+                event.params.response.payload_data.clone(),
+                event.params.response.opcode as u8,
             ),
-            Event::NetworkLoadingFailed(event) => monitor.loading_failed(
+            Event::NetworkWebSocketFrameReceived(event) => websocket_registry.record_frame(
                 &event.params.request_id,
-                normalize_timestamp_ms(event.params.timestamp),
-                event.params.error_text.clone(),
+                false,
+                event.params.response.payload_data.clone(),
+                event.params.response.opcode as u8,
             ),
+            Event::NetworkWebSocketClosed(event) => {
+                websocket_registry.record_closed(&event.params.request_id)
+            }
+            Event::NetworkWebSocketFrameError(event) => websocket_registry
+                .record_error(&event.params.request_id, event.params.error_message.clone()),
             Event::PageLifecycleEvent(event) => {
                 monitor.lifecycle(&event.params.frame_id, &event.params.name)
             }
@@ -1321,33 +1407,36 @@ fn response_received(
 
 pub fn setup_recording_for_tab(
     runtime: &mut BrowserRuntime,
-    tab: &headless_chrome::Tab,
+    tab: Arc<headless_chrome::Tab>,
 ) -> Result<(), String> {
-    runtime.dialog_manager.install(tab)?;
+    runtime.dialog_manager.install(&tab)?;
     let browser_context_id = tab
         .get_browser_context_id()
         .map_err(|error| format!("Failed to read browser context for downloads: {error}"))?;
     runtime
         .download_monitor
         .configure_context(browser_context_id.as_deref())?;
-    setup_file_chooser_capture(tab, runtime.file_chooser_manager.clone())?;
-    runtime.world_manager.ensure_utility_world(tab)?;
+    setup_file_chooser_capture(&tab, runtime.file_chooser_manager.clone())?;
+    runtime.world_manager.ensure_utility_world(&tab)?;
     inject_recorder_into_tab(
-        tab,
+        &tab,
         runtime.buffers.mask_passwords,
         runtime.buffers.raw_recorder_events.clone(),
     )?;
-    setup_console_capture(tab, runtime.buffers.raw_console_entries.clone())?;
+    setup_console_capture(&tab, runtime.buffers.raw_console_entries.clone())?;
     setup_network_capture(
-        tab,
+        tab.clone(),
         runtime.network_monitor.clone(),
         runtime.buffers.raw_network_entries.clone(),
+        runtime.websocket_registry.clone(),
+        runtime.har_recorder.clone(),
     )?;
-    runtime.context_state.apply_to_tab(tab)?;
+    install_websocket_router(&tab, runtime.websocket_registry.clone())?;
+    runtime.context_state.apply_to_tab(&tab)?;
     if !runtime.route_registry.is_empty() || runtime.context_state.http_credentials.is_some() {
         runtime
             .route_registry
-            .enable_for_tab(tab, runtime.context_state.http_credentials.is_some())?;
+            .enable_for_tab(&tab, runtime.context_state.http_credentials.is_some())?;
     }
     let target_id = tab.get_target_id().to_string();
     register_adopted_tab(&mut runtime.adopted_tab_target_ids, target_id.clone());
@@ -1387,7 +1476,7 @@ pub fn adopt_new_tabs(
                 .tab_opened_by_step
                 .insert(target_id.clone(), step_index);
         }
-        if setup_recording_for_tab(runtime, &tab).is_ok() {
+        if setup_recording_for_tab(runtime, tab.clone()).is_ok() {
             if let Some(info) = runtime
                 .list_tab_infos()
                 .into_iter()
@@ -1496,7 +1585,7 @@ pub fn setup_recording_for_runtime(runtime: &mut BrowserRuntime) -> Result<(), S
         }
     }
 
-    setup_recording_for_tab(runtime, &primary_tab)?;
+    setup_recording_for_tab(runtime, primary_tab.clone())?;
 
     let tabs_now: Vec<Arc<headless_chrome::Tab>> = runtime
         .browser

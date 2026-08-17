@@ -8,6 +8,7 @@ use headless_chrome::protocol::cdp::{Fetch, Network};
 
 use refact_integrations::browser_models::{RouteHandler, RouteInfo, RouteInterception, UrlPattern};
 
+use crate::har::HarReplay;
 use crate::network::{UrlMatcher, mask_headers, mask_text};
 
 const INTERCEPTION_REPORT_CAP: usize = 1_000;
@@ -22,6 +23,7 @@ struct RegisteredRoute {
 struct RouteState {
     routes: Vec<RegisteredRoute>,
     interceptions: Vec<RouteInterception>,
+    har_replay: Option<HarReplay>,
 }
 
 #[derive(Debug, Default)]
@@ -51,7 +53,8 @@ impl RouteRegistry {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.state.lock().unwrap().routes.is_empty()
+        let state = self.state.lock().unwrap();
+        state.routes.is_empty() && state.har_replay.is_none()
     }
 
     pub fn list(&self) -> Vec<RouteInfo> {
@@ -88,6 +91,14 @@ impl RouteRegistry {
 
     pub fn drain_interceptions(&self) -> Vec<RouteInterception> {
         std::mem::take(&mut self.state.lock().unwrap().interceptions)
+    }
+
+    pub fn set_har_replay(&self, replay: HarReplay) {
+        self.state.lock().unwrap().har_replay = Some(replay);
+    }
+
+    pub fn clear_har_replay(&self) {
+        self.state.lock().unwrap().har_replay = None;
     }
 
     pub fn enable_for_tab(
@@ -135,16 +146,24 @@ impl RouteRegistry {
         redirect_hop: bool,
     ) -> RequestPausedDecision {
         let mut state = self.state.lock().unwrap();
-        let Some(route) = state
+        let route = state
             .routes
             .iter()
             .find(|route| route.matcher.is_match(&url))
-            .cloned()
-        else {
+            .cloned();
+        let (pattern, handler) = if let Some(route) = route {
+            (route.info.pattern, route.info.handler)
+        } else if let Some(handler) = state
+            .har_replay
+            .as_ref()
+            .and_then(|replay| replay.match_request(&method, &url))
+        {
+            (UrlPattern::Text("har-replay".to_string()), handler)
+        } else {
             return RequestPausedDecision::Continue(None);
         };
 
-        let (decision, action, status, reason, response_body_preview) = match &route.info.handler {
+        let (decision, action, status, reason, response_body_preview) = match &handler {
             RouteHandler::Fulfill {
                 status,
                 headers,
@@ -229,7 +248,7 @@ impl RouteRegistry {
         state.interceptions.push(RouteInterception {
             url: mask_text(&url),
             method,
-            pattern: mask_pattern(&route.info.pattern),
+            pattern: mask_pattern(&pattern),
             action,
             request_headers: mask_headers(request_headers),
             request_body_preview: post_data.map(|data| mask_text(&data)),

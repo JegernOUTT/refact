@@ -262,6 +262,13 @@ function describeTypedStep(step: Record<string, unknown>): string {
     return `Arm file chooser for ${count} file${count === 1 ? "" : "s"}`;
   }
   if (action === "wait_for_download") return "Wait for download";
+  if (action === "route_web_socket") return "Route WebSocket";
+  if (action === "unroute_web_socket") return "Unroute WebSocket";
+  if (action === "send_web_socket_message") return "Send WebSocket message";
+  if (action === "wait_for_web_socket_frame") return "Wait for WebSocket frame";
+  if (action === "start_har_recording") return "Start HAR recording";
+  if (action === "stop_har_recording") return "Stop HAR recording";
+  if (action === "route_from_har") return "Route from HAR";
   if (action === "drag_and_drop") return "Drag element to target";
   if (action === "drop_files") {
     const count = Array.isArray(step.paths) ? step.paths.length : 0;
@@ -599,6 +606,19 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       .join("\n");
   }, [typedResult]);
 
+  const typedWebSocketsBlock = useMemo(() => {
+    if (!typedResult?.websockets?.length) return null;
+    return typedResult.websockets
+      .map((event) => {
+        const detail = event.data ?? event.error ?? event.status ?? "";
+        const route = event.routed ? " routed" : "";
+        return `${event.kind}${route}: ${event.url}${
+          detail ? ` · ${detail}` : ""
+        }`;
+      })
+      .join("\n");
+  }, [typedResult]);
+
   const typedContextBlock = useMemo(() => {
     const context = typedResult?.context;
     if (!context) return null;
@@ -726,6 +746,17 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       )}
 
       <NetworkPanel entries={typedResult?.network} />
+
+      {typedWebSocketsBlock && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>WebSockets</Box>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedWebSocketsBlock}
+            </ShikiCodeBlock>
+          </Box>
+        </Box>
+      )}
 
       {typedContextBlock && (
         <Box className={styles.section}>

@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+  <body>
+    <output id="received">waiting</output>
+    <script>
+      const socket = new WebSocket(`ws://${location.host}/ws-echo`);
+      socket.addEventListener("open", () => socket.send("hello"));
+      socket.addEventListener("message", (event) => {
+        document.querySelector("#received").textContent = event.data;
+      });
+    </script>
+  </body>
+</html>

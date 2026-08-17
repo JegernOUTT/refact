@@ -183,6 +183,77 @@ describe("ChromeTool", () => {
     ).toBeInTheDocument();
   });
 
+  test("summarizes WebSocket and HAR actions and renders WebSocket reports", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-network-advanced",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: {
+            steps: [
+              {
+                action: "route_web_socket",
+                pattern: "wss://example.test/**",
+                mode: "mock",
+              },
+              { action: "start_har_recording", mode: "full", content: "embed" },
+              { action: "stop_har_recording" },
+            ],
+          },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-network-advanced",
+      content: JSON.stringify({
+        ok: true,
+        steps: [
+          {
+            step_index: 0,
+            ok: true,
+            summary: "Added WebSocket route",
+            retries: 0,
+          },
+          {
+            step_index: 1,
+            ok: true,
+            summary: "Started HAR recording",
+            retries: 0,
+          },
+          { step_index: 2, ok: true, summary: "Saved HAR", retries: 0 },
+        ],
+        websockets: [
+          {
+            sequence: 1,
+            socket_id: "ws-1",
+            url: "wss://example.test/socket",
+            kind: "frame_received",
+            data: "masked frame",
+            routed: true,
+          },
+        ],
+      }),
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    expect(screen.getByText(/Route WebSocket/i)).toBeInTheDocument();
+    expect(screen.getByText(/Start HAR recording/i)).toBeInTheDocument();
+    await user.click(screen.getByText(/Browser action/i));
+    expect(screen.getByText("WebSockets")).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("frame_received routed")),
+    ).toBeInTheDocument();
+  });
+
   test("renders typed browser request and execution report", async () => {
     const user = userEvent.setup();
     const toolCall: ToolCall = {

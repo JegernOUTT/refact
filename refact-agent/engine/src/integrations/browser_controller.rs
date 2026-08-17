@@ -699,6 +699,7 @@ fn execute_steps_with_world(
         console: vec![],
         page_errors: vec![],
         network: vec![],
+        websockets: vec![],
         locator_handlers,
         dialogs: vec![],
         uploads: vec![],
@@ -1051,6 +1052,97 @@ fn execute_route_management_step(
                     .with_data(serde_json::json!({"routes": routes})),
             )
         }
+        BrowserStep::RouteWebSocket { pattern, mode } => Some(
+            match runtime.websocket_registry.add_route(pattern.clone(), *mode) {
+                Ok(()) => StepResult::success(idx, "Added WebSocket route").with_data(
+                    serde_json::json!({"route_count": runtime.websocket_registry.route_count()}),
+                ),
+                Err(error) => StepResult::failure(idx, "Add WebSocket route", error),
+            },
+        ),
+        BrowserStep::UnrouteWebSocket { pattern } => {
+            let removed = runtime.websocket_registry.remove_routes(pattern.as_ref());
+            Some(StepResult::success(
+                idx,
+                if pattern.is_some() {
+                    format!("Removed {removed} matching WebSocket route(s)")
+                } else {
+                    format!("Removed all {removed} WebSocket route(s)")
+                },
+            ))
+        }
+        BrowserStep::SendWebSocketMessage { url_pattern, data } => {
+            let result = runtime.websocket_registry.send_to_page(url_pattern, data);
+            let tabs = runtime
+                .browser
+                .get_tabs()
+                .lock()
+                .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            Some(
+                match result.and_then(|sent| {
+                    runtime.websocket_registry.flush_commands(&tabs)?;
+                    Ok(sent)
+                }) {
+                    Ok(sent) => StepResult::success(
+                        idx,
+                        format!("Sent WebSocket message to {sent} socket(s)"),
+                    ),
+                    Err(error) => StepResult::failure(idx, "Send WebSocket message", error),
+                },
+            )
+        }
+        BrowserStep::StartHarRecording {
+            path,
+            mode,
+            content,
+            url_filter,
+        } => Some(
+            match runtime.har_recorder.start(
+                &runtime.artifacts_dir,
+                path.as_deref(),
+                *mode,
+                *content,
+                url_filter.as_ref(),
+            ) {
+                Ok(path) => StepResult::success(idx, "Started HAR recording")
+                    .with_data(serde_json::json!({"path": path})),
+                Err(error) => StepResult::failure(idx, "Start HAR recording", error),
+            },
+        ),
+        BrowserStep::StopHarRecording => Some(match runtime.har_recorder.stop() {
+            Ok(summary) => StepResult::success(
+                idx,
+                format!(
+                    "Saved HAR with {} entries ({} bytes)",
+                    summary.entry_count, summary.bytes
+                ),
+            )
+            .with_data(serde_json::json!({"artifact": {
+                "kind": "har",
+                "mime": "application/json",
+                "path": summary.path,
+                "bytes": summary.bytes,
+                "entry_count": summary.entry_count
+            }})),
+            Err(error) => StepResult::failure(idx, "Stop HAR recording", error),
+        }),
+        BrowserStep::RouteFromHar {
+            path,
+            url_filter,
+            not_found,
+        } => Some(
+            match refact_browser::har::HarReplay::load(
+                Path::new(path),
+                url_filter.as_ref(),
+                *not_found,
+            )
+            .and_then(|replay| runtime.set_har_replay(replay))
+            {
+                Ok(()) => StepResult::success(idx, "Added HAR replay route"),
+                Err(error) => StepResult::failure(idx, "Route from HAR", error),
+            },
+        ),
         _ => None,
     }
 }
@@ -1151,6 +1243,10 @@ pub async fn execute_request_with_runtime(
         let rt = runtime_arc.lock().await;
         rt.network_monitor.clone()
     };
+    let websocket_registry = {
+        let rt = runtime_arc.lock().await;
+        rt.websocket_registry.clone()
+    };
     let download_monitor = {
         let rt = runtime_arc.lock().await;
         rt.download_monitor.clone()
@@ -1167,6 +1263,7 @@ pub async fn execute_request_with_runtime(
             BrowserStep::WaitForRequest { .. } => Some((index, network_monitor.request_cursor())),
             BrowserStep::WaitForResponse { .. } => Some((index, network_monitor.response_cursor())),
             BrowserStep::WaitForDownload { .. } => Some((index, download_monitor.cursor())),
+            BrowserStep::WaitForWebSocketFrame { .. } => Some((index, websocket_registry.cursor())),
             _ => None,
         })
         .collect::<std::collections::HashMap<_, _>>();
@@ -1231,10 +1328,42 @@ pub async fn execute_request_with_runtime(
             result
         } else if matches!(
             step,
-            BrowserStep::Route { .. } | BrowserStep::Unroute { .. } | BrowserStep::ListRoutes
+            BrowserStep::Route { .. }
+                | BrowserStep::Unroute { .. }
+                | BrowserStep::ListRoutes
+                | BrowserStep::RouteWebSocket { .. }
+                | BrowserStep::UnrouteWebSocket { .. }
+                | BrowserStep::SendWebSocketMessage { .. }
+                | BrowserStep::StartHarRecording { .. }
+                | BrowserStep::StopHarRecording
+                | BrowserStep::RouteFromHar { .. }
         ) {
             let mut rt = runtime_arc.lock().await;
             execute_route_management_step(&mut rt, step, idx).unwrap()
+        } else if let BrowserStep::WaitForWebSocketFrame {
+            pattern,
+            timeout_ms,
+        } = step
+        {
+            let matcher = pattern
+                .as_ref()
+                .map(|pattern| match pattern {
+                    UrlPattern::Text(value) => UrlMatcher::text(value),
+                    UrlPattern::Regex { source, flags } => UrlMatcher::regex(source, flags),
+                })
+                .transpose();
+            let cursor = armed_network_waits.get(&idx).copied().unwrap_or_default();
+            match matcher.and_then(|matcher| {
+                websocket_registry.wait_for_frame(
+                    matcher.as_ref(),
+                    cursor,
+                    Duration::from_millis(clamp_timeout_ms(*timeout_ms)),
+                )
+            }) {
+                Ok(frame) => StepResult::success(idx, "Observed WebSocket frame")
+                    .with_data(serde_json::json!({"frame": frame})),
+                Err(error) => StepResult::failure(idx, "Wait for WebSocket frame", error),
+            }
         } else if is_context_management_step(step) {
             let mut rt = runtime_arc.lock().await;
             execute_context_management_step(&mut rt, step, idx)
@@ -1485,6 +1614,7 @@ pub async fn execute_request_with_runtime(
         console,
         page_errors,
         network,
+        websockets,
         dialogs,
         uploads,
         downloads,
@@ -1505,6 +1635,7 @@ pub async fn execute_request_with_runtime(
             .collect();
         console.retain(|entry| entry.level != "page_error");
         let network = rt.flush_report_network();
+        let websockets = rt.websocket_registry.drain_report();
         let dialogs = rt.dialog_manager.take_reports();
         let uploads = rt.file_chooser_manager.take_uploads();
         let downloads = rt.download_monitor.take_report();
@@ -1514,6 +1645,7 @@ pub async fn execute_request_with_runtime(
             console,
             page_errors,
             network,
+            websockets,
             dialogs,
             uploads,
             downloads,
@@ -1531,6 +1663,7 @@ pub async fn execute_request_with_runtime(
         console,
         page_errors,
         network,
+        websockets,
         locator_handlers,
         dialogs,
         uploads,
@@ -1649,7 +1782,8 @@ pub fn execute_steps_with_runtime(
                     });
                     if let Err(error) =
                         crate::integrations::browser_runtime::setup_recording_for_tab(
-                            runtime, &new_tab,
+                            runtime,
+                            new_tab.clone(),
                         )
                     {
                         let _ = new_tab.close(false);
@@ -1662,6 +1796,7 @@ pub fn execute_steps_with_runtime(
                             console: vec![],
                             page_errors: vec![],
                             network: vec![],
+                            websockets: runtime.websocket_registry.drain_report(),
                             locator_handlers,
                             dialogs: runtime.dialog_manager.take_reports(),
                             uploads: runtime.file_chooser_manager.take_uploads(),
@@ -1779,7 +1914,13 @@ pub fn execute_steps_with_runtime(
             }
             step @ (BrowserStep::Route { .. }
             | BrowserStep::Unroute { .. }
-            | BrowserStep::ListRoutes) => {
+            | BrowserStep::ListRoutes
+            | BrowserStep::RouteWebSocket { .. }
+            | BrowserStep::UnrouteWebSocket { .. }
+            | BrowserStep::SendWebSocketMessage { .. }
+            | BrowserStep::StartHarRecording { .. }
+            | BrowserStep::StopHarRecording
+            | BrowserStep::RouteFromHar { .. }) => {
                 execute_route_management_step(runtime, step, idx).unwrap()
             }
             step if is_context_management_step(step) => {
@@ -1987,6 +2128,7 @@ pub fn execute_steps_with_runtime(
         console: vec![],
         page_errors: vec![],
         network: vec![],
+        websockets: runtime.websocket_registry.drain_report(),
         locator_handlers,
         dialogs,
         uploads,
@@ -2502,6 +2644,13 @@ fn execute_single_step(
         | BrowserStep::Route { .. }
         | BrowserStep::Unroute { .. }
         | BrowserStep::ListRoutes
+        | BrowserStep::RouteWebSocket { .. }
+        | BrowserStep::UnrouteWebSocket { .. }
+        | BrowserStep::SendWebSocketMessage { .. }
+        | BrowserStep::WaitForWebSocketFrame { .. }
+        | BrowserStep::StartHarRecording { .. }
+        | BrowserStep::StopHarRecording
+        | BrowserStep::RouteFromHar { .. }
         | BrowserStep::SetViewport { .. }
         | BrowserStep::EmulateMedia { .. }
         | BrowserStep::SetLocale { .. }

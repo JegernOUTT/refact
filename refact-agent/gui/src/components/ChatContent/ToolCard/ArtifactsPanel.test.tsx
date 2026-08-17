@@ -27,6 +27,15 @@ const artifacts = [
       data: null,
     },
   },
+  {
+    artifact: {
+      kind: "har",
+      mime: "application/json",
+      path: "/tmp/refact-browser/network.har",
+      bytes: 8_192,
+      entry_count: 4,
+    },
+  },
 ];
 
 const downloads = [
@@ -66,7 +75,7 @@ describe("ArtifactsPanel", () => {
     renderPanel(artifacts, downloads);
 
     const trigger = screen.getByRole("button", {
-      name: "Artifacts — 1 screenshot, 1 PDF, 2 downloads",
+      name: "Artifacts — 1 screenshot, 1 PDF, 1 HAR, 2 downloads",
     });
     expect(trigger).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("report.pdf")).not.toBeInTheDocument();
@@ -79,6 +88,11 @@ describe("ArtifactsPanel", () => {
     expect(screen.getByText("report.pdf")).toBeInTheDocument();
     expect(screen.getByText("4.0 KB")).toBeInTheDocument();
     expect(screen.getByText("3 pages")).toBeInTheDocument();
+    expect(screen.getByText("HARs (1)")).toBeInTheDocument();
+    expect(screen.getByText("4 entries · 8.0 KB")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Open HAR network.har" }),
+    ).toHaveAttribute("href", "file:///tmp/refact-browser/network.har");
     expect(screen.getByText("Downloads (2)")).toBeInTheDocument();
     expect(screen.getByText("report.csv")).toBeInTheDocument();
     expect(screen.getByText("Completed")).toBeInTheDocument();

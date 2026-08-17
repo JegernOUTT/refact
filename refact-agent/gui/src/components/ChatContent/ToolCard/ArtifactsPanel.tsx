@@ -1,9 +1,10 @@
 import { Box, Flex, Text } from "@radix-ui/themes";
-import { Download, FileText, Images } from "lucide-react";
+import { Download, FileJson, FileText, Images } from "lucide-react";
 
 import type {
   BrowserDownloadInfo,
   BrowserImageArtifact,
+  BrowserHarArtifact,
   BrowserPdfArtifact,
 } from "../../../services/refact/browser";
 import { DialogImage } from "../../DialogImage";
@@ -94,6 +95,28 @@ function parsePdfArtifact(value: unknown): DisplayPdf | null {
   };
 }
 
+function parseHarArtifact(value: unknown): BrowserHarArtifact | null {
+  const artifact = artifactValue(value);
+  if (
+    !artifact ||
+    artifact.kind !== "har" ||
+    artifact.mime !== "application/json" ||
+    typeof artifact.path !== "string" ||
+    artifact.path.length === 0 ||
+    !isNonNegativeNumber(artifact.bytes) ||
+    !isNonNegativeNumber(artifact.entry_count)
+  ) {
+    return null;
+  }
+  return {
+    kind: "har",
+    mime: "application/json",
+    path: artifact.path,
+    bytes: artifact.bytes,
+    entry_count: artifact.entry_count,
+  };
+}
+
 function isDownloadState(value: unknown): value is DisplayDownload["state"] {
   return (
     value === "in_progress" ||
@@ -173,11 +196,15 @@ export function ArtifactsPanel({ artifacts, downloads }: ArtifactsPanelProps) {
   const pdfs = artifactValues
     .map(parsePdfArtifact)
     .filter((value): value is DisplayPdf => value !== null);
+  const hars = artifactValues
+    .map(parseHarArtifact)
+    .filter((value): value is BrowserHarArtifact => value !== null);
   const downloadValues = Array.isArray(downloads) ? downloads : [];
   const parsedDownloads = downloadValues
     .map(parseDownload)
     .filter((value): value is DisplayDownload => value !== null);
-  const count = screenshots.length + pdfs.length + parsedDownloads.length;
+  const count =
+    screenshots.length + pdfs.length + hars.length + parsedDownloads.length;
 
   if (count === 0) return null;
 
@@ -186,6 +213,7 @@ export function ArtifactsPanel({ artifacts, downloads }: ArtifactsPanelProps) {
       ? countLabel(screenshots.length, "screenshot")
       : null,
     pdfs.length > 0 ? countLabel(pdfs.length, "PDF") : null,
+    hars.length > 0 ? countLabel(hars.length, "HAR") : null,
     parsedDownloads.length > 0
       ? countLabel(parsedDownloads.length, "download")
       : null,
@@ -273,6 +301,44 @@ export function ArtifactsPanel({ artifacts, downloads }: ArtifactsPanelProps) {
                   </Box>
                 );
               })}
+            </Box>
+          </Box>
+        ) : null}
+
+        {hars.length > 0 ? (
+          <Box className={styles.group}>
+            <Text className={styles.groupTitle} size="1" weight="bold">
+              HARs ({hars.length})
+            </Text>
+            <Box className={styles.rows}>
+              {hars.map((har, index) => (
+                <Box className={styles.row} key={`${har.path}-${index}`}>
+                  <Icon icon={FileJson} />
+                  <Box className={styles.rowContent}>
+                    <a
+                      aria-label={`Open HAR ${fileName(har.path)}`}
+                      className={styles.primaryLink}
+                      href={fileUrl(har.path)}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {fileName(har.path)}
+                    </a>
+                    <Text className={styles.meta} size="1">
+                      {har.entry_count} entries · {formatSize(har.bytes)}
+                    </Text>
+                    <a
+                      aria-label={`Open local path ${har.path}`}
+                      className={styles.path}
+                      href={fileUrl(har.path)}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {har.path}
+                    </a>
+                  </Box>
+                </Box>
+              ))}
             </Box>
           </Box>
         ) : null}

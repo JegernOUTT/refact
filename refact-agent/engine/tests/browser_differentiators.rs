@@ -18,7 +18,8 @@ use refact_lsp::integrations::browser_controller::{
 use refact_lsp::integrations::browser_locators::{parse_element_info, INSPECT_ELEMENT_JS};
 use refact_lsp::integrations::browser_models::{
     AccessibilitySnapshotOptions, BrowserActionRequest, BrowserLocator, BrowserStep, ElementInfo,
-    FieldKind, FillStrategy, SessionPolicy, TabTarget, UrlPattern,
+    FieldKind, FillStrategy, HarContentPolicy, HarMode, HarNotFound, SessionPolicy, TabTarget,
+    UrlPattern, WebSocketEventKind, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::{setup_recording_for_tab, BrowserRuntime, UTILITY_WORLD_NAME};
 use refact_lsp::refact_integrations::browser_types::RecorderEvent;
@@ -145,6 +146,62 @@ impl Drop for FixtureServer {
     }
 }
 
+#[test]
+fn websocket_inspection_and_har_replay_contracts_are_additive_and_masked() {
+    let registry = refact_lsp::refact_browser::WebSocketRegistry::default();
+    registry
+        .add_route(
+            UrlPattern::Text("wss://example.test/**".to_string()),
+            WebSocketRouteMode::Mock,
+        )
+        .unwrap();
+    registry.record_created(
+        "ws-1".to_string(),
+        "wss://example.test/socket?token=secret".to_string(),
+    );
+    registry.record_frame("ws-1", false, "password=hunter2".to_string(), 1);
+    let events = registry.drain_report();
+    assert_eq!(events[1].kind, WebSocketEventKind::FrameReceived);
+    assert!(!events[0].url.contains("secret"));
+    assert!(!events[1].data.as_deref().unwrap().contains("hunter2"));
+
+    let temp = tempdir().unwrap();
+    let recorder = refact_lsp::refact_browser::har::HarRecorder::default();
+    let path = recorder
+        .start(
+            temp.path(),
+            Some("offline.har"),
+            HarMode::Full,
+            HarContentPolicy::Embed,
+            None,
+        )
+        .unwrap();
+    recorder.record(
+        &refact_lsp::refact_integrations::browser_types::NetworkEntry {
+            method: "GET".to_string(),
+            url: "https://example.test/page?token=secret".to_string(),
+            status: Some(200),
+            status_text: Some("OK".to_string()),
+            ..Default::default()
+        },
+        Some(refact_lsp::refact_browser::har::normalize_response_body(
+            "<h1>password=hunter2</h1>".to_string(),
+            false,
+            Some("text/html".to_string()),
+        )),
+    );
+    let summary = recorder.stop().unwrap();
+    assert_eq!(summary.entry_count, 1);
+    let bytes = std::fs::read_to_string(&path).unwrap();
+    assert!(!bytes.contains("hunter2"));
+    let replay =
+        refact_lsp::refact_browser::har::HarReplay::load(&path, None, HarNotFound::Abort).unwrap();
+    assert!(matches!(
+        replay.match_request("GET", "https://example.test/missing"),
+        Some(refact_lsp::integrations::browser_models::RouteHandler::Abort { .. })
+    ));
+}
+
 struct BrowserCase {
     runtime: BrowserRuntime,
     _profile: TempDir,
@@ -182,7 +239,7 @@ impl BrowserCase {
     }
 
     fn setup_world(&mut self) {
-        setup_recording_for_tab(&mut self.runtime, &self.tab).unwrap();
+        setup_recording_for_tab(&mut self.runtime, self.tab.clone()).unwrap();
     }
 }
 

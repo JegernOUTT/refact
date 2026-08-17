@@ -77,6 +77,8 @@ const FIXTURE_PAGES: &[&str] = &[
     "cookie-banner.html",
     "interstitial.html",
     "generator.html",
+    "ws-echo.html",
+    "har-target.html",
 ];
 
 fn execute_steps(
@@ -331,7 +333,8 @@ impl BrowserCase {
     }
 
     fn setup_world(&mut self) {
-        refact_lsp::refact_browser::setup_recording_for_tab(&mut self.runtime, &self.tab).unwrap();
+        refact_lsp::refact_browser::setup_recording_for_tab(&mut self.runtime, self.tab.clone())
+            .unwrap();
     }
 
     fn call_version(&self) -> serde_json::Value {
@@ -467,7 +470,8 @@ async fn context_state_roundtrips_and_reaches_adopted_popup() {
     let mut fresh_runtime = launch_browser(&fresh_profile);
     let fresh_tab = fresh_runtime.browser.new_tab().unwrap();
     fresh_runtime.set_active_tab_target_id(fresh_tab.get_target_id().to_string());
-    refact_lsp::refact_browser::setup_recording_for_tab(&mut fresh_runtime, &fresh_tab).unwrap();
+    refact_lsp::refact_browser::setup_recording_for_tab(&mut fresh_runtime, fresh_tab.clone())
+        .unwrap();
     refact_lsp::refact_browser::context_state::set_storage_state(&fresh_tab, &state).unwrap();
     fresh_tab
         .navigate_to(&case.server.url("context-probe.html"))

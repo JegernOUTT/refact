@@ -1,0 +1,573 @@
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+use refact_integrations::browser_models::{
+    HarContentPolicy, HarMode, HarNotFound, RouteHandler, UrlPattern,
+};
+use refact_integrations::browser_types::NetworkEntry;
+
+use crate::network::{UrlMatcher, mask_headers, mask_text};
+
+#[derive(Clone, Debug)]
+pub struct HarResponseBody {
+    pub body: String,
+    pub base64: bool,
+    pub mime_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HarFile {
+    pub log: HarLog,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HarLog {
+    pub version: String,
+    pub creator: HarCreator,
+    pub entries: Vec<HarEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HarCreator {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HarEntry {
+    #[serde(rename = "startedDateTime")]
+    pub started_date_time: String,
+    pub time: f64,
+    pub request: HarRequest,
+    pub response: HarResponse,
+    pub cache: BTreeMap<String, String>,
+    pub timings: HarTimings,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HarRequest {
+    pub method: String,
+    pub url: String,
+    #[serde(rename = "httpVersion")]
+    pub http_version: String,
+    pub headers: Vec<HarNameValue>,
+    #[serde(rename = "queryString")]
+    pub query_string: Vec<HarNameValue>,
+    pub cookies: Vec<HarNameValue>,
+    #[serde(rename = "headersSize")]
+    pub headers_size: i64,
+    #[serde(rename = "bodySize")]
+    pub body_size: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HarResponse {
+    pub status: u16,
+    #[serde(rename = "statusText")]
+    pub status_text: String,
+    #[serde(rename = "httpVersion")]
+    pub http_version: String,
+    pub headers: Vec<HarNameValue>,
+    pub cookies: Vec<HarNameValue>,
+    pub content: HarContent,
+    #[serde(rename = "redirectURL")]
+    pub redirect_url: String,
+    #[serde(rename = "headersSize")]
+    pub headers_size: i64,
+    #[serde(rename = "bodySize")]
+    pub body_size: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HarContent {
+    pub size: i64,
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HarNameValue {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HarTimings {
+    pub send: f64,
+    pub wait: f64,
+    pub receive: f64,
+}
+
+#[derive(Clone, Debug)]
+struct HarRecording {
+    path: PathBuf,
+    mode: HarMode,
+    content: HarContentPolicy,
+    matcher: Option<UrlMatcher>,
+    entries: Vec<HarEntry>,
+}
+
+#[derive(Clone, Debug)]
+pub struct HarReplay {
+    entries: Vec<HarEntry>,
+    matcher: Option<UrlMatcher>,
+    not_found: HarNotFound,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HarRecordingSummary {
+    pub path: String,
+    pub entry_count: usize,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct HarRecorderState {
+    recording: Option<HarRecording>,
+    pending_bodies: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct HarRecorder {
+    state: Mutex<HarRecorderState>,
+    changed: Condvar,
+}
+
+impl HarRecorder {
+    pub fn start(
+        &self,
+        artifacts_dir: &Path,
+        path: Option<&str>,
+        mode: HarMode,
+        content: HarContentPolicy,
+        url_filter: Option<&UrlPattern>,
+    ) -> Result<PathBuf, String> {
+        let matcher = url_filter.map(matcher_for_pattern).transpose()?;
+        let path = match path {
+            Some(path) => {
+                let candidate = PathBuf::from(path);
+                let file_name = candidate
+                    .file_name()
+                    .ok_or_else(|| "HAR path must name a file".to_string())?;
+                if candidate.components().count() != 1 {
+                    return Err(
+                        "HAR path must be a file name inside the runtime artifact directory"
+                            .to_string(),
+                    );
+                }
+                artifacts_dir.join(file_name)
+            }
+            None => artifacts_dir.join(format!("network-{}.har", now_millis())),
+        };
+        if path.extension().and_then(|value| value.to_str()) != Some("har") {
+            return Err("HAR path must end in .har".to_string());
+        }
+        let mut state = self.state.lock().unwrap();
+        if state.recording.is_some() {
+            return Err("HAR recording is already active".to_string());
+        }
+        state.recording = Some(HarRecording {
+            path: path.clone(),
+            mode,
+            content,
+            matcher,
+            entries: Vec::new(),
+        });
+        Ok(path)
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.state.lock().unwrap().recording.is_some()
+    }
+
+    pub fn record(&self, entry: &NetworkEntry, body: Option<HarResponseBody>) {
+        let mut state = self.state.lock().unwrap();
+        let Some(recording) = state.recording.as_mut() else {
+            return;
+        };
+        if recording
+            .matcher
+            .as_ref()
+            .is_some_and(|matcher| !matcher.is_match(&entry.url))
+        {
+            return;
+        }
+        recording.entries.push(entry_from_monitor(
+            entry,
+            body,
+            recording.mode,
+            recording.content,
+        ));
+    }
+
+    pub fn begin_body_capture(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.recording.is_none() {
+            return false;
+        }
+        state.pending_bodies += 1;
+        true
+    }
+
+    pub fn finish_body_capture(&self, entry: &NetworkEntry, body: Option<HarResponseBody>) {
+        self.record(entry, body);
+        let mut state = self.state.lock().unwrap();
+        state.pending_bodies = state.pending_bodies.saturating_sub(1);
+        self.changed.notify_all();
+    }
+
+    pub fn stop(&self) -> Result<HarRecordingSummary, String> {
+        let mut state = self.state.lock().unwrap();
+        while state.pending_bodies > 0 {
+            state = self.changed.wait(state).unwrap();
+        }
+        let recording = state
+            .recording
+            .take()
+            .ok_or_else(|| "HAR recording is not active".to_string())?;
+        if let Some(parent) = recording.path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "Failed to create HAR directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        let file = HarFile {
+            log: HarLog {
+                version: "1.2".to_string(),
+                creator: HarCreator {
+                    name: "Refact Browser".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+                entries: recording.entries,
+            },
+        };
+        let bytes = serde_json::to_vec_pretty(&file)
+            .map_err(|error| format!("Failed to serialize HAR: {error}"))?;
+        std::fs::write(&recording.path, &bytes).map_err(|error| {
+            format!("Failed to write HAR {}: {error}", recording.path.display())
+        })?;
+        Ok(HarRecordingSummary {
+            path: recording.path.to_string_lossy().into_owned(),
+            entry_count: file.log.entries.len(),
+            bytes: bytes.len() as u64,
+        })
+    }
+}
+
+impl HarReplay {
+    pub fn load(
+        path: &Path,
+        url_filter: Option<&UrlPattern>,
+        not_found: HarNotFound,
+    ) -> Result<Self, String> {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("Failed to read HAR {}: {error}", path.display()))?;
+        let file: HarFile = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Invalid HAR {}: {error}", path.display()))?;
+        Ok(Self {
+            entries: file.log.entries,
+            matcher: url_filter.map(matcher_for_pattern).transpose()?,
+            not_found,
+        })
+    }
+
+    pub fn match_request(&self, method: &str, url: &str) -> Option<RouteHandler> {
+        if self
+            .matcher
+            .as_ref()
+            .is_some_and(|matcher| !matcher.is_match(url))
+        {
+            return None;
+        }
+        let masked_url = mask_text(url);
+        if let Some(entry) = self.entries.iter().find(|entry| {
+            entry.request.method.eq_ignore_ascii_case(method) && entry.request.url == masked_url
+        }) {
+            let headers = entry
+                .response
+                .headers
+                .iter()
+                .map(|header| (header.name.clone(), header.value.clone()))
+                .collect();
+            return Some(RouteHandler::Fulfill {
+                status: entry.response.status,
+                headers,
+                body: entry.response.content.text.clone(),
+                content_type: Some(entry.response.content.mime_type.clone()),
+                body_base64: entry.response.content.encoding.as_deref() == Some("base64"),
+            });
+        }
+        match self.not_found {
+            HarNotFound::Abort => Some(RouteHandler::Abort {
+                reason: "blockedbyclient".to_string(),
+            }),
+            HarNotFound::Fallback => None,
+        }
+    }
+}
+
+fn entry_from_monitor(
+    entry: &NetworkEntry,
+    body: Option<HarResponseBody>,
+    mode: HarMode,
+    content_policy: HarContentPolicy,
+) -> HarEntry {
+    let request_headers = mask_headers(entry.request_headers.clone());
+    let response_headers = mask_headers(entry.response_headers.clone());
+    let request_start = entry
+        .timing
+        .as_ref()
+        .and_then(|timing| timing.request_start)
+        .unwrap_or(entry.timestamp);
+    let response_start = entry
+        .timing
+        .as_ref()
+        .and_then(|timing| timing.response_start)
+        .unwrap_or(request_start);
+    let response_end = entry
+        .timing
+        .as_ref()
+        .and_then(|timing| timing.response_end)
+        .unwrap_or(response_start);
+    let body_size = body
+        .as_ref()
+        .map(|body| body.body.len() as i64)
+        .or_else(|| entry.encoded_data_length.map(|value| value as i64))
+        .unwrap_or(0);
+    let mime_type = body
+        .as_ref()
+        .and_then(|body| body.mime_type.clone())
+        .or_else(|| header_value(&response_headers, "content-type"))
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let content = match content_policy {
+        HarContentPolicy::Omit => HarContent {
+            size: body_size,
+            mime_type,
+            text: None,
+            encoding: None,
+        },
+        HarContentPolicy::Embed | HarContentPolicy::Attach => {
+            let text = body.as_ref().map(|body| {
+                if body.base64 {
+                    body.body.clone()
+                } else {
+                    mask_text(&body.body)
+                }
+            });
+            HarContent {
+                size: body_size,
+                mime_type,
+                text,
+                encoding: body
+                    .as_ref()
+                    .filter(|body| body.base64)
+                    .map(|_| "base64".to_string()),
+            }
+        }
+    };
+    HarEntry {
+        started_date_time: "1970-01-01T00:00:00.000Z".to_string(),
+        time: (response_end - entry.timestamp).max(0.0),
+        request: HarRequest {
+            method: entry.method.clone(),
+            url: mask_text(&entry.url),
+            http_version: "HTTP/1.1".to_string(),
+            headers: header_pairs(request_headers),
+            query_string: query_pairs(&entry.url),
+            cookies: Vec::new(),
+            headers_size: if mode == HarMode::Full { 0 } else { -1 },
+            body_size: 0,
+        },
+        response: HarResponse {
+            status: entry.status.unwrap_or(0),
+            status_text: entry.status_text.clone().unwrap_or_default(),
+            http_version: "HTTP/1.1".to_string(),
+            headers: header_pairs(response_headers),
+            cookies: Vec::new(),
+            content,
+            redirect_url: header_value(&entry.response_headers, "location")
+                .map(|value| mask_text(&value))
+                .unwrap_or_default(),
+            headers_size: if mode == HarMode::Full { 0 } else { -1 },
+            body_size,
+        },
+        cache: BTreeMap::new(),
+        timings: HarTimings {
+            send: (request_start - entry.timestamp).max(0.0),
+            wait: (response_start - request_start).max(0.0),
+            receive: (response_end - response_start).max(0.0),
+        },
+    }
+}
+
+fn header_pairs(headers: BTreeMap<String, String>) -> Vec<HarNameValue> {
+    headers
+        .into_iter()
+        .map(|(name, value)| HarNameValue { name, value })
+        .collect()
+}
+
+fn query_pairs(url: &str) -> Vec<HarNameValue> {
+    let Some(query) = url.split_once('?').map(|(_, query)| query) else {
+        return Vec::new();
+    };
+    query
+        .split('#')
+        .next()
+        .unwrap_or(query)
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            HarNameValue {
+                name: name.to_string(),
+                value: if is_sensitive_name(name) {
+                    "[REDACTED]".to_string()
+                } else {
+                    mask_text(value)
+                },
+            }
+        })
+        .collect()
+}
+
+fn is_sensitive_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "password" | "passwd" | "token" | "api_key" | "api-key" | "authorization"
+    )
+}
+
+fn header_value(headers: &BTreeMap<String, String>, name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+}
+
+fn matcher_for_pattern(pattern: &UrlPattern) -> Result<UrlMatcher, String> {
+    match pattern {
+        UrlPattern::Text(value) => UrlMatcher::text(value),
+        UrlPattern::Regex { source, flags } => UrlMatcher::regex(source, flags),
+    }
+}
+
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+pub fn normalize_response_body(
+    body: String,
+    base64: bool,
+    mime_type: Option<String>,
+) -> HarResponseBody {
+    let body = if base64 { body } else { mask_text(&body) };
+    HarResponseBody {
+        body,
+        base64,
+        mime_type,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use refact_integrations::browser_types::NetworkTiming;
+
+    fn network_entry() -> NetworkEntry {
+        NetworkEntry {
+            timestamp: 10.0,
+            method: "GET".to_string(),
+            url: "https://example.test/page?token=secret".to_string(),
+            resource_type: "Document".to_string(),
+            status: Some(200),
+            status_text: Some("OK".to_string()),
+            request_headers: BTreeMap::from([(
+                "Authorization".to_string(),
+                "Bearer secret".to_string(),
+            )]),
+            response_headers: BTreeMap::from([(
+                "Content-Type".to_string(),
+                "text/html".to_string(),
+            )]),
+            timing: Some(NetworkTiming {
+                start_time: 10.0,
+                request_start: Some(10.1),
+                response_start: Some(10.4),
+                response_end: Some(10.7),
+            }),
+            encoded_data_length: Some(20),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn har_entry_assembly_masks_headers_query_and_content() {
+        let entry = entry_from_monitor(
+            &network_entry(),
+            Some(normalize_response_body(
+                "<html>password=hunter2</html>".to_string(),
+                false,
+                Some("text/html".to_string()),
+            )),
+            HarMode::Full,
+            HarContentPolicy::Embed,
+        );
+        assert_eq!(entry.request.headers[0].value, "[REDACTED]");
+        assert_eq!(entry.request.query_string[0].value, "[REDACTED]");
+        assert!(!entry.response.content.text.unwrap().contains("hunter2"));
+        assert_eq!(entry.timings.wait, 0.3000000000000007);
+    }
+
+    #[test]
+    fn replay_matching_fulfills_or_applies_not_found_policy() {
+        let entry = entry_from_monitor(
+            &network_entry(),
+            Some(HarResponseBody {
+                body: base64::engine::general_purpose::STANDARD.encode("offline page"),
+                base64: true,
+                mime_type: Some("text/html".to_string()),
+            }),
+            HarMode::Full,
+            HarContentPolicy::Embed,
+        );
+        let replay = HarReplay {
+            entries: vec![entry],
+            matcher: None,
+            not_found: HarNotFound::Abort,
+        };
+        assert!(matches!(
+            replay.match_request("GET", "https://example.test/page?token=secret"),
+            Some(RouteHandler::Fulfill {
+                body_base64: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            replay.match_request("GET", "https://example.test/missing"),
+            Some(RouteHandler::Abort { .. })
+        ));
+
+        let fallback = HarReplay {
+            not_found: HarNotFound::Fallback,
+            ..replay
+        };
+        assert!(fallback
+            .match_request("GET", "https://example.test/missing")
+            .is_none());
+    }
+}
