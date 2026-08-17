@@ -1,0 +1,211 @@
+.surface {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-0);
+}
+
+.toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  padding: var(--rf-space-2);
+  overflow-x: auto;
+  background: var(--rf-surface-glass);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.toolbar > * {
+  flex: 0 0 auto;
+}
+
+.numberInput {
+  width: calc(var(--rf-control-h-lg) * 2);
+}
+
+.sourceConfiguration {
+  flex: 0 0 auto;
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.fileInput {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--rf-control-h);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+}
+
+.notice {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-1);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.canvas {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--rf-space-3);
+  overflow: auto;
+  background: var(--rf-surface-1);
+}
+
+.viewport {
+  position: relative;
+  flex: 0 0 auto;
+  min-height: 100%;
+  overflow: hidden;
+  background: var(--rf-surface-0);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  transform-origin: top center;
+}
+
+.zoom50 {
+  transform: scale(0.5);
+}
+.zoom75 {
+  transform: scale(0.75);
+}
+.zoom100 {
+  transform: scale(1);
+}
+.zoom125 {
+  transform: scale(1.25);
+}
+.zoom150 {
+  transform: scale(1.5);
+}
+.zoom200 {
+  transform: scale(2);
+}
+
+.frame,
+.referenceLive,
+.referenceImage {
+  display: block;
+  max-width: none;
+  min-height: 100%;
+  border: 0;
+}
+
+.frame,
+.referenceLive {
+  height: 100%;
+}
+
+.referenceSingle,
+.referenceOverlay {
+  position: relative;
+  display: flex;
+  min-height: 100%;
+}
+
+.referenceSingle {
+  gap: var(--rf-space-2);
+}
+
+.referenceImage {
+  object-fit: contain;
+}
+
+.referenceOverlay .referenceImage {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+}
+
+.opacity25.referenceOverlay .referenceImage {
+  opacity: 0.25;
+}
+.opacity50.referenceOverlay .referenceImage {
+  opacity: 0.5;
+}
+.opacity75.referenceOverlay .referenceImage {
+  opacity: 0.75;
+}
+
+.emptySource,
+.fallback {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--rf-space-4);
+  color: var(--rf-color-muted);
+  text-align: center;
+}
+
+.fallback {
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  overflow: auto;
+}
+
+.fallback img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.pickerResult {
+  position: absolute;
+  right: var(--rf-space-3);
+  bottom: var(--rf-space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  max-width: min(calc(var(--rf-nav-w) * 2), calc(100% - var(--rf-space-6)));
+  padding: var(--rf-space-2);
+  overflow-wrap: anywhere;
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-overlay);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+  font: var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
+}
+
+.pickerResult img {
+  max-width: 100%;
+  max-height: calc(var(--rf-control-h-lg) * 4);
+  object-fit: contain;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .toolbar,
+  .pickerResult {
+    background: var(--rf-surface-2);
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .toolbar,
+:global(.radix-themes[data-host="jetbrains"]) .pickerResult {
+  background: var(--rf-surface-2);
+  backdrop-filter: none;
+}

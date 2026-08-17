@@ -7,6 +7,7 @@ import { useAppSelector, useConfig } from "../../hooks";
 import { Chat } from "../Chat/Chat";
 import { ChatThreadProvider } from "../Chat/Thread";
 import { selectCapabilities } from "../Config/configSlice";
+import { DesignSurface } from "../Design";
 import { FileViewer } from "./FilesPanel";
 import { GitPanel } from "./GitPanel";
 import { isGitSurface, parseSurfaceKey, type SurfaceKey } from "./surfaceKey";
@@ -62,6 +63,17 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
           data-surface-key={surfaceKey}
         >
           <FileViewer path={parsed.id} />
+        </div>
+      );
+    }
+
+    if (parsed.kind === "design") {
+      return (
+        <div
+          className={classNames(styles.surfacePane, styles.panelSurface)}
+          data-surface-key={surfaceKey}
+        >
+          <DesignSurface surfaceId={parsed.id} />
         </div>
       );
     }

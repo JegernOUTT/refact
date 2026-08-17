@@ -8,22 +8,28 @@ export type SurfaceKind =
   | "task"
   | "buddy"
   | "dashboard"
+  | "design"
   | "file"
   | MainSurfaceKind;
 export type SurfaceKey = string;
 export type ChatSurfaceKey = `chat:${string}`;
+export type DesignSurfaceKey = `design:${string}`;
 export type FileSurfaceKey = `file:${string}`;
 export type MainSurfaceKey = "git:main";
 
 export type ParsedSurfaceKey =
-  | { kind: "chat" | "task" | "buddy" | "file"; id: string }
+  | { kind: "chat" | "task" | "buddy" | "design" | "file"; id: string }
   | { kind: "git"; id: "main" }
   | { kind: "dashboard"; id: null };
 
 const isPrefixedSurfaceKind = (
   kind: string,
-): kind is "chat" | "task" | "buddy" | "file" =>
-  kind === "chat" || kind === "task" || kind === "buddy" || kind === "file";
+): kind is "chat" | "task" | "buddy" | "design" | "file" =>
+  kind === "chat" ||
+  kind === "task" ||
+  kind === "buddy" ||
+  kind === "design" ||
+  kind === "file";
 
 export const isMainSurfaceKind = (kind: string): kind is MainSurfaceKind =>
   kind === "git";
@@ -85,6 +91,9 @@ export const isChatSurface = (key: SurfaceKey): key is ChatSurfaceKey =>
 export const isFileSurface = (key: SurfaceKey): key is FileSurfaceKey =>
   key.startsWith("file:") && key.length > "file:".length;
 
+export const isDesignSurface = (key: SurfaceKey): key is DesignSurfaceKey =>
+  key.startsWith("design:") && key.length > "design:".length;
+
 export const isMainSurface = (key: SurfaceKey): key is MainSurfaceKey =>
   key === "git:main";
 
@@ -99,14 +108,18 @@ export const isTerminalSurface = (key: SurfaceKey): boolean =>
 
 export const isWorkspaceSurface = (
   key: SurfaceKey,
-): key is ChatSurfaceKey | FileSurfaceKey | MainSurfaceKey =>
-  isChatSurface(key) || isFileSurface(key) || isGitSurface(key);
+): key is ChatSurfaceKey | DesignSurfaceKey | FileSurfaceKey | MainSurfaceKey =>
+  isChatSurface(key) ||
+  isDesignSurface(key) ||
+  isFileSurface(key) ||
+  isGitSurface(key);
 
 export const isWorkspaceSurfaceEnabled = (
   key: SurfaceKey,
   capabilities: WorkspaceCapabilities,
 ): boolean =>
   isChatSurface(key) ||
+  isDesignSurface(key) ||
   (isFileSurface(key) && capabilities.filesPanel) ||
   isMainSurfaceEnabled(key, capabilities);
 

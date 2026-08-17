@@ -70,6 +70,7 @@ import { tasksSlice } from "../features/Tasks";
 import { knowledgeSlice } from "../features/Knowledge/knowledgeSlice";
 import { connectionSlice } from "../features/Connection";
 import { browserSlice } from "../features/Browser";
+import { designSlice } from "../features/Design";
 import { skillsStatusApi } from "../services/refact/skillsStatus";
 import { mcpServerInfoApi } from "../services/refact/mcpServerInfo";
 import { mcpInteractionsApi } from "../services/refact/mcpInteractions";
@@ -170,6 +171,7 @@ const rootReducer = combineSlices(
   knowledgeSlice,
   connectionSlice,
   browserSlice,
+  designSlice,
   notificationsSlice,
   schedulerSlice,
   workspaceSlice,

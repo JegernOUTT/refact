@@ -17,12 +17,8 @@ import { DropzoneProvider } from "../Dropzone";
 import { useCheckpoints } from "../../hooks/useCheckpoints";
 import { Checkpoints } from "../../features/Checkpoints";
 import { TaskProgressWidget } from "../TaskProgressWidget";
-import { BrowserPanel } from "../../features/Browser/BrowserPanel";
 import { BrowserContextGuard } from "../../features/Browser/BrowserContextGuard";
-import {
-  selectBrowserContextOversize,
-  selectBrowserUiOpen,
-} from "../../features/Browser/browserSlice";
+import { selectBrowserContextOversize } from "../../features/Browser/browserSlice";
 import { SkillsIndicator } from "../ChatContent/SkillsIndicator";
 import {
   registerVisibleChatMount,
@@ -63,9 +59,6 @@ export const Chat: React.FC<ChatProps> = ({
   );
   const isBuddyChat = useAppSelector((state) =>
     selectIsBuddyChat(state, chatId),
-  );
-  const isBrowserOpen = useAppSelector((state) =>
-    selectBrowserUiOpen(state, chatId),
   );
   const browserOversizeInfo = useAppSelector((state) =>
     selectBrowserContextOversize(state, chatId),
@@ -145,7 +138,6 @@ export const Chat: React.FC<ChatProps> = ({
         width="100%"
         px="1"
       >
-        {isBrowserOpen && <BrowserPanel chatId={chatId} />}
         <Flex
           direction="column"
           className={styles.transcriptArea}

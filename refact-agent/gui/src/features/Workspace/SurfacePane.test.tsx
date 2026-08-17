@@ -4,12 +4,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import * as ChatModule from "../Chat/Chat";
+import * as DesignModule from "../Design";
 import { SurfacePane } from "./SurfacePane";
 import { makeSurfaceKey, parseSurfaceKey } from "./surfaceKey";
 
 vi.spyOn(ChatModule, "Chat").mockImplementation(({ chatId }) => (
   <section data-testid="chat-surface" data-chat-id={chatId ?? ""}>
     Chat surface {chatId ?? ""}
+  </section>
+));
+
+vi.spyOn(DesignModule, "DesignSurface").mockImplementation(({ surfaceId }) => (
+  <section data-testid="design-surface" data-surface-id={surfaceId}>
+    Design surface {surfaceId}
   </section>
 ));
 
@@ -73,6 +80,20 @@ describe("SurfacePane", () => {
 
     expect(await screen.findByText("const value = 1;")).toBeInTheDocument();
     expect(screen.getByLabelText("File viewer")).toBeInTheDocument();
+    expect(
+      document.querySelector(`[data-surface-key="${surfaceKey}"]`),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a Design surface for design surface keys", () => {
+    const surfaceKey = makeSurfaceKey("design", "chat-a");
+
+    render(<SurfacePane surfaceKey={surfaceKey} />);
+
+    expect(screen.getByTestId("design-surface")).toHaveAttribute(
+      "data-surface-id",
+      "chat-a",
+    );
     expect(
       document.querySelector(`[data-surface-key="${surfaceKey}"]`),
     ).toBeInTheDocument();

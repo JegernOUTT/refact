@@ -1,5 +1,11 @@
 import classNames from "classnames";
-import { FileText, Layers, Menu as MenuIcon, X } from "lucide-react";
+import {
+  FileText,
+  Layers,
+  Menu as MenuIcon,
+  Palette,
+  X,
+} from "lucide-react";
 import {
   ComponentProps,
   DragEvent,
@@ -83,6 +89,7 @@ type TabSurfaceKind =
   | "task"
   | "buddy"
   | "dashboard"
+  | "design"
   | "file"
   | MainSurfaceKind;
 
@@ -170,6 +177,7 @@ function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
     const parsed = parseSurfaceKey(surfaceKey);
     if (
       parsed.kind === "dashboard" ||
+      parsed.kind === "design" ||
       parsed.kind === "file" ||
       isMainSurfaceKind(parsed.kind)
     ) {
@@ -220,6 +228,14 @@ function displayInfoForSurface(
     return {
       title: "Dashboard",
       kind: "dashboard",
+      unreadNotificationCount: 0,
+    };
+  }
+
+  if (parsed.kind === "design") {
+    return {
+      title: parsed.id === "main" ? "Design" : `Design ${parsed.id}`,
+      kind: "design",
       unreadNotificationCount: 0,
     };
   }
@@ -404,7 +420,11 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
         }
         return;
       }
-      if (parsed.kind === "file" || isMainSurfaceKind(parsed.kind)) {
+      if (
+        parsed.kind === "design" ||
+        parsed.kind === "file" ||
+        isMainSurfaceKind(parsed.kind)
+      ) {
         dispatch(setActiveTab(tabId));
         if (currentPage?.name !== "chat") {
           dispatch(push({ name: "chat" }));
@@ -839,6 +859,8 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                   <span className={styles.tabStatus}>
                     {tab.kind === "file" ? (
                       <Icon icon={FileText} size="sm" tone="muted" />
+                    ) : tab.kind === "design" ? (
+                      <Icon icon={Palette} size="sm" tone="muted" />
                     ) : (
                       <StatusDot
                         aria-label={statusLabel(tab.status)}

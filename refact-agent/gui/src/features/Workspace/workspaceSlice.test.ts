@@ -49,6 +49,7 @@ import {
 } from "./workspaceSlice";
 import {
   isChatSurface,
+  isDesignSurface,
   isFilesSurface,
   isGitSurface,
   isMainSurface,
@@ -128,6 +129,7 @@ describe("surfaceKey helpers", () => {
     expect(makeSurfaceKey("chat", "thread-a")).toBe("chat:thread-a");
     expect(makeSurfaceKey("task", "task-a")).toBe("task:task-a");
     expect(makeSurfaceKey("buddy", "home")).toBe("buddy:home");
+    expect(makeSurfaceKey("design", "surface-a")).toBe("design:surface-a");
     expect(makeSurfaceKey("dashboard")).toBe("dashboard");
     expect(files).toBe("files:main");
     expect(git).toBe("git:main");
@@ -136,12 +138,17 @@ describe("surfaceKey helpers", () => {
       kind: "chat",
       id: "thread-a",
     });
+    expect(parseSurfaceKey("design:surface-a")).toEqual({
+      kind: "design",
+      id: "surface-a",
+    });
     expect(parseSurfaceKey("dashboard")).toEqual({
       kind: "dashboard",
       id: null,
     });
     expect(isChatSurface("chat:thread-a")).toBe(true);
     expect(isChatSurface("task:task-a")).toBe(false);
+    expect(isDesignSurface("design:surface-a")).toBe(true);
     expect(() => parseSurfaceKey(files)).toThrow("invalid surface key");
     expect(isMainSurface(files)).toBe(false);
     expect(isFilesSurface(files)).toBe(true);
@@ -235,6 +242,36 @@ describe("workspaceSlice", () => {
 
     expect(hydrated.tabs).toEqual([chatA]);
     expect(hydrated.activeTabId).toBe(chatA);
+  });
+
+  test("opens, binds, and hydrates design surfaces", () => {
+    const chatA = chat("a");
+    const designA = makeSurfaceKey("design", "a");
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(state, openTab(designA));
+    state = reducer(
+      state,
+      bindSurfaceToChat({ surfaceKey: designA, chatId: "a" }),
+    );
+
+    expect(state.tabs).toEqual([chatA, designA]);
+    expect(state.activeTabId).toBe(designA);
+    expect(state.contextChatByTab).toEqual({ [designA]: "a" });
+
+    const hydrated = reducer(
+      undefined,
+      hydrateWorkspace({
+        tabs: state.tabs,
+        activeTabId: state.activeTabId,
+        groups: state.groups,
+        contextChatByTab: state.contextChatByTab,
+        openThreadIds: ["a"],
+      }),
+    );
+
+    expect(hydrated.tabs).toEqual([chatA, designA]);
+    expect(hydrated.activeTabId).toBe(designA);
+    expect(hydrated.contextChatByTab).toEqual({ [designA]: "a" });
   });
 
   test("opens, activates, reorders, and closes tabs", () => {

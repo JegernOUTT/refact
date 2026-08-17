@@ -12,6 +12,12 @@ import {
   makeBrowserRuntime,
 } from "../../features/Browser";
 import { browserApi } from "../../services/refact/browser";
+import {
+  bindSurfaceToChat,
+  closeTab,
+  makeSurfaceKey,
+  openTab,
+} from "../../features/Workspace";
 
 type BrowserToggleButtonProps = {
   chatId: string;
@@ -32,6 +38,7 @@ export const BrowserToggleButton = forwardRef<
   const [browserStop] = browserApi.useBrowserStopMutation();
   const [browserScreenshot] = browserApi.useBrowserScreenshotMutation();
   const requestIdRef = useRef(0);
+  const designSurfaceKey = makeSurfaceKey("design", chatId);
   const runtimeIdRef = useRef<string | undefined>(runtime?.runtime_id);
   runtimeIdRef.current = runtime?.runtime_id;
 
@@ -49,6 +56,7 @@ export const BrowserToggleButton = forwardRef<
         } finally {
           if (requestIdRef.current === requestId) {
             dispatch(closeBrowserUi({ chatId }));
+            dispatch(closeTab(designSurfaceKey));
             setBusy(false);
           }
         }
@@ -58,6 +66,8 @@ export const BrowserToggleButton = forwardRef<
 
     const requestId = ++requestIdRef.current;
     dispatch(openBrowserUi({ chatId }));
+    dispatch(openTab(designSurfaceKey));
+    dispatch(bindSurfaceToChat({ surfaceKey: designSurfaceKey, chatId }));
     setBusy(true);
     void (async () => {
       try {
@@ -107,6 +117,7 @@ export const BrowserToggleButton = forwardRef<
     browserStart,
     browserStop,
     browserScreenshot,
+    designSurfaceKey,
   ]);
 
   const isActive = isOpen && runtime?.connected;

@@ -13,6 +13,7 @@ import {
 } from "../ChatPanes/panesTree";
 import {
   isChatSurface,
+  isDesignSurface,
   isFileSurface,
   isFilesSurface,
   isMainSurface,
@@ -379,7 +380,8 @@ const pruneContextChatByTab = (
   for (const [tabId, group] of Object.entries(state.groups)) {
     if (!group || state.contextChatByTab?.[tabId]) continue;
     const groupSurfaces = collectTabIds(group.root);
-    if (!groupSurfaces.some(isFileSurface)) continue;
+    if (!groupSurfaces.some((key) => isFileSurface(key) || isDesignSurface(key)))
+      continue;
     const chatId =
       chatIdFromSurface(focusedSurfaceKey(group)) ??
       chatIdFromSurface(groupSurfaces.find(isChatSurface) ?? null);
@@ -782,7 +784,7 @@ const writeGroup = (
   state.groups[tabId] = normalizedGroup;
   const groupSurfaces = collectTabIds(normalizedGroup.root);
   if (
-    groupSurfaces.some(isFileSurface) &&
+    groupSurfaces.some((key) => isFileSurface(key) || isDesignSurface(key)) &&
     (!contextChatId || !groupSurfaces.includes(`chat:${contextChatId}`))
   ) {
     setContextChatForTab(
@@ -913,6 +915,7 @@ const pruneNodeToOpenThreads = (
     const tabIds = node.tabIds.filter(
       (key) =>
         openChatSurface(key, openThreadIds) ||
+        isDesignSurface(key) ||
         (filesEnabled && isFileSurface(key)),
     );
     const activeTabId = tabIds.includes(node.activeTabId ?? "")
@@ -956,7 +959,10 @@ const normalizeHydratedGroup = (group: PaneGroup): PaneGroup | null => {
     surfaceCount === 0 ||
     surfaceCount > MAX_WORKSPACE_TABS ||
     uniqueSurfaceCount !== surfaceCount ||
-    surfaces.some((key) => !isChatSurface(key) && !isFileSurface(key))
+    surfaces.some(
+      (key) =>
+        !isChatSurface(key) && !isFileSurface(key) && !isDesignSurface(key),
+    )
   ) {
     return null;
   }
@@ -1150,7 +1156,8 @@ export const reconcileWorkspaceState = (
         (key) =>
           openChatSurface(key, openThreads) ||
           (contextOwnerIsOpen(key) &&
-            ((isFileSurface(key) && effectiveCapabilities.filesPanel) ||
+            (isDesignSurface(key) ||
+              (isFileSurface(key) && effectiveCapabilities.filesPanel) ||
               (!isFilesSurface(key) &&
                 isMainSurfaceEnabled(key, effectiveCapabilities)))),
       )
@@ -1290,7 +1297,7 @@ export const workspaceSlice = createSlice({
       if (!isWorkspaceSurface(action.payload)) return;
       const contextChatId =
         chatIdFromSurface(action.payload) ?? focusedWorkspaceChatId(state);
-      if (isFileSurface(action.payload)) {
+      if (isFileSurface(action.payload) || isDesignSurface(action.payload)) {
         for (const [tabId, group] of Object.entries(state.groups)) {
           if (!group) continue;
           const leaf = findLeafByTab(group.root, action.payload);
@@ -1722,6 +1729,7 @@ export const workspaceSlice = createSlice({
           activeTabId:
             activeTabId &&
             (isChatSurface(activeTabId) ||
+              isDesignSurface(activeTabId) ||
               isFileSurface(activeTabId) ||
               isMainSurface(activeTabId)) &&
             tabs.includes(activeTabId)
@@ -1894,6 +1902,18 @@ export const selectFocusedWorkspaceSurfaceKey = (
 export const selectFocusedWorkspaceChatId = (
   state: WorkspaceRootState,
 ): string | null => focusedWorkspaceChatId(state.workspace);
+
+export const selectSurfaceChatId = (
+  state: WorkspaceRootState,
+  surfaceKey: SurfaceKey,
+): string | null => {
+  const tabId = contextTabForSurface(state.workspace, surfaceKey);
+  return (
+    chatIdFromSurface(surfaceKey) ??
+    state.workspace.contextChatByTab?.[tabId] ??
+    null
+  );
+};
 
 export const selectFocusedChatLiveEdits = (
   state: FocusedChatWorkspaceRootState,
