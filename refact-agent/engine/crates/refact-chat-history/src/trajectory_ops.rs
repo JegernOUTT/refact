@@ -72,14 +72,18 @@ pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
 }
 
 fn preserve_hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::Value> {
-    match msg.role.as_str() {
+    let mut extra = match msg.role.as_str() {
         "plan" => preserve_extra_key(&msg.extra, "plan"),
         "goal" => preserve_extra_key(&msg.extra, "goal"),
         "event" => preserve_extra_key(&msg.extra, "event"),
         COMPRESSION_REPORT_ROLE => preserve_extra_key(&msg.extra, "compression_report"),
         "assistant" => preserve_assistant_compression_extra(msg),
         _ => serde_json::Map::new(),
+    };
+    if let Some(privacy) = msg.extra.get("privacy") {
+        extra.insert("privacy".to_string(), privacy.clone());
     }
+    extra
 }
 
 fn preserve_assistant_compression_extra(
@@ -2074,6 +2078,26 @@ mod tests {
         let sanitized = sanitize_message_for_new_thread(&message);
 
         assert_eq!(sanitized.extra, message.extra);
+    }
+
+    #[test]
+    fn sanitize_message_for_new_thread_preserves_privacy_metadata() {
+        let mut message = make_assistant_with_extra();
+        message.extra.insert(
+            "privacy".to_string(),
+            serde_json::json!({
+                "files": [{
+                    "path": ".env",
+                    "zone": "secrets",
+                    "attribution": "declared"
+                }]
+            }),
+        );
+
+        let sanitized = sanitize_message_for_new_thread(&message);
+
+        assert_eq!(sanitized.extra.len(), 1);
+        assert_eq!(sanitized.extra["privacy"], message.extra["privacy"]);
     }
 
     #[test]

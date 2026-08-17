@@ -30,10 +30,13 @@ pub async fn handoff_select(
 
     let bundled_context: Option<ChatMessage> = if opts.include_all_opened_context {
         use refact_core::chat_types::ChatContent;
-        let all_files: Vec<refact_core::chat_types::ContextFile> = messages
+        let source_context_messages: Vec<&ChatMessage> = messages
             .iter()
             .skip(system_prefix_len)
             .filter(|m| m.role == "context_file")
+            .collect();
+        let all_files: Vec<refact_core::chat_types::ContextFile> = source_context_messages
+            .iter()
             .filter_map(|m| {
                 if let ChatContent::ContextFiles(files) = &m.content {
                     Some(files.clone())
@@ -48,11 +51,16 @@ pub async fn handoff_select(
             None
         } else {
             use refact_core::chat_types::ChatContent;
-            Some(ChatMessage {
+            let mut bundled = ChatMessage {
                 role: "context_file".to_string(),
                 content: ChatContent::ContextFiles(all_files),
                 ..Default::default()
-            })
+            };
+            let source_context_messages: Vec<ChatMessage> =
+                source_context_messages.into_iter().cloned().collect();
+            crate::privacy::records::merge_message_records(&mut bundled, &source_context_messages)
+                .map_err(|error| error.to_string())?;
+            Some(bundled)
         }
     } else {
         None
@@ -147,16 +155,8 @@ pub async fn handoff_select(
                 crate::agentic::compress_trajectory::compress_trajectory(gcx, &excluded_sanitized)
                     .await
                     .map_err(|e| format!("Failed to generate summary: {}", e))?;
-            use refact_core::chat_types::ChatContent;
-            summary_msg = Some(ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText(format!(
-                    "## Previous conversation summary\n\n{}",
-                    summary
-                )),
-                ..Default::default()
-            });
-            llm_summary = Some(summary);
+            llm_summary = Some(summary.text.clone());
+            summary_msg = Some(previous_conversation_summary_message(summary));
         }
     }
 
@@ -218,10 +218,28 @@ pub async fn handoff_select(
     Ok((selected, stats, llm_summary))
 }
 
+fn previous_conversation_summary_message(
+    summary: crate::agentic::compress_trajectory::CompressedTrajectory,
+) -> ChatMessage {
+    use refact_core::chat_types::ChatContent;
+
+    let mut message = ChatMessage {
+        role: "user".to_string(),
+        content: ChatContent::SimpleText(format!(
+            "## Previous conversation summary\n\n{}",
+            summary.text
+        )),
+        ..Default::default()
+    };
+    crate::privacy::records::merge_records(&mut message, summary.records);
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use refact_core::chat_types::{ChatContent, ChatToolCall, ChatToolFunction, ContextFile};
+    use refact_privacy::{Attribution, FileRecord, PrivacyRecord};
 
     fn make_user_msg(content: &str) -> ChatMessage {
         ChatMessage {
@@ -237,6 +255,41 @@ mod tests {
             content: ChatContent::SimpleText(content.to_string()),
             ..Default::default()
         }
+    }
+
+    fn with_privacy(mut message: ChatMessage, records: Vec<FileRecord>) -> ChatMessage {
+        message.extra.insert(
+            "privacy".to_string(),
+            serde_json::to_value(PrivacyRecord { files: records }).unwrap(),
+        );
+        message
+    }
+
+    fn privacy_record(path: &str, zone: &str) -> FileRecord {
+        FileRecord {
+            path: path.to_string(),
+            zone: zone.to_string(),
+            attribution: Attribution::Declared,
+        }
+    }
+
+    #[test]
+    fn previous_conversation_summary_preserves_compressed_records() {
+        let secret = privacy_record(".env", "secrets");
+        let message = previous_conversation_summary_message(
+            crate::agentic::compress_trajectory::CompressedTrajectory {
+                text: "compressed history".to_string(),
+                records: vec![secret.clone()],
+            },
+        );
+
+        assert_eq!(
+            message.content.content_text_only(),
+            "## Previous conversation summary\n\ncompressed history"
+        );
+        let privacy: PrivacyRecord =
+            serde_json::from_value(message.extra["privacy"].clone()).unwrap();
+        assert_eq!(privacy.files, vec![secret]);
     }
 
     fn make_segment_summary_msg() -> ChatMessage {
@@ -775,11 +828,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_handoff_context_files_bundled_into_single_message() {
+        let early_record = privacy_record("early.rs", "secrets");
+        let mid_record = privacy_record("mid.rs", "guarded");
         let messages = vec![
             make_system_msg("s"),
-            make_context_file_msg("early.rs", "early"),
+            with_privacy(
+                make_context_file_msg("early.rs", "early"),
+                vec![early_record.clone()],
+            ),
             make_user_msg("u1"),
-            make_context_file_msg("mid.rs", "mid"),
+            with_privacy(
+                make_context_file_msg("mid.rs", "mid"),
+                vec![mid_record.clone()],
+            ),
             make_assistant_msg("a1"),
             make_user_msg("u2"),
             make_context_file_msg("late.rs", "late"),
@@ -814,6 +875,9 @@ mod tests {
         } else {
             panic!("Expected ContextFiles content");
         }
+        let privacy: PrivacyRecord =
+            serde_json::from_value(cf_msg.extra["privacy"].clone()).unwrap();
+        assert_eq!(privacy.files, vec![early_record, mid_record]);
 
         let first_cf_idx = selected
             .iter()

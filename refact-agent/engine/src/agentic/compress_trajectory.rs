@@ -6,6 +6,16 @@ use std::sync::Arc;
 
 const SUBAGENT_ID: &str = "compress_trajectory";
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompressedTrajectory {
+    pub text: String,
+    pub records: Vec<refact_privacy::FileRecord>,
+}
+
+fn source_records(messages: &[ChatMessage]) -> Result<Vec<refact_privacy::FileRecord>, String> {
+    crate::privacy::records::records_to_carry(messages).map_err(|error| error.to_string())
+}
+
 fn assistant_text_after_prompt(messages: &[ChatMessage], prompt_idx: usize) -> Option<String> {
     messages
         .iter()
@@ -28,7 +38,7 @@ fn assistant_text_after_prompt(messages: &[ChatMessage], prompt_idx: usize) -> O
 pub async fn compress_trajectory(
     gcx: Arc<GlobalContext>,
     messages: &Vec<ChatMessage>,
-) -> Result<String, String> {
+) -> Result<CompressedTrajectory, String> {
     if messages.is_empty() {
         return Err("The provided chat is empty".to_string());
     }
@@ -39,7 +49,7 @@ pub async fn compress_trajectory(
         "compress_trajectory",
         "🗜",
         10,
-        |_: &String| "Trajectory compressed".to_string(),
+        |_: &CompressedTrajectory| "Trajectory compressed".to_string(),
         move || async move {
             let subagent_config = get_subagent_config(gcx2.clone(), SUBAGENT_ID, None)
                 .await
@@ -72,7 +82,10 @@ pub async fn compress_trajectory(
             let content = assistant_text_after_prompt(&result.messages, compression_prompt_idx)
                 .ok_or_else(|| "Trajectory compression produced empty result".to_string())?;
 
-            Ok(content)
+            Ok(CompressedTrajectory {
+                text: content,
+                records: source_records(&messages)?,
+            })
         },
     )
     .await
@@ -81,6 +94,7 @@ pub async fn compress_trajectory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use refact_privacy::{Attribution, PrivacyRecord};
 
     const DEFAULT_COMPRESS_TRAJECTORY_YAML: &str = include_str!(
         "../../crates/refact-yaml-configs/src/defaults/subagents/compress_trajectory.yaml"
@@ -144,5 +158,40 @@ mod tests {
         ];
 
         assert_eq!(assistant_text_after_prompt(&messages, 2), None);
+    }
+
+    #[test]
+    fn source_records_unions_and_deduplicates_privacy_metadata() {
+        let secret = refact_privacy::FileRecord {
+            path: ".env".to_string(),
+            zone: "secrets".to_string(),
+            attribution: Attribution::Declared,
+        };
+        let normal = refact_privacy::FileRecord {
+            path: "src/lib.rs".to_string(),
+            zone: "normal".to_string(),
+            attribution: Attribution::Observed,
+        };
+        let mut first = message("user", "first");
+        first.extra.insert(
+            "privacy".to_string(),
+            serde_json::to_value(PrivacyRecord {
+                files: vec![secret.clone(), normal.clone()],
+            })
+            .unwrap(),
+        );
+        let mut second = message("assistant", "second");
+        second.extra.insert(
+            "privacy".to_string(),
+            serde_json::to_value(PrivacyRecord {
+                files: vec![secret.clone()],
+            })
+            .unwrap(),
+        );
+
+        assert_eq!(
+            source_records(&[first, second]).unwrap(),
+            vec![secret, normal]
+        );
     }
 }

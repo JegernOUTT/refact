@@ -64,7 +64,7 @@ pub async fn handle_v1_trajectory_compress(
 
     let response = serde_json::json!({
         "goal": "compress it",
-        "trajectory": trajectory,
+        "trajectory": trajectory.text,
     });
 
     Ok(Response::builder()

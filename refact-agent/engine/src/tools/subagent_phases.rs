@@ -262,12 +262,17 @@ pub fn build_gather_seed_messages(external_messages: &[ChatMessage]) -> Vec<Chat
         if !included[pos] {
             continue;
         }
-        let _ = item.idx;
-        out.push(ChatMessage {
+        let mut message = ChatMessage {
             role: item.role.to_string(),
             content: ChatContent::SimpleText(item.text.clone()),
             ..Default::default()
-        });
+        };
+        crate::privacy::records::carry_records_into(
+            &mut message,
+            std::slice::from_ref(&external_messages[item.idx]),
+        )
+        .expect("stored gather seed sources must have valid privacy metadata");
+        out.push(message);
     }
     out
 }
@@ -555,5 +560,22 @@ mod tests {
         let text = seed[0].content.content_text_only();
         assert!(text.chars().count() <= MAX_GATHER_SEED_USER_MSG_CHARS + 50);
         assert!(text.contains("[truncated for gather seed]"));
+    }
+
+    #[test]
+    fn gather_seed_carries_source_privacy_records() {
+        let mut source = msg("tool", "guarded output");
+        let record = refact_privacy::FileRecord {
+            path: ".env".to_string(),
+            zone: "secrets".to_string(),
+            attribution: refact_privacy::Attribution::Declared,
+        };
+        crate::privacy::records::merge_records(&mut source, [record.clone()]);
+
+        let seed = build_gather_seed_messages(&[source]);
+        let privacy: refact_privacy::PrivacyRecord =
+            serde_json::from_value(seed[0].extra["privacy"].clone()).unwrap();
+
+        assert_eq!(privacy.files, vec![record]);
     }
 }

@@ -94,11 +94,14 @@ pub async fn analyze_mode_transition(
         .replace("{memory_list}", &memory_list)
         .replace("{budget_summary}", &budget_summary);
 
-    let analysis_messages = vec![ChatMessage {
+    let mut analysis_message = ChatMessage {
         role: "user".to_string(),
         content: ChatContent::SimpleText(user_prompt),
         ..Default::default()
-    }];
+    };
+    crate::privacy::records::carry_records_into(&mut analysis_message, messages)
+        .map_err(|error| error.to_string())?;
+    let analysis_messages = vec![analysis_message];
 
     let result = run_subchat_once(gcx, SUBAGENT_ID, analysis_messages)
         .await

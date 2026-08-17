@@ -2508,6 +2508,7 @@ mod subchat_tests {
         SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED,
     };
     use crate::chat::summarization::{safe_segment_summary_failure_for_log, SegmentSummaryFailure};
+    use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
     use crate::chat::trajectories::save_trajectory_as;
     use crate::call_validation::{
         ChatContent, ChatMessage, ChatModelType, ReasoningEffort, SubchatParameters,
@@ -2716,6 +2717,49 @@ mod subchat_tests {
         )];
 
         let error = gate_subchat_boundary(&gcx, &messages, "untrusted/model").unwrap_err();
+
+        assert_eq!(
+            error,
+            "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry."
+        );
+    }
+
+    #[tokio::test]
+    async fn subchat_sanitization_preserves_records_for_destination_gate() {
+        let gcx = make_test_gcx().await;
+        install_privacy_policy(&gcx, "trusted", true);
+        let messages = vec![message_with_privacy(
+            "user",
+            "guarded context",
+            vec![privacy_record(".env", "secrets")],
+        )];
+
+        let sanitized = sanitize_messages_for_new_thread(&messages);
+        let error = prepare_subchat_messages(&gcx, sanitized, "untrusted/model").unwrap_err();
+
+        assert_eq!(
+            error,
+            "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry."
+        );
+    }
+
+    #[tokio::test]
+    async fn secrets_tagged_summarizer_request_is_refused_for_untrusted_model() {
+        let gcx = make_test_gcx().await;
+        install_privacy_policy(&gcx, "trusted", true);
+        let sources = vec![message_with_privacy(
+            "tool",
+            "guarded segment",
+            vec![privacy_record(".env", "secrets")],
+        )];
+        let request = crate::chat::summarization::summarizer_request_messages(
+            "summarize".to_string(),
+            &sources,
+        )
+        .unwrap();
+
+        let sanitized = sanitize_messages_for_new_thread(&request);
+        let error = prepare_subchat_messages(&gcx, sanitized, "untrusted/model").unwrap_err();
 
         assert_eq!(
             error,

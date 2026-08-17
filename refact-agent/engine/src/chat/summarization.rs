@@ -1478,6 +1478,7 @@ fn segment_text(messages: &[ChatMessage]) -> String {
 async fn summarize_segment_text(
     gcx: Arc<GlobalContext>,
     text: String,
+    source_messages: &[ChatMessage],
     model: String,
     model_n_ctx: usize,
     max_new_tokens: usize,
@@ -1494,10 +1495,8 @@ async fn summarize_segment_text(
         }
         _ => format!("Summarize this segment:\n\n{}", text),
     };
-    let summarize_messages = vec![
-        ChatMessage::new("system".to_string(), SEGMENT_SUMMARY_PROMPT.to_string()),
-        ChatMessage::new("user".to_string(), user_content),
-    ];
+    let summarize_messages = summarizer_request_messages(user_content, source_messages)
+        .map_err(|error| SegmentSummaryFailure::Transient(error.to_string()))?;
 
     let config = SubchatConfig {
         tool_name: "segment_summarize".to_string(),
@@ -1535,6 +1534,18 @@ async fn summarize_segment_text(
         .map_err(SegmentSummaryFailure::Transient)?;
 
     extract_non_empty_assistant_summary(&result.messages)
+}
+
+pub(crate) fn summarizer_request_messages(
+    user_content: String,
+    source_messages: &[ChatMessage],
+) -> Result<Vec<ChatMessage>, refact_privacy::PrivacyAuditError> {
+    let mut messages = vec![
+        ChatMessage::new("system".to_string(), SEGMENT_SUMMARY_PROMPT.to_string()),
+        ChatMessage::new("user".to_string(), user_content),
+    ];
+    crate::privacy::records::carry_records_into(&mut messages[1], source_messages)?;
+    Ok(messages)
 }
 
 fn extract_non_empty_assistant_summary(
@@ -1919,10 +1930,13 @@ fn merge_summarized_source_records(summary: &mut ChatMessage, source_messages: &
     summary.extra.remove("privacy");
     crate::privacy::records::merge_message_records(
         summary,
-        source_messages
+        &source_messages
             .iter()
-            .filter(|message| summarized_source_ids.contains(&message.message_id)),
-    );
+            .filter(|message| summarized_source_ids.contains(&message.message_id))
+            .cloned()
+            .collect::<Vec<_>>(),
+    )
+    .expect("stored summary sources must have valid privacy metadata");
 }
 
 fn preserved_source_messages_from_summary(
@@ -2188,6 +2202,7 @@ async fn summarize_segment(
     let summary = summarize_segment_text(
         gcx,
         text,
+        messages,
         model.clone(),
         model_n_ctx,
         max_new_tokens,
@@ -6355,6 +6370,28 @@ mod tests {
             summary.extra["compression"]["summarized_source_message_ids"],
             json!(["source-1", "source-2", "source-3"])
         );
+    }
+
+    #[test]
+    fn summarizer_request_unions_privacy_records_from_sources() {
+        let normal = privacy_file_record(
+            "src/lib.rs",
+            "normal",
+            refact_privacy::Attribution::Declared,
+        );
+        let secrets = privacy_file_record(".env", "secrets", refact_privacy::Attribution::Observed);
+        let sources = vec![
+            with_privacy_records(assistant("first"), [normal.clone()]),
+            tool("second"),
+            with_privacy_records(assistant("third"), [secrets.clone()]),
+        ];
+
+        let request = summarizer_request_messages("summarize".to_string(), &sources).unwrap();
+
+        assert!(!request[0].extra.contains_key("privacy"));
+        let privacy: refact_privacy::PrivacyRecord =
+            serde_json::from_value(request[1].extra["privacy"].clone()).unwrap();
+        assert_eq!(privacy.files, vec![normal, secrets]);
     }
 
     #[test]

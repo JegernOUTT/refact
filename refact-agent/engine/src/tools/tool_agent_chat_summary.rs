@@ -328,6 +328,7 @@ async fn load_agent_messages(
 async fn run_summary_subchat(
     ccx: Arc<AMutex<AtCommandsContext>>,
     prompt: String,
+    source_messages: &[ChatMessage],
     tool_call_id: String,
 ) -> Result<String, String> {
     let (
@@ -393,7 +394,9 @@ async fn run_summary_subchat(
         step_progress: None,
     };
 
-    let messages = vec![ChatMessage::new("user".to_string(), prompt)];
+    let mut messages = vec![ChatMessage::new("user".to_string(), prompt)];
+    crate::privacy::records::carry_records_into(&mut messages[0], source_messages)
+        .map_err(|error| error.to_string())?;
     let result = tokio::time::timeout(
         Duration::from_secs(SUMMARY_TIMEOUT_SECS),
         run_subchat(gcx, messages, config),
@@ -486,15 +489,16 @@ impl Tool for ToolAgentChatSummary {
 
         let transcript = linearize_transcript(&messages);
         let prompt = build_summary_prompt(focus.as_deref(), &transcript);
-        let raw_summary = match run_summary_subchat(ccx, prompt, tool_call_id.clone()).await {
-            Ok(summary) => summary,
-            Err(error) => {
-                return Ok(tool_message(
-                    tool_call_id,
-                    render_unavailable(&card_id, &error),
-                ))
-            }
-        };
+        let raw_summary =
+            match run_summary_subchat(ccx, prompt, &messages, tool_call_id.clone()).await {
+                Ok(summary) => summary,
+                Err(error) => {
+                    return Ok(tool_message(
+                        tool_call_id,
+                        render_unavailable(&card_id, &error),
+                    ))
+                }
+            };
 
         Ok(tool_message(
             tool_call_id,

@@ -365,36 +365,35 @@ pub fn merge_records(message: &mut ChatMessage, records: impl IntoIterator<Item 
     }
 }
 
-pub fn merge_message_records<'a>(
-    message: &mut ChatMessage,
-    sources: impl IntoIterator<Item = &'a ChatMessage>,
-) {
-    let records = sources
-        .into_iter()
-        .filter(|source| !shell_result_is_locally_resolved(source))
-        .filter_map(|source| source.extra.get("privacy"))
-        .filter_map(|value| serde_json::from_value::<PrivacyRecord>(value.clone()).ok())
-        .flat_map(|privacy| privacy.files);
-    merge_records(message, records);
+pub fn records_to_carry(
+    sources: &[ChatMessage],
+) -> Result<Vec<FileRecord>, refact_privacy::PrivacyAuditError> {
+    refact_privacy::records_from_messages(sources).map(|indexed| {
+        indexed
+            .into_iter()
+            .fold(Vec::new(), |mut records, (_, record)| {
+                if !records.contains(&record) {
+                    records.push(record);
+                }
+                records
+            })
+    })
 }
 
-fn shell_result_is_locally_resolved(message: &ChatMessage) -> bool {
-    message
-        .extra
-        .get("privacy_observation")
-        .and_then(|value| value.get("degraded"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-        || message.extra.get("privacy_shell").is_some_and(|shell| {
-            shell
-                .get("withheld")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-                || shell
-                    .get("approved")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-        })
+pub fn merge_message_records(
+    message: &mut ChatMessage,
+    sources: &[ChatMessage],
+) -> Result<(), refact_privacy::PrivacyAuditError> {
+    let records = records_to_carry(sources)?;
+    merge_records(message, records);
+    Ok(())
+}
+
+pub fn carry_records_into(
+    message: &mut ChatMessage,
+    sources: &[ChatMessage],
+) -> Result<(), refact_privacy::PrivacyAuditError> {
+    merge_message_records(message, sources)
 }
 
 fn file_record(
@@ -881,7 +880,7 @@ mod tests {
         merge_records(&mut source_b, [second.clone()]);
         let mut target = ChatMessage::default();
 
-        merge_message_records(&mut target, [&source_a, &source_b]);
+        merge_message_records(&mut target, &[source_a, source_b]).unwrap();
 
         let privacy: PrivacyRecord =
             serde_json::from_value(target.extra["privacy"].clone()).unwrap();
