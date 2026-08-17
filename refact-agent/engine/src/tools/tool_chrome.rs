@@ -88,7 +88,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Core: navigate, reload, go_back, go_forward, open_tab, close_tab, switch_tab, list_tabs, click, click_if_exists, hover, focus, blur, scroll_to, press_key, drag_and_drop, and drop_files. drag_and_drop accepts source/target locators or refs plus optional source_position/target_position. open_tab accepts optional device/url; close_tab accepts an optional tab and otherwise closes active. Closing active selects the preceding tab in adoption order, the next tab when closing the first, or leaves no active tab.\n",
     "Coordinate mouse escape hatch: mouse_move, mouse_down, mouse_up, mouse_click_xy, mouse_drag_xy, and mouse_wheel use main-frame viewport CSS pixels and bypass locator resolution. Use these only for canvas, map, and vision-driven UIs with no addressable element; locator/ref actions remain the default.\n",
     "Network: route/unroute/list_routes control HTTP interception. route_web_socket and unroute_web_socket install page-level WebSocket routing; send_web_socket_message supplies mock page messages and wait_for_web_socket_frame waits for observed traffic. start_har_recording and stop_har_recording write a runtime-owned HAR artifact; route_from_har replays it with abort or fallback for misses. HAR output is returned as a path and summary, never inlined.\n",
-    "Instrumentation: start_coverage and stop_coverage opt into precise JavaScript and CSS usage tracking and return bounded per-URL summaries plus a full JSON artifact. add_virtual_authenticator enables passkey testing; remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified manage it. Credential ids, private keys, user handles, blobs, and user names are redacted from reports.\n",
+    "Instrumentation: start_coverage and stop_coverage opt into precise JavaScript and CSS usage tracking and return bounded per-URL summaries plus a full JSON artifact. add_virtual_authenticator enables passkey testing and mints the authenticator id it returns, so never send it an id; remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified address that returned id. Credential ids, private keys, user handles, blobs, and user names are redacted from reports.\n",
     "Forms: fill, clear, select_option, check, uncheck.\n",
     "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch.\n",
     "Waiting: wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. ",
@@ -341,7 +341,13 @@ fn browser_step_schema_with_actions(
         "is_user_verified".to_string(),
         serde_json::json!({"type": "boolean"}),
     );
-    properties.insert("id".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "id".to_string(),
+        serde_json::json!({
+            "type": "string",
+            "description": "Virtual authenticator id minted by add_virtual_authenticator and returned in its result. Required by remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified; sending it to add_virtual_authenticator is an error."
+        }),
+    );
     properties.insert(
         "credential".to_string(),
         serde_json::json!({

@@ -1255,6 +1255,11 @@ fn is_instrumentation_step(step: &BrowserStep) -> bool {
     )
 }
 
+fn virtual_authenticator_added(idx: usize, id: String) -> StepResult {
+    StepResult::success(idx, format!("Added virtual authenticator {id}"))
+        .with_data(serde_json::json!({"authenticator_id": id}))
+}
+
 fn execute_instrumentation_step(
     runtime: &mut BrowserRuntime,
     step: &BrowserStep,
@@ -1304,6 +1309,7 @@ fn execute_instrumentation_step(
                 has_resident_key,
                 has_user_verification,
                 is_user_verified,
+                ..
             } => {
                 let id = runtime.webauthn_manager.add_virtual_authenticator(
                     &tab,
@@ -1313,8 +1319,7 @@ fn execute_instrumentation_step(
                     has_user_verification.unwrap_or(false),
                     is_user_verified.unwrap_or(false),
                 )?;
-                Ok(StepResult::success(idx, "Added virtual authenticator")
-                    .with_data(serde_json::json!({"authenticator_id": id})))
+                Ok(virtual_authenticator_added(idx, id))
             }
             BrowserStep::RemoveVirtualAuthenticator { id } => {
                 runtime
@@ -6697,5 +6702,18 @@ mod tests {
         let stabilized = html_stabilizes_with(2, || Ok(serde_json::json!("stable")), || {});
 
         assert!(stabilized);
+    }
+
+    #[test]
+    fn added_virtual_authenticator_result_reports_the_minted_id() {
+        let result = virtual_authenticator_added(4, "minted-uuid".to_string());
+
+        assert!(result.ok);
+        assert_eq!(result.step_index, 4);
+        assert_eq!(result.summary, "Added virtual authenticator minted-uuid");
+        assert_eq!(
+            result.data.unwrap()["authenticator_id"],
+            serde_json::json!("minted-uuid")
+        );
     }
 }

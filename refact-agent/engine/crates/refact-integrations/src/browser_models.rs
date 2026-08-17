@@ -1113,6 +1113,12 @@ pub enum BrowserStep {
     StopCoverage,
 
     AddVirtualAuthenticator {
+        #[serde(
+            default,
+            skip_serializing,
+            deserialize_with = "reject_server_minted_authenticator_id"
+        )]
+        id: (),
         #[serde(default, skip_serializing_if = "Option::is_none")]
         protocol: Option<BrowserAuthenticatorProtocol>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1549,6 +1555,15 @@ pub enum UrlPattern {
 
 fn default_true() -> bool {
     true
+}
+
+fn reject_server_minted_authenticator_id<'de, D>(_deserializer: D) -> Result<(), D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Err(serde::de::Error::custom(
+        "id is server-minted; omit it and use the returned id",
+    ))
 }
 
 fn is_false(value: &bool) -> bool {
@@ -2205,6 +2220,7 @@ mod tests {
             },
             BrowserStep::StopCoverage,
             BrowserStep::AddVirtualAuthenticator {
+                id: (),
                 protocol: Some(BrowserAuthenticatorProtocol::Ctap2),
                 transport: Some(BrowserAuthenticatorTransport::Usb),
                 has_resident_key: Some(true),
@@ -2497,6 +2513,52 @@ mod tests {
                 text: "Review".to_string(),
             },
         ]
+    }
+
+    #[test]
+    fn add_virtual_authenticator_parses_without_an_id_and_never_serializes_one() {
+        let step: BrowserStep = serde_json::from_str(
+            r#"{"action": "add_virtual_authenticator", "protocol": "ctap2", "transport": "internal"}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            step,
+            BrowserStep::AddVirtualAuthenticator {
+                protocol: Some(BrowserAuthenticatorProtocol::Ctap2),
+                transport: Some(BrowserAuthenticatorTransport::Internal),
+                ..
+            }
+        ));
+        assert!(
+            serde_json::to_value(&step).unwrap().get("id").is_none(),
+            "add_virtual_authenticator must not carry an id on the wire"
+        );
+    }
+
+    #[test]
+    fn add_virtual_authenticator_rejects_a_client_supplied_id() {
+        let error = serde_json::from_str::<BrowserStep>(
+            r#"{"action": "add_virtual_authenticator", "id": "mine"}"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("id is server-minted"), "{error}");
+        assert!(error.contains("use the returned id"), "{error}");
+    }
+
+    #[test]
+    fn other_webauthn_steps_still_address_the_minted_id() {
+        let step: BrowserStep = serde_json::from_str(
+            r#"{"action": "remove_virtual_authenticator", "id": "minted-uuid"}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            step,
+            BrowserStep::RemoveVirtualAuthenticator { ref id } if id == "minted-uuid"
+        ));
     }
 
     #[test]

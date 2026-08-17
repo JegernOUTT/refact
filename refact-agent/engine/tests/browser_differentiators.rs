@@ -293,6 +293,7 @@ async fn coverage_and_virtual_authenticator_work_without_always_on_domains() {
         &mut case.runtime,
         &[
             BrowserStep::AddVirtualAuthenticator {
+                id: (),
                 protocol: Some(BrowserAuthenticatorProtocol::Ctap2),
                 transport: Some(BrowserAuthenticatorTransport::Internal),
                 has_resident_key: Some(true),
@@ -314,6 +315,11 @@ async fn coverage_and_virtual_authenticator_work_without_always_on_domains() {
         .as_str()
         .unwrap()
         .to_string();
+    assert!(
+        webauthn.steps[0].summary.contains(&authenticator_id),
+        "add result must report the minted id: {:?}",
+        webauthn.steps[0].summary
+    );
     let credentials = execute_steps_with_runtime(
         &mut case.runtime,
         &[

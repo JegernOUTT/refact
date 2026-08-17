@@ -320,6 +320,27 @@ mod tests {
     }
 
     #[test]
+    fn add_virtual_authenticator_request_carries_options_only() {
+        let request = WebAuthn::AddVirtualAuthenticator {
+            options: virtual_authenticator_options(
+                BrowserAuthenticatorProtocol::Ctap2,
+                BrowserAuthenticatorTransport::Internal,
+                true,
+                true,
+                true,
+            ),
+        };
+
+        let payload = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            payload.as_object().unwrap().keys().collect::<Vec<_>>(),
+            vec!["options"]
+        );
+        assert!(payload.get("authenticatorId").is_none());
+        assert!(payload.get("id").is_none());
+    }
+
+    #[test]
     fn credential_payload_preserves_secret_material_only_for_cdp() {
         let source = credential();
         let payload = credential_payload(&source);
