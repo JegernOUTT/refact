@@ -199,6 +199,26 @@ describe("task delete middleware", () => {
 });
 
 describe("workspace routing middleware", () => {
+  it("constructs the store and routes workspace closeTab through its listener", async () => {
+    vi.resetModules();
+    const [storeModule, chatActions, workspaceActions] = await Promise.all([
+      import("./store"),
+      import("../features/Chat/Thread/actions"),
+      import("../features/Workspace/workspaceSlice"),
+    ]);
+    const store = storeModule.setUpStore();
+
+    store.dispatch(chatActions.createChatWithId({ id: "chat-a" }));
+    store.dispatch(workspaceActions.openTab("chat:chat-a"));
+    expect(store.getState().chat.threads["chat-a"]).toBeDefined();
+
+    store.dispatch(workspaceActions.closeTab("chat:chat-a"));
+
+    await waitFor(() => {
+      expect(store.getState().chat.threads["chat-a"]).toBeUndefined();
+    });
+  });
+
   it("hydrates workspace only after the project namespace is trusted", async () => {
     setProjectStorageNamespaceFromProjectInfo({
       workspaceRoots: ["/workspace/project-a"],

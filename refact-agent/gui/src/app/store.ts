@@ -84,12 +84,15 @@ import { buddyApi } from "../services/refact/buddy";
 import { notificationsSlice } from "../features/Notifications";
 import { schedulerSlice } from "../features/Scheduler";
 import { schedulerApi } from "../services/refact/schedulerApi";
-import { reconcileWorkspaceState, workspaceSlice } from "../features/Workspace";
-import { terminalSlice } from "../features/Workspace/TerminalPanel";
+import {
+  reconcileWorkspaceState,
+  workspaceSlice,
+} from "../features/Workspace/workspaceSlice";
+import { terminalSlice } from "../features/Workspace/TerminalPanel/terminalSlice";
 import { dashboardSlice } from "../features/DaemonDashboard/dashboardSlice";
 import { filesApi } from "../services/refact/files";
-import { filesPanelSlice } from "../features/Workspace/FilesPanel";
-import { gitPanelSlice } from "../features/Workspace/GitPanel";
+import { filesPanelSlice } from "../features/Workspace/FilesPanel/filesPanelSlice";
+import { gitPanelSlice } from "../features/Workspace/GitPanel/gitPanelSlice";
 import { privacyApi } from "../services/refact/privacy";
 import { privacySlice } from "../features/Privacy/privacySlice";
 

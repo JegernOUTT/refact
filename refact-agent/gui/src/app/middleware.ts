@@ -145,9 +145,6 @@ import {
   closeTab as closeWorkspaceTab,
   focusPane as focusWorkspacePane,
   hydrateWorkspace,
-  isChatSurface,
-  isFileSurface,
-  makeSurfaceKey,
   openTab as openWorkspaceTab,
   reconcileWorkspace,
   reorderTabs as reorderWorkspaceTabs,
@@ -170,7 +167,12 @@ import {
   splitPaneWithSurface,
   splitTab as splitWorkspaceTab,
   type WorkspaceState,
-} from "../features/Workspace";
+} from "../features/Workspace/workspaceSlice";
+import {
+  isChatSurface,
+  isFileSurface,
+  makeSurfaceKey,
+} from "../features/Workspace/surfaceKey";
 import {
   applyLiveFileUpdate,
   clearLiveFileUpdate,
@@ -180,7 +182,7 @@ import {
 import { parentDirectoryPath } from "../features/Workspace/FilesPanel/fileTreeModel";
 import { selectActiveGitRoot } from "../features/Workspace/GitPanel/gitPanelSlice";
 import { gitReadApi } from "../services/refact/gitRead";
-import { clearTerminalChatState } from "../features/Workspace/TerminalPanel";
+import { clearTerminalChatState } from "../features/Workspace/TerminalPanel/terminalSlice";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
