@@ -3190,10 +3190,6 @@ async fn selector_evaluator_preserves_shadow_and_xpath_boundaries() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "headless_chrome 1.0.20 drops Input.dragIntercepted on its non-flattened target transport"]
 async fn html5_drag_and_drop_reaches_page_handler() {
-    if e2e_enabled() {
-        eprintln!("skipping: headless_chrome 1.0.20 drops Input.dragIntercepted on its non-flattened target transport");
-        return;
-    }
     let Some(mut case) = BrowserCase::start("drag-drop.html").await else {
         return;
     };
