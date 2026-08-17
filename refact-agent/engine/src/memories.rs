@@ -2525,6 +2525,7 @@ mod firewall_tests {
         fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
             (
                 EmbeddingModelConfig {
+                    model_id: String::new(),
                     endpoint: String::new(),
                     endpoint_style: String::new(),
                     embedding_endpoint_style: String::new(),

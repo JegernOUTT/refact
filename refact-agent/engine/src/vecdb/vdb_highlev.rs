@@ -2,13 +2,47 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AMutex;
 use tracing::{error, info};
 
+use refact_core::llm_types::{BaseModelRecord, EmbeddingModelRecord};
 use refact_core::vecdb_types::VecdbSearch;
+use refact_privacy::Destination;
 
 use crate::background_tasks::BackgroundTasksHolder;
 use crate::global_context::GlobalContext;
+use crate::privacy::destinations::DestinationExt;
 use crate::vecdb::vdb_structs::{EmbeddingModelConfig, VecDbStatus, VecdbConstants};
 
 pub use refact_vecdb::vdb_highlev::VecDb;
+
+fn embedding_file_is_allowed(
+    gcx: &Arc<GlobalContext>,
+    roots: &refact_core::memory_plane::MemoryPlaneRoots,
+    destination: &Destination,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let policy = gcx
+        .privacy_policy_load
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .policy
+        .clone();
+    let compiled = match policy.compile() {
+        Ok(compiled) => compiled,
+        Err(error) => {
+            return Err(format!("privacy policy failed to compile: {error}"));
+        }
+    };
+    let mut privacy_roots = roots.project_roots.clone();
+    privacy_roots.extend(roots.global_knowledge_root.iter().cloned());
+    privacy_roots.extend(roots.global_trajectories_root.iter().cloned());
+    let zone = compiled.zone_for_path_with_roots(path, privacy_roots);
+    if zone.name == "blocked" || !destination.matches_send_to(&zone.send_to) {
+        return Err(format!(
+            "zone '{}' forbids embedding destination '{}'",
+            zone.name, destination.id.0
+        ));
+    }
+    Ok(())
+}
 
 async fn do_i_need_to_reload_vecdb(gcx: Arc<GlobalContext>) -> (bool, Option<VecdbConstants>) {
     let caps =
@@ -187,19 +221,32 @@ async fn initialize_vecdb_with_context(
 
     let config = init_config.unwrap_or_default();
     let memory_plane_roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
+    crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+    let destination = Destination::from_model_record(&EmbeddingModelRecord {
+        base: BaseModelRecord {
+            id: constants.embedding_model.model_id.clone(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
     let vec_db = refact_vecdb::vdb_init::init_vecdb_fail_safe(
         &vecdb_dir,
         &legacy_cache_dir,
         cmdline.workspace_folder.clone(),
         cmdline.insecure,
-        constants,
+        constants.clone(),
         config,
         shutdown_flag,
-        memory_plane_roots,
+        memory_plane_roots.clone(),
     )
     .await?;
 
     let shutdown_flag2 = gcx.shutdown_flag.clone();
+    let privacy_gcx = gcx.clone();
+    let file_vectorization_gate: refact_core::vecdb_types::FileVectorizationGate =
+        Arc::new(move |path| {
+            embedding_file_is_allowed(&privacy_gcx, &memory_plane_roots, &destination, path)
+        });
     let gcx_clone = gcx.clone();
     let file_reader: refact_core::vecdb_types::FileReader = Arc::new(move |path| {
         let gcx = gcx_clone.clone();
@@ -211,7 +258,7 @@ async fn initialize_vecdb_with_context(
     });
 
     let tasks = vec_db
-        .vecdb_start_background_tasks(shutdown_flag2, file_reader)
+        .vecdb_start_background_tasks(shutdown_flag2, file_reader, file_vectorization_gate)
         .await;
     let _background_tasks = BackgroundTasksHolder::new(tasks);
 
@@ -236,4 +283,57 @@ async fn get_default_vecdb_dir(gcx: Arc<GlobalContext>) -> Option<std::path::Pat
     project_dirs
         .first()
         .map(|root| root.join(".refact").join("vecdb"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use refact_privacy::{
+        DestinationId, DestinationKind, PolicyLoad, PrivacyPolicy, ShellBehavior, Zone,
+    };
+
+    #[tokio::test]
+    async fn embedding_gate_allows_normal_and_blocks_guarded_memory_files() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let root =
+            std::env::temp_dir().join(format!("refact-embedding-policy-{}", uuid::Uuid::new_v4()));
+        let guarded = root.join(".refact/knowledge/guarded.md");
+        let normal = root.join(".refact/knowledge/normal.md");
+        std::fs::create_dir_all(guarded.parent().unwrap()).unwrap();
+        std::fs::write(&guarded, "guarded").unwrap();
+        std::fs::write(&normal, "normal").unwrap();
+        *gcx.privacy_policy_load.write().unwrap() = PolicyLoad {
+            policy: Arc::new(PrivacyPolicy {
+                blocked: Vec::new(),
+                zones: vec![
+                    Zone {
+                        name: "guarded".to_string(),
+                        patterns: vec![guarded.to_string_lossy().into_owned()],
+                        send_to: vec!["trusted".to_string()],
+                        on_shell_read: ShellBehavior::Withhold,
+                    },
+                    Zone {
+                        name: "normal".to_string(),
+                        patterns: vec!["**".to_string()],
+                        send_to: vec!["*".to_string()],
+                        on_shell_read: ShellBehavior::Withhold,
+                    },
+                ],
+                ..Default::default()
+            }),
+            error: None,
+            source_paths: Vec::new(),
+        };
+        let roots =
+            refact_core::memory_plane::MemoryPlaneRoots::new(vec![root.clone()], None, None);
+        let destination = Destination {
+            id: DestinationId("embedding".to_string()),
+            kind: DestinationKind::Provider,
+            display_name: "embedding/model".to_string(),
+        };
+
+        assert!(embedding_file_is_allowed(&gcx, &roots, &destination, &guarded).is_err());
+        assert!(embedding_file_is_allowed(&gcx, &roots, &destination, &normal).is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

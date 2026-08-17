@@ -211,6 +211,14 @@ async fn collect_destinations(app: &AppState, policy: &PrivacyPolicy) -> Vec<Des
                 display_name: id,
             });
         }
+        if !caps.embedding_model.base.id.is_empty() {
+            let id = provider_id(&caps.embedding_model.base.id);
+            destinations.push(Destination {
+                id: DestinationId(id.clone()),
+                kind: DestinationKind::Provider,
+                display_name: id,
+            });
+        }
     }
     let mcp_paths = {
         let sessions = app.gcx.integration_sessions.lock().await;

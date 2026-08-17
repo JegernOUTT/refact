@@ -8,7 +8,8 @@ use tracing::info;
 
 use refact_core::memory_plane::MemoryPlaneRoots;
 use refact_core::vecdb_types::{
-    EmbeddingModelConfig, FileReader, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch,
+    EmbeddingModelConfig, FileReader, FileVectorizationGate, SearchResult, VecDbStatus,
+    VecdbRecord, VecdbSearch,
 };
 
 use crate::fetch_embedding;
@@ -122,6 +123,7 @@ impl VecDb {
         &self,
         shutdown_flag: Arc<AtomicBool>,
         file_reader: FileReader,
+        file_vectorization_gate: FileVectorizationGate,
     ) -> Vec<JoinHandle<()>> {
         info!("vecdb: start_background_tasks");
         vecdb_start_background_tasks(
@@ -129,6 +131,7 @@ impl VecDb {
             self.vectorizer_service.clone(),
             shutdown_flag,
             file_reader,
+            file_vectorization_gate,
         )
         .await
     }
@@ -253,6 +256,7 @@ mod tests {
                 .unwrap();
         });
         let model = EmbeddingModelConfig {
+            model_id: "test/test-embedding".to_string(),
             endpoint: format!("http://{source_addr}/embeddings"),
             endpoint_style: "openai".to_string(),
             embedding_endpoint_style: "openai".to_string(),

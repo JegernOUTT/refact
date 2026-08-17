@@ -185,6 +185,7 @@ mod tests {
         fn current_constants(&self) -> (crate::vecdb::vdb_structs::EmbeddingModelConfig, usize) {
             (
                 crate::vecdb::vdb_structs::EmbeddingModelConfig {
+                    model_id: String::new(),
                     endpoint: String::new(),
                     endpoint_style: String::new(),
                     embedding_endpoint_style: String::new(),

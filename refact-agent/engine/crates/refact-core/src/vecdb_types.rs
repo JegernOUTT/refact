@@ -14,6 +14,8 @@ pub type FileReader = Arc<
         + Sync,
 >;
 
+pub type FileVectorizationGate = Arc<dyn Fn(&PathBuf) -> Result<(), String> + Send + Sync>;
+
 #[async_trait]
 pub trait VecdbSearch: Send + Sync {
     async fn vecdb_search(
@@ -42,6 +44,8 @@ pub trait VecdbSearch: Send + Sync {
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct EmbeddingModelConfig {
+    #[serde(default)]
+    pub model_id: String,
     pub endpoint: String,
     pub endpoint_style: String,
     pub embedding_endpoint_style: String,
@@ -106,6 +110,7 @@ pub struct SearchResult {
 impl From<&EmbeddingModelRecord> for EmbeddingModelConfig {
     fn from(model: &EmbeddingModelRecord) -> Self {
         Self {
+            model_id: model.base.id.clone(),
             endpoint: model.base.endpoint.clone(),
             endpoint_style: model.base.endpoint_style.clone(),
             embedding_endpoint_style: model.base.embedding_endpoint_style.clone(),

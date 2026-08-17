@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use refact_core::ast_types::Document;
 use refact_core::memory_plane::{MemoryPlaneFileKind, MemoryPlaneRoots};
-use refact_core::vecdb_types::FileReader;
+use refact_core::vecdb_types::{FileReader, FileVectorizationGate};
 
 use crate::fetch_embedding::get_embedding_with_retries;
 use crate::vdb_markdown_splitter::MarkdownFileSplitter;
@@ -35,6 +35,10 @@ fn memory_plane_file_kind(
 
 fn is_path_to_enqueue_valid(path: &PathBuf, roots: &MemoryPlaneRoots) -> Result<(), String> {
     memory_plane_file_kind(path, roots).map(|_| ())
+}
+
+fn should_log_skip(skipped_paths: &mut HashSet<PathBuf>, path: &PathBuf) -> bool {
+    skipped_paths.insert(path.clone())
 }
 
 enum MessageToVecdbThread {
@@ -208,6 +212,7 @@ async fn vectorize_thread(
     vservice: Arc<AMutex<FileVectorizerService>>,
     shutdown_flag: Arc<AtomicBool>,
     file_reader: FileReader,
+    file_vectorization_gate: FileVectorizationGate,
 ) {
     let mut files_total: usize = 0;
     let mut files_unprocessed: usize;
@@ -228,6 +233,7 @@ async fn vectorize_thread(
     };
 
     let mut last_updated: HashMap<String, SystemTime> = HashMap::new();
+    let mut skipped_paths = HashSet::new();
     loop {
         if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
             tracing::info!("VecDB thread: shutdown detected, stopping");
@@ -362,6 +368,7 @@ async fn vectorize_thread(
                             }
                         }
                     }
+                    skipped_paths.clear();
                     tokio::select! {
                         _ = tokio::time::sleep(tokio::time::Duration::from_millis(1_000)) => {},
                         _ = vstatus_notify.notified() => {},
@@ -374,6 +381,21 @@ async fn vectorize_thread(
 
         let last_30_chars = refact_core::custom_error::last_n_chars(&cpath, 30);
         let doc_path: PathBuf = cpath.clone().into();
+
+        if let Err(reason) = file_vectorization_gate(&doc_path) {
+            if should_log_skip(&mut skipped_paths, &doc_path) {
+                info!("VecDB skipped {}: {}", doc_path.display(), reason);
+            }
+            if let Err(err) = vecdb_handler_arc
+                .lock()
+                .await
+                .vecdb_records_remove(vec![cpath])
+                .await
+            {
+                info!("VECDB Error removing guarded file: {}", err);
+            }
+            continue;
+        }
 
         let text_result = file_reader(doc_path.clone()).await;
         let text = match text_result {
@@ -506,12 +528,14 @@ pub async fn vecdb_start_background_tasks(
     vservice: Arc<AMutex<FileVectorizerService>>,
     shutdown_flag: Arc<AtomicBool>,
     file_reader: FileReader,
+    file_vectorization_gate: FileVectorizationGate,
 ) -> Vec<JoinHandle<()>> {
     let retrieve_thread_handle = tokio::spawn(vectorize_thread(
         vecdb_client.clone(),
         vservice.clone(),
         shutdown_flag,
         file_reader,
+        file_vectorization_gate,
     ));
     vec![retrieve_thread_handle]
 }
@@ -590,6 +614,9 @@ pub async fn vectorizer_enqueue_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::vdb_emb_aux;
 
     fn roots() -> MemoryPlaneRoots {
         MemoryPlaneRoots::new(
@@ -642,5 +669,160 @@ mod tests {
             &roots
         )
         .is_ok());
+    }
+
+    #[tokio::test]
+    async fn guarded_file_is_skipped_once_while_normal_file_vectorizes() {
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
+        }
+        let root = std::env::temp_dir().join(format!("refact-vecdb-gate-{}", uuid::Uuid::new_v4()));
+        let vecdb_dir = root.join("vecdb");
+        let guarded = root.join(".refact/knowledge/guarded.md");
+        let normal = root.join(".refact/knowledge/normal.md");
+        let roots = MemoryPlaneRoots::new(vec![root.clone()], None, None);
+        let embedding_requests = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/embeddings", listener.local_addr().unwrap());
+        let server_requests = embedding_requests.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            server_requests.fetch_add(1, Ordering::SeqCst);
+            let mut request = vec![0u8; 4096];
+            let size = tokio::io::AsyncReadExt::read(&mut socket, &mut request)
+                .await
+                .unwrap();
+            let body = String::from_utf8_lossy(&request[..size]);
+            assert!(!body.contains("guarded body"));
+            assert!(!body.contains("guarded.md"));
+            let input_count =
+                body.matches("normal body").count() + body.matches("normal.md").count();
+            let embeddings = std::iter::repeat("{\"embedding\":[0.25]}")
+                .take(input_count)
+                .collect::<Vec<_>>()
+                .join(",");
+            let response_body = format!("{{\"data\":[{embeddings}]}}");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes())
+                .await
+                .unwrap();
+        });
+        let constants = VecdbConstants {
+            embedding_model: refact_core::vecdb_types::EmbeddingModelConfig {
+                model_id: "embedding/test".to_string(),
+                endpoint,
+                endpoint_style: "openai".to_string(),
+                embedding_endpoint_style: "openai".to_string(),
+                api_key: String::new(),
+                model_name: "test".to_string(),
+                embedding_size: 1,
+                dimensions: None,
+                query_prefix: String::new(),
+                document_prefix: String::new(),
+                rejection_threshold: 1.0,
+                embedding_batch: 16,
+                n_ctx: 64,
+            },
+            tokenizer: None,
+            splitter_window_size: 32,
+            vecdb_max_files: 10,
+        };
+        let handler = Arc::new(AMutex::new(
+            VecDBSqlite::init(
+                &vecdb_dir,
+                &root,
+                "test",
+                1,
+                &vdb_emb_aux::create_emb_table_name(&vec!["workspace".to_string()]),
+            )
+            .await
+            .unwrap(),
+        ));
+        let service = Arc::new(AMutex::new(
+            FileVectorizerService::new(handler.clone(), constants, roots.clone()).await,
+        ));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let file_reads = reads.clone();
+        let file_reader: FileReader = Arc::new(move |path| {
+            let file_reads = file_reads.clone();
+            Box::pin(async move {
+                file_reads.fetch_add(1, Ordering::SeqCst);
+                if path.file_name().and_then(|name| name.to_str()) == Some("normal.md") {
+                    Ok("normal body".to_string())
+                } else {
+                    Ok("guarded body".to_string())
+                }
+            })
+        });
+        let gate_calls = Arc::new(AtomicUsize::new(0));
+        let guarded_path = guarded.clone();
+        let calls = gate_calls.clone();
+        let gate: FileVectorizationGate = Arc::new(move |path| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            if path == &guarded_path {
+                Err("guarded by test policy".to_string())
+            } else {
+                Ok(())
+            }
+        });
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let handles = vecdb_start_background_tasks(
+            Arc::new(AMutex::new(reqwest::Client::new())),
+            service.clone(),
+            shutdown.clone(),
+            file_reader,
+            gate,
+        )
+        .await;
+
+        vectorizer_enqueue_files(
+            service.clone(),
+            &[
+                guarded.to_string_lossy().into_owned(),
+                normal.to_string_lossy().into_owned(),
+            ],
+            true,
+            &roots,
+        )
+        .await;
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            loop {
+                if service.lock().await.vstatus.lock().await.state == "done" {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.store(true, Ordering::SeqCst);
+        service.lock().await.vstatus_notify.notify_waiters();
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        server.await.unwrap();
+
+        assert_eq!(gate_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert_eq!(embedding_requests.load(Ordering::SeqCst), 1);
+        assert!(handler.lock().await.size().await.unwrap() > 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skip_log_is_deduplicated_until_pass_finishes() {
+        let path = PathBuf::from("/workspace/project/.refact/knowledge/guarded.md");
+        let mut skipped_paths = HashSet::new();
+
+        assert!(should_log_skip(&mut skipped_paths, &path));
+        assert!(!should_log_skip(&mut skipped_paths, &path));
+        skipped_paths.clear();
+        assert!(should_log_skip(&mut skipped_paths, &path));
     }
 }
