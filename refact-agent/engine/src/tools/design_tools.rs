@@ -33,6 +33,15 @@ const MAX_TARGETS: usize = 50;
 const MAX_MATRIX_CELLS: usize = 400;
 const MAX_AUDIT_FINDINGS: usize = 500;
 const DEFAULT_DESIGN_TOKEN_STYLES: &[&str] = &["src/styles/tokens.css"];
+const PAGE_NOT_INSTRUMENTED_ERROR: &str =
+    "page not instrumented for design tools (requires the local Vite dev-server flow)";
+const INSTRUMENTATION_ERROR_MARKERS: &[&str] = &[
+    "Unknown RefactInjected method",
+    "RefactInjected is not installed",
+    "__refact_injected__ is not defined",
+];
+const ZERO_SCAN_WARNING: &str = "Contrast audit scanned 0 elements — page not instrumented or selector matched nothing; results are NOT a pass";
+const NO_TOKEN_FILES_WARNING: &str = "Contrast audit resolved 0 design-token files — non-token color findings are incomplete; results are NOT a pass";
 const PROBE_FUNCTION: &str = r#"function(properties) {
   const el = this;
   const rect = el.getBoundingClientRect();
@@ -736,6 +745,16 @@ fn locator_value(locator: &BrowserLocator) -> Result<Value, String> {
     serde_json::to_value(locator).map_err(|error| format!("failed to serialize locator: {error}"))
 }
 
+pub fn map_design_runtime_error(error: &str) -> String {
+    if INSTRUMENTATION_ERROR_MARKERS
+        .iter()
+        .any(|marker| error.contains(marker))
+    {
+        return PAGE_NOT_INSTRUMENTED_ERROR.to_string();
+    }
+    error.to_string()
+}
+
 fn resolve_target_handle(
     tab: &Tab,
     world: &WorldManager,
@@ -744,7 +763,9 @@ fn resolve_target_handle(
     let locator = target.locator()?;
     let handles = world
         .call_injected_handles(tab, "resolveLocator", json!([locator_value(&locator)?]))
-        .map_err(|error| format!("failed to resolve {}: {error}", target.key()))?;
+        .map_err(|error| {
+            map_design_runtime_error(&format!("failed to resolve {}: {error}", target.key()))
+        })?;
     match handles.as_slice() {
         [handle] => Ok(handle.clone()),
         [] => Err(format!("target `{}` matched no elements", target.key())),
@@ -1017,13 +1038,57 @@ fn find_raw_colors(tab: &Tab, token_colors: &[String]) -> Result<Vec<RawColorFin
         .collect())
 }
 
-fn token_colors_from_files(root: &Path, token_files: &[String]) -> Vec<String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenColorScan {
+    pub colors: Vec<String>,
+    pub resolved_files: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContrastAuditVerdict {
+    pub summary: String,
+    pub warning: Option<String>,
+}
+
+pub fn contrast_audit_verdict(
+    elements_scanned: usize,
+    failed: usize,
+    aaa_warnings: usize,
+    raw_colors: usize,
+    resolved_token_files: usize,
+) -> ContrastAuditVerdict {
+    let mut warnings = Vec::new();
+    if elements_scanned == 0 {
+        warnings.push(ZERO_SCAN_WARNING);
+    }
+    if resolved_token_files == 0 {
+        warnings.push(NO_TOKEN_FILES_WARNING);
+    }
+    let measured = format!(
+        "Contrast audit scanned {elements_scanned} elements: {failed} AA failures, {aaa_warnings} AAA warnings, and {raw_colors} non-token colors"
+    );
+    if warnings.is_empty() {
+        return ContrastAuditVerdict {
+            summary: measured,
+            warning: None,
+        };
+    }
+    let warning = warnings.join(" | ");
+    ContrastAuditVerdict {
+        summary: format!("{warning}. {measured}"),
+        warning: Some(warning),
+    }
+}
+
+fn token_colors_from_files(root: &Path, token_files: &[String]) -> TokenColorScan {
     let mut colors = Vec::new();
+    let mut resolved_files = Vec::new();
     for relative in token_files {
         let path = root.join(relative);
         let Ok(content) = std::fs::read_to_string(path) else {
             continue;
         };
+        resolved_files.push(relative.clone());
         let bytes = content.as_bytes();
         let mut index = 0;
         while index < bytes.len() {
@@ -1044,7 +1109,10 @@ fn token_colors_from_files(root: &Path, token_files: &[String]) -> Vec<String> {
     }
     colors.sort();
     colors.dedup();
-    colors
+    TokenColorScan {
+        colors,
+        resolved_files,
+    }
 }
 
 fn project_root(
@@ -1225,7 +1293,7 @@ impl Tool for ToolUiProbe {
             &self.config_path,
             "ui_probe",
             "UI Probe",
-            "Measure live DOM targets across a viewport × theme × state matrix. Returns computed styles, rectangles, and overflow flags without screenshots.",
+            "Measure live DOM targets across a viewport × theme × state matrix. Returns computed styles, rectangles, and overflow flags without screenshots. Requires a page instrumented by the local dev-server flow; third-party pages return a page-not-instrumented error.",
             json!({
                 "type":"object",
                 "properties":{
@@ -1367,7 +1435,7 @@ impl Tool for ToolContrastAudit {
         } else {
             args.token_files
         };
-        let token_colors = token_colors_from_files(&root, &token_files);
+        let token_scan = token_colors_from_files(&root, &token_files);
         let runtime = attached_runtime(app, &chat_id).await?;
         let mut runtime = runtime.lock().await;
         let tab = runtime
@@ -1380,6 +1448,7 @@ impl Tool for ToolContrastAudit {
             .unwrap_or(Value::Array(Vec::new()));
         let samples: Vec<RawContrastSample> = serde_json::from_value(raw)
             .map_err(|error| format!("failed to parse contrast samples: {error}"))?;
+        let elements_scanned = samples.len();
         let mut findings = Vec::new();
         for sample in samples {
             let ratio = contrast_ratio(
@@ -1408,25 +1477,30 @@ impl Tool for ToolContrastAudit {
                 break;
             }
         }
-        let raw_colors = find_raw_colors(&tab, &token_colors)?;
+        let raw_colors = find_raw_colors(&tab, &token_scan.colors)?;
         runtime.touch();
         let failed = findings.iter().filter(|finding| !finding.aa).count();
-        let summary = format!(
-            "Contrast audit found {failed} AA failures, {} AAA warnings, and {} non-token colors",
+        let verdict = contrast_audit_verdict(
+            elements_scanned,
+            failed,
             findings.len().saturating_sub(failed),
-            raw_colors.len()
+            raw_colors.len(),
+            token_scan.resolved_files.len(),
         );
         tool_message(
             tool_call_id,
             ToolJson::new(
                 "contrast_audit",
-                summary,
+                verdict.summary,
                 json!({
                     "findings":findings,
                     "raw_colors":raw_colors,
                     "thresholds":{"aaa":7.0,"aa":4.5,"large_text":3.0,"non_text":3.0},
                     "token_files":token_files,
-                    "token_color_count":token_colors.len()
+                    "token_files_resolved":token_scan.resolved_files,
+                    "token_color_count":token_scan.colors.len(),
+                    "elements_scanned":elements_scanned,
+                    "warning":verdict.warning
                 }),
             )
             .to_text(),
@@ -1438,7 +1512,7 @@ impl Tool for ToolContrastAudit {
             &self.config_path,
             "contrast_audit",
             "Contrast Audit",
-            "Audit live DOM text contrast against WCAG AAA 7.0, AA 4.5, large-text 3.0, and non-text 3.0 thresholds; also report raw stylesheet colors absent from discovered token files.",
+            "Audit live DOM text contrast against WCAG AAA 7.0, AA 4.5, large-text 3.0, and non-text 3.0 thresholds; also report raw stylesheet colors absent from discovered token files. Fails closed: reports elements_scanned and, when zero elements were measured or no token file resolved, leads the summary with a warning instead of a pass.",
             json!({"type":"object","properties":{"token_files":{"type":"array","items":{"type":"string"},"description":"Repository-relative design-token CSS files"}}}),
             false,
         )
@@ -1690,6 +1764,72 @@ mod tests {
         assert_eq!(text_threshold(16.0, "400"), 4.5);
         assert_eq!(text_threshold(18.66, "700"), 3.0);
         assert!(parse_css_color("transparent").is_err());
+    }
+
+    #[test]
+    fn contrast_audit_never_passes_without_measured_elements_or_tokens() {
+        let nothing_scanned = contrast_audit_verdict(0, 0, 0, 0, 1);
+        assert_eq!(nothing_scanned.warning.as_deref(), Some(ZERO_SCAN_WARNING));
+        assert!(nothing_scanned.summary.starts_with(ZERO_SCAN_WARNING));
+
+        let no_tokens = contrast_audit_verdict(12, 0, 0, 0, 0);
+        assert_eq!(no_tokens.warning.as_deref(), Some(NO_TOKEN_FILES_WARNING));
+        assert!(no_tokens.summary.starts_with(NO_TOKEN_FILES_WARNING));
+
+        let blind = contrast_audit_verdict(0, 0, 0, 0, 0);
+        let blind_warning = blind.warning.unwrap();
+        assert!(blind_warning.contains(ZERO_SCAN_WARNING));
+        assert!(blind_warning.contains(NO_TOKEN_FILES_WARNING));
+        assert!(blind.summary.starts_with(ZERO_SCAN_WARNING));
+
+        let clean = contrast_audit_verdict(12, 0, 3, 0, 2);
+        assert_eq!(clean.warning, None);
+        assert_eq!(
+            clean.summary,
+            "Contrast audit scanned 12 elements: 0 AA failures, 3 AAA warnings, and 0 non-token colors"
+        );
+    }
+
+    #[test]
+    fn injected_runtime_failures_report_missing_instrumentation() {
+        assert_eq!(
+            map_design_runtime_error(
+                "failed to resolve #root: Browser utility-world evaluation failed: Unknown RefactInjected method"
+            ),
+            PAGE_NOT_INSTRUMENTED_ERROR
+        );
+        assert_eq!(
+            map_design_runtime_error("failed to resolve #root: RefactInjected is not installed"),
+            PAGE_NOT_INSTRUMENTED_ERROR
+        );
+        assert_eq!(
+            map_design_runtime_error("target `#root` matched no elements"),
+            "target `#root` matched no elements"
+        );
+    }
+
+    #[test]
+    fn token_scan_reports_only_readable_token_files() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src/styles")).unwrap();
+        std::fs::write(
+            root.path().join("src/styles/tokens.css"),
+            ":root{--accent:#E7150D;--bg:#FFF;}",
+        )
+        .unwrap();
+        let scan = token_colors_from_files(
+            root.path(),
+            &[
+                "src/styles/tokens.css".to_string(),
+                "src/styles/missing.css".to_string(),
+            ],
+        );
+        assert_eq!(scan.resolved_files, vec!["src/styles/tokens.css"]);
+        assert_eq!(scan.colors, vec!["#e7150d", "#fff"]);
+
+        let empty = token_colors_from_files(root.path(), &["nope.css".to_string()]);
+        assert!(empty.resolved_files.is_empty());
+        assert!(empty.colors.is_empty());
     }
 
     #[test]
