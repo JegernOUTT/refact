@@ -131,7 +131,6 @@ pub(crate) struct HealthFileAnalysis {
     pub(crate) functions: Vec<HealthFunctionSummary>,
     pub(crate) findings: Vec<HealthFinding>,
     pub(crate) health_impact: Vec<HealthImpactContributor>,
-    pub(crate) impact_summaries: Vec<String>,
     pub(crate) refactorings: Vec<refact_codehealth::refactoring::RefactoringSuggestion>,
     pub(crate) cache_hit: bool,
 }
@@ -162,8 +161,6 @@ struct HealthFileCore {
 #[derive(Default)]
 struct HealthAnalysisCache {
     files: HashMap<String, HealthCacheEntry>,
-    hits: usize,
-    misses: usize,
 }
 
 #[derive(Clone)]
@@ -637,14 +634,6 @@ pub(crate) fn pr_blast_partial_warning(state: &PrBlastIndexState) -> Option<Stri
             state.queued, state.cross_file_edges
         )
     })
-}
-
-fn symbol_score_label(entry: &refact_codegraph::analytics::SymbolScore) -> String {
-    if entry.path.is_empty() {
-        entry.symbol.clone()
-    } else {
-        format!("{} ({})", entry.symbol, entry.path)
-    }
 }
 
 pub(crate) fn pr_blast_suggested_reviewers(
@@ -1239,8 +1228,8 @@ fn health_cache_lookup(
     coverage_signature: &Option<String>,
     trend_signature: &str,
 ) -> Option<HealthFileCore> {
-    let mut cache = health_analysis_cache().lock().unwrap();
-    let core = cache
+    let cache = health_analysis_cache().lock().unwrap();
+    cache
         .files
         .get(path)
         .filter(|entry| {
@@ -1249,13 +1238,7 @@ fn health_cache_lookup(
                 && &entry.coverage_signature == coverage_signature
                 && entry.trend_signature == trend_signature
         })
-        .map(|entry| entry.core.clone());
-    if core.is_some() {
-        cache.hits += 1;
-    } else {
-        cache.misses += 1;
-    }
-    core
+        .map(|entry| entry.core.clone())
 }
 
 fn health_cache_store(
@@ -1380,10 +1363,6 @@ fn health_analysis_from_core(core: HealthFileCore, cache_hit: bool) -> HealthFil
             .then_with(|| a.line.cmp(&b.line))
     });
     health_impact.truncate(5);
-    let impact_summaries = health_impact
-        .iter()
-        .map(health_impact_summary)
-        .collect::<Vec<_>>();
     let function_count = core.functions.len();
     let biomarker_count = core.findings.len();
     let refactoring_count = core.refactorings.len();
@@ -1406,27 +1385,8 @@ fn health_analysis_from_core(core: HealthFileCore, cache_hit: bool) -> HealthFil
         functions: core.functions,
         findings: core.findings,
         health_impact,
-        impact_summaries,
         refactorings: core.refactorings,
         cache_hit,
-    }
-}
-
-fn health_impact_summary(impact: &HealthImpactContributor) -> String {
-    format!(
-        "−{:.1} {}: {} — {}",
-        impact.deduction,
-        health_dimension_label(impact.dimension),
-        impact.biomarker,
-        impact.detail
-    )
-}
-
-fn health_dimension_label(dimension: refact_codehealth::biomarkers::Dimension) -> &'static str {
-    match dimension {
-        refact_codehealth::biomarkers::Dimension::Defect => "defect",
-        refact_codehealth::biomarkers::Dimension::Maintainability => "maintainability",
-        refact_codehealth::biomarkers::Dimension::Performance => "performance",
     }
 }
 
@@ -1658,12 +1618,6 @@ fn health_severity_rank(severity: refact_codehealth::biomarkers::Severity) -> u8
 #[cfg(test)]
 fn reset_health_cache_for_tests() {
     *health_analysis_cache().lock().unwrap() = HealthAnalysisCache::default();
-}
-
-#[cfg(test)]
-fn health_cache_stats_for_tests() -> (usize, usize) {
-    let cache = health_analysis_cache().lock().unwrap();
-    (cache.hits, cache.misses)
 }
 
 pub(crate) fn build_git_meta(

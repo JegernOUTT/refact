@@ -221,7 +221,21 @@ mod task_types_tests {
             "Default schema version should be 1"
         );
         assert_eq!(board.rev, 0, "Default rev should be 0");
-        assert_eq!(board.columns.len(), 5, "Should have 5 default columns");
+        assert_eq!(
+            board
+                .columns
+                .iter()
+                .map(|column| (column.id.as_str(), column.title.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("planned", "Planned"),
+                ("doing", "Doing"),
+                ("done", "Done"),
+                ("failed", "Failed"),
+                ("regressed", "Regressed"),
+            ],
+            "Should have the 5 default columns"
+        );
         assert_eq!(board.cards.len(), 0, "Default board should have no cards");
     }
 
@@ -453,6 +467,59 @@ mod task_types_tests {
         );
         assert!(!update.message.is_empty(), "Message should not be empty");
     }
+
+    #[test]
+    fn test_ready_cards_result_all_states() {
+        let mut board = TaskBoard::default();
+        board.cards = vec![
+            BoardCard {
+                id: "card1".into(),
+                title: "Ready".into(),
+                column: "planned".into(),
+                depends_on: vec![],
+            },
+            BoardCard {
+                id: "card2".into(),
+                title: "Blocked".into(),
+                column: "planned".into(),
+                depends_on: vec!["card5".into()],
+            },
+            BoardCard {
+                id: "card3".into(),
+                title: "Doing".into(),
+                column: "doing".into(),
+                depends_on: vec![],
+            },
+            BoardCard {
+                id: "card4".into(),
+                title: "Done".into(),
+                column: "done".into(),
+                depends_on: vec![],
+            },
+            BoardCard {
+                id: "card5".into(),
+                title: "Failed".into(),
+                column: "failed".into(),
+                depends_on: vec![],
+            },
+        ];
+
+        let result = board.get_ready_cards();
+
+        assert_eq!(result.ready, vec!["card1"], "Should have ready cards");
+        assert_eq!(result.blocked, vec!["card2"], "Should have blocked cards");
+        assert_eq!(
+            result.in_progress,
+            vec!["card3"],
+            "Should have in_progress cards"
+        );
+        assert_eq!(
+            result.completed,
+            vec!["card4"],
+            "Should have completed cards"
+        );
+        assert_eq!(result.failed, vec!["card5"], "Should have failed cards");
+    }
 }
 
 #[cfg(test)]
@@ -569,32 +636,6 @@ mod error_handling_tests {
             !meta.updated_at.is_empty(),
             "Updated_at should not be empty"
         );
-    }
-
-    #[test]
-    fn test_ready_cards_result_all_states() {
-        #[derive(Debug, Clone)]
-        struct ReadyCardsResult {
-            ready: Vec<String>,
-            blocked: Vec<String>,
-            in_progress: Vec<String>,
-            completed: Vec<String>,
-            failed: Vec<String>,
-        }
-
-        let result = ReadyCardsResult {
-            ready: vec!["card1".into()],
-            blocked: vec!["card2".into()],
-            in_progress: vec!["card3".into()],
-            completed: vec!["card4".into()],
-            failed: vec!["card5".into()],
-        };
-
-        assert_eq!(result.ready.len(), 1, "Should have ready cards");
-        assert_eq!(result.blocked.len(), 1, "Should have blocked cards");
-        assert_eq!(result.in_progress.len(), 1, "Should have in_progress cards");
-        assert_eq!(result.completed.len(), 1, "Should have completed cards");
-        assert_eq!(result.failed.len(), 1, "Should have failed cards");
     }
 
     #[test]

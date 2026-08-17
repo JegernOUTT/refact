@@ -711,13 +711,13 @@ mod tests {
     #[test]
     fn tool_review_rank_orders_tier_then_severity_then_confidence() {
         let mut findings = vec![];
-        let mut make = |claim: &str,
-                        status: VerificationStatus,
-                        severity: ReviewSeverity,
-                        confidence: f32,
-                        sources: Vec<&str>,
-                        exec: bool,
-                        index: u32| {
+        let make = |claim: &str,
+                    status: VerificationStatus,
+                    severity: ReviewSeverity,
+                    confidence: f32,
+                    sources: Vec<&str>,
+                    exec: bool,
+                    index: u32| {
             let mut f = finding(
                 &format!("src/file{index}.rs"),
                 1,

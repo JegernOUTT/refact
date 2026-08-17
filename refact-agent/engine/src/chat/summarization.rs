@@ -780,17 +780,6 @@ fn candidate_source_message_ids(
         .collect()
 }
 
-fn ensure_candidate_source_message_ids(
-    messages: &mut [ChatMessage],
-    candidate: &CompressionCandidate,
-) -> bool {
-    let mut changed = false;
-    for range in &candidate.ranges {
-        changed |= ensure_source_message_ids(messages, *range);
-    }
-    changed
-}
-
 /// Assigns missing message ids across every compression candidate and returns
 /// the indices that changed, so callers can emit granular `MessageUpdated`
 /// events instead of relying on the next snapshot.
@@ -3365,6 +3354,17 @@ mod tests {
     };
     use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
     use crate::global_context::tests::make_test_gcx;
+
+    fn ensure_candidate_source_message_ids(
+        messages: &mut [ChatMessage],
+        candidate: &CompressionCandidate,
+    ) -> bool {
+        let mut changed = false;
+        for range in &candidate.ranges {
+            changed |= ensure_source_message_ids(messages, *range);
+        }
+        changed
+    }
 
     fn chat_model_record(id: &str, n_ctx: usize) -> Arc<ChatModelRecord> {
         Arc::new(ChatModelRecord {

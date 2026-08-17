@@ -1070,7 +1070,6 @@ pub async fn maybe_enqueue_chat_activity_reaction(app: AppState, activity: ChatA
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
 
     fn classify_chat_reaction(text: &str, settings: &BuddySettings) -> ChatReaction {
         let kind = classify_chat_reaction_kind(text, settings);

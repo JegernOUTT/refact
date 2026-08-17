@@ -341,7 +341,6 @@ pub async fn build_legacy_sse_client(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::transport::Transport;
 
     #[test]
     fn test_resolve_message_endpoint_relative() {
