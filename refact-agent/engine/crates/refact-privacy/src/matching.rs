@@ -1,5 +1,6 @@
+use std::collections::BTreeSet;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::{collections::HashMap, sync::RwLock};
 
@@ -111,38 +112,90 @@ impl PrivacyPolicy {
 
 impl CompiledPolicy {
     pub fn zone_for_path(&self, path: &Path) -> &Zone {
+        self.zone_for_path_with_roots(path, std::iter::empty::<&Path>())
+    }
+
+    pub fn zone_for_path_with_roots<I, P>(&self, path: &Path, roots: I) -> &Zone
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let roots = roots
+            .into_iter()
+            .map(|root| absolute_path(root.as_ref()))
+            .collect::<Vec<_>>();
+        let canonical_path = canonicalize_or_original(&absolute_path(path));
+
+        let mut candidate_paths = vec![path.to_path_buf(), absolute_path(path), canonical_path];
+        append_relative_candidates(&mut candidate_paths, &roots);
+
         #[cfg(unix)]
-        if let Some(index) = self.cached_secret_zone(path) {
-            return &self.zones[index].zone;
+        if let Some(identity) = file_identity(path) {
+            if file_link_count(path).is_some_and(|count| count > 1) {
+                append_identity_aliases(&mut candidate_paths, identity, &roots);
+                append_relative_candidates(&mut candidate_paths, &roots);
+            }
         }
 
-        let normalized_path = normalize(&path.to_string_lossy());
-        if let Some((index, compiled)) = self.zones.iter().enumerate().find(|(_, compiled)| {
-            compiled
-                .patterns
-                .iter()
-                .any(|pattern| pattern.matches(&normalized_path))
+        let candidates = normalized_candidates(&candidate_paths);
+        #[cfg(unix)]
+        if let Some(index) = self.cached_secret_zone(path) {
+            if let Some((earlier, _)) =
+                self.zones[..=index]
+                    .iter()
+                    .enumerate()
+                    .find(|(_, compiled)| {
+                        compiled.patterns.iter().any(|pattern| {
+                            candidates
+                                .iter()
+                                .any(|candidate| pattern.matches(candidate))
+                        })
+                    })
+            {
+                return &self.zones[earlier].zone;
+            }
+        }
+        if let Some((index, _)) = self.zones.iter().enumerate().find(|(_, compiled)| {
+            compiled.patterns.iter().any(|pattern| {
+                candidates
+                    .iter()
+                    .any(|candidate| pattern.matches(candidate))
+            })
         }) {
             #[cfg(unix)]
-            if compiled.zone.name == "secrets" {
+            if self.zones[index].zone.name == "secrets" {
                 self.remember_secret_identity(path, index);
             }
-            return &compiled.zone;
+            return &self.zones[index].zone;
         }
 
         &self.zones[self.normal_index].zone
     }
 
-    pub fn strictest_zone_for_paths<I, P>(&self, paths: I) -> &Zone
+    pub fn strictest_zone_for_paths<I, P>(&self, paths: I) -> Zone
     where
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
-        paths
+        self.strictest_zone_for_paths_with_roots(paths, std::iter::empty::<&Path>())
+    }
+
+    pub fn strictest_zone_for_paths_with_roots<I, P, R, Q>(&self, paths: I, roots: R) -> Zone
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+        R: IntoIterator<Item = Q>,
+        Q: AsRef<Path>,
+    {
+        let roots = roots
             .into_iter()
-            .map(|path| self.zone_for_path(path.as_ref()))
-            .min_by_key(|zone| destination_count(&zone.send_to))
-            .unwrap_or(&self.zones[self.normal_index].zone)
+            .map(|root| root.as_ref().to_path_buf())
+            .collect::<Vec<_>>();
+        let zones = paths
+            .into_iter()
+            .map(|path| self.zone_for_path_with_roots(path.as_ref(), &roots))
+            .collect::<Vec<_>>();
+        effective_zone(&zones).unwrap_or_else(|| self.zones[self.normal_index].zone.clone())
     }
 
     #[cfg(unix)]
@@ -168,16 +221,144 @@ impl CompiledPolicy {
     }
 }
 
-fn destination_count(destinations: &[String]) -> usize {
-    if destinations.iter().any(|destination| destination == "*") {
-        usize::MAX
+fn effective_zone(zones: &[&Zone]) -> Option<Zone> {
+    let first = *zones.first()?;
+    let send_to = zones
+        .iter()
+        .skip(1)
+        .fold(first.send_to.clone(), |allowed, zone| {
+            intersect_destinations(&allowed, &zone.send_to)
+        });
+    let on_shell_read = zones
+        .iter()
+        .fold(ShellBehavior::Withhold, |strictest, zone| {
+            strictest_shell_behavior(strictest, zone.on_shell_read)
+        });
+    let name = zones
+        .iter()
+        .filter(|zone| {
+            same_destinations(&zone.send_to, &send_to) && zone.on_shell_read == on_shell_read
+        })
+        .map(|zone| zone.name.as_str())
+        .min()
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let names = zones
+                .iter()
+                .map(|zone| zone.name.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join("+");
+            format!("effective:{names}")
+        });
+    Some(Zone {
+        name,
+        patterns: Vec::new(),
+        send_to,
+        on_shell_read,
+    })
+}
+
+fn intersect_destinations(left: &[String], right: &[String]) -> Vec<String> {
+    let left_wildcard = left.iter().any(|destination| destination == "*");
+    let right_wildcard = right.iter().any(|destination| destination == "*");
+    if left_wildcard && right_wildcard {
+        return vec!["*".to_string()];
+    }
+    let values = if left_wildcard {
+        right.iter()
+    } else if right_wildcard {
+        left.iter()
     } else {
-        destinations.len()
+        return left
+            .iter()
+            .filter(|destination| right.contains(destination))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+    };
+    values
+        .filter(|destination| destination.as_str() != "*")
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn same_destinations(left: &[String], right: &[String]) -> bool {
+    let canonical = |values: &[String]| {
+        if values.iter().any(|value| value == "*") {
+            BTreeSet::from(["*".to_string()])
+        } else {
+            values.iter().cloned().collect()
+        }
+    };
+    canonical(left) == canonical(right)
+}
+
+fn strictest_shell_behavior(left: ShellBehavior, right: ShellBehavior) -> ShellBehavior {
+    use ShellBehavior::{Ask, Deny, Withhold};
+
+    match (left, right) {
+        (Deny, _) | (_, Deny) => Deny,
+        (Ask, _) | (_, Ask) => Ask,
+        (Withhold, Withhold) => Withhold,
     }
 }
 
 fn normalize(value: &str) -> String {
-    value.nfc().collect::<String>().to_lowercase()
+    value
+        .replace('\\', "/")
+        .nfc()
+        .collect::<String>()
+        .to_lowercase()
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn canonicalize_or_original(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn append_relative_candidates(candidate_paths: &mut Vec<PathBuf>, roots: &[PathBuf]) {
+    let paths = candidate_paths.clone();
+    for root in roots {
+        let canonical_root = canonicalize_or_original(root);
+        for path in &paths {
+            for candidate_root in [root, &canonical_root] {
+                if let Ok(relative) = path.strip_prefix(candidate_root) {
+                    candidate_paths.push(relative.to_path_buf());
+                }
+            }
+        }
+    }
+}
+
+fn normalized_candidates(paths: &[PathBuf]) -> BTreeSet<String> {
+    let mut candidates = BTreeSet::new();
+    for path in paths {
+        let normalized = normalize(&path.to_string_lossy());
+        if !normalized.is_empty() {
+            if let Some(basename) = normalized
+                .rsplit('/')
+                .find(|component| !component.is_empty())
+            {
+                candidates.insert(basename.to_string());
+            }
+            candidates.insert(normalized);
+        }
+    }
+    candidates
 }
 
 #[cfg(unix)]
@@ -191,6 +372,37 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
     })
 }
 
+#[cfg(unix)]
+fn file_link_count(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+
+    Some(std::fs::metadata(path).ok()?.nlink())
+}
+
+#[cfg(unix)]
+fn append_identity_aliases(paths: &mut Vec<PathBuf>, identity: FileIdentity, roots: &[PathBuf]) {
+    let mut pending = roots
+        .iter()
+        .map(|root| canonicalize_or_original(root))
+        .collect::<Vec<_>>();
+    while let Some(path) = pending.pop() {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                continue;
+            };
+            pending.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
+        } else if file_identity(&path) == Some(identity) {
+            paths.push(path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,13 +410,22 @@ mod tests {
     use crate::policy::{ShellBehavior, SubagentPolicy};
     use crate::record::{Attribution, FileRecord, PrivacyRecord};
 
-    fn zone(name: &str, patterns: &[&str], send_to: &[&str]) -> Zone {
+    fn zone_with_shell_behavior(
+        name: &str,
+        patterns: &[&str],
+        send_to: &[&str],
+        on_shell_read: ShellBehavior,
+    ) -> Zone {
         Zone {
             name: name.to_string(),
             patterns: patterns.iter().map(|value| (*value).to_string()).collect(),
             send_to: send_to.iter().map(|value| (*value).to_string()).collect(),
-            on_shell_read: ShellBehavior::Withhold,
+            on_shell_read,
         }
+    }
+
+    fn zone(name: &str, patterns: &[&str], send_to: &[&str]) -> Zone {
+        zone_with_shell_behavior(name, patterns, send_to, ShellBehavior::Withhold)
     }
 
     fn policy(zones: Vec<Zone>) -> PrivacyPolicy {
@@ -281,6 +502,70 @@ mod tests {
     }
 
     #[test]
+    fn incomparable_destination_sets_intersect_in_both_orders() {
+        let policy = policy(vec![
+            zone("a", &["a.txt"], &["provider-a"]),
+            zone("b", &["b.txt"], &["provider-b"]),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        for paths in [
+            [Path::new("a.txt"), Path::new("b.txt")],
+            [Path::new("b.txt"), Path::new("a.txt")],
+        ] {
+            let effective = compiled.strictest_zone_for_paths(paths);
+            assert!(effective.send_to.is_empty());
+            assert_eq!(effective.name, "effective:a+b");
+        }
+    }
+
+    #[test]
+    fn subset_destination_set_is_the_effective_set() {
+        let policy = policy(vec![
+            zone("a", &["a.txt"], &["provider-a"]),
+            zone("a-and-b", &["both.txt"], &["provider-a", "provider-b"]),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        let effective =
+            compiled.strictest_zone_for_paths([Path::new("a.txt"), Path::new("both.txt")]);
+
+        assert_eq!(effective.name, "a");
+        assert_eq!(effective.send_to, ["provider-a"]);
+    }
+
+    #[test]
+    fn strictest_zone_combines_shell_behavior() {
+        let policy = policy(vec![
+            zone_with_shell_behavior(
+                "withhold",
+                &["withhold.txt"],
+                &["provider-a"],
+                ShellBehavior::Withhold,
+            ),
+            zone_with_shell_behavior("ask", &["ask.txt"], &["provider-a"], ShellBehavior::Ask),
+            zone_with_shell_behavior("deny", &["deny.txt"], &["provider-a"], ShellBehavior::Deny),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        assert_eq!(
+            compiled
+                .strictest_zone_for_paths([Path::new("withhold.txt"), Path::new("ask.txt")])
+                .on_shell_read,
+            ShellBehavior::Ask
+        );
+        assert_eq!(
+            compiled
+                .strictest_zone_for_paths([Path::new("ask.txt"), Path::new("deny.txt")])
+                .on_shell_read,
+            ShellBehavior::Deny
+        );
+    }
+
+    #[test]
     fn zone_default_allows_no_destinations() {
         let zone = Zone::default();
         let destination = Destination {
@@ -331,6 +616,93 @@ mod tests {
         assert_eq!(
             compiled.zone_for_path(Path::new("cafe\u{301}.txt")).name,
             "accented"
+        );
+    }
+
+    #[test]
+    fn shipped_example_patterns_classify_absolute_paths() {
+        let policy = policy(vec![
+            zone("secrets", &["secrets.yaml", ".env*", "*.pem"], &[]),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        for path in ["/repo/.env", "/repo/secrets.yaml", "/repo/key.pem"] {
+            assert_eq!(compiled.zone_for_path(Path::new(path)).name, "secrets");
+        }
+    }
+
+    #[test]
+    fn absolute_workspace_relative_and_basename_candidates_match() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path();
+        let absolute = root.join("absolute.txt");
+        let relative = root.join("src").join("relative.txt");
+        let basename = root.join("nested").join("basename.txt");
+        let absolute_pattern = absolute.to_string_lossy().into_owned();
+        let policy = policy(vec![
+            zone("absolute", &[&absolute_pattern], &[]),
+            zone("relative", &["src/relative.txt"], &[]),
+            zone("basename", &["basename.txt"], &[]),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        assert_eq!(
+            compiled.zone_for_path_with_roots(&absolute, [root]).name,
+            "absolute"
+        );
+        assert_eq!(
+            compiled.zone_for_path_with_roots(&relative, [root]).name,
+            "relative"
+        );
+        assert_eq!(
+            compiled.zone_for_path_with_roots(&basename, [root]).name,
+            "basename"
+        );
+    }
+
+    #[test]
+    fn windows_separators_match_slash_patterns() {
+        let policy = policy(vec![
+            zone("secrets", &["*/repo/.env"], &[]),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        assert_eq!(
+            compiled.zone_for_path(Path::new(r"C:\repo\.env")).name,
+            "secrets"
+        );
+    }
+
+    #[test]
+    fn traversal_path_matches_canonical_path() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let secret_dir = temp.path().join("secrets");
+        std::fs::create_dir_all(&secret_dir).expect("secret dir should be created");
+        let secret = secret_dir.join("value.txt");
+        std::fs::write(&secret, "secret").expect("secret should be written");
+        let traversal = secret_dir.join("..").join("secrets").join("value.txt");
+        let policy = policy(vec![
+            zone("secrets", &["secrets/*"], &[]),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        assert_eq!(
+            compiled
+                .zone_for_path_with_roots(&traversal, [temp.path()])
+                .name,
+            compiled
+                .zone_for_path_with_roots(&secret, [temp.path()])
+                .name
+        );
+        assert_eq!(
+            compiled
+                .zone_for_path_with_roots(&traversal, [temp.path()])
+                .name,
+            "secrets"
         );
     }
 
@@ -404,20 +776,80 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn secrets_zone_remembers_matching_file_identity() {
+    fn hardlink_into_secrets_is_classified_when_queried_first() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
-        let secret = temp.path().join("secret.txt");
+        let secret_dir = temp.path().join("secrets");
+        std::fs::create_dir(&secret_dir).expect("secret dir should be created");
+        let secret = secret_dir.join("secret.txt");
         let alias = temp.path().join("alias.txt");
         std::fs::write(&secret, "secret").expect("secret should be written");
         std::fs::hard_link(&secret, &alias).expect("hard link should be created");
-        let pattern = format!("{}/*secret.txt", temp.path().display());
         let policy = policy(vec![
-            zone("secrets", &[&pattern], &[]),
+            zone("secrets", &["secrets/*"], &[]),
             zone("normal", &["*"], &["*"]),
         ]);
         let compiled = policy.compile().expect("policy should compile");
 
-        assert_eq!(compiled.zone_for_path(&secret).name, "secrets");
-        assert_eq!(compiled.zone_for_path(&alias).name, "secrets");
+        assert_eq!(
+            compiled
+                .zone_for_path_with_roots(&alias, [temp.path()])
+                .name,
+            "secrets"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_into_secrets_is_classified_when_queried_first() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let secret_dir = temp.path().join("secrets");
+        std::fs::create_dir(&secret_dir).expect("secret dir should be created");
+        let secret = secret_dir.join("secret.txt");
+        let alias = temp.path().join("alias.txt");
+        std::fs::write(&secret, "secret").expect("secret should be written");
+        std::os::unix::fs::symlink(&secret, &alias).expect("symlink should be created");
+        let policy = policy(vec![
+            zone("secrets", &["secrets/*"], &[]),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        assert_eq!(
+            compiled
+                .zone_for_path_with_roots(&alias, [temp.path()])
+                .name,
+            "secrets"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_identity_cache_does_not_override_an_earlier_zone() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let secret_dir = temp.path().join("secrets");
+        std::fs::create_dir(&secret_dir).expect("secret dir should be created");
+        let secret = secret_dir.join("secret.txt");
+        let alias = temp.path().join("public.txt");
+        std::fs::write(&secret, "secret").expect("secret should be written");
+        std::fs::hard_link(&secret, &alias).expect("hard link should be created");
+        let policy = policy(vec![
+            zone("public", &["public.txt"], &["*"]),
+            zone("secrets", &["secrets/*"], &[]),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        assert_eq!(
+            compiled
+                .zone_for_path_with_roots(&secret, [temp.path()])
+                .name,
+            "public"
+        );
+        assert_eq!(
+            compiled
+                .zone_for_path_with_roots(&alias, [temp.path()])
+                .name,
+            "public"
+        );
     }
 }

@@ -30,7 +30,13 @@ async fn resolve_completion_model_for_path(
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     load_privacy_if_needed(gcx.clone()).await;
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    authorize_completion_path(&policy, cursor_file, &model_rec.base.id)?;
+    let workspace_roots = gcx
+        .documents_state
+        .workspace_folders
+        .lock()
+        .unwrap()
+        .clone();
+    authorize_completion_path(&policy, cursor_file, &model_rec.base.id, &workspace_roots)?;
     Ok(model_rec)
 }
 
@@ -38,6 +44,7 @@ fn authorize_completion_path(
     policy: &refact_privacy::PrivacyPolicy,
     cursor_file: &str,
     model_id: &str,
+    workspace_roots: &[std::path::PathBuf],
 ) -> Result<(), ScratchError> {
     let destination = refact_privacy::Destination {
         id: refact_privacy::DestinationId(
@@ -53,7 +60,7 @@ fn authorize_completion_path(
             format!("privacy policy cannot authorize completion: {e}"),
         )
     })?;
-    let zone = compiled.zone_for_path(&cpath);
+    let zone = compiled.zone_for_path_with_roots(&cpath, workspace_roots);
     if !destination.matches_send_to(&zone.send_to) {
         return Err(ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -340,8 +347,8 @@ mod tests {
             subagents: refact_privacy::SubagentPolicy::default(),
         };
 
-        let denied = authorize_completion_path(&policy, "denied.rs", "trusted/model");
-        let allowed = authorize_completion_path(&policy, "allowed.rs", "trusted/model");
+        let denied = authorize_completion_path(&policy, "denied.rs", "trusted/model", &[]);
+        let allowed = authorize_completion_path(&policy, "allowed.rs", "trusted/model", &[]);
 
         assert_eq!(
             denied.unwrap_err().status_code,

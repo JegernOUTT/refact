@@ -43,6 +43,7 @@ pub fn attribute_shell_command(
         source: command.as_bytes(),
         cwd,
         policy,
+        roots: vec![cwd.to_path_buf()],
         seen: HashSet::new(),
         result: HeuristicAttribution {
             incomplete: tree.root_node().has_error(),
@@ -57,6 +58,7 @@ struct Collector<'a> {
     source: &'a [u8],
     cwd: &'a Path,
     policy: &'a CompiledPolicy,
+    roots: Vec<PathBuf>,
     seen: HashSet<PathBuf>,
     result: HeuristicAttribution,
 }
@@ -124,7 +126,7 @@ impl Collector<'_> {
         self.result.files.push(FileRecord {
             zone: self
                 .policy
-                .strictest_zone_for_paths([path, resolved.as_path()])
+                .strictest_zone_for_paths_with_roots([path, resolved.as_path()], &self.roots)
                 .name
                 .clone(),
             path: literal,

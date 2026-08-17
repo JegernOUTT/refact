@@ -243,6 +243,13 @@ fn live_match_counts(
         )
     })?;
     let mappings = registered_worktree_path_mappings(app.gcx.cache_dir.as_path());
+    let workspace_roots = app
+        .gcx
+        .documents_state
+        .workspace_folders
+        .lock()
+        .unwrap()
+        .clone();
     let files = app
         .gcx
         .documents_state
@@ -257,7 +264,7 @@ fn live_match_counts(
         .collect::<BTreeMap<_, _>>();
     counts.entry("blocked".to_string()).or_default();
     for path in files {
-        let zone = strictest_zone_for_path(&compiled, &path, &mappings);
+        let zone = strictest_zone_for_path(&compiled, &path, &workspace_roots, &mappings);
         *counts.entry(zone.name.clone()).or_default() += 1;
     }
     Ok(counts)

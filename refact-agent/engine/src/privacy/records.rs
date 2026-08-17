@@ -60,9 +60,10 @@ pub fn shell_observation_needed(gcx: &Arc<GlobalContext>, destination: &Destinat
         return true;
     };
     let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    let roots = privacy_roots(gcx, &mappings);
     workspace_files.into_iter().any(|path| {
         let candidates = record_path_candidates(gcx, &path, &mappings);
-        let zone = compiled.strictest_zone_for_paths(candidates);
+        let zone = compiled.strictest_zone_for_paths_with_roots(candidates, &roots);
         zone.name == "blocked" || !destination.matches_send_to(&zone.send_to)
     })
 }
@@ -101,7 +102,8 @@ fn zone_for_record_path<'a>(
     derived_zones: &DerivedPrivacyZones,
 ) -> String {
     let candidates = record_path_candidates(gcx, path, mappings);
-    let static_zone = compiled.strictest_zone_for_paths(&candidates);
+    let static_zone =
+        compiled.strictest_zone_for_paths_with_roots(&candidates, privacy_roots(gcx, mappings));
     let derived_zone_name = {
         let derived_zones = derived_zones
             .read()
@@ -144,6 +146,26 @@ fn record_path_candidates(
     candidates.sort();
     candidates.dedup();
     candidates
+}
+
+fn privacy_roots(
+    gcx: &Arc<GlobalContext>,
+    mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
+) -> Vec<PathBuf> {
+    let mut roots = gcx
+        .documents_state
+        .workspace_folders
+        .lock()
+        .unwrap()
+        .clone();
+    roots.extend(
+        mappings
+            .iter()
+            .flat_map(|mapping| [mapping.root.clone(), mapping.source_root.clone()]),
+    );
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 fn zone_destination_count(policy: &refact_privacy::PrivacyPolicy, name: &str) -> usize {

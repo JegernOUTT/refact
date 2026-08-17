@@ -172,12 +172,19 @@ pub(crate) fn registered_alias_paths(
     aliases
 }
 
-pub fn strictest_zone_for_path<'a>(
-    policy: &'a refact_privacy::CompiledPolicy,
+pub fn strictest_zone_for_path(
+    policy: &refact_privacy::CompiledPolicy,
     path: &Path,
+    workspace_roots: &[PathBuf],
     worktree_mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
-) -> &'a refact_privacy::Zone {
-    policy.strictest_zone_for_paths(registered_alias_paths(path, worktree_mappings))
+) -> refact_privacy::Zone {
+    let aliases = registered_alias_paths(path, worktree_mappings);
+    let roots = workspace_roots.iter().map(PathBuf::as_path).chain(
+        worktree_mappings
+            .iter()
+            .flat_map(|mapping| [mapping.root.as_path(), mapping.source_root.as_path()]),
+    );
+    policy.strictest_zone_for_paths_with_roots(aliases, roots)
 }
 
 pub(crate) fn check_file_privacy_with_context(
@@ -2938,13 +2945,13 @@ mod tests {
         .unwrap();
         let mappings = vec![crate::files_correction::RegisteredWorktreePathMapping {
             root: worktree,
-            source_root: source,
+            source_root: source.clone(),
         }];
 
         assert_eq!(policy.zone_for_path(&source_file).name, "normal");
         assert_eq!(policy.zone_for_path(&worktree_file).name, "secrets");
         assert_eq!(
-            strictest_zone_for_path(&policy, &source_file, &mappings).name,
+            strictest_zone_for_path(&policy, &source_file, &[source], &mappings).name,
             "secrets"
         );
     }
