@@ -3,6 +3,7 @@ pub mod artifacts;
 pub mod assertions;
 pub mod context_state;
 pub mod dialogs;
+pub mod drag;
 pub mod files;
 pub mod forms;
 mod frames;
@@ -29,6 +30,7 @@ pub use actionability::{
     RequiredStates, SystemClock, TimeoutError, TimeoutKind, required_states,
 };
 pub use dialogs::{DialogDecision, DialogManager, DialogResponse};
+pub use drag::{CdpDragDispatcher, DragDispatcher, DragEventType, drag_and_drop, drop_files};
 pub use context_state::{ContextState, MediaState, ViewportState};
 pub use handles::{
     CheckedState, ElementHandle, ElementState, ElementStateName, HandleError, HandleRegistry,
@@ -57,8 +59,8 @@ pub use locator_gen::LocatorGenerationOptions;
 pub use locators::{DEFAULT_TEST_ID_ATTRIBUTE, strict_mode_violation, test_id_locator};
 pub use mouse::{
     CdpMouseDispatcher, ContentQuad, MainFrameCssPoint, MainFrameCssViewport, Mouse, MouseButton,
-    MouseDispatch, MouseDispatcher, MouseError, MouseEventPayload, MouseEventType, ScrollStrategy,
-    TouchEventPayload, TouchEventType, clickable_point_from_quads,
+    MouseDispatch, MouseDispatcher, MouseError, MouseEventPayload, MouseEventType, MouseState,
+    ScrollStrategy, TouchEventPayload, TouchEventType, clickable_point_from_quads,
 };
 pub use network::{
     NetworkLoadState, NetworkMonitorHandle, RequestStarted, ResponseReceived, UrlMatcher,
@@ -455,6 +457,7 @@ pub struct BrowserRuntime {
     pub network_monitor: Arc<NetworkMonitorHandle>,
     pub route_registry: Arc<RouteRegistry>,
     pub context_state: ContextState,
+    pub mouse_states: HashMap<String, MouseState>,
     pub idle_timeout: Duration,
     pub is_connected: bool,
     pub last_activity: Instant,
@@ -544,6 +547,7 @@ impl BrowserRuntime {
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
             route_registry: Arc::new(RouteRegistry::default()),
             context_state: ContextState::default(),
+            mouse_states: HashMap::new(),
             idle_timeout,
             is_connected: true,
             last_activity: Instant::now(),
@@ -597,6 +601,7 @@ impl BrowserRuntime {
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
             route_registry: Arc::new(RouteRegistry::default()),
             context_state: ContextState::default(),
+            mouse_states: HashMap::new(),
             idle_timeout,
             is_connected: true,
             last_activity: Instant::now(),

@@ -912,6 +912,21 @@ pub struct BrowserPdfOptions {
     pub outline: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct BrowserPosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserMouseButton {
+    #[default]
+    Left,
+    Middle,
+    Right,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum BrowserStep {
@@ -1070,6 +1085,52 @@ pub enum BrowserStep {
         key: String,
         #[serde(default)]
         modifiers: Vec<String>,
+    },
+    DragAndDrop {
+        source: BrowserLocator,
+        target: BrowserLocator,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_position: Option<BrowserPosition>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_position: Option<BrowserPosition>,
+    },
+    DropFiles {
+        target: BrowserLocator,
+        paths: Vec<String>,
+    },
+    MouseMove {
+        x: f64,
+        y: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<usize>,
+    },
+    MouseDown {
+        #[serde(default)]
+        button: BrowserMouseButton,
+    },
+    MouseUp {
+        #[serde(default)]
+        button: BrowserMouseButton,
+    },
+    MouseClickXy {
+        x: f64,
+        y: f64,
+        #[serde(default)]
+        button: BrowserMouseButton,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        click_count: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delay: Option<u64>,
+    },
+    MouseDragXy {
+        start_x: f64,
+        start_y: f64,
+        end_x: f64,
+        end_y: f64,
+    },
+    MouseWheel {
+        delta_x: f64,
+        delta_y: f64,
     },
 
     Fill {
@@ -1354,6 +1415,14 @@ impl BrowserStep {
         "blur",
         "scroll_to",
         "press_key",
+        "drag_and_drop",
+        "drop_files",
+        "mouse_move",
+        "mouse_down",
+        "mouse_up",
+        "mouse_click_xy",
+        "mouse_drag_xy",
+        "mouse_wheel",
         "fill",
         "clear",
         "select_option",
@@ -1979,6 +2048,44 @@ mod tests {
             BrowserStep::PressKey {
                 key: "Enter".to_string(),
                 modifiers: vec!["Ctrl".to_string()],
+            },
+            BrowserStep::DragAndDrop {
+                source: locator(),
+                target: locator(),
+                source_position: Some(BrowserPosition { x: 1.0, y: 2.0 }),
+                target_position: Some(BrowserPosition { x: 3.0, y: 4.0 }),
+            },
+            BrowserStep::DropFiles {
+                target: locator(),
+                paths: vec!["/tmp/file".to_string()],
+            },
+            BrowserStep::MouseMove {
+                x: 10.0,
+                y: 20.0,
+                steps: Some(2),
+            },
+            BrowserStep::MouseDown {
+                button: BrowserMouseButton::Left,
+            },
+            BrowserStep::MouseUp {
+                button: BrowserMouseButton::Left,
+            },
+            BrowserStep::MouseClickXy {
+                x: 10.0,
+                y: 20.0,
+                button: BrowserMouseButton::Left,
+                click_count: Some(2),
+                delay: Some(10),
+            },
+            BrowserStep::MouseDragXy {
+                start_x: 1.0,
+                start_y: 2.0,
+                end_x: 3.0,
+                end_y: 4.0,
+            },
+            BrowserStep::MouseWheel {
+                delta_x: 0.0,
+                delta_y: 100.0,
             },
             BrowserStep::Fill {
                 locator: locator(),

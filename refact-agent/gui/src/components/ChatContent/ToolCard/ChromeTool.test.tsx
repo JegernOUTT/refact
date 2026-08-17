@@ -43,6 +43,69 @@ function makeStore(toolMessage: {
 }
 
 describe("ChromeTool", () => {
+  test("summarizes drag, file drop, and coordinate mouse steps", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-pointer-actions",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: {
+            steps: [
+              {
+                action: "drag_and_drop",
+                source: { by: "ref", value: "e1" },
+                target: { by: "ref", value: "e2" },
+              },
+              {
+                action: "drop_files",
+                target: { by: "ref", value: "e2" },
+                paths: ["/tmp/a.txt", "/tmp/b.txt"],
+              },
+              { action: "mouse_click_xy", x: 125, y: 240 },
+            ],
+          },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-pointer-actions",
+      content: JSON.stringify({
+        ok: true,
+        steps: [
+          { step_index: 0, ok: true, summary: "Dragged element", retries: 0 },
+          { step_index: 1, ok: true, summary: "Dropped files", retries: 0 },
+          {
+            step_index: 2,
+            ok: true,
+            summary: "Clicked coordinates",
+            retries: 0,
+          },
+        ],
+      }),
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    expect(screen.getByText(/Drag element to target/i)).toBeInTheDocument();
+    expect(screen.getByText(/Drop 2 files/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Mouse Click Xy \(125, 240\)/i),
+    ).toBeInTheDocument();
+    await user.click(screen.getByText(/Browser action/i));
+    expect(screen.getByText("Results")).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("Dropped files")),
+    ).toBeInTheDocument();
+  });
+
   test("renders image and PDF artifacts", async () => {
     const user = userEvent.setup();
     const toolCall: ToolCall = {

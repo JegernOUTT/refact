@@ -194,10 +194,44 @@ export type BrowserLocator = {
 
 export type BrowserTabTarget = { type: "active" } | { type: "id"; id: string };
 
-export type BrowserStep = {
-  action: string;
-  [key: string]: unknown;
-};
+export type BrowserMouseButton = "left" | "middle" | "right";
+
+export type BrowserPosition = { x: number; y: number };
+
+export type BrowserPointerStep =
+  | {
+      action: "drag_and_drop";
+      source: BrowserLocator;
+      target: BrowserLocator;
+      source_position?: BrowserPosition;
+      target_position?: BrowserPosition;
+    }
+  | { action: "drop_files"; target: BrowserLocator; paths: string[] }
+  | { action: "mouse_move"; x: number; y: number; steps?: number }
+  | { action: "mouse_down" | "mouse_up"; button?: BrowserMouseButton }
+  | {
+      action: "mouse_click_xy";
+      x: number;
+      y: number;
+      button?: BrowserMouseButton;
+      click_count?: number;
+      delay?: number;
+    }
+  | {
+      action: "mouse_drag_xy";
+      start_x: number;
+      start_y: number;
+      end_x: number;
+      end_y: number;
+    }
+  | { action: "mouse_wheel"; delta_x: number; delta_y: number };
+
+export type BrowserStep =
+  | BrowserPointerStep
+  | {
+      action: string;
+      [key: string]: unknown;
+    };
 
 export type BrowserActionRequest = {
   chat_id: string;

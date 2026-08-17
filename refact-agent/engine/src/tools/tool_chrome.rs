@@ -85,7 +85,8 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Ref-first batched browser automation. Prefer the typed `request`: ONE call can carry many steps, unlike one-action-per-call servers. ",
     "Take `accessibility_snapshot`, read its `[ref=eN]` handles, then act with `locator.by=ref`; refs come from the most recent snapshot. ",
     "Canonical batch: {\"steps\":[{\"action\":\"accessibility_snapshot\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]} Pass this object as `request`; e5/e7 stand for handles minted by the latest snapshot.\n",
-    "Core: navigate, reload, go_back, go_forward, open_tab, close_tab, switch_tab, list_tabs, click, click_if_exists, hover, focus, blur, scroll_to, press_key. open_tab accepts optional device/url; close_tab accepts an optional tab and otherwise closes active. Closing active selects the preceding tab in adoption order, the next tab when closing the first, or leaves no active tab.\n",
+    "Core: navigate, reload, go_back, go_forward, open_tab, close_tab, switch_tab, list_tabs, click, click_if_exists, hover, focus, blur, scroll_to, press_key, drag_and_drop, and drop_files. drag_and_drop accepts source/target locators or refs plus optional source_position/target_position. open_tab accepts optional device/url; close_tab accepts an optional tab and otherwise closes active. Closing active selects the preceding tab in adoption order, the next tab when closing the first, or leaves no active tab.\n",
+    "Coordinate mouse escape hatch: mouse_move, mouse_down, mouse_up, mouse_click_xy, mouse_drag_xy, and mouse_wheel use main-frame viewport CSS pixels and bypass locator resolution. Use these only for canvas, map, and vision-driven UIs with no addressable element; locator/ref actions remain the default.\n",
     "Forms: fill, clear, select_option, check, uncheck.\n",
     "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch.\n",
     "Waiting: wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. ",
@@ -208,6 +209,15 @@ fn browser_step_schema_with_actions(
     );
     properties.insert("tab".to_string(), tab_target_schema());
     properties.insert("locator".to_string(), browser_locator_schema());
+    properties.insert("source".to_string(), browser_locator_schema());
+    properties.insert("target".to_string(), browser_locator_schema());
+    let position_schema = serde_json::json!({
+        "type": "object",
+        "required": ["x", "y"],
+        "properties": {"x": {"type": "number"}, "y": {"type": "number"}}
+    });
+    properties.insert("source_position".to_string(), position_schema.clone());
+    properties.insert("target_position".to_string(), position_schema);
     properties.insert("root".to_string(), browser_locator_schema());
     properties.insert("text".to_string(), serde_json::json!({"type": "string"}));
     properties.insert("key".to_string(), serde_json::json!({"type": "string"}));
@@ -233,6 +243,30 @@ fn browser_step_schema_with_actions(
         serde_json::json!({"type": "string"}),
     );
     properties.insert("seconds".to_string(), serde_json::json!({"type": "number"}));
+    properties.insert("x".to_string(), serde_json::json!({"type": "number"}));
+    properties.insert("y".to_string(), serde_json::json!({"type": "number"}));
+    properties.insert("start_x".to_string(), serde_json::json!({"type": "number"}));
+    properties.insert("start_y".to_string(), serde_json::json!({"type": "number"}));
+    properties.insert("end_x".to_string(), serde_json::json!({"type": "number"}));
+    properties.insert("end_y".to_string(), serde_json::json!({"type": "number"}));
+    properties.insert("delta_x".to_string(), serde_json::json!({"type": "number"}));
+    properties.insert("delta_y".to_string(), serde_json::json!({"type": "number"}));
+    properties.insert(
+        "steps".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 1}),
+    );
+    properties.insert(
+        "button".to_string(),
+        serde_json::json!({"type": "string", "enum": ["left", "middle", "right"]}),
+    );
+    properties.insert(
+        "click_count".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 1}),
+    );
+    properties.insert(
+        "delay".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 0}),
+    );
     properties.insert(
         "timeout_ms".to_string(),
         serde_json::json!({"type": "integer", "minimum": 0}),
@@ -950,11 +984,18 @@ mod tests {
             "animations",
             "attribute",
             "boxes",
+            "button",
             "caret",
             "clear_first",
+            "click_count",
             "clip",
             "contains",
+            "delay",
+            "delta_x",
+            "delta_y",
             "device",
+            "end_x",
+            "end_y",
             "expression",
             "format",
             "full_page",
@@ -989,10 +1030,17 @@ mod tests {
             "scale",
             "seconds",
             "selector",
+            "source",
+            "source_position",
+            "start_x",
+            "start_y",
             "state",
+            "steps",
             "style",
             "tab",
             "tagged",
+            "target",
+            "target_position",
             "text",
             "timeout_ms",
             "times",
@@ -1002,6 +1050,8 @@ mod tests {
             "value",
             "verify",
             "width",
+            "x",
+            "y",
         ] {
             assert!(
                 properties.contains_key(field),

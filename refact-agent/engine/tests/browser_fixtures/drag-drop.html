@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+  <body>
+    <div id="source" draggable="true">Drag me</div>
+    <div id="target">Drop here</div>
+    <div id="files">Drop files here</div>
+    <script>
+      const source = document.querySelector("#source");
+      const target = document.querySelector("#target");
+      const files = document.querySelector("#files");
+      source.addEventListener("dragstart", (event) => {
+        event.dataTransfer.setData("text/plain", "dragged");
+      });
+      target.addEventListener("dragover", (event) => event.preventDefault());
+      target.addEventListener("drop", (event) => {
+        event.preventDefault();
+        target.dataset.dropped = event.dataTransfer.getData("text/plain");
+      });
+      files.addEventListener("dragover", (event) => event.preventDefault());
+      files.addEventListener("drop", (event) => {
+        event.preventDefault();
+        files.dataset.files = Array.from(event.dataTransfer.files)
+          .map((file) => file.name)
+          .join(",");
+      });
+    </script>
+  </body>
+</html>

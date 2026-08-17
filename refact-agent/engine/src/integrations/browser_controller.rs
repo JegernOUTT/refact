@@ -16,11 +16,11 @@ use crate::integrations::browser_runtime::BrowserRuntime;
 use refact_browser::{
     ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
     ActionabilityExecutionMode, ActionabilityTimeouts, CdpKeyboardDispatcher, CdpMouseDispatcher,
-    ElementHandle, HitTargetController, HitTargetPoint, HitTargetResult, Keyboard, LocatorHandler,
-    LocatorHandlerLease, LocatorHandlerOperation, LocatorHandlerProbe, LocatorHandlerRegistry,
-    ExpectPollResult, LocatorOutcome, Mouse, MouseButton, NetworkLoadState, NetworkMonitorHandle,
-    Ref, ScrollStrategy, SnapshotMode, SnapshotOptions, SystemClock, UrlMatcher, WorldManager,
-    DEFAULT_DISMISS_OVERLAYS_HANDLER,
+    CdpDragDispatcher, ElementHandle, HitTargetController, HitTargetPoint, HitTargetResult,
+    Keyboard, LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation, LocatorHandlerProbe,
+    LocatorHandlerRegistry, ExpectPollResult, LocatorOutcome, Mouse, MouseButton, NetworkLoadState,
+    NetworkMonitorHandle, MainFrameCssPoint, MouseState, Ref, ScrollStrategy, SnapshotMode,
+    SnapshotOptions, SystemClock, UrlMatcher, WorldManager, DEFAULT_DISMISS_OVERLAYS_HANDLER,
 };
 use refact_browser::artifacts::{pdf_payload, screenshot_capture, ScreenshotMetrics};
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
@@ -128,6 +128,121 @@ struct BrowserActionDriver<'a> {
     image_policy: &'a ImagePolicy,
     precheck_deadline: Instant,
     resolved: Option<ResolvedElement>,
+}
+
+struct DragActionabilityDriver<'a> {
+    tab: &'a Tab,
+    world: &'a WorldManager,
+    locator: &'a BrowserLocator,
+    handlers: Option<&'a Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &'a mut Vec<LocatorHandlerFiring>,
+    image_policy: &'a ImagePolicy,
+    precheck_deadline: Instant,
+    resolved: Option<ResolvedElement>,
+    position: Option<BrowserPosition>,
+}
+
+impl Drop for DragActionabilityDriver<'_> {
+    fn drop(&mut self) {
+        if let Some(resolved) = self.resolved.take() {
+            let _ = self.world.release_handle(self.tab, &resolved.handle);
+        }
+    }
+}
+
+impl ActionabilityDriver for DragActionabilityDriver<'_> {
+    type Output = (String, ElementHandle, MainFrameCssPoint);
+
+    fn resolve(&mut self) -> LocatorOutcome {
+        if let Some(resolved) = self.resolved.take() {
+            let _ = self.world.release_handle(self.tab, &resolved.handle);
+        }
+        match resolve_element(self.tab, self.world, self.locator) {
+            Ok(resolved) => {
+                let preview = element_preview(self.tab, self.world, &resolved.handle);
+                self.resolved = Some(resolved);
+                LocatorOutcome::Found { preview }
+            }
+            Err(error) => {
+                if matches!(self.locator.strategy, LocatorStrategy::Ref { .. }) {
+                    LocatorOutcome::Error { description: error }
+                } else if let Some(count) = strict_mode_count(&error) {
+                    LocatorOutcome::MultipleMatches { count }
+                } else {
+                    LocatorOutcome::NotFound
+                }
+            }
+        }
+    }
+
+    fn element_state(&mut self) -> Result<refact_browser::ElementState, ActionabilityDiagnostic> {
+        let resolved = self
+            .resolved
+            .as_ref()
+            .ok_or(ActionabilityDiagnostic::Detached)?;
+        self.world
+            .element_states(self.tab, &resolved.handle)
+            .map_err(|error| ActionabilityDiagnostic::PrecheckFailed {
+                description: error.to_string(),
+            })
+    }
+
+    fn perform(&mut self) -> Result<Self::Output, ActionabilityDiagnostic> {
+        let resolved = self
+            .resolved
+            .as_ref()
+            .ok_or(ActionabilityDiagnostic::Detached)?;
+        let point =
+            element_drag_point(self.tab, &resolved.handle, self.position).map_err(|error| {
+                ActionabilityDiagnostic::PrecheckFailed {
+                    description: error.to_string(),
+                }
+            })?;
+        match HitTargetController::default().expect_hit_target(
+            self.tab,
+            self.world,
+            &resolved.handle,
+            HitTargetPoint {
+                x: point.x,
+                y: point.y,
+            },
+        ) {
+            Ok(HitTargetResult::Done) => {
+                let resolved = self.resolved.take().unwrap();
+                Ok((resolved.info.tag, resolved.handle, point))
+            }
+            Ok(HitTargetResult::Intercepted { description }) => {
+                Err(intercepts_pointer_events(description))
+            }
+            Ok(HitTargetResult::NotConnected) => Err(ActionabilityDiagnostic::Detached),
+            Ok(HitTargetResult::Skipped) => Err(ActionabilityDiagnostic::PrecheckFailed {
+                description: "Browser drag hit-target check was skipped".to_string(),
+            }),
+            Err(error) => Err(ActionabilityDiagnostic::PrecheckFailed {
+                description: error.to_string(),
+            }),
+        }
+    }
+
+    fn wait_for_navigation(&mut self) -> Result<(), ActionabilityDiagnostic> {
+        wait_for_pending_navigation(self.tab, self.precheck_deadline)
+            .map_err(|description| ActionabilityDiagnostic::PrecheckFailed { description })
+    }
+
+    fn locator_handlers_checkpoint(&mut self) -> Result<(), ActionabilityDiagnostic> {
+        let Some(handlers) = self.handlers else {
+            return Ok(());
+        };
+        perform_locator_handlers_checkpoint(
+            self.tab,
+            self.world,
+            handlers,
+            self.locator_handler_firings,
+            self.image_policy,
+            self.precheck_deadline,
+        )
+        .map_err(|description| ActionabilityDiagnostic::PrecheckFailed { description })
+    }
 }
 
 impl<'a> BrowserActionDriver<'a> {
@@ -543,6 +658,7 @@ fn execute_steps_with_world(
     let mut locator_handlers = Vec::new();
     let mut all_ok = true;
     let mut pre_step_url: Option<String> = Some(tab.get_url());
+    let mut mouse_state = MouseState::default();
 
     for (idx, step) in steps.iter().enumerate() {
         let result = execute_single_step(
@@ -554,6 +670,7 @@ fn execute_steps_with_world(
             image_policy,
             Some(&handlers),
             &mut locator_handlers,
+            &mut mouse_state,
         );
         let is_non_fatal = matches!(
             step,
@@ -956,6 +1073,7 @@ fn execute_step_with_world(
 ) -> StepResult {
     let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
     let handlers = Arc::new(Mutex::new(LocatorHandlerRegistry::default()));
+    let mut mouse_state = MouseState::default();
     let result = execute_single_step(
         tab,
         world,
@@ -965,6 +1083,7 @@ fn execute_step_with_world(
         image_policy,
         Some(&handlers),
         &mut Vec::new(),
+        &mut mouse_state,
     );
     if result.ok && is_navigation_step(step) {
         let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
@@ -1063,7 +1182,6 @@ pub async fn execute_request_with_runtime(
         None;
     let mut new_tabs = Vec::new();
     let mut routed_requests = Vec::new();
-
     for (idx, step) in request.steps.iter().enumerate() {
         let step_tab_ids = runtime_arc.lock().await.known_tab_ids();
         if let Some(tab) = &current_tab {
@@ -1143,6 +1261,11 @@ pub async fn execute_request_with_runtime(
             }
             match &current_tab {
                 Some(tab) => tokio::task::block_in_place(|| {
+                    let mut rt = runtime_arc.blocking_lock();
+                    let mouse_state = rt
+                        .mouse_states
+                        .entry(tab.get_target_id().to_string())
+                        .or_default();
                     execute_runtime_network_step(
                         tab,
                         &world,
@@ -1153,6 +1276,7 @@ pub async fn execute_request_with_runtime(
                         image_policy,
                         &handlers,
                         &mut locator_handlers,
+                        mouse_state,
                     )
                 }),
                 None => StepResult::failure(
@@ -1430,6 +1554,7 @@ async fn validate_upload_paths(
         BrowserStep::SetInputFiles { paths, .. } | BrowserStep::ExpectFileChooser { paths } => {
             paths.as_slice()
         }
+        BrowserStep::DropFiles { paths, .. } => paths.as_slice(),
         _ => &[],
     }) {
         let path = PathBuf::from(path);
@@ -1742,15 +1867,20 @@ pub fn execute_steps_with_runtime(
             other => match &current_tab {
                 Some(tab) => {
                     let chooser_was_armed = runtime.file_chooser_manager.is_armed();
+                    let world = runtime.world_manager.clone();
                     let mut result = execute_single_step(
                         tab,
-                        &runtime.world_manager,
+                        &world,
                         other,
                         idx,
                         pre_step_url.as_deref(),
                         image_policy,
                         Some(&handlers),
                         &mut locator_handlers,
+                        runtime
+                            .mouse_states
+                            .entry(tab.get_target_id().to_string())
+                            .or_default(),
                     );
                     if chooser_was_armed && matches!(other, BrowserStep::Click { .. }) {
                         if result.ok {
@@ -1889,6 +2019,7 @@ fn execute_runtime_network_step(
     image_policy: &ImagePolicy,
     handlers: &Arc<Mutex<LocatorHandlerRegistry>>,
     locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+    mouse_state: &mut MouseState,
 ) -> StepResult {
     match step {
         BrowserStep::WaitForNetworkIdle { timeout_ms } => wait_for_load_state(
@@ -1931,6 +2062,7 @@ fn execute_runtime_network_step(
             image_policy,
             Some(handlers),
             locator_handler_firings,
+            mouse_state,
         ),
     }
 }
@@ -2000,6 +2132,8 @@ fn needs_locator_handler_checkpoint(step: &BrowserStep) -> bool {
         BrowserStep::Click { .. }
             | BrowserStep::ClickIfExists { .. }
             | BrowserStep::Hover { .. }
+            | BrowserStep::DragAndDrop { .. }
+            | BrowserStep::DropFiles { .. }
             | BrowserStep::Focus { .. }
             | BrowserStep::Blur { .. }
             | BrowserStep::ScrollTo { .. }
@@ -2236,6 +2370,7 @@ fn execute_locator_handler(
                     image_policy,
                     Some(handlers),
                     firings,
+                    &mut MouseState::default(),
                 );
                 if !result.ok {
                     return Err(result.error.unwrap_or(result.summary));
@@ -2337,6 +2472,7 @@ fn execute_single_step(
     image_policy: &ImagePolicy,
     handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
     locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+    mouse_state: &mut MouseState,
 ) -> StepResult {
     if needs_locator_handler_checkpoint(step) && !uses_actionability_engine(step) {
         if let Some(handlers) = handlers {
@@ -2466,6 +2602,102 @@ fn execute_single_step(
             image_policy,
         ),
         BrowserStep::PressKey { key, modifiers } => step_press_key(tab, idx, key, modifiers),
+        BrowserStep::DragAndDrop {
+            source,
+            target,
+            source_position,
+            target_position,
+        } => step_drag_and_drop(
+            tab,
+            world,
+            idx,
+            source,
+            target,
+            *source_position,
+            *target_position,
+            handlers,
+            locator_handler_firings,
+            image_policy,
+            mouse_state,
+        ),
+        BrowserStep::DropFiles { target, paths } => step_drop_files(
+            tab,
+            world,
+            idx,
+            target,
+            paths,
+            handlers,
+            locator_handler_firings,
+            image_policy,
+        ),
+        BrowserStep::MouseMove { x, y, steps } => step_mouse(
+            tab,
+            idx,
+            mouse_state,
+            |mouse| mouse.move_to(*x, *y, steps.unwrap_or(1)),
+            format!("Moved mouse to ({x}, {y})"),
+        ),
+        BrowserStep::MouseDown { button } => step_mouse(
+            tab,
+            idx,
+            mouse_state,
+            |mouse| mouse.down(browser_mouse_button(*button), 1),
+            format!("Pressed {button:?} mouse button"),
+        ),
+        BrowserStep::MouseUp { button } => step_mouse(
+            tab,
+            idx,
+            mouse_state,
+            |mouse| mouse.up(browser_mouse_button(*button), 1),
+            format!("Released {button:?} mouse button"),
+        ),
+        BrowserStep::MouseClickXy {
+            x,
+            y,
+            button,
+            click_count,
+            delay,
+        } => step_mouse(
+            tab,
+            idx,
+            mouse_state,
+            |mouse| {
+                mouse.move_to(*x, *y, 1)?;
+                for count in 1..=click_count.unwrap_or(1) {
+                    mouse.down(browser_mouse_button(*button), count)?;
+                    if let Some(delay) = delay {
+                        std::thread::sleep(Duration::from_millis(*delay));
+                    }
+                    mouse.up(browser_mouse_button(*button), count)?;
+                }
+                Ok(())
+            },
+            format!("Clicked at ({x}, {y})"),
+        ),
+        BrowserStep::MouseDragXy {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+        } => step_mouse(
+            tab,
+            idx,
+            mouse_state,
+            |mouse| {
+                mouse.move_to(*start_x, *start_y, 1)?;
+                mouse.down(MouseButton::Left, 1)?;
+                mouse.move_to(*end_x, *end_y, 2)?;
+                mouse.up(MouseButton::Left, 1)
+            },
+            format!("Dragged mouse from ({start_x}, {start_y}) to ({end_x}, {end_y})"),
+        ),
+        BrowserStep::MouseWheel { delta_x, delta_y } => step_mouse(
+            tab,
+            idx,
+            mouse_state,
+            |mouse| mouse.wheel(*delta_x, *delta_y),
+            format!("Scrolled mouse wheel by ({delta_x}, {delta_y})"),
+        ),
 
         BrowserStep::Fill {
             locator,
@@ -3027,7 +3259,222 @@ fn uses_actionability_engine(step: &BrowserStep) -> bool {
             | BrowserStep::Hover { .. }
             | BrowserStep::Focus { .. }
             | BrowserStep::ScrollTo { .. }
+            | BrowserStep::DragAndDrop { .. }
     )
+}
+
+fn element_drag_point(
+    tab: &Tab,
+    handle: &ElementHandle,
+    position: Option<BrowserPosition>,
+) -> Result<MainFrameCssPoint, refact_browser::MouseError> {
+    if let Some(position) = position {
+        let quads = tab
+            .call_method(DOM::GetContentQuads {
+                node_id: None,
+                backend_node_id: None,
+                object_id: Some(handle.object_id.clone()),
+            })
+            .map_err(|error| {
+                refact_browser::MouseError::Protocol(format!(
+                    "Failed to read browser element content quads: {error}"
+                ))
+            })?;
+        let Some(quad) = quads.quads.first() else {
+            return Err(refact_browser::MouseError::NoQuads);
+        };
+        if quad.len() != 8 {
+            return Err(refact_browser::MouseError::Protocol(
+                "Browser content quad must contain 8 coordinates".to_string(),
+            ));
+        }
+        return Ok(MainFrameCssPoint {
+            x: quad[0] + position.x,
+            y: quad[1] + position.y,
+        });
+    }
+    CdpMouseDispatcher::new(tab).clickable_point(handle)
+}
+
+fn resolve_drag_endpoint(
+    tab: &Tab,
+    world: &WorldManager,
+    locator: &BrowserLocator,
+    position: Option<BrowserPosition>,
+    action: ActionKind,
+    mode: ActionabilityExecutionMode,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+) -> Result<
+    refact_browser::ActionabilitySuccess<(String, ElementHandle, MainFrameCssPoint)>,
+    refact_browser::ActionabilityError,
+> {
+    let engine = ActionabilityEngine::new(SystemClock::default(), ActionabilityTimeouts::default());
+    let mut driver = DragActionabilityDriver {
+        tab,
+        world,
+        locator,
+        handlers,
+        locator_handler_firings: firings,
+        image_policy,
+        precheck_deadline: Instant::now() + ActionabilityTimeouts::default().action,
+        resolved: None,
+        position,
+    };
+    engine.execute_with_timeout_in_mode(
+        &describe_locator(locator),
+        action,
+        ActionabilityTimeouts::default().action,
+        mode,
+        &mut driver,
+    )
+}
+
+fn step_drag_and_drop(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    source: &BrowserLocator,
+    target: &BrowserLocator,
+    source_position: Option<BrowserPosition>,
+    target_position: Option<BrowserPosition>,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+    mouse_state: &mut MouseState,
+) -> StepResult {
+    let source = match resolve_drag_endpoint(
+        tab,
+        world,
+        source,
+        source_position,
+        ActionKind::DragSource,
+        ActionabilityExecutionMode::Standard,
+        handlers,
+        firings,
+        image_policy,
+    ) {
+        Ok(source) => source,
+        Err(error) => {
+            let mut result = StepResult::failure(idx, "Drag source failed", error.to_string());
+            result.actionability = Some(error.diagnostics(ActionKind::DragSource));
+            return result;
+        }
+    };
+    let target = match resolve_drag_endpoint(
+        tab,
+        world,
+        target,
+        target_position,
+        ActionKind::DragTarget,
+        ActionabilityExecutionMode::SkipLocatorHandlers,
+        handlers,
+        firings,
+        image_policy,
+    ) {
+        Ok(target) => target,
+        Err(error) => {
+            let mut result = StepResult::failure(idx, "Drag target failed", error.to_string());
+            result.actionability = Some(error.diagnostics(ActionKind::DragTarget));
+            return result;
+        }
+    };
+    let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
+    let dispatcher = CdpMouseDispatcher::new(tab);
+    let mut mouse = Mouse::from_state(dispatcher, &keyboard, mouse_state.clone());
+    let mut drag = CdpDragDispatcher::new(tab, world);
+    let drag_result = refact_browser::drag_and_drop(
+        &mut mouse,
+        &mut drag,
+        &source.output.1.frame_id,
+        source.output.2,
+        target.output.2,
+        2,
+    );
+    *mouse_state = mouse.state();
+    let _ = world.release_handle(tab, &source.output.1);
+    let _ = world.release_handle(tab, &target.output.1);
+    match drag_result {
+        Ok(()) => {
+            let mut result = StepResult::success(
+                idx,
+                format!("Dragged <{}> to <{}>", source.output.0, target.output.0),
+            );
+            result.retries = source.attempts + target.attempts;
+            result
+        }
+        Err(error) => StepResult::failure(idx, "Drag and drop failed", error.to_string()),
+    }
+}
+
+fn step_drop_files(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    target: &BrowserLocator,
+    paths: &[String],
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+) -> StepResult {
+    let resolved = match resolve_drag_endpoint(
+        tab,
+        world,
+        target,
+        None,
+        ActionKind::DragTarget,
+        ActionabilityExecutionMode::Standard,
+        handlers,
+        firings,
+        image_policy,
+    ) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            let mut result = StepResult::failure(idx, "File drop target failed", error.to_string());
+            result.actionability = Some(error.diagnostics(ActionKind::DragTarget));
+            return result;
+        }
+    };
+    let outcome = refact_browser::drop_files(tab, world, &resolved.output.1, paths);
+    let _ = world.release_handle(tab, &resolved.output.1);
+    match outcome {
+        Ok(true) => StepResult::success(idx, format!("Dropped {} file(s)", paths.len())),
+        Ok(false) => StepResult::failure(
+            idx,
+            "File drop rejected",
+            "Target dragover handler did not call preventDefault()",
+        ),
+        Err(error) => StepResult::failure(idx, "File drop failed", error),
+    }
+}
+
+fn browser_mouse_button(button: BrowserMouseButton) -> MouseButton {
+    match button {
+        BrowserMouseButton::Left => MouseButton::Left,
+        BrowserMouseButton::Middle => MouseButton::Middle,
+        BrowserMouseButton::Right => MouseButton::Right,
+    }
+}
+
+fn step_mouse(
+    tab: &Tab,
+    idx: usize,
+    state: &mut MouseState,
+    operation: impl FnOnce(
+        &mut Mouse<'_, CdpMouseDispatcher<'_>, CdpKeyboardDispatcher<'_>>,
+    ) -> Result<(), refact_browser::MouseError>,
+    summary: String,
+) -> StepResult {
+    let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
+    let mut mouse = Mouse::from_state(CdpMouseDispatcher::new(tab), &keyboard, state.clone());
+    match operation(&mut mouse) {
+        Ok(()) => {
+            *state = mouse.state();
+            StepResult::success(idx, summary)
+        }
+        Err(error) => StepResult::failure(idx, "Coordinate mouse action failed", error.to_string()),
+    }
 }
 
 fn step_set_input_files(

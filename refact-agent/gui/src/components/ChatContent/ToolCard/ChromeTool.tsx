@@ -262,6 +262,20 @@ function describeTypedStep(step: Record<string, unknown>): string {
     return `Arm file chooser for ${count} file${count === 1 ? "" : "s"}`;
   }
   if (action === "wait_for_download") return "Wait for download";
+  if (action === "drag_and_drop") return "Drag element to target";
+  if (action === "drop_files") {
+    const count = Array.isArray(step.paths) ? step.paths.length : 0;
+    return `Drop ${count} file${count === 1 ? "" : "s"}`;
+  }
+  if (
+    (action === "mouse_move" || action === "mouse_click_xy") &&
+    typeof step.x === "number" &&
+    typeof step.y === "number"
+  ) {
+    return `${prettifyActionName(action)} (${step.x}, ${step.y})`;
+  }
+  if (action === "mouse_drag_xy") return "Mouse drag by coordinates";
+  if (action === "mouse_wheel") return "Mouse wheel";
   if (
     (action === "click" || action === "scroll_to") &&
     isRecord(step.locator)

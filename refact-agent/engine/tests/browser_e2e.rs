@@ -2923,6 +2923,8 @@ async fn aria_snapshot_serializes_composed_tree_and_distills_generics() {
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn selector_evaluator_matches_text_visibility_and_global_nth() {
     let Some(mut case) = BrowserCase::start("selectors.html").await else {
         return;
@@ -3034,6 +3036,65 @@ async fn selector_evaluator_preserves_shadow_and_xpath_boundaries() {
         })
         .collect::<Vec<_>>();
     assert!(!ids.iter().any(|id| id == "shadow-button"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn drag_file_drop_and_coordinate_mouse_reach_page_handlers() {
+    let Some(mut case) = BrowserCase::start("drag-drop.html").await else {
+        return;
+    };
+    case.setup_world();
+    let file = case._profile.path().join("drop.txt");
+    std::fs::write(&file, "dropped").unwrap();
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::DragAndDrop {
+                source: BrowserLocator::css("#source"),
+                target: BrowserLocator::css("#target"),
+                source_position: None,
+                target_position: None,
+            },
+            BrowserStep::DropFiles {
+                target: BrowserLocator::css("#files"),
+                paths: vec![file.to_string_lossy().into_owned()],
+            },
+            BrowserStep::Eval {
+                expression: "({dragged:document.querySelector('#target').dataset.dropped,files:document.querySelector('#files').dataset.files})".to_string(),
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(report.ok, "drag/drop report: {report:?}");
+    assert_eq!(
+        report.steps[2].data.as_ref().unwrap()["value"]["dragged"],
+        "dragged"
+    );
+    assert_eq!(
+        report.steps[2].data.as_ref().unwrap()["value"]["files"],
+        "drop.txt"
+    );
+
+    case.navigate("canvas-draw.html");
+    case.setup_world();
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::MouseDragXy {
+                start_x: 10.0,
+                start_y: 10.0,
+                end_x: 80.0,
+                end_y: 60.0,
+            },
+            BrowserStep::Eval {
+                expression: "document.querySelector('#canvas').dataset.drawn".to_string(),
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(report.ok, "coordinate mouse report: {report:?}");
+    assert_eq!(report.steps[1].data.as_ref().unwrap()["value"], "yes");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

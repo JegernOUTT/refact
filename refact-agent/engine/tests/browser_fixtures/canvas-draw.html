@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <body>
+    <canvas id="canvas" width="200" height="120"></canvas>
+    <script>
+      const canvas = document.querySelector("#canvas");
+      const context = canvas.getContext("2d");
+      let drawing = false;
+      const point = (event) => {
+        const rect = canvas.getBoundingClientRect();
+        return [event.clientX - rect.left, event.clientY - rect.top];
+      };
+      canvas.addEventListener("mousedown", (event) => {
+        drawing = true;
+        const [x, y] = point(event);
+        context.beginPath();
+        context.moveTo(x, y);
+      });
+      canvas.addEventListener("mousemove", (event) => {
+        if (!drawing) return;
+        const [x, y] = point(event);
+        context.lineTo(x, y);
+        context.stroke();
+      });
+      canvas.addEventListener("mouseup", () => {
+        drawing = false;
+        canvas.dataset.drawn = "yes";
+      });
+    </script>
+  </body>
+</html>

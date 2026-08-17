@@ -137,6 +137,30 @@ pub trait MouseDispatcher {
     fn dispatch(&mut self, event: MouseDispatch) -> Result<(), String>;
 }
 
+#[derive(Clone, Debug)]
+pub struct MouseState {
+    position: MainFrameCssPoint,
+    last_button: Option<MouseButton>,
+    buttons: HashSet<MouseButton>,
+}
+
+impl Default for MouseState {
+    fn default() -> Self {
+        Self {
+            position: MainFrameCssPoint::default(),
+            last_button: Some(MouseButton::None),
+            buttons: HashSet::new(),
+        }
+    }
+}
+
+impl MouseState {
+    pub fn reset_buttons(&mut self) {
+        self.last_button = None;
+        self.buttons.clear();
+    }
+}
+
 pub struct CdpMouseDispatcher<'a> {
     tab: &'a Tab,
 }
@@ -319,43 +343,59 @@ impl MouseDispatcher for CdpMouseDispatcher<'_> {
 pub struct Mouse<'a, D, K> {
     dispatcher: D,
     keyboard: &'a Keyboard<K>,
-    position: MainFrameCssPoint,
-    last_button: Option<MouseButton>,
-    buttons: HashSet<MouseButton>,
+    state: MouseState,
 }
 
 impl<'a, D: MouseDispatcher, K: KeyboardDispatcher> Mouse<'a, D, K> {
     pub fn new(dispatcher: D, keyboard: &'a Keyboard<K>) -> Self {
+        Self::from_state(dispatcher, keyboard, MouseState::default())
+    }
+
+    pub fn from_state(dispatcher: D, keyboard: &'a Keyboard<K>, state: MouseState) -> Self {
         Self {
             dispatcher,
             keyboard,
-            position: MainFrameCssPoint::default(),
-            last_button: Some(MouseButton::None),
-            buttons: HashSet::new(),
+            state,
         }
     }
 
     pub fn position(&self) -> MainFrameCssPoint {
-        self.position
+        self.state.position
+    }
+
+    pub fn state(&self) -> MouseState {
+        self.state.clone()
+    }
+
+    pub fn reset_buttons(&mut self) {
+        self.state.reset_buttons();
+    }
+
+    pub(crate) fn set_position(&mut self, point: MainFrameCssPoint) {
+        self.state.position = point;
     }
 
     pub fn move_to(&mut self, x: f64, y: f64, steps: usize) -> Result<(), MouseError> {
         if steps == 0 {
             return Err(MouseError::InvalidSteps);
         }
-        let from = self.position;
-        self.position = MainFrameCssPoint { x, y };
+        let from = self.state.position;
+        self.state.position = MainFrameCssPoint { x, y };
         for step in 1..=steps {
             let progress = step as f64 / steps as f64;
             self.dispatch_mouse(MouseEventPayload {
                 event_type: MouseEventType::Moved,
                 x: from.x + (x - from.x) * progress,
                 y: from.y + (y - from.y) * progress,
-                button: self.last_button,
-                buttons: Some(buttons_bitmask(&self.buttons)),
+                button: self.state.last_button,
+                buttons: Some(buttons_bitmask(&self.state.buttons)),
                 modifiers: self.keyboard.modifier_bitmask(),
                 click_count: None,
-                force: Some(if self.buttons.is_empty() { 0.0 } else { 0.5 }),
+                force: Some(if self.state.buttons.is_empty() {
+                    0.0
+                } else {
+                    0.5
+                }),
                 delta_x: None,
                 delta_y: None,
             })?;
@@ -368,14 +408,14 @@ impl<'a, D: MouseDispatcher, K: KeyboardDispatcher> Mouse<'a, D, K> {
     }
 
     pub fn down(&mut self, button: MouseButton, click_count: u32) -> Result<(), MouseError> {
-        self.last_button = Some(button);
-        self.buttons.insert(button);
+        self.state.last_button = Some(button);
+        self.state.buttons.insert(button);
         self.dispatch_mouse(MouseEventPayload {
             event_type: MouseEventType::Pressed,
-            x: self.position.x,
-            y: self.position.y,
+            x: self.state.position.x,
+            y: self.state.position.y,
             button: Some(button),
-            buttons: Some(buttons_bitmask(&self.buttons)),
+            buttons: Some(buttons_bitmask(&self.state.buttons)),
             modifiers: self.keyboard.modifier_bitmask(),
             click_count: Some(click_count),
             force: Some(0.5),
@@ -385,14 +425,14 @@ impl<'a, D: MouseDispatcher, K: KeyboardDispatcher> Mouse<'a, D, K> {
     }
 
     pub fn up(&mut self, button: MouseButton, click_count: u32) -> Result<(), MouseError> {
-        self.last_button = None;
-        self.buttons.remove(&button);
+        self.state.last_button = None;
+        self.state.buttons.remove(&button);
         self.dispatch_mouse(MouseEventPayload {
             event_type: MouseEventType::Released,
-            x: self.position.x,
-            y: self.position.y,
+            x: self.state.position.x,
+            y: self.state.position.y,
             button: Some(button),
-            buttons: Some(buttons_bitmask(&self.buttons)),
+            buttons: Some(buttons_bitmask(&self.state.buttons)),
             modifiers: self.keyboard.modifier_bitmask(),
             click_count: Some(click_count),
             force: None,
@@ -418,8 +458,8 @@ impl<'a, D: MouseDispatcher, K: KeyboardDispatcher> Mouse<'a, D, K> {
     pub fn wheel(&mut self, delta_x: f64, delta_y: f64) -> Result<(), MouseError> {
         self.dispatch_mouse(MouseEventPayload {
             event_type: MouseEventType::Wheel,
-            x: self.position.x,
-            y: self.position.y,
+            x: self.state.position.x,
+            y: self.state.position.y,
             button: None,
             buttons: None,
             modifiers: self.keyboard.modifier_bitmask(),
