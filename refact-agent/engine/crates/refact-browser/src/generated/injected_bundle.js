@@ -1,4 +1,4 @@
-// @refact-injected-hash c31bd7e81b70a08e26cf7dd435e3fa1aaaad1ce2223527f2767cde9624594992
+// @refact-injected-hash ddb03f43852544c888cb0e62705eae32b164e6824908e49b3375dd42b64c9774
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -4977,6 +4977,9 @@ function queryDescendantsPiercingShadow(scope) {
     elements.shift();
   return elements;
 }
+function queryCssPiercingShadow(scope, selector) {
+  return queryParsedSelector(parseSelector(`css=${selector}`), scope);
+}
 function queryByAttribute(scope, attribute, value, exact = false, regex) {
   if (!attribute)
     throw new Error("Test id attribute must not be empty");
@@ -5061,7 +5064,7 @@ var RefactInjected = class {
   resolveAll(locator, scopeOverride) {
     var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l;
     const document = this.global.document;
-    const scope = scopeOverride != null ? scopeOverride : locator.within ? document.querySelector(locator.within) : document;
+    const scope = scopeOverride != null ? scopeOverride : locator.within ? queryCssPiercingShadow(document, locator.within)[0] : document;
     if (!scope)
       throw new Error("Scope selector not found");
     if (scopeOverride && locator.within)
@@ -5069,15 +5072,15 @@ var RefactInjected = class {
     let elements;
     switch (locator.by) {
       case "css":
-        elements = Array.from(scope.querySelectorAll((_a = locator.value) != null ? _a : ""));
+        elements = queryCssPiercingShadow(scope, (_a = locator.value) != null ? _a : "");
         break;
       case "id": {
-        const element = scope.querySelector(`#${CSS.escape((_b = locator.value) != null ? _b : "")}`);
+        const element = queryCssPiercingShadow(scope, `#${CSS.escape((_b = locator.value) != null ? _b : "")}`)[0];
         elements = element ? [element] : [];
         break;
       }
       case "name":
-        elements = Array.from(scope.querySelectorAll(`[name=${JSON.stringify((_c = locator.value) != null ? _c : "")}]`));
+        elements = queryCssPiercingShadow(scope, `[name=${JSON.stringify((_c = locator.value) != null ? _c : "")}]`);
         break;
       case "test_id":
         elements = queryByAttribute(scope, (_d = locator.attribute) != null ? _d : "data-testid", (_e = locator.value) != null ? _e : "", locator.exact, locator.regex);
@@ -5092,7 +5095,7 @@ var RefactInjected = class {
         elements = queryByAttribute(scope, "title", (_h = locator.value) != null ? _h : "", locator.exact, locator.regex);
         break;
       case "autocomplete":
-        elements = Array.from(scope.querySelectorAll(`[autocomplete=${JSON.stringify((_i = locator.value) != null ? _i : "")}]`));
+        elements = queryCssPiercingShadow(scope, `[autocomplete=${JSON.stringify((_i = locator.value) != null ? _i : "")}]`);
         break;
       case "text": {
         const cache = /* @__PURE__ */ new Map();

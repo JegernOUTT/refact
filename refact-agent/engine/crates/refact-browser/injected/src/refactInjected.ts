@@ -149,6 +149,10 @@ function queryDescendantsPiercingShadow(scope: Document | Element): Element[] {
   return elements;
 }
 
+function queryCssPiercingShadow(scope: Document | Element, selector: string): Element[] {
+  return queryParsedSelector(parseSelector(`css=${selector}`), scope);
+}
+
 function queryByAttribute(scope: Document | Element, attribute: string, value: string, exact = false, regex?: LocatorRegex): Element[] {
   if (!attribute)
     throw new Error('Test id attribute must not be empty');
@@ -244,7 +248,7 @@ export class RefactInjected {
 
   resolveAll(locator: RefactLocator, scopeOverride?: Document | Element): Element[] {
     const document = this.global.document;
-    const scope = scopeOverride ?? (locator.within ? document.querySelector(locator.within) : document);
+    const scope = scopeOverride ?? (locator.within ? queryCssPiercingShadow(document, locator.within)[0] : document);
     if (!scope)
       throw new Error('Scope selector not found');
     if (scopeOverride && locator.within)
@@ -252,15 +256,15 @@ export class RefactInjected {
     let elements: Element[];
     switch (locator.by) {
       case 'css':
-        elements = Array.from(scope.querySelectorAll(locator.value ?? ''));
+        elements = queryCssPiercingShadow(scope, locator.value ?? '');
         break;
       case 'id': {
-        const element = scope.querySelector(`#${CSS.escape(locator.value ?? '')}`);
+        const element = queryCssPiercingShadow(scope, `#${CSS.escape(locator.value ?? '')}`)[0];
         elements = element ? [element] : [];
         break;
       }
       case 'name':
-        elements = Array.from(scope.querySelectorAll(`[name=${JSON.stringify(locator.value ?? '')}]`));
+        elements = queryCssPiercingShadow(scope, `[name=${JSON.stringify(locator.value ?? '')}]`);
         break;
       case 'test_id':
         elements = queryByAttribute(scope, locator.attribute ?? 'data-testid', locator.value ?? '', locator.exact, locator.regex);
@@ -275,7 +279,7 @@ export class RefactInjected {
         elements = queryByAttribute(scope, 'title', locator.value ?? '', locator.exact, locator.regex);
         break;
       case 'autocomplete':
-        elements = Array.from(scope.querySelectorAll(`[autocomplete=${JSON.stringify(locator.value ?? '')}]`));
+        elements = queryCssPiercingShadow(scope, `[autocomplete=${JSON.stringify(locator.value ?? '')}]`);
         break;
       case 'text': {
         const cache = new Map<Element | ShadowRoot, ElementText>();
