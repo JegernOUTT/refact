@@ -531,6 +531,7 @@ async fn differentiator_04_extract_links_is_bounded_and_reports_total() {
 
 // Structured table rows prevent agents from reparsing presentation-oriented HTML or text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn differentiator_05_extract_table_returns_structured_rows() {
     let Some(mut case) = BrowserCase::start("roles.html").await else {
         return;
@@ -581,6 +582,7 @@ async fn differentiator_06_fill_fallback_reports_strategy_verification_and_retri
 
 // Capped computed-style inspection keeps diagnostics useful without flooding tool output.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn differentiator_07_styles_filters_properties_and_caps_output() {
     let Some(mut case) = BrowserCase::start("snapshot.html").await else {
         return;
@@ -618,6 +620,7 @@ async fn differentiator_07_styles_filters_properties_and_caps_output() {
 
 // Visible highlighting lets a human observer verify the element an agent is discussing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn differentiator_08_highlight_element_draws_visible_outline() {
     let Some(mut case) = BrowserCase::start("snapshot.html").await else {
         return;
