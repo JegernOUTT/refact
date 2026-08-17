@@ -689,6 +689,47 @@ async fn fixture_server_serves_every_page_in_browser() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn navigation_steps_wait_for_reload_history_and_open_tab() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    let initial_url = case.server.url("snapshot.html");
+    let next_url = case.server.url("delayed-button.html");
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::Reload,
+            BrowserStep::Eval {
+                expression: "history.pushState({}, '', '#same-document'); location.href"
+                    .to_string(),
+            },
+            BrowserStep::GoBack,
+            BrowserStep::GoForward,
+            BrowserStep::Navigate {
+                url: next_url.clone(),
+            },
+            BrowserStep::GoBack,
+            BrowserStep::GoForward,
+            BrowserStep::OpenTab {
+                device: None,
+                url: Some(initial_url.clone()),
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(report.ok, "navigation steps failed: {report:?}");
+    assert_eq!(report.steps.len(), 8);
+    assert_eq!(report.steps[2].summary, "Navigated back");
+    assert_eq!(report.steps[3].summary, "Navigated forward");
+    assert_eq!(report.steps[5].summary, "Navigated back");
+    assert_eq!(report.steps[6].summary, "Navigated forward");
+    assert_eq!(report.url.as_deref(), Some(initial_url.as_str()));
+    assert_eq!(report.new_tabs.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn navigated_fixture_context_contains_screenshot_image() {
     let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
         return;

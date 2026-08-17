@@ -1993,14 +1993,11 @@ pub fn execute_steps_with_runtime(
                         };
                     }
                     let navigation_error = url.as_ref().and_then(|url| {
-                        new_tab
-                            .navigate_to(url)
-                            .err()
-                            .map(|error| error.to_string())
+                        run_and_wait_for_navigation(&new_tab, DEFAULT_WAIT_TIMEOUT_MS, || {
+                            trigger_page_navigation(&new_tab, url)
+                        })
+                        .err()
                     });
-                    if navigation_error.is_none() && url.is_some() {
-                        let _ = new_tab.wait_until_navigated();
-                    }
                     let _ = new_tab.evaluate(INSPECT_ELEMENT_JS, false);
                     current_tab = Some(new_tab);
                     runtime.set_active_tab_target_id(target_id.clone());
@@ -3853,19 +3850,7 @@ fn step_set_input_files(
 
 fn step_navigate(tab: &Tab, idx: usize, url: &str) -> StepResult {
     match run_and_wait_for_navigation(tab, DEFAULT_WAIT_TIMEOUT_MS, || {
-        let response = tab
-            .call_method(Page::Navigate {
-                url: url.to_string(),
-                referrer: None,
-                transition_Type: None,
-                frame_id: None,
-                referrer_policy: None,
-            })
-            .map_err(|error| format!("CDP Page.navigate failed: {error}"))?;
-        if let Some(error) = response.error_text {
-            return Err(format!("CDP Page.navigate failed: {error}"));
-        }
-        Ok((response.frame_id, response.loader_id))
+        trigger_page_navigation(tab, url)
     }) {
         Ok(()) => StepResult::success(idx, format!("Navigated to {}", url)),
         Err(e) => StepResult::failure(idx, format!("Navigate to {}", url), e.to_string()),
@@ -3873,40 +3858,150 @@ fn step_navigate(tab: &Tab, idx: usize, url: &str) -> StepResult {
 }
 
 fn step_nav_js(tab: &Tab, idx: usize, js: &str, success_msg: &str) -> StepResult {
-    match tab.evaluate(js, false) {
-        Ok(_) => {
-            let _ = tab.wait_until_navigated();
-            StepResult::success(idx, success_msg.to_string())
-        }
-        Err(e) => StepResult::failure(idx, success_msg.to_string(), e.to_string()),
+    match run_and_wait_for_navigation(tab, DEFAULT_WAIT_TIMEOUT_MS, || {
+        let target = js_navigation_target(tab, js)?;
+        tab.evaluate(js, false)
+            .map_err(|error| format!("JS navigation trigger failed: {error}"))?;
+        Ok(target)
+    }) {
+        Ok(()) => StepResult::success(idx, success_msg.to_string()),
+        Err(error) => StepResult::failure(idx, success_msg.to_string(), error),
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum NavigationWaitTarget {
+    Loader {
+        frame_id: Page::FrameId,
+        loader_id: Option<String>,
+    },
+    Triggered {
+        frame_id: Page::FrameId,
+        previous_loader_id: String,
+        expected_url: Option<String>,
+        allow_same_document: bool,
+    },
+    NoNavigation,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum NavigationEvent {
+    Load {
+        frame_id: Page::FrameId,
+        loader_id: String,
+    },
+    FrameNavigated {
+        frame_id: Page::FrameId,
+        loader_id: String,
+        url: String,
+        restored_from_back_forward_cache: bool,
+    },
+    SameDocument {
+        frame_id: Page::FrameId,
+        url: String,
+    },
+}
+
+fn trigger_page_navigation(tab: &Tab, url: &str) -> Result<NavigationWaitTarget, String> {
+    let response = tab
+        .call_method(Page::Navigate {
+            url: url.to_string(),
+            referrer: None,
+            transition_Type: None,
+            frame_id: None,
+            referrer_policy: None,
+        })
+        .map_err(|error| format!("CDP Page.navigate failed: {error}"))?;
+    if let Some(error) = response.error_text {
+        return Err(format!("CDP Page.navigate failed: {error}"));
+    }
+    Ok(NavigationWaitTarget::Loader {
+        frame_id: response.frame_id,
+        loader_id: response.loader_id,
+    })
+}
+
+fn js_navigation_target(tab: &Tab, js: &str) -> Result<NavigationWaitTarget, String> {
+    let frame = tab
+        .call_method(Page::GetFrameTree(None))
+        .map_err(|error| format!("Failed to read the main frame before navigation: {error}"))?
+        .frame_tree
+        .frame;
+    let expected_url = match js {
+        "history.back()" => history_target_url(tab, -1)?,
+        "history.forward()" => history_target_url(tab, 1)?,
+        _ => None,
+    };
+    if matches!(js, "history.back()" | "history.forward()") && expected_url.is_none() {
+        return Ok(NavigationWaitTarget::NoNavigation);
+    }
+    Ok(NavigationWaitTarget::Triggered {
+        frame_id: frame.id,
+        previous_loader_id: frame.loader_id,
+        expected_url,
+        allow_same_document: js != "location.reload()",
+    })
+}
+
+fn history_target_url(tab: &Tab, offset: i64) -> Result<Option<String>, String> {
+    let history = tab
+        .call_method(Page::GetNavigationHistory(None))
+        .map_err(|error| format!("Failed to read browser navigation history: {error}"))?;
+    let target_index = i64::from(history.current_index) + offset;
+    if target_index < 0 {
+        return Ok(None);
+    }
+    Ok(history
+        .entries
+        .get(target_index as usize)
+        .map(|entry| entry.url.clone()))
+}
+
+fn page_frame_url(frame: &Page::Frame) -> String {
+    format!(
+        "{}{}",
+        frame.url,
+        frame.url_fragment.as_deref().unwrap_or_default()
+    )
 }
 
 fn run_and_wait_for_navigation(
     tab: &Tab,
     timeout_ms: u64,
-    trigger: impl FnOnce() -> Result<(Page::FrameId, Option<String>), String>,
+    trigger: impl FnOnce() -> Result<NavigationWaitTarget, String>,
 ) -> Result<(), String> {
     let (sender, receiver) = mpsc::channel();
     let listener = tab
-        .add_event_listener(Arc::new(move |event: &Event| {
-            if let Event::PageLifecycleEvent(event) = event {
-                if event.params.name == NAVIGATION_LIFECYCLE_EVENT {
-                    let _ = sender.send((
-                        event.params.frame_id.clone(),
-                        event.params.loader_id.clone(),
-                    ));
-                }
+        .add_event_listener(Arc::new(move |event: &Event| match event {
+            Event::PageLifecycleEvent(event) if event.params.name == NAVIGATION_LIFECYCLE_EVENT => {
+                let _ = sender.send(NavigationEvent::Load {
+                    frame_id: event.params.frame_id.clone(),
+                    loader_id: event.params.loader_id.clone(),
+                });
             }
+            Event::PageFrameNavigated(event) => {
+                let frame = &event.params.frame;
+                let _ = sender.send(NavigationEvent::FrameNavigated {
+                    frame_id: frame.id.clone(),
+                    loader_id: frame.loader_id.clone(),
+                    url: page_frame_url(frame),
+                    restored_from_back_forward_cache: matches!(
+                        &event.params.Type,
+                        Page::NavigationType::BackForwardCacheRestore
+                    ),
+                });
+            }
+            Event::PageNavigatedWithinDocument(event) => {
+                let _ = sender.send(NavigationEvent::SameDocument {
+                    frame_id: event.params.frame_id.clone(),
+                    url: event.params.url.clone(),
+                });
+            }
+            _ => {}
         }))
         .map_err(|error| format!("Failed to listen for CDP navigation events: {error}"))?;
-    let result = trigger().and_then(|(frame_id, loader_id)| {
-        wait_for_navigation_event(
-            &receiver,
-            &frame_id,
-            loader_id.as_ref(),
-            Duration::from_millis(timeout_ms),
-        )
+    let result = trigger().and_then(|target| {
+        wait_for_navigation_event(&receiver, &target, Duration::from_millis(timeout_ms))
     });
     let removal = tab
         .remove_event_listener(&listener)
@@ -3915,33 +4010,94 @@ fn run_and_wait_for_navigation(
 }
 
 fn wait_for_navigation_event(
-    receiver: &Receiver<(Page::FrameId, String)>,
-    frame_id: &Page::FrameId,
-    loader_id: Option<&String>,
+    receiver: &Receiver<NavigationEvent>,
+    target: &NavigationWaitTarget,
     timeout: Duration,
 ) -> Result<(), String> {
-    let Some(loader_id) = loader_id else {
-        return Ok(());
-    };
+    let (frame_id, mut pending_loader_id, previous_loader_id, expected_url, allow_same_document) =
+        match target {
+            NavigationWaitTarget::NoNavigation => return Ok(()),
+            NavigationWaitTarget::Loader {
+                frame_id: _,
+                loader_id: None,
+            } => return Ok(()),
+            NavigationWaitTarget::Loader {
+                frame_id,
+                loader_id: Some(loader_id),
+            } => (frame_id, Some(loader_id.clone()), None, None, false),
+            NavigationWaitTarget::Triggered {
+                frame_id,
+                previous_loader_id,
+                expected_url,
+                allow_same_document,
+            } => (
+                frame_id,
+                None,
+                Some(previous_loader_id),
+                expected_url.as_ref(),
+                *allow_same_document,
+            ),
+        };
     let deadline = Instant::now() + timeout;
+    let mut loaded = std::collections::HashSet::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match receiver.recv_timeout(remaining) {
-            Ok((completed_frame, completed_loader))
-                if completed_frame == *frame_id && completed_loader == *loader_id =>
+            Ok(NavigationEvent::Load {
+                frame_id: completed_frame,
+                loader_id,
+            }) if completed_frame == *frame_id => {
+                if pending_loader_id.as_ref() == Some(&loader_id) {
+                    return Ok(());
+                }
+                loaded.insert(loader_id);
+            }
+            Ok(NavigationEvent::FrameNavigated {
+                frame_id: completed_frame,
+                loader_id,
+                url,
+                restored_from_back_forward_cache,
+            }) if completed_frame == *frame_id
+                && previous_loader_id.is_some_and(|previous| previous != &loader_id)
+                && expected_url.is_none_or(|expected| expected == &url) =>
             {
-                return Ok(())
+                if restored_from_back_forward_cache || loaded.contains(&loader_id) {
+                    return Ok(());
+                }
+                pending_loader_id = Some(loader_id);
+            }
+            Ok(NavigationEvent::SameDocument {
+                frame_id: completed_frame,
+                url,
+            }) if completed_frame == *frame_id
+                && previous_loader_id.is_some()
+                && allow_same_document
+                && expected_url.is_none_or(|expected| expected == &url) =>
+            {
+                return Ok(());
             }
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) => {
+                let missing = pending_loader_id.as_ref().map_or_else(
+                    || {
+                        format!(
+                            "CDP Page.frameNavigated or Page.navigatedWithinDocument for frame {frame_id}"
+                        )
+                    },
+                    |loader_id| {
+                        format!(
+                            "CDP Page.lifecycleEvent({NAVIGATION_LIFECYCLE_EVENT}) for frame {frame_id} and loader {loader_id}"
+                        )
+                    },
+                );
                 return Err(format!(
-                    "Timed out after {}ms waiting for CDP Page.lifecycleEvent({NAVIGATION_LIFECYCLE_EVENT}) for frame {frame_id} and loader {loader_id}",
+                    "Timed out after {}ms waiting for {missing}",
                     timeout.as_millis()
                 ));
             }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(format!(
-                    "CDP navigation listener disconnected before Page.lifecycleEvent({NAVIGATION_LIFECYCLE_EVENT}) arrived for frame {frame_id} and loader {loader_id}"
+                    "CDP navigation listener disconnected for frame {frame_id}"
                 ));
             }
         }
@@ -5615,13 +5771,18 @@ mod tests {
     fn navigation_wait_accepts_event_buffered_before_wait() {
         let (sender, receiver) = mpsc::channel();
         sender
-            .send(("main".to_string(), "loader".to_string()))
+            .send(NavigationEvent::Load {
+                frame_id: "main".to_string(),
+                loader_id: "loader".to_string(),
+            })
             .unwrap();
 
         assert!(wait_for_navigation_event(
             &receiver,
-            &"main".to_string(),
-            Some(&"loader".to_string()),
+            &NavigationWaitTarget::Loader {
+                frame_id: "main".to_string(),
+                loader_id: Some("loader".to_string()),
+            },
             Duration::ZERO,
         )
         .is_ok());
@@ -5633,8 +5794,10 @@ mod tests {
 
         let error = wait_for_navigation_event(
             &receiver,
-            &"main".to_string(),
-            Some(&"loader".to_string()),
+            &NavigationWaitTarget::Loader {
+                frame_id: "main".to_string(),
+                loader_id: Some("loader".to_string()),
+            },
             Duration::ZERO,
         )
         .unwrap_err();
@@ -5649,10 +5812,214 @@ mod tests {
     fn same_document_navigation_needs_no_load_event() {
         let (_sender, receiver) = mpsc::channel();
 
-        assert!(
-            wait_for_navigation_event(&receiver, &"main".to_string(), None, Duration::ZERO,)
-                .is_ok()
-        );
+        assert!(wait_for_navigation_event(
+            &receiver,
+            &NavigationWaitTarget::Loader {
+                frame_id: "main".to_string(),
+                loader_id: None,
+            },
+            Duration::ZERO,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn triggered_navigation_accepts_load_buffered_before_commit() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(NavigationEvent::Load {
+                frame_id: "main".to_string(),
+                loader_id: "new-loader".to_string(),
+            })
+            .unwrap();
+        sender
+            .send(NavigationEvent::FrameNavigated {
+                frame_id: "main".to_string(),
+                loader_id: "new-loader".to_string(),
+                url: "https://example.test/next".to_string(),
+                restored_from_back_forward_cache: false,
+            })
+            .unwrap();
+
+        assert!(wait_for_navigation_event(
+            &receiver,
+            &NavigationWaitTarget::Triggered {
+                frame_id: "main".to_string(),
+                previous_loader_id: "old-loader".to_string(),
+                expected_url: Some("https://example.test/next".to_string()),
+                allow_same_document: true,
+            },
+            Duration::ZERO,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn triggered_navigation_waits_for_load_after_commit() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(NavigationEvent::FrameNavigated {
+                frame_id: "main".to_string(),
+                loader_id: "new-loader".to_string(),
+                url: "https://example.test/next".to_string(),
+                restored_from_back_forward_cache: false,
+            })
+            .unwrap();
+        sender
+            .send(NavigationEvent::Load {
+                frame_id: "main".to_string(),
+                loader_id: "new-loader".to_string(),
+            })
+            .unwrap();
+
+        assert!(wait_for_navigation_event(
+            &receiver,
+            &NavigationWaitTarget::Triggered {
+                frame_id: "main".to_string(),
+                previous_loader_id: "old-loader".to_string(),
+                expected_url: Some("https://example.test/next".to_string()),
+                allow_same_document: true,
+            },
+            Duration::ZERO,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn triggered_navigation_ignores_unrelated_frame_and_url() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(NavigationEvent::SameDocument {
+                frame_id: "child".to_string(),
+                url: "https://example.test/next".to_string(),
+            })
+            .unwrap();
+        sender
+            .send(NavigationEvent::SameDocument {
+                frame_id: "main".to_string(),
+                url: "https://example.test/unrelated".to_string(),
+            })
+            .unwrap();
+
+        let error = wait_for_navigation_event(
+            &receiver,
+            &NavigationWaitTarget::Triggered {
+                frame_id: "main".to_string(),
+                previous_loader_id: "loader".to_string(),
+                expected_url: Some("https://example.test/next".to_string()),
+                allow_same_document: true,
+            },
+            Duration::ZERO,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Page.frameNavigated or Page.navigatedWithinDocument"));
+    }
+
+    #[test]
+    fn triggered_same_document_navigation_needs_no_load_event() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(NavigationEvent::SameDocument {
+                frame_id: "main".to_string(),
+                url: "https://example.test/page#next".to_string(),
+            })
+            .unwrap();
+
+        assert!(wait_for_navigation_event(
+            &receiver,
+            &NavigationWaitTarget::Triggered {
+                frame_id: "main".to_string(),
+                previous_loader_id: "loader".to_string(),
+                expected_url: Some("https://example.test/page#next".to_string()),
+                allow_same_document: true,
+            },
+            Duration::ZERO,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn reload_ignores_same_document_events() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(NavigationEvent::SameDocument {
+                frame_id: "main".to_string(),
+                url: "https://example.test/page#noise".to_string(),
+            })
+            .unwrap();
+
+        let error = wait_for_navigation_event(
+            &receiver,
+            &NavigationWaitTarget::Triggered {
+                frame_id: "main".to_string(),
+                previous_loader_id: "loader".to_string(),
+                expected_url: None,
+                allow_same_document: false,
+            },
+            Duration::ZERO,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Page.frameNavigated or Page.navigatedWithinDocument"));
+    }
+
+    #[test]
+    fn back_forward_cache_restore_needs_no_load_event() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(NavigationEvent::FrameNavigated {
+                frame_id: "main".to_string(),
+                loader_id: "restored-loader".to_string(),
+                url: "https://example.test/back".to_string(),
+                restored_from_back_forward_cache: true,
+            })
+            .unwrap();
+
+        assert!(wait_for_navigation_event(
+            &receiver,
+            &NavigationWaitTarget::Triggered {
+                frame_id: "main".to_string(),
+                previous_loader_id: "current-loader".to_string(),
+                expected_url: Some("https://example.test/back".to_string()),
+                allow_same_document: true,
+            },
+            Duration::ZERO,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn triggered_navigation_timeout_names_missing_commit_event() {
+        let (_sender, receiver) = mpsc::channel();
+
+        let error = wait_for_navigation_event(
+            &receiver,
+            &NavigationWaitTarget::Triggered {
+                frame_id: "main".to_string(),
+                previous_loader_id: "loader".to_string(),
+                expected_url: None,
+                allow_same_document: true,
+            },
+            Duration::ZERO,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Timed out after 0ms"));
+        assert!(error.contains("Page.frameNavigated or Page.navigatedWithinDocument"));
+        assert!(error.contains("frame main"));
+    }
+
+    #[test]
+    fn unavailable_history_direction_needs_no_navigation_event() {
+        let (_sender, receiver) = mpsc::channel();
+
+        assert!(wait_for_navigation_event(
+            &receiver,
+            &NavigationWaitTarget::NoNavigation,
+            Duration::ZERO,
+        )
+        .is_ok());
     }
 
     #[test]
