@@ -737,6 +737,7 @@ pub async fn block_until_signal(
 
 fn build_shared_http_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .pool_idle_timeout(Some(Duration::from_secs(60)))
@@ -850,6 +851,7 @@ pub async fn create_global_context(
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn test_engine_global_config_parses_trusted_projects() {
@@ -891,6 +893,52 @@ pub mod tests {
         let cfg: EngineGlobalConfig =
             serde_yaml::from_str("scheduler:\n  enabled: true\n").unwrap();
         assert!(cfg.hooks.trusted_projects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shared_http_client_rejects_redirect_without_contacting_target() {
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        let source_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_addr = source_listener.local_addr().unwrap();
+        let source = tokio::spawn(async move {
+            let (mut socket, _) = source_listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_addr}/collect\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = build_shared_http_client_builder().build().unwrap();
+        let model = refact_core::llm_types::BaseModelRecord {
+            id: "redirecting-provider".to_string(),
+            name: "test-model".to_string(),
+            endpoint: format!("http://{source_addr}/provider"),
+            api_key: "provider-secret".to_string(),
+            ..Default::default()
+        };
+        let error = refact_llm::forward_to_openai_style_endpoint(
+            &model,
+            "private prompt",
+            &client,
+            &refact_core::chat_types::SamplingParameters::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("status=307"));
+        source.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), target_listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

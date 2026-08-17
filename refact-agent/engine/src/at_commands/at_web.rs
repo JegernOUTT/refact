@@ -119,7 +119,9 @@ async fn fetch_with_jina_reader(
     url: &str,
     options: Option<&HashMap<String, Value>>,
 ) -> Result<String, String> {
+    // Public web reads carry no provider credentials and need ordinary site redirects.
     let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(Duration::from_secs(JINA_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
@@ -319,7 +321,9 @@ fn find_content(html: String) -> String {
 }
 
 async fn fetch_html(url: &str, timeout: Duration) -> Result<String, String> {
+    // Public web reads carry no provider credentials and need ordinary site redirects.
     let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(timeout)
         .build()
         .map_err(|e| e.to_string())?;

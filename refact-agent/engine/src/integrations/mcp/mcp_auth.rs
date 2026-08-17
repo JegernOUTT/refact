@@ -298,6 +298,7 @@ pub async fn probe_mcp_auth(
 
     let client = reqwest::Client::builder()
         .default_headers(header_map)
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("build probe client: {}", e))?;
@@ -514,6 +515,7 @@ impl MCPTokenManager {
         }
 
         let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {}", e))?;

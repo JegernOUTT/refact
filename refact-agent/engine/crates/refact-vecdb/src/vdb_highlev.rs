@@ -17,6 +17,10 @@ use crate::vdb_sqlite::VecDBSqlite;
 use crate::vdb_structs::{VecdbConstants};
 use crate::vdb_thread::{vecdb_start_background_tasks, vectorizer_enqueue_files, FileVectorizerService};
 
+fn build_embedding_http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+}
+
 pub struct VecDb {
     vecdb_emb_client: Arc<AMutex<reqwest::Client>>,
     vecdb_handler: Arc<AMutex<VecDBSqlite>>,
@@ -101,7 +105,7 @@ impl VecDb {
             )
             .await,
         ));
-        let mut http_client_builder = reqwest::Client::builder();
+        let mut http_client_builder = build_embedding_http_client_builder();
         if insecure {
             http_client_builder = http_client_builder.danger_accept_invalid_certs(true);
         }
@@ -219,5 +223,63 @@ impl VecdbSearch for VecDb {
         filter_mb: Option<String>,
     ) -> Result<Vec<VecdbRecord>, String> {
         VecDb::vecdb_search_with_embedding(self, embedding, top_n, filter_mb).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn embedding_client_rejects_redirect_without_contacting_target() {
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        let source_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_addr = source_listener.local_addr().unwrap();
+        let source = tokio::spawn(async move {
+            let (mut socket, _) = source_listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_addr}/collect\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let model = EmbeddingModelConfig {
+            endpoint: format!("http://{source_addr}/embeddings"),
+            endpoint_style: "openai".to_string(),
+            embedding_endpoint_style: "openai".to_string(),
+            api_key: "embedding-secret".to_string(),
+            model_name: "test-embedding".to_string(),
+            embedding_size: 1,
+            dimensions: None,
+            query_prefix: String::new(),
+            document_prefix: String::new(),
+            rejection_threshold: 1.0,
+            embedding_batch: 1,
+            n_ctx: 1,
+        };
+        let client = Arc::new(AMutex::new(
+            build_embedding_http_client_builder().build().unwrap(),
+        ));
+
+        let error =
+            fetch_embedding::get_embedding(client, &model, vec!["private file".to_string()])
+                .await
+                .unwrap_err();
+        assert!(error.contains("Embedding request failed with status 307 Temporary Redirect"));
+        source.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), target_listener.accept())
+                .await
+                .is_err()
+        );
     }
 }

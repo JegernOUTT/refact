@@ -350,6 +350,7 @@ fn build_control_client_with_timeout(timeout: Duration) -> Result<reqwest::Clien
     reqwest::Client::builder()
         .connect_timeout(CONTROL_CONNECT_TIMEOUT)
         .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
 }

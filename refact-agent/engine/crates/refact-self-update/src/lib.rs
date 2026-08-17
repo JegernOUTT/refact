@@ -157,7 +157,9 @@ struct ReqwestReleaseSource {
 
 impl ReqwestReleaseSource {
     fn new(current_version: &str) -> Result<Self, SelfUpdateError> {
+        // Public GitHub release downloads carry no credentials and redirect to asset storage.
         let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(10))
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(TOTAL_TIMEOUT)
             .user_agent(format!("refact-self-update/{current_version}"))

@@ -18,10 +18,10 @@ pub async fn load_models_dev_catalog(
     gcx: Arc<GlobalContext>,
     force_refresh: bool,
 ) -> Result<ModelsDevCatalog, String> {
-    let (cache_dir, http_client) = { (gcx.cache_dir.clone(), gcx.http_client.clone()) };
+    let cache_dir = gcx.cache_dir.clone();
 
     if force_refresh {
-        match fetch_models_dev_catalog(&http_client).await {
+        match fetch_models_dev_catalog().await {
             Ok((catalog, body)) => {
                 if let Err(e) = write_models_dev_cache(&cache_dir, &body).await {
                     warn!("Failed to write models.dev runtime cache: {e}");
@@ -38,11 +38,14 @@ pub async fn load_models_dev_catalog(
     }
 }
 
-async fn fetch_models_dev_catalog(
-    http_client: &reqwest::Client,
-) -> Result<(ModelsDevCatalog, String), String> {
+async fn fetch_models_dev_catalog() -> Result<(ModelsDevCatalog, String), String> {
     use std::time::Duration;
     const FETCH_TIMEOUT_SECS: u64 = 10;
+    // The public catalog carries no credentials and may redirect between CDN endpoints.
+    let http_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|e| format!("Failed to create models.dev HTTP client: {e}"))?;
     tokio::time::timeout(Duration::from_secs(FETCH_TIMEOUT_SECS), async {
         let response = http_client
             .get(MODELS_DEV_API_URL)

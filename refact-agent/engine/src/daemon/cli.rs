@@ -1340,6 +1340,7 @@ fn event_follow_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(EVENT_FOLLOW_CONNECT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("failed to build daemon event follow client")
     })

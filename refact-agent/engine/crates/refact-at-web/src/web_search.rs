@@ -336,7 +336,7 @@ fn contains_searxng_block_page(body: &str) -> bool {
 fn build_http_client() -> Result<Client, String> {
     Client::builder()
         .timeout(Duration::from_secs(DDG_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
 }
