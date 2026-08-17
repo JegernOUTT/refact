@@ -514,6 +514,7 @@ pub async fn collect_evidence(
             rejections.push(rejection(&finding, index, "file_not_in_scope"));
             continue;
         };
+        let file = crate::files_correction::canonicalize_normalized_path(file);
         let text = match get_file_text_from_memory_or_disk(gcx.clone(), &file).await {
             Ok(text) => text,
             Err(_) => {
@@ -522,13 +523,19 @@ pub async fn collect_evidence(
             }
         };
         let line_count = text.lines().count() as u32;
-        let normalized_line1 = finding.line1.max(1);
-        if normalized_line1 > line_count {
+        if finding.line1 < 1
+            || finding.line2 < 1
+            || finding.line1 > line_count
+            || finding.line2 > line_count
+        {
             rejections.push(rejection(&finding, index, "range_out_of_bounds"));
             continue;
         }
-        finding.line1 = normalized_line1;
-        finding.line2 = finding.line2.max(normalized_line1).min(line_count);
+        if finding.line2 < finding.line1 {
+            rejections.push(rejection(&finding, index, "range_invalid"));
+            continue;
+        }
+        finding.file = file.to_string_lossy().to_string();
         let (excerpt_line1, excerpt_line2, excerpt) =
             excerpt_for_range(&text, finding.line1, finding.line2);
         finding.evidence.push(ReviewEvidence {
@@ -544,7 +551,11 @@ pub async fn collect_evidence(
             finding
                 .checks_performed
                 .push("diff_hunk_skipped:no_diff_base".to_string());
-        } else if !scope.changed_files.iter().any(|path| path == &file) {
+        } else if !scope
+            .changed_files
+            .iter()
+            .any(|path| crate::files_correction::canonicalize_normalized_path(path.clone()) == file)
+        {
             finding
                 .checks_performed
                 .push("diff_hunk_skipped:file_unchanged".to_string());
@@ -694,7 +705,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_code_review_evidence_attaches_excerpt_with_context_and_clamps_end() {
+    async fn tool_code_review_evidence_rejects_fabricated_ranges() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("sample.rs");
         std::fs::write(
@@ -706,19 +717,32 @@ mod tests {
         )
         .unwrap();
         let gcx = gcx_for(temp.path()).await;
-        let mut findings = vec![finding(&file, 8, 30, "The branch fails.")];
+        let mut findings = vec![
+            finding(&file, 0, 1, "Zero start."),
+            finding(&file, 1, 0, "Zero end."),
+            finding(&file, 8, 30, "Past end."),
+            finding(&file, 13, 13, "Start past end."),
+        ];
 
         let rejected = collect_evidence(gcx, &scope(file.clone()), &mut findings).await;
 
-        assert!(rejected.is_empty());
-        assert_eq!(findings[0].line2, 12);
-        assert_eq!(findings[0].evidence[0].kind, "excerpt");
-        assert_eq!(findings[0].evidence[0].line1, Some(3));
-        assert_eq!(findings[0].evidence[0].line2, Some(12));
-        assert!(findings[0].evidence[0].content.contains("8: line 8"));
-        assert!(findings[0]
-            .checks_performed
-            .contains(&"symbols_skipped:codegraph_unavailable".to_string()));
+        assert!(findings.is_empty());
+        assert_eq!(rejected.len(), 4);
+        assert!(rejected
+            .iter()
+            .all(|rejection| rejection.reason == "range_out_of_bounds"));
+        assert_eq!(
+            rejected
+                .iter()
+                .map(EvidenceRejection::check_name)
+                .collect::<Vec<_>>(),
+            vec![
+                "evidence_reject:1:range_out_of_bounds",
+                "evidence_reject:2:range_out_of_bounds",
+                "evidence_reject:3:range_out_of_bounds",
+                "evidence_reject:4:range_out_of_bounds",
+            ]
+        );
     }
 
     #[tokio::test]

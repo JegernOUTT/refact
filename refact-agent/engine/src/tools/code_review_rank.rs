@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 
@@ -6,24 +7,24 @@ use crate::tools::code_review_types::{ReviewFinding, ReviewReport, ReviewSeverit
 
 const MAX_EVIDENCE_PER_FINDING: usize = 8;
 
-fn normalized_claim(claim: &str) -> String {
-    claim
-        .chars()
-        .filter(|character| !character.is_ascii_digit())
-        .collect::<String>()
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 fn stable_finding_id(finding: &ReviewFinding) -> String {
+    let excerpt = finding
+        .evidence
+        .iter()
+        .find(|evidence| evidence.kind == "excerpt")
+        .and_then(|evidence| evidence.path.as_deref().map(|path| (evidence, path)));
+    let (excerpt_content, path) = match excerpt {
+        Some((excerpt, path)) => (excerpt.content.as_str(), path),
+        None => ("", finding.file.as_str()),
+    };
+    let canonical_path = crate::files_correction::canonicalize_normalized_path(PathBuf::from(path));
+    let excerpt_digest = hex::encode(Sha256::digest(excerpt_content.as_bytes()));
     let input = format!(
         "{}|{}|{}|{}",
         finding.category,
-        finding.file,
+        canonical_path.to_string_lossy().replace('\\', "/"),
         finding.line1 / 50,
-        normalized_claim(&finding.claim)
+        excerpt_digest
     );
     let digest = hex::encode(Sha256::digest(input.as_bytes()));
     format!("rf-{}", &digest[..8])
@@ -187,8 +188,6 @@ pub(super) fn finalize_review_report(report: &mut ReviewReport) {
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
-
     use super::*;
     use crate::tools::code_review_types::{ReviewEvidence, ReviewScopeSummary};
 
@@ -202,6 +201,8 @@ mod tests {
         severity: ReviewSeverity,
         confidence: f32,
     ) -> ReviewFinding {
+        let canonical_path =
+            crate::files_correction::canonicalize_normalized_path(PathBuf::from(file));
         ReviewFinding {
             id: String::new(),
             category: category.to_string(),
@@ -212,7 +213,13 @@ mod tests {
             line1,
             line2,
             claim: claim.to_string(),
-            evidence: vec![],
+            evidence: vec![ReviewEvidence {
+                kind: "excerpt".to_string(),
+                path: Some(canonical_path.to_string_lossy().to_string()),
+                line1: Some(line1),
+                line2: Some(line2),
+                content: "deterministic excerpt".to_string(),
+            }],
             impact: None,
             remediation: None,
             checks_performed: vec![],
@@ -242,43 +249,10 @@ mod tests {
         }
     }
 
-    proptest! {
-        #[test]
-        fn tool_code_review_stable_id_survives_line_and_digit_jitter(
-            bucket in 0u32..10_000,
-            jitter in -10i32..=10,
-            first_number in 0u32..1_000_000,
-            second_number in 0u32..1_000_000,
-        ) {
-            let line1 = bucket * 50 + 25;
-            let jittered_line = (line1 as i64 + jitter as i64) as u32;
-            let first = finding(
-                "src/lib.rs",
-                line1,
-                line1 + 2,
-                "correctness",
-                &format!("Timeout {first_number} leaves request 17 pending"),
-                VerificationStatus::Verified,
-                ReviewSeverity::High,
-                0.9,
-            );
-            let second = finding(
-                "src/lib.rs",
-                jittered_line,
-                jittered_line + 2,
-                "correctness",
-                &format!(" timeout   {second_number} leaves request 90210 pending "),
-                VerificationStatus::Verified,
-                ReviewSeverity::High,
-                0.9,
-            );
-
-            prop_assert_eq!(stable_finding_id(&first), stable_finding_id(&second));
-        }
-    }
-
     #[test]
-    fn tool_code_review_stable_id_distinguishes_claims() {
+    fn tool_code_review_stable_id_ignores_claim_and_reviewer_path_spelling() {
+        let absolute_path =
+            crate::files_correction::canonicalize_normalized_path(PathBuf::from("src/lib.rs"));
         let first = finding(
             "src/lib.rs",
             110,
@@ -290,24 +264,50 @@ mod tests {
             0.9,
         );
         let second = finding(
-            "src/lib.rs",
+            &absolute_path.to_string_lossy(),
             110,
             112,
             "correctness",
-            "The branch duplicates errors",
+            "Errors disappear when this branch executes",
             VerificationStatus::Verified,
             ReviewSeverity::High,
             0.9,
         );
 
         let first_id = stable_finding_id(&first);
-        assert_eq!(first_id, "rf-28e67722");
         assert!(first_id.starts_with("rf-"));
         assert_eq!(first_id.len(), 11);
         assert!(first_id[3..]
             .chars()
             .all(|character| character.is_ascii_hexdigit()));
-        assert_ne!(first_id, stable_finding_id(&second));
+        assert_eq!(first_id, stable_finding_id(&second));
+    }
+
+    #[test]
+    fn tool_code_review_stable_id_distinguishes_different_anchors() {
+        let first = finding(
+            "src/lib.rs",
+            10,
+            12,
+            "correctness",
+            "The first defect",
+            VerificationStatus::Verified,
+            ReviewSeverity::High,
+            0.9,
+        );
+        let mut second = finding(
+            "src/lib.rs",
+            20,
+            22,
+            "correctness",
+            "The second defect",
+            VerificationStatus::Verified,
+            ReviewSeverity::High,
+            0.9,
+        );
+        second.evidence[0].content = "different deterministic excerpt".to_string();
+
+        assert_ne!(stable_finding_id(&first), stable_finding_id(&second));
     }
 
     #[test]

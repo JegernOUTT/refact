@@ -19,6 +19,7 @@ const MAX_VERIFIER_CALLS: usize = 3;
 const VERIFIER_PARSE_FAILED: &str = "verifier_parse_failed";
 const VERIFIER_CALL_FAILED: &str = "verifier_call_failed";
 const VERIFIER_BUDGET_EXHAUSTED: &str = "verifier_budget_exhausted";
+const VERIFIER_INCOMPLETE: &str = "verifier_incomplete";
 
 const VERIFIER_RETRY_PROMPT: &str = r#"Your response was malformed. Return exactly one fenced json block and no other text:
 
@@ -26,7 +27,7 @@ const VERIFIER_RETRY_PROMPT: &str = r#"Your response was malformed. Return exact
 {"verdicts":[{"index":0,"status":"verified|downgraded|rejected|needs_human_validation","confidence":0.0,"note":"<=200 chars"}]}
 ```
 
-Return at most one verdict for each candidate index from the original evidence bundle."#;
+Return exactly one verdict for each candidate index from the original evidence bundle."#;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct BlindCandidate<'a> {
@@ -220,17 +221,42 @@ fn downgrade_severity(severity: &ReviewSeverity) -> ReviewSeverity {
     }
 }
 
-pub(crate) fn apply_verifier_verdicts(report: &mut ReviewReport, verdicts: Vec<VerifierVerdict>) {
+fn missing_verdict_indices(allowed_indices: &[usize], verdicts: &[VerifierVerdict]) -> Vec<usize> {
+    let covered = verdicts
+        .iter()
+        .map(|verdict| verdict.index)
+        .collect::<HashSet<_>>();
+    allowed_indices
+        .iter()
+        .copied()
+        .filter(|index| !covered.contains(index))
+        .collect()
+}
+
+pub(crate) fn apply_verifier_verdicts(
+    report: &mut ReviewReport,
+    verdicts: Vec<VerifierVerdict>,
+    incomplete_indices: impl IntoIterator<Item = usize>,
+) {
     let verdicts = verdicts
         .into_iter()
         .map(|verdict| (verdict.index, verdict))
         .collect::<HashMap<_, _>>();
+    let incomplete_indices = incomplete_indices.into_iter().collect::<HashSet<_>>();
     let mut rejected = 0;
+    let mut incomplete = 0;
     report.findings = std::mem::take(&mut report.findings)
         .into_iter()
         .enumerate()
         .filter_map(|(index, mut finding)| {
             let Some(verdict) = verdicts.get(&index) else {
+                if incomplete_indices.contains(&index) {
+                    incomplete += 1;
+                    finding.verification_status = VerificationStatus::NeedsHumanValidation;
+                    finding
+                        .checks_performed
+                        .push(VERIFIER_INCOMPLETE.to_string());
+                }
                 return Some(finding);
             };
             tracing::debug!("code_review verifier candidate {}: {}", index, verdict.note);
@@ -260,6 +286,11 @@ pub(crate) fn apply_verifier_verdicts(report: &mut ReviewReport, verdicts: Vec<V
         report
             .checks_performed
             .push(format!("verifier_rejected:{rejected}"));
+    }
+    if incomplete > 0 {
+        report
+            .checks_performed
+            .push(format!("{VERIFIER_INCOMPLETE}:{incomplete}"));
     }
 }
 
@@ -350,6 +381,7 @@ pub(crate) async fn verify_review_report(
     };
     let mut budget = VerifierCallBudget::default();
     let mut verdicts = Vec::new();
+    let mut incomplete_indices = Vec::new();
 
     while let Some(batch) = batches.pop_front() {
         if !budget.reserve() {
@@ -396,6 +428,7 @@ pub(crate) async fn verify_review_report(
         match parse_verifier_verdicts(&first_text, &batch_indices) {
             Ok(batch_verdicts) => {
                 merge_metering(metering, first.metering);
+                incomplete_indices.extend(missing_verdict_indices(&batch_indices, &batch_verdicts));
                 verdicts.extend(batch_verdicts);
             }
             Err(first_error) => {
@@ -434,7 +467,13 @@ pub(crate) async fn verify_review_report(
                         let retry_text = get_last_assistant_content(&retry.messages);
                         merge_metering(metering, retry.metering);
                         match parse_verifier_verdicts(&retry_text, &batch_indices) {
-                            Ok(batch_verdicts) => verdicts.extend(batch_verdicts),
+                            Ok(batch_verdicts) => {
+                                incomplete_indices.extend(missing_verdict_indices(
+                                    &batch_indices,
+                                    &batch_verdicts,
+                                ));
+                                verdicts.extend(batch_verdicts);
+                            }
                             Err(second_error) => {
                                 tracing::warn!(
                                     "code_review verifier response malformed after retry: {second_error}"
@@ -463,7 +502,7 @@ pub(crate) async fn verify_review_report(
         }
     }
 
-    apply_verifier_verdicts(report, verdicts);
+    apply_verifier_verdicts(report, verdicts, incomplete_indices);
 }
 
 #[cfg(test)]
@@ -541,17 +580,38 @@ mod tests {
     }
 
     #[test]
-    fn tool_code_review_verifier_accepts_partial_and_ignores_unknown_indices() {
+    fn tool_code_review_verifier_marks_missing_and_ignores_unknown_indices() {
         let parsed = parse_verifier_verdicts(
             r#"```json
-{"verdicts":[{"index":1,"status":"downgraded","confidence":0.5,"note":"Partial."},{"index":99,"status":"rejected","confidence":0.9,"note":"Unknown."}]}
+{"verdicts":[{"index":0,"status":"verified","confidence":0.6,"note":"Supported."},{"index":1,"status":"downgraded","confidence":0.5,"note":"Partial."},{"index":99,"status":"rejected","confidence":0.9,"note":"Unknown."}]}
 ```"#,
             &[0, 1, 2],
         )
         .unwrap();
+        let missing = missing_verdict_indices(&[0, 1, 2], &parsed);
+        let mut report = report(vec![
+            finding(ReviewSeverity::High, 0.9),
+            finding(ReviewSeverity::High, 0.8),
+            finding(ReviewSeverity::High, 0.7),
+        ]);
 
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].index, 1);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(missing, [2]);
+        apply_verifier_verdicts(&mut report, parsed, missing);
+        assert_eq!(
+            report.findings[0].verification_status,
+            VerificationStatus::Verified
+        );
+        assert_eq!(
+            report.findings[1].verification_status,
+            VerificationStatus::Downgraded
+        );
+        assert_eq!(
+            report.findings[2].verification_status,
+            VerificationStatus::NeedsHumanValidation
+        );
+        assert_eq!(report.findings[2].checks_performed, [VERIFIER_INCOMPLETE]);
+        assert_eq!(report.checks_performed, ["verifier_incomplete:1"]);
     }
 
     #[test]
@@ -725,6 +785,7 @@ mod tests {
                     note: String::new(),
                 },
             ],
+            [],
         );
 
         assert_eq!(report.findings.len(), 6);
