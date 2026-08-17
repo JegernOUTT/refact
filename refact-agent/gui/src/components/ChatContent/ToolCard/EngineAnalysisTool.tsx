@@ -4,9 +4,13 @@ import {
   FileWarning,
   GitBranch,
   HelpCircle,
+  Image,
+  ListTree,
   Map,
+  MousePointer2,
   Network,
   Radar,
+  ScanSearch,
   ShieldAlert,
   type LucideIcon,
 } from "lucide-react";
@@ -26,6 +30,7 @@ import { Markdown, ShikiCodeBlock } from "../../Markdown";
 import { Icon } from "../../ui";
 import { formatToolDisplayName } from "../../../utils/toolNameAliases";
 import { AnalysisReportView } from "./AnalysisReport";
+import { ArtifactsPanel } from "./ArtifactsPanel";
 import {
   buildAnalysisReport,
   parseEngineAnalysisJson,
@@ -42,10 +47,15 @@ const ENGINE_ANALYSIS_ICONS: Partial<Record<string, LucideIcon>> = {
   code_map: Map,
   code_why: HelpCircle,
   codegraph_overview: Network,
+  contrast_audit: ScanSearch,
   dead_code: FileWarning,
   git_risk: GitBranch,
+  image_region: Image,
+  mark_elements: MousePointer2,
   pr_blast: Radar,
   security_scan: ShieldAlert,
+  ui_probe: ListTree,
+  visual_diff: Copy,
 };
 
 function formatArgs(argsStr: string): string {
@@ -171,6 +181,7 @@ export const EngineAnalysisTool: React.FC<EngineAnalysisToolProps> = ({
   );
   const markdown = codeMapMarkdown(toolName, parsed);
   const meta = resultMeta(toolName, parsed);
+  const artifacts = parsed?.artifact ? [parsed] : [];
   const AnalysisIcon = ENGINE_ANALYSIS_ICONS[toolName] ?? Network;
 
   return (
@@ -214,6 +225,7 @@ export const EngineAnalysisTool: React.FC<EngineAnalysisToolProps> = ({
                 <Markdown>{markdown}</Markdown>
               </Box>
             )}
+            {artifacts.length > 0 && <ArtifactsPanel artifacts={artifacts} />}
           </Box>
         )}
       </ToolCard>

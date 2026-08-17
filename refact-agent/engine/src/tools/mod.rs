@@ -8,6 +8,7 @@ pub mod scope_utils;
 pub mod tools_description;
 pub mod tools_list;
 
+mod design_tools;
 pub mod subagent_phases;
 pub(crate) mod task_tool_helpers;
 #[cfg(test)]
@@ -35,6 +36,7 @@ mod tool_code_review;
 pub(crate) mod tool_codegraph;
 pub(crate) mod tool_compress_chat;
 pub mod tool_config_subagent;
+mod tool_contrast_audit;
 pub(crate) mod tool_cron_create;
 mod tool_cron_delete;
 mod tool_cron_list;
@@ -46,7 +48,9 @@ mod tool_get_plan;
 mod tool_glob;
 pub mod tool_goal_pursuit_controls;
 mod tool_handoff_to_mode;
+mod tool_image_region;
 mod tool_knowledge;
+mod tool_mark_elements;
 mod tool_mcp_search;
 mod tool_mv;
 mod tool_process;
@@ -66,9 +70,11 @@ mod tool_subagent;
 mod tool_swarm_investigate;
 mod tool_trajectory_context;
 mod tool_tree;
+mod tool_ui_probe;
 mod tool_update_goal;
 pub mod tool_update_plan;
 mod tool_validate_goal;
+mod tool_visual_diff;
 mod tool_web;
 mod tool_web_search;
 

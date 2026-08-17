@@ -189,6 +189,11 @@ describe("ToolsContent routing", () => {
     "security_scan",
     "pr_blast",
     "dead_code",
+    "ui_probe",
+    "mark_elements",
+    "contrast_audit",
+    "image_region",
+    "visual_diff",
   ])("routes %s to EngineAnalysisTool", (name) => {
     renderToolContent(
       name,
@@ -197,6 +202,30 @@ describe("ToolsContent routing", () => {
 
     expect(screen.getByTestId("engine-analysis-tool")).toBeInTheDocument();
     expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
+  });
+
+  it("renders design-tool image artifacts inside the analysis card", () => {
+    renderToolContent(
+      "visual_diff",
+      JSON.stringify({
+        tool: "visual_diff",
+        summary: "Changed 2 pixels",
+        changed_pixels: 2,
+        changed_percent: 0.5,
+        regions: [],
+        artifact: {
+          kind: "image",
+          mime: "image/png",
+          data: "cG5n",
+          width: 2,
+          height: 2,
+          bytes: 3,
+        },
+      }),
+    );
+
+    openToolCard();
+    expect(screen.getByTestId("artifacts-panel")).toBeInTheDocument();
   });
 
   it("renders security_scan summary instead of GenericTool fallback", () => {

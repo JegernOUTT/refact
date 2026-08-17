@@ -331,6 +331,21 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
             config_path: config_path.clone(),
             ..Default::default()
         }),
+        Box::new(crate::tools::tool_ui_probe::ToolUiProbe {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_mark_elements::ToolMarkElements {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_contrast_audit::ToolContrastAudit {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_image_region::ToolImageRegion {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_visual_diff::ToolVisualDiff {
+            config_path: config_path.clone(),
+        }),
     ];
 
     let system_tools = builtin_system_tools(config_path.clone());

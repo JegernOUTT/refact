@@ -870,6 +870,95 @@ async fn artifacts_capture_page_clip_element_pdf_and_highlight_lifecycle() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn design_tools_measure_marks_contrast_and_visual_changes() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    case.tab
+        .evaluate(
+            "document.querySelector('nav').id='probe-target';document.querySelector('nav').style.cssText='width:50vw;overflow:hidden;color:#777;background:#888';true",
+            false,
+        )
+        .unwrap();
+
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::SetViewport {
+                width: 375,
+                height: 800,
+                device_scale_factor: Some(1.0),
+                is_mobile: Some(false),
+                has_touch: Some(false),
+            },
+            BrowserStep::EmulateMedia {
+                color_scheme: Some("dark".to_string()),
+                reduced_motion: None,
+                forced_colors: None,
+                contrast: None,
+                media: None,
+            },
+            BrowserStep::Styles {
+                locator: BrowserLocator::css("#probe-target"),
+                property_filter: Some("color|width|overflow".to_string()),
+            },
+            BrowserStep::AccessibilitySnapshot {
+                options: AccessibilitySnapshotOptions {
+                    mode: Default::default(),
+                    refs: Some(true),
+                    boxes: true,
+                    root: None,
+                    max_chars: None,
+                },
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(report.ok, "design probe failed: {report:?}");
+    let nodes = report.steps[3].data.as_ref().unwrap()["nodes"]
+        .as_array()
+        .unwrap();
+    assert!(nodes.iter().any(|node| {
+        node["ref"].as_str().is_some()
+            && node["box"]["width"].as_i64().is_some_and(|width| width > 0)
+    }));
+
+    let contrast = case
+        .tab
+        .evaluate(
+            "(()=>{const s=getComputedStyle(document.querySelector('#probe-target'));return s.color!==s.backgroundColor})()",
+            false,
+        )
+        .unwrap();
+    assert_eq!(contrast.value, Some(json!(true)));
+
+    let baseline = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::Screenshot {
+            options: Default::default(),
+        }],
+    );
+    case.tab
+        .evaluate(
+            "document.querySelector('#probe-target').style.background='magenta';true",
+            false,
+        )
+        .unwrap();
+    let changed = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::Screenshot {
+            options: Default::default(),
+        }],
+    );
+    assert_ne!(
+        baseline.steps[0].data.as_ref().unwrap()["data"],
+        changed.steps[0].data.as_ref().unwrap()["data"]
+    );
+}
+
 #[tokio::test]
 #[ignore]
 async fn world_utility_survives_hostile_globals() {

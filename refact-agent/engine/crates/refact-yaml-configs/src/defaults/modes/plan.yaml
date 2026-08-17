@@ -209,6 +209,11 @@ tools:
   - web
   - web_search
   - chrome
+  - ui_probe
+  - mark_elements
+  - contrast_audit
+  - image_region
+  - visual_diff
   - subagent
   - agent_list
   - agent_status

@@ -38,6 +38,35 @@ interface BaseResult {
   tool: string;
   summary: string;
 }
+export interface UiProbeResult extends BaseResult {
+  matrix: Array<Record<string, unknown>>;
+  target_count: number;
+  viewport_count: number;
+  theme_count: number;
+  state_count: number;
+}
+export interface MarkElementsResult extends BaseResult {
+  marks: Array<Record<string, unknown>>;
+  artifact: Record<string, unknown>;
+}
+export interface ContrastAuditResult extends BaseResult {
+  findings: Array<Record<string, unknown>>;
+  raw_colors: Array<Record<string, unknown>>;
+  thresholds: Record<string, number>;
+}
+export interface ImageRegionResult extends BaseResult {
+  source: string;
+  region: Record<string, number>;
+  artifact: Record<string, unknown>;
+}
+export interface VisualDiffResult extends BaseResult {
+  baseline: string;
+  baseline_updated: boolean;
+  changed_pixels: number;
+  changed_percent: number;
+  regions: Array<Record<string, unknown>>;
+  artifact: Record<string, unknown>;
+}
 interface IndexState {
   queued: number;
   cross_file_edges: number;
@@ -1251,6 +1280,139 @@ function codeMap(value: Record<string, unknown>): Built | null {
   };
 }
 
+function designTool(
+  value: Record<string, unknown>,
+  toolName: string,
+): Built | null {
+  const rows: RowInput[] = [];
+  const facts: AnalysisMetric[] = [];
+  if (toolName === "ui_probe") {
+    const matrix = arr(value, "matrix");
+    if (!matrix) return null;
+    const targetCount = num(value, "target_count");
+    const viewportCount = num(value, "viewport_count");
+    const themeCount = num(value, "theme_count");
+    const stateCount = num(value, "state_count");
+    if (targetCount !== null) facts.push(metric("Targets", targetCount));
+    if (viewportCount !== null) facts.push(metric("Viewports", viewportCount));
+    if (themeCount !== null) facts.push(metric("Themes", themeCount));
+    if (stateCount !== null) facts.push(metric("States", stateCount));
+    const matrixRows = mapRows(matrix, (item) => {
+      const target = str(item, "target");
+      const theme = str(item, "theme");
+      const state = str(item, "state");
+      const viewport = rec(item, "viewport");
+      const width = viewport ? num(viewport, "width") : null;
+      const height = viewport ? num(viewport, "height") : null;
+      if (target === null || theme === null || state === null) return null;
+      return {
+        title: target,
+        detail: `${theme} · ${state}`,
+        lead:
+          width !== null && height !== null ? `${width}×${height}` : undefined,
+      };
+    });
+    if (!matrixRows) return null;
+    rows.push(...matrixRows);
+  } else if (toolName === "mark_elements") {
+    const marks = arr(value, "marks");
+    if (!marks) return null;
+    facts.push(metric("Marks", marks.length));
+    const markRows = mapRows(marks, (item) => {
+      const markId = num(item, "mark_id");
+      const reference = str(item, "ref");
+      const role = str(item, "role");
+      const name = str(item, "name");
+      if (markId === null || reference === null || role === null) return null;
+      return {
+        title: name ?? role,
+        detail: `${role} · ref=${reference}`,
+        lead: String(markId),
+      };
+    });
+    if (!markRows) return null;
+    rows.push(...markRows);
+  } else if (toolName === "contrast_audit") {
+    const findings = arr(value, "findings");
+    const rawColors = arr(value, "raw_colors");
+    if (!findings || !rawColors) return null;
+    facts.push(metric("Contrast findings", findings.length));
+    facts.push(metric("Non-token colors", rawColors.length));
+    const findingRows = mapRows(findings, (item) => {
+      const selector = str(item, "selector");
+      const ratio = num(item, "ratio");
+      const threshold = num(item, "threshold");
+      const severity = str(item, "severity");
+      if (selector === null || ratio === null || threshold === null)
+        return null;
+      return {
+        title: selector,
+        detail: `Required ${threshold.toFixed(1)}:1`,
+        lead: `${ratio.toFixed(2)}:1`,
+        severity:
+          severity === "High" || severity === "Medium" ? severity : undefined,
+      };
+    });
+    const rawColorRows = mapRows(rawColors, (item) => {
+      const color = str(item, "color");
+      const selector = str(item, "selector");
+      return color === null || selector === null
+        ? null
+        : { title: color, detail: selector, severity: "Low" as const };
+    });
+    if (!findingRows || !rawColorRows) return null;
+    rows.push(...findingRows, ...rawColorRows);
+  } else if (toolName === "image_region") {
+    const sourceValue = value.source;
+    const source =
+      typeof sourceValue === "string"
+        ? sourceValue
+        : isRecord(sourceValue) && typeof sourceValue.display === "string"
+          ? sourceValue.display
+          : null;
+    const region = rec(value, "region");
+    if (source === null || !region) return null;
+    const width = num(region, "width");
+    const height = num(region, "height");
+    rows.push({
+      title: source,
+      detail:
+        width !== null && height !== null
+          ? `Native crop ${width}×${height}`
+          : "Native image crop",
+      paths: [source],
+    });
+  } else if (toolName === "visual_diff") {
+    const changedPixels = num(value, "changed_pixels");
+    const changedPercent = num(value, "changed_percent");
+    const regions = arr(value, "regions");
+    if (changedPixels === null || changedPercent === null || !regions)
+      return null;
+    facts.push(metric("Changed pixels", changedPixels));
+    facts.push(metric("Changed %", changedPercent));
+    const regionRows = mapRows(regions, (item) => {
+      const x = num(item, "x");
+      const y = num(item, "y");
+      const width = num(item, "width");
+      const height = num(item, "height");
+      const pixels = num(item, "changed_pixels");
+      if ([x, y, width, height, pixels].some((entry) => entry === null))
+        return null;
+      return {
+        title: `Region at ${x},${y}`,
+        detail: `${width}×${height}`,
+        lead: `${pixels}px`,
+        severity: "Medium",
+      };
+    });
+    if (!regionRows) return null;
+    rows.push(...regionRows);
+  } else {
+    return null;
+  }
+  return { facts, index: [], sections: [{ title: "Results", rows }] };
+}
+
 export function buildAnalysisReport(
   toolName: string,
   value: unknown,
@@ -1271,6 +1433,14 @@ export function buildAnalysisReport(
   else if (toolName === "code_health") built = health(value);
   else if (toolName === "code_why") built = codeWhy(value);
   else if (toolName === "code_map") built = codeMap(value);
+  else if (
+    toolName === "ui_probe" ||
+    toolName === "mark_elements" ||
+    toolName === "contrast_audit" ||
+    toolName === "image_region" ||
+    toolName === "visual_diff"
+  )
+    built = designTool(value, toolName);
   if (!built) return null;
   let nextLine = 1;
   const sections = built.sections.map(

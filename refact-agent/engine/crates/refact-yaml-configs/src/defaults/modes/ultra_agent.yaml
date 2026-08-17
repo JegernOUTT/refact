@@ -198,6 +198,11 @@ tools:
   - web
   - web_search
   - chrome
+  - ui_probe
+  - mark_elements
+  - contrast_audit
+  - image_region
+  - visual_diff
   - shell
   - apply_patch
   - create_textdoc

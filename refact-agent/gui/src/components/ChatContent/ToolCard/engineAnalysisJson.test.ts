@@ -461,4 +461,46 @@ describe("buildAnalysisReport", () => {
       }),
     ).toBeNull();
   });
+
+  it.each([
+    [
+      "ui_probe",
+      {
+        matrix: [],
+        target_count: 1,
+        viewport_count: 3,
+        theme_count: 2,
+        state_count: 1,
+      },
+    ],
+    [
+      "mark_elements",
+      { marks: [{ mark_id: 1, ref: "e1", role: "button", name: "Save" }] },
+    ],
+    [
+      "contrast_audit",
+      {
+        findings: [
+          { selector: "#low", ratio: 2.1, threshold: 4.5, severity: "High" },
+        ],
+        raw_colors: [],
+      },
+    ],
+    [
+      "image_region",
+      { source: "/tmp/page.png", region: { width: 100, height: 80 } },
+    ],
+    [
+      "visual_diff",
+      {
+        changed_pixels: 12,
+        changed_percent: 1.2,
+        regions: [{ x: 1, y: 2, width: 3, height: 4, changed_pixels: 12 }],
+      },
+    ],
+  ])("maps %s design-tool payloads structurally", (tool, payload) => {
+    const result = report(tool, payload);
+    expect(result.headline).toBe(`${tool} summary`);
+    expect(result.sections[0]?.title).toBe("Results");
+  });
 });
