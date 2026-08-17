@@ -27,7 +27,7 @@
         fetch('/missing-network-resource'),
       ]);
       const value = await slow.json();
-      document.querySelector('#result').textContent = `${value.echo}:${missing.status}`;
+      document.querySelector('#result').textContent = `echo ${value.echo} after ${value.delay_ms}ms:${missing.status}`;
     });
   </script>
 </body>

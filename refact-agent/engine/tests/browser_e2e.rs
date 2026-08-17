@@ -602,6 +602,9 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
             target: TabTarget::Active,
             attach_screenshot: false,
             steps: vec![
+                BrowserStep::RemoveLocatorHandler {
+                    name: "dismiss_overlays".to_string(),
+                },
                 BrowserStep::AddLocatorHandler {
                     name: "network-overlay".to_string(),
                     locator: BrowserLocator::css("#accept-all"),
@@ -638,8 +641,14 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
     .unwrap();
 
     assert!(report.ok, "mixed browser batch failed: {report:?}");
-    assert!(report.steps[3].summary.contains("Matched response"));
-    assert!(report.steps[4].summary.contains("networkidle"));
+    assert!(report.steps[4].summary.contains("Matched response"));
+    let waited_response = report.steps[4].data.as_ref().unwrap();
+    assert!(waited_response["url"]
+        .as_str()
+        .unwrap()
+        .ends_with("/missing-network-resource"));
+    assert_eq!(waited_response["status"], 404);
+    assert!(report.steps[5].summary.contains("networkidle"));
     assert_eq!(returned_text(&report), "echo ok after 700ms:404");
     assert!(report
         .locator_handlers
