@@ -8,7 +8,9 @@ use crate::yaml_configs::customization_registry::{
     get_project_registry, should_expose_subagent_as_config_tool,
 };
 
-use super::tools_description::{Tool, ToolGroup, ToolGroupCategory, ToolSourceType};
+use super::tools_description::{
+    Tool, ToolDesc, ToolGroup, ToolGroupCategory, ToolSource, ToolSourceType,
+};
 use super::tool_config_subagent::ToolConfigSubagent;
 
 /// When MCP tool count exceeds this threshold, lazy loading activates.
@@ -81,6 +83,55 @@ pub fn apply_mcp_lazy_filter(mut tools: Vec<Box<dyn Tool + Send>>) -> ToolsForMo
             vec![]
         },
     }
+}
+
+pub fn provider_of_model(model_id: &str) -> &str {
+    model_id
+        .split_once('/')
+        .map_or(model_id, |(provider, _)| provider)
+}
+
+pub async fn tool_access_policy(gcx: Arc<GlobalContext>) -> Arc<refact_privacy::PrivacyPolicy> {
+    crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+    gcx.privacy_policy_load.read().unwrap().policy.clone()
+}
+
+pub fn mcp_tool_allowed(
+    policy: &refact_privacy::PrivacyPolicy,
+    provider: &str,
+    desc: &ToolDesc,
+) -> bool {
+    if !(desc.name.starts_with("mcp")
+        && matches!(desc.source.source_type, ToolSourceType::Integration))
+    {
+        return true;
+    }
+    if provider.is_empty() {
+        return false;
+    }
+    let server = crate::integrations::mcp::mcp_interactions::server_name_from_config_path(
+        &desc.source.config_path,
+    );
+    policy.tool_access.mcp_allowed(provider, &server)
+}
+
+pub async fn mcp_config_allowed_for_model(
+    gcx: Arc<GlobalContext>,
+    model_id: &str,
+    config_path: &str,
+) -> bool {
+    let policy = tool_access_policy(gcx).await;
+    if policy.tool_access.providers.is_empty() {
+        return true;
+    }
+    if model_id.is_empty() {
+        return false;
+    }
+    let server =
+        crate::integrations::mcp::mcp_interactions::server_name_from_config_path(config_path);
+    policy
+        .tool_access
+        .mcp_allowed(provider_of_model(model_id), &server)
 }
 
 fn tool_available(
@@ -769,6 +820,113 @@ mod tests {
     };
 
     use super::*;
+    fn desc_with_source(name: &str, source: ToolSource) -> ToolDesc {
+        ToolDesc {
+            name: name.to_string(),
+            experimental: false,
+            allow_parallel: false,
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            output_schema: None,
+            annotations: None,
+            display_name: name.to_string(),
+            source,
+        }
+    }
+
+    fn mcp_desc(config_path: &str, name: &str) -> ToolDesc {
+        desc_with_source(
+            name,
+            ToolSource {
+                source_type: ToolSourceType::Integration,
+                config_path: config_path.to_string(),
+            },
+        )
+    }
+
+    fn builtin_desc(name: &str) -> ToolDesc {
+        desc_with_source(
+            name,
+            ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: String::new(),
+            },
+        )
+    }
+
+    fn policy_limiting(provider: &str, servers: &[&str]) -> refact_privacy::PrivacyPolicy {
+        refact_privacy::PrivacyPolicy {
+            tool_access: refact_privacy::ToolAccess {
+                providers: std::collections::BTreeMap::from([(
+                    provider.to_string(),
+                    refact_privacy::ProviderToolAccess {
+                        mcp: servers.iter().map(|s| (*s).to_string()).collect(),
+                    },
+                )]),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn provider_of_model_takes_the_prefix_before_the_slash() {
+        assert_eq!(provider_of_model("openai_codex/gpt-5"), "openai_codex");
+        assert_eq!(provider_of_model("ollama/llama3:8b"), "ollama");
+        assert_eq!(provider_of_model("bare-model"), "bare-model");
+        assert_eq!(provider_of_model(""), "");
+    }
+
+    #[test]
+    fn blocked_server_tools_are_denied_and_allowed_ones_survive() {
+        let policy = policy_limiting("openai_codex", &["github"]);
+
+        assert!(mcp_tool_allowed(
+            &policy,
+            "openai_codex",
+            &mcp_desc("mcp_stdio_github.yaml", "mcp_github_create_issue")
+        ));
+        assert!(!mcp_tool_allowed(
+            &policy,
+            "openai_codex",
+            &mcp_desc("mcp_stdio_postgres.yaml", "mcp_postgres_query")
+        ));
+    }
+
+    #[test]
+    fn non_mcp_tools_are_never_gated() {
+        let policy = policy_limiting("openai_codex", &[]);
+
+        assert!(mcp_tool_allowed(
+            &policy,
+            "openai_codex",
+            &builtin_desc("cat")
+        ));
+        assert!(mcp_tool_allowed(
+            &policy,
+            "openai_codex",
+            &builtin_desc("mcp_call")
+        ));
+    }
+
+    #[test]
+    fn unlisted_provider_and_wildcard_keep_every_server() {
+        let policy = policy_limiting("openai_codex", &["*"]);
+        let tool = mcp_desc("mcp_stdio_postgres.yaml", "mcp_postgres_query");
+
+        assert!(mcp_tool_allowed(&policy, "openai_codex", &tool));
+        assert!(mcp_tool_allowed(&policy, "ollama", &tool));
+    }
+
+    #[test]
+    fn unknown_caller_is_denied_when_an_allowlist_exists() {
+        let policy = policy_limiting("openai_codex", &["github"]);
+
+        assert!(!mcp_tool_allowed(
+            &policy,
+            "",
+            &mcp_desc("mcp_stdio_github.yaml", "mcp_github_create_issue")
+        ));
+    }
 
     fn exposed_subagent(id: &str) -> SubagentConfig {
         SubagentConfig {
@@ -1345,6 +1503,14 @@ pub async fn get_tools_for_mode(
         })
         .map(|(_, tool)| tool)
         .collect();
+
+    if let Some(mid) = model_id {
+        let policy = tool_access_policy(gcx.clone()).await;
+        if !policy.tool_access.providers.is_empty() {
+            let provider = provider_of_model(mid).to_string();
+            result.retain(|tool| mcp_tool_allowed(&policy, &provider, &tool.tool_description()));
+        }
+    }
 
     result.sort_by(|a, b| {
         let a_order = tool_order

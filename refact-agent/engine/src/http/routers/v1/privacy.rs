@@ -23,6 +23,7 @@ pub struct PrivacyPolicyResponse {
     pub match_counts: BTreeMap<String, usize>,
     pub error: Option<String>,
     pub source_paths: Vec<String>,
+    pub has_project_overrides: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -176,9 +177,13 @@ pub async fn handle_v1_privacy_inspect(
 
 async fn build_policy_response(app: &AppState) -> Result<PrivacyPolicyResponse, ScratchError> {
     let load = app.gcx.privacy_policy_load.read().unwrap().clone();
-    let policy = load.policy.as_ref().clone();
-    let destinations = collect_destinations(app, &policy).await;
-    let match_counts = live_match_counts(app, &policy)?;
+    let effective = load.policy.as_ref().clone();
+    let policy = crate::privacy::global_only_policy(app.gcx.clone())
+        .await
+        .unwrap_or_else(|| effective.clone());
+    let has_project_overrides = policy != effective;
+    let destinations = collect_destinations(app, &effective).await;
+    let match_counts = live_match_counts(app, &effective)?;
     Ok(PrivacyPolicyResponse {
         policy,
         destinations,
@@ -189,12 +194,16 @@ async fn build_policy_response(app: &AppState) -> Result<PrivacyPolicyResponse, 
             .into_iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
+        has_project_overrides,
     })
 }
 
 async fn collect_destinations(app: &AppState, policy: &PrivacyPolicy) -> Vec<Destination> {
     let mut destinations = Vec::new();
-    if let Some(caps) = app.gcx.caps_state.read().await.caps.clone() {
+    let caps = crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
+        .await
+        .ok();
+    if let Some(caps) = caps {
         for model in caps.chat_models.values() {
             let id = provider_id(&model.base.id);
             destinations.push(Destination {
@@ -220,10 +229,18 @@ async fn collect_destinations(app: &AppState, policy: &PrivacyPolicy) -> Vec<Des
             });
         }
     }
-    let mcp_paths = {
+    let mut mcp_paths =
+        crate::integrations::setting_up_integrations::integrations_all(app.gcx.clone(), false)
+            .await
+            .integrations
+            .into_iter()
+            .filter(|record| record.integr_name.starts_with("mcp_") && record.integr_config_exists)
+            .map(|record| record.integr_config_path)
+            .collect::<Vec<_>>();
+    {
         let sessions = app.gcx.integration_sessions.lock().await;
-        sessions.keys().cloned().collect::<Vec<_>>()
-    };
+        mcp_paths.extend(sessions.keys().cloned());
+    }
     for path in mcp_paths {
         let id = crate::integrations::mcp::mcp_interactions::server_name_from_config_path(&path);
         destinations.push(Destination {

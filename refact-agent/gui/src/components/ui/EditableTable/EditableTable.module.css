@@ -1,10 +1,13 @@
 .root {
   display: grid;
   min-width: 0;
-  justify-items: start;
   gap: var(--rf-space-3);
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
+}
+
+.root > button {
+  justify-self: start;
 }
 
 .tableWrap {

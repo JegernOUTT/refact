@@ -465,6 +465,7 @@ mod tests {
             blocked: Vec::new(),
             zones,
             subagents: SubagentPolicy::default(),
+            ..Default::default()
         }
     }
 

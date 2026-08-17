@@ -1259,6 +1259,7 @@ mod tests {
                 },
             ],
             subagents: refact_privacy::SubagentPolicy::default(),
+            ..Default::default()
         };
         gcx.privacy_policy_load.write().unwrap().policy = Arc::new(policy);
 

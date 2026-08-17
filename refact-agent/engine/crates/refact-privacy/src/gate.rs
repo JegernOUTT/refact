@@ -218,6 +218,7 @@ mod tests {
                 },
             ],
             subagents: SubagentPolicy::default(),
+            ..Default::default()
         }
     }
 
@@ -284,6 +285,7 @@ mod tests {
                 on_shell_read: ShellBehavior::Withhold,
             }],
             subagents: SubagentPolicy::default(),
+            ..Default::default()
         });
         let audited = AuditedRecords {
             value: "payload".to_string(),

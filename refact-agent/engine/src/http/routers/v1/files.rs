@@ -805,6 +805,7 @@ mod tests {
                     },
                 ],
                 subagents: SubagentPolicy::default(),
+                ..Default::default()
             },
         );
 

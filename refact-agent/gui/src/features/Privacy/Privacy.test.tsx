@@ -47,11 +47,13 @@ const policy: PrivacyPolicyResponse = {
       },
     ],
     subagents: { report_declassifies: true },
+    tool_access: { providers: {} },
   },
   destinations: [destination],
   match_counts: { secrets: 1, normal: 4 },
   error: null,
   source_paths: [],
+  has_project_overrides: false,
 };
 
 const file = {

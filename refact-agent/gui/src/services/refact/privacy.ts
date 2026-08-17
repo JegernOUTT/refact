@@ -14,12 +14,23 @@ export type PrivacyZone = {
 
 export type ResolvedPrivacyZone = Omit<PrivacyZone, "patterns">;
 
+export type PrivacyProviderToolAccess = {
+  mcp: string[];
+};
+
+export type PrivacyToolAccess = {
+  providers: Record<string, PrivacyProviderToolAccess | undefined>;
+};
+
+export type PrivacyMatchCounts = Record<string, number | undefined>;
+
 export type PrivacyPolicy = {
   blocked: string[];
   zones: PrivacyZone[];
   subagents: {
     report_declassifies: boolean;
   };
+  tool_access: PrivacyToolAccess;
 };
 
 export type PrivacyDestinationKind =
@@ -37,9 +48,10 @@ export type PrivacyDestination = {
 export type PrivacyPolicyResponse = {
   policy: PrivacyPolicy;
   destinations: PrivacyDestination[];
-  match_counts: Record<string, number>;
+  match_counts: PrivacyMatchCounts;
   error: string | null;
   source_paths: string[];
+  has_project_overrides: boolean;
 };
 
 export type PrivacyObservationCapability = {

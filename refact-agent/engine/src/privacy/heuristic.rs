@@ -267,6 +267,7 @@ mod tests {
                 },
             ],
             subagents: SubagentPolicy::default(),
+            ..Default::default()
         }
         .compile()
         .expect("policy should compile")

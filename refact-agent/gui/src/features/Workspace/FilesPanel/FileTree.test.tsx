@@ -29,6 +29,7 @@ const privacyResponse: PrivacyPolicyResponse = {
       },
     ],
     subagents: { report_declassifies: true },
+    tool_access: { providers: {} },
   },
   destinations: [
     {
@@ -45,6 +46,7 @@ const privacyResponse: PrivacyPolicyResponse = {
   match_counts: { secrets: 1, normal: 0 },
   error: null,
   source_paths: ["/home/user/.config/refact/privacy.yaml"],
+  has_project_overrides: false,
 };
 
 const installHandlers = () => {

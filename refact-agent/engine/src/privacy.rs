@@ -79,6 +79,11 @@ fn global_privacy_path(gcx: &GlobalContext) -> PathBuf {
         canonical_path(gcx.cmdline.privacy_yaml.clone())
     }
 }
+pub async fn global_only_policy(gcx: Arc<GlobalContext>) -> Option<refact_privacy::PrivacyPolicy> {
+    let path = global_privacy_path(&gcx);
+    let content = tokio::fs::read_to_string(&path).await.ok()?;
+    refact_privacy::parse_policy_yaml(&content).ok()
+}
 
 pub async fn load_privacy_if_needed(gcx: Arc<GlobalContext>) -> Arc<PrivacySettings> {
     let current_time = SystemTime::now()

@@ -77,8 +77,31 @@ impl Tool for ToolMcpSearch {
         let re = regex::Regex::new(&format!("(?i){}", query))
             .map_err(|e| format!("Invalid regex pattern '{}': {}", query, e))?;
 
-        let gcx = ccx.lock().await.app.gcx.clone();
-        let integration_groups = get_integration_tools(gcx).await;
+        let (gcx, model_id, bypass) = {
+            let ccx = ccx.lock().await;
+            (
+                ccx.app.gcx.clone(),
+                ccx.current_model.clone(),
+                ccx.tool_access_bypass,
+            )
+        };
+        let mut integration_groups = get_integration_tools(gcx.clone()).await;
+        let policy = crate::tools::tools_list::tool_access_policy(gcx).await;
+        if !bypass && !policy.tool_access.providers.is_empty() {
+            let provider = crate::tools::tools_list::provider_of_model(&model_id);
+            for group in integration_groups
+                .iter_mut()
+                .filter(|g| matches!(g.category, ToolGroupCategory::MCP))
+            {
+                group.tools.retain(|tool| {
+                    crate::tools::tools_list::mcp_tool_allowed(
+                        &policy,
+                        provider,
+                        &tool.tool_description(),
+                    )
+                });
+            }
+        }
 
         let matched: Vec<(String, String, Value)> = integration_groups
             .iter()

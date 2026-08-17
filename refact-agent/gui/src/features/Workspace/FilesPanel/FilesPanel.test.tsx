@@ -48,11 +48,13 @@ const privacyResponse: PrivacyPolicyResponse = {
       },
     ],
     subagents: { report_declassifies: true },
+    tool_access: { providers: {} },
   },
   destinations: [],
   match_counts: { normal: 0 },
   error: null,
   source_paths: [],
+  has_project_overrides: false,
 };
 
 const worktree = (id: string): WorktreeMeta => ({

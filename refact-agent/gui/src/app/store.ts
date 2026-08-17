@@ -94,7 +94,6 @@ import { filesApi } from "../services/refact/files";
 import { filesPanelSlice } from "../features/Workspace/FilesPanel/filesPanelSlice";
 import { gitPanelSlice } from "../features/Workspace/GitPanel/gitPanelSlice";
 import { privacyApi } from "../services/refact/privacy";
-import { privacySlice } from "../features/Privacy/privacySlice";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -182,7 +181,6 @@ const rootReducer = combineSlices(
   dashboardSlice,
   filesPanelSlice,
   gitPanelSlice,
-  privacySlice,
 );
 
 const rootPersistConfig = {

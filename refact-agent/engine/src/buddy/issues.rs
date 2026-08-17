@@ -466,21 +466,21 @@ pub async fn create_issue_via_mcp(
         &recent_errors,
     )?;
 
-    let ccx = Arc::new(AMutex::new(
-        AtCommandsContext::new_from_app(
-            gcx.clone(),
-            4000,
-            20,
-            false,
-            vec![],
-            String::new(),
-            None,
-            String::new(),
-            None,
-            None,
-        )
-        .await,
-    ));
+    let mut ccx_inner = AtCommandsContext::new_from_app(
+        gcx.clone(),
+        4000,
+        20,
+        false,
+        vec![],
+        String::new(),
+        None,
+        String::new(),
+        None,
+        None,
+    )
+    .await;
+    ccx_inner.tool_access_bypass = true;
+    let ccx = Arc::new(AMutex::new(ccx_inner));
     let mut tool = crate::tools::tool_mcp_call::ToolMcpCall {};
     let mut args = HashMap::new();
     args.insert("tool_name".to_string(), serde_json::json!(mcp_tool));

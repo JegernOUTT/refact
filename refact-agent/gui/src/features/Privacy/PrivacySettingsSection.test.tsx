@@ -27,6 +27,7 @@ const policy: PrivacyPolicy = {
     },
   ],
   subagents: { report_declassifies: true },
+  tool_access: { providers: {} },
 };
 
 const response: PrivacyPolicyResponse = {
@@ -35,17 +36,18 @@ const response: PrivacyPolicyResponse = {
     {
       id: "trusted",
       kind: "provider",
-      display_name: "Trusted provider",
+      display_name: "trusted",
     },
     {
       id: "build-mcp",
       kind: "mcp",
-      display_name: "Build MCP",
+      display_name: "build-mcp",
     },
   ],
   match_counts: { secrets: 2, normal: 7 },
   error: null,
   source_paths: ["/home/user/.config/refact/privacy.yaml"],
+  has_project_overrides: false,
 };
 
 const status: PrivacyStatusResponse = {
@@ -58,43 +60,44 @@ const status: PrivacyStatusResponse = {
   config_error: null,
 };
 
+function mockPolicyEndpoints(onSave: (policy: PrivacyPolicy) => void) {
+  server.use(
+    http.get("*/v1/privacy/policy", () => HttpResponse.json(response)),
+    http.get("*/v1/privacy/status", () => HttpResponse.json(status)),
+    http.post("*/v1/privacy/policy", async ({ request }) => {
+      const saved = (await request.json()) as PrivacyPolicy;
+      onSave(saved);
+      return HttpResponse.json({
+        ...response,
+        policy: saved,
+      } satisfies PrivacyPolicyResponse);
+    }),
+  );
+}
+
 describe("PrivacySettingsSection", () => {
-  it("renders one destination column per destination and saves a cell toggle", async () => {
+  it("groups destinations by kind and saves a zone toggle from a destination row", async () => {
     let savedPolicy: PrivacyPolicy | null = null;
-    server.use(
-      http.get("*/v1/privacy/policy", () => HttpResponse.json(response)),
-      http.get("*/v1/privacy/status", () => HttpResponse.json(status)),
-      http.post("*/v1/privacy/policy", async ({ request }) => {
-        savedPolicy = (await request.json()) as PrivacyPolicy;
-        return HttpResponse.json({
-          ...response,
-          policy: savedPolicy,
-        } satisfies PrivacyPolicyResponse);
-      }),
-    );
+    mockPolicyEndpoints((saved) => {
+      savedPolicy = saved;
+    });
 
     const view = render(<PrivacySettingsSection />);
-    const grid = await screen.findByRole("table", {
-      name: "Zone destination permissions",
-    });
-    const columns = within(grid).getAllByRole("columnheader");
 
-    expect(columns).toHaveLength(3);
-    expect(columns[1]).toHaveTextContent("Trusted provider");
-    expect(columns[2]).toHaveTextContent("Build MCP");
-    expect(within(grid).getByText("2 matches")).toBeInTheDocument();
-    expect(within(grid).getByText("7 matches")).toBeInTheDocument();
-    expect(screen.getByText("Runtime active")).toBeInTheDocument();
+    const providerTab = await screen.findByRole("button", {
+      name: /Model providers/,
+    });
+    expect(providerTab).toHaveAttribute("aria-pressed", "true");
     expect(
-      screen.getByRole("combobox", {
-        name: "Shell read behavior for secrets",
-      }),
+      screen.getByRole("button", { name: /MCP servers/ }),
     ).toBeInTheDocument();
 
     await view.user.click(
-      within(grid).getByRole("button", {
-        name: "Allow secrets to Build MCP",
-      }),
+      screen.getByRole("button", { name: /^trusted/, expanded: false }),
+    );
+
+    await view.user.click(
+      screen.getByRole("switch", { name: "Send secrets to trusted" }),
     );
 
     await waitFor(() => {
@@ -102,14 +105,81 @@ describe("PrivacySettingsSection", () => {
     });
     expect(savedPolicy).toEqual({
       ...policy,
-      zones: [
-        {
-          ...policy.zones[0],
-          send_to: ["trusted", "build-mcp"],
-        },
-        policy.zones[1],
-      ],
+      zones: [{ ...policy.zones[0], send_to: [] }, policy.zones[1]],
     });
+  });
+
+  it("limits a provider to a subset of MCP servers", async () => {
+    let savedPolicy: PrivacyPolicy | null = null;
+    mockPolicyEndpoints((saved) => {
+      savedPolicy = saved;
+    });
+
+    const view = render(<PrivacySettingsSection />);
+
+    await view.user.click(
+      await screen.findByRole("button", { name: /^trusted/, expanded: false }),
+    );
+
+    const mcpSwitch = screen.getByRole("switch", {
+      name: "Allow trusted to use build-mcp",
+    });
+    expect(mcpSwitch).toBeChecked();
+
+    await view.user.click(mcpSwitch);
+
+    await waitFor(() => {
+      expect(savedPolicy).not.toBeNull();
+    });
+    expect(savedPolicy).toEqual({
+      ...policy,
+      tool_access: { providers: { trusted: { mcp: [] } } },
+    });
+  });
+
+  it("edits globally blocked patterns", async () => {
+    let savedPolicy: PrivacyPolicy | null = null;
+    mockPolicyEndpoints((saved) => {
+      savedPolicy = saved;
+    });
+
+    const view = render(<PrivacySettingsSection />);
+
+    expect(await screen.findByText("*.blocked")).toBeInTheDocument();
+
+    await view.user.click(
+      screen.getByRole("button", { name: "Add blocked pattern" }),
+    );
+    await view.user.type(
+      screen.getByRole("textbox", { name: "Add blocked pattern" }),
+      "id_rsa{Enter}",
+    );
+
+    await waitFor(() => {
+      expect(savedPolicy).not.toBeNull();
+    });
+    expect(savedPolicy).toEqual({
+      ...policy,
+      blocked: ["*.blocked", "id_rsa"],
+    });
+  });
+
+  it("keeps the access matrix collapsed until requested", async () => {
+    mockPolicyEndpoints(() => undefined);
+
+    const view = render(<PrivacySettingsSection />);
+
+    const toggle = await screen.findByRole("button", { name: "Show matrix" });
+    expect(
+      screen.queryByRole("table", { name: "Zone destination permissions" }),
+    ).not.toBeInTheDocument();
+
+    await view.user.click(toggle);
+
+    const matrix = await screen.findByRole("table", {
+      name: "Zone destination permissions",
+    });
+    expect(within(matrix).getAllByRole("columnheader")).toHaveLength(3);
   });
 
   it("shows configuration and degraded-observation errors loudly", async () => {

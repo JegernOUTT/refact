@@ -118,7 +118,7 @@ impl Tool for ToolMcpCall {
         let tool_args = extract_proxy_args(args).unwrap_or_default();
 
         let gcx = ccx.lock().await.app.gcx.clone();
-        let mut integration_groups = get_integration_tools(gcx).await;
+        let mut integration_groups = get_integration_tools(gcx.clone()).await;
 
         // Move the tool out of the groups so it can be awaited safely.
         let mut found_tool: Option<Box<dyn Tool + Send>> = None;
@@ -137,7 +137,27 @@ impl Tool for ToolMcpCall {
         }
 
         match found_tool {
-            Some(tool) => tool.match_against_confirm_deny(ccx, &tool_args).await,
+            Some(tool) => {
+                let (model_id, bypass) = {
+                    let locked = ccx.lock().await;
+                    (locked.current_model.clone(), locked.tool_access_bypass)
+                };
+                if !bypass
+                    && !crate::tools::tools_list::mcp_config_allowed_for_model(
+                        gcx.clone(),
+                        &model_id,
+                        &tool.tool_description().source.config_path,
+                    )
+                    .await
+                {
+                    return Ok(MatchConfirmDeny {
+                        result: MatchConfirmDenyResult::DENY,
+                        command: tool_name.clone(),
+                        rule: "privacy tool_access".to_string(),
+                    });
+                }
+                tool.match_against_confirm_deny(ccx, &tool_args).await
+            }
             None => Ok(MatchConfirmDeny {
                 result: MatchConfirmDenyResult::PASS,
                 command: String::new(),
@@ -161,7 +181,7 @@ impl Tool for ToolMcpCall {
         let tool_args = extract_proxy_args(args)?;
 
         let gcx = ccx.lock().await.app.gcx.clone();
-        let mut integration_groups = get_integration_tools(gcx).await;
+        let mut integration_groups = get_integration_tools(gcx.clone()).await;
 
         // Find the named MCP tool and extract it (needs &mut self for tool_execute).
         let mut found_tool: Option<Box<dyn Tool + Send>> = None;
@@ -185,6 +205,24 @@ impl Tool for ToolMcpCall {
                 tool_name
             )
         })?;
+
+        let (model_id, bypass) = {
+            let locked = ccx.lock().await;
+            (locked.current_model.clone(), locked.tool_access_bypass)
+        };
+        if !bypass
+            && !crate::tools::tools_list::mcp_config_allowed_for_model(
+                gcx.clone(),
+                &model_id,
+                &tool.tool_description().source.config_path,
+            )
+            .await
+        {
+            return Err(format!(
+                "MCP tool '{}' is not available for the current model provider.",
+                tool_name
+            ));
+        }
 
         if !tool.config().unwrap_or_default().enabled {
             return Err(format!("MCP tool '{}' is disabled.", tool_name));

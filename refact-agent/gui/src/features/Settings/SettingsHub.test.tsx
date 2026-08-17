@@ -180,7 +180,7 @@ describe("SettingsHub — left nav dispatches change(), not push()", () => {
     const { store } = renderHub({ name: "general settings" });
     const initialLength = store.getState().pages.length;
 
-    fireEvent.click(screen.getByRole("button", { name: "Privacy" }));
+    fireEvent.click(screen.getByRole("button", { name: "Privacy & Access" }));
 
     const pages = store.getState().pages;
     expect(pages.length).toBe(initialLength);

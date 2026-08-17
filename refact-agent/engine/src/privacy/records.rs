@@ -638,6 +638,7 @@ mod tests {
                 },
             ],
             subagents: SubagentPolicy::default(),
+            ..Default::default()
         });
         gcx
     }
@@ -653,6 +654,7 @@ mod tests {
             blocked: Vec::new(),
             zones,
             subagents: SubagentPolicy::default(),
+            ..Default::default()
         });
         gcx
     }
@@ -688,6 +690,7 @@ mod tests {
                 },
             ],
             subagents: SubagentPolicy::default(),
+            ..Default::default()
         };
         let compiled = policy.compile().expect("policy should compile");
 

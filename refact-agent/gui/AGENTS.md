@@ -43,7 +43,7 @@ src/
 │   ├── Pages/        # Navigation stack
 │   ├── PatchesAndDiffsTracker/
 │   ├── Providers/    # LLM provider config + OAuth
-│   ├── Privacy/      # Zone grid, destination inspector, shield, and privacy result cards
+│   ├── Privacy/      # Zone cards, destination access, audit matrix, inspector, shield, result cards
 │   ├── Statistics/   # Usage charts
 │   ├── Tasks/        # Task management
 │   ├── ThreadHistory/# Thread history view
@@ -178,7 +178,9 @@ All generate hooks (`useGetCapsQuery`, etc.). Dynamic base URL from Redux state.
 
 Chat uses **Commands API** + **SSE subscription**, not RTK Query.
 
-Privacy policy, status, destination inspection, and policy saves belong to `privacyApi`. The `privacySlice` stores only ephemeral `selectedZoneName`; do not copy server policy/status data into Redux or scan chat messages inside Privacy components.
+Privacy policy, status, destination inspection, and policy saves belong to `privacyApi`. Privacy holds no Redux slice: the page is driven entirely by RTK Query plus local component state. Do not copy server policy/status data into Redux or scan chat messages inside Privacy components.
+
+The Privacy & Access page is destination-first, not a zone × destination matrix. `features/Privacy/access.ts` is the single home for the shared predicates (`zoneAllowsDestination`, `mcpAllowedForProvider`, `SHELL_BEHAVIOR_OPTIONS`) so component files export components only and stay Fast-Refresh clean. `ZoneCard` owns pattern editing as chips (`PatternChips`), `DestinationAccess` groups destinations by kind and expands one row at a time, and `AccessMatrix` is the read-only audit grid with a sticky zone column, collapsed by default. `PrivacyPolicy.tool_access.providers[<provider>]` is optional by design: an absent provider may use every MCP server, so `match_counts` and `tool_access.providers` are typed with `| undefined` values and must be read with `??` defaults. The `policy` returned by `/v1/privacy/policy` is the **global-only** document that the page edits; `match_counts` and destinations reflect the merged effective policy, and `has_project_overrides` must be surfaced so users know a project file narrows what they see. `isCatchAllZone` guards the zone whose removal would leave an invisible engine-synthesized allow-all fallback.
 
 ## Key Hooks
 
@@ -497,7 +499,7 @@ Chat can proceed when ALL true: `snapshot_received && !streaming && !waiting_for
 - **Tour/Onboarding**: Welcome screen, guided tour bubbles.
 - **FIM Debug**: Fill-in-Middle debug panel with search context and symbol list.
 - **CodeGraph status**: Toolbar mini indicators surface CodeGraph, VecDB, and legacy AST compatibility state from `/v1/rag-status`; CodeGraph settings are host-provided feature flags and status lives in the Knowledge slice.
-- **Privacy**: Settings owns the zone × destination policy grid and observation status; chat owns the model shield, destination inspector, blocked-send card, and local-only withheld-output reveal; FileTree shows each resolved zone and persists exact-path moves through the complete policy.
+- **Privacy & Access**: Settings owns destination-first access editing (zone cards, blocked patterns, per-destination zone and MCP toggles, read-only audit matrix) and observation status; chat owns the model shield, destination inspector, blocked-send card, and local-only withheld-output reveal; FileTree shows each resolved zone and persists exact-path moves through the complete policy.
 - **Docker**: Container list, start/stop/kill/remove, env vars, smart links.
 - **Compression Hints**: 🗜️ icon when context approaches limit. `compression_strength: "absent" | "weak" | "strong"`.
 - **Queued Messages**: Send while streaming. Priority queue bypasses tool wait.

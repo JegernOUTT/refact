@@ -351,6 +351,7 @@ mod tests {
                 },
             ],
             subagents: refact_privacy::SubagentPolicy::default(),
+            ..Default::default()
         };
 
         let denied = authorize_completion_path(&policy, "denied.rs", "trusted/model", &[]);

@@ -45,6 +45,7 @@ pub struct AtCommandsContext {
     pub execution_scope: Option<ExecutionScope>,
     pub derived_privacy_zones: Arc<StdRwLock<HashMap<PathBuf, String>>>,
     pub subchat_depth: usize,
+    pub tool_access_bypass: bool,
 
     pub at_commands: HashMap<String, Arc<dyn AtCommand + Send>>,
     pub subchat_tool_parameters: IndexMap<String, SubchatParameters>,
@@ -180,6 +181,7 @@ impl AtCommandsContext {
             execution_scope,
             derived_privacy_zones,
             subchat_depth: 0,
+            tool_access_bypass: false,
             at_commands: at_commands_dict(app).await,
             subchat_tool_parameters: IndexMap::new(),
             postprocess_parameters: PostprocessSettings::new(),

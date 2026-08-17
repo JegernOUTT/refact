@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,6 +10,39 @@ pub struct PrivacyPolicy {
     pub blocked: Vec<String>,
     pub zones: Vec<Zone>,
     pub subagents: SubagentPolicy,
+    pub tool_access: ToolAccess,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct ToolAccess {
+    pub providers: BTreeMap<String, ProviderToolAccess>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProviderToolAccess {
+    pub mcp: Vec<String>,
+}
+
+impl Default for ProviderToolAccess {
+    fn default() -> Self {
+        Self {
+            mcp: vec!["*".to_string()],
+        }
+    }
+}
+
+impl ToolAccess {
+    pub fn mcp_allowed(&self, provider: &str, server: &str) -> bool {
+        match self.providers.get(provider) {
+            None => true,
+            Some(access) => access
+                .mcp
+                .iter()
+                .any(|allowed| allowed == "*" || allowed == server),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -97,6 +130,7 @@ struct PolicyConfig {
     blocked: Vec<String>,
     zones: Vec<Zone>,
     subagents: SubagentPolicy,
+    tool_access: ToolAccess,
     #[serde(rename = "only_send_to_servers_I_control")]
     only_send_to_servers_i_control: Option<Vec<String>>,
 }
@@ -121,6 +155,7 @@ pub fn migrate_legacy(legacy: LegacyPrivacyPolicy) -> PrivacyPolicy {
         blocked: legacy.blocked,
         zones,
         subagents: SubagentPolicy::default(),
+        tool_access: ToolAccess::default(),
     }
 }
 
@@ -128,6 +163,15 @@ pub fn merge_project(global: &PrivacyPolicy, project: &PrivacyPolicy) -> Privacy
     let mut merged = global.clone();
     union_patterns(&mut merged.blocked, &project.blocked);
     merged.subagents.report_declassifies &= project.subagents.report_declassifies;
+
+    for (provider, project_access) in &project.tool_access.providers {
+        let merged_access = merged
+            .tool_access
+            .providers
+            .entry(provider.clone())
+            .or_default();
+        merged_access.mcp = intersect_destinations(&merged_access.mcp, &project_access.mcp);
+    }
 
     for project_zone in &project.zones {
         if let Some(global_zone) = merged
@@ -170,18 +214,21 @@ pub fn parse_policy_yaml(content: &str) -> Result<PrivacyPolicy, String> {
         .map_err(|error| format!("invalid privacy policy: {error}"))?;
 
     if config.zones.is_empty() {
-        return Ok(migrate_legacy(LegacyPrivacyPolicy {
+        let mut migrated = migrate_legacy(LegacyPrivacyPolicy {
             blocked: config.blocked,
             only_send_to_servers_i_control: config
                 .only_send_to_servers_i_control
                 .unwrap_or_default(),
-        }));
+        });
+        migrated.tool_access = config.tool_access;
+        return Ok(migrated);
     }
 
     let mut policy = PrivacyPolicy {
         blocked: config.blocked,
         zones: config.zones,
         subagents: config.subagents,
+        tool_access: config.tool_access,
     };
     if let Some(patterns) = config.only_send_to_servers_i_control {
         let legacy = migrate_legacy(LegacyPrivacyPolicy {
@@ -348,6 +395,7 @@ mod tests {
                 zone("normal", &["*"], &["*"], ShellBehavior::Withhold),
             ],
             subagents: SubagentPolicy::default(),
+            tool_access: ToolAccess::default(),
         };
         let project = PrivacyPolicy {
             blocked: vec!["project.key".to_string()],
@@ -358,6 +406,7 @@ mod tests {
                 ShellBehavior::Withhold,
             )],
             subagents: SubagentPolicy::default(),
+            tool_access: ToolAccess::default(),
         };
 
         let merged = merge_project(&global, &project);
@@ -380,6 +429,7 @@ mod tests {
             subagents: SubagentPolicy {
                 report_declassifies: false,
             },
+            tool_access: ToolAccess::default(),
         };
         let project = PrivacyPolicy {
             blocked: Vec::new(),
@@ -398,6 +448,7 @@ mod tests {
                 ),
             ],
             subagents: SubagentPolicy::default(),
+            tool_access: ToolAccess::default(),
         };
 
         let merged = merge_project(&global, &project);
@@ -444,6 +495,85 @@ mod tests {
         assert_eq!(policy.blocked, vec!["*.key"]);
         assert!(policy.zones.iter().any(|zone| zone.name == "normal"));
         policy.compile().unwrap();
+    }
+    #[test]
+    fn absent_provider_may_use_every_mcp_server() {
+        let access = ToolAccess::default();
+
+        assert!(access.mcp_allowed("openai_codex", "github"));
+        assert!(access.mcp_allowed("anything", "anything"));
+    }
+
+    #[test]
+    fn listed_provider_is_limited_to_its_servers() {
+        let access = ToolAccess {
+            providers: BTreeMap::from([(
+                "openai_codex".to_string(),
+                ProviderToolAccess {
+                    mcp: vec!["github".to_string()],
+                },
+            )]),
+        };
+
+        assert!(access.mcp_allowed("openai_codex", "github"));
+        assert!(!access.mcp_allowed("openai_codex", "postgres"));
+        assert!(access.mcp_allowed("ollama", "postgres"));
+    }
+
+    #[test]
+    fn project_can_only_narrow_provider_mcp_access() {
+        let global = PrivacyPolicy {
+            tool_access: ToolAccess {
+                providers: BTreeMap::from([(
+                    "openai_codex".to_string(),
+                    ProviderToolAccess {
+                        mcp: vec!["github".to_string(), "fetch".to_string()],
+                    },
+                )]),
+            },
+            ..PrivacyPolicy::default()
+        };
+        let project = PrivacyPolicy {
+            tool_access: ToolAccess {
+                providers: BTreeMap::from([
+                    (
+                        "openai_codex".to_string(),
+                        ProviderToolAccess {
+                            mcp: vec!["fetch".to_string(), "postgres".to_string()],
+                        },
+                    ),
+                    (
+                        "ollama".to_string(),
+                        ProviderToolAccess {
+                            mcp: vec!["github".to_string()],
+                        },
+                    ),
+                ]),
+            },
+            ..PrivacyPolicy::default()
+        };
+
+        let merged = merge_project(&global, &project);
+
+        assert_eq!(
+            merged.tool_access.providers["openai_codex"].mcp,
+            vec!["fetch"]
+        );
+        assert_eq!(merged.tool_access.providers["ollama"].mcp, vec!["github"]);
+        assert!(!merged.tool_access.mcp_allowed("openai_codex", "postgres"));
+        assert!(!merged.tool_access.mcp_allowed("ollama", "postgres"));
+    }
+
+    #[test]
+    fn tool_access_survives_legacy_migration() {
+        let policy = parse_policy_yaml(
+            "privacy_rules:\n  blocked: []\n  tool_access:\n    providers:\n      openai_codex:\n        mcp: ['github']\n",
+        )
+        .unwrap();
+
+        assert!(policy.zones.iter().any(|zone| zone.name == "normal"));
+        assert!(policy.tool_access.mcp_allowed("openai_codex", "github"));
+        assert!(!policy.tool_access.mcp_allowed("openai_codex", "postgres"));
     }
 
     #[tokio::test]

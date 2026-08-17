@@ -134,6 +134,7 @@ mod tests {
                     on_shell_read: refact_privacy::ShellBehavior::Withhold,
                 }],
                 subagents: refact_privacy::SubagentPolicy::default(),
+                ..Default::default()
             });
             panic!("poison privacy policy lock");
         })

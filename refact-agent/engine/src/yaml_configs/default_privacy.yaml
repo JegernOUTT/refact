@@ -46,6 +46,18 @@ privacy_rules:
   # subagents:
   #   report_declassifies: true
 
+  # tool_access controls which MCP servers a model provider may use tools from. This is tool
+  # availability, not file content: a denied server's tools are never offered to that provider,
+  # and mcp_call / mcp_tool_search refuse it too. A provider that is not listed may use every
+  # server, so adding this section never removes tools that already worked.
+  # Project files may only narrow a provider's list, never widen it.
+  # tool_access:
+  #   providers:
+  #     openai_codex:
+  #       mcp: ["github", "fetch"]
+  #     ollama:
+  #       mcp: ["*"]
+
 # See unit tests in privacy.rs for more examples.
 
 scheduler:

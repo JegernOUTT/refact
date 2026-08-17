@@ -30,7 +30,7 @@ export interface SettingsSectionDef {
 
 export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   { id: "general", label: "General", icon: Settings },
-  { id: "privacy", label: "Privacy", icon: ShieldCheck },
+  { id: "privacy", label: "Privacy & Access", icon: ShieldCheck },
   { id: "providers", label: "Providers", icon: Plug },
   { id: "models", label: "Models", icon: Bot },
   { id: "customization", label: "Customization", icon: Paintbrush },

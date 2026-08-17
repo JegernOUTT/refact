@@ -2609,11 +2609,17 @@ async fn subchat_single_internal(
     {
         vec![]
     } else {
-        let tools_turned_on_by_cmdline = get_available_tools(gcx.clone())
+        let mut tools_turned_on_by_cmdline = get_available_tools(gcx.clone())
             .await
             .into_iter()
             .map(|tool| tool.tool_description())
             .collect::<Vec<_>>();
+        let policy = crate::tools::tools_list::tool_access_policy(gcx.clone()).await;
+        if !policy.tool_access.providers.is_empty() {
+            let provider = crate::tools::tools_list::provider_of_model(model_id);
+            tools_turned_on_by_cmdline
+                .retain(|desc| crate::tools::tools_list::mcp_tool_allowed(&policy, provider, desc));
+        }
 
         match tools_subset.as_ref() {
             Some(subset) => tools_turned_on_by_cmdline
@@ -2853,6 +2859,7 @@ mod subchat_tests {
                 subagents: SubagentPolicy {
                     report_declassifies,
                 },
+                ..Default::default()
             }),
             error: None,
             source_paths: Vec::new(),

@@ -2940,6 +2940,7 @@ mod tests {
                 },
             ],
             subagents: refact_privacy::SubagentPolicy::default(),
+            ..Default::default()
         }
         .compile()
         .unwrap();

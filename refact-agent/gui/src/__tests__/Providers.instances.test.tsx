@@ -83,6 +83,7 @@ const privacyPolicy: PrivacyPolicy = {
     },
   ],
   subagents: { report_declassifies: false },
+  tool_access: { providers: {} },
 };
 
 const privacyResponse: PrivacyPolicyResponse = {
@@ -97,6 +98,7 @@ const privacyResponse: PrivacyPolicyResponse = {
   match_counts: { secrets: 1, normal: 10 },
   error: null,
   source_paths: [],
+  has_project_overrides: false,
 };
 
 describe("Providers provider instances", () => {

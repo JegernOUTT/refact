@@ -11,6 +11,6 @@ pub use gate::{clear, records_from_messages, Cleared, PrivacyAuditError, Privacy
 pub use matching::{compile_patterns, CompiledPolicy, PolicyError};
 pub use policy::{
     load_policy, merge_project, migrate_legacy, parse_policy_yaml, LegacyPrivacyPolicy, PolicyLoad,
-    PrivacyPolicy, ShellBehavior, SubagentPolicy, Zone,
+    PrivacyPolicy, ProviderToolAccess, ShellBehavior, SubagentPolicy, ToolAccess, Zone,
 };
 pub use record::{Attribution, FileRecord, PrivacyRecord};

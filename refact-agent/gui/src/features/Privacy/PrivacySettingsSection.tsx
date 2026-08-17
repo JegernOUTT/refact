@@ -1,38 +1,29 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { Plus } from "lucide-react";
 
 import {
   Badge,
   Button,
-  EditableTable,
   ErrorState,
-  FieldSelect,
   LoadingState,
   SettingItem,
   StatusDot,
+  Switch,
 } from "../../components/ui";
-import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   type PrivacyPolicy,
-  type PrivacyShellBehavior,
   type PrivacyZone,
   useGetPrivacyPolicyQuery,
   useGetPrivacyStatusQuery,
   useUpdatePrivacyPolicyMutation,
 } from "../../services/refact/privacy";
 import { SettingsGroup, SettingsSection } from "../Settings/SettingsSection";
-import { selectSelectedZoneName, setSelectedZone } from "./privacySlice";
-import { ZoneGrid } from "./ZoneGrid";
+import { isCatchAllZone, mcpAllowedForProvider } from "./access";
+import { AccessMatrix } from "./AccessMatrix";
+import { DestinationAccess } from "./DestinationAccess";
+import { PatternChips } from "./PatternChips";
+import { ZoneCard } from "./ZoneCard";
 import styles from "./PrivacySettingsSection.module.css";
-
-type PatternRow = {
-  pattern: string;
-};
-
-const SHELL_BEHAVIOR_OPTIONS = [
-  { value: "withhold", label: "Withhold output" },
-  { value: "ask", label: "Ask first" },
-  { value: "deny", label: "Deny command" },
-];
 
 function errorText(error: unknown) {
   if (error && typeof error === "object" && "data" in error) {
@@ -69,92 +60,58 @@ function toggleDestination(
   };
 }
 
-interface ZonePatternsEditorProps {
-  zone: PrivacyZone;
-  matchCount: number;
-  saving: boolean;
-  onSave: (patterns: string[]) => void;
+function toggleMcpAccess(
+  policy: PrivacyPolicy,
+  providerId: string,
+  server: string,
+  allServers: string[],
+): PrivacyPolicy {
+  const current = policy.tool_access.providers[providerId]?.mcp ?? ["*"];
+  const allowed = current.includes("*") || current.includes(server);
+  const next = current.includes("*")
+    ? allServers.filter((id) => id !== server)
+    : allowed
+      ? current.filter((id) => id !== server)
+      : [...current, server];
+  const coversEverything = allServers.every((id) => next.includes(id));
+  const mcp = coversEverything ? ["*"] : next;
+
+  return {
+    ...policy,
+    tool_access: {
+      ...policy.tool_access,
+      providers: { ...policy.tool_access.providers, [providerId]: { mcp } },
+    },
+  };
 }
 
-function ZonePatternsEditor({
-  matchCount,
-  onSave,
-  saving,
-  zone,
-}: ZonePatternsEditorProps) {
-  const [rows, setRows] = useState<PatternRow[]>(() =>
-    zone.patterns.map((pattern) => ({ pattern })),
-  );
-
-  useEffect(() => {
-    setRows(zone.patterns.map((pattern) => ({ pattern })));
-  }, [zone.name, zone.patterns]);
-
-  const hasBlankPattern = rows.some((row) => row.pattern.trim().length === 0);
-  const dirty =
-    rows.length !== zone.patterns.length ||
-    rows.some((row, index) => row.pattern !== zone.patterns[index]);
-
-  return (
-    <SettingItem
-      layout="stack"
-      title="File patterns"
-      description={`${String(
-        matchCount,
-      )} workspace files currently match this zone.`}
-      control={
-        <div className={styles.patternEditor}>
-          <EditableTable<PatternRow>
-            addLabel="Add pattern"
-            columns={[
-              {
-                id: "pattern",
-                header: "Pattern",
-                placeholder: "Glob pattern",
-                getInputProps: () => ({ disabled: saving }),
-              },
-            ]}
-            createRow={() => ({ pattern: "" })}
-            emptyMessage="No patterns in this zone"
-            removeLabel="Remove pattern"
-            validate={({ value }) =>
-              value.trim().length === 0 ? "Pattern is required" : null
-            }
-            value={rows}
-            onChange={setRows}
-          />
-          <Button
-            disabled={!dirty || hasBlankPattern}
-            loading={saving}
-            size="sm"
-            variant="soft"
-            onClick={() => onSave(rows.map((row) => row.pattern))}
-          >
-            Apply patterns
-          </Button>
-        </div>
-      }
-    />
-  );
+function nextZoneName(zones: PrivacyZone[]) {
+  const taken = new Set(zones.map((zone) => zone.name));
+  let index = 1;
+  let candidate = "new_zone";
+  while (taken.has(candidate)) {
+    index += 1;
+    candidate = `new_zone_${String(index)}`;
+  }
+  return candidate;
 }
 
 export function PrivacySettingsSection() {
-  const dispatch = useAppDispatch();
-  const selectedZoneName = useAppSelector(selectSelectedZoneName);
   const policyQuery = useGetPrivacyPolicyQuery(undefined);
   const statusQuery = useGetPrivacyStatusQuery(undefined);
   const [updatePolicy, updateState] = useUpdatePrivacyPolicyMutation();
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [matrixOpen, setMatrixOpen] = useState(false);
 
   const data = policyQuery.data;
-  const selectedZone = useMemo(() => {
-    if (!data) return null;
-    const selected = data.policy.zones.find(
-      (zone) => zone.name === selectedZoneName,
-    );
-    if (selected) return selected;
-    return data.policy.zones[0];
-  }, [data, selectedZoneName]);
+
+  const mcpServers = useMemo(
+    () =>
+      (data?.destinations ?? [])
+        .filter((destination) => destination.kind === "mcp")
+        .map((destination) => destination.id),
+    [data],
+  );
 
   const save = useCallback(
     async (policy: PrivacyPolicy) => {
@@ -168,7 +125,7 @@ export function PrivacySettingsSection() {
     [updatePolicy],
   );
 
-  const handleDestinationToggle = useCallback(
+  const handleZoneToggle = useCallback(
     (zoneName: string, destinationId: string) => {
       if (!data) return;
       void save(
@@ -181,6 +138,14 @@ export function PrivacySettingsSection() {
       );
     },
     [data, save],
+  );
+
+  const handleMcpToggle = useCallback(
+    (providerId: string, server: string) => {
+      if (!data) return;
+      void save(toggleMcpAccess(data.policy, providerId, server, mcpServers));
+    },
+    [data, mcpServers, save],
   );
 
   const updateZone = useCallback(
@@ -196,11 +161,36 @@ export function PrivacySettingsSection() {
     [data, save],
   );
 
+  const removeZone = useCallback(
+    (zoneName: string) => {
+      if (!data) return;
+      void save({
+        ...data.policy,
+        zones: data.policy.zones.filter((zone) => zone.name !== zoneName),
+      });
+    },
+    [data, save],
+  );
+
+  const addZone = useCallback(() => {
+    if (!data) return;
+    const zone: PrivacyZone = {
+      name: nextZoneName(data.policy.zones),
+      patterns: [],
+      send_to: [],
+      on_shell_read: "withhold",
+    };
+    void save({
+      ...data.policy,
+      zones: [zone, ...data.policy.zones],
+    });
+  }, [data, save]);
+
   if (policyQuery.isLoading) {
     return (
       <SettingsSection
-        title="Privacy"
-        description="Control which files may reach each external destination."
+        title="Privacy & Access"
+        description="Decide which files leave your machine, and what each destination is allowed to touch."
       >
         <LoadingState label="Loading privacy policy" variant="full" />
       </SettingsSection>
@@ -210,8 +200,8 @@ export function PrivacySettingsSection() {
   if (policyQuery.isError || !data) {
     return (
       <SettingsSection
-        title="Privacy"
-        description="Control which files may reach each external destination."
+        title="Privacy & Access"
+        description="Decide which files leave your machine, and what each destination is allowed to touch."
       >
         <ErrorState
           title="Failed to load privacy policy"
@@ -259,10 +249,31 @@ export function PrivacySettingsSection() {
         ? "success"
         : "muted";
 
+  const saveStatus = updateState.isLoading
+    ? "saving"
+    : updateState.isSuccess
+      ? "saved"
+      : updateState.isError
+        ? "error"
+        : "idle";
+
+  const blockedProviders = data.destinations.filter(
+    (destination) =>
+      destination.kind === "provider" &&
+      mcpServers.some(
+        (server) =>
+          !mcpAllowedForProvider(
+            data.policy.tool_access,
+            destination.id,
+            server,
+          ),
+      ),
+  );
+
   return (
     <SettingsSection
-      title="Privacy"
-      description="Control which files may reach each provider, MCP server, subagent model, and completion service."
+      title="Privacy & Access"
+      description="Decide which files leave your machine, and what each destination is allowed to touch."
       width="wide"
     >
       {configError ? (
@@ -278,6 +289,13 @@ export function PrivacySettingsSection() {
           title="Privacy policy was not saved"
           description={saveError}
         />
+      ) : null}
+      {data.has_project_overrides ? (
+        <p className={styles.noteLine}>
+          A project <code>.refact/privacy.yaml</code> tightens this policy
+          further. You are editing the global policy here; project files can
+          only narrow it, never widen it.
+        </p>
       ) : null}
 
       <SettingsGroup title="Runtime protection">
@@ -303,67 +321,140 @@ export function PrivacySettingsSection() {
         />
       </SettingsGroup>
 
-      <SettingsGroup title="Destination access">
+      <SettingsGroup title="File zones">
         <SettingItem
           layout="stack"
-          title="Zone permissions"
-          description="Each destination column is independent. Select a zone name to edit its patterns."
-          saveStatus={
-            updateState.isLoading
-              ? "saving"
-              : updateState.isSuccess
-                ? "saved"
-                : updateState.isError
-                  ? "error"
-                  : "idle"
-          }
+          title="What is sensitive"
+          description="A zone is a set of files matched by glob patterns. A file belongs to the first zone listed here whose patterns match it, so put narrow zones above broad ones."
+          saveStatus={saveStatus}
           control={
-            <ZoneGrid
+            <div className={styles.zoneStack}>
+              <div className={styles.zoneCards}>
+                {data.policy.zones.map((zone) => (
+                  <ZoneCard
+                    key={zone.name}
+                    matchCount={data.match_counts[zone.name] ?? 0}
+                    removable={
+                      data.policy.zones.length > 1 && !isCatchAllZone(zone)
+                    }
+                    saving={updateState.isLoading}
+                    takenNames={data.policy.zones
+                      .map((other) => other.name)
+                      .filter((other) => other !== zone.name)}
+                    zone={zone}
+                    onChange={(patch) => updateZone(zone.name, patch)}
+                    onRemove={() => removeZone(zone.name)}
+                  />
+                ))}
+              </div>
+              <Button
+                disabled={updateState.isLoading}
+                leftIcon={Plus}
+                size="sm"
+                variant="soft"
+                onClick={addZone}
+              >
+                Add zone
+              </Button>
+            </div>
+          }
+        />
+      </SettingsGroup>
+
+      <SettingsGroup title="Never send anywhere">
+        <SettingItem
+          layout="stack"
+          title="Blocked patterns"
+          description="Blocked from every destination, including local models. Overrides every zone."
+          control={
+            <div className={styles.blockedBox}>
+              <PatternChips
+                addLabel="Add blocked pattern"
+                disabled={updateState.isLoading}
+                emptyLabel="Nothing is globally blocked"
+                patterns={data.policy.blocked}
+                placeholder="e.g. id_rsa"
+                onChange={(blocked) => void save({ ...data.policy, blocked })}
+              />
+            </div>
+          }
+        />
+      </SettingsGroup>
+
+      <SettingsGroup title="Destinations">
+        <SettingItem
+          layout="stack"
+          title="Who may touch what"
+          description="Open a destination to choose which zones it may receive. Model providers can additionally be limited to a subset of MCP servers."
+          saveStatus={saveStatus}
+          control={
+            <DestinationAccess
               destinations={data.destinations}
               matchCounts={data.match_counts}
+              mcpServers={mcpServers}
               saving={updateState.isLoading}
-              selectedZoneName={selectedZone?.name ?? null}
+              toolAccess={data.policy.tool_access}
               zones={data.policy.zones}
-              onSelectZone={(zoneName) => dispatch(setSelectedZone(zoneName))}
-              onToggle={handleDestinationToggle}
+              onToggleMcp={handleMcpToggle}
+              onToggleZone={handleZoneToggle}
+            />
+          }
+        />
+        {blockedProviders.length > 0 ? (
+          <p className={styles.noteLine}>
+            {blockedProviders.length} provider
+            {blockedProviders.length === 1 ? "" : "s"} cannot use every MCP
+            server. Their blocked servers are hidden from the tool list and
+            refused at call time.
+          </p>
+        ) : null}
+      </SettingsGroup>
+
+      <SettingsGroup title="Subagents">
+        <SettingItem
+          title="Subagent reports declassify"
+          description="A subagent's summary may be sent onward even when it read restricted files. Turn off to re-check the parent's destination against everything the subagent read."
+          control={
+            <Switch
+              aria-label="Subagent reports declassify"
+              checked={data.policy.subagents.report_declassifies}
+              disabled={updateState.isLoading}
+              onCheckedChange={(report_declassifies) =>
+                void save({
+                  ...data.policy,
+                  subagents: { report_declassifies },
+                })
+              }
             />
           }
         />
       </SettingsGroup>
 
-      {selectedZone ? (
-        <SettingsGroup title={`Zone: ${selectedZone.name}`}>
-          <ZonePatternsEditor
-            matchCount={data.match_counts[selectedZone.name]}
-            saving={updateState.isLoading}
-            zone={selectedZone}
-            onSave={(patterns) => updateZone(selectedZone.name, { patterns })}
-          />
-        </SettingsGroup>
-      ) : null}
-
-      <SettingsGroup title="Shell reads">
-        {data.policy.zones.map((zone) => (
-          <SettingItem
-            className="rf-enter"
-            key={zone.name}
-            title={zone.name}
-            description="Choose what happens when a shell command reads a file in this zone."
-            control={
-              <FieldSelect
-                aria-label={`Shell read behavior for ${zone.name}`}
-                disabled={updateState.isLoading}
-                options={SHELL_BEHAVIOR_OPTIONS}
-                value={zone.on_shell_read}
-                onChange={(value) =>
-                  updateZone(zone.name, {
-                    on_shell_read: value as PrivacyShellBehavior,
-                  })
-                }
-              />
-            }
-          />
-        ))}
+      <SettingsGroup title="Audit">
+        <SettingItem
+          layout="stack"
+          title="Access matrix"
+          description="Read-only overview of every zone against every destination."
+          control={
+            <div className={styles.auditBox}>
+              <Button
+                aria-expanded={matrixOpen}
+                size="sm"
+                variant="ghost"
+                onClick={() => setMatrixOpen((open) => !open)}
+              >
+                {matrixOpen ? "Hide matrix" : "Show matrix"}
+              </Button>
+              {matrixOpen ? (
+                <AccessMatrix
+                  destinations={data.destinations}
+                  matchCounts={data.match_counts}
+                  zones={data.policy.zones}
+                />
+              ) : null}
+            </div>
+          }
+        />
       </SettingsGroup>
     </SettingsSection>
   );
