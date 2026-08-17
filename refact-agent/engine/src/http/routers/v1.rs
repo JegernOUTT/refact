@@ -254,6 +254,7 @@ use crate::http::routers::v1::mcp_interactions::{
 use crate::http::routers::v1::v1_browser::{
     handle_browser_start, handle_browser_stop, handle_browser_screenshot, handle_browser_context,
     handle_browser_context_commit, handle_browser_element_pick, handle_browser_element_pick_result,
+    handle_browser_element_pick_cancel,
     handle_browser_curl, handle_browser_eval, handle_browser_inject_css, handle_browser_remove_css,
     handle_browser_dom_snapshot, handle_browser_accessibility, handle_browser_record_animation,
     handle_browser_handoff, handle_browser_status, handle_browser_annotate_start,
@@ -711,6 +712,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/browser/element-pick/result",
             post(handle_browser_element_pick_result),
+        )
+        .route(
+            "/browser/element-pick/cancel",
+            post(handle_browser_element_pick_cancel),
         )
         .route("/browser/curl", post(handle_browser_curl))
         .route("/browser/eval", post(handle_browser_eval))

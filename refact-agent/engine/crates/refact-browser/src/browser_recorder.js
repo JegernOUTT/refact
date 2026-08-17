@@ -1,9 +1,11 @@
 (function() {
     'use strict';
     if (window.__refact_recorder_installed) return;
-    window.__refact_recorder_installed = true;
+
+    try {
 
     var MASK_PASSWORDS = __REFACT_MASK_PASSWORDS__;
+    var MASKED_VALUE = '********';
 
     function cssEscape(str) {
         return str.replace(/[\\"']/g, '\\$&').replace(/[\x00-\x1f]/g, '');
@@ -63,7 +65,7 @@
         var data = {
             type: 'input',
             selector: getSelector(el),
-            value: masked ? '*'.repeat((el.value || '').length) : (el.value || ''),
+            value: masked ? MASKED_VALUE : (el.value || ''),
             masked: masked,
             timestamp: getTimestamp()
         };
@@ -168,5 +170,12 @@
                 startObserver();
             }, { once: true });
         }
+    }
+
+    window.__refact_recorder_blocked = null;
+    window.__refact_recorder_installed = true;
+
+    } catch (e) {
+        window.__refact_recorder_blocked = 'csp';
     }
 })();

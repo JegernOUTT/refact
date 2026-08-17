@@ -12,6 +12,7 @@ import {
 } from "./browserSlice";
 import { addThreadImage } from "../Chat/Thread/actions";
 import { formatBrowserDraftBlock, insertBrowserDraft } from "./draftInsert";
+import { runPickerPolling } from "./pickerPolling";
 
 function formatAnnotationsText(annotations: BrowserAnnotation[]): string {
   if (annotations.length === 0) return "(no annotations)";
@@ -43,6 +44,8 @@ export function useBrowserToolbarActions(chatId: string) {
   const [browserElementPick] = browserApi.useBrowserElementPickMutation();
   const [browserElementPickResult] =
     browserApi.useBrowserElementPickResultMutation();
+  const [browserElementPickCancel] =
+    browserApi.useBrowserElementPickCancelMutation();
   const [browserAnnotateStart] = browserApi.useBrowserAnnotateStartMutation();
   const [browserAnnotateResult] = browserApi.useBrowserAnnotateResultMutation();
   const [browserAnnotateClear] = browserApi.useBrowserAnnotateClearMutation();
@@ -144,26 +147,23 @@ export function useBrowserToolbarActions(chatId: string) {
           dispatch(setPickerActive({ chatId, active: true }));
           try {
             await browserElementPick({ chat_id: chatId }).unwrap();
-            const pollInterval = 500;
-            const maxAttempts = 60;
-            for (let i = 0; i < maxAttempts; i++) {
-              await new Promise((r) => setTimeout(r, pollInterval));
-              const pickResult = await browserElementPickResult({
-                chat_id: chatId,
-              }).unwrap();
-              if ("status" in pickResult) {
-                continue;
-              }
-              if ("selector" in pickResult) {
-                const text = `Selector: ${pickResult.selector}\nText: ${
-                  pickResult.innerText
-                }\nBbox: ${JSON.stringify(pickResult.bbox)}`;
-                insertBrowserDraft(
-                  formatBrowserDraftBlock("Browser Picked Element", text),
-                  chatId,
-                );
-              }
-              break;
+            const picked = await runPickerPolling({
+              poll: () =>
+                browserElementPickResult({ chat_id: chatId }).unwrap(),
+              cancel: () =>
+                browserElementPickCancel({ chat_id: chatId })
+                  .unwrap()
+                  .catch((_: unknown) => undefined),
+              wait: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
+            });
+            if (picked) {
+              const text = `Selector: ${picked.selector}\nText: ${
+                picked.innerText
+              }\nBbox: ${JSON.stringify(picked.bbox)}`;
+              insertBrowserDraft(
+                formatBrowserDraftBlock("Browser Picked Element", text),
+                chatId,
+              );
             }
           } finally {
             dispatch(setPickerActive({ chatId, active: false }));
@@ -255,6 +255,7 @@ export function useBrowserToolbarActions(chatId: string) {
       browserCurl,
       browserElementPick,
       browserElementPickResult,
+      browserElementPickCancel,
       browserAnnotateStart,
       browserAnnotateResult,
       browserAnnotateClear,

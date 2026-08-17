@@ -9,6 +9,7 @@ import {
   BROWSER_CURL,
   BROWSER_ELEMENT_PICK,
   BROWSER_ELEMENT_PICK_RESULT,
+  BROWSER_ELEMENT_PICK_CANCEL,
   BROWSER_RECORD_ANIMATION,
   BROWSER_HANDOFF,
   BROWSER_STATUS,
@@ -95,6 +96,14 @@ export type BrowserElementPickResultResponse =
       innerText: string;
       bbox: { x: number; y: number; width: number; height: number };
     };
+
+export type BrowserElementPickCancelRequest = {
+  chat_id: string;
+};
+
+export type BrowserElementPickCancelResponse = {
+  status: "cancelled";
+};
 
 export type BrowserRecordAnimationRequest = {
   chat_id: string;
@@ -656,6 +665,23 @@ export const browserApi = createApi({
         });
         if (response.error) return { error: response.error };
         return { data: response.data as BrowserElementPickResultResponse };
+      },
+    }),
+    browserElementPickCancel: builder.mutation<
+      BrowserElementPickCancelResponse,
+      BrowserElementPickCancelRequest
+    >({
+      async queryFn(args, api, extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(state, BROWSER_ELEMENT_PICK_CANCEL);
+        const response = await baseQuery({
+          url,
+          method: "POST",
+          body: args,
+          ...extraOptions,
+        });
+        if (response.error) return { error: response.error };
+        return { data: response.data as BrowserElementPickCancelResponse };
       },
     }),
     browserRecordAnimation: builder.mutation<

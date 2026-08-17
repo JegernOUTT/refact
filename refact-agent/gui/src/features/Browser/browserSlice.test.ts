@@ -263,6 +263,77 @@ describe("browserSlice", () => {
     expect(rt!.pending_toolbar_actions).toEqual(["screenshot"]);
   });
 
+  test("browser_timeline navigation resets annotate and picker overlays", () => {
+    const initial = stateWith(
+      "chat-1",
+      makeRuntime({ annotate_active: true, picker_active: true }),
+    );
+    const state = reducer(
+      initial,
+      applyChatEvent({
+        chat_id: "chat-1",
+        seq: "1",
+        type: "browser_timeline",
+        events: [
+          {
+            timestamp: "00:00:01",
+            source: "user",
+            type: "navigation",
+            summary: "navigate \u2192 https://example.com/next",
+          },
+        ],
+      }),
+    );
+    const rt = state.runtimes["chat-1"];
+    expect(rt).toBeDefined();
+    expect(rt!.annotate_active).toBe(false);
+    expect(rt!.picker_active).toBe(false);
+    expect(rt!.timeline).toHaveLength(1);
+  });
+
+  test("browser_timeline without navigation keeps overlay state", () => {
+    const initial = stateWith(
+      "chat-1",
+      makeRuntime({ annotate_active: true, picker_active: true }),
+    );
+    const state = reducer(
+      initial,
+      applyChatEvent({
+        chat_id: "chat-1",
+        seq: "1",
+        type: "browser_timeline",
+        events: [
+          {
+            timestamp: "00:00:01",
+            source: "user",
+            type: "click",
+            summary: "click #button",
+          },
+        ],
+      }),
+    );
+    const rt = state.runtimes["chat-1"];
+    expect(rt).toBeDefined();
+    expect(rt!.annotate_active).toBe(true);
+    expect(rt!.picker_active).toBe(true);
+  });
+
+  test("browser_toolbar_action accepts pick_element", () => {
+    const initial = stateWith("chat-1", makeRuntime());
+    const state = reducer(
+      initial,
+      applyChatEvent({
+        chat_id: "chat-1",
+        seq: "1",
+        type: "browser_toolbar_action",
+        action: "pick_element",
+      }),
+    );
+    const rt = state.runtimes["chat-1"];
+    expect(rt).toBeDefined();
+    expect(rt!.pending_toolbar_actions).toEqual(["pick_element"]);
+  });
+
   test("browser_toolbar_action queues multiple actions", () => {
     const initial = stateWith("chat-1", makeRuntime());
     let state = reducer(

@@ -10,6 +10,8 @@ import type {
   BrowserCurlResponse,
   BrowserElementPickResponse,
   BrowserElementPickResultResponse,
+  BrowserElementPickCancelRequest,
+  BrowserElementPickCancelResponse,
   BrowserRecordAnimationResponse,
   BrowserHandoffResponse,
   BrowserStatusResponse,
@@ -138,6 +140,13 @@ describe("Browser API contract tests", () => {
       expect(response.bbox.width).toBe(150);
       expect(response.bbox.height).toBe(50);
     }
+  });
+
+  test("BrowserElementPickCancel matches engine struct", () => {
+    const request: BrowserElementPickCancelRequest = { chat_id: "chat-1" };
+    const response: BrowserElementPickCancelResponse = { status: "cancelled" };
+    expect(request.chat_id).toBe("chat-1");
+    expect(response.status).toBe("cancelled");
   });
 
   test("BrowserRecordAnimationResponse matches engine struct", () => {

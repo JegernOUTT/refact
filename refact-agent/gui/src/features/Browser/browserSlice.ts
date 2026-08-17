@@ -95,6 +95,8 @@ const initialState: BrowserState = {
 
 const TIMELINE_MAX = 2000;
 
+const NAVIGATION_ENTRY_TYPE = "navigation";
+
 const VALID_TOOLBAR_ACTIONS = [
   "screenshot",
   "screenshot_full",
@@ -438,6 +440,10 @@ export const browserSlice = createSlice({
         rt.timeline.push(...newEntries);
         if (rt.timeline.length > TIMELINE_MAX) {
           rt.timeline.splice(0, rt.timeline.length - TIMELINE_MAX);
+        }
+        if (newEntries.some((entry) => entry.type === NAVIGATION_ENTRY_TYPE)) {
+          rt.annotate_active = false;
+          rt.picker_active = false;
         }
       } else if (event.type === "browser_toolbar_action") {
         const rt = state.runtimes[event.chat_id];

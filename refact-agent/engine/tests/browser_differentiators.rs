@@ -239,6 +239,33 @@ impl BrowserCase {
         })
     }
 
+    async fn start_with_chrome(page: &str) -> Self {
+        let chrome = discover_chrome().expect(
+            "install Chrome, Chromium, google-chrome, or chromium-browser to run this test",
+        );
+        let server = FixtureServer::start().await;
+        let profile = tempdir().unwrap();
+        let mut runtime = BrowserRuntime::launch(
+            profile.path().to_path_buf(),
+            None,
+            Some(chrome),
+            Some(Duration::from_secs(120)),
+            true,
+            true,
+        )
+        .unwrap();
+        let tab = runtime.browser.new_tab().unwrap();
+        runtime.set_active_tab_target_id(tab.get_target_id().to_string());
+        tab.navigate_to(&server.url(page)).unwrap();
+        tab.wait_until_navigated().unwrap();
+        Self {
+            runtime,
+            _profile: profile,
+            server,
+            tab,
+        }
+    }
+
     fn setup_world(&mut self) {
         setup_recording_for_tab(&mut self.runtime, self.tab.clone()).unwrap();
     }
@@ -1044,4 +1071,115 @@ async fn differentiator_16_rich_element_info_reports_state_text_box_and_field_ki
     assert!(editable.content_editable);
     assert_eq!(editable.inner_text.as_deref(), Some("editable text"));
     assert_eq!(editable.field_kind, FieldKind::ContentEditable);
+}
+
+// A fail-open install flag makes the health loop treat a crashed panel as healthy and never retry it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome"]
+async fn injected_panel_install_flags_report_the_real_mount_state() {
+    let mut case = BrowserCase::start_with_chrome("hostile-globals.html").await;
+    case.setup_world();
+
+    for flag in [
+        "!!window.__refact_toolbar_installed",
+        "!!window.__refact_recorder_installed",
+        "!!window.__refact_overlays_installed",
+        "!!document.querySelector('#__refact_toolbar_host')",
+        "typeof window.__refact_overlays === 'object'",
+        "!window.__refact_toolbar_blocked",
+        "!window.__refact_recorder_blocked",
+        "!window.__refact_overlays_blocked",
+    ] {
+        assert_eq!(eval_value(&case.tab, flag), Value::Bool(true), "{flag}");
+    }
+
+    assert_eq!(
+        eval_value(
+            &case.tab,
+            "typeof window.__refact_overlays.startPicker === 'function' && typeof window.__refact_overlays.cancelPicker === 'function' && typeof window.__refact_overlays.startAnnotate === 'function'"
+        ),
+        Value::Bool(true)
+    );
+
+    let health = refact_lsp::refact_browser::probe_injection_health(&case.tab);
+    assert!(!health.needs_injection);
+    assert_eq!(health.blocked, None);
+
+    case.tab
+        .evaluate(
+            "(function(){ document.querySelector('#__refact_toolbar_host').remove(); window.__refact_toolbar_installed = false; })()",
+            false,
+        )
+        .unwrap();
+
+    let degraded = refact_lsp::refact_browser::probe_injection_health(&case.tab);
+    assert!(degraded.needs_injection);
+
+    refact_lsp::refact_browser::ensure_injection_into_tab(
+        &case.tab,
+        true,
+        case.runtime.buffers.raw_recorder_events.clone(),
+    );
+
+    for flag in [
+        "!!window.__refact_toolbar_installed",
+        "!!document.querySelector('#__refact_toolbar_host')",
+    ] {
+        assert_eq!(eval_value(&case.tab, flag), Value::Bool(true), "{flag}");
+    }
+}
+
+// A picker overlay without a release path traps every click on the page behind a full-viewport shield.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome"]
+async fn picker_overlay_always_releases_the_page() {
+    let mut case = BrowserCase::start_with_chrome("selectors.html").await;
+    case.setup_world();
+
+    case.tab
+        .evaluate("window.__refact_overlays.startPicker(60000)", false)
+        .unwrap();
+    let active = eval_json(
+        &case.tab,
+        "({ overlay: !!document.getElementById('__refact_picker_overlay'), active: !!window.__refact_picker_active })",
+    );
+    assert_eq!(active["overlay"], true);
+    assert_eq!(active["active"], true);
+
+    case.tab
+        .evaluate(
+            "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))",
+            false,
+        )
+        .unwrap();
+    let released = eval_json(
+        &case.tab,
+        "({ overlay: !!document.getElementById('__refact_picker_overlay'), active: !!window.__refact_picker_active })",
+    );
+    assert_eq!(released["overlay"], false);
+    assert_eq!(released["active"], false);
+
+    case.tab
+        .evaluate("window.__refact_overlays.startPicker(150)", false)
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    let timed_out = eval_json(
+        &case.tab,
+        "({ overlay: !!document.getElementById('__refact_picker_overlay'), active: !!window.__refact_picker_active })",
+    );
+    assert_eq!(timed_out["overlay"], false);
+    assert_eq!(timed_out["active"], false);
+
+    case.tab
+        .evaluate("window.__refact_overlays.startPicker(60000)", false)
+        .unwrap();
+    case.tab
+        .evaluate("window.__refact_overlays.cancelPicker()", false)
+        .unwrap();
+    let cancelled = eval_json(
+        &case.tab,
+        "({ overlay: !!document.getElementById('__refact_picker_overlay'), active: !!window.__refact_picker_active })",
+    );
+    assert_eq!(cancelled["overlay"], false);
+    assert_eq!(cancelled["active"], false);
 }

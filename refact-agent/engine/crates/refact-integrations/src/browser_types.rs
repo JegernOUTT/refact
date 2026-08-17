@@ -146,11 +146,13 @@ pub struct MutationSummaryEntry {
     pub descriptions: Vec<String>,
 }
 
+pub const MASKED_VALUE: &str = "********";
+
 pub fn apply_password_masking(event: &RecorderEvent) -> RecorderEvent {
     match event {
         RecorderEvent::Input {
             selector,
-            value,
+            value: _,
             masked,
             timestamp,
             tag,
@@ -163,7 +165,7 @@ pub fn apply_password_masking(event: &RecorderEvent) -> RecorderEvent {
             if *masked {
                 RecorderEvent::Input {
                     selector: selector.clone(),
-                    value: "*".repeat(value.len()),
+                    value: MASKED_VALUE.to_string(),
                     masked: true,
                     timestamp: *timestamp,
                     tag: tag.clone(),
@@ -325,7 +327,7 @@ mod tests {
         let masked = apply_password_masking(&event);
         match masked {
             RecorderEvent::Input { value, masked, .. } => {
-                assert_eq!(value, "*********");
+                assert_eq!(value, "********");
                 assert!(masked);
             }
             _ => panic!("Wrong variant"),
@@ -582,7 +584,7 @@ mod tests {
                 placeholder,
                 ..
             } => {
-                assert_eq!(value, "******");
+                assert_eq!(value, "********");
                 assert_eq!(tag.as_deref(), Some("input"));
                 assert_eq!(input_type.as_deref(), Some("password"));
                 assert_eq!(field_name.as_deref(), Some("password"));

@@ -92,7 +92,7 @@ use std::time::{Duration, Instant};
 
 use headless_chrome::Browser;
 use headless_chrome::protocol::cdp::types::Event;
-use headless_chrome::protocol::cdp::{Network, Page};
+use headless_chrome::protocol::cdp::{Network, Page, Runtime};
 use serde_json;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -111,6 +111,13 @@ const MAX_RAW_EVENT_BYTES: usize = 64 * 1024;
 
 const RECORDER_SCRIPT_TEMPLATE: &str = include_str!("browser_recorder.js");
 const TOOLBAR_SCRIPT: &str = include_str!("browser_toolbar.js");
+const OVERLAYS_SCRIPT: &str = include_str!("browser_overlays.js");
+
+pub const PICKER_PAGE_TIMEOUT_MS: u64 = 35_000;
+
+pub fn overlays_script() -> &'static str {
+    OVERLAYS_SCRIPT
+}
 
 const STEALTH_SCRIPT: &str = r#"(function() {
     if (window.__refact_stealth_installed) return;
@@ -1012,6 +1019,15 @@ pub fn inject_recorder_into_tab(
     }
 
     if let Err(e) = tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
+        source: OVERLAYS_SCRIPT.to_string(),
+        world_name: None,
+        include_command_line_api: None,
+        run_immediately: None,
+    }) {
+        warn!("Failed to add overlays script (non-fatal): {}", e);
+    }
+
+    if let Err(e) = tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
         source: TOOLBAR_SCRIPT.to_string(),
         world_name: None,
         include_command_line_api: None,
@@ -1026,6 +1042,9 @@ pub fn inject_recorder_into_tab(
     if let Err(e) = tab.evaluate(&script, false) {
         warn!("Recorder immediate evaluate failed (non-fatal): {}", e);
     }
+    if let Err(e) = tab.evaluate(OVERLAYS_SCRIPT, false) {
+        warn!("Overlays immediate evaluate failed (non-fatal): {}", e);
+    }
     if let Err(e) = tab.evaluate(TOOLBAR_SCRIPT, false) {
         warn!("Toolbar immediate evaluate failed (non-fatal): {}", e);
     }
@@ -1033,31 +1052,125 @@ pub fn inject_recorder_into_tab(
     Ok(())
 }
 
+pub const INJECTION_HEALTH_PROBE_JS: &str = r#"(function(){
+    try {
+        var blocked = window.__refact_toolbar_blocked || window.__refact_recorder_blocked || window.__refact_overlays_blocked || null;
+        var installed = typeof window.__refact_event === 'function'
+            && !!window.__refact_stealth_installed
+            && !!window.__refact_recorder_installed
+            && !!window.__refact_overlays_installed
+            && !!window.__refact_toolbar_installed;
+        if (installed) { try { window.__refact_event(''); } catch(e) { return {needs:true, blocked:null}; } }
+        return { needs: !installed && !blocked, blocked: blocked };
+    } catch(e) { return { needs: true, blocked: null }; }
+})()"#;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InjectionHealth {
+    pub needs_injection: bool,
+    pub blocked: Option<String>,
+}
+
+pub fn evaluate_by_value(
+    tab: &headless_chrome::Tab,
+    expression: &str,
+) -> Option<serde_json::Value> {
+    let evaluated = tab
+        .call_method(Runtime::Evaluate {
+            expression: expression.to_string(),
+            return_by_value: Some(true),
+            generate_preview: Some(false),
+            silent: Some(false),
+            await_promise: Some(false),
+            include_command_line_api: Some(false),
+            user_gesture: Some(false),
+            object_group: None,
+            context_id: None,
+            throw_on_side_effect: None,
+            timeout: None,
+            disable_breaks: None,
+            repl_mode: None,
+            allow_unsafe_eval_blocked_by_csp: None,
+            unique_context_id: None,
+            serialization_options: None,
+        })
+        .ok()?;
+    if evaluated.exception_details.is_some() {
+        return None;
+    }
+    evaluated.result.value
+}
+
+pub fn probe_injection_health(tab: &headless_chrome::Tab) -> InjectionHealth {
+    parse_injection_health(evaluate_by_value(tab, INJECTION_HEALTH_PROBE_JS).as_ref())
+}
+
+pub fn parse_injection_health(value: Option<&serde_json::Value>) -> InjectionHealth {
+    let Some(value) = value.and_then(|value| value.as_object()) else {
+        return InjectionHealth {
+            needs_injection: true,
+            blocked: None,
+        };
+    };
+    InjectionHealth {
+        needs_injection: value
+            .get("needs")
+            .and_then(|needs| needs.as_bool())
+            .unwrap_or(true),
+        blocked: value
+            .get("blocked")
+            .and_then(|blocked| blocked.as_str())
+            .filter(|blocked| !blocked.is_empty())
+            .map(str::to_string),
+    }
+}
+
 pub fn ensure_injection_into_tab(
     tab: &headless_chrome::Tab,
     mask_passwords: bool,
     action_buffer: Arc<Mutex<Vec<String>>>,
-) {
-    let needs = tab
-        .evaluate(
-            r#"(function(){
-                try {
-                    if (typeof window.__refact_event !== 'function') return true;
-                    if (!window.__refact_stealth_installed || !window.__refact_recorder_installed || !window.__refact_toolbar_installed) return true;
-                    try { window.__refact_event(''); } catch(e) { return true; }
-                    return false;
-                } catch(e) { return true; }
-            })()"#,
-            false,
-        )
-        .ok()
-        .and_then(|r| r.value)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+) -> InjectionHealth {
+    let health = probe_injection_health(tab);
 
-    if needs {
+    if health.needs_injection {
         let _ = inject_recorder_into_tab(tab, mask_passwords, action_buffer);
+    } else if let Some(reason) = &health.blocked {
+        warn!(
+            "Injected panel blocked on {} ({}), skipping retry",
+            tab.get_url(),
+            reason
+        );
     }
+    health
+}
+
+pub fn ensure_injection_into_all_tabs(
+    runtime: &BrowserRuntime,
+) -> Vec<(String, InjectionHealth)> {
+    let mask_passwords = runtime.buffers.mask_passwords;
+    let action_buffer = runtime.buffers.raw_recorder_events.clone();
+    let tabs: Vec<Arc<headless_chrome::Tab>> = runtime
+        .browser
+        .get_tabs()
+        .lock()
+        .map(|tabs| tabs.iter().cloned().collect())
+        .unwrap_or_default();
+
+    let mut visited = BTreeSet::new();
+    let mut report = Vec::new();
+    for tab in tabs {
+        let target_id = tab.get_target_id().to_string();
+        if !visited.insert(target_id.clone()) {
+            continue;
+        }
+        let url = tab.get_url();
+        if url.starts_with("chrome://") || url == "about:blank" {
+            continue;
+        }
+        let health = ensure_injection_into_tab(&tab, mask_passwords, action_buffer.clone());
+        report.push((target_id, health));
+    }
+    report
 }
 
 fn extract_refact_event_json(payload: &serde_json::Value) -> Option<String> {
@@ -1816,7 +1929,7 @@ mod tests {
         assert_eq!(buf.action_buffer.len(), 1);
         match &buf.action_buffer[0] {
             RecorderEvent::Input { value, masked, .. } => {
-                assert_eq!(value, "******");
+                assert_eq!(value, "********");
                 assert!(*masked);
             }
             _ => panic!("Expected input"),
@@ -2067,12 +2180,237 @@ mod tests {
             "curl",
             "annotate",
             "highlight",
+            "pick_element",
         ] {
             assert!(
                 TOOLBAR_SCRIPT.contains(contract),
                 "toolbar lacks {contract}"
             );
         }
+    }
+
+    // A fail-open install flag makes the health loop believe a crashed panel is healthy and never retry.
+    #[test]
+    fn install_flags_are_set_only_after_a_confirmed_mount() {
+        let toolbar_flag = TOOLBAR_SCRIPT
+            .find("window.__refact_toolbar_installed = true;")
+            .expect("toolbar never marks itself installed");
+        let toolbar_guard = TOOLBAR_SCRIPT
+            .find("if (!document.body || !document.body.contains(host)) return false;")
+            .expect("toolbar does not verify its host is mounted");
+        assert!(
+            toolbar_guard < toolbar_flag,
+            "toolbar sets its install flag before confirming the mount"
+        );
+        assert!(TOOLBAR_SCRIPT.contains("window.__refact_toolbar_blocked = 'csp';"));
+        assert!(TOOLBAR_SCRIPT.contains("window.__refact_toolbar_blocked = 'mount_rejected';"));
+
+        let recorder = build_recorder_script(true);
+        let recorder_flag = recorder
+            .find("window.__refact_recorder_installed = true;")
+            .expect("recorder never marks itself installed");
+        let listeners = recorder
+            .rfind("document.addEventListener('submit'")
+            .expect("recorder lost its submit listener");
+        assert!(
+            listeners < recorder_flag,
+            "recorder sets its install flag before wiring listeners"
+        );
+        assert!(recorder.contains("window.__refact_recorder_blocked = 'csp';"));
+
+        let overlays_flag = OVERLAYS_SCRIPT
+            .find("window.__refact_overlays_installed = true;")
+            .expect("overlays never mark themselves installed");
+        let overlays_api = OVERLAYS_SCRIPT
+            .find("window.__refact_overlays = {")
+            .expect("overlays never publish their api");
+        assert!(
+            overlays_api < overlays_flag,
+            "overlays set their install flag before publishing the api"
+        );
+        assert!(OVERLAYS_SCRIPT.contains("window.__refact_overlays_blocked = 'csp';"));
+    }
+
+    // Divergent overlay copies drift apart; one module owns picker, annotate and the z-index ladder.
+    #[test]
+    fn overlays_module_owns_picker_annotate_and_the_z_index_ladder() {
+        for contract in [
+            "startPicker: startPicker",
+            "cancelPicker: releasePicker",
+            "readPicked: readPicked",
+            "startAnnotate: startAnnotate",
+            "readAnnotations: readAnnotations",
+            "clearAnnotations: clearAnnotations",
+        ] {
+            assert!(OVERLAYS_SCRIPT.contains(contract), "overlays lack {contract}");
+        }
+
+        assert!(OVERLAYS_SCRIPT.contains("if (e.key === 'Escape')"));
+        assert!(OVERLAYS_SCRIPT.contains("picker.timer = setTimeout(releasePicker, limit);"));
+
+        let router = include_str!("../../../src/http/routers/v1/v1_browser.rs");
+        let bridge = router
+            .split_once("fn eval_overlay(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(
+            bridge.contains("return_by_value: Some(true)"),
+            "overlay bridge does not use cdp value serialization"
+        );
+        assert!(
+            !router.contains("JSON.stringify(window.__refact"),
+            "overlay bridge trusts the page's JSON.stringify"
+        );
+
+        let ladder = [
+            ("Z_ANNOTATION_BACKDROP", 2147483643_u64),
+            ("Z_ANNOTATE_OVERLAY", 2147483645),
+            ("Z_TOOLBAR_HOST", 2147483646),
+            ("Z_ANNOTATION_MARKER", 2147483647),
+            ("Z_CAPTION_INPUT", 2147483647),
+            ("Z_PICKER_OVERLAY", 2147483647),
+        ];
+        let mut previous = 0_u64;
+        for (name, value) in ladder {
+            assert!(
+                OVERLAYS_SCRIPT.contains(&format!("var {name} = {value};")),
+                "overlays lack {name} = {value}"
+            );
+            assert!(previous <= value, "{name} breaks the z-index ordering");
+            previous = value;
+        }
+        assert!(
+            TOOLBAR_SCRIPT.contains("z-index:2147483646"),
+            "toolbar host drifted from Z_TOOLBAR_HOST"
+        );
+    }
+
+    // A blocked page must not be re-injected on every health tick, and a healthy page must not be touched.
+    #[test]
+    fn injection_health_distinguishes_healthy_blocked_and_missing() {
+        assert_eq!(
+            parse_injection_health(Some(&serde_json::json!({"needs": false, "blocked": null}))),
+            InjectionHealth {
+                needs_injection: false,
+                blocked: None
+            }
+        );
+        assert_eq!(
+            parse_injection_health(Some(&serde_json::json!({"needs": false, "blocked": "csp"}))),
+            InjectionHealth {
+                needs_injection: false,
+                blocked: Some("csp".to_string())
+            }
+        );
+        assert_eq!(
+            parse_injection_health(Some(&serde_json::json!({"needs": true, "blocked": null}))),
+            InjectionHealth {
+                needs_injection: true,
+                blocked: None
+            }
+        );
+        assert_eq!(
+            parse_injection_health(None),
+            InjectionHealth {
+                needs_injection: true,
+                blocked: None
+            }
+        );
+        assert_eq!(
+            parse_injection_health(Some(&serde_json::json!("not-an-object"))),
+            InjectionHealth {
+                needs_injection: true,
+                blocked: None
+            }
+        );
+
+        for marker in [
+            "window.__refact_overlays_installed",
+            "window.__refact_toolbar_blocked",
+            "window.__refact_recorder_blocked",
+            "window.__refact_overlays_blocked",
+        ] {
+            assert!(
+                INJECTION_HEALTH_PROBE_JS.contains(marker),
+                "health probe ignores {marker}"
+            );
+        }
+    }
+
+    // Healing only the active tab leaves background tabs permanently un-instrumented.
+    #[test]
+    fn all_tabs_healing_skips_blank_and_internal_tabs_without_repeats() {
+        let source = include_str!("lib.rs");
+        let sweep = source
+            .split_once("pub fn ensure_injection_into_all_tabs(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(sweep.contains("if !visited.insert(target_id.clone())"));
+        assert!(sweep.contains("url.starts_with(\"chrome://\") || url == \"about:blank\""));
+        assert!(sweep.contains("ensure_injection_into_tab(&tab, mask_passwords, action_buffer.clone())"));
+
+        let router = include_str!("../../../src/http/routers/v1/v1_browser.rs");
+        assert!(router.contains("ensure_injection_into_all_tabs(&rt)"));
+    }
+
+    // Inline overlay template strings in the router are what drifted into four divergent copies.
+    #[test]
+    fn router_delegates_overlay_work_to_the_shared_module() {
+        let router = include_str!("../../../src/http/routers/v1/v1_browser.rs");
+        for banned in [
+            "let picker_js = r#\"",
+            "let annotate_js = r#\"",
+            "let clear_js = r#\"",
+            "__refact_annotation_marker",
+            "__refact_picker_overlay",
+            "__refact_annotate_overlay",
+        ] {
+            assert!(
+                !router.contains(banned),
+                "router still ships inline overlay javascript: {banned}"
+            );
+        }
+        for call in [
+            "\"startPicker({})\"",
+            "\"readPicked()\"",
+            "\"cancelPicker()\"",
+            "\"startAnnotate()\"",
+            "\"readAnnotations()\"",
+            "\"clearAnnotations()\"",
+        ] {
+            assert!(router.contains(call), "router never calls {call}");
+        }
+    }
+
+    // A length-preserving mask still discloses the password length to anything reading the transcript.
+    #[test]
+    fn password_mask_is_fixed_length_in_both_layers() {
+        let script = build_recorder_script(true);
+        assert!(script.contains("var MASKED_VALUE = '********';"));
+        assert!(script.contains("value: masked ? MASKED_VALUE : (el.value || ''),"));
+        assert!(!script.contains("'*'.repeat("));
+
+        let mut buf = make_test_buffers();
+        for secret in ["a", "much-longer-password-value"] {
+            buf.handle_recorder_event(&format!(
+                r##"{{"type":"input","selector":"#pass","value":"{secret}","masked":true,"timestamp":1}}"##
+            ));
+        }
+        let masked = buf.flush_action_buffer();
+        let values = masked
+            .iter()
+            .map(|event| match event {
+                RecorderEvent::Input { value, .. } => value.clone(),
+                _ => panic!("expected input"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec!["********".to_string(), "********".to_string()]);
     }
 
     // Browser-side detection plus Rust-side remasking must keep secrets out of serialized recorder output.
@@ -2089,7 +2427,8 @@ mod tests {
         ));
         let payload = serde_json::to_string(&buf.flush_action_buffer()).unwrap();
         assert!(!payload.contains(secret), "secret leaked: {payload}");
-        assert!(payload.contains("*****************"));
+        assert!(payload.contains("********"));
+        assert!(!payload.contains("*********"));
     }
 
     // Page-observable stealth patches must remain separate from isolated automation internals.
