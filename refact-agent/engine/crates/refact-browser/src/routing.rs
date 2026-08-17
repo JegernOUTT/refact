@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use base64::Engine;
 use headless_chrome::Tab;
@@ -15,6 +17,15 @@ use crate::network::{UrlMatcher, mask_headers, mask_text};
 
 const INTERCEPTION_REPORT_CAP: usize = 1_000;
 const HAR_ROUTE_PATTERN: &str = "har-replay";
+const FETCH_MAX_REDIRECTS: usize = 20;
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const FORBIDDEN_REQUEST_HEADERS: [&str; 3] = ["cookie", "host", "content-length"];
+const HOP_BY_HOP_RESPONSE_HEADERS: [&str; 4] = [
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+];
 
 #[derive(Clone, Debug)]
 struct RegisteredRoute {
@@ -41,14 +52,24 @@ pub struct RouteRegistry {
 }
 
 impl RouteRegistry {
-    pub fn add(&self, pattern: UrlPattern, handler: RouteHandler) -> Result<(), String> {
+    pub fn add(
+        &self,
+        pattern: UrlPattern,
+        handler: RouteHandler,
+        times: Option<u32>,
+    ) -> Result<(), String> {
         let matcher = matcher_for_pattern(&pattern)?;
         validate_handler(&handler)?;
+        if times == Some(0) {
+            return Err("Route times must be at least 1".to_string());
+        }
         self.state.lock().unwrap().routes.push(RegisteredRoute {
             info: RouteInfo {
                 pattern,
                 handler,
                 har: None,
+                times_remaining: times,
+                order: 0,
             },
             matcher,
         });
@@ -87,8 +108,11 @@ impl RouteRegistry {
         state
             .routes
             .iter()
+            .rev()
             .map(|route| masked_route_info(&route.info))
             .chain(state.har_replay.as_ref().map(har_route_info))
+            .enumerate()
+            .map(|(order, info)| RouteInfo { order, ..info })
             .collect()
     }
 
@@ -175,124 +199,449 @@ impl RouteRegistry {
         post_data: Option<String>,
         redirect_hop: bool,
     ) -> RequestPausedDecision {
-        let mut state = self.state.lock().unwrap();
-        let route = state
-            .routes
-            .iter()
-            .find(|route| route.matcher.is_match(&url))
-            .cloned();
-        let (pattern, handler) = if let Some(route) = route {
-            (route.info.pattern, route.info.handler)
-        } else if let Some(handler) = state
-            .har_replay
-            .as_ref()
-            .and_then(|replay| replay.match_request(&method, &url))
-        {
-            (UrlPattern::Text(HAR_ROUTE_PATTERN.to_string()), handler)
-        } else {
+        let Some((pattern, handler)) = self.match_chain(&method, &url) else {
             return RequestPausedDecision::Continue(None);
         };
-
-        let (decision, action, status, reason, response_body_preview) = match &handler {
-            RouteHandler::Fulfill {
-                status,
-                headers,
-                body,
-                content_type,
-                body_base64,
-            } => {
-                let mut headers = headers.clone();
-                if let Some(content_type) = content_type {
-                    if !headers
-                        .keys()
-                        .any(|name| name.eq_ignore_ascii_case("content-type"))
-                    {
-                        headers.insert("Content-Type".to_string(), content_type.clone());
-                    }
-                }
-                let body_wire = body.as_ref().map(|body| {
-                    if *body_base64 {
-                        body.clone()
-                    } else {
-                        base64::engine::general_purpose::STANDARD.encode(body.as_bytes())
-                    }
-                });
-                let response_body_preview = body.as_ref().map(|body| {
-                    if *body_base64 {
-                        "[base64 body]".to_string()
-                    } else {
-                        mask_text(body)
-                    }
-                });
-                (
-                    RequestPausedDecision::Fulfill(Fetch::FulfillRequest {
-                        request_id,
-                        response_code: *status as u32,
-                        response_headers: Some(headers_to_cdp(&headers)),
-                        binary_response_headers: None,
-                        body: body_wire,
-                        response_phrase: None,
-                    }),
-                    "fulfill".to_string(),
-                    Some(*status),
-                    None,
-                    response_body_preview,
-                )
-            }
-            RouteHandler::Abort { reason } => (
-                RequestPausedDecision::Fail(Fetch::FailRequest {
-                    request_id,
-                    error_reason: parse_error_reason(reason)
-                        .unwrap_or(Network::ErrorReason::Failed),
-                }),
-                "abort".to_string(),
-                None,
-                Some(reason.clone()),
-                None,
-            ),
-            RouteHandler::Continue {
-                url,
-                method,
-                headers,
-                post_data,
-            } => (
-                RequestPausedDecision::Continue(Some(Fetch::ContinueRequest {
-                    request_id,
-                    url: url.clone(),
-                    method: method.clone(),
-                    post_data: post_data.as_ref().map(|data| {
-                        base64::engine::general_purpose::STANDARD.encode(data.as_bytes())
-                    }),
-                    headers: headers.as_ref().map(|overrides| {
-                        headers_to_cdp(&merge_headers(&request_headers, overrides))
-                    }),
-                    intercept_response: None,
-                })),
-                "continue".to_string(),
-                None,
-                None,
-                None,
-            ),
-        };
-
+        let outcome = execute_handler(
+            request_id,
+            &handler,
+            &url,
+            &method,
+            &request_headers,
+            post_data.as_deref(),
+        );
+        let mut state = self.state.lock().unwrap();
         state.interceptions.push(RouteInterception {
             url: mask_text(&url),
             method,
             pattern: mask_pattern(&pattern),
-            action,
+            action: outcome.action,
             request_headers: mask_headers(request_headers),
             request_body_preview: post_data.map(|data| mask_text(&data)),
-            response_body_preview,
-            status,
-            reason,
+            response_body_preview: outcome.response_body_preview,
+            status: outcome.status,
+            reason: outcome.reason,
             redirect_hop,
         });
         if state.interceptions.len() > INTERCEPTION_REPORT_CAP {
             let excess = state.interceptions.len() - INTERCEPTION_REPORT_CAP;
             state.interceptions.drain(..excess);
         }
-        decision
+        outcome.decision
     }
+
+    fn match_chain(&self, method: &str, url: &str) -> Option<(UrlPattern, RouteHandler)> {
+        let mut state = self.state.lock().unwrap();
+        let mut fallback_pattern = None;
+        let mut expired = Vec::new();
+        let mut matched = None;
+        for index in (0..state.routes.len()).rev() {
+            if !state.routes[index].matcher.is_match(url) {
+                continue;
+            }
+            let route = &mut state.routes[index];
+            if let Some(remaining) = route.info.times_remaining.as_mut() {
+                *remaining = remaining.saturating_sub(1);
+                if *remaining == 0 {
+                    expired.push(index);
+                }
+            }
+            if matches!(route.info.handler, RouteHandler::Fallback) {
+                fallback_pattern = Some(route.info.pattern.clone());
+                continue;
+            }
+            matched = Some((route.info.pattern.clone(), route.info.handler.clone()));
+            break;
+        }
+        for index in expired {
+            state.routes.remove(index);
+        }
+        matched
+            .or_else(|| {
+                state
+                    .har_replay
+                    .as_ref()
+                    .and_then(|replay| replay.match_request(method, url))
+                    .map(|handler| (UrlPattern::Text(HAR_ROUTE_PATTERN.to_string()), handler))
+            })
+            .or_else(|| fallback_pattern.map(|pattern| (pattern, RouteHandler::Fallback)))
+    }
+}
+
+struct HandlerOutcome {
+    decision: RequestPausedDecision,
+    action: String,
+    status: Option<u16>,
+    reason: Option<String>,
+    response_body_preview: Option<String>,
+}
+
+struct UpstreamResponse {
+    status: u16,
+    headers: BTreeMap<String, String>,
+    body: Option<String>,
+    body_base64: bool,
+}
+
+fn execute_handler(
+    request_id: String,
+    handler: &RouteHandler,
+    url: &str,
+    method: &str,
+    request_headers: &BTreeMap<String, String>,
+    post_data: Option<&str>,
+) -> HandlerOutcome {
+    match handler {
+        RouteHandler::Fulfill {
+            status,
+            headers,
+            body,
+            content_type,
+            body_base64,
+            ..
+        } => fulfill_outcome(
+            request_id,
+            "fulfill",
+            *status,
+            headers.clone(),
+            body.clone(),
+            content_type.clone(),
+            *body_base64,
+        ),
+        RouteHandler::Abort { reason } => HandlerOutcome {
+            decision: RequestPausedDecision::Fail(Fetch::FailRequest {
+                request_id,
+                error_reason: parse_error_reason(reason).unwrap_or(Network::ErrorReason::Failed),
+            }),
+            action: "abort".to_string(),
+            status: None,
+            reason: Some(reason.clone()),
+            response_body_preview: None,
+        },
+        RouteHandler::Continue {
+            url,
+            method,
+            headers,
+            post_data,
+        } => HandlerOutcome {
+            decision: RequestPausedDecision::Continue(Some(Fetch::ContinueRequest {
+                request_id,
+                url: url.clone(),
+                method: method.clone(),
+                post_data: post_data
+                    .as_ref()
+                    .map(|data| base64::engine::general_purpose::STANDARD.encode(data.as_bytes())),
+                headers: headers.as_ref().map(|overrides| {
+                    headers_to_cdp(&merge_request_headers(request_headers, Some(overrides)))
+                }),
+                intercept_response: None,
+            })),
+            action: "continue".to_string(),
+            status: None,
+            reason: None,
+            response_body_preview: None,
+        },
+        RouteHandler::Fallback => HandlerOutcome {
+            decision: RequestPausedDecision::Continue(None),
+            action: "fallback".to_string(),
+            status: None,
+            reason: None,
+            response_body_preview: None,
+        },
+        RouteHandler::FetchAndFulfill {
+            url: url_override,
+            method: method_override,
+            headers: header_overrides,
+            post_data: post_override,
+            status: status_override,
+            response_headers,
+            body: body_override,
+            body_base64,
+        } => {
+            let target_url = url_override.clone().unwrap_or_else(|| url.to_string());
+            let target_method = method_override
+                .clone()
+                .unwrap_or_else(|| method.to_string());
+            let headers = merge_request_headers(request_headers, header_overrides.as_ref());
+            let request_body = post_override
+                .clone()
+                .or_else(|| post_data.map(str::to_string));
+            match fetch_upstream(&target_url, &target_method, &headers, request_body) {
+                Ok(response) => {
+                    let headers = merge_headers(&response.headers, response_headers);
+                    let (body, encoded) = match body_override {
+                        Some(body) => (Some(body.clone()), *body_base64),
+                        None => (response.body, response.body_base64),
+                    };
+                    fulfill_outcome(
+                        request_id,
+                        "fetch_and_fulfill",
+                        status_override.unwrap_or(response.status),
+                        headers,
+                        body,
+                        None,
+                        encoded,
+                    )
+                }
+                Err(error) => HandlerOutcome {
+                    decision: RequestPausedDecision::Fail(Fetch::FailRequest {
+                        request_id,
+                        error_reason: Network::ErrorReason::Failed,
+                    }),
+                    action: "abort".to_string(),
+                    status: None,
+                    reason: Some(mask_text(&error)),
+                    response_body_preview: None,
+                },
+            }
+        }
+    }
+}
+
+fn fulfill_outcome(
+    request_id: String,
+    action: &str,
+    status: u16,
+    mut headers: BTreeMap<String, String>,
+    body: Option<String>,
+    content_type: Option<String>,
+    body_base64: bool,
+) -> HandlerOutcome {
+    if let Some(content_type) = content_type {
+        if !headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("content-type"))
+        {
+            headers.insert("Content-Type".to_string(), content_type);
+        }
+    }
+    let body_wire = body.as_ref().map(|body| {
+        if body_base64 {
+            body.clone()
+        } else {
+            base64::engine::general_purpose::STANDARD.encode(body.as_bytes())
+        }
+    });
+    let response_body_preview = body.as_ref().map(|body| {
+        if body_base64 {
+            "[base64 body]".to_string()
+        } else {
+            mask_text(body)
+        }
+    });
+    HandlerOutcome {
+        decision: RequestPausedDecision::Fulfill(Fetch::FulfillRequest {
+            request_id,
+            response_code: status as u32,
+            response_headers: Some(headers_to_cdp(&headers)),
+            binary_response_headers: None,
+            body: body_wire,
+            response_phrase: None,
+        }),
+        action: action.to_string(),
+        status: Some(status),
+        reason: None,
+        response_body_preview,
+    }
+}
+
+fn fetch_client() -> Result<&'static reqwest::blocking::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::blocking::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .redirect(reqwest::redirect::Policy::limited(FETCH_MAX_REDIRECTS))
+                .timeout(FETCH_TIMEOUT)
+                .build()
+                .map_err(|error| format!("Failed to build route fetch client: {error}"))
+        })
+        .as_ref()
+        .map_err(|error| error.clone())
+}
+
+fn fetch_upstream(
+    url: &str,
+    method: &str,
+    headers: &BTreeMap<String, String>,
+    body: Option<String>,
+) -> Result<UpstreamResponse, String> {
+    let method = reqwest::Method::from_bytes(method.to_ascii_uppercase().as_bytes())
+        .map_err(|error| format!("Invalid route fetch method: {error}"))?;
+    let mut request = fetch_client()?.request(method, url);
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    if let Some(body) = body {
+        request = request.body(body);
+    }
+    let response = request
+        .send()
+        .map_err(|error| format!("Route fetch failed: {error}"))?;
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .filter(|(name, _)| !is_hop_by_hop_response_header(name.as_str()))
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.to_string(), value.to_string()))
+        })
+        .collect();
+    let bytes = response
+        .bytes()
+        .map_err(|error| format!("Route fetch response failed: {error}"))?;
+    let (body, body_base64) = match String::from_utf8(bytes.to_vec()) {
+        Ok(text) => (Some(text), false),
+        Err(error) => (
+            Some(base64::engine::general_purpose::STANDARD.encode(error.into_bytes())),
+            true,
+        ),
+    };
+    Ok(UpstreamResponse {
+        status,
+        headers,
+        body,
+        body_base64,
+    })
+}
+
+pub fn normalize_route_handler(
+    handler: RouteHandler,
+    artifacts_dir: &Path,
+) -> Result<RouteHandler, String> {
+    let RouteHandler::Fulfill {
+        status,
+        headers,
+        body,
+        path,
+        json,
+        content_type,
+        body_base64,
+    } = handler
+    else {
+        return Ok(handler);
+    };
+    if usize::from(body.is_some()) + usize::from(path.is_some()) + usize::from(json.is_some()) > 1 {
+        return Err("Route fulfill accepts only one of body, path, or json".to_string());
+    }
+    let (body, content_type, body_base64) = match (path, json) {
+        (Some(path), _) => {
+            let resolved = resolve_fulfill_path(&path, artifacts_dir)?;
+            let bytes = std::fs::read(&resolved)
+                .map_err(|error| format!("Failed to read route fulfill path: {error}"))?;
+            let content_type =
+                content_type.or_else(|| Some(content_type_for_path(&resolved).to_string()));
+            match String::from_utf8(bytes) {
+                Ok(text) => (Some(text), content_type, false),
+                Err(error) => (
+                    Some(base64::engine::general_purpose::STANDARD.encode(error.into_bytes())),
+                    content_type,
+                    true,
+                ),
+            }
+        }
+        (_, Some(json)) => (
+            Some(
+                serde_json::to_string(&json)
+                    .map_err(|error| format!("Invalid route fulfill json: {error}"))?,
+            ),
+            Some(content_type.unwrap_or_else(|| "application/json".to_string())),
+            false,
+        ),
+        _ => (body, content_type, body_base64),
+    };
+    Ok(RouteHandler::Fulfill {
+        status,
+        headers,
+        body,
+        path: None,
+        json: None,
+        content_type,
+        body_base64,
+    })
+}
+
+fn resolve_fulfill_path(path: &str, artifacts_dir: &Path) -> Result<PathBuf, String> {
+    let candidate = Path::new(path);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        artifacts_dir.join(candidate)
+    };
+    let canonical = resolved
+        .canonicalize()
+        .map_err(|_| format!("Route fulfill path does not exist: {path}"))?;
+    if !candidate.is_absolute() {
+        let root = artifacts_dir
+            .canonicalize()
+            .map_err(|error| format!("Failed to resolve artifact directory: {error}"))?;
+        if !canonical.starts_with(&root) {
+            return Err(format!(
+                "Route fulfill path escapes the artifact directory: {path}"
+            ));
+        }
+    }
+    if !canonical.is_file() {
+        return Err(format!("Route fulfill path is not a file: {path}"));
+    }
+    Ok(canonical)
+}
+
+fn content_type_for_path(path: &Path) -> &'static str {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("html" | "htm") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        Some("json") => "application/json",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("md") => "text/markdown; charset=utf-8",
+        Some("csv") => "text/csv; charset=utf-8",
+        Some("xml") => "application/xml",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        Some("pdf") => "application/pdf",
+        Some("wasm") => "application/wasm",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+fn is_forbidden_request_header(name: &str) -> bool {
+    FORBIDDEN_REQUEST_HEADERS
+        .iter()
+        .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+}
+
+fn is_hop_by_hop_response_header(name: &str) -> bool {
+    HOP_BY_HOP_RESPONSE_HEADERS
+        .iter()
+        .any(|hop| name.eq_ignore_ascii_case(hop))
+}
+
+fn merge_request_headers(
+    existing: &BTreeMap<String, String>,
+    overrides: Option<&BTreeMap<String, String>>,
+) -> BTreeMap<String, String> {
+    let Some(overrides) = overrides else {
+        return existing.clone();
+    };
+    let allowed = overrides
+        .iter()
+        .filter(|(name, _)| !is_forbidden_request_header(name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    merge_headers(existing, &allowed)
 }
 
 fn matcher_for_pattern(pattern: &UrlPattern) -> Result<UrlMatcher, String> {
@@ -304,10 +653,19 @@ fn matcher_for_pattern(pattern: &UrlPattern) -> Result<UrlMatcher, String> {
 
 fn validate_handler(handler: &RouteHandler) -> Result<(), String> {
     match handler {
-        RouteHandler::Fulfill { status, .. } if !(100..=599).contains(status) => Err(format!(
+        RouteHandler::Fulfill { status, .. }
+        | RouteHandler::FetchAndFulfill {
+            status: Some(status),
+            ..
+        } if !(100..=599).contains(status) => Err(format!(
             "Route fulfill status must be between 100 and 599, got {status}"
         )),
         RouteHandler::Fulfill {
+            body: Some(body),
+            body_base64: true,
+            ..
+        }
+        | RouteHandler::FetchAndFulfill {
             body: Some(body),
             body_base64: true,
             ..
@@ -397,24 +755,32 @@ fn merge_headers(
     merged
 }
 
+fn masked_body(body: Option<&String>, body_base64: bool) -> Option<String> {
+    body.map(|body| {
+        if body_base64 {
+            "[base64 body]".to_string()
+        } else {
+            mask_text(body)
+        }
+    })
+}
+
 fn masked_route_info(info: &RouteInfo) -> RouteInfo {
     let handler = match &info.handler {
         RouteHandler::Fulfill {
             status,
             headers,
             body,
+            path,
+            json,
             content_type,
             body_base64,
         } => RouteHandler::Fulfill {
             status: *status,
             headers: mask_headers(headers.clone()),
-            body: body.as_ref().map(|body| {
-                if *body_base64 {
-                    "[base64 body]".to_string()
-                } else {
-                    mask_text(body)
-                }
-            }),
+            body: masked_body(body.as_ref(), *body_base64),
+            path: path.as_ref().map(|path| mask_text(path)),
+            json: json.clone(),
             content_type: content_type.clone(),
             body_base64: *body_base64,
         },
@@ -432,11 +798,33 @@ fn masked_route_info(info: &RouteInfo) -> RouteInfo {
             headers: headers.clone().map(mask_headers),
             post_data: post_data.as_ref().map(|data| mask_text(data)),
         },
+        RouteHandler::Fallback => RouteHandler::Fallback,
+        RouteHandler::FetchAndFulfill {
+            url,
+            method,
+            headers,
+            post_data,
+            status,
+            response_headers,
+            body,
+            body_base64,
+        } => RouteHandler::FetchAndFulfill {
+            url: url.as_ref().map(|url| mask_text(url)),
+            method: method.clone(),
+            headers: headers.clone().map(mask_headers),
+            post_data: post_data.as_ref().map(|data| mask_text(data)),
+            status: *status,
+            response_headers: mask_headers(response_headers.clone()),
+            body: masked_body(body.as_ref(), *body_base64),
+            body_base64: *body_base64,
+        },
     };
     RouteInfo {
         pattern: mask_pattern(&info.pattern),
         handler,
         har: info.har.clone(),
+        times_remaining: info.times_remaining,
+        order: info.order,
     }
 }
 
@@ -462,6 +850,8 @@ fn har_route_info(replay: &HarReplay) -> RouteInfo {
             entry_count: replay.entry_count(),
             not_found: replay.not_found(),
         }),
+        times_remaining: None,
+        order: 0,
     }
 }
 
@@ -485,22 +875,46 @@ mod tests {
         (UrlPattern::Text(pattern.to_string()), handler)
     }
 
+    fn fulfill(status: u16, body: &str) -> RouteHandler {
+        RouteHandler::Fulfill {
+            status,
+            headers: BTreeMap::new(),
+            body: Some(body.to_string()),
+            path: None,
+            json: None,
+            content_type: None,
+            body_base64: false,
+        }
+    }
+
+    fn abort(reason: &str) -> RouteHandler {
+        RouteHandler::Abort {
+            reason: reason.to_string(),
+        }
+    }
+
     fn har_replay(dir: &tempfile::TempDir, name: &str, not_found: HarNotFound) -> HarReplay {
         let path = dir.path().join(name);
         std::fs::write(&path, HAR_FIXTURE).unwrap();
         HarReplay::load(&path, None, not_found).unwrap()
     }
 
+    fn decide_get(registry: &RouteRegistry, request_id: &str, url: &str) -> RequestPausedDecision {
+        registry.decide(
+            request_id.to_string(),
+            url.to_string(),
+            "GET".to_string(),
+            BTreeMap::new(),
+            None,
+            false,
+        )
+    }
+
     #[test]
     fn registry_add_remove_and_clear_reuse_url_matcher() {
         let registry = RouteRegistry::default();
-        let (pattern, handler) = route(
-            "https://example.com/**",
-            RouteHandler::Abort {
-                reason: "blockedbyclient".to_string(),
-            },
-        );
-        registry.add(pattern.clone(), handler).unwrap();
+        let (pattern, handler) = route("https://example.com/**", abort("blockedbyclient"));
+        registry.add(pattern.clone(), handler, None).unwrap();
         registry
             .add(
                 UrlPattern::Regex {
@@ -513,6 +927,7 @@ mod tests {
                     headers: None,
                     post_data: None,
                 },
+                None,
             )
             .unwrap();
 
@@ -533,9 +948,12 @@ mod tests {
                     status: 99,
                     headers: BTreeMap::new(),
                     body: None,
+                    path: None,
+                    json: None,
                     content_type: None,
                     body_base64: false,
                 },
+                None,
             )
             .is_err());
         assert!(registry
@@ -545,9 +963,12 @@ mod tests {
                     status: 200,
                     headers: BTreeMap::new(),
                     body: Some("not base64".to_string()),
+                    path: None,
+                    json: None,
                     content_type: None,
                     body_base64: true,
                 },
+                None,
             )
             .is_err());
         assert!(registry.is_empty());
@@ -575,13 +996,8 @@ mod tests {
     fn unroute_all_clears_har_replay_and_counts_it() {
         let dir = tempfile::tempdir().unwrap();
         let registry = RouteRegistry::default();
-        let (pattern, handler) = route(
-            "https://example.com/**",
-            RouteHandler::Abort {
-                reason: "blockedbyclient".to_string(),
-            },
-        );
-        registry.add(pattern, handler).unwrap();
+        let (pattern, handler) = route("https://example.com/**", abort("blockedbyclient"));
+        registry.add(pattern, handler, None).unwrap();
         registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Abort));
 
         assert_eq!(registry.list().len(), 2);
@@ -594,13 +1010,8 @@ mod tests {
     fn targeted_unroute_removes_only_the_har_replay() {
         let dir = tempfile::tempdir().unwrap();
         let registry = RouteRegistry::default();
-        let (pattern, handler) = route(
-            "https://example.com/**",
-            RouteHandler::Abort {
-                reason: "blockedbyclient".to_string(),
-            },
-        );
-        registry.add(pattern.clone(), handler).unwrap();
+        let (pattern, handler) = route("https://example.com/**", abort("blockedbyclient"));
+        registry.add(pattern.clone(), handler, None).unwrap();
         registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Fallback));
 
         assert_eq!(registry.remove(Some(&pattern)), 1);
@@ -638,14 +1049,7 @@ mod tests {
         let registry = RouteRegistry::default();
         registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Abort));
 
-        let decision = registry.decide(
-            "one".to_string(),
-            "https://example.com/missing".to_string(),
-            "GET".to_string(),
-            BTreeMap::new(),
-            None,
-            false,
-        );
+        let decision = decide_get(&registry, "one", "https://example.com/missing");
         assert!(matches!(decision, RequestPausedDecision::Fail(_)));
 
         let reports = registry.drain_interceptions();
@@ -657,14 +1061,7 @@ mod tests {
         assert_eq!(reports[0].action, "abort");
 
         registry.remove(None);
-        let after = registry.decide(
-            "two".to_string(),
-            "https://example.com/missing".to_string(),
-            "GET".to_string(),
-            BTreeMap::new(),
-            None,
-            false,
-        );
+        let after = decide_get(&registry, "two", "https://example.com/missing");
         assert!(matches!(after, RequestPausedDecision::Continue(None)));
         assert!(registry.drain_interceptions().is_empty());
     }
@@ -702,6 +1099,7 @@ mod tests {
                     )])),
                     post_data: Some("token=hidden".to_string()),
                 },
+                None,
             )
             .unwrap();
 
@@ -736,12 +1134,12 @@ mod tests {
                 status: 201,
                 headers: BTreeMap::new(),
                 body: Some("ok".to_string()),
+                path: None,
+                json: None,
                 content_type: Some("text/plain".to_string()),
                 body_base64: false,
             },
-            RouteHandler::Abort {
-                reason: "blockedbyclient".to_string(),
-            },
+            abort("blockedbyclient"),
             RouteHandler::Continue {
                 url: Some("https://example.com/other".to_string()),
                 method: Some("PATCH".to_string()),
@@ -755,16 +1153,10 @@ mod tests {
                 .add(
                     UrlPattern::Text("https://example.com/**".to_string()),
                     handler,
+                    None,
                 )
                 .unwrap();
-            let decision = registry.decide(
-                index.to_string(),
-                "https://example.com/api".to_string(),
-                "GET".to_string(),
-                BTreeMap::new(),
-                None,
-                false,
-            );
+            let decision = decide_get(&registry, &index.to_string(), "https://example.com/api");
             match index {
                 0 => assert!(matches!(decision, RequestPausedDecision::Fulfill(_))),
                 1 => assert!(matches!(decision, RequestPausedDecision::Fail(_))),
@@ -772,5 +1164,466 @@ mod tests {
             }
             assert_eq!(registry.drain_interceptions().len(), 1);
         }
+    }
+
+    #[test]
+    fn newest_matching_route_wins_and_list_reports_chain_order() {
+        let registry = RouteRegistry::default();
+        let pattern = UrlPattern::Text("https://example.com/**".to_string());
+        registry
+            .add(pattern.clone(), fulfill(200, "oldest"), None)
+            .unwrap();
+        registry
+            .add(pattern.clone(), fulfill(201, "newest"), None)
+            .unwrap();
+
+        decide_get(&registry, "one", "https://example.com/api");
+        let reports = registry.drain_interceptions();
+        assert_eq!(reports[0].status, Some(201));
+        assert_eq!(reports[0].response_body_preview.as_deref(), Some("newest"));
+
+        let listed = registry.list();
+        assert_eq!(listed[0].order, 0);
+        assert_eq!(listed[1].order, 1);
+        assert!(matches!(
+            &listed[0].handler,
+            RouteHandler::Fulfill { body, .. } if body.as_deref() == Some("newest")
+        ));
+    }
+
+    #[test]
+    fn fallback_handler_passes_to_the_next_older_matching_route() {
+        let registry = RouteRegistry::default();
+        let pattern = UrlPattern::Text("https://example.com/**".to_string());
+        registry
+            .add(pattern.clone(), fulfill(200, "oldest"), None)
+            .unwrap();
+        registry
+            .add(pattern.clone(), RouteHandler::Fallback, None)
+            .unwrap();
+
+        let decision = decide_get(&registry, "one", "https://example.com/api");
+        assert!(matches!(decision, RequestPausedDecision::Fulfill(_)));
+        let reports = registry.drain_interceptions();
+        assert_eq!(reports[0].action, "fulfill");
+        assert_eq!(reports[0].status, Some(200));
+    }
+
+    #[test]
+    fn fallback_chain_traverses_into_the_har_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = RouteRegistry::default();
+        registry
+            .add(
+                UrlPattern::Text("https://example.com/**".to_string()),
+                RouteHandler::Fallback,
+                None,
+            )
+            .unwrap();
+        registry.set_har_replay(har_replay(&dir, "page.har", HarNotFound::Abort));
+
+        let decision = decide_get(&registry, "one", "https://example.com/api");
+        assert!(matches!(decision, RequestPausedDecision::Fulfill(_)));
+        let reports = registry.drain_interceptions();
+        assert_eq!(
+            reports[0].pattern,
+            UrlPattern::Text("har-replay".to_string())
+        );
+        assert_eq!(reports[0].response_body_preview.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn fallback_without_a_tail_reaches_the_network_and_is_still_reported() {
+        let registry = RouteRegistry::default();
+        registry
+            .add(
+                UrlPattern::Text("https://example.com/**".to_string()),
+                RouteHandler::Fallback,
+                None,
+            )
+            .unwrap();
+
+        let decision = decide_get(&registry, "one", "https://example.com/api");
+        assert!(matches!(decision, RequestPausedDecision::Continue(None)));
+        let reports = registry.drain_interceptions();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].action, "fallback");
+    }
+
+    #[test]
+    fn times_counts_down_and_expires_the_route_from_the_registry_and_listing() {
+        let registry = RouteRegistry::default();
+        let pattern = UrlPattern::Text("https://example.com/**".to_string());
+        registry
+            .add(pattern.clone(), fulfill(200, "mocked"), Some(2))
+            .unwrap();
+
+        assert_eq!(registry.list()[0].times_remaining, Some(2));
+        assert!(matches!(
+            decide_get(&registry, "one", "https://example.com/api"),
+            RequestPausedDecision::Fulfill(_)
+        ));
+        assert_eq!(registry.list()[0].times_remaining, Some(1));
+
+        assert!(matches!(
+            decide_get(&registry, "two", "https://example.com/api"),
+            RequestPausedDecision::Fulfill(_)
+        ));
+        assert!(registry.is_empty());
+        assert!(registry.list().is_empty());
+
+        assert!(matches!(
+            decide_get(&registry, "three", "https://example.com/api"),
+            RequestPausedDecision::Continue(None)
+        ));
+    }
+
+    #[test]
+    fn traversed_fallback_handlers_also_consume_their_times_budget() {
+        let registry = RouteRegistry::default();
+        let pattern = UrlPattern::Text("https://example.com/**".to_string());
+        registry
+            .add(pattern.clone(), fulfill(200, "oldest"), None)
+            .unwrap();
+        registry
+            .add(pattern.clone(), RouteHandler::Fallback, Some(1))
+            .unwrap();
+
+        decide_get(&registry, "one", "https://example.com/api");
+        let listed = registry.list();
+        assert_eq!(listed.len(), 1);
+        assert!(matches!(
+            &listed[0].handler,
+            RouteHandler::Fulfill { body, .. } if body.as_deref() == Some("oldest")
+        ));
+    }
+
+    #[test]
+    fn unmatched_routes_keep_their_times_budget() {
+        let registry = RouteRegistry::default();
+        registry
+            .add(
+                UrlPattern::Text("https://example.com/api/**".to_string()),
+                fulfill(200, "mocked"),
+                Some(1),
+            )
+            .unwrap();
+
+        decide_get(&registry, "one", "https://example.com/assets/app.js");
+        assert_eq!(registry.list()[0].times_remaining, Some(1));
+    }
+
+    #[test]
+    fn zero_times_is_rejected_at_registration() {
+        let registry = RouteRegistry::default();
+        let error = registry
+            .add(
+                UrlPattern::Text("https://example.com/**".to_string()),
+                fulfill(200, "mocked"),
+                Some(0),
+            )
+            .unwrap_err();
+
+        assert!(error.contains("times"), "unexpected error: {error}");
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn targeted_unroute_removes_every_handler_of_that_pattern() {
+        let registry = RouteRegistry::default();
+        let pattern = UrlPattern::Text("https://example.com/**".to_string());
+        registry
+            .add(pattern.clone(), fulfill(200, "oldest"), None)
+            .unwrap();
+        registry
+            .add(pattern.clone(), RouteHandler::Fallback, None)
+            .unwrap();
+        registry
+            .add(
+                UrlPattern::Text("https://other.dev/**".to_string()),
+                abort("failed"),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(registry.remove(Some(&pattern)), 2);
+        assert_eq!(registry.list().len(), 1);
+    }
+
+    #[test]
+    fn fulfill_from_path_infers_the_content_type_from_the_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("mock.json"), r#"{"ok":true}"#).unwrap();
+
+        let normalized = normalize_route_handler(
+            RouteHandler::Fulfill {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: None,
+                path: Some("mock.json".to_string()),
+                json: None,
+                content_type: None,
+                body_base64: false,
+            },
+            dir.path(),
+        )
+        .unwrap();
+
+        let RouteHandler::Fulfill {
+            body,
+            path,
+            content_type,
+            body_base64,
+            ..
+        } = normalized
+        else {
+            panic!("expected a fulfill handler");
+        };
+        assert_eq!(body.as_deref(), Some(r#"{"ok":true}"#));
+        assert_eq!(path, None);
+        assert_eq!(content_type.as_deref(), Some("application/json"));
+        assert!(!body_base64);
+    }
+
+    #[test]
+    fn fulfill_from_path_encodes_binary_files_as_base64() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pixel.png"), [0xffu8, 0xd8, 0x00, 0x01]).unwrap();
+
+        let normalized = normalize_route_handler(
+            RouteHandler::Fulfill {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: None,
+                path: Some("pixel.png".to_string()),
+                json: None,
+                content_type: None,
+                body_base64: false,
+            },
+            dir.path(),
+        )
+        .unwrap();
+
+        let RouteHandler::Fulfill {
+            body,
+            content_type,
+            body_base64,
+            ..
+        } = normalized
+        else {
+            panic!("expected a fulfill handler");
+        };
+        assert!(body_base64);
+        assert_eq!(content_type.as_deref(), Some("image/png"));
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(body.unwrap())
+                .unwrap(),
+            vec![0xffu8, 0xd8, 0x00, 0x01]
+        );
+    }
+
+    #[test]
+    fn fulfill_path_rejects_traversal_and_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().parent().unwrap().join("outside-route.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        let artifacts = dir.path().join("artifacts");
+        std::fs::create_dir(&artifacts).unwrap();
+
+        let traversal = normalize_route_handler(
+            RouteHandler::Fulfill {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: None,
+                path: Some("../../outside-route.txt".to_string()),
+                json: None,
+                content_type: None,
+                body_base64: false,
+            },
+            &artifacts,
+        )
+        .unwrap_err();
+        assert!(traversal.contains("escapes"), "unexpected: {traversal}");
+
+        let missing = normalize_route_handler(
+            RouteHandler::Fulfill {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: None,
+                path: Some("nope.txt".to_string()),
+                json: None,
+                content_type: None,
+                body_base64: false,
+            },
+            &artifacts,
+        )
+        .unwrap_err();
+        assert!(missing.contains("does not exist"), "unexpected: {missing}");
+
+        std::fs::remove_file(&outside).unwrap();
+    }
+
+    #[test]
+    fn fulfill_json_shorthand_sets_the_body_and_content_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let normalized = normalize_route_handler(
+            RouteHandler::Fulfill {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: None,
+                path: None,
+                json: Some(serde_json::json!({"source": "mocked"})),
+                content_type: None,
+                body_base64: false,
+            },
+            dir.path(),
+        )
+        .unwrap();
+
+        let RouteHandler::Fulfill {
+            body,
+            json,
+            content_type,
+            ..
+        } = normalized
+        else {
+            panic!("expected a fulfill handler");
+        };
+        assert_eq!(body.as_deref(), Some(r#"{"source":"mocked"}"#));
+        assert_eq!(json, None);
+        assert_eq!(content_type.as_deref(), Some("application/json"));
+    }
+
+    #[test]
+    fn fulfill_rejects_more_than_one_body_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = normalize_route_handler(
+            RouteHandler::Fulfill {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: Some("inline".to_string()),
+                path: None,
+                json: Some(serde_json::json!({})),
+                content_type: None,
+                body_base64: false,
+            },
+            dir.path(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("only one of"), "unexpected: {error}");
+    }
+
+    #[test]
+    fn non_fulfill_handlers_pass_normalization_through_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = RouteHandler::FetchAndFulfill {
+            url: None,
+            method: None,
+            headers: None,
+            post_data: None,
+            status: Some(500),
+            response_headers: BTreeMap::new(),
+            body: None,
+            body_base64: false,
+        };
+
+        assert_eq!(
+            normalize_route_handler(handler.clone(), dir.path()).unwrap(),
+            handler
+        );
+    }
+
+    #[test]
+    fn forbidden_request_headers_keep_their_original_values() {
+        let original = BTreeMap::from([
+            ("Cookie".to_string(), "session=real".to_string()),
+            ("Host".to_string(), "example.com".to_string()),
+            ("Content-Length".to_string(), "4".to_string()),
+            ("Accept".to_string(), "text/html".to_string()),
+        ]);
+        let overrides = BTreeMap::from([
+            ("cookie".to_string(), "session=forged".to_string()),
+            ("host".to_string(), "evil.dev".to_string()),
+            ("content-length".to_string(), "9999".to_string()),
+            ("accept".to_string(), "application/json".to_string()),
+        ]);
+
+        let merged = merge_request_headers(&original, Some(&overrides));
+
+        assert_eq!(merged["Cookie"], "session=real");
+        assert_eq!(merged["Host"], "example.com");
+        assert_eq!(merged["Content-Length"], "4");
+        assert_eq!(merged["accept"], "application/json");
+        assert!(!merged.contains_key("Accept"));
+    }
+
+    #[test]
+    fn fetch_and_fulfill_reports_an_abort_when_the_upstream_request_fails() {
+        let registry = RouteRegistry::default();
+        registry
+            .add(
+                UrlPattern::Text("https://example.invalid/**".to_string()),
+                RouteHandler::FetchAndFulfill {
+                    url: None,
+                    method: None,
+                    headers: None,
+                    post_data: None,
+                    status: None,
+                    response_headers: BTreeMap::new(),
+                    body: None,
+                    body_base64: false,
+                },
+                None,
+            )
+            .unwrap();
+
+        let decision = decide_get(&registry, "one", "https://example.invalid/api");
+        assert!(matches!(decision, RequestPausedDecision::Fail(_)));
+        let reports = registry.drain_interceptions();
+        assert_eq!(reports[0].action, "abort");
+        assert!(reports[0]
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Route fetch failed")));
+    }
+
+    #[test]
+    fn fetch_and_fulfill_validates_its_status_override_and_base64_body() {
+        let registry = RouteRegistry::default();
+        assert!(registry
+            .add(
+                UrlPattern::Text("https://example.com/**".to_string()),
+                RouteHandler::FetchAndFulfill {
+                    url: None,
+                    method: None,
+                    headers: None,
+                    post_data: None,
+                    status: Some(700),
+                    response_headers: BTreeMap::new(),
+                    body: None,
+                    body_base64: false,
+                },
+                None,
+            )
+            .is_err());
+        assert!(registry
+            .add(
+                UrlPattern::Text("https://example.com/**".to_string()),
+                RouteHandler::FetchAndFulfill {
+                    url: None,
+                    method: None,
+                    headers: None,
+                    post_data: None,
+                    status: None,
+                    response_headers: BTreeMap::new(),
+                    body: Some("not base64".to_string()),
+                    body_base64: true,
+                },
+                None,
+            )
+            .is_err());
+        assert!(registry.is_empty());
     }
 }

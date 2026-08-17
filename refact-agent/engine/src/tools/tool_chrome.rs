@@ -96,7 +96,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Waiting: wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. wait_for_url takes a plain substring in `pattern` and matches when the current URL contains it, unlike the glob/regex `pattern` used by route and wait_for_request. ",
     "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, or `wait_for_selector` for genuine synchronization.\n",
     "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, pdf, styles, tab_log. Screenshots support full_page, clip, type, quality, scale, omit_background, animations, caret, mask, mask_color, and style; screenshot_element uses locator or ref. PDF supports Chromium print options and returns an artifact path.\n",
-    "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, or continue modifications; unroute removes one pattern or all routes; list_routes returns active routes. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. Page-level routes may not observe requests served by a service worker.\n",
+    "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, continue, fallback, or fetch_and_fulfill; unroute removes one pattern or all routes; list_routes returns active routes in evaluation order with `order` and `times_remaining`. Several routes may share a pattern: the newest matching route runs first, a fallback handler hands the request to the next older matching route, then to the HAR replay, then to the network. Optional `times` on a route expires it after that many matches, including matches consumed by a traversed fallback. fulfill takes `body`, or `path` to serve a file (relative paths stay inside the runtime artifact directory, content type inferred from the extension), or `json` for a JSON body; status defaults to 200. fetch_and_fulfill performs the real request from the engine (up to 20 redirects, forwarding the page's own request headers) and fulfills with the real response, optionally overriding status, response_headers, and body. Cookie, Host, and Content-Length request headers keep their original values on continue and fetch_and_fulfill. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. URL patterns are globs (`*`, `**`, `{a,b}`) or `{source,flags}` regexes; `?` is literal and JavaScript route predicates are not supported. Page-level routes may not observe requests served by a service worker.\n",
     "Context: set_viewport, emulate_media, set_locale, set_timezone, set_user_agent, set_geolocation, set_offline, and set_extra_http_headers persist across adopted tabs and popups. Cookie state uses get_cookies, set_cookies, clear_cookies. Web storage uses get_storage, set_storage, clear_storage with kind local or session. storage_state and set_storage_state use Playwright's {cookies,origins:[{origin,local_storage}]} login-reuse shape. grant_permissions and clear_permissions control origin permissions. set_http_credentials shares the lazy Fetch path with routing. Cookie, storage, and credential values are redacted in reports.\n",
     "Files: set_input_files, expect_file_chooser, wait_for_download.\n",
     "Dialogs: handle_dialog arms the next dialog with `accept` and optional `prompt_text`; unarmed dialogs auto-dismiss except beforeunload, which is accepted.\n",
@@ -615,13 +615,15 @@ fn route_handler_schema() -> serde_json::Value {
         "oneOf": [
             {
                 "type": "object",
-                "required": ["type", "status"],
+                "required": ["type"],
                 "properties": {
                     "type": {"type": "string", "enum": ["fulfill"]},
-                    "status": {"type": "integer", "minimum": 100, "maximum": 599},
+                    "status": {"type": "integer", "minimum": 100, "maximum": 599, "description": "Defaults to 200"},
                     "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                     "content_type": {"type": "string"},
                     "body": {"type": "string", "description": "UTF-8 text by default; set body_base64=true when this string contains base64-encoded binary response bytes"},
+                    "path": {"type": "string", "description": "Serve this file as the response body; relative paths resolve inside the runtime artifact directory and may not escape it. Content type is inferred from the extension unless content_type is set"},
+                    "json": {"description": "Serialize this value as the response body with content type application/json"},
                     "body_base64": {"type": "boolean", "description": "Treat body as already-base64-encoded binary bytes instead of UTF-8 text"}
                 }
             },
@@ -642,6 +644,28 @@ fn route_handler_schema() -> serde_json::Value {
                     "method": {"type": "string"},
                     "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                     "post_data": {"type": "string", "description": "UTF-8 request body replacement"}
+                }
+            },
+            {
+                "type": "object",
+                "required": ["type"],
+                "properties": {
+                    "type": {"type": "string", "enum": ["fallback"], "description": "Hand the request to the next older route registered for a matching pattern, then the HAR replay, then the network"}
+                }
+            },
+            {
+                "type": "object",
+                "required": ["type"],
+                "properties": {
+                    "type": {"type": "string", "enum": ["fetch_and_fulfill"], "description": "Perform the real request from the engine, then fulfill the page with the response"},
+                    "url": {"type": "string", "description": "Request URL override; defaults to the intercepted URL"},
+                    "method": {"type": "string", "description": "Request method override"},
+                    "headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Request header overrides merged over the intercepted headers"},
+                    "post_data": {"type": "string", "description": "UTF-8 request body replacement"},
+                    "status": {"type": "integer", "minimum": 100, "maximum": 599, "description": "Response status override; defaults to the real status"},
+                    "response_headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Response header overrides merged over the real response headers"},
+                    "body": {"type": "string", "description": "Response body replacement; defaults to the real response body"},
+                    "body_base64": {"type": "boolean", "description": "Treat body as already-base64-encoded binary bytes instead of UTF-8 text"}
                 }
             }
         ]
@@ -1151,8 +1175,18 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(
             handler_types,
-            BTreeSet::from(["abort", "continue", "fulfill"])
+            BTreeSet::from([
+                "abort",
+                "continue",
+                "fallback",
+                "fetch_and_fulfill",
+                "fulfill"
+            ])
         );
+        assert!(schema
+            .pointer("/properties/request/properties/steps/items/properties/handler/oneOf/1/oneOf/0/properties/path/description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains("artifact directory")));
         assert!(schema
             .pointer("/properties/request/properties/steps/items/properties/handler/oneOf/1/oneOf/0/properties/body/description")
             .and_then(Value::as_str)

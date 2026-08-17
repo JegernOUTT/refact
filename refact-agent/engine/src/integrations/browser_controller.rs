@@ -1120,13 +1120,17 @@ fn execute_route_management_step(
     idx: usize,
 ) -> Option<StepResult> {
     match step {
-        BrowserStep::Route { pattern, handler } => {
-            Some(match runtime.add_route(pattern.clone(), handler.clone()) {
+        BrowserStep::Route {
+            pattern,
+            handler,
+            times,
+        } => Some(
+            match runtime.add_route(pattern.clone(), handler.clone(), *times) {
                 Ok(()) => StepResult::success(idx, "Added network route")
                     .with_data(serde_json::json!({"routes": runtime.route_registry.list()})),
                 Err(error) => StepResult::failure(idx, "Add network route", error),
-            })
-        }
+            },
+        ),
         BrowserStep::Unroute { pattern } => Some(match runtime.remove_routes(pattern.as_ref()) {
             Ok(removed) => StepResult::success(
                 idx,
@@ -6821,6 +6825,7 @@ mod tests {
                 RouteHandler::Abort {
                     reason: "blockedbyclient".to_string(),
                 },
+                None,
             )
             .unwrap();
         registry
@@ -6829,6 +6834,7 @@ mod tests {
                 RouteHandler::Abort {
                     reason: "failed".to_string(),
                 },
+                None,
             )
             .unwrap();
         registry
@@ -6844,6 +6850,8 @@ mod tests {
                 entry_count: 12,
                 not_found: HarNotFound::Abort,
             }),
+            times_remaining: None,
+            order: 0,
         }
     }
 

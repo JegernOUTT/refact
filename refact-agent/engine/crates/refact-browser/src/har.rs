@@ -322,6 +322,8 @@ impl HarReplay {
                 status: entry.response.status,
                 headers,
                 body: entry.response.content.text.clone(),
+                path: None,
+                json: None,
                 content_type: Some(entry.response.content.mime_type.clone()),
                 body_base64: entry.response.content.encoding.as_deref() == Some("base64"),
             });

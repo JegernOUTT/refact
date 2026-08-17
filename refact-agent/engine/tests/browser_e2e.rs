@@ -2541,9 +2541,12 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                         status: 200,
                         headers: BTreeMap::new(),
                         body: Some(json!({"source": "mocked"}).to_string()),
+                        path: None,
+                        json: None,
                         content_type: Some("application/json".to_string()),
                         body_base64: false,
                     },
+                    times: None,
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#fetch-data"),
@@ -2582,6 +2585,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                     handler: RouteHandler::Abort {
                         reason: "blockedbyclient".to_string(),
                     },
+                    times: None,
                 },
                 BrowserStep::Eval {
                     expression: "document.querySelector('#result').textContent = 'idle'"
@@ -2627,6 +2631,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                         )])),
                         post_data: None,
                     },
+                    times: None,
                 },
                 BrowserStep::Eval {
                     expression: "document.querySelector('#result').textContent = 'idle'"
@@ -2705,9 +2710,12 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                         status: 200,
                         headers: BTreeMap::new(),
                         body: Some(json!({"source": "popup-mocked"}).to_string()),
+                        path: None,
+                        json: None,
                         content_type: Some("application/json".to_string()),
                         body_base64: false,
                     },
+                    times: None,
                 },
                 BrowserStep::WaitForPopup {
                     timeout_ms: Some(5_000),
@@ -2734,6 +2742,153 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
         .intercepted_requests
         .iter()
         .any(|request| request.action == "fulfill"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn newest_route_falls_back_to_the_older_handler_and_times_expires_it() {
+    let Some(mut case) = BrowserCase::start("route-target.html").await else {
+        return;
+    };
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let data_pattern = UrlPattern::Text(case.server.url("api/data"));
+
+    let chained = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: None,
+            network: NetworkReportMode::default(),
+            steps: vec![
+                BrowserStep::Route {
+                    pattern: data_pattern.clone(),
+                    handler: RouteHandler::Fulfill {
+                        status: 200,
+                        headers: BTreeMap::new(),
+                        body: None,
+                        path: None,
+                        json: Some(json!({"source": "oldest"})),
+                        content_type: None,
+                        body_base64: false,
+                    },
+                    times: None,
+                },
+                BrowserStep::Route {
+                    pattern: data_pattern.clone(),
+                    handler: RouteHandler::Fallback,
+                    times: Some(1),
+                },
+                BrowserStep::ListRoutes,
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#fetch-data"),
+                },
+                BrowserStep::WaitForText {
+                    text: "oldest".to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(chained.ok, "fallback chain failed: {chained:?}");
+    assert_eq!(chained.intercepted_requests[0].action, "fulfill");
+    assert_eq!(chained.intercepted_requests[0].status, Some(200));
+
+    let listed = chained.steps[2]
+        .data
+        .as_ref()
+        .and_then(|data| data.get("routes"))
+        .and_then(|routes| routes.as_array())
+        .expect("list_routes payload");
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0]["order"], json!(0));
+    assert_eq!(listed[0]["handler"]["type"], json!("fallback"));
+    assert_eq!(listed[0]["times_remaining"], json!(1));
+    assert_eq!(listed[1]["order"], json!(1));
+
+    let expired = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: None,
+            network: NetworkReportMode::default(),
+            steps: vec![BrowserStep::ListRoutes],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(expired.ok, "list_routes failed: {expired:?}");
+    assert_eq!(expired.active_routes.len(), 1);
+    assert!(matches!(
+        expired.active_routes[0].handler,
+        RouteHandler::Fulfill { .. }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn fetch_and_fulfill_replays_the_real_response_with_overrides() {
+    let Some(mut case) = BrowserCase::start("route-target.html").await else {
+        return;
+    };
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let data_pattern = UrlPattern::Text(case.server.url("api/data"));
+
+    let fetched = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: None,
+            network: NetworkReportMode::default(),
+            steps: vec![
+                BrowserStep::Route {
+                    pattern: data_pattern.clone(),
+                    handler: RouteHandler::FetchAndFulfill {
+                        url: None,
+                        method: None,
+                        headers: Some(BTreeMap::from([(
+                            "X-Route-Test".to_string(),
+                            "fetched".to_string(),
+                        )])),
+                        post_data: None,
+                        status: Some(201),
+                        response_headers: BTreeMap::from([(
+                            "X-Mutated".to_string(),
+                            "yes".to_string(),
+                        )]),
+                        body: None,
+                        body_base64: false,
+                    },
+                    times: None,
+                },
+                BrowserStep::Click {
+                    locator: BrowserLocator::css("#fetch-data"),
+                },
+                BrowserStep::WaitForText {
+                    text: "fetched".to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(fetched.ok, "fetch_and_fulfill failed: {fetched:?}");
+    assert_eq!(fetched.intercepted_requests[0].action, "fetch_and_fulfill");
+    assert_eq!(fetched.intercepted_requests[0].status, Some(201));
+    assert!(fetched.intercepted_requests[0]
+        .response_body_preview
+        .as_deref()
+        .is_some_and(|preview| preview.contains("fetched")));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

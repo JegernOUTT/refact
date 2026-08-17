@@ -648,9 +648,11 @@ impl BrowserRuntime {
         &mut self,
         pattern: refact_integrations::browser_models::UrlPattern,
         handler: refact_integrations::browser_models::RouteHandler,
+        times: Option<u32>,
     ) -> Result<(), String> {
+        let handler = routing::normalize_route_handler(handler, &self.artifacts_dir)?;
         let enable = self.route_registry.is_empty();
-        self.route_registry.add(pattern.clone(), handler)?;
+        self.route_registry.add(pattern.clone(), handler, times)?;
         if enable {
             let tabs = self
                 .browser

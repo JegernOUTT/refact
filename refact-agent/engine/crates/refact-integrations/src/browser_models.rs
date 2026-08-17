@@ -1060,6 +1060,8 @@ pub enum BrowserStep {
     Route {
         pattern: UrlPattern,
         handler: RouteHandler,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        times: Option<u32>,
     },
     Unroute {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1511,15 +1513,20 @@ pub enum LocatorHandlerAction {
     Steps { steps: Vec<BrowserStep> },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RouteHandler {
     Fulfill {
+        #[serde(default = "default_fulfill_status")]
         status: u16,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         headers: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        json: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content_type: Option<String>,
         #[serde(default, skip_serializing_if = "is_false")]
@@ -1538,6 +1545,29 @@ pub enum RouteHandler {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         post_data: Option<String>,
     },
+    Fallback,
+    FetchAndFulfill {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        headers: Option<BTreeMap<String, String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        post_data: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        response_headers: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        body_base64: bool,
+    },
+}
+
+fn default_fulfill_status() -> u16 {
+    200
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1975,12 +2005,16 @@ pub struct BrowserStorageState {
     pub origins: Vec<BrowserStorageOrigin>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RouteInfo {
     pub pattern: UrlPattern,
     pub handler: RouteHandler,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub har: Option<HarRouteInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub times_remaining: Option<u32>,
+    #[serde(default)]
+    pub order: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2206,6 +2240,7 @@ mod tests {
                 handler: RouteHandler::Abort {
                     reason: "blockedbyclient".to_string(),
                 },
+                times: Some(2),
             },
             BrowserStep::Unroute { pattern: None },
             BrowserStep::ListRoutes,

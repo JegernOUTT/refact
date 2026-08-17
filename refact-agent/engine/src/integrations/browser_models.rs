@@ -322,6 +322,72 @@ mod tests {
     }
 
     #[test]
+    fn route_accepts_times_and_the_new_chain_handlers() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "route", "pattern": "**/api/**", "handler": {"type": "fulfill", "json": {"ok": true}}, "times": 2},
+                {"action": "route", "pattern": "**/api/**", "handler": {"type": "fallback"}},
+                {"action": "route", "pattern": "**/api/**", "handler": {"type": "fetch_and_fulfill", "status": 503}}
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request.steps[0],
+            BrowserStep::Route {
+                times: Some(2),
+                handler: RouteHandler::Fulfill { status: 200, .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            request.steps[1],
+            BrowserStep::Route {
+                times: None,
+                handler: RouteHandler::Fallback,
+                ..
+            }
+        ));
+        assert!(matches!(
+            request.steps[2],
+            BrowserStep::Route {
+                handler: RouteHandler::FetchAndFulfill {
+                    status: Some(503),
+                    ..
+                },
+                ..
+            }
+        ));
+
+        assert_eq!(
+            serde_json::to_value(&request.steps[1]).unwrap(),
+            serde_json::json!({
+                "action": "route",
+                "pattern": "**/api/**",
+                "handler": {"type": "fallback"}
+            })
+        );
+    }
+
+    #[test]
+    fn fulfill_path_shorthand_round_trips_without_a_status() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "route", "pattern": "**/app.css", "handler": {"type": "fulfill", "path": "mock.css"}}]
+        }))
+        .unwrap();
+
+        let BrowserStep::Route {
+            handler: RouteHandler::Fulfill { status, path, .. },
+            ..
+        } = &request.steps[0]
+        else {
+            panic!("expected a fulfill route");
+        };
+        assert_eq!(*status, 200);
+        assert_eq!(path.as_deref(), Some("mock.css"));
+    }
+
+    #[test]
     fn unknown_batch_envelope_fields_are_rejected() {
         let error = parse_browser_action_request(serde_json::json!({
             "steps": [],
