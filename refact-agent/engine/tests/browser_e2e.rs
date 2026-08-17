@@ -1086,13 +1086,19 @@ async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
             false,
         )
         .unwrap();
+    case.tab
+        .evaluate(
+            "const delayed = document.querySelector('#delayed'); delayed.style.display = 'none'; setTimeout(() => delayed.style.display = 'inline-block', 1500)",
+            false,
+        )
+        .unwrap();
     let report = execute_steps_with_runtime(
         &mut case.runtime,
         &[
             BrowserStep::Expect {
                 locator: Some(BrowserLocator::css("#delayed")),
                 matcher: BrowserExpectation::ToBeVisible,
-                timeout_ms: Some(2_000),
+                timeout_ms: Some(3_000),
                 soft: false,
             },
             BrowserStep::Expect {

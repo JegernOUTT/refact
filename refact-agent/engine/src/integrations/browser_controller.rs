@@ -3270,9 +3270,13 @@ fn step_expect(
         };
         StepResult::failure(idx, summary, message)
     };
-    step.retries = attempts.saturating_sub(1);
+    step.retries = expect_retries(attempts);
     step.assertion = Some(assertion);
     step
+}
+
+fn expect_retries(attempts: u32) -> u32 {
+    attempts.saturating_sub(1)
 }
 
 fn expectation_expected_value(matcher: &BrowserExpectation) -> Value {
@@ -5516,6 +5520,17 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matched_expect_attempts_exclude_the_first_attempt_from_retries() {
+        assert_eq!(expect_retries(4), 3);
+    }
+
+    #[test]
+    fn timed_out_expect_attempts_exclude_the_first_attempt_from_retries() {
+        assert_eq!(expect_retries(2), 1);
+        assert_eq!(expect_retries(0), 0);
+    }
 
     #[test]
     fn intercepting_preview_excludes_failure_suffix() {
