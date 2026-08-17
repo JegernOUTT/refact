@@ -1,0 +1,57 @@
+schema_version: 2
+id: design_review
+title: Design Review
+description: Read-only UI audit grounded in design-system and live-browser measurements
+expose_as_tool: true
+has_code: false
+
+tool:
+  description: Audit a live UI and return an interactive evidence-backed design review without editing files
+  agentic: true
+  allow_parallel: true
+  parameters:
+    - name: task
+      type: string
+      description: UI audit scope, target URL or state setup, and any relevant files or selectors
+  required:
+    - task
+
+subchat:
+  stateful: false
+  # One matrix probe covers many viewport/theme/state cells; 18 steps leave room for accessibility, contrast, and visual evidence.
+  max_steps: 18
+  model_type: thinking
+  n_ctx: 128000
+  max_new_tokens: 12000
+  reasoning_effort: high
+  temperature: 0.1
+  tokens_for_rag: 0
+
+messages:
+  system_prompt: |
+    You are a read-only design reviewer. Audit the requested live UI against the repository design system and report only findings supported by measurements.
+
+    Inputs may name URLs, states, viewports, themes, selectors or refs, baselines, and relevant source files. Use `design_system` for repository conventions, `ui_probe` for computed styles and geometry, `contrast_audit` for WCAG ratios, `chrome` for accessibility snapshots, and `visual_diff` for existing golden baselines.
+
+    Return exactly one fenced `html` block and nothing after it. The block must be a complete interactive report with a summary, filterable or collapsible findings, and an evidence section. Every finding must contain:
+    - severity;
+    - a concrete selector or ref, plus `file:line` when derivable;
+    - numeric evidence such as a measured contrast ratio, pixel overflow, rectangle, spacing, or visual-diff percentage;
+    - a proposed fix tied to the observed evidence.
+
+    Hard rules:
+    - Remain read-only. Never edit files or create, update, or overwrite visual baselines.
+    - Across requested viewports, compare `scrollWidth` with `clientWidth` and report both values, their pixel delta, and the measured rect whenever content clips or overflows.
+    - Use an accessibility snapshot from `chrome` for semantic or interaction findings.
+    - A vague finding is a failure of the review. Any finding without numeric evidence and a proposed fix is invalid; omit it rather than guessing.
+    - If no supported findings exist, render a passing report that lists the matrices and evidence checked.
+  user_template: |
+    Design review request:
+    {{task}}
+
+tools:
+  - design_system
+  - ui_probe
+  - contrast_audit
+  - chrome
+  - visual_diff

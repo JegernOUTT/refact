@@ -1181,6 +1181,80 @@ mod tests {
             "mode YAML tools lists reference unregistered tool names (get_tools_for_mode silently drops them): {failures:?}"
         );
     }
+
+    #[tokio::test]
+    async fn yaml_configs_design_workflows_load_and_reference_registered_tools() {
+        let gcx = task_prompt_contract_gcx().await;
+        let registry =
+            crate::yaml_configs::customization_registry::load_registry_from_dir(&gcx.config_dir)
+                .await;
+        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+
+        let registered = get_available_tools(gcx)
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect::<HashSet<_>>();
+        let design = registry
+            .modes
+            .get("design")
+            .expect("design mode should load");
+        let review = registry
+            .subagents
+            .get("design_review")
+            .expect("design_review subagent should load");
+        let visual_qa = registry
+            .subagents
+            .get("visual_qa")
+            .expect("visual_qa subagent should load");
+
+        for (id, tools) in [
+            ("design", &design.tools),
+            ("design_review", &review.tools),
+            ("visual_qa", &visual_qa.tools),
+        ] {
+            let missing = tools
+                .iter()
+                .filter(|name| !registered.contains(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert!(
+                missing.is_empty(),
+                "{id} references unregistered tools: {missing:?}"
+            );
+        }
+
+        let review_prompt = review
+            .messages
+            .system_prompt
+            .as_deref()
+            .expect("design_review system prompt");
+        for required in [
+            "numeric evidence",
+            "proposed fix",
+            "scrollWidth",
+            "clientWidth",
+            "fenced `html` block",
+        ] {
+            assert!(review_prompt.contains(required), "missing `{required}`");
+        }
+
+        let visual_qa_prompt = visual_qa
+            .messages
+            .system_prompt
+            .as_deref()
+            .expect("visual_qa system prompt");
+        for required in [
+            "Verdict: PASS",
+            "Verdict: FAIL",
+            "diff artifact",
+            "console error",
+            "page error",
+            "layout shift",
+        ] {
+            assert!(visual_qa_prompt.contains(required), "missing `{required}`");
+        }
+    }
 }
 
 pub async fn get_available_tool_groups(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
