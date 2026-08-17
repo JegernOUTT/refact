@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -93,10 +94,9 @@ pub fn shell_observation_needed_for_session(
     })
 }
 
-fn zone_for_record_path<'a>(
+fn zone_for_record_path(
     gcx: &Arc<GlobalContext>,
-    policy: &refact_privacy::PrivacyPolicy,
-    compiled: &'a refact_privacy::CompiledPolicy,
+    compiled: &refact_privacy::CompiledPolicy,
     path: &Path,
     mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
     derived_zones: &DerivedPrivacyZones,
@@ -108,16 +108,25 @@ fn zone_for_record_path<'a>(
         let derived_zones = derived_zones
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        candidates
-            .iter()
-            .filter_map(|candidate| derived_zones.get(candidate))
-            .min_by_key(|name| zone_destination_count(policy, name))
-            .cloned()
+        strictest_named_zone(
+            compiled,
+            candidates
+                .iter()
+                .filter_map(|candidate| derived_zones.get(candidate))
+                .map(String::as_str),
+        )
+        .map(str::to_string)
     };
     let Some(derived_zone_name) = derived_zone_name else {
         return static_zone.name.clone();
     };
-    if zone_destination_count(policy, &derived_zone_name) < destination_count(&static_zone.send_to)
+    if compare_zone_strictness(
+        compiled,
+        &derived_zone_name,
+        zone_destinations(compiled, &derived_zone_name),
+        &static_zone.name,
+        &static_zone.send_to,
+    ) == Ordering::Less
     {
         derived_zone_name
     } else {
@@ -168,30 +177,97 @@ fn privacy_roots(
     roots
 }
 
-fn zone_destination_count(policy: &refact_privacy::PrivacyPolicy, name: &str) -> usize {
-    if name == "blocked" {
-        return 0;
-    }
-    policy
-        .zones
-        .iter()
-        .find(|zone| zone.name == name)
-        .map(|zone| destination_count(&zone.send_to))
-        .unwrap_or_else(|| {
-            if name == "normal" {
-                usize::MAX
-            } else {
-                usize::MAX - 1
-            }
-        })
+fn compare_named_zones(
+    compiled: &refact_privacy::CompiledPolicy,
+    left: &str,
+    right: &str,
+) -> Ordering {
+    compare_zone_strictness(
+        compiled,
+        left,
+        zone_destinations(compiled, left),
+        right,
+        zone_destinations(compiled, right),
+    )
 }
 
-fn destination_count(destinations: &[String]) -> usize {
-    if destinations.iter().any(|destination| destination == "*") {
-        usize::MAX
-    } else {
-        destinations.len()
+fn compare_zone_strictness(
+    compiled: &refact_privacy::CompiledPolicy,
+    left_name: &str,
+    left_destinations: &[String],
+    right_name: &str,
+    right_destinations: &[String],
+) -> Ordering {
+    match (
+        destinations_strict_subset(left_destinations, right_destinations),
+        destinations_strict_subset(right_destinations, left_destinations),
+    ) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        _ => compare_zone_order(compiled, left_name, right_name),
     }
+}
+
+fn compare_zone_order(
+    compiled: &refact_privacy::CompiledPolicy,
+    left_name: &str,
+    right_name: &str,
+) -> Ordering {
+    compiled
+        .zone_index_named(left_name)
+        .unwrap_or(usize::MAX)
+        .cmp(&compiled.zone_index_named(right_name).unwrap_or(usize::MAX))
+        .then_with(|| left_name.cmp(right_name))
+}
+
+fn strictest_named_zone<'a, I>(
+    compiled: &refact_privacy::CompiledPolicy,
+    names: I,
+) -> Option<&'a str>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut names = names.into_iter();
+    let first = names.next()?;
+    let minimums = names.fold(vec![first], |mut minimums, candidate| {
+        let candidate_destinations = zone_destinations(compiled, candidate);
+        if minimums.iter().any(|minimum| {
+            destinations_strict_subset(zone_destinations(compiled, minimum), candidate_destinations)
+        }) {
+            return minimums;
+        }
+        minimums.retain(|minimum| {
+            !destinations_strict_subset(
+                candidate_destinations,
+                zone_destinations(compiled, minimum),
+            )
+        });
+        minimums.push(candidate);
+        minimums
+    });
+    minimums
+        .into_iter()
+        .min_by(|left, right| compare_zone_order(compiled, left, right))
+}
+
+fn zone_destinations<'a>(compiled: &'a refact_privacy::CompiledPolicy, name: &str) -> &'a [String] {
+    compiled
+        .zone_named(name)
+        .map(|zone| zone.send_to.as_slice())
+        .unwrap_or(&[])
+}
+
+fn destinations_strict_subset(left: &[String], right: &[String]) -> bool {
+    let left_wildcard = left.iter().any(|destination| destination == "*");
+    let right_wildcard = right.iter().any(|destination| destination == "*");
+    if left_wildcard {
+        return false;
+    }
+    if right_wildcard {
+        return true;
+    }
+    left.iter().all(|destination| right.contains(destination))
+        && right.iter().any(|destination| !left.contains(destination))
 }
 
 pub async fn apply_shell_observation(
@@ -407,7 +483,7 @@ fn file_record(
     let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
     Ok(FileRecord {
         path: refact_core::chat_types::normalize_file_name(path.to_string_lossy().into_owned()),
-        zone: zone_for_record_path(gcx, &policy, &compiled, path, &mappings, derived_zones),
+        zone: zone_for_record_path(gcx, &compiled, path, &mappings, derived_zones),
         attribution,
     })
 }
@@ -464,12 +540,14 @@ fn inherit_observed_write_zones(
     writes: impl IntoIterator<Item = PathBuf>,
     derived_zones: &DerivedPrivacyZones,
 ) -> Result<(), String> {
-    let Some(zone_name) = reads
-        .iter()
-        .filter(|record| record.zone != "normal")
-        .map(|record| record.zone.as_str())
-        .min_by_key(|name| zone_destination_count(policy, name))
-    else {
+    let compiled = policy.compile().map_err(|error| error.to_string())?;
+    let Some(zone_name) = strictest_named_zone(
+        &compiled,
+        reads
+            .iter()
+            .filter(|record| record.zone != "normal")
+            .map(|record| record.zone.as_str()),
+    ) else {
         return Ok(());
     };
     let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
@@ -480,10 +558,7 @@ fn inherit_observed_write_zones(
         for candidate in record_path_candidates(gcx, &path, &mappings) {
             let replace = derived_zones
                 .get(&candidate)
-                .map(|current| {
-                    zone_destination_count(policy, zone_name)
-                        < zone_destination_count(policy, current)
-                })
+                .map(|current| compare_named_zones(&compiled, zone_name, current) == Ordering::Less)
                 .unwrap_or(true);
             if replace {
                 derived_zones.insert(candidate, zone_name.to_string());
@@ -569,6 +644,107 @@ mod tests {
 
     fn tool_message(content: &str) -> ChatMessage {
         ChatMessage::new("tool".to_string(), content.to_string())
+    }
+
+    async fn gcx_with_zones(workspace: &Path, zones: Vec<Zone>) -> Arc<GlobalContext> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.to_path_buf()];
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(PrivacyPolicy {
+            blocked: Vec::new(),
+            zones,
+            subagents: SubagentPolicy::default(),
+        });
+        gcx
+    }
+
+    #[test]
+    fn named_zone_strictness_uses_inclusion_then_zone_order() {
+        let policy = PrivacyPolicy {
+            blocked: Vec::new(),
+            zones: vec![
+                Zone {
+                    name: "z-earlier".to_string(),
+                    patterns: vec!["earlier.txt".to_string()],
+                    send_to: vec!["provider-a".to_string(), "provider-b".to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+                Zone {
+                    name: "a-later-equal".to_string(),
+                    patterns: vec!["equal.txt".to_string()],
+                    send_to: vec!["provider-b".to_string(), "provider-a".to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+                Zone {
+                    name: "later-narrow".to_string(),
+                    patterns: vec!["narrow.txt".to_string()],
+                    send_to: vec!["provider-a".to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+                Zone {
+                    name: "normal".to_string(),
+                    patterns: vec!["*".to_string()],
+                    send_to: vec!["*".to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+            ],
+            subagents: SubagentPolicy::default(),
+        };
+        let compiled = policy.compile().expect("policy should compile");
+
+        assert_eq!(
+            compare_named_zones(&compiled, "a-later-equal", "z-earlier"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_named_zones(&compiled, "later-narrow", "z-earlier"),
+            Ordering::Less
+        );
+        for names in [
+            ["z-earlier", "a-later-equal", "later-narrow"],
+            ["later-narrow", "a-later-equal", "z-earlier"],
+        ] {
+            assert_eq!(strictest_named_zone(&compiled, names), Some("later-narrow"));
+        }
+    }
+
+    #[tokio::test]
+    async fn derived_static_tie_uses_zone_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file.txt");
+        std::fs::write(&file, "value").unwrap();
+        let gcx = gcx_with_zones(
+            temp.path(),
+            vec![
+                Zone {
+                    name: "derived-earlier".to_string(),
+                    patterns: vec!["derived-only.txt".to_string()],
+                    send_to: vec!["provider-a".to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+                Zone {
+                    name: "static-later".to_string(),
+                    patterns: vec!["file.txt".to_string()],
+                    send_to: vec!["provider-a".to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+                Zone {
+                    name: "normal".to_string(),
+                    patterns: vec!["*".to_string()],
+                    send_to: vec!["*".to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+            ],
+        )
+        .await;
+        let derived_zones = new_derived_privacy_zones();
+        derived_zones
+            .write()
+            .unwrap()
+            .insert(file.clone(), "derived-earlier".to_string());
+
+        let record = file_record(&gcx, &file, Attribution::Observed, &derived_zones).unwrap();
+
+        assert_eq!(record.zone, "derived-earlier");
     }
 
     #[tokio::test]

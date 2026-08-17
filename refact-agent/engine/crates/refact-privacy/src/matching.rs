@@ -118,6 +118,12 @@ impl CompiledPolicy {
             .map(|compiled| &compiled.zone)
     }
 
+    pub fn zone_index_named(&self, name: &str) -> Option<usize> {
+        self.zones
+            .iter()
+            .position(|compiled| compiled.zone.name == name)
+    }
+
     pub fn zone_for_path(&self, path: &Path) -> &Zone {
         self.zone_for_path_with_roots(path, std::iter::empty::<&Path>())
     }
@@ -200,7 +206,13 @@ impl CompiledPolicy {
             .collect::<Vec<_>>();
         let zones = paths
             .into_iter()
-            .map(|path| self.zone_for_path_with_roots(path.as_ref(), &roots))
+            .map(|path| {
+                let zone = self.zone_for_path_with_roots(path.as_ref(), &roots);
+                let index = self
+                    .zone_index_named(&zone.name)
+                    .expect("matched zones should belong to the compiled policy");
+                (index, zone)
+            })
             .collect::<Vec<_>>();
         effective_zone(&zones).unwrap_or_else(|| self.zones[self.normal_index].zone.clone())
     }
@@ -228,31 +240,30 @@ impl CompiledPolicy {
     }
 }
 
-fn effective_zone(zones: &[&Zone]) -> Option<Zone> {
-    let first = *zones.first()?;
+fn effective_zone(zones: &[(usize, &Zone)]) -> Option<Zone> {
+    let first = zones.first()?.1;
     let send_to = zones
         .iter()
         .skip(1)
-        .fold(first.send_to.clone(), |allowed, zone| {
+        .fold(first.send_to.clone(), |allowed, (_, zone)| {
             intersect_destinations(&allowed, &zone.send_to)
         });
     let on_shell_read = zones
         .iter()
-        .fold(ShellBehavior::Withhold, |strictest, zone| {
+        .fold(ShellBehavior::Withhold, |strictest, (_, zone)| {
             strictest_shell_behavior(strictest, zone.on_shell_read)
         });
     let name = zones
         .iter()
-        .filter(|zone| {
+        .filter(|(_, zone)| {
             same_destinations(&zone.send_to, &send_to) && zone.on_shell_read == on_shell_read
         })
-        .map(|zone| zone.name.as_str())
-        .min()
-        .map(str::to_string)
+        .min_by_key(|(index, _)| *index)
+        .map(|(_, zone)| zone.name.clone())
         .unwrap_or_else(|| {
             let names = zones
                 .iter()
-                .map(|zone| zone.name.as_str())
+                .map(|(_, zone)| zone.name.as_str())
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>()
@@ -506,6 +517,68 @@ mod tests {
                 .name,
             "restricted"
         );
+    }
+
+    #[test]
+    fn identical_destination_sets_use_zone_order_in_both_path_orders() {
+        let policy = policy(vec![
+            zone("z-first", &["first.txt"], &["*"]),
+            zone("a-second", &["second.txt"], &["*"]),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        for paths in [
+            [Path::new("first.txt"), Path::new("second.txt")],
+            [Path::new("second.txt"), Path::new("first.txt")],
+        ] {
+            assert_eq!(compiled.strictest_zone_for_paths(paths).name, "z-first");
+        }
+    }
+
+    #[test]
+    fn rooted_identical_destination_sets_use_zone_order_in_both_path_orders() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let first = temp.path().join("first.txt");
+        let second = temp.path().join("second.txt");
+        let first_pattern = first.to_string_lossy().into_owned();
+        let policy = policy(vec![
+            zone("z-first", &[&first_pattern], &["*"]),
+            zone("a-second", &["second.txt"], &["*"]),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        for paths in [
+            [first.as_path(), second.as_path()],
+            [second.as_path(), first.as_path()],
+        ] {
+            assert_eq!(
+                compiled
+                    .strictest_zone_for_paths_with_roots(paths, [temp.path()])
+                    .name,
+                "z-first"
+            );
+        }
+    }
+
+    #[test]
+    fn later_strict_subset_beats_zone_order() {
+        let policy = policy(vec![
+            zone("broad-first", &["broad.txt"], &["provider-a", "provider-b"]),
+            zone("narrow-second", &["narrow.txt"], &["provider-a"]),
+            zone("normal", &["*"], &["*"]),
+        ]);
+        let compiled = policy.compile().expect("policy should compile");
+
+        for paths in [
+            [Path::new("broad.txt"), Path::new("narrow.txt")],
+            [Path::new("narrow.txt"), Path::new("broad.txt")],
+        ] {
+            let effective = compiled.strictest_zone_for_paths(paths);
+            assert_eq!(effective.name, "narrow-second");
+            assert_eq!(effective.send_to, ["provider-a"]);
+        }
     }
 
     #[test]
