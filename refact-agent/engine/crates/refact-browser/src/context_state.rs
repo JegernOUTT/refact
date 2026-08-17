@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use headless_chrome::Tab;
 use headless_chrome::protocol::cdp::{Browser, Emulation, Network};
@@ -311,6 +312,45 @@ pub fn storage_state(tab: &Tab) -> Result<BrowserStorageState, String> {
     Ok(BrowserStorageState { cookies, origins })
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct StorageStateArtifact {
+    pub path: PathBuf,
+    pub bytes: usize,
+}
+
+pub fn save_storage_state(
+    state: &BrowserStorageState,
+    artifacts_dir: &Path,
+    save_as: &str,
+) -> Result<StorageStateArtifact, String> {
+    let file_name = Path::new(save_as)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| *value == save_as && !value.is_empty())
+        .ok_or_else(|| {
+            "save_as must be a file name inside the runtime artifact directory".to_string()
+        })?;
+    std::fs::create_dir_all(artifacts_dir).map_err(|error| {
+        format!(
+            "Failed to create browser artifacts directory {}: {error}",
+            artifacts_dir.display()
+        )
+    })?;
+    let path = artifacts_dir.join(file_name);
+    let body = serde_json::to_vec_pretty(state)
+        .map_err(|error| format!("Failed to serialize storage state: {error}"))?;
+    std::fs::write(&path, &body).map_err(|error| {
+        format!(
+            "Failed to save storage state artifact {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(StorageStateArtifact {
+        path,
+        bytes: body.len(),
+    })
+}
+
 pub fn set_storage_state(tab: &Tab, state: &BrowserStorageState) -> Result<(), String> {
     set_cookies(tab, &state.cookies)?;
     for origin in &state.origins {
@@ -464,6 +504,29 @@ fn cookie_to_cdp(cookie: &BrowserCookie) -> Network::CookieParam {
 mod tests {
     use super::*;
 
+    fn sample_state() -> BrowserStorageState {
+        BrowserStorageState {
+            cookies: vec![BrowserCookie {
+                name: "session".to_string(),
+                value: "cookie-secret".to_string(),
+                domain: "example.test".to_string(),
+                path: "/".to_string(),
+                expires: None,
+                http_only: true,
+                secure: true,
+                same_site: Some(BrowserCookieSameSite::Lax),
+                url: None,
+            }],
+            origins: vec![BrowserStorageOrigin {
+                origin: "https://example.test".to_string(),
+                local_storage: vec![BrowserStorageItem {
+                    name: "token".to_string(),
+                    value: "storage-secret".to_string(),
+                }],
+            }],
+        }
+    }
+
     #[test]
     fn emulation_payload_keeps_viewport_and_media_features() {
         let viewport = ViewportState {
@@ -485,29 +548,44 @@ mod tests {
 
     #[test]
     fn cookie_and_storage_state_are_redacted_for_reports() {
-        let state = BrowserStorageState {
-            cookies: vec![BrowserCookie {
-                name: "session".to_string(),
-                value: "cookie-secret".to_string(),
-                domain: "example.test".to_string(),
-                path: "/".to_string(),
-                expires: None,
-                http_only: true,
-                secure: true,
-                same_site: Some(BrowserCookieSameSite::Lax),
-                url: None,
-            }],
-            origins: vec![BrowserStorageOrigin {
-                origin: "https://example.test".to_string(),
-                local_storage: vec![BrowserStorageItem {
-                    name: "token".to_string(),
-                    value: "storage-secret".to_string(),
-                }],
-            }],
-        };
+        let state = sample_state();
         let serialized = serde_json::to_string(&mask_storage_state(&state)).unwrap();
         assert!(!serialized.contains("cookie-secret"));
         assert!(!serialized.contains("storage-secret"));
         assert!(serialized.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn saved_storage_state_artifact_round_trips_unredacted_while_report_stays_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts_dir = dir.path().join("artifacts");
+        let state = sample_state();
+        let artifact = save_storage_state(&state, &artifacts_dir, "auth.json").unwrap();
+
+        assert_eq!(artifact.path, artifacts_dir.join("auth.json"));
+        let body = std::fs::read(&artifact.path).unwrap();
+        assert_eq!(artifact.bytes, body.len());
+        let restored: BrowserStorageState = serde_json::from_slice(&body).unwrap();
+        assert_eq!(restored, state);
+        assert_eq!(restored.cookies[0].value, "cookie-secret");
+        assert_eq!(restored.origins[0].local_storage[0].value, "storage-secret");
+
+        let report = serde_json::to_string(&mask_storage_state(&state)).unwrap();
+        assert!(!report.contains("cookie-secret"));
+        assert!(!report.contains("storage-secret"));
+    }
+
+    #[test]
+    fn saved_storage_state_rejects_paths_outside_the_artifact_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts_dir = dir.path().join("artifacts");
+        let state = sample_state();
+        for save_as in ["../x.json", "nested/x.json", "/tmp/x.json", "..", ""] {
+            let error = save_storage_state(&state, &artifacts_dir, save_as).unwrap_err();
+            assert!(error.contains("save_as must be a file name"), "{error}");
+            assert!(!error.contains("cookie-secret"));
+            assert!(!error.contains("storage-secret"));
+        }
+        assert!(!artifacts_dir.join("x.json").exists());
     }
 }

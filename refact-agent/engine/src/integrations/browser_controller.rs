@@ -803,7 +803,7 @@ fn is_context_management_step(step: &BrowserStep) -> bool {
             | BrowserStep::GetStorage { .. }
             | BrowserStep::SetStorage { .. }
             | BrowserStep::ClearStorage { .. }
-            | BrowserStep::StorageState
+            | BrowserStep::StorageState { .. }
             | BrowserStep::SetStorageState { .. }
             | BrowserStep::GrantPermissions { .. }
             | BrowserStep::ClearPermissions
@@ -1024,7 +1024,7 @@ fn execute_context_management_step(
             )?;
             Ok(StepResult::success(idx, "Cleared storage"))
         }
-        BrowserStep::StorageState => {
+        BrowserStep::StorageState { save_as } => {
             let state = refact_browser::context_state::storage_state(
                 runtime
                     .get_active_tab()
@@ -1032,8 +1032,37 @@ fn execute_context_management_step(
                     .as_ref(),
             )?;
             let masked = refact_browser::context_state::mask_storage_state(&state);
-            Ok(StepResult::success(idx, "Captured storage state")
-                .with_data(serde_json::json!({"state": masked})))
+            let artifact = save_as
+                .as_deref()
+                .map(|save_as| {
+                    refact_browser::context_state::save_storage_state(
+                        &state,
+                        &runtime.artifacts_dir,
+                        save_as,
+                    )
+                })
+                .transpose()?;
+            match artifact {
+                Some(artifact) => Ok(StepResult::success(
+                    idx,
+                    format!(
+                        "Saved storage state to {} ({} bytes)",
+                        artifact.path.display(),
+                        artifact.bytes
+                    ),
+                )
+                .with_data(serde_json::json!({
+                    "state": masked,
+                    "artifact": {
+                        "kind": "storage_state",
+                        "mime": "application/json",
+                        "path": artifact.path,
+                        "bytes": artifact.bytes,
+                    }
+                }))),
+                None => Ok(StepResult::success(idx, "Captured storage state")
+                    .with_data(serde_json::json!({"state": masked}))),
+            }
         }
         BrowserStep::SetStorageState { state } => {
             refact_browser::context_state::set_storage_state(
@@ -2857,7 +2886,7 @@ fn execute_single_step(
         | BrowserStep::GetStorage { .. }
         | BrowserStep::SetStorage { .. }
         | BrowserStep::ClearStorage { .. }
-        | BrowserStep::StorageState
+        | BrowserStep::StorageState { .. }
         | BrowserStep::SetStorageState { .. }
         | BrowserStep::GrantPermissions { .. }
         | BrowserStep::ClearPermissions

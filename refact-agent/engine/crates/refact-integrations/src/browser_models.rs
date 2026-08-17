@@ -1214,7 +1214,10 @@ pub enum BrowserStep {
     ClearStorage {
         kind: BrowserStorageKind,
     },
-    StorageState,
+    StorageState {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save_as: Option<String>,
+    },
     SetStorageState {
         state: BrowserStorageState,
     },
@@ -2280,7 +2283,9 @@ mod tests {
             BrowserStep::ClearStorage {
                 kind: BrowserStorageKind::Session,
             },
-            BrowserStep::StorageState,
+            BrowserStep::StorageState {
+                save_as: Some("auth.json".to_string()),
+            },
             BrowserStep::SetStorageState {
                 state: BrowserStorageState::default(),
             },
