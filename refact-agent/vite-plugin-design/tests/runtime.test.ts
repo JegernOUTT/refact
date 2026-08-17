@@ -166,15 +166,15 @@ describe("createDesignRuntime", () => {
       instruction: "Match the reference",
       screenshot: "data:image/png;base64,crop",
     });
-    const call = postMessage.mock.calls.find(
+    const calls = postMessage.mock.calls.filter(
       ([message]) =>
         typeof message === "object" &&
         message !== null &&
         "type" in message &&
         message.type === "refact:send-followup-turn",
     );
-    expect(call).toBeDefined();
-    const message = call?.[0] as { payload: { content: string } };
+    expect(calls).toHaveLength(1);
+    const message = calls[0]?.[0] as { payload: { content: string } };
     expect(JSON.parse(message.payload.content)).toEqual({
       edits: runtime.pendingEdits,
       instruction: "Match the reference",

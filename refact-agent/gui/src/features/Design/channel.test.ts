@@ -62,4 +62,47 @@ describe("Design channel", () => {
     channel.dispose();
     frame.remove();
   });
+
+  it("delivers one valid child Apply and rejects a malformed Apply", () => {
+    const onMessage = vi.fn();
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const frameWindow = frame.contentWindow;
+    expect(frameWindow).not.toBeNull();
+    const channel = createDesignChannel({
+      frame,
+      allowedOrigins: ["https://allowed.example"],
+      resourceUri: "https://allowed.example/app",
+      onMessage,
+    });
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "refact:send-followup-turn",
+          payload: { content: "Apply these edits" },
+        },
+        origin: "https://allowed.example",
+        source: frameWindow,
+      }),
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "refact:send-followup-turn",
+          payload: { content: null },
+        },
+        origin: "https://allowed.example",
+        source: frameWindow,
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenCalledWith({
+      type: "refact:send-followup-turn",
+      payload: { content: "Apply these edits" },
+    });
+    channel.dispose();
+    frame.remove();
+  });
 });

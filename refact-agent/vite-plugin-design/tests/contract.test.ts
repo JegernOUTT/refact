@@ -8,6 +8,7 @@ import type {
   DesignSurfaceInboundMessage as RuntimeInbound,
   DesignSurfaceOutboundMessage as RuntimeOutbound,
 } from "../src/runtime";
+import { parseDesignSurfaceMessage } from "../../gui/src/features/Design/surfaceContract";
 import { describe, expect, it } from "vitest";
 
 type Equal<Left, Right> =
@@ -24,13 +25,65 @@ type Equal<Left, Right> =
 const selectionMatches: Equal<ParentSelection, RuntimeSelection> = true;
 const inboundMatches: Equal<ParentInbound, RuntimeInbound> = true;
 const outboundMatches: Equal<ParentOutbound, RuntimeOutbound> = true;
+type ChildToParentType =
+  | "refact:design-ready"
+  | "refact:element-selected"
+  | "refact:iframe-blocked"
+  | "refact:send-followup-turn";
+type ParentToChildType = "refact:set-state" | "refact:call-tool";
+const parentInboundDirection: Equal<ParentInbound["type"], ChildToParentType> = true;
+const runtimeInboundDirection: Equal<RuntimeInbound["type"], ChildToParentType> = true;
+const parentOutboundDirection: Equal<ParentOutbound["type"], ParentToChildType> = true;
+const runtimeOutboundDirection: Equal<RuntimeOutbound["type"], ParentToChildType> = true;
 
 void selectionMatches;
 void inboundMatches;
 void outboundMatches;
+void parentInboundDirection;
+void runtimeInboundDirection;
+void parentOutboundDirection;
+void runtimeOutboundDirection;
 
 describe("surface contract", () => {
-  it("matches T-55 in both directions", () => {
-    expect(selectionMatches && inboundMatches && outboundMatches).toBe(true);
+  it("matches T-55 with explicit per-message directions", () => {
+    expect(
+      selectionMatches &&
+        inboundMatches &&
+        outboundMatches &&
+        parentInboundDirection &&
+        runtimeInboundDirection &&
+        parentOutboundDirection &&
+        runtimeOutboundDirection,
+    ).toBe(true);
+  });
+
+  it("accepts the runtime Apply envelope and rejects malformed or reversed traffic", () => {
+    expect(
+      parseDesignSurfaceMessage({
+        type: "refact:send-followup-turn",
+        payload: { content: '{"edits":[]}' },
+      }),
+    ).toEqual({
+      type: "refact:send-followup-turn",
+      payload: { content: '{"edits":[]}' },
+    });
+    expect(
+      parseDesignSurfaceMessage({
+        type: "refact:send-followup-turn",
+        payload: { content: 42 },
+      }),
+    ).toBeNull();
+    expect(
+      parseDesignSurfaceMessage({
+        type: "refact:set-state",
+        payload: { theme: "dark", pickerEnabled: true, devicePixelRatio: 2 },
+      }),
+    ).toBeNull();
+    expect(
+      parseDesignSurfaceMessage({
+        type: "refact:call-tool",
+        payload: { name: "design.apply", arguments: {} },
+      }),
+    ).toBeNull();
   });
 });

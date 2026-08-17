@@ -54,8 +54,6 @@ export function createDesignChannel({
     ui: { resourceUri },
     callTool: (name, args) =>
       post({ type: "refact:call-tool", payload: { name, arguments: args } }),
-    sendFollowupTurn: (content) =>
-      post({ type: "refact:send-followup-turn", payload: { content } }),
     setState: (state) => post({ type: "refact:set-state", payload: state }),
     dispose: () => window.removeEventListener("message", handleMessage),
   };

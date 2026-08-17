@@ -7,6 +7,7 @@ import {
   StatusDot,
 } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
+import { useChatActions } from "../../hooks/useChatActions";
 import { selectBrowserRuntime } from "../Browser/browserSlice";
 import { selectSurfaceChatId } from "../Workspace/workspaceSlice";
 import { DesignFrame } from "./DesignFrame";
@@ -38,6 +39,7 @@ export function DesignSurface({ surfaceId }: DesignSurfaceProps) {
   const browserRuntime = useAppSelector((state) =>
     chatId ? selectBrowserRuntime(state, chatId) : undefined,
   );
+  const { submit } = useChatActions(chatId ?? undefined);
   const state = storedState ?? makeDesignSurfaceState();
 
   useEffect(() => {
@@ -56,14 +58,16 @@ export function DesignSurface({ surfaceId }: DesignSurfaceProps) {
         onPatch({ liveStatus: "interactive", fallbackReason: null });
       } else if (message.type === "refact:element-selected") {
         onPatch({ selection: message.payload });
-      } else {
+      } else if (message.type === "refact:iframe-blocked") {
         onPatch({
           liveStatus: "blocked",
           fallbackReason: message.payload.reason,
         });
+      } else {
+        void submit(message.payload.content);
       }
     },
-    [onPatch],
+    [onPatch, submit],
   );
   const handleReference = useCallback(
     (files: FileList | null) => {

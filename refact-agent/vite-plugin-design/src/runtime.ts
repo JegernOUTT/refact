@@ -28,6 +28,10 @@ export type DesignSurfaceInboundMessage =
   | {
       type: "refact:iframe-blocked";
       payload: { reason: string };
+    }
+  | {
+      type: "refact:send-followup-turn";
+      payload: { content: string };
     };
 
 export type DesignSurfaceOutboundMessage =
@@ -42,10 +46,6 @@ export type DesignSurfaceOutboundMessage =
   | {
       type: "refact:call-tool";
       payload: { name: string; arguments: Record<string, unknown> };
-    }
-  | {
-      type: "refact:send-followup-turn";
-      payload: { content: string };
     };
 
 export type PendingStyleEdit = {
@@ -310,7 +310,7 @@ export function createDesignRuntime(options: DesignRuntimeOptions): DesignRuntim
   let hovered: Element | null = null;
   let overlay: ReturnType<typeof makeOverlay> | null = null;
 
-  const post = (message: DesignSurfaceInboundMessage | DesignSurfaceOutboundMessage): boolean => {
+  const post = (message: DesignSurfaceInboundMessage): boolean => {
     if (!parentOrigin) return false;
     parentWindow.postMessage(message, parentOrigin);
     return true;

@@ -28,6 +28,10 @@ export type DesignSurfaceInboundMessage =
   | {
       type: "refact:iframe-blocked";
       payload: { reason: string };
+    }
+  | {
+      type: "refact:send-followup-turn";
+      payload: { content: string };
     };
 
 export type DesignSurfaceOutboundMessage =
@@ -42,16 +46,11 @@ export type DesignSurfaceOutboundMessage =
   | {
       type: "refact:call-tool";
       payload: { name: string; arguments: Record<string, unknown> };
-    }
-  | {
-      type: "refact:send-followup-turn";
-      payload: { content: string };
     };
 
 export interface SurfaceRenderer<TState> {
   readonly ui: { readonly resourceUri: string };
   callTool(name: string, args: Record<string, unknown>): void;
-  sendFollowupTurn(content: string): void;
   setState(state: TState): void;
 }
 
@@ -105,6 +104,11 @@ export function parseDesignSurfaceMessage(
   if (value.type === "refact:iframe-blocked") {
     return isRecord(value.payload) && typeof value.payload.reason === "string"
       ? { type: value.type, payload: { reason: value.payload.reason } }
+      : null;
+  }
+  if (value.type === "refact:send-followup-turn") {
+    return isRecord(value.payload) && typeof value.payload.content === "string"
+      ? { type: value.type, payload: { content: value.payload.content } }
       : null;
   }
   return null;

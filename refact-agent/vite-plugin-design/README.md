@@ -47,7 +47,7 @@ Loading an instrumented app normally has no active Design behavior. The injected
 2. `event.origin` exactly matches an `allowedParentOrigins` entry.
 3. The message is a valid `refact:set-state` payload.
 
-The first valid state message is the handshake. The runtime then replies with `refact:design-ready`. Hover and click selection emit only the documented `DesignElementSelection`: selector, role, accessible name, rectangle, selected computed-style properties, JSX source file/line, and a nullable crop data URL. It does not expose component props, application state, closures, storage, cookies, or arbitrary DOM serialization.
+The first valid state message is the handshake. The runtime then replies with `refact:design-ready`. Child-to-parent traffic is `refact:design-ready`, `refact:element-selected`, `refact:iframe-blocked`, and `refact:send-followup-turn`; parent-to-child traffic is `refact:set-state` and `refact:call-tool`. Hover and click selection emit only the documented `DesignElementSelection`: selector, role, accessible name, rectangle, selected computed-style properties, JSX source file/line, and a nullable crop data URL. It does not expose component props, application state, closures, storage, cookies, or arbitrary DOM serialization.
 
 Temporary design edits use `HTMLElement.style.setProperty` only. `clearPendingStyleEdits()` restores the original inline declarations. Annotation pins remain in the injected overlay and are never written to the application. `apply(instruction, screenshot)` JSON-serializes `{ edits, instruction, screenshot }` into one `refact:send-followup-turn` payload; source changes remain the agent's responsibility.
 
