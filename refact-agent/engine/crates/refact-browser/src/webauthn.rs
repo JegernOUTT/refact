@@ -298,6 +298,28 @@ mod tests {
     }
 
     #[test]
+    fn authenticator_options_serialize_required_passkey_capabilities() {
+        let options = virtual_authenticator_options(
+            BrowserAuthenticatorProtocol::Ctap2,
+            BrowserAuthenticatorTransport::Internal,
+            true,
+            true,
+            true,
+        );
+        assert_eq!(
+            serde_json::to_value(options).unwrap(),
+            serde_json::json!({
+                "protocol": "ctap2",
+                "transport": "internal",
+                "hasResidentKey": true,
+                "hasUserVerification": true,
+                "automaticPresenceSimulation": true,
+                "isUserVerified": true,
+            })
+        );
+    }
+
+    #[test]
     fn credential_payload_preserves_secret_material_only_for_cdp() {
         let source = credential();
         let payload = credential_payload(&source);
