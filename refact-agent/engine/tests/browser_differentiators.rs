@@ -17,9 +17,10 @@ use refact_lsp::integrations::browser_controller::{
 };
 use refact_lsp::integrations::browser_locators::{parse_element_info, INSPECT_ELEMENT_JS};
 use refact_lsp::integrations::browser_models::{
-    AccessibilitySnapshotOptions, BrowserActionRequest, BrowserLocator, BrowserStep, ElementInfo,
-    FieldKind, FillStrategy, HarContentPolicy, HarMode, HarNotFound, SessionPolicy, TabTarget,
-    UrlPattern, WebSocketEventKind, WebSocketRouteMode,
+    AccessibilitySnapshotOptions, BrowserActionRequest, BrowserAuthenticatorProtocol,
+    BrowserAuthenticatorTransport, BrowserLocator, BrowserStep, ElementInfo, FieldKind,
+    FillStrategy, HarContentPolicy, HarMode, HarNotFound, SessionPolicy, TabTarget, UrlPattern,
+    WebSocketEventKind, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::{setup_recording_for_tab, BrowserRuntime, UTILITY_WORLD_NAME};
 use refact_lsp::refact_integrations::browser_types::RecorderEvent;
@@ -251,6 +252,91 @@ fn eval_json(tab: &Tab, expression: &str) -> Value {
     let wrapped = format!("JSON.stringify({expression})");
     let serialized = eval_value(tab, &wrapped);
     serde_json::from_str(serialized.as_str().unwrap()).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn coverage_and_virtual_authenticator_work_without_always_on_domains() {
+    let Some(mut case) = BrowserCase::start("coverage-target.html").await else {
+        return;
+    };
+    case.setup_world();
+    let coverage = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::StartCoverage {
+                js: Some(true),
+                css: Some(true),
+                reset_on_navigation: Some(false),
+            },
+            BrowserStep::Eval {
+                expression: "window.coverageTarget".to_string(),
+            },
+            BrowserStep::StopCoverage,
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(coverage.ok, "coverage failed: {coverage:?}");
+    let data = coverage.steps[2].data.as_ref().unwrap();
+    let summaries = data["coverage"].as_array().unwrap();
+    assert!(summaries.iter().any(|summary| {
+        let percentage = summary["used_percentage"].as_f64().unwrap_or_default();
+        percentage > 0.0 && percentage < 100.0
+    }));
+    assert!(FsPath::new(data["artifact"]["path"].as_str().unwrap()).is_file());
+
+    case.tab
+        .navigate_to(&case.server.url("webauthn-target.html"))
+        .unwrap();
+    case.tab.wait_until_navigated().unwrap();
+    let webauthn = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::AddVirtualAuthenticator {
+                protocol: Some(BrowserAuthenticatorProtocol::Ctap2),
+                transport: Some(BrowserAuthenticatorTransport::Internal),
+                has_resident_key: Some(true),
+                has_user_verification: Some(true),
+                is_user_verified: Some(true),
+            },
+            BrowserStep::Click {
+                locator: BrowserLocator::css("#create"),
+            },
+            BrowserStep::WaitForText {
+                text: "created:public-key".to_string(),
+                timeout_ms: Some(5_000),
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(webauthn.ok, "WebAuthn create failed: {webauthn:?}");
+    let authenticator_id = webauthn.steps[0].data.as_ref().unwrap()["authenticator_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let credentials = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::ListCredentials {
+                id: authenticator_id.clone(),
+            },
+            BrowserStep::Click {
+                locator: BrowserLocator::css("#get"),
+            },
+            BrowserStep::WaitForText {
+                text: "got:public-key".to_string(),
+                timeout_ms: Some(5_000),
+            },
+            BrowserStep::RemoveVirtualAuthenticator {
+                id: authenticator_id,
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(credentials.ok, "WebAuthn get failed: {credentials:?}");
+    let serialized = serde_json::to_string(&credentials.steps[0].data).unwrap();
+    assert!(serialized.contains("[REDACTED]"));
+    assert!(!serialized.contains("privateKey"));
 }
 
 // One batched request avoids the extra agent round trips incurred by one-action-per-call tools.

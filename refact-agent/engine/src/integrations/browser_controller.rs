@@ -1147,6 +1147,125 @@ fn execute_route_management_step(
     }
 }
 
+fn is_instrumentation_step(step: &BrowserStep) -> bool {
+    matches!(
+        step,
+        BrowserStep::StartCoverage { .. }
+            | BrowserStep::StopCoverage
+            | BrowserStep::AddVirtualAuthenticator { .. }
+            | BrowserStep::RemoveVirtualAuthenticator { .. }
+            | BrowserStep::ListCredentials { .. }
+            | BrowserStep::AddCredential { .. }
+            | BrowserStep::ClearCredentials { .. }
+            | BrowserStep::SetUserVerified { .. }
+    )
+}
+
+fn execute_instrumentation_step(
+    runtime: &mut BrowserRuntime,
+    step: &BrowserStep,
+    idx: usize,
+) -> StepResult {
+    let result: Result<StepResult, String> = (|| {
+        let tab = runtime
+            .get_active_tab()
+            .ok_or_else(|| "No active tab in browser runtime".to_string())?;
+        match step {
+            BrowserStep::StartCoverage {
+                js,
+                css,
+                reset_on_navigation,
+            } => {
+                let options = refact_browser::coverage::CoverageOptions::resolve(
+                    *js,
+                    *css,
+                    *reset_on_navigation,
+                );
+                runtime.coverage_manager.start(&tab, options)?;
+                Ok(StepResult::success(
+                    idx,
+                    format!(
+                        "Started coverage (JavaScript: {}, CSS: {})",
+                        options.js, options.css
+                    ),
+                ))
+            }
+            BrowserStep::StopCoverage => {
+                let stopped = runtime
+                    .coverage_manager
+                    .stop(&tab, &runtime.artifacts_dir)?;
+                let resource_count = stopped.artifact.resource_count;
+                Ok(StepResult::success(
+                    idx,
+                    format!("Stopped coverage for {resource_count} resource(s)"),
+                )
+                .with_data(serde_json::json!({
+                    "coverage": stopped.summaries,
+                    "artifact": stopped.artifact,
+                })))
+            }
+            BrowserStep::AddVirtualAuthenticator {
+                protocol,
+                transport,
+                has_resident_key,
+                has_user_verification,
+                is_user_verified,
+            } => {
+                let id = runtime.webauthn_manager.add_virtual_authenticator(
+                    &tab,
+                    protocol.unwrap_or_default(),
+                    transport.unwrap_or_default(),
+                    has_resident_key.unwrap_or(false),
+                    has_user_verification.unwrap_or(false),
+                    is_user_verified.unwrap_or(false),
+                )?;
+                Ok(StepResult::success(idx, "Added virtual authenticator")
+                    .with_data(serde_json::json!({"authenticator_id": id})))
+            }
+            BrowserStep::RemoveVirtualAuthenticator { id } => {
+                runtime
+                    .webauthn_manager
+                    .remove_virtual_authenticator(&tab, id)?;
+                Ok(StepResult::success(idx, "Removed virtual authenticator"))
+            }
+            BrowserStep::ListCredentials { id } => {
+                let credentials = runtime.webauthn_manager.list_credentials(&tab, id)?;
+                Ok(
+                    StepResult::success(idx, format!("Listed {} credential(s)", credentials.len()))
+                        .with_data(serde_json::json!({"credentials": credentials})),
+                )
+            }
+            BrowserStep::AddCredential { id, credential } => {
+                runtime
+                    .webauthn_manager
+                    .add_credential(&tab, id, credential)?;
+                Ok(StepResult::success(
+                    idx,
+                    "Added virtual authenticator credential",
+                ))
+            }
+            BrowserStep::ClearCredentials { id } => {
+                runtime.webauthn_manager.clear_credentials(&tab, id)?;
+                Ok(StepResult::success(
+                    idx,
+                    "Cleared virtual authenticator credentials",
+                ))
+            }
+            BrowserStep::SetUserVerified { id, verified } => {
+                runtime
+                    .webauthn_manager
+                    .set_user_verified(&tab, id, *verified)?;
+                Ok(StepResult::success(
+                    idx,
+                    format!("Set virtual authenticator user verification to {verified}"),
+                ))
+            }
+            _ => unreachable!(),
+        }
+    })();
+    result.unwrap_or_else(|error| StepResult::failure(idx, "Browser instrumentation", error))
+}
+
 pub fn execute_step(
     tab: &Tab,
     step: &BrowserStep,
@@ -1364,6 +1483,9 @@ pub async fn execute_request_with_runtime(
                     .with_data(serde_json::json!({"frame": frame})),
                 Err(error) => StepResult::failure(idx, "Wait for WebSocket frame", error),
             }
+        } else if is_instrumentation_step(step) {
+            let mut rt = runtime_arc.lock().await;
+            execute_instrumentation_step(&mut rt, step, idx)
         } else if is_context_management_step(step) {
             let mut rt = runtime_arc.lock().await;
             execute_context_management_step(&mut rt, step, idx)
@@ -1922,6 +2044,9 @@ pub fn execute_steps_with_runtime(
             | BrowserStep::StopHarRecording
             | BrowserStep::RouteFromHar { .. }) => {
                 execute_route_management_step(runtime, step, idx).unwrap()
+            }
+            step if is_instrumentation_step(step) => {
+                execute_instrumentation_step(runtime, step, idx)
             }
             step if is_context_management_step(step) => {
                 execute_context_management_step(runtime, step, idx)
@@ -2651,6 +2776,14 @@ fn execute_single_step(
         | BrowserStep::StartHarRecording { .. }
         | BrowserStep::StopHarRecording
         | BrowserStep::RouteFromHar { .. }
+        | BrowserStep::StartCoverage { .. }
+        | BrowserStep::StopCoverage
+        | BrowserStep::AddVirtualAuthenticator { .. }
+        | BrowserStep::RemoveVirtualAuthenticator { .. }
+        | BrowserStep::ListCredentials { .. }
+        | BrowserStep::AddCredential { .. }
+        | BrowserStep::ClearCredentials { .. }
+        | BrowserStep::SetUserVerified { .. }
         | BrowserStep::SetViewport { .. }
         | BrowserStep::EmulateMedia { .. }
         | BrowserStep::SetLocale { .. }

@@ -62,6 +62,49 @@ pub enum HarNotFound {
     Fallback,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserAuthenticatorProtocol {
+    U2f,
+    #[default]
+    Ctap2,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserAuthenticatorTransport {
+    #[default]
+    Usb,
+    Nfc,
+    Ble,
+    Cable,
+    Internal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserWebAuthnCredential {
+    pub credential_id: String,
+    #[serde(default)]
+    pub is_resident_credential: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rp_id: Option<String>,
+    pub private_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_handle: Option<String>,
+    #[serde(default)]
+    pub sign_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large_blob: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_eligibility: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_state: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_display_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocatorRegex {
     pub source: String,
@@ -1059,6 +1102,46 @@ pub enum BrowserStep {
         not_found: HarNotFound,
     },
 
+    StartCoverage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        js: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        css: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reset_on_navigation: Option<bool>,
+    },
+    StopCoverage,
+
+    AddVirtualAuthenticator {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol: Option<BrowserAuthenticatorProtocol>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport: Option<BrowserAuthenticatorTransport>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        has_resident_key: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        has_user_verification: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_user_verified: Option<bool>,
+    },
+    RemoveVirtualAuthenticator {
+        id: String,
+    },
+    ListCredentials {
+        id: String,
+    },
+    AddCredential {
+        id: String,
+        credential: BrowserWebAuthnCredential,
+    },
+    ClearCredentials {
+        id: String,
+    },
+    SetUserVerified {
+        id: String,
+        verified: bool,
+    },
+
     SetViewport {
         width: u32,
         height: u32,
@@ -1488,6 +1571,14 @@ impl BrowserStep {
         "start_har_recording",
         "stop_har_recording",
         "route_from_har",
+        "start_coverage",
+        "stop_coverage",
+        "add_virtual_authenticator",
+        "remove_virtual_authenticator",
+        "list_credentials",
+        "add_credential",
+        "clear_credentials",
+        "set_user_verified",
         "set_viewport",
         "emulate_media",
         "set_locale",
@@ -2093,6 +2184,48 @@ mod tests {
                 path: "page.har".to_string(),
                 url_filter: None,
                 not_found: HarNotFound::Abort,
+            },
+            BrowserStep::StartCoverage {
+                js: Some(true),
+                css: Some(true),
+                reset_on_navigation: Some(true),
+            },
+            BrowserStep::StopCoverage,
+            BrowserStep::AddVirtualAuthenticator {
+                protocol: Some(BrowserAuthenticatorProtocol::Ctap2),
+                transport: Some(BrowserAuthenticatorTransport::Usb),
+                has_resident_key: Some(true),
+                has_user_verification: Some(true),
+                is_user_verified: Some(true),
+            },
+            BrowserStep::RemoveVirtualAuthenticator {
+                id: "authenticator".to_string(),
+            },
+            BrowserStep::ListCredentials {
+                id: "authenticator".to_string(),
+            },
+            BrowserStep::AddCredential {
+                id: "authenticator".to_string(),
+                credential: BrowserWebAuthnCredential {
+                    credential_id: "credential".to_string(),
+                    is_resident_credential: true,
+                    rp_id: Some("example.com".to_string()),
+                    private_key: "private".to_string(),
+                    user_handle: Some("user".to_string()),
+                    sign_count: 0,
+                    large_blob: None,
+                    backup_eligibility: None,
+                    backup_state: None,
+                    user_name: None,
+                    user_display_name: None,
+                },
+            },
+            BrowserStep::ClearCredentials {
+                id: "authenticator".to_string(),
+            },
+            BrowserStep::SetUserVerified {
+                id: "authenticator".to_string(),
+                verified: true,
             },
             BrowserStep::SetViewport {
                 width: 390,

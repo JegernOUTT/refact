@@ -396,10 +396,19 @@ export type BrowserHarArtifact = {
   entry_count: number;
 };
 
+export type BrowserCoverageArtifact = {
+  kind: "coverage";
+  mime: "application/json";
+  path: string;
+  bytes: number;
+  resource_count: number;
+};
+
 export type BrowserArtifact =
   | BrowserImageArtifact
   | BrowserPdfArtifact
-  | BrowserHarArtifact;
+  | BrowserHarArtifact
+  | BrowserCoverageArtifact;
 
 export type BrowserWebSocketEvent = {
   sequence: number;

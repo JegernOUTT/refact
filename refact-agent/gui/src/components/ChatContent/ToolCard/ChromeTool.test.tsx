@@ -43,6 +43,58 @@ function makeStore(toolMessage: {
 }
 
 describe("ChromeTool", () => {
+  test("summarizes coverage and virtual authenticator steps", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-instrumentation",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: {
+            steps: [
+              { action: "start_coverage", js: true, css: true },
+              { action: "stop_coverage" },
+              {
+                action: "add_credential",
+                id: "auth-1",
+                credential: {
+                  credential_id: "secret-id",
+                  private_key: "secret-key",
+                },
+              },
+              { action: "list_credentials", id: "auth-1" },
+            ],
+          },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-instrumentation",
+      content: JSON.stringify({ ok: true, steps: [] }),
+    });
+
+    const view = render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    expect(screen.getByText(/Start JS\/CSS coverage/i)).toBeInTheDocument();
+    expect(screen.getByText(/Stop JS\/CSS coverage/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Add authenticator credential/i),
+    ).toBeInTheDocument();
+    await user.click(screen.getByText(/Browser action/i));
+    expect(
+      screen.getByText((text) => text.includes('"action": "list_credentials"')),
+    ).toBeInTheDocument();
+    expect(view.container.textContent).toContain("[REDACTED]");
+    expect(view.container.textContent).not.toMatch(/secret-key|secret-id/);
+  });
+
   test("summarizes drag, file drop, and coordinate mouse steps", async () => {
     const user = userEvent.setup();
     const toolCall: ToolCall = {

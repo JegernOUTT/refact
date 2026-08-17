@@ -3,6 +3,7 @@ import { Download, FileJson, FileText, Images } from "lucide-react";
 
 import type {
   BrowserDownloadInfo,
+  BrowserCoverageArtifact,
   BrowserImageArtifact,
   BrowserHarArtifact,
   BrowserPdfArtifact,
@@ -117,6 +118,28 @@ function parseHarArtifact(value: unknown): BrowserHarArtifact | null {
   };
 }
 
+function parseCoverageArtifact(value: unknown): BrowserCoverageArtifact | null {
+  const artifact = artifactValue(value);
+  if (
+    !artifact ||
+    artifact.kind !== "coverage" ||
+    artifact.mime !== "application/json" ||
+    typeof artifact.path !== "string" ||
+    artifact.path.length === 0 ||
+    !isNonNegativeNumber(artifact.bytes) ||
+    !isNonNegativeNumber(artifact.resource_count)
+  ) {
+    return null;
+  }
+  return {
+    kind: "coverage",
+    mime: "application/json",
+    path: artifact.path,
+    bytes: artifact.bytes,
+    resource_count: artifact.resource_count,
+  };
+}
+
 function isDownloadState(value: unknown): value is DisplayDownload["state"] {
   return (
     value === "in_progress" ||
@@ -199,12 +222,19 @@ export function ArtifactsPanel({ artifacts, downloads }: ArtifactsPanelProps) {
   const hars = artifactValues
     .map(parseHarArtifact)
     .filter((value): value is BrowserHarArtifact => value !== null);
+  const coverage = artifactValues
+    .map(parseCoverageArtifact)
+    .filter((value): value is BrowserCoverageArtifact => value !== null);
   const downloadValues = Array.isArray(downloads) ? downloads : [];
   const parsedDownloads = downloadValues
     .map(parseDownload)
     .filter((value): value is DisplayDownload => value !== null);
   const count =
-    screenshots.length + pdfs.length + hars.length + parsedDownloads.length;
+    screenshots.length +
+    pdfs.length +
+    hars.length +
+    coverage.length +
+    parsedDownloads.length;
 
   if (count === 0) return null;
 
@@ -214,6 +244,7 @@ export function ArtifactsPanel({ artifacts, downloads }: ArtifactsPanelProps) {
       : null,
     pdfs.length > 0 ? countLabel(pdfs.length, "PDF") : null,
     hars.length > 0 ? countLabel(hars.length, "HAR") : null,
+    coverage.length > 0 ? countLabel(coverage.length, "coverage report") : null,
     parsedDownloads.length > 0
       ? countLabel(parsedDownloads.length, "download")
       : null,
@@ -335,6 +366,47 @@ export function ArtifactsPanel({ artifacts, downloads }: ArtifactsPanelProps) {
                       target="_blank"
                     >
                       {har.path}
+                    </a>
+                  </Box>
+                </Box>
+              ))}
+            </Box>
+          </Box>
+        ) : null}
+
+        {coverage.length > 0 ? (
+          <Box className={styles.group}>
+            <Text className={styles.groupTitle} size="1" weight="bold">
+              Coverage reports ({coverage.length})
+            </Text>
+            <Box className={styles.rows}>
+              {coverage.map((report, index) => (
+                <Box className={styles.row} key={`${report.path}-${index}`}>
+                  <Icon icon={FileJson} />
+                  <Box className={styles.rowContent}>
+                    <a
+                      aria-label={`Open coverage report ${fileName(
+                        report.path,
+                      )}`}
+                      className={styles.primaryLink}
+                      href={fileUrl(report.path)}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {fileName(report.path)}
+                    </a>
+                    <Text className={styles.meta} size="1">
+                      {report.resource_count} resources ·{" "}
+                      {formatSize(report.bytes)}
+                    </Text>
+                    <a
+                      aria-label={`Open local path ${report.path}`}
+                      className={styles.path}
+                      href={fileUrl(report.path)}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {report.path}
                     </a>
                   </Box>
                 </Box>

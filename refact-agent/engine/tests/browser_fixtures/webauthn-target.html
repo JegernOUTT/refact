@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>WebAuthn target</title>
+  </head>
+  <body>
+    <button id="create">Create passkey</button>
+    <button id="get">Get passkey</button>
+    <output id="result">ready</output>
+    <script>
+      const challenge = new Uint8Array(32).fill(7);
+      const userId = new Uint8Array(16).fill(3);
+      document.querySelector('#create').addEventListener('click', async () => {
+        const credential = await navigator.credentials.create({
+          publicKey: {
+            challenge,
+            rp: { name: 'Refact', id: location.hostname },
+            user: { id: userId, name: 'refact@example.com', displayName: 'Refact Test' },
+            pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+            authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
+          },
+        });
+        window.credentialId = credential.rawId;
+        document.querySelector('#result').textContent = `created:${credential.type}`;
+      });
+      document.querySelector('#get').addEventListener('click', async () => {
+        const credential = await navigator.credentials.get({
+          publicKey: {
+            challenge,
+            rpId: location.hostname,
+            allowCredentials: [{ type: 'public-key', id: window.credentialId }],
+            userVerification: 'required',
+          },
+        });
+        document.querySelector('#result').textContent = `got:${credential.type}`;
+      });
+    </script>
+  </body>
+</html>

@@ -269,6 +269,16 @@ function describeTypedStep(step: Record<string, unknown>): string {
   if (action === "start_har_recording") return "Start HAR recording";
   if (action === "stop_har_recording") return "Stop HAR recording";
   if (action === "route_from_har") return "Route from HAR";
+  if (action === "start_coverage") return "Start JS/CSS coverage";
+  if (action === "stop_coverage") return "Stop JS/CSS coverage";
+  if (action === "add_virtual_authenticator")
+    return "Add virtual authenticator";
+  if (action === "remove_virtual_authenticator")
+    return "Remove virtual authenticator";
+  if (action === "list_credentials") return "List authenticator credentials";
+  if (action === "add_credential") return "Add authenticator credential";
+  if (action === "clear_credentials") return "Clear authenticator credentials";
+  if (action === "set_user_verified") return "Set authenticator verification";
   if (action === "drag_and_drop") return "Drag element to target";
   if (action === "drop_files") {
     const count = Array.isArray(step.paths) ? step.paths.length : 0;
@@ -458,7 +468,16 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         key: string,
         value: unknown,
       ): unknown {
-        if (key === "password") return "[REDACTED]";
+        if (
+          key === "password" ||
+          key === "private_key" ||
+          key === "credential_id" ||
+          key === "user_handle" ||
+          key === "large_blob" ||
+          key === "user_name" ||
+          key === "user_display_name"
+        )
+          return "[REDACTED]";
         if (key === "value" && typeof this.name === "string") {
           return "[REDACTED]";
         }

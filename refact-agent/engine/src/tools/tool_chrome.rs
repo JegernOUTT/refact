@@ -88,6 +88,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Core: navigate, reload, go_back, go_forward, open_tab, close_tab, switch_tab, list_tabs, click, click_if_exists, hover, focus, blur, scroll_to, press_key, drag_and_drop, and drop_files. drag_and_drop accepts source/target locators or refs plus optional source_position/target_position. open_tab accepts optional device/url; close_tab accepts an optional tab and otherwise closes active. Closing active selects the preceding tab in adoption order, the next tab when closing the first, or leaves no active tab.\n",
     "Coordinate mouse escape hatch: mouse_move, mouse_down, mouse_up, mouse_click_xy, mouse_drag_xy, and mouse_wheel use main-frame viewport CSS pixels and bypass locator resolution. Use these only for canvas, map, and vision-driven UIs with no addressable element; locator/ref actions remain the default.\n",
     "Network: route/unroute/list_routes control HTTP interception. route_web_socket and unroute_web_socket install page-level WebSocket routing; send_web_socket_message supplies mock page messages and wait_for_web_socket_frame waits for observed traffic. start_har_recording and stop_har_recording write a runtime-owned HAR artifact; route_from_har replays it with abort or fallback for misses. HAR output is returned as a path and summary, never inlined.\n",
+    "Instrumentation: start_coverage and stop_coverage opt into precise JavaScript and CSS usage tracking and return bounded per-URL summaries plus a full JSON artifact. add_virtual_authenticator enables passkey testing; remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified manage it. Credential ids, private keys, user handles, blobs, and user names are redacted from reports.\n",
     "Forms: fill, clear, select_option, check, uncheck.\n",
     "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch.\n",
     "Waiting: wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. ",
@@ -313,6 +314,53 @@ fn browser_step_schema_with_actions(
     properties.insert(
         "verify".to_string(),
         serde_json::json!({"type": "boolean", "description": "Defaults to true for fill and clear"}),
+    );
+    properties.insert("js".to_string(), serde_json::json!({"type": "boolean"}));
+    properties.insert("css".to_string(), serde_json::json!({"type": "boolean"}));
+    properties.insert(
+        "reset_on_navigation".to_string(),
+        serde_json::json!({"type": "boolean", "description": "Reset coverage on navigation; defaults to true"}),
+    );
+    properties.insert(
+        "protocol".to_string(),
+        serde_json::json!({"type": "string", "enum": ["u2f", "ctap2"]}),
+    );
+    properties.insert(
+        "transport".to_string(),
+        serde_json::json!({"type": "string", "enum": ["usb", "nfc", "ble", "cable", "internal"]}),
+    );
+    properties.insert(
+        "has_resident_key".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    properties.insert(
+        "has_user_verification".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    properties.insert(
+        "is_user_verified".to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    properties.insert("id".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "credential".to_string(),
+        serde_json::json!({
+            "type": "object",
+            "required": ["credential_id", "private_key"],
+            "properties": {
+                "credential_id": {"type": "string"},
+                "is_resident_credential": {"type": "boolean"},
+                "rp_id": {"type": "string"},
+                "private_key": {"type": "string"},
+                "user_handle": {"type": "string"},
+                "sign_count": {"type": "integer", "minimum": 0},
+                "large_blob": {"type": "string"},
+                "backup_eligibility": {"type": "boolean"},
+                "backup_state": {"type": "boolean"},
+                "user_name": {"type": "string"},
+                "user_display_name": {"type": "string"}
+            }
+        }),
     );
     properties.insert(
         "max_chars".to_string(),
@@ -991,6 +1039,8 @@ mod tests {
             "click_count",
             "clip",
             "contains",
+            "credential",
+            "css",
             "delay",
             "delta_x",
             "delta_y",
@@ -1002,6 +1052,11 @@ mod tests {
             "full_page",
             "handler",
             "height",
+            "has_resident_key",
+            "has_user_verification",
+            "id",
+            "is_user_verified",
+            "js",
             "key",
             "label",
             "landscape",
@@ -1024,8 +1079,10 @@ mod tests {
             "print_background",
             "prompt_text",
             "property_filter",
+            "protocol",
             "quality",
             "refs",
+            "reset_on_navigation",
             "root",
             "save_as",
             "scale",
@@ -1045,6 +1102,7 @@ mod tests {
             "text",
             "timeout_ms",
             "times",
+            "transport",
             "type",
             "url",
             "url_or_pattern",
@@ -1616,6 +1674,16 @@ fn format_controller_report(
                 ) {
                     log.push(format!("PDF artifact: {path} ({bytes} bytes)"));
                 }
+            } else if data["artifact"]["kind"] == "coverage" {
+                if let (Some(path), Some(bytes), Some(resources)) = (
+                    data["artifact"]["path"].as_str(),
+                    data["artifact"]["bytes"].as_u64(),
+                    data["artifact"]["resource_count"].as_u64(),
+                ) {
+                    log.push(format!(
+                        "Coverage artifact: {path} ({resources} resources, {bytes} bytes)"
+                    ));
+                }
             }
             format_step_data(data, &mut log);
         }
@@ -1654,6 +1722,7 @@ fn execution_report_to_multimodal(
 
     let mut text_report = serde_json::to_value(report)
         .map_err(|e| format!("Failed to serialize browser report: {}", e))?;
+    redact_browser_credential_fields(&mut text_report);
     strip_binary_data_for_text(&mut text_report);
     let text_pretty = serde_json::to_string_pretty(&text_report)
         .map_err(|e| format!("Failed to pretty-print browser report: {}", e))?;
@@ -1687,6 +1756,60 @@ fn execution_report_to_multimodal(
     }
 
     Ok(content)
+}
+
+fn redact_browser_credential_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for key in [
+                "private_key",
+                "credential_id",
+                "user_handle",
+                "large_blob",
+                "user_name",
+                "user_display_name",
+            ] {
+                if map.contains_key(key) {
+                    map.insert(
+                        key.to_string(),
+                        serde_json::Value::String("[REDACTED]".to_string()),
+                    );
+                }
+            }
+            for child in map.values_mut() {
+                redact_browser_credential_fields(child);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                redact_browser_credential_fields(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod browser_credential_redaction_tests {
+    use super::redact_browser_credential_fields;
+
+    #[test]
+    fn browser_credential_request_fields_are_redacted_recursively() {
+        let mut value = serde_json::json!({
+            "credential": {
+                "credential_id": "secret-id",
+                "private_key": "secret-key",
+                "user_handle": "secret-handle",
+                "rp_id": "example.com"
+            }
+        });
+        redact_browser_credential_fields(&mut value);
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(!serialized.contains("secret-id"));
+        assert!(!serialized.contains("secret-key"));
+        assert!(!serialized.contains("secret-handle"));
+        assert!(serialized.contains("example.com"));
+    }
 }
 
 fn strip_binary_data_for_text(value: &mut serde_json::Value) {

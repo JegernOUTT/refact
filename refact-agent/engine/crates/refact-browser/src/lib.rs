@@ -2,6 +2,7 @@ mod actionability;
 pub mod artifacts;
 pub mod assertions;
 pub mod context_state;
+pub mod coverage;
 pub mod dialogs;
 pub mod drag;
 pub mod files;
@@ -21,6 +22,7 @@ mod refs;
 mod routing;
 mod snapshot;
 mod us_keyboard_layout;
+pub mod webauthn;
 pub mod websocket;
 mod world;
 
@@ -461,6 +463,8 @@ pub struct BrowserRuntime {
     pub route_registry: Arc<RouteRegistry>,
     pub websocket_registry: Arc<WebSocketRegistry>,
     pub har_recorder: Arc<har::HarRecorder>,
+    pub coverage_manager: coverage::CoverageManager,
+    pub webauthn_manager: webauthn::WebAuthnManager,
     pub context_state: ContextState,
     pub mouse_states: HashMap<String, MouseState>,
     pub idle_timeout: Duration,
@@ -553,6 +557,8 @@ impl BrowserRuntime {
             route_registry: Arc::new(RouteRegistry::default()),
             websocket_registry: Arc::new(WebSocketRegistry::default()),
             har_recorder: Arc::new(har::HarRecorder::default()),
+            coverage_manager: coverage::CoverageManager::default(),
+            webauthn_manager: webauthn::WebAuthnManager::default(),
             context_state: ContextState::default(),
             mouse_states: HashMap::new(),
             idle_timeout,
@@ -609,6 +615,8 @@ impl BrowserRuntime {
             route_registry: Arc::new(RouteRegistry::default()),
             websocket_registry: Arc::new(WebSocketRegistry::default()),
             har_recorder: Arc::new(har::HarRecorder::default()),
+            coverage_manager: coverage::CoverageManager::default(),
+            webauthn_manager: webauthn::WebAuthnManager::default(),
             context_state: ContextState::default(),
             mouse_states: HashMap::new(),
             idle_timeout,
@@ -928,11 +936,17 @@ fn tab_opener(
 
 impl Drop for BrowserRuntime {
     fn drop(&mut self) {
+        let tabs = self
+            .browser
+            .get_tabs()
+            .lock()
+            .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.coverage_manager.cleanup(&tabs);
+        self.webauthn_manager.cleanup(&tabs);
         if !self.route_registry.is_empty() || self.context_state.http_credentials.is_some() {
-            if let Ok(tabs) = self.browser.get_tabs().lock() {
-                for tab in tabs.iter() {
-                    let _ = self.route_registry.disable_for_tab(tab);
-                }
+            for tab in &tabs {
+                let _ = self.route_registry.disable_for_tab(tab);
             }
             self.route_registry.remove(None);
         }
