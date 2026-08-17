@@ -220,11 +220,19 @@ impl CompiledPolicy {
     #[cfg(unix)]
     fn cached_secret_zone(&self, path: &Path) -> Option<usize> {
         let identity = file_identity(path)?;
-        let cache = self
-            .secret_identities
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.get(&identity).copied()
+        match self.secret_identities.read() {
+            Ok(cache) => cache.get(&identity).copied(),
+            Err(poisoned) => {
+                drop(poisoned.into_inner());
+                let mut cache = self
+                    .secret_identities
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                cache.clear();
+                self.secret_identities.clear_poison();
+                None
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -232,11 +240,17 @@ impl CompiledPolicy {
         let Some(identity) = file_identity(path) else {
             return;
         };
-        let mut cache = self
-            .secret_identities
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.insert(identity, zone_index);
+        match self.secret_identities.write() {
+            Ok(mut cache) => {
+                cache.insert(identity, zone_index);
+            }
+            Err(poisoned) => {
+                let mut cache = poisoned.into_inner();
+                cache.clear();
+                cache.insert(identity, zone_index);
+                self.secret_identities.clear_poison();
+            }
+        }
     }
 }
 
@@ -930,6 +944,53 @@ mod tests {
                 .zone_for_path_with_roots(&alias, [temp.path()])
                 .name,
             "public"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn poisoned_secret_identity_cache_is_cleared_before_classification() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let secret_dir = temp.path().join("secrets");
+        std::fs::create_dir(&secret_dir).expect("secret dir should be created");
+        let secret = secret_dir.join("secret.txt");
+        let alias = temp.path().join("alias.txt");
+        std::fs::write(&secret, "secret").expect("secret should be written");
+        std::fs::hard_link(&secret, &alias).expect("hard link should be created");
+        let compiled = std::sync::Arc::new(
+            policy(vec![
+                zone("secrets", &["secrets/*"], &[]),
+                zone("normal", &["*"], &["*"]),
+            ])
+            .compile()
+            .expect("policy should compile"),
+        );
+        let identity = file_identity(&secret).expect("secret identity should be available");
+        let poison = compiled.clone();
+        let _ = std::thread::spawn(move || {
+            let mut cache = poison
+                .secret_identities
+                .write()
+                .expect("cache should lock before poisoning");
+            cache.insert(identity, 1);
+            panic!("poison secret cache");
+        })
+        .join();
+
+        assert_eq!(
+            compiled
+                .zone_for_path_with_roots(&alias, [temp.path()])
+                .name,
+            "secrets"
+        );
+        assert!(!compiled.secret_identities.is_poisoned());
+        assert_eq!(
+            compiled
+                .secret_identities
+                .read()
+                .expect("cache should be usable after recovery")
+                .get(&identity),
+            Some(&0)
         );
     }
 }

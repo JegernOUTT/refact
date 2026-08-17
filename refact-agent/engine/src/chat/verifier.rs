@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -131,10 +132,11 @@ impl VerificationCommandRunner for SystemVerificationCommandRunner {
     }
 }
 
-fn check_cwd_in_worktree(worktree: &Path, effective_cwd: &Path) -> Result<(), String> {
-    let canonical_worktree = std::fs::canonicalize(worktree)
+async fn check_cwd_in_worktree(worktree: &Path, effective_cwd: &Path) -> Result<(), String> {
+    let canonical_worktree = tokio::fs::canonicalize(worktree)
+        .await
         .map_err(|e| format!("cannot access worktree '{}': {}", worktree.display(), e))?;
-    if let Ok(canonical_cwd) = std::fs::canonicalize(effective_cwd) {
+    if let Ok(canonical_cwd) = tokio::fs::canonicalize(effective_cwd).await {
         if !canonical_cwd.starts_with(&canonical_worktree) {
             return Err(format!(
                 "cwd '{}' is outside the worktree",
@@ -201,15 +203,28 @@ pub async fn store_verifier_report(
 }
 
 pub async fn schedule_card_verifier(gcx: Arc<GlobalContext>, request: VerifyCardRequest) {
-    tokio::spawn(async move {
-        if let Err(error) = verify_card(gcx.clone(), request.clone()).await {
+    if gcx.shutdown_flag.load(Ordering::SeqCst) {
+        return;
+    }
+    let task_gcx = gcx.clone();
+    let mut tasks = gcx.card_verifier_tasks.lock().await;
+    while let Some(result) = tasks.try_join_next() {
+        if let Err(error) = result {
+            tracing::warn!("card verifier task failed: {error}");
+        }
+    }
+    if gcx.shutdown_flag.load(Ordering::SeqCst) {
+        return;
+    }
+    tasks.spawn(async move {
+        if let Err(error) = verify_card(task_gcx.clone(), request.clone()).await {
             if is_stale_verifier_error(&error) {
                 tracing::info!("{}", error);
                 return;
             }
             let report = launch_failure_report(error);
             if let Err(store_error) = store_verifier_report(
-                gcx,
+                task_gcx,
                 &request.task_id,
                 &request.card_id,
                 request.expected_state.as_ref(),
@@ -225,6 +240,18 @@ pub async fn schedule_card_verifier(gcx: Arc<GlobalContext>, request: VerifyCard
             }
         }
     });
+}
+
+pub async fn shutdown_card_verifiers(gcx: Arc<GlobalContext>) {
+    let mut tasks = gcx.card_verifier_tasks.lock().await;
+    tasks.abort_all();
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            if !error.is_cancelled() {
+                tracing::warn!("card verifier task failed during shutdown: {error}");
+            }
+        }
+    }
 }
 
 pub async fn schedule_card_verifier_after_finish(
@@ -264,7 +291,10 @@ pub async fn verify_card(
         .as_ref()
         .map(PathBuf::from)
         .ok_or_else(|| format!("Card {} has no agent worktree", card.id))?;
-    if !worktree.is_dir() {
+    if !tokio::fs::metadata(&worktree)
+        .await
+        .is_ok_and(|metadata| metadata.is_dir())
+    {
         return Err(format!(
             "Card {} worktree '{}' does not exist",
             card.id,
@@ -507,7 +537,7 @@ async fn run_verification_argv_impl(
         };
     };
     let effective_cwd = cwd.map_or_else(|| worktree.to_path_buf(), |cwd| worktree.join(cwd));
-    if let Err(reason) = check_cwd_in_worktree(worktree, &effective_cwd) {
+    if let Err(reason) = check_cwd_in_worktree(worktree, &effective_cwd).await {
         return VerificationResult {
             command: command.to_string(),
             exit_code: None,
@@ -1105,12 +1135,35 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
 
         schedule_card_verifier_after_finish(
-            gcx,
+            gcx.clone(),
             "missing-task".to_string(),
             "T-missing".to_string(),
             expected_state,
         )
         .await;
+
+        assert_eq!(gcx.card_verifier_tasks.lock().await.len(), 1);
+        shutdown_card_verifiers(gcx.clone()).await;
+        assert!(gcx.card_verifier_tasks.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn verifier_is_not_scheduled_after_shutdown_starts() {
+        let mut card = card("");
+        card.id = "T-stopped".to_string();
+        let expected_state = ExpectedCardState::from_card(0, &card);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        gcx.shutdown_flag.store(true, Ordering::SeqCst);
+
+        schedule_card_verifier_after_finish(
+            gcx.clone(),
+            "missing-task".to_string(),
+            "T-stopped".to_string(),
+            expected_state,
+        )
+        .await;
+
+        assert!(gcx.card_verifier_tasks.lock().await.is_empty());
     }
 
     #[tokio::test]

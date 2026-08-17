@@ -275,6 +275,7 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
     }
 
     chat::close_all_chat_sessions(crate::app_state::AppState::from_gcx(gcx.clone()).await).await;
+    chat::verifier::shutdown_card_verifiers(gcx.clone()).await;
     background_tasks.abort().await;
     git::checkpoints::abort_init_shadow_repos(gcx.clone()).await;
     let exec_cleanup = gcx

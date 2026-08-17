@@ -296,6 +296,14 @@ fn output_to_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&strip_ansi_escapes::strip(bytes)).to_string()
 }
 
+struct AbortOnDropTask(JoinHandle<()>);
+
+impl Drop for AbortOnDropTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn incomplete_utf8_suffix_len(bytes: &[u8]) -> usize {
     let len = bytes.len();
     let start = len.saturating_sub(3);
@@ -350,8 +358,8 @@ fn pump_output(
     stream: ExecOutputStream,
     mut pipe: impl AsyncRead + Unpin + Send + 'static,
     progress_tx: Option<mpsc::UnboundedSender<crate::types::ExecOutputChunk>>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+) -> AbortOnDropTask {
+    AbortOnDropTask(tokio::spawn(async move {
         let mut buffer = [0; PIPE_READ_BYTES];
         loop {
             match pipe.read(&mut buffer).await {
@@ -375,7 +383,7 @@ fn pump_output(
                 }
             }
         }
-    })
+    }))
 }
 
 fn pump_blocking_output(
@@ -384,8 +392,8 @@ fn pump_blocking_output(
     stream: ExecOutputStream,
     mut reader: Box<dyn Read + Send>,
     progress_tx: Option<mpsc::UnboundedSender<crate::types::ExecOutputChunk>>,
-) -> JoinHandle<()> {
-    tokio::task::spawn_blocking(move || {
+) -> AbortOnDropTask {
+    AbortOnDropTask(tokio::task::spawn_blocking(move || {
         let mut buffer = [0; PIPE_READ_BYTES];
         let mut decoder = Utf8ChunkDecoder::default();
         let append_raw = |raw_text: String| {
@@ -423,22 +431,22 @@ fn pump_blocking_output(
                 }
             }
         }
-    })
+    }))
 }
 
 async fn finish_pumps_with_timeout(
-    mut stdout_task: JoinHandle<()>,
-    mut stderr_task: JoinHandle<()>,
+    mut stdout_task: AbortOnDropTask,
+    mut stderr_task: AbortOnDropTask,
     timeout: Duration,
 ) -> bool {
     let wait = async {
-        let _ = tokio::join!(&mut stdout_task, &mut stderr_task);
+        let _ = tokio::join!(&mut stdout_task.0, &mut stderr_task.0);
     };
     if tokio::time::timeout(timeout, wait).await.is_ok() {
         return true;
     }
-    stdout_task.abort();
-    stderr_task.abort();
+    stdout_task.0.abort();
+    stderr_task.0.abort();
     false
 }
 
@@ -614,8 +622,8 @@ async fn monitor_process(
     sandboxed: bool,
     #[cfg(target_os = "linux")] observation: Option<ObservationHandle>,
     #[cfg(not(target_os = "linux"))] observation: Option<()>,
-    stdout_task: JoinHandle<()>,
-    stderr_task: JoinHandle<()>,
+    stdout_task: AbortOnDropTask,
+    stderr_task: AbortOnDropTask,
 ) {
     let (terminal_status, finish_response) = loop {
         let abort_wait = async {
@@ -729,8 +737,8 @@ async fn monitor_process(
             #[cfg(not(target_os = "linux"))]
             let observation_ended_early = false;
             if observation_ended_early {
-                stdout_task.abort();
-                stderr_task.abort();
+                stdout_task.0.abort();
+                stderr_task.0.abort();
                 terminal_status
             } else {
                 let drain_timeout = output_drain_timeout.unwrap_or(EXIT_PUMP_DRAIN_TIMEOUT);
@@ -905,7 +913,7 @@ impl ExecRegistry {
             stderr,
             request.output_progress_tx.clone(),
         );
-        tokio::spawn(monitor_process(
+        self.track_monitor_task(monitor_process(
             self.clone(),
             process_id.clone(),
             child,
@@ -917,7 +925,8 @@ impl ExecRegistry {
             observation_handle,
             stdout_task,
             stderr_task,
-        ));
+        ))
+        .await;
         let snapshot = self.mark_started(&process_id).await?;
         if matches!(request.mode, ExecMode::Foreground) {
             #[cfg(target_os = "linux")]
@@ -1022,8 +1031,8 @@ impl ExecRegistry {
             pty_handle.reader,
             request.output_progress_tx.clone(),
         );
-        let stderr_task = tokio::spawn(async {});
-        tokio::spawn(monitor_process(
+        let stderr_task = AbortOnDropTask(tokio::spawn(async {}));
+        self.track_monitor_task(monitor_process(
             self.clone(),
             process_id.clone(),
             child,
@@ -1035,7 +1044,8 @@ impl ExecRegistry {
             None,
             stdout_task,
             stderr_task,
-        ));
+        ))
+        .await;
         let snapshot = self.mark_started(&process_id).await?;
         if matches!(request.mode, ExecMode::Foreground) {
             return Ok(ExecSpawnResult::new(

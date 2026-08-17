@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
+use tokio::task::JoinSet;
 
 use crate::transcript::{
     ExecRawCapture, ExecRawOutput, ExecRawRead, ExecTranscript, DEFAULT_SPILL_THRESHOLD_BYTES,
@@ -365,6 +367,8 @@ pub struct ExecShutdownCleanupSummary {
     pub child_stopped_count: usize,
     pub child_failed_count: usize,
     pub child_timed_out_count: usize,
+    pub monitor_joined_count: usize,
+    pub monitor_aborted_count: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -407,6 +411,7 @@ pub struct ExecRegistry {
     records: Arc<Mutex<HashMap<ExecProcessId, ExecProcessRecord>>>,
     completion_tx: ProcessCompletionTx,
     output_tx: broadcast::Sender<ExecOutputChunk>,
+    monitor_tasks: Arc<Mutex<JoinSet<()>>>,
 }
 
 impl Default for ExecRegistry {
@@ -417,6 +422,7 @@ impl Default for ExecRegistry {
             records: Arc::new(Mutex::new(HashMap::new())),
             completion_tx,
             output_tx,
+            monitor_tasks: Arc::new(Mutex::new(JoinSet::new())),
         }
     }
 }
@@ -436,6 +442,19 @@ impl ExecRegistry {
 
     pub fn completion_tx(&self) -> ProcessCompletionTx {
         self.completion_tx.clone()
+    }
+
+    pub(crate) async fn track_monitor_task<F>(&self, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let mut tasks = self.monitor_tasks.lock().await;
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result {
+                tracing::warn!("exec monitor task failed: {error}");
+            }
+        }
+        tasks.spawn(task);
     }
 
     pub async fn register(
@@ -1424,7 +1443,31 @@ impl ExecRegistry {
                 }
             }
         }
+        let (joined, aborted) = self.shutdown_monitor_tasks().await;
+        summary.monitor_joined_count = joined;
+        summary.monitor_aborted_count = aborted;
         summary
+    }
+
+    async fn shutdown_monitor_tasks(&self) -> (usize, usize) {
+        let mut tasks = self.monitor_tasks.lock().await;
+        let mut joined = 0;
+        while let Some(result) = tasks.try_join_next() {
+            joined += 1;
+            if let Err(error) = result {
+                tracing::warn!("exec monitor task failed during shutdown: {error}");
+            }
+        }
+        let aborted = tasks.len();
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                if !error.is_cancelled() {
+                    tracing::warn!("exec monitor task failed during shutdown: {error}");
+                }
+            }
+        }
+        (joined, aborted)
     }
 
     async fn keep_cleanup_failure(
@@ -1669,6 +1712,7 @@ async fn cleanup_target(
 mod tests {
     use std::io::{self, Write};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
     use crate::spill::SpillTarget;
@@ -1676,6 +1720,14 @@ mod tests {
     use crate::types::{ExecMode, ExecOwnerMeta, ExecStatusKind};
 
     struct BlockingWriter;
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
 
     impl Write for BlockingWriter {
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
@@ -2595,6 +2647,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_shutdown_aborts_and_joins_monitor_tasks() {
+        let registry = ExecRegistry::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = dropped.clone();
+        registry
+            .track_monitor_task(async move {
+                let _signal = DropSignal(task_dropped);
+                std::future::pending::<()>().await;
+            })
+            .await;
+        tokio::task::yield_now().await;
+
+        let summary = registry.cleanup_shutdown(Duration::from_millis(10)).await;
+
+        assert_eq!(summary.monitor_joined_count, 0);
+        assert_eq!(summary.monitor_aborted_count, 1);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn test_cleanup_shutdown_kills_registered_child() {
         let registry = ExecRegistry::new();
         let mut command = if cfg!(target_os = "windows") {
@@ -2712,6 +2784,10 @@ mod tests {
         assert_eq!(summary.runtime_stopped_count, 1);
         assert_eq!(summary.runtime_failed_count, 0);
         assert_eq!(summary.runtime_timed_out_count, 0);
+        assert_eq!(
+            summary.monitor_joined_count + summary.monitor_aborted_count,
+            1
+        );
         assert!(registry.get(&process_id).await.is_none());
     }
 
