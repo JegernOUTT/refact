@@ -68,15 +68,25 @@ pub fn screenshot_capture(
             rect = intersect_clip(clip, rect)?;
         }
         (rect, false, true)
-    } else {
-        let viewport = BrowserScreenshotClip {
+    } else if let Some(clip) = options.clip {
+        let content = BrowserScreenshotClip {
             x: 0.0,
             y: 0.0,
-            width: metrics.viewport_width,
-            height: metrics.viewport_height,
+            width: metrics.content_width,
+            height: metrics.content_height,
         };
-        let rect = intersect_clip(options.clip.unwrap_or(viewport), viewport)?;
-        (rect, true, false)
+        (intersect_clip(clip, content)?, false, true)
+    } else {
+        (
+            BrowserScreenshotClip {
+                x: 0.0,
+                y: 0.0,
+                width: metrics.viewport_width,
+                height: metrics.viewport_height,
+            },
+            true,
+            false,
+        )
     };
     let mut scale = if viewport_relative {
         metrics.viewport_scale
@@ -284,12 +294,12 @@ mod tests {
     }
 
     #[test]
-    fn viewport_clip_adds_scroll_offset_and_respects_device_scale() {
+    fn document_clip_can_capture_beyond_the_viewport() {
         let capture = screenshot_capture(
             &BrowserScreenshotOptions {
                 clip: Some(BrowserScreenshotClip {
-                    x: 2.0,
-                    y: 4.0,
+                    x: 500.0,
+                    y: 700.0,
                     width: 100.0,
                     height: 80.0,
                 }),
@@ -299,10 +309,22 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(capture.clip.x, 12.0);
-        assert_eq!(capture.clip.y, 24.0);
-        assert_eq!(capture.clip.width, 50.0);
-        assert_eq!(capture.clip.height, 40.0);
+        assert_eq!(capture.clip.x, 500.0);
+        assert_eq!(capture.clip.y, 700.0);
+        assert_eq!(capture.clip.width, 100.0);
+        assert_eq!(capture.clip.height, 80.0);
+        assert_eq!(capture.clip.scale, 1.0);
+        assert!(capture.capture_beyond_viewport);
+    }
+
+    #[test]
+    fn viewport_capture_adds_scroll_offset_and_respects_viewport_scale() {
+        let capture =
+            screenshot_capture(&BrowserScreenshotOptions::default(), metrics(), None).unwrap();
+        assert_eq!(capture.clip.x, 10.0);
+        assert_eq!(capture.clip.y, 20.0);
+        assert_eq!(capture.clip.width, 400.0);
+        assert_eq!(capture.clip.height, 300.0);
         assert_eq!(capture.clip.scale, 2.0);
         assert!(!capture.capture_beyond_viewport);
     }
