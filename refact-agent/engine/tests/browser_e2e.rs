@@ -3189,7 +3189,7 @@ async fn selector_evaluator_preserves_shadow_and_xpath_boundaries() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "headless_chrome 1.0.20 drops Input.dragIntercepted on its non-flattened target transport"]
-async fn drag_file_drop_and_coordinate_mouse_reach_page_handlers() {
+async fn html5_drag_and_drop_reaches_page_handler() {
     if e2e_enabled() {
         eprintln!("skipping: headless_chrome 1.0.20 drops Input.dragIntercepted on its non-flattened target transport");
         return;
@@ -3198,20 +3198,18 @@ async fn drag_file_drop_and_coordinate_mouse_reach_page_handlers() {
         return;
     };
     case.setup_world();
-    let file = case._profile.path().join("drop.txt");
-    std::fs::write(&file, "dropped").unwrap();
     let report = execute_steps_with_runtime(
         &mut case.runtime,
         &[
+            BrowserStep::WaitForSelector {
+                locator: BrowserLocator::css("#source"),
+                timeout_ms: Some(2_000),
+            },
             BrowserStep::DragAndDrop {
                 source: BrowserLocator::css("#source"),
                 target: BrowserLocator::css("#target"),
                 source_position: None,
                 target_position: None,
-            },
-            BrowserStep::DropFiles {
-                target: BrowserLocator::css("#files"),
-                paths: vec![file.to_string_lossy().into_owned()],
             },
             BrowserStep::Eval {
                 expression: "({dragged:document.querySelector('#target').dataset.dropped,files:document.querySelector('#files').dataset.files})".to_string(),
@@ -3224,6 +3222,35 @@ async fn drag_file_drop_and_coordinate_mouse_reach_page_handlers() {
         report.steps[2].data.as_ref().unwrap()["value"]["dragged"],
         "dragged"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn file_drop_and_coordinate_mouse_reach_page_handlers() {
+    let Some(mut case) = BrowserCase::start("drag-drop.html").await else {
+        return;
+    };
+    case.setup_world();
+    let file = case._profile.path().join("drop.txt");
+    std::fs::write(&file, "dropped").unwrap();
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::WaitForSelector {
+                locator: BrowserLocator::css("#files"),
+                timeout_ms: Some(2_000),
+            },
+            BrowserStep::DropFiles {
+                target: BrowserLocator::css("#files"),
+                paths: vec![file.to_string_lossy().into_owned()],
+            },
+            BrowserStep::Eval {
+                expression: "({dragged:document.querySelector('#target').dataset.dropped,files:document.querySelector('#files').dataset.files})".to_string(),
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(report.ok, "file drop report: {report:?}");
     assert_eq!(
         report.steps[2].data.as_ref().unwrap()["value"]["files"],
         "drop.txt"
