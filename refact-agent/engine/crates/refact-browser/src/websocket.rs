@@ -484,6 +484,24 @@ fn matcher_for_pattern(pattern: &UrlPattern) -> Result<UrlMatcher, String> {
     }
 }
 
+fn websocket_event_from_binding_payload(payload: &Value) -> Option<Value> {
+    let value = match payload {
+        Value::String(text) => serde_json::from_str::<Value>(text).ok()?,
+        other => other.clone(),
+    };
+    if let Some(args) = value.get("args").and_then(Value::as_array) {
+        return match args.first() {
+            Some(Value::String(text)) => serde_json::from_str::<Value>(text)
+                .ok()
+                .filter(Value::is_object),
+            Some(event) if event.is_object() => Some(event.clone()),
+            _ => None,
+        };
+    }
+    value.get("type").and_then(Value::as_str)?;
+    Some(value)
+}
+
 pub fn install_websocket_router(
     tab: &Tab,
     registry: std::sync::Arc<WebSocketRegistry>,
@@ -492,13 +510,10 @@ pub fn install_websocket_router(
     tab.expose_function(
         WEBSOCKET_BINDING,
         std::sync::Arc::new(move |payload: Value| {
-            let Some(args) = payload.get("args").and_then(Value::as_array) else {
+            let Some(event) = websocket_event_from_binding_payload(&payload) else {
                 return;
             };
-            let Some(event) = args.first() else {
-                return;
-            };
-            registry.handle_page_event(&target_id, event);
+            registry.handle_page_event(&target_id, &event);
         }),
     )
     .map_err(|error| format!("Failed to expose WebSocket route binding: {error}"))?;
@@ -522,7 +537,7 @@ fn websocket_mock_script() -> String {
   const NativeWebSocket = globalThis.WebSocket;
   const sockets = new Map();
   let nextId = 0;
-  const emit = event => globalThis.{binding}(event);
+  const emit = event => globalThis.{binding}(JSON.stringify(event));
   const toWire = data => {{
     if (typeof data === 'string') return Promise.resolve({{ data, is_base64: false }});
     const blob = data instanceof Blob ? data : new Blob([data]);
@@ -631,6 +646,70 @@ mod tests {
                 .data
                 .as_deref()
                 .is_none_or(|data| !data.contains("hunter2"))
+        }));
+    }
+
+    #[test]
+    fn shim_constructs_from_one_string_and_emits_a_single_json_string() {
+        let script = websocket_mock_script();
+        assert!(script.contains("constructor(url, protocols)"));
+        assert!(script.contains(&format!(
+            "globalThis.{WEBSOCKET_BINDING}(JSON.stringify(event))"
+        )));
+        assert!(!script.contains(&format!("globalThis.{WEBSOCKET_BINDING}(event)")));
+    }
+
+    #[test]
+    fn binding_payload_shapes_unwrap_to_page_events() {
+        let direct = Value::String(
+            json!({"type": "created", "id": "refact-ws-1", "url": "ws://host/ws-echo"}).to_string(),
+        );
+        assert_eq!(
+            websocket_event_from_binding_payload(&direct).unwrap()["type"],
+            json!("created")
+        );
+
+        let wrapped = Value::String(
+            json!({
+                "name": WEBSOCKET_BINDING,
+                "seq": 1,
+                "args": [json!({"type": "closed", "id": "refact-ws-1"}).to_string()],
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            websocket_event_from_binding_payload(&wrapped).unwrap()["type"],
+            json!("closed")
+        );
+
+        assert!(websocket_event_from_binding_payload(&Value::String("not json".to_string())).is_none());
+        assert!(
+            websocket_event_from_binding_payload(&Value::String(json!({"seq": 1}).to_string()))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn created_binding_payload_registers_socket_reachable_by_send() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = WebSocketRegistry::default();
+        registry
+            .add_route(pattern.clone(), WebSocketRouteMode::Mock)
+            .unwrap();
+        let payload = Value::String(
+            json!({"type": "created", "id": "refact-ws-1", "url": "ws://127.0.0.1:8123/ws-echo"})
+                .to_string(),
+        );
+        let event = websocket_event_from_binding_payload(&payload).unwrap();
+        registry.handle_page_event("tab-1", &event);
+        assert_eq!(registry.send_to_page(&pattern, "mocked-frame").unwrap(), 1);
+        let events = registry.drain_report();
+        assert!(events.iter().any(|event| {
+            matches!(event.kind, WebSocketEventKind::Created) && event.routed
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(event.kind, WebSocketEventKind::FrameReceived)
+                && event.data.as_deref() == Some("mocked-frame")
         }));
     }
 

@@ -26,7 +26,7 @@ use refact_lsp::integrations::browser_models::{
     BrowserExpectedText, BrowserExpectation, BrowserLoadState, BrowserLocator, BrowserPdfOptions,
     BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
     BrowserStorageItem, BrowserStorageKind, FillStrategy, LocatorHandlerAction, LocatorRegex,
-    RouteHandler, SessionPolicy, TabTarget, UrlPattern,
+    RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -2620,6 +2620,71 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
         .intercepted_requests
         .iter()
         .any(|request| request.action == "fulfill"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
+    let Some(mut case) = BrowserCase::start("states.html").await else {
+        return;
+    };
+    case.setup_world();
+    let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+    let page = case.server.url("ws-echo.html");
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+
+    let report = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: false,
+            steps: vec![
+                BrowserStep::RouteWebSocket {
+                    pattern: pattern.clone(),
+                    mode: WebSocketRouteMode::Mock,
+                },
+                BrowserStep::Navigate { url: page },
+                BrowserStep::SendWebSocketMessage {
+                    url_pattern: pattern.clone(),
+                    data: "mocked-frame".to_string(),
+                },
+                BrowserStep::WaitForText {
+                    text: "mocked-frame".to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.ok, "websocket routing failed: {report:?}");
+    assert!(
+        report.page_errors.is_empty(),
+        "page errors while constructing the routed WebSocket: {:?}",
+        report.page_errors
+    );
+    assert_eq!(
+        report.steps[2].summary,
+        "Sent WebSocket message to 1 socket(s)"
+    );
+    assert!(
+        report.websockets.iter().any(|event| {
+            matches!(event.kind, WebSocketEventKind::Created) && event.routed
+        }),
+        "no routed socket recorded: {:?}",
+        report.websockets
+    );
+    assert!(
+        report.websockets.iter().any(|event| {
+            matches!(event.kind, WebSocketEventKind::FrameSent)
+                && event.data.as_deref() == Some("hello")
+        }),
+        "page frame not observed: {:?}",
+        report.websockets
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
