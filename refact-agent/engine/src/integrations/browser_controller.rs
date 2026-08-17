@@ -1910,53 +1910,62 @@ async fn validate_upload_paths(
     gcx: Arc<GlobalContext>,
     request: &BrowserActionRequest,
 ) -> Result<(), String> {
-    for path in request.steps.iter().flat_map(|step| match step {
-        BrowserStep::SetInputFiles { paths, .. } | BrowserStep::ExpectFileChooser { paths } => {
-            paths.as_slice()
+    for (idx, step) in request.steps.iter().enumerate() {
+        let (action, paths) = match step {
+            BrowserStep::SetInputFiles { paths, .. } => ("set_input_files", paths.as_slice()),
+            BrowserStep::ExpectFileChooser { paths } => ("expect_file_chooser", paths.as_slice()),
+            BrowserStep::DropFiles { paths, .. } => ("drop_files", paths.as_slice()),
+            _ => continue,
+        };
+        for path in paths {
+            validate_upload_path(gcx.clone(), path)
+                .await
+                .map_err(|error| format!("step[{idx}] ({action}): {error}"))?;
         }
-        BrowserStep::DropFiles { paths, .. } => paths.as_slice(),
-        _ => &[],
-    }) {
-        let path = PathBuf::from(path);
-        crate::files_correction::check_if_its_inside_a_workspace_or_config(gcx.clone(), &path)
+    }
+    Ok(())
+}
+
+async fn validate_upload_path(gcx: Arc<GlobalContext>, path: &str) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    crate::files_correction::check_if_its_inside_a_workspace_or_config(gcx.clone(), &path)
+        .await
+        .map_err(|error| format!("Upload path is not allowed: {error}"))?;
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| format!("Upload path does not exist: {}", path.display()))?;
+    if canonical.is_file() {
+        crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &canonical)
             .await
-            .map_err(|error| format!("Upload path is not allowed: {error}"))?;
-        let canonical = path
-            .canonicalize()
-            .map_err(|_| format!("Upload path does not exist: {}", path.display()))?;
-        if canonical.is_file() {
-            crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &canonical)
+            .map_err(|error| format!("Upload path is blocked by privacy rules: {error}"))?;
+    } else if canonical.is_dir() {
+        for entry in walkdir::WalkDir::new(&canonical) {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "Failed to inspect upload directory {}: {error}",
+                    canonical.display()
+                )
+            })?;
+            if entry.file_type().is_symlink() {
+                return Err(format!(
+                    "Upload directories cannot contain symbolic links: {}",
+                    entry.path().display()
+                ));
+            }
+            if entry.file_type().is_file() {
+                crate::files_in_workspace::check_file_privacy_for_send(
+                    gcx.clone(),
+                    &entry.path().to_path_buf(),
+                )
                 .await
                 .map_err(|error| format!("Upload path is blocked by privacy rules: {error}"))?;
-        } else if canonical.is_dir() {
-            for entry in walkdir::WalkDir::new(&canonical) {
-                let entry = entry.map_err(|error| {
-                    format!(
-                        "Failed to inspect upload directory {}: {error}",
-                        canonical.display()
-                    )
-                })?;
-                if entry.file_type().is_symlink() {
-                    return Err(format!(
-                        "Upload directories cannot contain symbolic links: {}",
-                        entry.path().display()
-                    ));
-                }
-                if entry.file_type().is_file() {
-                    crate::files_in_workspace::check_file_privacy_for_send(
-                        gcx.clone(),
-                        &entry.path().to_path_buf(),
-                    )
-                    .await
-                    .map_err(|error| format!("Upload path is blocked by privacy rules: {error}"))?;
-                }
             }
-        } else {
-            return Err(format!(
-                "Upload path is not a file or directory: {}",
-                canonical.display()
-            ));
         }
+    } else {
+        return Err(format!(
+            "Upload path is not a file or directory: {}",
+            canonical.display()
+        ));
     }
     Ok(())
 }

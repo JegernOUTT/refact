@@ -19,7 +19,7 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 
 use crate::integrations::browser_actions::{self, BrowserAction, DeviceType};
 use crate::integrations::browser_controller;
-use crate::integrations::browser_models::{BrowserActionRequest, ExecutionReport};
+use crate::integrations::browser_models::{ExecutionReport, parse_browser_action_request};
 use crate::integrations::browser_runtime::{
     BrowserRuntime, find_runtime_by_chat_id, register_browser_runtime, get_browser_profile_dir,
     setup_recording_for_runtime, setup_recording_for_tab,
@@ -856,7 +856,7 @@ impl Tool for ToolChrome {
         let mut typed_content: Option<Vec<MultimodalElement>> = None;
 
         if let Some(request_value) = args.get("request") {
-            let request: BrowserActionRequest = serde_json::from_value(request_value.clone())
+            let request = parse_browser_action_request(request_value.clone())
                 .map_err(|e| format!("argument `request` is invalid: {}", e))?;
 
             let runtime_id = {
