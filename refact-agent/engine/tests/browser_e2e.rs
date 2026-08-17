@@ -2738,7 +2738,7 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
-            attach_screenshot: false,
+            attach_screenshot: None,
             steps: vec![
                 BrowserStep::RouteWebSocket {
                     pattern: pattern.clone(),
