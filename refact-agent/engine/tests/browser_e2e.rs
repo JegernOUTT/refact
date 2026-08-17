@@ -2061,20 +2061,21 @@ async fn moving_target_click_reports_successful_retries() {
     };
     case.setup_world();
     case.tab
-        .evaluate(
-            "const moving = document.querySelector('#moving'); moving.style.animation = 'none'; void moving.offsetWidth; moving.style.animation = 'travel 1.5s linear forwards'",
-            false,
-        )
+        .evaluate("globalThis.armMovingTargetForClick()", false)
         .unwrap();
     let report = execute_steps_with_runtime(
         &mut case.runtime,
-        &[BrowserStep::Click {
-            locator: BrowserLocator::css("#moving"),
-        }],
+        &[
+            BrowserStep::Click {
+                locator: BrowserLocator::css("#moving"),
+            },
+            text_step("#result"),
+        ],
         &ImagePolicy::browser_capture(),
     );
 
     assert!(report.ok, "moving click should settle: {report:?}");
+    assert_eq!(returned_text(&report), "moving clicked");
     let diagnostics = report.steps[0]
         .actionability
         .as_ref()

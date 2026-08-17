@@ -12,9 +12,18 @@
   <button id="moving">Moving button</button>
   <output id="result"></output>
   <script>
-    document.querySelector('#moving').addEventListener('click', () => {
+    const moving = document.querySelector('#moving');
+    moving.addEventListener('click', () => {
       document.querySelector('#result').textContent = 'moving clicked';
     });
+    globalThis.armMovingTargetForClick = () => {
+      moving.style.animation = 'none';
+      moving.style.left = '0px';
+      void moving.offsetWidth;
+      globalThis.addEventListener('mousemove', () => {
+        moving.style.left = '240px';
+      }, { capture: true, once: true });
+    };
   </script>
 </body>
 </html>
