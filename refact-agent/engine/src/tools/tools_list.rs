@@ -354,15 +354,7 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
     let system_tools = builtin_system_tools(config_path.clone());
 
     let deep_analysis_tools: Vec<Box<dyn Tool + Send>> = vec![
-        Box::new(
-            crate::tools::tool_strategic_planning::ToolStrategicPlanning {
-                config_path: config_path.clone(),
-            },
-        ),
         Box::new(crate::tools::tool_review::ToolCodeReview {
-            config_path: config_path.clone(),
-        }),
-        Box::new(crate::tools::tool_deep_research::ToolDeepResearch {
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_subagent::ToolSubagent {
@@ -571,9 +563,6 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_task_batch::ToolMergeReadyInOrder::new()),
         Box::new(crate::tools::tool_task_restart_agent::ToolTaskRestartAgent::new()),
         Box::new(crate::tools::tool_task_verify_card::ToolTaskVerifyCard::new()),
-        Box::new(crate::tools::tool_swarm_investigate::ToolSwarmInvestigate {
-            config_path: config_path.clone(),
-        }),
         Box::new(crate::tools::tool_task_documents::ToolDocList::new()),
         Box::new(crate::tools::tool_task_documents::ToolDocGet::new()),
         Box::new(crate::tools::tool_task_documents::ToolDocCreate::new()),
@@ -1001,6 +990,7 @@ mod tests {
             "agent_branch",
             "cache_control",
             "content",
+            "depends_on",
             "description",
             "executing_tools",
             "exit_code",

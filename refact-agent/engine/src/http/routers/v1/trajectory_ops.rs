@@ -226,10 +226,7 @@ fn describe_transform_actions(opts: &CompressOptions) -> Vec<String> {
         actions.push("Drop project information from system messages".to_string());
     }
     if opts.compress_non_agentic_tools {
-        actions.push(
-            "Compress tool results (preserving deep_research, subagent, strategic_planning)"
-                .to_string(),
-        );
+        actions.push("Compress tool results (preserving subagent)".to_string());
     }
     if opts.strip_metering {
         actions.push("Strip metering information".to_string());

@@ -677,7 +677,7 @@ mod tests {
         let messages = vec![
             make_system_msg("s"),
             make_user_msg("q"),
-            make_assistant_with_tool_call("tc1", "research"),
+            make_assistant_with_tool_call("tc1", "subagent"),
             make_tool_msg("tc1", "research results"),
             make_assistant_msg("final"),
         ];
@@ -731,7 +731,7 @@ mod tests {
         let messages = vec![
             make_system_msg("s"),
             make_user_msg("q"),
-            make_assistant_with_tool_call("tc1", "plan"),
+            make_assistant_with_tool_call("tc1", "task_done"),
             make_tool_msg("tc1", "planning results"),
             make_assistant_msg("final"),
         ];
@@ -748,20 +748,12 @@ mod tests {
         assert_system_prefix(&selected);
         assert_eq!(
             roles(&selected),
-            vec![
-                "system",
-                "assistant",
-                "tool",
-                "user",
-                "assistant",
-                "plan",
-                "user"
-            ]
+            vec!["system", "user", "assistant", "plan", "user"]
         );
         let plan = selected
             .iter()
             .find(|message| message.role == "plan")
-            .expect("handoff should carry plan tool output as a pinned plan");
+            .expect("handoff should carry plan report tool output as a pinned plan");
         assert_eq!(plan.content.content_text_only(), "planning results");
         assert_eq!(plan.preserve, Some(true));
     }
@@ -976,7 +968,7 @@ mod tests {
         let messages = vec![
             make_system_msg("s"),
             make_user_msg("q1"),
-            make_assistant_with_tool_call("tc1", "research"),
+            make_assistant_with_tool_call("tc1", "subagent"),
             make_tool_msg("tc1", "research results"),
             make_assistant_msg("after research"),
             make_user_msg("q2"),
@@ -1056,11 +1048,11 @@ mod tests {
         let messages = vec![
             make_system_msg("s"),
             make_user_msg("q1"),
-            make_assistant_with_tool_call("tc1", "research"),
+            make_assistant_with_tool_call("tc1", "subagent"),
             make_tool_msg("tc1", "research 1"),
             make_assistant_msg("a1"),
-            make_assistant_with_tool_call("tc2", "plan"),
-            make_tool_msg("tc2", "planning 1"),
+            make_assistant_with_tool_call("tc2", "review"),
+            make_tool_msg("tc2", "review 1"),
             make_assistant_msg("a2"),
             make_user_msg("q2"),
             make_assistant_msg("final"),

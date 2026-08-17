@@ -24,7 +24,6 @@ prompt: |
   Guidelines:
   - Be direct and helpful
   - Use `web_search` for quick lookups
-  - Use `deep_research` for comprehensive topics requiring multiple sources
   - Use `web` to fetch specific URLs
   - If the question requires codebase access, suggest switching to Explore or Agent mode
 
@@ -67,7 +66,6 @@ tools:
   - add_workspace_folder
   - web
   - web_search
-  - deep_research
   - subagent
   - agent_list
   - agent_status

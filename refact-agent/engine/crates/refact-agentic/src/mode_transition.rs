@@ -832,7 +832,7 @@ fn goal_event_subkind(message: &ChatMessage) -> Option<&str> {
 /// as the new chat's plan banner. `finish` is intentionally excluded: its report is
 /// already carried as a "Task Completion Report" user message by `find_finish_report`.
 fn is_plan_report_tool(name: &str) -> bool {
-    matches!(name, "plan" | "task_done")
+    matches!(name, "task_done")
 }
 
 fn string_list_from_value(value: Option<&serde_json::Value>) -> Vec<String> {
@@ -2647,7 +2647,7 @@ MSG_ID:2
                 content: ChatContent::SimpleText("plan this".to_string()),
                 ..Default::default()
             },
-            assistant_tool_call("call_plan", "plan"),
+            assistant_tool_call("call_plan", "task_done"),
             tool_result("call_plan", plan_body),
         ];
         let decisions = ParsedDecisions {
@@ -2703,7 +2703,7 @@ MSG_ID:2
     async fn assemble_new_chat_existing_plan_wins_over_plan_source() {
         let messages = vec![
             plan_role_message(1, "EXISTING_BASE_PLAN"),
-            assistant_tool_call("call_plan", "plan"),
+            assistant_tool_call("call_plan", "task_done"),
             tool_result("call_plan", "PLAN_REPORT_BODY"),
         ];
         let decisions = ParsedDecisions {
@@ -2765,7 +2765,7 @@ MSG_ID:2
                 content: ChatContent::SimpleText("go".to_string()),
                 ..Default::default()
             },
-            assistant_tool_call("call_plan", "plan"),
+            assistant_tool_call("call_plan", "task_done"),
             tool_result("call_plan", plan_body),
         ];
         let decisions = ParsedDecisions::default();
@@ -2783,7 +2783,7 @@ MSG_ID:2
     #[tokio::test]
     async fn assemble_new_chat_does_not_auto_pin_ambiguous_plan_reports() {
         let messages = vec![
-            assistant_tool_call("call_a", "plan"),
+            assistant_tool_call("call_a", "task_done"),
             tool_result("call_a", "FIRST PLAN REPORT"),
             assistant_tool_call("call_b", "task_done"),
             tool_result("call_b", "SECOND REPORT"),
@@ -2848,7 +2848,7 @@ MSG_ID:2
     #[test]
     fn carried_plan_messages_pins_single_report_when_no_plan_role() {
         let messages = vec![
-            assistant_tool_call("call_plan", "plan"),
+            assistant_tool_call("call_plan", "task_done"),
             tool_result("call_plan", "REPORT BODY"),
         ];
 
@@ -2897,11 +2897,11 @@ MSG_ID:2
     #[test]
     fn format_annotated_messages_labels_tool_result_with_tool_name() {
         let messages = vec![
-            assistant_tool_call("call_plan", "plan"),
+            assistant_tool_call("call_plan", "task_done"),
             tool_result("call_plan", "the plan report"),
         ];
         let metadata = extract_conversation_metadata(&messages);
         let formatted = format_annotated_messages(&metadata);
-        assert!(formatted.contains("[tool: plan]"), "{formatted}");
+        assert!(formatted.contains("[tool: task_done]"), "{formatted}");
     }
 }

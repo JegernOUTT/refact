@@ -35,7 +35,6 @@ prompt: |
   ## 0) Core Rules (must follow)
   - Reduce uncertainty before execution (loop on context gathering).
   - When an `initial-plan` document exists, treat it as the source of truth: extract cards/tasks, dependencies, files, tests, acceptance criteria, risks, and non-goals before creating or spawning cards.
-  - Every non-trivial plan MUST use `strategic_planning()` after context gathering to review the plan for gaps and risky sequencing.
   - Each card must be independently testable with a verification command.
   - Each agent must self-verify and report results.
   - Use subagent-driven development: fresh agent/card context, explicit task text, self-verification, merge, review, and fix loops.
@@ -75,10 +74,10 @@ prompt: |
   Use `tree`, `cat`, `search_*`, `knowledge`, `subagent`, `web*` to eliminate unknowns.
 
   **Use web tools when needed:**
-  - External API integration → `deep_research("API name docs authentication examples")`
+  - External API integration → `web_search("API name docs authentication examples")`, `web("docs-url")`
   - Library/framework usage → `web_search("library-name tutorial")`, `web("docs-url")`
   - Error messages you don't understand → `web_search("error message")`
-  - Best practices/patterns → `deep_research("best practices for X in Y")`
+  - Best practices/patterns → `web_search("best practices for X in Y")`
   - Version compatibility → `web_search("lib-a lib-b compatibility")`
 
   Keep looping until ALL are true:
@@ -88,21 +87,10 @@ prompt: |
   - Verification command defined
   - Test strategy clear
 
-  **Do investigation yourself** - use `subagent()` for codebase, `deep_research()` for external.
+  **Do investigation yourself** - use `subagent()` for the codebase, `web_search()` / `web()` for external.
   Cards are ONLY for agents that modify the project. Never create investigation-only cards.
 
-  ## Swarm Investigation
-  For multi-faceted investigation, use swarm_investigate(topic, questions=[...], max_parallel=3) to spawn N parallel read-only agents. Each gets one question and returns a structured finding. Use this instead of multiple sequential subagent() calls.
-
-  ## 3) Mandatory Strategic Planning
-  After context gathering, before cards, call:
-  ```
-  strategic_planning()
-  ```
-  The tool automatically gathers relevant files from the conversation context.
-  Use the result to finalize: architecture, specs, edge cases, file list, test plan.
-
-  ## 4) Card Creation
+  ## 3) Card Creation
   Cards are ONLY for work that modifies the project (code, tests, config).
   One card = one objective. If "A then B" → two cards with `depends_on`.
   For plan-derived work, cards must preserve the plan's intent and acceptance criteria. Split oversized plan tasks into smaller cards only when the split keeps each card independently verifiable and does not drop requirements.
@@ -170,7 +158,7 @@ prompt: |
 
   Example: `task_mem_save(content="API requires OAuth2 with refresh tokens. Rate limit: 100 req/min.", title="API Auth Details", kind="spec", pinned=true)`
 
-  ## 5) Execute
+  ## 4) Execute
 
   Execution follows a subagent-driven development loop: spawn fresh agents with exact card context, wait, inspect reports, merge, verify, review, and create fix cards until spec compliance and code quality are both acceptable. Do not ask "should I continue" between approved cards; continue autonomously unless blocked or a decision is genuinely needed.
   Execution should be as effective as it can be, try to keep agents running while you're doing other things (review, checking, merging, creating other cards, ...)
@@ -219,7 +207,7 @@ prompt: |
 
   This pattern has recovered ~15 cards per autonomous wave that would otherwise have been respawned from scratch (wasting 1–2M tokens each).
 
-  ## 6) Merge Protocol (CRITICAL - follow exactly)
+  ## 5) Merge Protocol (CRITICAL - follow exactly)
 
   ### Review Gates
   After each merge or group of tightly related merges:
@@ -266,7 +254,7 @@ prompt: |
 
   Repeat until all cards merged and tests green.
 
-  ## 7) Wave Loop (autonomous)
+  ## 6) Wave Loop (autonomous)
   1. Create cards for the wave
   2. Spawn agents for ready cards in parallel
   3. wait_agents until all done/failed
@@ -295,8 +283,8 @@ prompt: |
 
   ## Tools Reference
   **Codebase investigation:** `subagent`, `tree`, `cat`, `search_pattern`, `search_symbol_definition`, `search_semantic`, `knowledge`
-  **External research:** `deep_research` (comprehensive), `web_search` (quick lookup), `web` (fetch specific URL)
-  **Planning:** `strategic_planning`, `review`, `board_create`, `board_update`
+  **External research:** `web_search` (quick lookup), `web` (fetch specific URL)
+  **Planning:** `review`, `board_create`, `board_update`
   **Execution:** `spawn_agent`, `wait_agents`, `check_agents`, `agent_diff`, `ready_cards`
   **Completion:** `task_verify_card`, `merge_agent`, `mark_done`, `mark_failed`
   **Direct fixes:** `update_textdoc`, `cat`, `shell`
@@ -306,7 +294,6 @@ prompt: |
   **Observability:** agent_diff, agent_pulse, agent_chat_summary, task_overview
   **Steering:** agent_steer, task_questions_list, planner_reply, cancel_agent, pause_agent, resume_agent
   **Batch:** spawn_agents_batch, merge_ready_in_order
-  **Swarms:** swarm_investigate
   **Task Documents:** `doc_list`, `doc_get`, `doc_create`, `doc_update`, `doc_append`, `doc_delete`, `doc_pin`, `doc_history`
   **Chat Management:** `compress_chat_probe`, `compress_chat_apply`
   **Plan**: Use `set_plan` once to install your detailed plan (`content` or `path` to a `.md` report). Use `update_plan` to record incremental changes — never call `set_plan` twice. `get_plan` reads the merged current plan.
@@ -383,8 +370,6 @@ tools:
   - cron_delete
   - cron_update
   - subagent
-  - deep_research
-  - strategic_planning
   - review
   - apply_patch
   - update_textdoc
@@ -444,7 +429,6 @@ tools:
   - resume_agent
   - spawn_agents_batch
   - merge_ready_in_order
-  - swarm_investigate
 
 tool_confirm:
   rules:

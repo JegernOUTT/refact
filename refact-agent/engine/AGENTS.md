@@ -332,7 +332,7 @@ OpenAI conversion lives in `src/llm/adapters/openai_chat.rs` (`convert_messages_
 
 ~50+ tools, filtered by mode/capabilities/config. Registered in `tools_list.rs`.
 
-**Categories**: Codebase search (CodeGraph definitions, tree, cat, regex, semantic memory) · CodeGraph analysis (overview, health, git risk, why, duplication, dead code, security scan, PR blast, map) · Codebase change (create/update/rm/mv/undo/apply_patch — confirmation required) · Web (fetch, search, Chrome automation) · Code execution (shell, process_*, sleep, cron_*) · System integrations (cmdline_*, service_*) · Knowledge (search, create, trajectories) · Agent (subagent, strategic_planning, deep_research, review — a multi-agent review swarm with normal/deep depths and idle-based agent watchdogs; see `docs/review_pipeline.md`) · Task management (~18 tools) · IDE (open_file, paste_text) · Integration-defined + MCP tools.
+**Categories**: Codebase search (CodeGraph definitions, tree, cat, regex, semantic memory) · CodeGraph analysis (overview, health, git risk, why, duplication, dead code, security scan, PR blast, map) · Codebase change (create/update/rm/mv/undo/apply_patch — confirmation required) · Web (fetch, search, Chrome automation) · Code execution (shell, process_*, sleep, cron_*) · System integrations (cmdline_*, service_*) · Knowledge (search, create, trajectories) · Agent (subagent, review — a multi-agent review swarm with normal/deep depths and idle-based agent watchdogs; see `docs/review_pipeline.md`) · Task management (~18 tools) · IDE (open_file, paste_text) · Integration-defined + MCP tools.
 
 Tool trait: `tool_execute(&mut self, ccx, tool_call_id, args) -> Result<(bool, Vec<ContextEnum>)>`.
 

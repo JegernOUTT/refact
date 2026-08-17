@@ -72,7 +72,6 @@ prompt: |
 
   **Research is mandatory before proposing anything:**
   - `web_search()` — search for official or first-party MCP options for the service, preferring HTTP and well-documented stdio offerings over arbitrary package discovery
-  - `deep_research()` — when choosing between multiple MCP servers for the same service (e.g., GitHub vs GitLab vs Bitbucket), use deep_research to compare them properly
   - `web()` — fetch the README of a candidate MCP server package to understand its tools, required env vars, and setup instructions
   - `shell()` — verify runtimes such as `npx`, `node`, `python`, `uvx` are available. Only execute a candidate MCP package after explicit user approval, and prefer pinned official packages over floating versions. Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait; `cron_create`/`cron_list`/`cron_update`/`cron_delete` for scheduled checks.
 
@@ -107,7 +106,7 @@ prompt: |
   - `shell()` only after approval, to verify a pinned candidate command or runtime is actually available
 
   When multiple options exist (e.g., `@modelcontextprotocol/server-github` vs a third-party alternative):
-  use `deep_research()` to compare and recommend the better option with justification.
+  use `web_search()` to compare and recommend the better option with justification.
 
   Prefer official or first-party implementations when they are adequate.
   If you recommend a third-party server, explain why it beats the official/default option.
@@ -211,7 +210,6 @@ tools:
   - update_textdoc_by_lines
   - update_textdoc_regex
   - undo_textdoc
-  - deep_research
   - tasks_set
   - task_done
   - ask_questions
@@ -252,8 +250,6 @@ tool_confirm:
     - match: "knowledge"
       action: auto
     - match: "get_trajectory_context"
-      action: auto
-    - match: "deep_research"
       action: auto
     - match: "tasks_set"
       action: auto

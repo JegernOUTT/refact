@@ -69,7 +69,7 @@ Refact is not a one-shot autocomplete box; it is a live agent loop that can insp
 - Search stack with teeth: `tree`, `cat`, regex search, AST `symbol_def`, semantic search, trajectory/knowledge lookup, and project memory let the agent triangulate code by path, structure, and meaning.
 - Editing is first-class and guarded: `apply_patch`, `create_textdoc`, `update_textdoc*`, `mv`, `rm`, and `undo_textdoc` produce concrete workspace mutations, with confirmation gates and limited auto-approval for patch-like edits.
 - Runtime tools close the loop: `shell`, `process_start`, `process_read`, `process_wait`, `process_kill`, PTY `process_write_stdin`, `sleep`, and `cron_*` let agents run commands, monitor services, drive interactive processes, and schedule follow-ups.
-- Delegation is built in: `subagent`, `delegate`, `strategic_planning`, `deep_research`, and `code_review` can split exploration, review, and implementation work across specialized agent passes.
+- Delegation is built in: `subagent`, `delegate`, and `code_review` can split exploration, review, and implementation work across specialized agent passes.
 - Web and browser reach: web fetch/search plus Chrome automation tools can inspect external docs, reproduce UI flows, and bring live evidence back into the chat loop.
 - Streaming stays structured: content, reasoning, thinking blocks, citations, server content blocks, and tool calls are merged as typed deltas; compatible tools can run in parallel and report back without flattening the transcript into mush.
 

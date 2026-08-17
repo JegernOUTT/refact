@@ -173,8 +173,6 @@ override:
     - "Understand how module Y works" → subagent with cat, tree, search_pattern
     - "Find files matching pattern Z" → subagent with glob, tree
 
-    **For complex analysis:** use `strategic_planning()` which automatically gathers relevant files
-
     **For code review:** use `review()` after significant changes
 
     **Task Progress Tracking:**

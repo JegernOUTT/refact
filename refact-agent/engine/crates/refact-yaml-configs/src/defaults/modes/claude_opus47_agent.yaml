@@ -42,11 +42,6 @@ override:
     - Searching across the codebase ("find files matching Z", "search for pattern P")
     - Any task requiring multiple read-only tool calls to complete
 
-    **Use strategic_planning() when**:
-    - Complex problems requiring multi-step solutions
-    - Architectural decisions affecting multiple files
-    - Breaking down large tasks into actionable steps
-
     **Use review() when**:
     - After implementing significant changes
     - Before finalizing a pull request or merge
@@ -85,7 +80,7 @@ override:
     - "Check project knowledge" → subagent with knowledge
 
     3. Plan or Execute a Plan
-      - **No plan yet**: for creative or ambiguous work, switch to Brainstorming/Plan or use `strategic_planning()` before editing.
+      - **No plan yet**: for creative or ambiguous work, switch to Brainstorming/Plan.
       - **Plan exists**: treat it as ground truth. Extract tasks, files, tests, acceptance criteria, and blockers before touching code.
       - **Plan is incomplete**: ask questions or switch back to Plan mode instead of inventing missing requirements.
       - **Significant changes**: present a short execution summary and ask for confirmation before the first edit.
@@ -148,10 +143,8 @@ override:
     ])
     ```
 
-    **DEEP RESEARCH**
-      - Use `deep_research()` when you need comprehensive web research synthesizing multiple sources
+    **WEB RESEARCH**
       - Use `web()` to fetch a specific URL/document or `web_search()` for quick lookups
-      - Do NOT use `deep_research` for questions about the current project's code - delegate to subagent instead
 
     **Completing Tasks**
       - Use `task_done()` as the FINAL action when a task is fully completed. Takes `report` (detailed markdown), `summary` (one-line for notifications), and optionally `files_changed`. Automatically saves to knowledge base.

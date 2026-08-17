@@ -158,8 +158,6 @@ pub const CC_TOOL_RENAMES: &[(&str, &str)] = &[
     ("search_semantic", "semantic_search"),
     ("search_pattern", "regex_search"),
     // Orchestration
-    ("strategic_planning", "plan"),
-    ("deep_research", "research"),
     ("review", "review"),
     ("subagent", "subagent"),
     // General task management
@@ -266,8 +264,6 @@ const CC_SYSTEM_REPLACEMENTS: &[(&str, &str)] = &[
     ("create_textdoc",           "write"),
     ("undo_textdoc",             "undo"),
     // Orchestration
-    ("strategic_planning",       "plan"),
-    ("deep_research",            "research"),
     ("review",                   "review"),
     ("subagent",                 "subagent"),
     // Task management
@@ -382,7 +378,7 @@ pub fn prepend_system(system: Value) -> Value {
 ///   3. Bare Refact builtin name: apply CC_TOOL_RENAMES + add `t_` prefix.
 ///
 /// Examples:
-///   "strategic_planning"          → "t_plan"
+///   "update_textdoc_regex"        → "t_patch_re"
 ///   "cat"                         → "t_cat"
 ///   "mcp_tool_search"             → "tool_search"  (strip mcp_ prefix)
 ///   "mcp_github_create_issue"     → "github_create_issue"  (strip mcp_ prefix)
@@ -414,10 +410,10 @@ pub fn apply_cc_tool_names(tools: &mut Value) {
 /// Apply CC-mode tool name transformation to tool_use blocks in message history.
 ///
 /// Handles four cases:
-///   - Already `t_`-prefixed (e.g. "t_plan"): check if base needs rename, leave otherwise
-///   - `mcp_`-prefixed Refact tool in history (e.g. "mcp_strategic_planning"): rename → "t_plan"
+///   - Already `t_`-prefixed (e.g. "t_patch_re"): check if base needs rename, leave otherwise
+///   - `mcp_`-prefixed Refact tool in history (e.g. "mcp_update_textdoc_regex"): rename → "t_patch_re"
 ///   - Real MCP integration tool `mcp_*` in history: strip `mcp_` → bare name
-///   - Unprefixed Refact builtin (e.g. "strategic_planning"): rename + add t_ → "t_plan"
+///   - Unprefixed Refact builtin (e.g. "update_textdoc_regex"): rename + add t_ → "t_patch_re"
 pub fn apply_cc_tool_use_in_messages(messages: &mut Value) {
     if let Some(msgs) = messages.as_array_mut() {
         for msg in msgs {
@@ -438,7 +434,7 @@ pub fn apply_cc_tool_use_in_messages(messages: &mut Value) {
                         let base = &name[MCP_TOOL_PREFIX.len()..];
                         for (original, renamed) in CC_TOOL_RENAMES {
                             if *original == base {
-                                // "t_strategic_planning" → "t_plan"
+                                // "t_update_textdoc_regex" → "t_patch_re"
                                 block["name"] = json!(format!("{}{}", MCP_TOOL_PREFIX, renamed));
                                 break;
                             }
@@ -446,7 +442,7 @@ pub fn apply_cc_tool_use_in_messages(messages: &mut Value) {
                         // If base is already a short renamed value or unknown: leave as-is
                     } else if name.starts_with("mcp_") {
                         // mcp_-prefixed name in history (Refact builtin or real MCP tool).
-                        // For Refact builtins: "mcp_strategic_planning" → "t_plan"
+                        // For Refact builtins: "mcp_update_textdoc_regex" → "t_patch_re"
                         // For real MCP tools:  "mcp_tool_search"        → "tool_search"
                         let base = &name["mcp_".len()..];
                         // Check if base matches an original Refact tool name → use t_ + renamed
@@ -657,7 +653,7 @@ mod tests {
     fn test_apply_cc_tool_names_renames_and_prefixes() {
         let mut tools = json!([
             {"name": "search", "description": "Search"},
-            {"name": "strategic_planning", "description": "Plan"},
+            {"name": "update_textdoc_regex", "description": "Edit"},
             {"name": "t_already_prefixed", "description": "Pre-prefixed"},
             // Real MCP integration tools — mcp_ prefix must be stripped (blacklisted by Anthropic)
             {"name": "mcp_tool_search", "input_schema": {"type": "object"}},
@@ -666,7 +662,7 @@ mod tests {
         apply_cc_tool_names(&mut tools);
         let arr = tools.as_array().unwrap();
         assert_eq!(arr[0]["name"], "t_search"); // no rename entry → t_ prefix
-        assert_eq!(arr[1]["name"], "t_plan"); // renamed strategic_planning → t_plan
+        assert_eq!(arr[1]["name"], "t_patch_re"); // renamed + prefixed
         assert_eq!(arr[2]["name"], "t_already_prefixed"); // already t_-prefixed → untouched
         assert_eq!(arr[3]["name"], "tool_search"); // mcp_ stripped → bare name
         assert_eq!(arr[4]["name"], "github_create_issue"); // mcp_ stripped → bare name
@@ -680,9 +676,9 @@ mod tests {
                 "content": [
                     {"type": "text", "text": "Let me search"},
                     {"type": "tool_use", "id": "c1", "name": "search", "input": {}},
-                    {"type": "tool_use", "id": "c2", "name": "strategic_planning", "input": {}},
+                    {"type": "tool_use", "id": "c2", "name": "update_textdoc_regex", "input": {}},
                     {"type": "tool_use", "id": "c3", "name": "t_already", "input": {}},
-                    {"type": "tool_use", "id": "c4", "name": "t_strategic_planning", "input": {}},
+                    {"type": "tool_use", "id": "c4", "name": "t_update_textdoc_regex", "input": {}},
                     {"type": "tool_use", "id": "c5", "name": "mcp_github_create_issue", "input": {}},
                     {"type": "tool_use", "id": "c6", "name": "github_create_issue", "input": {}},
                     {"type": "tool_use", "id": "c7", "name": "mcp_tree", "input": {}},
@@ -692,9 +688,9 @@ mod tests {
         apply_cc_tool_use_in_messages(&mut messages);
         let content = &messages[0]["content"];
         assert_eq!(content[1]["name"], "t_search"); // prefix only (unprefixed → t_)
-        assert_eq!(content[2]["name"], "t_plan"); // rename + prefix
+        assert_eq!(content[2]["name"], "t_patch_re"); // rename + prefix
         assert_eq!(content[3]["name"], "t_already"); // already t_-prefixed, no rename entry → unchanged
-        assert_eq!(content[4]["name"], "t_plan"); // old-style t_strategic_planning → t_plan
+        assert_eq!(content[4]["name"], "t_patch_re"); // old-style renamed tool → current name
         assert_eq!(content[5]["name"], "github_create_issue"); // real MCP history → outbound bare name
         assert_eq!(content[6]["name"], "github_create_issue"); // already outbound bare name → unchanged
         assert_eq!(content[7]["name"], "t_tree"); // old internal mcp_ alias stays a CC tool name
@@ -703,7 +699,6 @@ mod tests {
     #[test]
     fn test_cc_resolve_tool_name_roundtrip() {
         // t_-prefixed Refact builtins → original name
-        assert_eq!(cc_resolve_tool_name("t_plan"), "strategic_planning");
         assert_eq!(cc_resolve_tool_name("t_patch_re"), "update_textdoc_regex");
         assert_eq!(
             cc_resolve_tool_name("t_patch_ln"),
@@ -920,7 +915,6 @@ mod tests {
         assert_eq!(cc_resolve_tool_name("t_tree"), "tree");
         assert_eq!(cc_resolve_tool_name("t_cat"), "cat");
         assert_eq!(cc_resolve_tool_name("t_subagent"), "subagent");
-        assert_eq!(cc_resolve_tool_name("t_plan"), "strategic_planning");
         assert_eq!(cc_resolve_tool_name("t_write"), "create_textdoc");
         assert_eq!(cc_resolve_tool_name("t_patch"), "update_textdoc");
         assert_eq!(cc_resolve_tool_name("t_patch_re"), "update_textdoc_regex");
@@ -940,7 +934,6 @@ mod tests {
         assert_eq!(cc_resolve_tool_name("t_say"), "buddy_say");
         assert_eq!(cc_resolve_tool_name("t_merge_worktree"), "worktree_merge");
         assert_eq!(cc_resolve_tool_name("t_review"), "review");
-        assert_eq!(cc_resolve_tool_name("t_research"), "deep_research");
         assert_eq!(cc_resolve_tool_name("t_save_knowledge"), "create_knowledge");
         assert_eq!(cc_resolve_tool_name("t_hist_search"), "search_trajectories");
         assert_eq!(cc_resolve_tool_name("t_hist_get"), "get_trajectory_context");
@@ -969,11 +962,11 @@ mod tests {
     fn test_apply_cc_tool_names_tool_choice_consistency() {
         let mut tools = json!([
             {"name": "mcp_tool_search", "input_schema": {"type": "object"}},
-            {"name": "strategic_planning", "description": "Plan", "input_schema": {"type": "object"}},
+            {"name": "update_textdoc_regex", "description": "Edit", "input_schema": {"type": "object"}},
         ]);
         apply_cc_tool_names(&mut tools);
         let arr = tools.as_array().unwrap();
         assert_eq!(arr[0]["name"], "tool_search");
-        assert_eq!(arr[1]["name"], "t_plan");
+        assert_eq!(arr[1]["name"], "t_patch_re");
     }
 }

@@ -143,7 +143,6 @@ tools:
   - agent_wait
   - agent_result
   - agent_cancel
-  - strategic_planning
   - ask_questions
   - tasks_set
   - task_done

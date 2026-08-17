@@ -612,11 +612,6 @@ pub const TOOLS_TO_PRESERVE: &[&str] = &[
     "delegate_with_editing",
     "code_review",
     "code_review_gather_files",
-    "strategic_planning",
-    "strategic_planning_gather_files",
-    "deep_research",
-    "research",
-    "plan",
     "review",
 ];
 const TOOL_PREVIEW_CHARS: usize = 200;
@@ -665,8 +660,6 @@ pub fn canonical_tool_name_for_preservation(name: &str) -> String {
     let base = normalized.strip_prefix("t_").unwrap_or(&normalized);
     match base {
         "task" => "subagent".to_string(),
-        "plan" => "strategic_planning".to_string(),
-        "research" => "deep_research".to_string(),
         "code_review" => "review".to_string(),
         _ => base.to_string(),
     }
@@ -2587,17 +2580,7 @@ mod tests {
                 "{tool_name} should be preserved"
             );
         }
-        for alias in [
-            "task",
-            "Task",
-            "t_delegate",
-            "t_plan",
-            "t_research",
-            "t_review",
-            "strategicPlanning",
-            "deepResearch",
-            "codeReview",
-        ] {
+        for alias in ["task", "Task", "t_delegate", "t_review", "codeReview"] {
             assert!(should_preserve_tool(alias), "{alias} should be preserved");
         }
         assert!(!should_preserve_tool("cat"));

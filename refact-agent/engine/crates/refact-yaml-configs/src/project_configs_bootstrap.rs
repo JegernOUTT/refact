@@ -79,6 +79,32 @@ pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), Stri
     )
     .await;
 
+    remove_retired_default(
+        &config_dir.join("subagents").join("deep_research.yaml"),
+        "subagents/deep_research.yaml",
+        &existing_checksums,
+        &mut new_checksums,
+    )
+    .await;
+
+    remove_retired_default(
+        &config_dir.join("subagents").join("strategic_planning.yaml"),
+        "subagents/strategic_planning.yaml",
+        &existing_checksums,
+        &mut new_checksums,
+    )
+    .await;
+
+    remove_retired_default(
+        &config_dir
+            .join("subagents")
+            .join("strategic_planning_gather_files.yaml"),
+        "subagents/strategic_planning_gather_files.yaml",
+        &existing_checksums,
+        &mut new_checksums,
+    )
+    .await;
+
     for (key, value) in &existing_checksums {
         if !is_bootstrap_owned_key(key) {
             new_checksums

@@ -155,8 +155,6 @@ prompt: |
 
   Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
 
-  Use `strategic_planning()` for complex architecture, multi-component trade-offs, or when you need an independent planning pass after gathering context.
-
   ## Asking Questions - CRITICAL
 
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text.
@@ -220,7 +218,6 @@ tools:
   - agent_wait
   - agent_result
   - agent_cancel
-  - strategic_planning
   - ask_questions
   - tasks_set
   - task_done

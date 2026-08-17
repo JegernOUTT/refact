@@ -59,10 +59,8 @@ import {
   ShellTool as NewShellTool,
   ExecToolCard,
   SubagentTool as NewSubagentTool,
-  PlanningTool,
   CodeReviewTool as NewCodeReviewTool,
   EngineAnalysisTool,
-  ResearchTool,
   ShellServiceTool as NewShellServiceTool,
   EditTool,
   FileOpTool,
@@ -965,52 +963,10 @@ function processToolCalls(
     );
   }
 
-  if (headName === "strategic_planning") {
-    const elem = (
-      <PlanningTool
-        key={`strategic-planning-tool-${head.id ?? processed.length}`}
-        toolCall={normalizedHead}
-      />
-    );
-    return processToolCalls(
-      tail,
-      toolResults,
-      features,
-      [...processed, elem],
-      contextFilesByToolId,
-      diffsByToolId,
-      activeToolCallId,
-      backgroundAgents,
-      onOpenTrajectory,
-      threadId,
-    );
-  }
-
   if (headName === "code_review") {
     const elem = (
       <NewCodeReviewTool
         key={`code-review-tool-${head.id ?? processed.length}`}
-        toolCall={normalizedHead}
-      />
-    );
-    return processToolCalls(
-      tail,
-      toolResults,
-      features,
-      [...processed, elem],
-      contextFilesByToolId,
-      diffsByToolId,
-      activeToolCallId,
-      backgroundAgents,
-      onOpenTrajectory,
-      threadId,
-    );
-  }
-
-  if (headName === "deep_research") {
-    const elem = (
-      <ResearchTool
-        key={`deep-research-tool-${head.id ?? processed.length}`}
         toolCall={normalizedHead}
       />
     );

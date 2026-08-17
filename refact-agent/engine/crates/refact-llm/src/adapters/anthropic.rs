@@ -2473,7 +2473,7 @@ mod tests {
         .with_tools(
             vec![json!({
                 "type": "function",
-                "function": {"name": "strategic_planning", "parameters": {}}
+                "function": {"name": "subagent", "parameters": {}}
             })],
             None,
         );
@@ -2493,7 +2493,7 @@ mod tests {
         assert!(system[1].get("cache_control").is_none());
         assert_eq!(system[2]["text"], "Be helpful");
         assert_eq!(system[2]["cache_control"]["type"], "ephemeral");
-        assert_eq!(http.body["tools"][0]["name"], "t_plan");
+        assert_eq!(http.body["tools"][0]["name"], "t_subagent");
         assert_eq!(http.body["tools"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(
             http.body["messages"][0]["content"][0]["cache_control"]["type"],

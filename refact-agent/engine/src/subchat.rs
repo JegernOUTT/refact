@@ -325,11 +325,7 @@ pub struct SubchatConfig {
 }
 
 fn should_stream_thinking_progress(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "deep_research" | "strategic_planning" | "strategic_planning_gather_files"
-    ) || tool_name == "review_agents"
-        || tool_name.starts_with("review_")
+    tool_name == "review_agents" || tool_name.starts_with("review_")
 }
 
 struct SubchatProgressCollector {
@@ -3308,11 +3304,11 @@ mod subchat_tests {
             planner_chat_id: Some("planner-task-1-1".to_string()),
         };
         let config = SubchatConfig {
-            tool_name: "strategic_planning_gather_files".to_string(),
+            tool_name: "subagent".to_string(),
             stateful: true,
             autonomous_no_confirm: false,
             chat_id: None,
-            title: Some("Strategic Planning: Gathering Files".to_string()),
+            title: Some("Subagent: Gathering Files".to_string()),
             parent_id: Some("planner-task-1-1".to_string()),
             link_type: Some("gather_files".to_string()),
             root_chat_id: Some("planner-task-1-1".to_string()),
@@ -3657,10 +3653,6 @@ mod subchat_tests {
 
         assert_eq!(params.subchat_n_ctx, 200_000);
         assert_eq!(params.subchat_cache_control, CacheControl::Off);
-        let planning_params = resolve_subchat_params(gcx.clone(), "strategic_planning")
-            .await
-            .unwrap();
-        assert_eq!(planning_params.subchat_cache_control, CacheControl::Off);
         assert!(
             params.subchat_max_new_tokens + params.subchat_tokens_for_rag + extra_budget
                 < params.subchat_n_ctx,
@@ -3891,11 +3883,11 @@ mod subchat_tests {
 
         install_caps(gcx.clone(), caps).await;
 
-        let err = resolve_subchat_params(gcx, "strategic_planning_gather_files")
+        let err = resolve_subchat_params(gcx, "title_generation")
             .await
             .unwrap_err();
 
-        assert!(err.contains("Light model required by subagent 'strategic_planning_gather_files'"));
+        assert!(err.contains("Light model required by subagent 'title_generation'"));
         assert!(err.contains("model_type: light"));
         assert!(err.contains("Default model settings"));
     }

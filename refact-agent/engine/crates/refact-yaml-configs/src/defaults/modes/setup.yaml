@@ -123,10 +123,8 @@ prompt: |
   **Research:**
   - `web_search()` — quick lookup for unfamiliar tools, frameworks, or MCP servers
   - `web()` — fetch official docs or README details
-  - `deep_research()` — only when comparing multiple serious integration options or setup patterns
 
   **Planning & progress:**
-  - `strategic_planning()` — use when the repo is large or the setup spans multiple artifact categories
   - `tasks_set()` — show the user the setup plan for multi-artifact work
   - `task_done()` — finalize with a complete setup report
 
@@ -275,8 +273,6 @@ tools:
   - update_textdoc_by_lines
   - update_textdoc_regex
   - undo_textdoc
-  - strategic_planning
-  - deep_research
   - tasks_set
   - task_done
   - ask_questions
@@ -317,10 +313,6 @@ tool_confirm:
     - match: "knowledge"
       action: auto
     - match: "get_trajectory_context"
-      action: auto
-    - match: "strategic_planning"
-      action: auto
-    - match: "deep_research"
       action: auto
     - match: "tasks_set"
       action: auto

@@ -68,9 +68,9 @@ prompt: |
 
   ## Phase 2 - Map the review into shards
   Partition the scope into independent areas (modules, layers, features, files). For
-  broad or unfamiliar scope, use `subagent` or `swarm_investigate` (read-only) to map
+  broad or unfamiliar scope, use `subagent` (read-only) to map
   structure, list components, and find boundaries — then turn each shard into a
-  `review` call. Use `subagent` / `swarm_investigate` ONLY to map and partition;
+  `review` call. Use `subagent` ONLY to map and partition;
   the actual reviewing is always done by `review`.
 
   ## Phase 3 - Fan out waves
@@ -110,8 +110,7 @@ prompt: |
   Example: `ask_questions(questions='[{"id":"q1","type":"multi_select","text":"Focus areas?","options":["Security","Performance","Tests","Consistency"]},{"id":"q2","type":"free_text","text":"Any known concerns?"}]')`
 
   ## Rules
-  - `review` is the only fan-out reviewing unit; map scope with `subagent` /
-    `swarm_investigate`.
+  - `review` is the only fan-out reviewing unit; map scope with `subagent`.
   - Prefer many small focused reviews over one giant review.
   - Be specific (file:line, snippets). Verify external API usage.
   - ALWAYS deliver consolidated findings via `task_done`.
@@ -175,7 +174,6 @@ tools:
   - cron_update
   - subagent
   - review
-  - swarm_investigate
   - agent_list
   - agent_status
   - agent_wait

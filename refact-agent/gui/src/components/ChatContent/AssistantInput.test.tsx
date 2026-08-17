@@ -162,16 +162,8 @@ describe("AssistantInput", () => {
         },
       },
       {
-        id: "alias-plan",
-        index: 2,
-        function: {
-          name: "t_plan",
-          arguments: "{}",
-        },
-      },
-      {
         id: "alias-web-search",
-        index: 3,
+        index: 2,
         function: {
           name: "WebSearch",
           arguments: JSON.stringify({ query: "refact" }),
@@ -183,7 +175,6 @@ describe("AssistantInput", () => {
 
     expect(screen.getByText(/Read/i)).toBeInTheDocument();
     expect(screen.getByText("TODO")).toBeInTheDocument();
-    expect(screen.getByText(/Plan solution/i)).toBeInTheDocument();
     expect(screen.getByText(/Search web/i)).toBeInTheDocument();
   });
 

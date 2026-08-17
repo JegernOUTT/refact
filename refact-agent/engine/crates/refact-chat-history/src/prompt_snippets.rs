@@ -38,9 +38,7 @@ pub const AGENT_EXPLORATION_INSTRUCTIONS: &str = r#"2. **Delegate exploration to
 - `web()`, `web_search()` - external documentation
 - `knowledge()` - search project knowledge base
 - `search_trajectories()` - find relevant past conversations
-- `get_trajectory_context()` - retrieve messages from a trajectory
-
-**For complex analysis**: delegate to `strategic_planning()` which automatically gathers relevant files"#;
+- `get_trajectory_context()` - retrieve messages from a trajectory"#;
 
 pub const CODEGRAPH_INSTRUCTIONS: &str = r#"## CodeGraph Tools
 
@@ -54,7 +52,7 @@ Use `tree`, `cat`, `search_pattern`, and `search_symbol_definition` for exact fi
 Treat index-readiness warnings as partial results and corroborate important conclusions with `cat` or search tools."#;
 
 pub const AGENT_EXECUTION_INSTRUCTIONS: &str = r#"3. Plan or Execute a Plan
-  - **No plan yet**: for creative or ambiguous work, switch to Brainstorm/Plan or use `strategic_planning()` before editing.
+  - **No plan yet**: for creative or ambiguous work, switch to Brainstorm/Plan before editing.
   - **Plan exists**: treat it as ground truth. Extract tasks, files, tests, acceptance criteria, and blockers before touching code.
   - **Plan is incomplete**: ask questions or switch back to Plan mode instead of inventing missing requirements.
   - **Significant changes**: present a short execution summary and ask for confirmation before the first edit.

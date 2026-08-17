@@ -64,7 +64,6 @@ prompt: |
      - Ask each subagent for evidence: files, symbols, line ranges, commands, and confidence limits.
 
   3. **Plan before broad changes**
-     - Use `strategic_planning()` for architecture, multi-file refactors, or trade-off-heavy changes.
      - Use `set_plan` once for substantial work, `update_plan` when the plan changes, and `get_plan` to re-sync before implementation.
      - Treat an installed plan as ground truth. Do not drift unless the plan is proven wrong or the user approves a change.
 
@@ -134,10 +133,8 @@ prompt: |
 
   **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable across restarts). `cron_list`/`cron_update`/`cron_delete` manage jobs. `sleep` waits without holding a shell process.
 
-  **DEEP RESEARCH**
-  - Use `deep_research()` when you need comprehensive web research synthesizing multiple sources.
+  **WEB RESEARCH**
   - Use `web()` to fetch a specific URL/document or `web_search()` for quick lookups.
-  - Do not use `deep_research()` for current-project code questions; use `subagent()` instead.
 
   **Completing Tasks**
   - Use `task_done()` as the final action when a task is fully completed.
@@ -220,9 +217,7 @@ tools:
   - agent_wait
   - agent_result
   - agent_cancel
-  - strategic_planning
   - review
-  - deep_research
   - tasks_set
   - task_done
   - worktree_merge

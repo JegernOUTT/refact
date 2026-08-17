@@ -318,7 +318,6 @@ const TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS: &[&str] = &[
     "delegate",
     "agent_wait",
     "agent_result",
-    "swarm_investigate",
 ];
 
 fn is_tool_result_truncation_exempt(tool_name: &str) -> bool {
@@ -770,7 +769,6 @@ mod tests {
         assert!(is_tool_result_truncation_exempt("delegate"));
         assert!(is_tool_result_truncation_exempt("agent_wait"));
         assert!(is_tool_result_truncation_exempt("agent_result"));
-        assert!(is_tool_result_truncation_exempt("swarm_investigate"));
         assert!(!is_tool_result_truncation_exempt("cat"));
         assert!(!is_tool_result_truncation_exempt("shell"));
         assert!(!is_tool_result_truncation_exempt("web_search"));

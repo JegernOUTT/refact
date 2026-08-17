@@ -4009,19 +4009,7 @@ mod tests {
 
     #[test]
     fn structured_summary_preserves_agentic_tool_outputs_from_suppression() {
-        let protected_names = [
-            "subagent",
-            "code_review",
-            "strategic_planning",
-            "deep_research",
-            "plan",
-            "review",
-            "research",
-            "task",
-            "t_review",
-            "t_plan",
-            "t_research",
-        ];
+        let protected_names = ["subagent", "code_review", "review", "task", "t_review"];
         for name in protected_names {
             let protected_output = format!("full {name} report {}", "x".repeat(500));
             let source = vec![

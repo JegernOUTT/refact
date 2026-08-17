@@ -13,8 +13,6 @@ const CC_TOOL_ALIASES: Partial<Record<string, string>> = {
   semantic_search: "search_semantic",
   regex_search: "search_pattern",
   glob: "glob",
-  plan: "strategic_planning",
-  research: "deep_research",
   review: "code_review",
   delegate: "subagent",
   set_tasks: "tasks_set",
