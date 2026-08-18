@@ -13,6 +13,8 @@ use tungstenite::{Message, WebSocket, connect};
 
 use crate::{ElementHandle, WorldManager};
 
+const CANCELED_REASON: &str = "canceled";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InputMetadata {
     tag: String,
@@ -265,6 +267,7 @@ impl DownloadTracker {
                 received_bytes: 0,
                 total_bytes: 0,
                 state: DownloadState::InProgress,
+                failure_reason: None,
             },
             reported: false,
         });
@@ -284,7 +287,33 @@ impl DownloadTracker {
         let download = &mut tracker.downloads[index].info;
         download.received_bytes = received_bytes;
         download.total_bytes = total_bytes;
+        download.failure_reason = (state == DownloadState::Canceled).then(|| {
+            download
+                .failure_reason
+                .clone()
+                .unwrap_or(CANCELED_REASON.to_string())
+        });
         download.state = state;
+    }
+
+    pub fn latest_active(&self) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .downloads
+            .iter()
+            .rev()
+            .find(|download| download.info.state == DownloadState::InProgress)
+            .map(|download| download.info.guid.clone())
+    }
+
+    pub fn mark_canceled(&self, guid: &str, reason: &str) -> Option<DownloadInfo> {
+        let mut tracker = self.state.lock().unwrap();
+        let index = tracker.indexes.get(guid).copied()?;
+        let download = &mut tracker.downloads[index].info;
+        download.state = DownloadState::Canceled;
+        download.failure_reason = Some(reason.to_string());
+        Some(download.clone())
     }
 
     pub fn completed_after(&self, cursor: u64) -> Option<DownloadInfo> {
@@ -414,6 +443,20 @@ impl DownloadMonitor {
         self.tracker.cursor()
     }
 
+    pub fn cancel_download(&self, id: Option<&str>) -> Result<DownloadInfo, String> {
+        let guid = match id {
+            Some(id) => id.to_string(),
+            None => self
+                .tracker
+                .latest_active()
+                .ok_or_else(|| "No download is in progress".to_string())?,
+        };
+        self.send_command("Browser.cancelDownload", json!({"guid": guid}))?;
+        self.tracker
+            .mark_canceled(&guid, CANCELED_REASON)
+            .ok_or_else(|| format!("Unknown download id {guid}"))
+    }
+
     pub fn wait_for_download(
         &self,
         cursor: u64,
@@ -424,10 +467,7 @@ impl DownloadMonitor {
         loop {
             if let Some(download) = self.tracker.completed_after(cursor) {
                 if download.state == DownloadState::Canceled {
-                    return Err(format!(
-                        "Download canceled: {}",
-                        download.suggested_filename
-                    ));
+                    return Ok(download);
                 }
                 return self.finish_download(download, save_as);
             }
@@ -631,6 +671,69 @@ mod tests {
         tracker.progress("b", 2, 9, DownloadState::Canceled);
         assert_eq!(tracker.take_report().len(), 2);
         assert!(tracker.take_report().is_empty());
+    }
+
+    #[test]
+    fn canceled_progress_records_a_failure_reason_and_completion_does_not() {
+        let tracker = DownloadTracker::default();
+        let cursor = tracker.cursor();
+        tracker.begin(
+            "a".into(),
+            "https://example/a".into(),
+            "f".into(),
+            "a.txt".into(),
+            "/tmp/a".into(),
+        );
+        tracker.progress("a", 3, 9, DownloadState::InProgress);
+        assert!(tracker.completed_after(cursor).is_none());
+        tracker.progress("a", 3, 9, DownloadState::Canceled);
+        let canceled = tracker.completed_after(cursor).unwrap();
+        assert_eq!(canceled.failure_reason.as_deref(), Some(CANCELED_REASON));
+
+        let second = DownloadTracker::default();
+        let cursor = second.cursor();
+        second.begin(
+            "b".into(),
+            "https://example/b".into(),
+            "f".into(),
+            "b.txt".into(),
+            "/tmp/b".into(),
+        );
+        second.progress("b", 9, 9, DownloadState::Completed);
+        assert_eq!(second.completed_after(cursor).unwrap().failure_reason, None);
+    }
+
+    #[test]
+    fn cancel_targets_the_latest_in_progress_download_and_keeps_its_reason() {
+        let tracker = DownloadTracker::default();
+        assert_eq!(tracker.latest_active(), None);
+        tracker.begin(
+            "a".into(),
+            "https://example/a".into(),
+            "f".into(),
+            "a.txt".into(),
+            "/tmp/a".into(),
+        );
+        tracker.begin(
+            "b".into(),
+            "https://example/b".into(),
+            "f".into(),
+            "b.txt".into(),
+            "/tmp/b".into(),
+        );
+        assert_eq!(tracker.latest_active().as_deref(), Some("b"));
+
+        let canceled = tracker.mark_canceled("b", CANCELED_REASON).unwrap();
+        assert_eq!(canceled.state, DownloadState::Canceled);
+        assert_eq!(canceled.failure_reason.as_deref(), Some(CANCELED_REASON));
+        assert_eq!(tracker.latest_active().as_deref(), Some("a"));
+        assert!(tracker.mark_canceled("missing", CANCELED_REASON).is_none());
+
+        tracker.progress("b", 2, 9, DownloadState::Canceled);
+        assert_eq!(
+            tracker.take_report()[0].failure_reason.as_deref(),
+            Some(CANCELED_REASON)
+        );
     }
 
     #[test]

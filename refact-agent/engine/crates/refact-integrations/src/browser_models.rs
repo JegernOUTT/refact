@@ -1268,6 +1268,8 @@ pub enum BrowserStep {
         content: HarContentPolicy,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url_filter: Option<UrlPattern>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        update: Option<String>,
     },
     StopHarRecording,
     RouteFromHar {
@@ -1488,14 +1490,20 @@ pub enum BrowserStep {
     StorageState {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         save_as: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        indexed_db: Option<bool>,
     },
     SetStorageState {
         state: BrowserStorageState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        indexed_db: Option<bool>,
     },
     GrantPermissions {
         permissions: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
+        #[serde(default, skip_serializing_if = "BrowserPermissionState::is_granted")]
+        state: BrowserPermissionState,
     },
     ClearPermissions,
     SetHttpCredentials {
@@ -1699,6 +1707,10 @@ pub enum BrowserStep {
         timeout_ms: Option<u64>,
         #[serde(default)]
         save_as: Option<String>,
+    },
+    CancelDownload {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     WaitForElementHidden {
         locator: BrowserLocator,
@@ -2085,6 +2097,7 @@ impl BrowserStep {
         "wait_for_request",
         "wait_for_response",
         "wait_for_download",
+        "cancel_download",
         "wait_for_element_hidden",
         "wait_for_element_stable",
         "wait_seconds",
@@ -2174,6 +2187,8 @@ pub struct BrowserActionRequest {
     pub page_context: Option<PageContextMode>,
     #[serde(default)]
     pub network: NetworkReportMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_service_workers: Option<bool>,
     pub steps: Vec<BrowserStep>,
 }
 
@@ -2482,6 +2497,59 @@ pub struct BrowserStorageOrigin {
     pub origin: String,
     #[serde(default)]
     pub local_storage: Vec<BrowserStorageItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexed_db: Vec<BrowserIndexedDbDatabase>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrowserIndexedDbDatabase {
+    pub name: String,
+    pub version: f64,
+    #[serde(default)]
+    pub stores: Vec<BrowserIndexedDbStore>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrowserIndexedDbStore {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<serde_json::Value>,
+    #[serde(default)]
+    pub auto_increment: bool,
+    #[serde(default)]
+    pub records: Vec<BrowserIndexedDbRecord>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrowserIndexedDbRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<serde_json::Value>,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserPermissionState {
+    #[default]
+    Granted,
+    Denied,
+    Prompt,
+}
+
+impl BrowserPermissionState {
+    pub fn is_granted(&self) -> bool {
+        matches!(self, BrowserPermissionState::Granted)
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            BrowserPermissionState::Granted => "granted",
+            BrowserPermissionState::Denied => "denied",
+            BrowserPermissionState::Prompt => "prompt",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -2548,6 +2616,8 @@ pub struct DownloadInfo {
     pub received_bytes: u64,
     pub total_bytes: u64,
     pub state: DownloadState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2677,6 +2747,7 @@ mod tests {
                     name: "logged_in".to_string(),
                     value: "true".to_string(),
                 }],
+                indexed_db: Vec::new(),
             }],
         };
         let json = serde_json::to_value(&state).unwrap();
@@ -2756,6 +2827,7 @@ mod tests {
                 mode: HarMode::Full,
                 content: HarContentPolicy::Embed,
                 url_filter: None,
+                update: None,
             },
             BrowserStep::StopHarRecording,
             BrowserStep::RouteFromHar {
@@ -2927,13 +2999,16 @@ mod tests {
             },
             BrowserStep::StorageState {
                 save_as: Some("auth.json".to_string()),
+                indexed_db: Some(true),
             },
             BrowserStep::SetStorageState {
                 state: BrowserStorageState::default(),
+                indexed_db: None,
             },
             BrowserStep::GrantPermissions {
                 permissions: vec!["geolocation".to_string()],
                 origin: None,
+                state: BrowserPermissionState::Denied,
             },
             BrowserStep::ClearPermissions,
             BrowserStep::SetHttpCredentials {
@@ -3082,6 +3157,7 @@ mod tests {
                 timeout_ms: Some(1_000),
                 save_as: Some("file.txt".to_string()),
             },
+            BrowserStep::CancelDownload { id: None },
             BrowserStep::WaitForElementHidden {
                 locator: locator(),
                 timeout_ms: Some(1_000),
@@ -4621,6 +4697,7 @@ mod tests {
                 received_bytes: 7,
                 total_bytes: 7,
                 state: DownloadState::Completed,
+                failure_reason: None,
             }],
             new_tabs: vec![],
             active_routes: vec![],

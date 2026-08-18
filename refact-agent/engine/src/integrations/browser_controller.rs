@@ -855,6 +855,56 @@ fn is_context_management_step(step: &BrowserStep) -> bool {
     )
 }
 
+fn download_step_result(idx: usize, download: Result<DownloadInfo, String>) -> StepResult {
+    match download {
+        Ok(download) if download.state == DownloadState::Canceled => StepResult::failure(
+            idx,
+            "Wait for download",
+            format!(
+                "Download failed ({}): {}",
+                download
+                    .failure_reason
+                    .clone()
+                    .unwrap_or_else(|| "canceled".to_string()),
+                download.suggested_filename
+            ),
+        )
+        .with_data(serde_json::to_value(download).unwrap_or_default()),
+        Ok(download) => {
+            StepResult::success(idx, format!("Downloaded {}", download.suggested_filename))
+                .with_data(serde_json::to_value(download).unwrap_or_default())
+        }
+        Err(error) => StepResult::failure(idx, "Wait for download", error),
+    }
+}
+
+fn cancel_download_step_result(idx: usize, download: Result<DownloadInfo, String>) -> StepResult {
+    match download {
+        Ok(download) => StepResult::success(
+            idx,
+            format!("Canceled download {}", download.suggested_filename),
+        )
+        .with_data(serde_json::to_value(download).unwrap_or_default()),
+        Err(error) => StepResult::failure(idx, "Cancel download", error),
+    }
+}
+
+fn apply_permission_state(
+    current: &[String],
+    permissions: &[String],
+    state: BrowserPermissionState,
+) -> Vec<String> {
+    let mut granted = current
+        .iter()
+        .filter(|permission| !permissions.contains(permission))
+        .cloned()
+        .collect::<Vec<_>>();
+    if state.is_granted() {
+        granted.extend(permissions.iter().cloned());
+    }
+    granted
+}
+
 fn open_tab_for_device(
     runtime: &BrowserRuntime,
     device: &Option<String>,
@@ -1170,12 +1220,16 @@ fn execute_context_management_step(
             )?;
             Ok(StepResult::success(idx, "Cleared storage"))
         }
-        BrowserStep::StorageState { save_as } => {
+        BrowserStep::StorageState {
+            save_as,
+            indexed_db,
+        } => {
             let state = refact_browser::context_state::storage_state(
                 runtime
                     .get_active_tab()
                     .ok_or_else(|| "No active tab in browser runtime".to_string())?
                     .as_ref(),
+                indexed_db.unwrap_or(false),
             )?;
             let masked = refact_browser::context_state::mask_storage_state(&state);
             let artifact = save_as
@@ -1210,19 +1264,21 @@ fn execute_context_management_step(
                     .with_data(serde_json::json!({"state": masked}))),
             }
         }
-        BrowserStep::SetStorageState { state } => {
+        BrowserStep::SetStorageState { state, indexed_db } => {
             refact_browser::context_state::set_storage_state(
                 runtime
                     .get_active_tab()
                     .ok_or_else(|| "No active tab in browser runtime".to_string())?
                     .as_ref(),
                 state,
+                indexed_db.unwrap_or(false),
             )?;
             Ok(StepResult::success(idx, "Restored storage state"))
         }
         BrowserStep::GrantPermissions {
             permissions,
             origin,
+            state,
         } => {
             refact_browser::context_state::grant_permissions(
                 runtime
@@ -1231,11 +1287,17 @@ fn execute_context_management_step(
                     .as_ref(),
                 permissions,
                 origin.clone(),
+                *state,
             )?;
-            runtime.context_state.permissions = permissions.clone();
+            runtime.context_state.permissions =
+                apply_permission_state(&runtime.context_state.permissions, permissions, *state);
             Ok(StepResult::success(
                 idx,
-                format!("Granted {} permission(s)", permissions.len()),
+                format!(
+                    "Set {} permission(s) to {}",
+                    permissions.len(),
+                    state.label()
+                ),
             ))
         }
         BrowserStep::ClearPermissions => {
@@ -1353,6 +1415,7 @@ fn execute_route_management_step(
             mode,
             content,
             url_filter,
+            update,
         } => Some(
             match runtime.har_recorder.start(
                 &runtime.artifacts_dir,
@@ -1360,6 +1423,7 @@ fn execute_route_management_step(
                 *mode,
                 *content,
                 url_filter.as_ref(),
+                update.as_deref(),
             ) {
                 Ok(path) => StepResult::success(idx, "Started HAR recording")
                     .with_data(serde_json::json!({"path": path})),
@@ -1369,17 +1433,29 @@ fn execute_route_management_step(
         BrowserStep::StopHarRecording => Some(match runtime.har_recorder.stop() {
             Ok(summary) => StepResult::success(
                 idx,
-                format!(
-                    "Saved HAR with {} entries ({} bytes)",
-                    summary.entry_count, summary.bytes
-                ),
+                match &summary.updated_from {
+                    Some(_) => format!(
+                        "Updated HAR to {} entries ({} replaced, {} appended, {} bytes)",
+                        summary.entry_count,
+                        summary.replaced_entries,
+                        summary.appended_entries,
+                        summary.bytes
+                    ),
+                    None => format!(
+                        "Saved HAR with {} entries ({} bytes)",
+                        summary.entry_count, summary.bytes
+                    ),
+                },
             )
             .with_data(serde_json::json!({"artifact": {
                 "kind": "har",
                 "mime": "application/json",
                 "path": summary.path,
                 "bytes": summary.bytes,
-                "entry_count": summary.entry_count
+                "entry_count": summary.entry_count,
+                "updated_from": summary.updated_from,
+                "replaced_entries": summary.replaced_entries,
+                "appended_entries": summary.appended_entries
             }})),
             Err(error) => StepResult::failure(idx, "Stop HAR recording", error),
         }),
@@ -1412,11 +1488,13 @@ struct BrowserResetCounts {
     locator_handlers: usize,
     authenticators: usize,
     clock: bool,
+    service_worker_block: bool,
 }
 
 impl BrowserResetCounts {
     fn summary(&self) -> String {
         format!(
+            "Reset: {}, {}, {}, {}, {}, offline off, emulation cleared, {}, {}",
             "Reset: {}, {}, {}, {}, {}, offline off, throttling off, emulation and device cleared, {}",
             counted(self.routes, "route"),
             counted(self.har_replays, "har replay"),
@@ -1427,6 +1505,11 @@ impl BrowserResetCounts {
                 "clock cleared"
             } else {
                 "clock off"
+            },
+            if self.service_worker_block {
+                "service worker block cleared"
+            } else {
+                "service worker block off"
             },
         )
     }
@@ -1443,6 +1526,7 @@ impl BrowserResetCounts {
                 "throttling_cleared": true,
                 "emulation_cleared": true,
                 "clock_cleared": self.clock,
+                "service_worker_block_cleared": self.service_worker_block,
             }
         })
     }
@@ -1477,6 +1561,7 @@ fn reset_sticky_registries(
     locator_handlers: &Mutex<LocatorHandlerRegistry>,
     authenticators: usize,
     clock: bool,
+    service_worker_block: bool,
 ) -> Result<BrowserResetCounts, String> {
     let har_replays = routes.iter().filter(|route| route.har.is_some()).count();
     Ok(BrowserResetCounts {
@@ -1489,6 +1574,7 @@ fn reset_sticky_registries(
             .reset(),
         authenticators,
         clock,
+        service_worker_block,
     })
 }
 
@@ -1504,12 +1590,14 @@ fn execute_reset_step(runtime: &mut BrowserRuntime, idx: usize) -> StepResult {
         runtime.remove_routes(None)?;
         let authenticators = runtime.webauthn_manager.cleanup(&tabs);
         let clock = runtime.clock.reset(&tabs)?;
+        let service_worker_block = runtime.context_state.block_service_workers;
         let counts = reset_sticky_registries(
             &routes,
             &runtime.websocket_registry,
             &runtime.locator_handlers,
             authenticators,
             clock,
+            service_worker_block,
         )?;
         runtime.context_state.clear_overrides(&tabs)?;
         Ok(counts)
@@ -2345,6 +2433,9 @@ pub async fn execute_request_with_runtime(
                 .ok_or_else(|| format!("No tab found with id={}", id))?;
             rt.set_active_tab_target_id(tab.get_target_id().to_string());
         }
+        if let Some(block) = request.block_service_workers {
+            rt.set_block_service_workers(block)?;
+        }
     }
 
     let initial_url = {
@@ -2424,22 +2515,24 @@ pub async fn execute_request_with_runtime(
         } = step
         {
             let timeout = Duration::from_millis(clamp_timeout_ms(*timeout_ms));
-            match tokio::task::block_in_place(|| {
-                download_monitor.wait_for_download(
-                    armed_network_waits
-                        .get(&idx)
-                        .copied()
-                        .unwrap_or_else(|| download_monitor.cursor()),
-                    timeout,
-                    save_as.as_deref(),
-                )
-            }) {
-                Ok(download) => {
-                    StepResult::success(idx, format!("Downloaded {}", download.suggested_filename))
-                        .with_data(serde_json::to_value(download).unwrap_or_default())
-                }
-                Err(error) => StepResult::failure(idx, "Wait for download", error),
-            }
+            download_step_result(
+                idx,
+                tokio::task::block_in_place(|| {
+                    download_monitor.wait_for_download(
+                        armed_network_waits
+                            .get(&idx)
+                            .copied()
+                            .unwrap_or_else(|| download_monitor.cursor()),
+                        timeout,
+                        save_as.as_deref(),
+                    )
+                }),
+            )
+        } else if let BrowserStep::CancelDownload { id } = step {
+            cancel_download_step_result(
+                idx,
+                tokio::task::block_in_place(|| download_monitor.cancel_download(id.as_deref())),
+            )
         } else if let BrowserStep::Pdf { options } = step {
             let mut rt = runtime_arc.lock().await;
             let result = match rt.get_active_tab() {
@@ -3191,20 +3284,21 @@ pub fn execute_steps_with_runtime(
             BrowserStep::WaitForDownload {
                 timeout_ms,
                 save_as,
-            } => match runtime.download_monitor.wait_for_download(
-                armed_download_waits
-                    .get(&idx)
-                    .copied()
-                    .unwrap_or_else(|| runtime.download_monitor.cursor()),
-                Duration::from_millis(clamp_timeout_ms(*timeout_ms)),
-                save_as.as_deref(),
-            ) {
-                Ok(download) => {
-                    StepResult::success(idx, format!("Downloaded {}", download.suggested_filename))
-                        .with_data(serde_json::to_value(download).unwrap_or_default())
-                }
-                Err(error) => StepResult::failure(idx, "Wait for download", error),
-            },
+            } => download_step_result(
+                idx,
+                runtime.download_monitor.wait_for_download(
+                    armed_download_waits
+                        .get(&idx)
+                        .copied()
+                        .unwrap_or_else(|| runtime.download_monitor.cursor()),
+                    Duration::from_millis(clamp_timeout_ms(*timeout_ms)),
+                    save_as.as_deref(),
+                ),
+            ),
+            BrowserStep::CancelDownload { id } => cancel_download_step_result(
+                idx,
+                runtime.download_monitor.cancel_download(id.as_deref()),
+            ),
             BrowserStep::Pdf { options } => match &current_tab {
                 Some(tab) => step_pdf(tab, idx, options, &runtime.artifacts_dir),
                 None => StepResult::failure(idx, "PDF", "No active tab"),
@@ -4209,7 +4303,8 @@ fn execute_single_step(
         BrowserStep::WaitForLoadState { .. }
         | BrowserStep::WaitForRequest { .. }
         | BrowserStep::WaitForResponse { .. }
-        | BrowserStep::WaitForDownload { .. } => StepResult::failure(
+        | BrowserStep::WaitForDownload { .. }
+        | BrowserStep::CancelDownload { .. } => StepResult::failure(
             idx,
             "Network wait",
             "Network waits require a browser runtime",
@@ -9854,9 +9949,15 @@ mod tests {
             .unwrap();
         let locator_handlers = populated_locator_handlers();
 
-        let counts =
-            reset_sticky_registries(&routes, &websocket_registry, &locator_handlers, 1, true)
-                .unwrap();
+        let counts = reset_sticky_registries(
+            &routes,
+            &websocket_registry,
+            &locator_handlers,
+            1,
+            true,
+            true,
+        )
+        .unwrap();
         route_registry.remove(None);
 
         assert_eq!(
@@ -9868,10 +9969,12 @@ mod tests {
                 locator_handlers: 3,
                 authenticators: 1,
                 clock: true,
+                service_worker_block: true,
             }
         );
         assert_eq!(
             counts.summary(),
+            "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, offline off, emulation cleared, clock cleared, service worker block cleared"
             "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, offline off, throttling off, emulation and device cleared, clock cleared"
         );
         assert!(route_registry.is_empty());
@@ -9915,13 +10018,16 @@ mod tests {
         let websocket_registry = WebSocketRegistry::default();
         let locator_handlers = populated_locator_handlers();
 
-        reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, false).unwrap();
+        reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, false, false)
+            .unwrap();
         let repeated =
-            reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, false).unwrap();
+            reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, false, false)
+                .unwrap();
 
         assert_eq!(repeated, BrowserResetCounts::default());
         assert_eq!(
             repeated.summary(),
+            "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, offline off, emulation cleared, clock off, service worker block off"
             "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, offline off, throttling off, emulation and device cleared, clock off"
         );
         assert_eq!(websocket_registry.route_count(), 0);
@@ -10008,6 +10114,7 @@ mod tests {
             locator_handlers: 3,
             authenticators: 1,
             clock: true,
+            service_worker_block: true,
         };
 
         assert_eq!(
@@ -10023,9 +10130,98 @@ mod tests {
                     "throttling_cleared": true,
                     "emulation_cleared": true,
                     "clock_cleared": true,
+                    "service_worker_block_cleared": true,
                 }
             })
         );
+    }
+
+    #[test]
+    fn permission_state_tracks_only_the_permissions_that_stay_granted() {
+        let granted = apply_permission_state(
+            &[],
+            &["geolocation".to_string(), "notifications".to_string()],
+            BrowserPermissionState::Granted,
+        );
+        assert_eq!(granted, vec!["geolocation", "notifications"]);
+
+        let denied = apply_permission_state(
+            &granted,
+            &["notifications".to_string()],
+            BrowserPermissionState::Denied,
+        );
+        assert_eq!(denied, vec!["geolocation"]);
+
+        let prompted = apply_permission_state(
+            &denied,
+            &["geolocation".to_string()],
+            BrowserPermissionState::Prompt,
+        );
+        assert!(prompted.is_empty());
+
+        let regranted = apply_permission_state(
+            &["geolocation".to_string()],
+            &["geolocation".to_string()],
+            BrowserPermissionState::Granted,
+        );
+        assert_eq!(regranted, vec!["geolocation"]);
+    }
+
+    fn download(state: DownloadState, failure_reason: Option<&str>) -> DownloadInfo {
+        DownloadInfo {
+            guid: "guid-1".to_string(),
+            url: "https://example.test/report.csv".to_string(),
+            frame_id: "frame".to_string(),
+            suggested_filename: "report.csv".to_string(),
+            local_path: "/tmp/report.csv".to_string(),
+            received_bytes: 4,
+            total_bytes: 9,
+            state,
+            failure_reason: failure_reason.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn wait_for_download_surfaces_the_failure_reason_and_keeps_the_download_data() {
+        let failed =
+            download_step_result(3, Ok(download(DownloadState::Canceled, Some("canceled"))));
+        assert!(!failed.ok);
+        assert_eq!(
+            failed.error.as_deref(),
+            Some("Download failed (canceled): report.csv")
+        );
+        assert_eq!(failed.data.as_ref().unwrap()["failure_reason"], "canceled");
+        assert_eq!(failed.data.as_ref().unwrap()["state"], "canceled");
+
+        let completed = download_step_result(3, Ok(download(DownloadState::Completed, None)));
+        assert!(completed.ok);
+        assert_eq!(completed.summary, "Downloaded report.csv");
+        assert!(completed.data.as_ref().unwrap()["failure_reason"].is_null());
+
+        let timed_out = download_step_result(3, Err("Timed out waiting for download".to_string()));
+        assert!(!timed_out.ok);
+        assert_eq!(
+            timed_out.error.as_deref(),
+            Some("Timed out waiting for download")
+        );
+        assert!(timed_out.data.is_none());
+    }
+
+    #[test]
+    fn cancel_download_reports_the_canceled_download_or_the_cancel_error() {
+        let canceled =
+            cancel_download_step_result(1, Ok(download(DownloadState::Canceled, Some("canceled"))));
+        assert!(canceled.ok);
+        assert_eq!(canceled.summary, "Canceled download report.csv");
+        assert_eq!(
+            canceled.data.as_ref().unwrap()["failure_reason"],
+            "canceled"
+        );
+
+        let missing = cancel_download_step_result(1, Err("No download is in progress".to_string()));
+        assert!(!missing.ok);
+        assert_eq!(missing.summary, "Cancel download");
+        assert_eq!(missing.error.as_deref(), Some("No download is in progress"));
     }
 
     fn filmstrip_artifact(

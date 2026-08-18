@@ -20,6 +20,8 @@ struct BrowserActionRequestEnvelope {
     page_context: Option<PageContextMode>,
     #[serde(default)]
     network: NetworkReportMode,
+    #[serde(default)]
+    block_service_workers: Option<bool>,
     steps: Vec<Value>,
 }
 
@@ -36,6 +38,7 @@ pub fn parse_browser_action_request(value: Value) -> Result<BrowserActionRequest
         attach_screenshot: envelope.attach_screenshot,
         page_context: envelope.page_context,
         network: envelope.network,
+        block_service_workers: envelope.block_service_workers,
         steps,
     })
 }
@@ -376,6 +379,42 @@ mod tests {
     }
 
     #[test]
+    fn cancel_download_takes_an_optional_id_and_rejects_unknown_fields() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "cancel_download"}, {"action": "cancel_download", "id": "guid-1"}]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request.steps.as_slice(),
+            [
+                BrowserStep::CancelDownload { id: None },
+                BrowserStep::CancelDownload { id: Some(_) }
+            ]
+        ));
+        assert_eq!(
+            serde_json::to_value(&request.steps[0]).unwrap(),
+            serde_json::json!({"action": "cancel_download"})
+        );
+
+        let error = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "cancel_download", "guid": "guid-1"}]
+        }))
+        .unwrap_err();
+        assert!(
+            error.starts_with("step[0] (cancel_download): "),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("guid"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn grant_permissions_defaults_to_granted_and_accepts_denied_or_prompt() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "grant_permissions", "permissions": ["geolocation"]},
+                {"action": "grant_permissions", "permissions": ["notifications"], "state": "denied"},
+                {"action": "grant_permissions", "permissions": ["midi"], "state": "prompt", "origin": "https://x.test"}
     fn cdp_send_defaults_to_the_page_target_and_omits_absent_params() {
         let request = parse_browser_action_request(serde_json::json!({
             "steps": [
@@ -385,6 +424,90 @@ mod tests {
         }))
         .unwrap();
 
+        assert!(matches!(
+            request.steps.as_slice(),
+            [
+                BrowserStep::GrantPermissions {
+                    state: BrowserPermissionState::Granted,
+                    ..
+                },
+                BrowserStep::GrantPermissions {
+                    state: BrowserPermissionState::Denied,
+                    ..
+                },
+                BrowserStep::GrantPermissions {
+                    state: BrowserPermissionState::Prompt,
+                    origin: Some(_),
+                    ..
+                }
+            ]
+        ));
+        assert_eq!(
+            serde_json::to_value(&request.steps[0]).unwrap(),
+            serde_json::json!({"action": "grant_permissions", "permissions": ["geolocation"]})
+        );
+        assert_eq!(
+            serde_json::to_value(&request.steps[1]).unwrap()["state"],
+            "denied"
+        );
+
+        let error = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "grant_permissions", "permissions": [], "state": "allow"}]
+        }))
+        .unwrap_err();
+        assert!(error.contains("allow"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn har_update_and_storage_indexed_db_are_optional_additive_fields() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "start_har_recording", "mode": "full", "content": "embed", "update": "login.har"},
+                {"action": "storage_state", "indexed_db": true},
+                {"action": "set_storage_state", "state": {}, "indexed_db": false}
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request.steps.as_slice(),
+            [
+                BrowserStep::StartHarRecording {
+                    path: None,
+                    update: Some(_),
+                    ..
+                },
+                BrowserStep::StorageState {
+                    save_as: None,
+                    indexed_db: Some(true)
+                },
+                BrowserStep::SetStorageState {
+                    indexed_db: Some(false),
+                    ..
+                }
+            ]
+        ));
+
+        let defaults = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "start_har_recording", "mode": "full", "content": "embed"},
+                {"action": "storage_state"}
+            ]
+        }))
+        .unwrap();
+        assert!(matches!(
+            defaults.steps.as_slice(),
+            [
+                BrowserStep::StartHarRecording { update: None, .. },
+                BrowserStep::StorageState {
+                    indexed_db: None,
+                    ..
+                }
+            ]
+        ));
+        assert_eq!(
+            serde_json::to_value(&defaults.steps[1]).unwrap(),
+            serde_json::json!({"action": "storage_state"})
         let BrowserStep::CdpSend {
             method,
             params,
@@ -417,6 +540,32 @@ mod tests {
     }
 
     #[test]
+    fn block_service_workers_is_a_batch_level_option() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "block_service_workers": true,
+            "steps": [{"action": "reload"}]
+        }))
+        .unwrap();
+        assert_eq!(request.block_service_workers, Some(true));
+
+        let absent =
+            parse_browser_action_request(serde_json::json!({"steps": [{"action": "reload"}]}))
+                .unwrap();
+        assert_eq!(absent.block_service_workers, None);
+        assert!(
+            serde_json::to_value(&absent).unwrap()["block_service_workers"].is_null(),
+            "absent batch option must not serialize"
+        );
+
+        let error = parse_browser_action_request(serde_json::json!({
+            "block_service_worker": true,
+            "steps": []
+        }))
+        .unwrap_err();
+        assert!(
+            error.contains("block_service_worker"),
+            "unexpected error: {error}"
+        );
     fn cdp_send_requires_a_method_and_rejects_unknown_fields_and_targets() {
         for (step, expected) in [
             (

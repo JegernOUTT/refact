@@ -113,6 +113,7 @@ struct HarRecording {
     content: HarContentPolicy,
     matcher: Option<UrlMatcher>,
     entries: Vec<HarEntry>,
+    base: Option<(PathBuf, Vec<HarEntry>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -128,6 +129,12 @@ pub struct HarRecordingSummary {
     pub path: String,
     pub entry_count: usize,
     pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_from: Option<String>,
+    #[serde(default)]
+    pub replaced_entries: usize,
+    #[serde(default)]
+    pub appended_entries: usize,
 }
 
 #[derive(Debug, Default)]
@@ -150,23 +157,24 @@ impl HarRecorder {
         mode: HarMode,
         content: HarContentPolicy,
         url_filter: Option<&UrlPattern>,
+        update: Option<&str>,
     ) -> Result<PathBuf, String> {
         let matcher = url_filter.map(matcher_for_pattern).transpose()?;
-        let path = match path {
-            Some(path) => {
-                let candidate = PathBuf::from(path);
-                let file_name = candidate
-                    .file_name()
-                    .ok_or_else(|| "HAR path must name a file".to_string())?;
-                if candidate.components().count() != 1 {
-                    return Err(
-                        "HAR path must be a file name inside the runtime artifact directory"
-                            .to_string(),
-                    );
-                }
-                artifacts_dir.join(file_name)
-            }
-            None => artifacts_dir.join(format!("network-{}.har", now_millis())),
+        let base = update
+            .map(|update| {
+                let path = artifact_har_path(artifacts_dir, update)?;
+                let bytes = std::fs::read(&path).map_err(|error| {
+                    format!("Failed to read HAR to update {}: {error}", path.display())
+                })?;
+                let file: HarFile = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("Invalid HAR {}: {error}", path.display()))?;
+                Ok::<_, String>((path, file.log.entries))
+            })
+            .transpose()?;
+        let path = match (path, &base) {
+            (Some(path), _) => artifact_har_path(artifacts_dir, path)?,
+            (None, Some((base_path, _))) => base_path.clone(),
+            (None, None) => artifacts_dir.join(format!("network-{}.har", now_millis())),
         };
         if path.extension().and_then(|value| value.to_str()) != Some("har") {
             return Err("HAR path must end in .har".to_string());
@@ -181,6 +189,7 @@ impl HarRecorder {
             content,
             matcher,
             entries: Vec::new(),
+            base,
         });
         Ok(path)
     }
@@ -242,6 +251,11 @@ impl HarRecorder {
                 )
             })?;
         }
+        let (updated_from, base_entries) = match recording.base {
+            Some((path, entries)) => (Some(path.to_string_lossy().into_owned()), Some(entries)),
+            None => (None, None),
+        };
+        let merge = merge_har_entries(base_entries.unwrap_or_default(), recording.entries);
         let file = HarFile {
             log: HarLog {
                 version: "1.2".to_string(),
@@ -249,7 +263,7 @@ impl HarRecorder {
                     name: "Refact Browser".to_string(),
                     version: env!("CARGO_PKG_VERSION").to_string(),
                 },
-                entries: recording.entries,
+                entries: merge.entries,
             },
         };
         let bytes = serde_json::to_vec_pretty(&file)
@@ -261,8 +275,57 @@ impl HarRecorder {
             path: recording.path.to_string_lossy().into_owned(),
             entry_count: file.log.entries.len(),
             bytes: bytes.len() as u64,
+            updated_from,
+            replaced_entries: merge.replaced,
+            appended_entries: merge.appended,
         })
     }
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct HarMerge {
+    pub entries: Vec<HarEntry>,
+    pub replaced: usize,
+    pub appended: usize,
+}
+
+pub fn merge_har_entries(base: Vec<HarEntry>, recorded: Vec<HarEntry>) -> HarMerge {
+    let mut merge = HarMerge {
+        entries: base,
+        ..Default::default()
+    };
+    for entry in recorded {
+        match merge.entries.iter_mut().find(|existing| {
+            existing.request.url == entry.request.url
+                && existing
+                    .request
+                    .method
+                    .eq_ignore_ascii_case(&entry.request.method)
+        }) {
+            Some(existing) => {
+                *existing = entry;
+                merge.replaced += 1;
+            }
+            None => {
+                merge.entries.push(entry);
+                merge.appended += 1;
+            }
+        }
+    }
+    merge
+}
+
+fn artifact_har_path(artifacts_dir: &Path, path: &str) -> Result<PathBuf, String> {
+    let candidate = PathBuf::from(path);
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| "HAR path must name a file".to_string())?;
+    if candidate.components().count() != 1 {
+        return Err(
+            "HAR path must be a file name inside the runtime artifact directory".to_string(),
+        );
+    }
+    Ok(artifacts_dir.join(file_name))
 }
 
 impl HarReplay {
@@ -552,6 +615,139 @@ mod tests {
         assert_eq!(entry.request.query_string[0].value, "[REDACTED]");
         assert!(!entry.response.content.text.unwrap().contains("hunter2"));
         assert_eq!(entry.timings.wait, 0.3000000000000007);
+    }
+
+    fn entry_for(method: &str, url: &str, status: u16) -> HarEntry {
+        let mut entry = entry_from_monitor(
+            &network_entry(),
+            None,
+            HarMode::Full,
+            HarContentPolicy::Omit,
+        );
+        entry.request.method = method.to_string();
+        entry.request.url = url.to_string();
+        entry.response.status = status;
+        entry
+    }
+
+    #[test]
+    fn merging_replaces_matched_method_and_url_and_appends_the_rest() {
+        let merge = merge_har_entries(
+            vec![
+                entry_for("GET", "https://example.test/a", 200),
+                entry_for("POST", "https://example.test/a", 201),
+            ],
+            vec![
+                entry_for("get", "https://example.test/a", 503),
+                entry_for("GET", "https://example.test/b", 200),
+            ],
+        );
+
+        assert_eq!(merge.replaced, 1);
+        assert_eq!(merge.appended, 1);
+        assert_eq!(merge.entries.len(), 3);
+        assert_eq!(merge.entries[0].response.status, 503);
+        assert_eq!(merge.entries[1].response.status, 201);
+        assert_eq!(merge.entries[2].request.url, "https://example.test/b");
+    }
+
+    #[test]
+    fn recording_without_an_update_base_keeps_every_recorded_entry() {
+        let merge = merge_har_entries(
+            Vec::new(),
+            vec![
+                entry_for("GET", "https://example.test/a", 200),
+                entry_for("GET", "https://example.test/b", 200),
+            ],
+        );
+
+        assert_eq!((merge.replaced, merge.appended), (0, 2));
+        assert_eq!(merge.entries.len(), 2);
+    }
+
+    #[test]
+    fn update_mode_records_into_the_existing_har_and_reports_the_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = dir.path();
+        std::fs::create_dir_all(artifacts).unwrap();
+        let base = HarFile {
+            log: HarLog {
+                version: "1.2".to_string(),
+                creator: HarCreator {
+                    name: "Refact Browser".to_string(),
+                    version: "0".to_string(),
+                },
+                entries: vec![entry_from_monitor(
+                    &network_entry(),
+                    None,
+                    HarMode::Full,
+                    HarContentPolicy::Omit,
+                )],
+            },
+        };
+        std::fs::write(
+            artifacts.join("login.har"),
+            serde_json::to_vec_pretty(&base).unwrap(),
+        )
+        .unwrap();
+
+        let recorder = HarRecorder::default();
+        let path = recorder
+            .start(
+                artifacts,
+                None,
+                HarMode::Full,
+                HarContentPolicy::Omit,
+                None,
+                Some("login.har"),
+            )
+            .unwrap();
+        assert_eq!(path, artifacts.join("login.har"));
+        recorder.record(&network_entry(), None);
+        let summary = recorder.stop().unwrap();
+
+        assert_eq!(summary.entry_count, 1);
+        assert_eq!((summary.replaced_entries, summary.appended_entries), (1, 0));
+        assert_eq!(
+            summary.updated_from.as_deref(),
+            Some(artifacts.join("login.har").to_string_lossy().as_ref())
+        );
+        let written: HarFile =
+            serde_json::from_slice(&std::fs::read(artifacts.join("login.har")).unwrap()).unwrap();
+        assert_eq!(written.log.entries.len(), 1);
+    }
+
+    #[test]
+    fn update_mode_rejects_paths_outside_the_artifact_directory_and_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = HarRecorder::default();
+        let error = recorder
+            .start(
+                dir.path(),
+                None,
+                HarMode::Full,
+                HarContentPolicy::Omit,
+                None,
+                Some("nested/login.har"),
+            )
+            .unwrap_err();
+        assert!(error.contains("must be a file name"), "{error}");
+
+        let missing = recorder
+            .start(
+                dir.path(),
+                None,
+                HarMode::Full,
+                HarContentPolicy::Omit,
+                None,
+                Some("absent.har"),
+            )
+            .unwrap_err();
+        assert!(
+            missing.contains("Failed to read HAR to update"),
+            "{missing}"
+        );
+        assert!(!recorder.is_active());
     }
 
     #[test]

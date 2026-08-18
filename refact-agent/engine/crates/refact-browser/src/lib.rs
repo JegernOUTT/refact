@@ -791,6 +791,20 @@ impl BrowserRuntime {
         Ok(())
     }
 
+    pub fn set_block_service_workers(&mut self, block: bool) -> Result<(), String> {
+        self.context_state.block_service_workers = block;
+        for tab in self
+            .browser
+            .get_tabs()
+            .lock()
+            .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+        {
+            context_state::apply_block_service_workers(&tab, block)?;
+        }
+        Ok(())
+    }
+
     pub fn set_http_credentials(
         &mut self,
         username: String,

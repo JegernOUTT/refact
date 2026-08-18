@@ -4,9 +4,15 @@ use std::path::{Path, PathBuf};
 use headless_chrome::Tab;
 use headless_chrome::protocol::cdp::{Browser, Emulation, Network};
 use refact_integrations::browser_models::{
-    BrowserContextSummary, BrowserCookie, BrowserCookieSameSite, BrowserStorageItem,
+    BrowserContextSummary, BrowserCookie, BrowserCookieSameSite, BrowserIndexedDbDatabase,
+    BrowserIndexedDbRecord, BrowserIndexedDbStore, BrowserPermissionState, BrowserStorageItem,
     BrowserStorageKind, BrowserStorageOrigin, BrowserStorageState,
 };
+
+pub const MAX_INDEXED_DB_RECORDS_PER_STORE: usize = 200;
+
+#[derive(Clone, Debug, Default)]
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewportState {
@@ -150,6 +156,7 @@ pub struct ContextState {
     pub extra_http_headers: BTreeMap<String, String>,
     pub permissions: Vec<String>,
     pub http_credentials: Option<(String, String)>,
+    pub block_service_workers: bool,
 }
 
 impl ContextState {
@@ -198,6 +205,8 @@ impl ContextState {
             })
             .map_err(|error| format!("Failed to set geolocation: {error}"))?;
         }
+        apply_offline(tab, self.offline)?;
+        apply_block_service_workers(tab, self.block_service_workers)?;
         apply_network_conditions(tab, self.offline, self.network_conditions.as_ref())?;
         apply_cpu_throttling(tab, self.cpu_throttling_rate)?;
         apply_extra_http_headers(tab, &self.extra_http_headers)?;
@@ -219,6 +228,7 @@ impl ContextState {
         self.network_conditions = None;
         self.cpu_throttling_rate = None;
         self.permissions.clear();
+        self.block_service_workers = false;
         for tab in tabs {
             tab.call_method(Emulation::ClearDeviceMetricsOverride(None))
                 .map_err(|error| format!("Failed to clear viewport: {error}"))?;
@@ -243,6 +253,8 @@ impl ContextState {
             .map_err(|error| format!("Failed to clear user agent: {error}"))?;
             tab.call_method(Emulation::ClearGeolocationOverride(None))
                 .map_err(|error| format!("Failed to clear geolocation: {error}"))?;
+            apply_offline(tab, self.offline)?;
+            apply_block_service_workers(tab, self.block_service_workers)?;
             apply_network_conditions(tab, self.offline, self.network_conditions.as_ref())?;
             apply_cpu_throttling(tab, self.cpu_throttling_rate)?;
             clear_permissions(tab)?;
@@ -356,6 +368,12 @@ pub fn apply_cpu_throttling(tab: &Tab, rate: Option<f64>) -> Result<(), String> 
     .map_err(|error| format!("Failed to set CPU throttling: {error}"))
 }
 
+pub fn apply_block_service_workers(tab: &Tab, block: bool) -> Result<(), String> {
+    tab.call_method(Network::SetBypassServiceWorker { bypass: block })
+        .map(|_| ())
+        .map_err(|error| format!("Failed to set service worker bypass: {error}"))
+}
+
 pub fn apply_extra_http_headers(
     tab: &Tab,
     headers: &BTreeMap<String, String>,
@@ -464,7 +482,7 @@ pub fn clear_storage(tab: &Tab, kind: BrowserStorageKind) -> Result<(), String> 
         .map_err(|error| format!("Failed to clear storage: {error}"))
 }
 
-pub fn storage_state(tab: &Tab) -> Result<BrowserStorageState, String> {
+pub fn storage_state(tab: &Tab, indexed_db: bool) -> Result<BrowserStorageState, String> {
     let cookies = get_cookies(tab, None)?;
     let origin = current_origin(tab)?;
     let local_storage = get_storage(tab, BrowserStorageKind::Local, None).unwrap_or_default();
@@ -474,9 +492,130 @@ pub fn storage_state(tab: &Tab) -> Result<BrowserStorageState, String> {
         vec![BrowserStorageOrigin {
             origin,
             local_storage,
+            indexed_db: if indexed_db {
+                get_indexed_db(tab)?
+            } else {
+                Vec::new()
+            },
         }]
     };
     Ok(BrowserStorageState { cookies, origins })
+}
+
+pub fn get_indexed_db(tab: &Tab) -> Result<Vec<BrowserIndexedDbDatabase>, String> {
+    let value = tab
+        .evaluate(&indexed_db_snapshot_js(), true)
+        .map_err(|error| format!("Failed to read IndexedDB: {error}"))?
+        .value
+        .and_then(|value| value.as_str().map(str::to_string))
+        .ok_or_else(|| "IndexedDB read returned no value".to_string())?;
+    serde_json::from_str(&value).map_err(|error| format!("Failed to parse IndexedDB: {error}"))
+}
+
+pub fn set_indexed_db(tab: &Tab, databases: &[BrowserIndexedDbDatabase]) -> Result<(), String> {
+    if databases.is_empty() {
+        return Ok(());
+    }
+    let payload = serde_json::to_string(databases)
+        .map_err(|error| format!("Failed to serialize IndexedDB: {error}"))?;
+    let value = tab
+        .evaluate(&indexed_db_restore_js(&payload), true)
+        .map_err(|error| format!("Failed to restore IndexedDB: {error}"))?
+        .value
+        .and_then(|value| value.as_str().map(str::to_string))
+        .ok_or_else(|| "IndexedDB restore returned no value".to_string())?;
+    if value.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Failed to restore IndexedDB: {value}"))
+    }
+}
+
+fn indexed_db_snapshot_js() -> String {
+    format!(
+        r#"(async () => {{
+  if (!self.indexedDB || !indexedDB.databases) return JSON.stringify([]);
+  const open = (name) => new Promise((resolve, reject) => {{
+    const request = indexedDB.open(name);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error('blocked'));
+  }});
+  const readAll = (store, method) => new Promise((resolve, reject) => {{
+    const request = store[method](undefined, {MAX_INDEXED_DB_RECORDS_PER_STORE} + 1);
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  }});
+  const databases = [];
+  for (const info of await indexedDB.databases()) {{
+    if (!info.name) continue;
+    const db = await open(info.name);
+    const stores = [];
+    for (const storeName of Array.from(db.objectStoreNames)) {{
+      const store = db.transaction(storeName, 'readonly').objectStore(storeName);
+      const values = await readAll(store, 'getAll');
+      const keys = store.keyPath === null ? await readAll(store, 'getAllKeys') : [];
+      const truncated = values.length > {MAX_INDEXED_DB_RECORDS_PER_STORE};
+      const records = values.slice(0, {MAX_INDEXED_DB_RECORDS_PER_STORE}).map((value, index) => (
+        store.keyPath === null ? {{key: keys[index], value}} : {{value}}
+      ));
+      stores.push({{
+        name: storeName,
+        key_path: store.keyPath,
+        auto_increment: store.autoIncrement,
+        records,
+        truncated,
+      }});
+    }}
+    db.close();
+    databases.push({{name: info.name, version: db.version, stores}});
+  }}
+  return JSON.stringify(databases);
+}})()"#
+    )
+}
+
+fn indexed_db_restore_js(payload: &str) -> String {
+    format!(
+        r#"(async () => {{
+  if (!self.indexedDB) return 'IndexedDB is unavailable';
+  const databases = {payload};
+  try {{
+    for (const database of databases) {{
+      await new Promise((resolve, reject) => {{
+        const request = indexedDB.deleteDatabase(database.name);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+        request.onblocked = () => resolve();
+      }});
+      const db = await new Promise((resolve, reject) => {{
+        const request = indexedDB.open(database.name, database.version);
+        request.onupgradeneeded = () => {{
+          for (const store of database.stores) {{
+            request.result.createObjectStore(store.name, {{
+              keyPath: store.key_path === null ? undefined : store.key_path,
+              autoIncrement: store.auto_increment,
+            }});
+          }}
+        }};
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      }});
+      for (const store of database.stores) {{
+        if (!store.records.length) continue;
+        const target = db.transaction(store.name, 'readwrite').objectStore(store.name);
+        for (const record of store.records) {{
+          target.put(record.value, 'key' in record ? record.key : undefined);
+        }}
+      }}
+      db.close();
+    }}
+  }} catch (error) {{
+    return String(error);
+  }}
+  return '';
+}})()"#
+    )
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -518,12 +657,20 @@ pub fn save_storage_state(
     })
 }
 
-pub fn set_storage_state(tab: &Tab, state: &BrowserStorageState) -> Result<(), String> {
+pub fn set_storage_state(
+    tab: &Tab,
+    state: &BrowserStorageState,
+    indexed_db: bool,
+) -> Result<(), String> {
     set_cookies(tab, &state.cookies)?;
     for origin in &state.origins {
         with_origin(tab, Some(&origin.origin), || {
             clear_storage(tab, BrowserStorageKind::Local)?;
-            set_storage(tab, BrowserStorageKind::Local, &origin.local_storage)
+            set_storage(tab, BrowserStorageKind::Local, &origin.local_storage)?;
+            if indexed_db {
+                set_indexed_db(tab, &origin.indexed_db)?;
+            }
+            Ok(())
         })?;
     }
     Ok(())
@@ -533,7 +680,13 @@ pub fn grant_permissions(
     tab: &Tab,
     permissions: &[String],
     origin: Option<String>,
+    state: BrowserPermissionState,
 ) -> Result<(), String> {
+    let setting = match state {
+        BrowserPermissionState::Granted => Browser::PermissionSetting::Granted,
+        BrowserPermissionState::Denied => Browser::PermissionSetting::Denied,
+        BrowserPermissionState::Prompt => Browser::PermissionSetting::Prompt,
+    };
     for permission in permissions {
         tab.call_method(Browser::SetPermission {
             permission: Browser::PermissionDescriptor {
@@ -544,12 +697,17 @@ pub fn grant_permissions(
                 allow_without_gesture: None,
                 pan_tilt_zoom: None,
             },
-            setting: Browser::PermissionSetting::Granted,
+            setting: setting.clone(),
             origin: origin.clone(),
             embedding_origin: None,
             browser_context_id: None,
         })
-        .map_err(|error| format!("Failed to grant permission {permission}: {error}"))?;
+        .map_err(|error| {
+            format!(
+                "Failed to set permission {permission} to {}: {error}",
+                state.label()
+            )
+        })?;
     }
     Ok(())
 }
@@ -587,6 +745,29 @@ pub fn mask_storage_state(state: &BrowserStorageState) -> BrowserStorageState {
                     .map(|item| BrowserStorageItem {
                         name: item.name.clone(),
                         value: "[REDACTED]".to_string(),
+                    })
+                    .collect(),
+                indexed_db: origin
+                    .indexed_db
+                    .iter()
+                    .map(|database| BrowserIndexedDbDatabase {
+                        name: database.name.clone(),
+                        version: database.version,
+                        stores: database
+                            .stores
+                            .iter()
+                            .map(|store| BrowserIndexedDbStore {
+                                records: store
+                                    .records
+                                    .iter()
+                                    .map(|record| BrowserIndexedDbRecord {
+                                        key: record.key.clone(),
+                                        value: serde_json::Value::String("[REDACTED]".to_string()),
+                                    })
+                                    .collect(),
+                                ..store.clone()
+                            })
+                            .collect(),
                     })
                     .collect(),
             })
@@ -690,8 +871,28 @@ mod tests {
                     name: "token".to_string(),
                     value: "storage-secret".to_string(),
                 }],
+                indexed_db: Vec::new(),
             }],
         }
+    }
+
+    fn state_with_indexed_db() -> BrowserStorageState {
+        let mut state = sample_state();
+        state.origins[0].indexed_db = vec![BrowserIndexedDbDatabase {
+            name: "app".to_string(),
+            version: 3.0,
+            stores: vec![BrowserIndexedDbStore {
+                name: "sessions".to_string(),
+                key_path: Some(serde_json::json!("id")),
+                auto_increment: false,
+                records: vec![BrowserIndexedDbRecord {
+                    key: None,
+                    value: serde_json::json!({"id": 1, "refresh": "indexeddb-secret"}),
+                }],
+                truncated: true,
+            }],
+        }];
+        state
     }
 
     #[test]
@@ -815,6 +1016,55 @@ mod tests {
         assert!(!serialized.contains("cookie-secret"));
         assert!(!serialized.contains("storage-secret"));
         assert!(serialized.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn indexed_db_records_are_redacted_for_reports_but_keep_their_shape() {
+        let state = state_with_indexed_db();
+        let masked = mask_storage_state(&state);
+        let store = &masked.origins[0].indexed_db[0].stores[0];
+
+        assert_eq!(masked.origins[0].indexed_db[0].name, "app");
+        assert_eq!(masked.origins[0].indexed_db[0].version, 3.0);
+        assert_eq!(store.name, "sessions");
+        assert_eq!(store.key_path, Some(serde_json::json!("id")));
+        assert!(store.truncated);
+        assert_eq!(store.records[0].value, serde_json::json!("[REDACTED]"));
+        assert!(!serde_json::to_string(&masked)
+            .unwrap()
+            .contains("indexeddb-secret"));
+    }
+
+    #[test]
+    fn storage_state_without_indexed_db_omits_the_field_entirely() {
+        let json = serde_json::to_value(sample_state()).unwrap();
+        assert!(json["origins"][0].get("indexed_db").is_none());
+
+        let restored: BrowserStorageState = serde_json::from_value(json).unwrap();
+        assert!(restored.origins[0].indexed_db.is_empty());
+
+        let with_db = serde_json::to_value(state_with_indexed_db()).unwrap();
+        assert_eq!(
+            with_db["origins"][0]["indexed_db"][0]["stores"][0]["truncated"],
+            true
+        );
+        assert_eq!(
+            serde_json::from_value::<BrowserStorageState>(with_db).unwrap(),
+            state_with_indexed_db()
+        );
+    }
+
+    #[test]
+    fn indexed_db_snapshot_script_bounds_records_and_restore_script_embeds_the_payload() {
+        let snapshot = indexed_db_snapshot_js();
+        assert!(snapshot.contains(&format!("{MAX_INDEXED_DB_RECORDS_PER_STORE} + 1")));
+        assert!(snapshot.contains("indexedDB.databases"));
+        assert!(snapshot.contains("getAllKeys"));
+
+        let restore = indexed_db_restore_js("[{\"name\":\"app\"}]");
+        assert!(restore.contains("[{\"name\":\"app\"}]"));
+        assert!(restore.contains("deleteDatabase"));
+        assert!(restore.contains("createObjectStore"));
     }
 
     #[test]
