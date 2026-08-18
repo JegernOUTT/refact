@@ -140,6 +140,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "reset is the escape hatch for sticky plumbing: one call drops every network route, HAR replay, WebSocket route, locator handler, virtual authenticator, and the fake clock, turns offline off, drops network and CPU throttling, and clears media, viewport, device, geolocation, and permission overrides, reporting what it cleared with counts. It leaves cookies, storage, open tabs, and the current page untouched.\n",
     "Clock: clock_install pins fake time (optional `time` as unix ms or ISO string, current time by default) and must run before the page caches Date; clock_fast_forward jumps ahead firing each due timer AT MOST ONCE while clock_run_for advances firing ALL callbacks along the way, so a 60s interval fires once under fast_forward and 60 times under run_for. clock_pause_at stops time at an instant, clock_resume restarts it, clock_set_fixed_time freezes Date.now while leaving timers running, and clock_set_system_time shifts time silently without firing timers. `ticks` takes milliseconds or \"MM:SS\"/\"HH:MM:SS\"; the clock is session-scoped across tabs and navigations until reset clears it.\n",
     "reset is the escape hatch for sticky plumbing: one call drops every network route, HAR replay, WebSocket route, locator handler, and virtual authenticator, turns offline off, and clears media, viewport, device, geolocation, and permission overrides, reporting what it cleared with counts. It leaves cookies, storage, open tabs, and the current page untouched. ",
+    "cdp_send is the raw Chrome DevTools Protocol escape hatch for the long tail that has no dedicated step: send `method` plus optional `params`, with `target` \"page\" (default, the active tab) or \"browser\". Prefer a dedicated step whenever one exists, because those carry actionability, redaction, and reset bookkeeping that raw CDP does not. State set through cdp_send is invisible to list_routes and reset, so undo it yourself; Emulation and Network mutations come back with a warning saying exactly that. Browser.close is refused, and so is Target.closeTarget aimed at the tab this session drives. Results return inline as JSON under 8KB and as an artifact path beyond it, cookie and storage values are redacted, and CDP errors surface verbatim on one bounded line.\n",
     "http_request sends an HTTP call that shares the page's cookie jar in both directions: matching cookies for the target domain and path are attached, and response Set-Cookie headers are written back into the browser, so a logged-in page and the API call see the same session. Send url plus optional method, headers, and exactly one of body, body_json (auto application/json), or form (auto urlencoded); http and https only. Results carry status, final URL after redirects, content-type/content-length (set full_headers=true for every header), and the body inline when it stays under 8KB, otherwise an artifact path. Cookie values are never inlined, only the count and names. Set fail_on_status=true to fail the step on a non-2xx status.\n",
     "Instrumentation: start_coverage and stop_coverage opt into precise JavaScript and CSS usage tracking and return bounded per-URL summaries plus a full JSON artifact. add_virtual_authenticator enables passkey testing and mints the authenticator id it returns, so never send it an id; remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified address that returned id. Credential ids, private keys, user handles, blobs, and user names are redacted from reports.\n",
     "Motion: capture_frames records a burst and returns ONE composed filmstrip image (up to a 4x6 grid, each cell labelled +NNNms) plus per-frame artifact paths and the percentage of pixels that changed against the previous frame, so animations and transient UI are readable even without looking at pixels. It takes duration_ms (defaults to 1000, capped at 10000) with either frame_count (2-24, defaults to 8) or interval_ms, and scopes to an element with locator or to the whole document with full_page. Out-of-range values are hard errors. screencast_start and screencast_stop bracket a manual session that auto-stops at 30000ms or 60 frames and reports that cap as a warning; screencast_stop composes a filmstrip unless compose=false. The filmstrip is always attached, even when attach_screenshot is false.\n",
@@ -276,7 +277,15 @@ fn browser_step_schema_with_actions(
     properties.insert("tab".to_string(), tab_target_schema());
     properties.insert("locator".to_string(), browser_locator_schema());
     properties.insert("source".to_string(), browser_locator_schema());
-    properties.insert("target".to_string(), browser_locator_schema());
+    properties.insert(
+        "target".to_string(),
+        serde_json::json!({
+            "oneOf": [
+                browser_locator_schema(),
+                {"type": "string", "enum": ["page", "browser"], "description": "cdp_send target, page by default"}
+            ]
+        }),
+    );
     let position_schema = serde_json::json!({
         "type": "object",
         "required": ["x", "y"],
@@ -706,7 +715,11 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "method".to_string(),
-        serde_json::json!({"type": "string", "description": "HTTP method for http_request, GET by default"}),
+        serde_json::json!({"type": "string", "description": "HTTP method for http_request, GET by default; CDP method such as Runtime.evaluate for cdp_send"}),
+    );
+    properties.insert(
+        "params".to_string(),
+        serde_json::json!({"type": "object", "description": "cdp_send CDP parameters, omitted when the method takes none"}),
     );
     properties.insert(
         "body".to_string(),
@@ -859,7 +872,7 @@ fn locator_handler_schema() -> serde_json::Value {
         .filter(|action| {
             !matches!(
                 *action,
-                "route" | "unroute" | "list_routes" | "reset" | "http_request"
+                "route" | "unroute" | "list_routes" | "reset" | "http_request" | "cdp_send"
             ) && !action.starts_with("clock_")
         })
         .collect::<Vec<_>>();
@@ -1287,6 +1300,7 @@ mod tests {
             "omit_background",
             "outline",
             "page_ranges",
+            "params",
             "paths",
             "pattern",
             "polling_ms",

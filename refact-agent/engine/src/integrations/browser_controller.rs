@@ -18,15 +18,16 @@ use crate::integrations::browser_runtime::BrowserRuntime;
 use crate::integrations::browser_types::{ConsoleEntry, NetworkEntry};
 use refact_browser::{
     ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
-    ActionabilityExecutionMode, ActionabilityTimeouts, CdpDragObserver, CdpKeyboardDispatcher,
-    CdpMouseDispatcher, ClockOp, DEFAULT_DISMISS_OVERLAYS_HANDLER, ElementHandle, ExpectPollResult,
-    FUNCTION_POLL_BACKOFF_MS, HitTargetController, HitTargetPoint, HitTargetResult, Keyboard,
-    LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation, LocatorGenerationOptions,
-    LocatorHandlerProbe, LocatorHandlerRegistry, LocatorOutcome, MainFrameCssPoint, Mouse,
-    MouseButton, MouseState, NetworkLoadState, NetworkMonitorHandle, Ref, ScrollStrategy,
-    SnapshotMode, SnapshotOptions, SystemClock, UrlMatcher, WebSocketRegistry, WorldManager,
-    apply_network_report_mode, current_wall_ms, parse_clock_ticks, parse_clock_time,
-    required_states,
+    ActionabilityExecutionMode, ActionabilityTimeouts, CDP_INLINE_RESULT_LIMIT_BYTES,
+    CdpDragObserver, CdpGuardrail, CdpKeyboardDispatcher, CdpMouseDispatcher, ClockOp,
+    DEFAULT_DISMISS_OVERLAYS_HANDLER, ElementHandle, ExpectPollResult, FUNCTION_POLL_BACKOFF_MS,
+    HitTargetController, HitTargetPoint, HitTargetResult, Keyboard, LocatorGenerationOptions,
+    LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation, LocatorHandlerProbe,
+    LocatorHandlerRegistry, LocatorOutcome, MainFrameCssPoint, Mouse, MouseButton, MouseState,
+    NetworkLoadState, NetworkMonitorHandle, Ref, ScrollStrategy, SnapshotMode, SnapshotOptions,
+    SystemClock, UrlMatcher, WebSocketRegistry, WorldManager, apply_network_report_mode,
+    classify_cdp_command, current_wall_ms, parse_clock_ticks, parse_clock_time,
+    redact_cdp_result, required_states,
 };
 use refact_browser::artifacts::{
     ComposeLayout, ElementStateAction, ScreenshotMetrics, compose_sheet, element_state_sequence,
@@ -1489,6 +1490,122 @@ fn execute_reset_step(runtime: &mut BrowserRuntime, idx: usize) -> StepResult {
     }
 }
 
+fn save_cdp_result(
+    rendered: &str,
+    artifacts_dir: &Path,
+    file_name: &str,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(artifacts_dir).map_err(|error| {
+        format!(
+            "Failed to create browser artifacts directory {}: {error}",
+            artifacts_dir.display()
+        )
+    })?;
+    let path = artifacts_dir.join(file_name);
+    std::fs::write(&path, rendered).map_err(|error| {
+        format!(
+            "Failed to save the CDP result artifact {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
+
+fn cdp_send_result(
+    method: &str,
+    target: CdpTarget,
+    warnings: Vec<String>,
+    result: Value,
+    idx: usize,
+    artifacts_dir: &Path,
+) -> StepResult {
+    let redacted = redact_cdp_result(method, result);
+    let rendered = serde_json::to_string_pretty(&redacted).unwrap_or_else(|_| redacted.to_string());
+    let mut data = serde_json::json!({
+        "cdp_send": {
+            "method": method,
+            "target": target.label(),
+            "warnings": warnings,
+            "bytes": rendered.len(),
+        }
+    });
+    let entry = &mut data["cdp_send"];
+    if rendered.len() > CDP_INLINE_RESULT_LIMIT_BYTES {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        match save_cdp_result(&rendered, artifacts_dir, &format!("cdp-{nonce}-{idx}.json")) {
+            Ok(path) => {
+                entry["artifact"] = serde_json::json!({
+                    "kind": "cdp_result",
+                    "mime": "application/json",
+                    "path": path,
+                    "bytes": rendered.len(),
+                })
+            }
+            Err(error) => return StepResult::failure(idx, "cdp_send", error),
+        }
+    } else {
+        entry["result"] = redacted;
+    }
+    let suffix = if warnings.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", counted(warnings.len(), "warning"))
+    };
+    StepResult::success(
+        idx,
+        format!(
+            "{method} on {} returned {} bytes{suffix}",
+            target.label(),
+            rendered.len()
+        ),
+    )
+    .with_data(data)
+}
+
+fn execute_cdp_send_step(
+    runtime: &mut BrowserRuntime,
+    method: &str,
+    params: Option<&Value>,
+    target: CdpTarget,
+    idx: usize,
+) -> StepResult {
+    let own_target_id = runtime
+        .get_active_tab()
+        .map(|tab| tab.get_target_id().to_string());
+    let warnings = match classify_cdp_command(method, params, own_target_id.as_deref()) {
+        CdpGuardrail::Denied { reason } => {
+            return StepResult::failure(idx, format!("cdp_send {method} blocked"), reason);
+        }
+        CdpGuardrail::Allowed { warnings } => warnings,
+    };
+    let target_id = match target {
+        CdpTarget::Page => match own_target_id {
+            Some(target_id) => Some(target_id),
+            None => {
+                return StepResult::failure(
+                    idx,
+                    "cdp_send",
+                    "No active tab in browser runtime".to_string(),
+                );
+            }
+        },
+        CdpTarget::Browser => None,
+    };
+    let artifacts_dir = runtime.artifacts_dir.clone();
+    let session = match runtime.cdp_session() {
+        Ok(session) => session,
+        Err(error) => return StepResult::failure(idx, "cdp_send", error),
+    };
+    runtime.touch();
+    match session.send(method, params, target_id.as_deref()) {
+        Ok(result) => cdp_send_result(method, target, warnings, result, idx, &artifacts_dir),
+        Err(error) => StepResult::failure(idx, format!("cdp_send {method} failed"), error),
+    }
+}
+
 fn is_screencast_step(step: &BrowserStep) -> bool {
     matches!(
         step,
@@ -2344,6 +2461,16 @@ pub async fn execute_request_with_runtime(
         } else if matches!(step, BrowserStep::Reset) {
             let mut rt = runtime_arc.lock().await;
             execute_reset_step(&mut rt, idx)
+        } else if let BrowserStep::CdpSend {
+            method,
+            params,
+            target,
+        } = step
+        {
+            tokio::task::block_in_place(|| {
+                let mut rt = runtime_arc.blocking_lock();
+                execute_cdp_send_step(&mut rt, method, params.as_ref(), *target, idx)
+            })
         } else if is_screencast_step(step) {
             tokio::task::block_in_place(|| {
                 let mut rt = runtime_arc.blocking_lock();
@@ -2947,6 +3074,11 @@ pub fn execute_steps_with_runtime(
                 execute_route_management_step(runtime, step, idx).unwrap()
             }
             BrowserStep::Reset => execute_reset_step(runtime, idx),
+            BrowserStep::CdpSend {
+                method,
+                params,
+                target,
+            } => execute_cdp_send_step(runtime, method, params.as_ref(), *target, idx),
             step if is_screencast_step(step) => {
                 execute_screencast_step(runtime, step, idx, image_policy)
             }
@@ -3717,6 +3849,7 @@ fn execute_single_step(
         | BrowserStep::StopHarRecording
         | BrowserStep::RouteFromHar { .. }
         | BrowserStep::Reset
+        | BrowserStep::CdpSend { .. }
         | BrowserStep::CaptureFrames { .. }
         | BrowserStep::ScreencastStart { .. }
         | BrowserStep::ScreencastStop { .. }
@@ -9289,6 +9422,66 @@ mod tests {
             );
         }
         Mutex::new(registry)
+    }
+
+    #[test]
+    fn cdp_send_inlines_small_results_and_reports_warnings_in_the_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let step = cdp_send_result(
+            "Emulation.setDeviceMetricsOverride",
+            CdpTarget::Page,
+            vec!["Emulation.setDeviceMetricsOverride is invisible to reset".to_string()],
+            serde_json::json!({"ok": true}),
+            3,
+            dir.path(),
+        );
+
+        assert!(step.ok);
+        assert!(
+            step.summary
+                .starts_with("Emulation.setDeviceMetricsOverride on page returned ")
+                && step.summary.ends_with(" (1 warning)"),
+            "unexpected summary: {}",
+            step.summary
+        );
+        let data = step.data.as_ref().unwrap();
+        assert_eq!(data["cdp_send"]["result"], serde_json::json!({"ok": true}));
+        assert_eq!(data["cdp_send"]["target"], "page");
+        assert_eq!(data["cdp_send"]["warnings"].as_array().unwrap().len(), 1);
+        assert!(data["cdp_send"]["artifact"].is_null());
+    }
+
+    #[test]
+    fn cdp_send_spills_oversized_results_to_an_artifact_and_redacts_cookies() {
+        let dir = tempfile::tempdir().unwrap();
+        let cookies = (0..400)
+            .map(|index| serde_json::json!({"name": format!("c{index}"), "value": "secret-value"}))
+            .collect::<Vec<_>>();
+        let step = cdp_send_result(
+            "Network.getCookies",
+            CdpTarget::Browser,
+            Vec::new(),
+            serde_json::json!({"cookies": cookies}),
+            0,
+            dir.path(),
+        );
+
+        assert!(step.ok, "{step:?}");
+        assert!(!step.summary.contains("warning"));
+        let artifact = &step.data.as_ref().unwrap()["cdp_send"]["artifact"];
+        assert_eq!(artifact["mime"], "application/json");
+        assert!(
+            artifact["bytes"].as_u64().unwrap() > CDP_INLINE_RESULT_LIMIT_BYTES as u64,
+            "artifact must only be used past the inline limit"
+        );
+        assert!(step.data.as_ref().unwrap()["cdp_send"]["result"].is_null());
+
+        let saved = std::fs::read_to_string(artifact["path"].as_str().unwrap()).unwrap();
+        assert!(
+            !saved.contains("secret-value"),
+            "cookie values must be redacted before they reach an artifact"
+        );
+        assert!(saved.contains("[REDACTED]"));
     }
 
     #[test]

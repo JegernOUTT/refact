@@ -1182,6 +1182,13 @@ pub enum BrowserStep {
         not_found: HarNotFound,
     },
     Reset,
+    CdpSend {
+        method: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params: Option<serde_json::Value>,
+        #[serde(default)]
+        target: CdpTarget,
+    },
     HttpRequest {
         #[serde(flatten)]
         options: BrowserHttpRequest,
@@ -1829,6 +1836,23 @@ pub enum UrlPattern {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CdpTarget {
+    #[default]
+    Page,
+    Browser,
+}
+
+impl CdpTarget {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Page => "page",
+            Self::Browser => "browser",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ClockTicks {
@@ -1882,6 +1906,7 @@ impl BrowserStep {
         "stop_har_recording",
         "route_from_har",
         "reset",
+        "cdp_send",
         "clock_install",
         "clock_fast_forward",
         "clock_pause_at",
@@ -2634,6 +2659,11 @@ mod tests {
                 not_found: HarNotFound::Abort,
             },
             BrowserStep::Reset,
+            BrowserStep::CdpSend {
+                method: "Runtime.evaluate".to_string(),
+                params: Some(serde_json::json!({"expression": "1 + 1"})),
+                target: CdpTarget::Page,
+            },
             BrowserStep::ClockInstall {
                 time: Some(ClockTime::Text("2020-02-02T00:00:00Z".to_string())),
             },

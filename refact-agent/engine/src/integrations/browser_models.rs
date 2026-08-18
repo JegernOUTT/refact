@@ -376,6 +376,73 @@ mod tests {
     }
 
     #[test]
+    fn cdp_send_defaults_to_the_page_target_and_omits_absent_params() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "cdp_send", "method": "Browser.getVersion", "target": "browser"},
+                {"action": "cdp_send", "method": "Runtime.evaluate", "params": {"expression": "1+1"}}
+            ]
+        }))
+        .unwrap();
+
+        let BrowserStep::CdpSend {
+            method,
+            params,
+            target,
+        } = &request.steps[0]
+        else {
+            panic!("expected a cdp_send step");
+        };
+        assert_eq!(method, "Browser.getVersion");
+        assert_eq!(*params, None);
+        assert_eq!(*target, CdpTarget::Browser);
+
+        assert!(matches!(
+            &request.steps[1],
+            BrowserStep::CdpSend {
+                target: CdpTarget::Page,
+                params: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(&request.steps[1]).unwrap(),
+            serde_json::json!({
+                "action": "cdp_send",
+                "method": "Runtime.evaluate",
+                "params": {"expression": "1+1"},
+                "target": "page"
+            })
+        );
+    }
+
+    #[test]
+    fn cdp_send_requires_a_method_and_rejects_unknown_fields_and_targets() {
+        for (step, expected) in [
+            (
+                serde_json::json!({"action": "cdp_send", "params": {}}),
+                "method",
+            ),
+            (
+                serde_json::json!({"action": "cdp_send", "method": "Page.reload", "sessionId": "x"}),
+                "sessionId",
+            ),
+            (
+                serde_json::json!({"action": "cdp_send", "method": "Page.reload", "target": "tab"}),
+                "tab",
+            ),
+        ] {
+            let error = parse_browser_action_request(serde_json::json!({"steps": [step.clone()]}))
+                .unwrap_err();
+            assert!(
+                error.starts_with("step[0] (cdp_send): "),
+                "unexpected error for {step}: {error}"
+            );
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
     fn tap_parses_both_the_locator_and_the_coordinate_shape() {
         let request = parse_browser_action_request(serde_json::json!({
             "steps": [

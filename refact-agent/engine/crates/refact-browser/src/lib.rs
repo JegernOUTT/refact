@@ -1,6 +1,7 @@
 mod actionability;
 pub mod artifacts;
 pub mod assertions;
+pub mod cdp;
 pub mod clock;
 pub mod context_state;
 pub mod coverage;
@@ -37,6 +38,10 @@ pub use actionability::{
     ActionabilityEngine, ActionabilityError, ActionabilityExecutionMode, ActionabilitySuccess,
     ActionabilityTimeouts, CallLog, Clock, Deadline, ExpectPollResult, FUNCTION_POLL_BACKOFF_MS,
     LocatorOutcome, RequiredStates, SystemClock, TimeoutError, TimeoutKind, required_states,
+};
+pub use cdp::{
+    CDP_INLINE_RESULT_LIMIT_BYTES, CdpGuardrail, CdpSession, bounded_cdp_text,
+    classify_cdp_command, redact_cdp_result,
 };
 pub use dialogs::{DialogDecision, DialogManager, DialogResponse};
 pub use drag::{
@@ -474,6 +479,7 @@ pub struct BrowserRuntime {
     pub dialog_manager: DialogManager,
     pub file_chooser_manager: Arc<FileChooserManager>,
     pub download_monitor: Arc<DownloadMonitor>,
+    cdp_session: Option<Arc<cdp::CdpSession>>,
     pub active_tab_target_id: Option<String>,
     pub recording_tab_target_id: Option<String>,
     pub adopted_tab_target_ids: Vec<String>,
@@ -568,6 +574,7 @@ impl BrowserRuntime {
             dialog_manager: DialogManager::default(),
             file_chooser_manager: Arc::new(FileChooserManager::default()),
             download_monitor,
+            cdp_session: None,
             active_tab_target_id: None,
             recording_tab_target_id: None,
             adopted_tab_target_ids: Vec::new(),
@@ -625,6 +632,7 @@ impl BrowserRuntime {
             dialog_manager: DialogManager::default(),
             file_chooser_manager: Arc::new(FileChooserManager::default()),
             download_monitor,
+            cdp_session: None,
             active_tab_target_id: None,
             recording_tab_target_id: None,
             adopted_tab_target_ids: Vec::new(),
@@ -655,6 +663,15 @@ impl BrowserRuntime {
 
     pub fn mask_passwords(&self) -> bool {
         self.buffers.mask_passwords
+    }
+
+    pub fn cdp_session(&mut self) -> Result<Arc<cdp::CdpSession>, String> {
+        if let Some(session) = &self.cdp_session {
+            return Ok(session.clone());
+        }
+        let session = Arc::new(cdp::CdpSession::connect(&self.browser.get_ws_url())?);
+        self.cdp_session = Some(session.clone());
+        Ok(session)
     }
 
     pub fn headless(&self) -> bool {

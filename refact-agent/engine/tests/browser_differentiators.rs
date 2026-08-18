@@ -716,6 +716,7 @@ async fn differentiator_09_tab_log_and_runtime_buffers_keep_independent_cursors(
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::Full,
             steps: vec![
                 BrowserStep::TabLog,
@@ -882,6 +883,7 @@ async fn differentiator_12_password_masking_survives_final_serialization() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Fill {

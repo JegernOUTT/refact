@@ -26,7 +26,7 @@ use refact_lsp::integrations::browser_models::{
     BrowserCookieSameSite, BrowserElementState, BrowserExpectation, BrowserExpectedText,
     BrowserHttpRequest, BrowserLoadState, BrowserLocator, BrowserPdfOptions, BrowserPollMatcher,
     BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
-    BrowserStorageItem, BrowserStorageKind, BrowserTextMode, ClockTicks, ClockTime,
+    BrowserStorageItem, BrowserStorageKind, BrowserTextMode, CdpTarget, ClockTicks, ClockTime,
     FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode, PageContextMode,
     RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind, WebSocketRouteMode,
 };
@@ -6082,4 +6082,163 @@ async fn screenshot_style_pierces_shadow_dom() {
         .value
         .unwrap();
     assert_eq!(injected, json!(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn cdp_send_round_trips_raw_protocol_calls_on_page_and_browser_targets() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+
+    let report = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: Some(false),
+            network: NetworkReportMode::default(),
+            steps: vec![
+                BrowserStep::CdpSend {
+                    method: "Runtime.evaluate".to_string(),
+                    params: Some(json!({"expression": "40 + 2", "returnByValue": true})),
+                    target: CdpTarget::Page,
+                },
+                BrowserStep::CdpSend {
+                    method: "Browser.getVersion".to_string(),
+                    params: None,
+                    target: CdpTarget::Browser,
+                },
+                BrowserStep::CdpSend {
+                    method: "Emulation.setDeviceMetricsOverride".to_string(),
+                    params: Some(json!({
+                        "width": 500,
+                        "height": 400,
+                        "deviceScaleFactor": 1,
+                        "mobile": false
+                    })),
+                    target: CdpTarget::Page,
+                },
+                BrowserStep::Eval {
+                    expression: "window.innerWidth".to_string(),
+                },
+            ],
+            page_context: None,
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.ok, "cdp_send batch failed: {report:?}");
+
+    let evaluated = report.steps[0].data.as_ref().unwrap();
+    assert_eq!(evaluated["cdp_send"]["result"]["result"]["value"], 42);
+    assert_eq!(evaluated["cdp_send"]["target"], "page");
+    assert_eq!(evaluated["cdp_send"]["method"], "Runtime.evaluate");
+    assert!(
+        evaluated["cdp_send"]["warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "Runtime.evaluate must not warn: {evaluated}"
+    );
+
+    let version = report.steps[1].data.as_ref().unwrap();
+    assert_eq!(version["cdp_send"]["target"], "browser");
+    assert!(
+        version["cdp_send"]["result"]["product"]
+            .as_str()
+            .is_some_and(|product| !product.is_empty()),
+        "Browser.getVersion must reach the browser target: {version}"
+    );
+
+    let warned = report.steps[2].data.as_ref().unwrap();
+    let warnings = warned["cdp_send"]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "expected one warning: {warned}");
+    assert!(warnings[0].as_str().unwrap().contains("reset"));
+
+    assert_eq!(
+        report.steps[3].data.as_ref().unwrap()["value"],
+        500,
+        "the long-lived cdp session must keep its overrides applied"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn cdp_send_guardrails_refuse_session_breaking_methods_and_surface_cdp_errors() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    let own_target_id = case.tab.get_target_id().to_string();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+
+    let send = |method: &str, params: Option<serde_json::Value>, target: CdpTarget| {
+        let runtime = runtime.clone();
+        let method = method.to_string();
+        async move {
+            execute_request_with_runtime(
+                runtime,
+                BrowserActionRequest {
+                    session: SessionPolicy::SharedDefault,
+                    target: TabTarget::Active,
+                    attach_screenshot: Some(false),
+                    network: NetworkReportMode::default(),
+                    steps: vec![BrowserStep::CdpSend {
+                        method,
+                        params,
+                        target,
+                    }],
+                    page_context: None,
+                },
+                &ImagePolicy::browser_capture(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    let closed = send("Browser.close", None, CdpTarget::Browser).await;
+    assert!(!closed.ok, "Browser.close must be refused: {closed:?}");
+    assert!(
+        closed.steps[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("shut down the shared browser"),
+        "unexpected denial: {:?}",
+        closed.steps[0]
+    );
+
+    let self_close = send(
+        "Target.closeTarget",
+        Some(json!({"targetId": own_target_id})),
+        CdpTarget::Browser,
+    )
+    .await;
+    assert!(!self_close.ok, "self-close must be refused: {self_close:?}");
+    assert!(self_close.steps[0]
+        .error
+        .as_ref()
+        .unwrap()
+        .contains(&own_target_id));
+
+    let unknown = send("Nope.doesNotExist", None, CdpTarget::Page).await;
+    assert!(!unknown.ok, "unknown methods must fail: {unknown:?}");
+    let error = unknown.steps[0].error.as_ref().unwrap();
+    assert!(
+        !error.contains('\n'),
+        "CDP errors must be one line: {error}"
+    );
+    assert!(error.contains("not found") || error.contains("wasn't found"));
+
+    let alive = send("Browser.getVersion", None, CdpTarget::Browser).await;
+    assert!(
+        alive.ok,
+        "the browser must survive every refused call: {alive:?}"
+    );
 }
