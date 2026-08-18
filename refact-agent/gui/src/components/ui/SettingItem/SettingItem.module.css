@@ -3,7 +3,7 @@
 
   display: grid;
   min-width: 0;
-  max-width: 100%;
+  max-width: min(100%, var(--rf-settings-measure));
   gap: var(--rf-row-gap);
   padding: var(--rf-row-pad) 0;
   color: var(--rf-color-fg);
@@ -11,10 +11,9 @@
 }
 
 .row {
-  grid-template-columns: minmax(0, 1fr) minmax(
-      0,
-      var(--rf-setting-item-control-max)
-    );
+  grid-template-columns:
+    minmax(var(--rf-settings-copy-min), 1fr)
+    minmax(0, var(--rf-setting-item-control-max));
   align-items: center;
   column-gap: var(--rf-space-4);
 }
@@ -71,6 +70,21 @@
 }
 
 @media (width <= 640px) {
+  .row {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .control {
+    --rf-input-max: 100%;
+
+    max-width: 100%;
+    justify-self: stretch;
+    justify-items: stretch;
+  }
+}
+
+@container rf-settings (width <= 640px) {
   .row {
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;

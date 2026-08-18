@@ -4,6 +4,7 @@ import { ArrowLeft, Info, Search } from "lucide-react";
 import { PageWrapper } from "../../components/PageWrapper";
 import { ScrollArea } from "../../components/ScrollArea";
 import {
+  Badge,
   Button,
   EmptyState,
   ErrorState,
@@ -68,6 +69,8 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
   const dispatch = useAppDispatch();
   const [search, setSearch] = useState("");
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
+  const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  const [showAllTags, setShowAllTags] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [installingItem, setInstallingItem] =
     useState<ExtensionMarketplaceItem | null>(null);
@@ -77,20 +80,45 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
   const [quickAddError, setQuickAddError] = useState<string | null>(null);
   const [saveSource, { isLoading: isAddingSource }] =
     useSaveExtensionMarketplaceSourceMutation();
+  const contentRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    const settingsControl = contentRef.current?.querySelector<HTMLElement>(
+      '[title="Manage marketplace sources"]',
+    );
+    settingsControl?.setAttribute("aria-label", "Manage marketplace sources");
+  }, [sources]);
+
+  const allTags = useMemo(
+    () =>
+      Array.from(new Set(items.flatMap((item) => item.tags))).sort((a, b) =>
+        a.localeCompare(b),
+      ),
+    [items],
+  );
+
+  const orderedTags = useMemo(
+    () =>
+      selectedTag && allTags.includes(selectedTag)
+        ? [selectedTag, ...allTags.filter((tag) => tag !== selectedTag)]
+        : allTags,
+    [allTags, selectedTag],
+  );
 
   const filteredItems = useMemo(() => {
     const q = search.toLowerCase();
     return items.filter((item) => {
       const sourceOk =
         selectedSource === null || item.source_id === selectedSource;
+      const tagOk = selectedTag === null || item.tags.includes(selectedTag);
       const searchOk =
         q.length === 0 ||
         item.name.toLowerCase().includes(q) ||
         item.description.toLowerCase().includes(q) ||
         item.tags.some((tag) => tag.toLowerCase().includes(q));
-      return sourceOk && searchOk;
+      return sourceOk && tagOk && searchOk;
     });
-  }, [items, search, selectedSource]);
+  }, [items, search, selectedSource, selectedTag]);
 
   const errorMessage =
     error && typeof error === "object" && "data" in error
@@ -157,7 +185,7 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
   };
 
   const content = (
-    <div className={styles.pageStack}>
+    <div className={styles.pageStack} ref={contentRef}>
       {!embedded && (
         <div className={styles.header}>
           <Button variant="ghost" size="sm" leftIcon={ArrowLeft} onClick={back}>
@@ -187,37 +215,45 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
         />
       </div>
 
-      <div className={styles.quickAddSection}>
-        <p className={styles.text}>Add GitHub Source by URL</p>
-        <div className={styles.quickAddRow}>
-          <FieldText
-            aria-label="GitHub source URL"
-            placeholder="https://github.com/owner/repo"
-            value={quickAddUrl}
-            onChange={setQuickAddUrl}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                void handleQuickAdd();
-              }
-            }}
-            className={styles.grow}
-          />
-          <Button
-            variant="primary"
-            onClick={() => void handleQuickAdd()}
-            disabled={!quickAddUrl.trim() || isAddingSource}
-            loading={isAddingSource}
+      {allTags.length > 0 && (
+        <div className={styles.tagFilterSection}>
+          <div
+            className={`${styles.filterRow} ${
+              showAllTags ? styles.filterRowExpanded : styles.filterRowCollapsed
+            }`}
           >
-            {isAddingSource ? "Adding…" : "Add"}
+            <Badge
+              tone={selectedTag === null ? "accent" : "muted"}
+              className={styles.sourceTab}
+              role="button"
+              tabIndex={0}
+              onClick={() => setSelectedTag(null)}
+            >
+              All
+            </Badge>
+            {orderedTags.map((tag) => (
+              <Badge
+                key={tag}
+                tone={selectedTag === tag ? "accent" : "muted"}
+                className={styles.sourceTab}
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedTag(selectedTag === tag ? null : tag)}
+              >
+                {tag}
+              </Badge>
+            ))}
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setShowAllTags((visible) => !visible)}
+            aria-expanded={showAllTags}
+          >
+            {showAllTags ? "Show fewer" : `Show all tags (${allTags.length})`}
           </Button>
         </div>
-        {quickAddError && (
-          <div className={classNames(styles.notice, styles.noticeDanger)}>
-            <Icon icon={Info} tone="danger" />
-            <p className={styles.smallText}>{quickAddError}</p>
-          </div>
-        )}
-      </div>
+      )}
 
       {errorMessage && (
         <ErrorState
@@ -257,6 +293,38 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
           )}
         />
       )}
+
+      <div className={styles.quickAddSection}>
+        <p className={styles.text}>Add GitHub Source by URL</p>
+        <div className={styles.quickAddRow}>
+          <FieldText
+            aria-label="GitHub source URL"
+            placeholder="https://github.com/owner/repo"
+            value={quickAddUrl}
+            onChange={setQuickAddUrl}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                void handleQuickAdd();
+              }
+            }}
+            className={styles.grow}
+          />
+          <Button
+            variant="primary"
+            onClick={() => void handleQuickAdd()}
+            disabled={!quickAddUrl.trim() || isAddingSource}
+            loading={isAddingSource}
+          >
+            {isAddingSource ? "Adding…" : "Add"}
+          </Button>
+        </div>
+        {quickAddError && (
+          <div className={classNames(styles.notice, styles.noticeDanger)}>
+            <Icon icon={Info} tone="danger" />
+            <p className={styles.smallText}>{quickAddError}</p>
+          </div>
+        )}
+      </div>
     </div>
   );
 

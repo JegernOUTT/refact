@@ -1,4 +1,5 @@
 import React from "react";
+import { ChevronDown } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
 
 import { SchemaField } from "./SchemaField";
@@ -563,6 +564,8 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
                   className={styles.extraButton}
                   variant="ghost"
                   size="sm"
+                  rightIcon={ChevronDown}
+                  aria-expanded={areShowingExtraFields}
                   onClick={() => setAreShowingExtraFields((prev) => !prev)}
                 >
                   {areShowingExtraFields ? "Hide" : "Show"} advanced fields

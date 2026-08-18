@@ -12,6 +12,11 @@
   min-width: 0;
 }
 
+.addButton {
+  align-self: flex-start;
+  width: max-content;
+}
+
 .hookRow {
   display: flex;
   flex-direction: column;

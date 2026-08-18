@@ -1,5 +1,6 @@
 import classNames from "classnames";
 import type React from "react";
+import { useId } from "react";
 
 import styles from "./SettingsSection.module.css";
 
@@ -16,6 +17,7 @@ export interface SettingsSectionProps
 export interface SettingsGroupProps
   extends Omit<React.ComponentProps<"section">, "title"> {
   title: React.ReactNode;
+  description?: React.ReactNode;
   children: React.ReactNode;
 }
 
@@ -57,15 +59,25 @@ export function SettingsSection({
 export function SettingsGroup({
   children,
   className,
+  description,
   title,
   ...props
 }: SettingsGroupProps) {
+  const titleId = useId();
+
   return (
     <section
+      role="group"
+      aria-labelledby={titleId}
       {...props}
       className={classNames(styles.group, "rf-stagger", className)}
     >
-      <h2 className={styles.groupTitle}>{title}</h2>
+      <h2 className={styles.groupTitle} id={titleId}>
+        {title}
+      </h2>
+      {description ? (
+        <p className={styles.groupDescription}>{description}</p>
+      ) : null}
       <div className={styles.groupRows}>{children}</div>
     </section>
   );

@@ -1,34 +1,22 @@
 .panel {
   container-type: inline-size;
   display: grid;
+  width: min(100%, var(--rf-settings-measure));
   min-width: 0;
-  gap: var(--rf-space-5);
+  gap: var(--rf-section-gap);
 }
 
-.summaryBadges {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--rf-space-2);
+.summary {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
 }
 
-.layout {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: minmax(0, 420px) minmax(0, 1fr);
-  align-items: start;
-  gap: var(--rf-space-5);
-}
-
-.createCard,
-.listPane,
 .form,
 .builderSectionContent,
 .editForm,
 .editGrid,
 .commandGrid,
-.listTitleBlock,
 .jobCard,
 .jobTitleBlock,
 .jobMetaItem,
@@ -39,40 +27,8 @@
   min-width: 0;
 }
 
-.createCard {
-  gap: var(--rf-space-4);
-  padding: var(--rf-space-4);
-}
-
-.listPane {
-  gap: var(--rf-space-3);
-}
-
-.paneTitle {
-  min-width: 0;
-  margin: 0;
-  overflow-wrap: anywhere;
-  color: var(--rf-color-fg);
-  font: 700 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
-}
-
 .form {
   gap: var(--rf-space-4);
-}
-
-.builderSection {
-  display: grid;
-  min-width: 0;
-  gap: var(--rf-space-3);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  padding: var(--rf-space-3);
-}
-
-.builderLegend {
-  padding: 0 var(--rf-space-1);
-  color: var(--rf-color-fg);
-  font: 700 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
 }
 
 .builderSectionContent {
@@ -170,7 +126,6 @@
   min-width: 0;
 }
 
-.toggles,
 .editGrid,
 .commandGrid {
   display: grid;
@@ -190,7 +145,7 @@
 
 .formActions {
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: var(--rf-space-2);
 }
 
@@ -199,10 +154,6 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--rf-space-2) var(--rf-space-3);
-}
-
-.listTitleBlock {
-  gap: var(--rf-space-1);
 }
 
 .emptyState {
@@ -374,8 +325,6 @@
 }
 
 @container (width <= 880px) {
-  .layout,
-  .toggles,
   .editGrid,
   .commandGrid,
   .webhookPathRow {

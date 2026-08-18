@@ -1,8 +1,18 @@
 .capabilityBanner {
+  display: flex;
+  justify-content: flex-end;
   padding: var(--rf-panel-pad);
   border: var(--rf-hairline) solid var(--rf-border-strong);
   border-radius: var(--rf-radius-card);
   background: var(--rf-surface-2);
+}
+
+.groupContent {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  justify-items: start;
+  gap: var(--rf-space-2);
 }
 
 .zoneStack {
@@ -43,6 +53,13 @@
   flex: none;
   align-items: center;
   gap: var(--rf-space-2);
+}
+
+.deletePlaceholder {
+  width: var(--rf-control-h-sm);
+  height: var(--rf-control-h-sm);
+  flex-shrink: 0;
+  visibility: hidden;
 }
 
 .zoneName {
@@ -97,8 +114,9 @@
   width: 100%;
   min-width: 0;
   padding: var(--rf-panel-pad);
-  border: var(--rf-hairline) solid var(--rf-color-danger);
+  border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
 }
 
 .destinationBlock {

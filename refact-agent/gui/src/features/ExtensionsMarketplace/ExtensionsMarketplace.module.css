@@ -78,6 +78,22 @@
   flex-wrap: wrap;
 }
 
+.tagFilterSection {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--rf-space-1);
+}
+
+.filterRowCollapsed {
+  max-height: 4.5rem;
+  overflow: hidden;
+}
+
+.filterRowExpanded {
+  max-height: none;
+}
+
 .quickAddRow,
 .cardMeta,
 .cardActionRow,
@@ -205,15 +221,23 @@
 }
 
 .description {
+  --rf-clamp-lines: 3;
+
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  flex-shrink: 0;
+  max-height: calc(var(--rf-clamp-lines) * 1em * var(--rf-line));
+  -webkit-line-clamp: var(--rf-clamp-lines);
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
 .bodyPreview {
+  --rf-clamp-lines: 3;
+
   display: -webkit-box;
-  -webkit-line-clamp: 4;
+  flex-shrink: 0;
+  max-height: calc(var(--rf-clamp-lines) * 1em * var(--rf-line));
+  -webkit-line-clamp: var(--rf-clamp-lines);
   -webkit-box-orient: vertical;
   overflow: hidden;
   font-style: italic;

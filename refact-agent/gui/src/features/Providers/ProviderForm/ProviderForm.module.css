@@ -126,12 +126,20 @@
 
 .advancedToggleWrap {
   display: flex;
-  justify-content: center;
+  justify-content: flex-start;
   min-width: 0;
 }
 
 .extraButton {
-  width: 100%;
+  width: max-content;
+}
+
+.extraButton svg {
+  transition: transform var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.extraButton[aria-expanded="true"] svg {
+  transform: rotate(180deg);
 }
 
 .fieldControlStack {

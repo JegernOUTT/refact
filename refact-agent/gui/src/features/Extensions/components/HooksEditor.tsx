@@ -318,7 +318,13 @@ export const HooksEditor: React.FC<HooksEditorProps> = ({ scope }) => {
               description="Add a hook to run commands on lifecycle events."
             />
           )}
-          <Button variant="soft" size="sm" onClick={handleAdd} leftIcon={Plus}>
+          <Button
+            className={styles.addButton}
+            variant="soft"
+            size="sm"
+            onClick={handleAdd}
+            leftIcon={Plus}
+          >
             Add Hook
           </Button>
         </div>

@@ -75,6 +75,13 @@ const KIND_LABELS: Record<ConfigKind, string> = {
   code_lens: "Code Lens",
 };
 
+const KIND_SINGULAR_LABELS: Record<ConfigKind, string> = {
+  modes: "Mode",
+  subagents: "Subagent",
+  toolbox_commands: "Toolbox Command",
+  code_lens: "Code Lens",
+};
+
 const KIND_ORDER: ConfigKind[] = [
   "modes",
   "subagents",
@@ -117,7 +124,10 @@ const ConfigList: React.FC<{
         >
           <div className={styles.rowInfo}>
             <span className={styles.rowTitle}>{item.title}</span>
-            <span className={styles.rowId}>{item.id}</span>
+            {item.title.trim().toLowerCase() !==
+              item.id.trim().toLowerCase() && (
+              <span className={styles.rowId}>{item.id}</span>
+            )}
           </div>
           <Badge
             className={styles.scopeBadge}
@@ -522,7 +532,7 @@ const CreateConfigDialog: React.FC<{
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <Dialog.Content maxWidth="calc(var(--rf-space-6) * 12)">
-        <Dialog.Title>Create {KIND_LABELS[kind]}</Dialog.Title>
+        <Dialog.Title>Create {KIND_SINGULAR_LABELS[kind]}</Dialog.Title>
         <div className={styles.dialogBody}>
           <FieldText
             placeholder="Config ID (e.g., my_mode)"
@@ -742,7 +752,7 @@ export const Customization: React.FC<CustomizationProps> = ({
         leftIcon={Plus}
         onClick={() => setCreateDialogOpen(true)}
       >
-        New {KIND_LABELS[activeKind]}
+        New {KIND_SINGULAR_LABELS[activeKind]}
       </Button>
     </>
   );

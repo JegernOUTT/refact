@@ -18,6 +18,14 @@ import { Button, FieldSwitch, Select, SettingItem } from "../../components/ui";
 import { SettingsGroup, SettingsSection } from "./SettingsSection";
 import styles from "./GeneralSettingsSection.module.css";
 
+const FEATURE_LABELS: Record<string, string | undefined> = {
+  statistics: "Statistics",
+  vecdb: "VecDB",
+  ast: "AST",
+  codegraph: "CodeGraph",
+  images: "Images",
+};
+
 export const GeneralSettingsSection: React.FC = () => {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
@@ -84,8 +92,10 @@ export const GeneralSettingsSection: React.FC = () => {
               <SettingItem
                 key={feature}
                 className="rf-enter"
-                title={feature}
-                description={locked ? "Managed in settings" : undefined}
+                title={FEATURE_LABELS[feature] ?? feature}
+                description={
+                  locked ? "Controlled by the server configuration." : undefined
+                }
                 control={
                   <FieldSwitch
                     checked={!!value}

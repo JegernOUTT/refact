@@ -32,39 +32,51 @@ export const ExtItemList: React.FC<ExtItemListProps> = ({
 }) => {
   return (
     <div className={`${styles.list} rf-stagger`}>
-      <Button variant="soft" onClick={onCreate} size="sm" leftIcon={Plus}>
+      <Button
+        variant="soft"
+        onClick={onCreate}
+        size="sm"
+        leftIcon={Plus}
+        className={styles.createButton}
+      >
         New
       </Button>
       {items.map((item) => (
-        <button
+        <div
           key={item.name}
-          type="button"
-          aria-label={`Select ${item.name}`}
-          className={`${styles.item} rf-pressable ${
+          className={`${styles.item} ${
             selectedId === item.name ? styles.selected : ""
           }`}
-          onClick={() => onSelect(item.name)}
         >
-          <span className={styles.content}>
-            <span className={styles.title}>{item.name}</span>
-            <span className={styles.description}>{item.description}</span>
-          </span>
+          <button
+            type="button"
+            aria-label={`Select ${item.name}`}
+            aria-current={selectedId === item.name ? "true" : undefined}
+            className={`${styles.main} rf-pressable ${
+              selectedId === item.name ? styles.selected : ""
+            }`}
+            onClick={() => onSelect(item.name)}
+          >
+            <span className={styles.content}>
+              <span className={styles.title}>{item.name}</span>
+              <span className={styles.description}>{item.description}</span>
+            </span>
+          </button>
           <span className={styles.meta}>
             <Badge tone="muted">{SCOPE_LABELS[item.scope]}</Badge>
-            {!item.read_only && (
+            {item.read_only ? (
+              <span aria-hidden="true" className={styles.deletePlaceholder} />
+            ) : (
               <IconButton
                 variant="danger"
                 size="sm"
                 icon={Trash2}
                 aria-label={`Delete ${item.name}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDelete(item.name, item.scope);
-                }}
+                onClick={() => onDelete(item.name, item.scope)}
               />
             )}
           </span>
-        </button>
+        </div>
       ))}
       {items.length === 0 && (
         <EmptyState

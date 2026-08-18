@@ -71,6 +71,22 @@
   flex-wrap: wrap;
 }
 
+.tagFilterSection {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--rf-space-1);
+}
+
+.filterRowCollapsed {
+  max-height: 4.5rem;
+  overflow: hidden;
+}
+
+.filterRowExpanded {
+  max-height: none;
+}
+
 .title {
   margin: 0;
   font-size: var(--rf-text-4);
@@ -240,8 +256,12 @@
 }
 
 .serverDescription {
+  --rf-clamp-lines: 3;
+
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  flex-shrink: 0;
+  max-height: calc(var(--rf-clamp-lines) * 1em * var(--rf-line));
+  -webkit-line-clamp: var(--rf-clamp-lines);
   -webkit-box-orient: vertical;
   overflow: hidden;
   font-size: var(--rf-text-1);

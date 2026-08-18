@@ -1,5 +1,27 @@
 import { toPascalCase } from "./toPascalCase";
 
+const INTEGRATION_ACRONYMS: Record<string, string | undefined> = {
+  mcp: "MCP",
+  http: "HTTP",
+  https: "HTTPS",
+  api: "API",
+  cli: "CLI",
+  url: "URL",
+  id: "ID",
+  ci: "CI",
+  sdk: "SDK",
+  ai: "AI",
+  db: "DB",
+};
+
+export const humanizeIntegrationName = (integrationName: string): string =>
+  integrationName
+    .split(/[_\-\s]+/)
+    .map(
+      (part) => INTEGRATION_ACRONYMS[part.toLowerCase()] ?? toPascalCase(part),
+    )
+    .join(" ");
+
 export const getIntegrationInfo = (integrationName: string) => {
   const isMCPSse = integrationName.startsWith("mcp_sse");
   const isMCPHttp = integrationName.startsWith("mcp_http");
@@ -12,7 +34,7 @@ export const getIntegrationInfo = (integrationName: string) => {
 
   const getDisplayName = () => {
     if (!integrationName.includes("TEMPLATE")) {
-      return toPascalCase(integrationName);
+      return humanizeIntegrationName(integrationName);
     }
     if (isCmdline) return "Command-line Tool";
     if (isService) return "Command-line Service";

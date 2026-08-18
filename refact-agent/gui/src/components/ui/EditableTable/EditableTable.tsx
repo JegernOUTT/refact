@@ -1,5 +1,5 @@
 import classNames from "classnames";
-import { Plus, Trash2 } from "lucide-react";
+import { Eye, EyeOff, Plus, Trash2 } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button, IconButton } from "../Button";
@@ -13,6 +13,7 @@ export interface EditableTableColumn<T extends EditableTableRow> {
   header: React.ReactNode;
   placeholder?: string;
   inputType?: React.ComponentProps<"input">["type"];
+  secret?: boolean | ((row: T) => boolean);
   width?: string;
   getInputProps?: (params: {
     row: T;
@@ -188,6 +189,10 @@ export function EditableTable<T extends EditableTableRow>({
                 <tr className={classNames(styles.row, "rf-enter")} key={row.id}>
                   {columns.map((column) => {
                     const error = errors[rowIndex]?.[column.id];
+                    const secret =
+                      typeof column.secret === "function"
+                        ? column.secret(row.value)
+                        : column.secret ?? false;
 
                     const inputProps = (column.getInputProps?.({
                       row: row.value,
@@ -202,11 +207,18 @@ export function EditableTable<T extends EditableTableRow>({
                         >
                           {column.header}
                         </label>
-                        <FieldText
-                          {...inputProps}
-                          aria-invalid={error ? true : undefined}
+                        <EditableTableInput
+                          error={error}
                           id={inputKey(rowIndex, column.id)}
-                          ref={(node) => {
+                          inputProps={inputProps}
+                          inputType={column.inputType}
+                          key={`${inputKey(rowIndex, column.id)}-${
+                            secret ? "secret" : "plain"
+                          }`}
+                          placeholder={column.placeholder}
+                          secret={secret}
+                          value={String(row.value[column.id])}
+                          inputRef={(node) => {
                             const key = inputKey(rowIndex, column.id);
 
                             if (node) {
@@ -215,18 +227,10 @@ export function EditableTable<T extends EditableTableRow>({
                               inputRefs.current.delete(key);
                             }
                           }}
-                          placeholder={column.placeholder}
-                          type={column.inputType}
-                          value={String(row.value[column.id])}
                           onChange={(nextValue) =>
                             updateCell(rowIndex, column.id, nextValue)
                           }
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") {
-                              event.preventDefault();
-                              focusNext(rowIndex, column.id);
-                            }
-                          }}
+                          onEnter={() => focusNext(rowIndex, column.id)}
                         />
                         {error ? (
                           <FieldError className={styles.error}>
@@ -267,6 +271,76 @@ export function EditableTable<T extends EditableTableRow>({
       >
         {addLabel}
       </Button>
+    </div>
+  );
+}
+
+interface EditableTableInputProps {
+  error: React.ReactNode;
+  id: string;
+  inputProps: Partial<React.ComponentProps<"input">>;
+  inputRef: (node: HTMLInputElement | null) => void;
+  inputType?: React.ComponentProps<"input">["type"];
+  placeholder?: string;
+  secret: boolean;
+  value: string;
+  onChange: (value: string) => void;
+  onEnter: () => void;
+}
+
+function EditableTableInput({
+  error,
+  id,
+  inputProps,
+  inputRef,
+  inputType,
+  onChange,
+  onEnter,
+  placeholder,
+  secret,
+  value,
+}: EditableTableInputProps) {
+  const [revealed, setRevealed] = useState(false);
+
+  const input = (
+    <FieldText
+      {...inputProps}
+      aria-invalid={error ? true : undefined}
+      autoComplete={secret ? "off" : inputProps.autoComplete}
+      data-1p-ignore={secret ? "" : undefined}
+      id={id}
+      placeholder={placeholder}
+      ref={inputRef}
+      spellCheck={secret ? false : inputProps.spellCheck}
+      type={secret ? (revealed ? "text" : "password") : inputType}
+      value={value}
+      onChange={onChange}
+      onKeyDown={(event) => {
+        inputProps.onKeyDown?.(event);
+
+        if (!event.defaultPrevented && event.key === "Enter") {
+          event.preventDefault();
+          onEnter();
+        }
+      }}
+    />
+  );
+
+  if (!secret) {
+    return input;
+  }
+
+  return (
+    <div className={styles.secretField}>
+      {input}
+      <IconButton
+        aria-label={revealed ? "Hide value" : "Show value"}
+        icon={revealed ? EyeOff : Eye}
+        size="sm"
+        type="button"
+        variant="ghost"
+        onClick={() => setRevealed((current) => !current)}
+      />
     </div>
   );
 }

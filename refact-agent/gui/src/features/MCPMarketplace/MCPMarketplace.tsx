@@ -60,7 +60,9 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
   const [installingKey, setInstallingKey] = useState<string | null>(null);
   const [installError, setInstallError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showAllTags, setShowAllTags] = useState(false);
   const [page, setPage] = useState(1);
+  const contentRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
     const timer = setTimeout(() => {
@@ -90,6 +92,13 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
     () => marketplaceData?.sources ?? [],
     [marketplaceData?.sources],
   );
+
+  React.useEffect(() => {
+    const settingsControl = contentRef.current?.querySelector<HTMLElement>(
+      '[title="Manage marketplace sources"]',
+    );
+    settingsControl?.setAttribute("aria-label", "Manage marketplace sources");
+  }, [sources]);
 
   const sourceMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -135,6 +144,14 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
     );
     return Array.from(tagSet).sort();
   }, [marketplaceData]);
+
+  const orderedTags = useMemo(
+    () =>
+      selectedTag && allTags.includes(selectedTag)
+        ? [selectedTag, ...allTags.filter((tag) => tag !== selectedTag)]
+        : allTags,
+    [allTags, selectedTag],
+  );
 
   // Search and tag filtering are applied engine-side across all sources.
   const filteredServers = useMemo(
@@ -251,7 +268,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
   }
 
   const content = (
-    <div className={styles.pageStack}>
+    <div className={styles.pageStack} ref={contentRef}>
       {!embedded && (
         <div className={styles.header}>
           <Button
@@ -291,28 +308,42 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
       </div>
 
       {allTags.length > 0 && (
-        <div className={styles.filterRow}>
-          <Badge
-            tone={selectedTag === null ? "accent" : "muted"}
-            className={styles.tagFilter}
-            role="button"
-            tabIndex={0}
-            onClick={() => setSelectedTag(null)}
+        <div className={styles.tagFilterSection}>
+          <div
+            className={`${styles.filterRow} ${
+              showAllTags ? styles.filterRowExpanded : styles.filterRowCollapsed
+            }`}
           >
-            All
-          </Badge>
-          {allTags.map((tag) => (
             <Badge
-              key={tag}
-              tone={selectedTag === tag ? "accent" : "muted"}
+              tone={selectedTag === null ? "accent" : "muted"}
               className={styles.tagFilter}
               role="button"
               tabIndex={0}
-              onClick={() => setSelectedTag(selectedTag === tag ? null : tag)}
+              onClick={() => setSelectedTag(null)}
             >
-              {tag}
+              All
             </Badge>
-          ))}
+            {orderedTags.map((tag) => (
+              <Badge
+                key={tag}
+                tone={selectedTag === tag ? "accent" : "muted"}
+                className={styles.tagFilter}
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedTag(selectedTag === tag ? null : tag)}
+              >
+                {tag}
+              </Badge>
+            ))}
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setShowAllTags((visible) => !visible)}
+            aria-expanded={showAllTags}
+          >
+            {showAllTags ? "Show fewer" : `Show all tags (${allTags.length})`}
+          </Button>
         </div>
       )}
 

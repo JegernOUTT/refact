@@ -29,9 +29,14 @@ export const ProjectIntegrations: FC<ProjectIntegrationsProps> = ({
 
       return (
         <SettingsGroup
-          title={`In ${formattedProjectName} · ${integrations.length} ${
-            integrations.length !== 1 ? "integrations" : "integration"
-          }`}
+          title={
+            <>
+              In{" "}
+              <span className={styles.projectPath}>{formattedProjectName}</span>{" "}
+              · {integrations.length}{" "}
+              {integrations.length !== 1 ? "integrations" : "integration"}
+            </>
+          }
           key={`project-group-${index}`}
         >
           <p className={styles.groupDescription}>

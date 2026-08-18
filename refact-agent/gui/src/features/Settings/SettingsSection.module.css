@@ -89,11 +89,24 @@
   text-transform: uppercase;
 }
 
+.groupDescription {
+  max-width: 68ch;
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
 .groupRows {
   display: grid;
   min-width: 0;
   max-width: 100%;
   gap: var(--rf-row-gap);
+}
+
+.body > *,
+.group > *,
+.groupRows > * {
+  min-width: 0;
 }
 
 @media (width <= 640px) {

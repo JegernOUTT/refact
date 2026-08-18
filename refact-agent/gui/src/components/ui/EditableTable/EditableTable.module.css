@@ -58,6 +58,18 @@
   gap: var(--rf-space-1);
 }
 
+.secretField {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.secretField > input {
+  min-width: 0;
+}
+
 .actionCell {
   display: flex;
   align-items: start;

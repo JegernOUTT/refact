@@ -119,9 +119,9 @@ function FieldBase({
             {required ? <span className={styles.required}>*</span> : null}
           </label>
           {helper ? (
-            <p className={styles.helper} id={descriptionId}>
+            <div className={styles.helper} id={descriptionId}>
               {helper}
-            </p>
+            </div>
           ) : null}
         </div>
       ) : null}

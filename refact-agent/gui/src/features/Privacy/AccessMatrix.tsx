@@ -1,3 +1,5 @@
+import type { Ref } from "react";
+
 import { Badge, StatusDot } from "../../components/ui";
 import type {
   PrivacyDestination,
@@ -11,15 +13,17 @@ export interface AccessMatrixProps {
   zones: PrivacyZone[];
   destinations: PrivacyDestination[];
   matchCounts: PrivacyMatchCounts;
+  containerRef?: Ref<HTMLDivElement>;
 }
 
 export function AccessMatrix({
+  containerRef,
   destinations,
   matchCounts,
   zones,
 }: AccessMatrixProps) {
   return (
-    <div className={`${styles.matrixScroll} scrollX`}>
+    <div className={`${styles.matrixScroll} scrollX`} ref={containerRef}>
       <table
         aria-label="Zone destination permissions"
         className={styles.matrix}

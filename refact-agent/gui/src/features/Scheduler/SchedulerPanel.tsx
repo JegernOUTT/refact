@@ -1,12 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { ArrowLeft, RefreshCw } from "lucide-react";
-import {
-  Badge,
-  Button,
-  FieldError,
-  StatusDot,
-  Surface,
-} from "../../components/ui";
+import { Button, FieldError } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   type CreateCronRequest,
@@ -22,7 +16,7 @@ import {
   selectCurrentThreadId,
   selectThreadMode,
 } from "../Chat/Thread/selectors";
-import { SettingsSection } from "../Settings/SettingsSection";
+import { SettingsGroup, SettingsSection } from "../Settings/SettingsSection";
 import { CronCreateForm } from "./CronCreateForm";
 import { selectLastCronFireAt } from "./schedulerSlice";
 import { CronList } from "./CronList";
@@ -160,29 +154,14 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
   );
 
   const summary = (
-    <div className={styles.summaryBadges} aria-label="Scheduler summary">
-      <Badge tone="default" variant="glass">
-        <StatusDot status="idle" />
-        {tasks.length} total
-      </Badge>
-      <Badge tone="success" variant="glass">
-        <StatusDot status="success" />
-        {enabledCount} enabled
-      </Badge>
-      <Badge tone="success" variant="glass">
-        <StatusDot status="success" />
-        {recurringCount} recurring
-      </Badge>
-      <Badge tone="accent" variant="glass">
-        <StatusDot status="running" />
-        {durableCount} durable
-      </Badge>
-      {lastCronFireAt ? (
-        <Badge tone="muted" variant="glass">
-          Last fired {new Date(lastCronFireAt).toLocaleTimeString()}
-        </Badge>
-      ) : null}
-    </div>
+    <p className={styles.summary} aria-label="Scheduler summary">
+      {tasks.length === 0
+        ? "No schedules configured"
+        : `${tasks.length} total · ${enabledCount} enabled · ${recurringCount} recurring · ${durableCount} durable`}
+      {lastCronFireAt
+        ? ` · Last fired ${new Date(lastCronFireAt).toLocaleTimeString()}`
+        : null}
+    </p>
   );
 
   return (
@@ -193,57 +172,37 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
       subNav={summary}
     >
       <div className={styles.panel}>
-        <div className={styles.layout}>
-          <Surface
-            className={styles.createCard}
-            variant="glass"
-            animated="rise"
-          >
-            <h3 className={styles.paneTitle}>New schedule</h3>
-            <CronCreateForm
-              onSubmit={handleCreate}
-              isLoading={createState.isLoading}
-              error={createState.error}
-              taskCount={tasks.length}
-            />
-          </Surface>
+        <CronCreateForm
+          onSubmit={handleCreate}
+          isLoading={createState.isLoading}
+          error={createState.error}
+          taskCount={tasks.length}
+        />
 
-          <section
-            className={styles.listPane}
-            aria-labelledby="scheduler-list-title"
-          >
-            <div className={styles.listHeader}>
-              <div className={styles.listTitleBlock}>
-                <h3 className={styles.paneTitle} id="scheduler-list-title">
-                  Scheduled prompts
-                </h3>
-                <p className={styles.sectionHint}>
-                  Review lifecycle status, next and last fire times, schedule
-                  scope, recurrence, and prompt description.
-                </p>
-              </div>
-            </div>
-            {error ? (
-              <FieldError>{schedulerErrorMessage(error)}</FieldError>
-            ) : null}
-            {renderedMutationError ? (
-              <FieldError>
-                {schedulerErrorMessage(renderedMutationError)}
-              </FieldError>
-            ) : null}
-            <CronList
-              tasks={sortedTasks}
-              isLoading={isFetching}
-              deletingId={deletingId}
-              updatingId={updatingId}
-              runningId={runningId}
-              onDelete={deleteTask}
-              onToggleEnabled={toggleEnabled}
-              onRunNow={runNow}
-              onUpdate={updateTask}
-            />
-          </section>
-        </div>
+        <SettingsGroup
+          title="Scheduled prompts"
+          description="Review lifecycle status, fire times, schedule scope, recurrence, and prompt description."
+        >
+          {error ? (
+            <FieldError>{schedulerErrorMessage(error)}</FieldError>
+          ) : null}
+          {renderedMutationError ? (
+            <FieldError>
+              {schedulerErrorMessage(renderedMutationError)}
+            </FieldError>
+          ) : null}
+          <CronList
+            tasks={sortedTasks}
+            isLoading={isFetching}
+            deletingId={deletingId}
+            updatingId={updatingId}
+            runningId={runningId}
+            onDelete={deleteTask}
+            onToggleEnabled={toggleEnabled}
+            onRunNow={runNow}
+            onUpdate={updateTask}
+          />
+        </SettingsGroup>
       </div>
     </SettingsSection>
   );

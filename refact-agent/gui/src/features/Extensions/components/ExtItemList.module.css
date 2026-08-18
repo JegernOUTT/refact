@@ -5,20 +5,23 @@
   min-width: 0;
 }
 
+.createButton {
+  width: max-content;
+  align-self: flex-start;
+}
+
 .item {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--rf-space-2);
   min-width: 0;
   width: 100%;
-  border: 0;
   border-radius: var(--rf-radius-ctl);
   background: transparent;
   color: var(--rf-color-fg);
-  cursor: pointer;
   padding: var(--rf-space-2);
-  text-align: left;
   transition: background var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
@@ -26,8 +29,36 @@
   background: var(--rf-surface-1);
 }
 
-.selected {
-  background: var(--rf-color-accent-soft);
+.item.selected {
+  background: var(--rf-selected-bg);
+  box-shadow: inset 2px 0 0 var(--rf-color-accent);
+}
+
+.item.selected:hover {
+  background: var(--rf-selected-bg);
+}
+
+.item.selected .title {
+  color: var(--rf-selected-fg);
+}
+
+.main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.main::after {
+  position: absolute;
+  inset: 0;
+  content: "";
 }
 
 .content {
@@ -55,8 +86,17 @@
 }
 
 .meta {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   flex-shrink: 0;
   gap: var(--rf-space-1);
+}
+
+.deletePlaceholder {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  visibility: hidden;
 }

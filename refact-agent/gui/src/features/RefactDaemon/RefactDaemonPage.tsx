@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ArrowLeft,
@@ -52,6 +52,8 @@ const HOUR_SECONDS = MINUTE_SECONDS * 60;
 const DAY_SECONDS = HOUR_SECONDS * 24;
 const SHORT_SHA_LENGTH = 12;
 const DAEMON_POLLING_INTERVAL_MS = 3000;
+const DAEMON_MAX_POLLING_INTERVAL_MS = 60000;
+const DAEMON_MAX_POLLING_FAILURES = 10;
 const UPDATE_POLLING_INTERVAL_MS = 1000;
 
 export type RefactDaemonPageProps = {
@@ -684,10 +686,56 @@ function UpdatesCard({
 export function RefactDaemonPage({ backFromDaemon }: RefactDaemonPageProps) {
   const config = useConfig();
   const daemonBaseUrl = resolveDaemonBaseUrl(config);
-  const { data, error, isLoading, isFetching, refetch } = useGetDaemonInfoQuery(
-    undefined,
-    { pollingInterval: DAEMON_POLLING_INTERVAL_MS },
+  const [pollingInterval, setPollingInterval] = useState(
+    DAEMON_POLLING_INTERVAL_MS,
   );
+  const [pollingStopped, setPollingStopped] = useState(false);
+  const pollingFailuresRef = useRef(0);
+  const {
+    data,
+    error,
+    fulfilledTimeStamp,
+    isError,
+    isFetching,
+    isLoading,
+    refetch,
+  } = useGetDaemonInfoQuery(undefined, {
+    pollingInterval: pollingStopped ? 0 : pollingInterval,
+  });
+
+  useEffect(() => {
+    if (isFetching || !isError) return;
+
+    const nextFailures = Math.min(
+      pollingFailuresRef.current + 1,
+      DAEMON_MAX_POLLING_FAILURES,
+    );
+    pollingFailuresRef.current = nextFailures;
+    if (nextFailures >= DAEMON_MAX_POLLING_FAILURES) {
+      setPollingStopped(true);
+    } else {
+      setPollingInterval(
+        Math.min(
+          DAEMON_POLLING_INTERVAL_MS * 2 ** nextFailures,
+          DAEMON_MAX_POLLING_INTERVAL_MS,
+        ),
+      );
+    }
+  }, [isError, isFetching]);
+
+  useEffect(() => {
+    if (fulfilledTimeStamp === undefined) return;
+    pollingFailuresRef.current = 0;
+    setPollingStopped(false);
+    setPollingInterval(DAEMON_POLLING_INTERVAL_MS);
+  }, [fulfilledTimeStamp]);
+
+  const retryPolling = useCallback(() => {
+    pollingFailuresRef.current = 0;
+    setPollingStopped(false);
+    setPollingInterval(DAEMON_POLLING_INTERVAL_MS);
+    void refetch();
+  }, [refetch]);
 
   const columns = useMemo<DataTableColumn<DaemonWorker>[]>(
     () => [
@@ -804,7 +852,7 @@ export function RefactDaemonPage({ backFromDaemon }: RefactDaemonPageProps) {
           <Button
             leftIcon={RefreshCw}
             loading={isFetching}
-            onClick={() => void refetch()}
+            onClick={retryPolling}
             size="sm"
             variant="soft"
           >
@@ -823,7 +871,7 @@ export function RefactDaemonPage({ backFromDaemon }: RefactDaemonPageProps) {
             <Button
               leftIcon={RefreshCw}
               loading={isFetching}
-              onClick={() => void refetch()}
+              onClick={retryPolling}
               size="sm"
             >
               Retry
@@ -913,7 +961,7 @@ export function RefactDaemonPage({ backFromDaemon }: RefactDaemonPageProps) {
             <Button
               leftIcon={RefreshCw}
               loading={isFetching}
-              onClick={() => void refetch()}
+              onClick={retryPolling}
               size="sm"
             >
               Refresh

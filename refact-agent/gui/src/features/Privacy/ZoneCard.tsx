@@ -85,7 +85,9 @@ export function ZoneCard({
               variant="danger"
               onClick={onRemove}
             />
-          ) : null}
+          ) : (
+            <span aria-hidden="true" className={styles.deletePlaceholder} />
+          )}
         </div>
       </div>
 

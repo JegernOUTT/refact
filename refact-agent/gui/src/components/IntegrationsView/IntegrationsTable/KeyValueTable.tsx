@@ -4,6 +4,7 @@ import isEqual from "lodash.isequal";
 import { EditableTable } from "../../ui";
 import { debugIntegrations } from "../../../debugConfig";
 import { MCPEnvs } from "../../../services/refact";
+import { isSecretKeyName } from "./secretKeys";
 
 import styles from "./IntegrationTables.module.css";
 
@@ -118,6 +119,7 @@ export const KeyValueTable: FC<KeyValueTableProps> = ({
         {
           id: "value",
           header: columnNames[1],
+          secret: (row) => isSecretKeyName(row.key),
           getInputProps: ({ row, rowIndex }) => ({
             "data-row-id": row.id,
             "data-row-index": rowIndex,

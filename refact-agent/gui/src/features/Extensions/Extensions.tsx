@@ -196,7 +196,14 @@ export const Extensions: React.FC<ExtensionsProps> = ({
             </span>
           ),
         },
-        { value: "hooks", label: "Hooks" },
+        {
+          value: "hooks",
+          label: (
+            <span className={styles.tabLabel}>
+              Hooks <span>({registry?.hooks.length ?? 0})</span>
+            </span>
+          ),
+        },
       ]}
     />
   );
@@ -227,13 +234,15 @@ export const Extensions: React.FC<ExtensionsProps> = ({
                 draftId={draftId}
               />
             ) : (
-              <ExtItemList
-                items={registry?.skills ?? []}
-                selectedId={selectedSkill}
-                onSelect={setSelectedSkill}
-                onCreate={() => openCreateDialog("skill")}
-                onDelete={handleDeleteSkill}
-              />
+              <div className={styles.itemListContainer}>
+                <ExtItemList
+                  items={registry?.skills ?? []}
+                  selectedId={selectedSkill}
+                  onSelect={setSelectedSkill}
+                  onCreate={() => openCreateDialog("skill")}
+                  onDelete={handleDeleteSkill}
+                />
+              </div>
             ))}
 
           {activeTab === "commands" &&
@@ -244,13 +253,15 @@ export const Extensions: React.FC<ExtensionsProps> = ({
                 draftId={draftId}
               />
             ) : (
-              <ExtItemList
-                items={registry?.slash_commands ?? []}
-                selectedId={selectedCommand}
-                onSelect={setSelectedCommand}
-                onCreate={() => openCreateDialog("command")}
-                onDelete={handleDeleteCommand}
-              />
+              <div className={styles.itemListContainer}>
+                <ExtItemList
+                  items={registry?.slash_commands ?? []}
+                  selectedId={selectedCommand}
+                  onSelect={setSelectedCommand}
+                  onCreate={() => openCreateDialog("command")}
+                  onDelete={handleDeleteCommand}
+                />
+              </div>
             ))}
 
           {activeTab === "hooks" && <HooksEditor />}

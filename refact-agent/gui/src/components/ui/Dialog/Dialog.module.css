@@ -2,7 +2,7 @@
   position: fixed;
   inset: 0;
   z-index: var(--rf-z-overlay, 600);
-  background: var(--rf-surface-3);
+  background: var(--rf-scrim);
 }
 
 .content {

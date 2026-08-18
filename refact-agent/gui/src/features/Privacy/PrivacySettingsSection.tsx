@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 
 import {
@@ -6,10 +6,12 @@ import {
   Button,
   ErrorState,
   LoadingState,
+  SaveStatus,
   SettingItem,
   StatusDot,
   Switch,
 } from "../../components/ui";
+import { useReducedMotion } from "../../hooks";
 import {
   type PrivacyPolicy,
   type PrivacyZone,
@@ -102,6 +104,19 @@ export function PrivacySettingsSection() {
   const [updatePolicy, updateState] = useUpdatePrivacyPolicyMutation();
   const [saveError, setSaveError] = useState<string | null>(null);
   const [matrixOpen, setMatrixOpen] = useState(false);
+  const matrixRef = useRef<HTMLDivElement>(null);
+  const matrixWasOpenRef = useRef(false);
+  const reducedMotion = useReducedMotion();
+
+  useEffect(() => {
+    if (matrixOpen && !matrixWasOpenRef.current) {
+      matrixRef.current?.scrollIntoView({
+        block: "nearest",
+        behavior: reducedMotion ? "auto" : "smooth",
+      });
+    }
+    matrixWasOpenRef.current = matrixOpen;
+  }, [matrixOpen, reducedMotion]);
 
   const data = policyQuery.data;
 
@@ -298,108 +313,98 @@ export function PrivacySettingsSection() {
         </p>
       ) : null}
 
-      <SettingsGroup title="Runtime protection">
-        <SettingItem
-          className={`${styles.capabilityBanner} rf-enter`}
-          title="Shell file observation"
-          description={observationDescription}
-          control={
-            <Badge tone={observationTone} variant="soft">
-              <StatusDot
-                aria-hidden="true"
-                status={
-                  observationTone === "warning"
-                    ? "warning"
-                    : observationTone === "success"
-                      ? "success"
-                      : "in_progress"
-                }
-              />
-              {observationLabel}
-            </Badge>
-          }
-        />
-      </SettingsGroup>
-
-      <SettingsGroup title="File zones">
-        <SettingItem
-          layout="stack"
-          title="What is sensitive"
-          description="A zone is a set of files matched by glob patterns. A file belongs to the first zone listed here whose patterns match it, so put narrow zones above broad ones."
-          saveStatus={saveStatus}
-          control={
-            <div className={styles.zoneStack}>
-              <div className={styles.zoneCards}>
-                {data.policy.zones.map((zone) => (
-                  <ZoneCard
-                    key={zone.name}
-                    matchCount={data.match_counts[zone.name] ?? 0}
-                    removable={
-                      data.policy.zones.length > 1 && !isCatchAllZone(zone)
-                    }
-                    saving={updateState.isLoading}
-                    takenNames={data.policy.zones
-                      .map((other) => other.name)
-                      .filter((other) => other !== zone.name)}
-                    zone={zone}
-                    onChange={(patch) => updateZone(zone.name, patch)}
-                    onRemove={() => removeZone(zone.name)}
-                  />
-                ))}
-              </div>
-              <Button
-                disabled={updateState.isLoading}
-                leftIcon={Plus}
-                size="sm"
-                variant="soft"
-                onClick={addZone}
-              >
-                Add zone
-              </Button>
-            </div>
-          }
-        />
-      </SettingsGroup>
-
-      <SettingsGroup title="Never send anywhere">
-        <SettingItem
-          layout="stack"
-          title="Blocked patterns"
-          description="Blocked from every destination, including local models. Overrides every zone."
-          control={
-            <div className={styles.blockedBox}>
-              <PatternChips
-                addLabel="Add blocked pattern"
-                disabled={updateState.isLoading}
-                emptyLabel="Nothing is globally blocked"
-                patterns={data.policy.blocked}
-                placeholder="e.g. id_rsa"
-                onChange={(blocked) => void save({ ...data.policy, blocked })}
-              />
-            </div>
-          }
-        />
-      </SettingsGroup>
-
-      <SettingsGroup title="Destinations">
-        <SettingItem
-          layout="stack"
-          title="Who may touch what"
-          description="Open a destination to choose which zones it may receive. Model providers can additionally be limited to a subset of MCP servers."
-          saveStatus={saveStatus}
-          control={
-            <DestinationAccess
-              destinations={data.destinations}
-              matchCounts={data.match_counts}
-              mcpServers={mcpServers}
-              saving={updateState.isLoading}
-              toolAccess={data.policy.tool_access}
-              zones={data.policy.zones}
-              onToggleMcp={handleMcpToggle}
-              onToggleZone={handleZoneToggle}
+      <SettingsGroup
+        title="Shell file observation"
+        description={observationDescription}
+      >
+        <div className={`${styles.capabilityBanner} rf-enter`}>
+          <Badge tone={observationTone} variant="soft">
+            <StatusDot
+              aria-hidden="true"
+              status={
+                observationTone === "warning"
+                  ? "warning"
+                  : observationTone === "success"
+                    ? "success"
+                    : "in_progress"
+              }
             />
-          }
-        />
+            {observationLabel}
+          </Badge>
+        </div>
+      </SettingsGroup>
+
+      <SettingsGroup
+        title="What is sensitive"
+        description="A zone is a set of files matched by glob patterns. A file belongs to the first zone listed here whose patterns match it, so put narrow zones above broad ones."
+      >
+        <div className={styles.groupContent}>
+          <SaveStatus state={saveStatus} />
+          <div className={styles.zoneStack}>
+            <div className={styles.zoneCards}>
+              {data.policy.zones.map((zone) => (
+                <ZoneCard
+                  key={zone.name}
+                  matchCount={data.match_counts[zone.name] ?? 0}
+                  removable={
+                    data.policy.zones.length > 1 && !isCatchAllZone(zone)
+                  }
+                  saving={updateState.isLoading}
+                  takenNames={data.policy.zones
+                    .map((other) => other.name)
+                    .filter((other) => other !== zone.name)}
+                  zone={zone}
+                  onChange={(patch) => updateZone(zone.name, patch)}
+                  onRemove={() => removeZone(zone.name)}
+                />
+              ))}
+            </div>
+            <Button
+              disabled={updateState.isLoading}
+              leftIcon={Plus}
+              size="sm"
+              variant="soft"
+              onClick={addZone}
+            >
+              Add zone
+            </Button>
+          </div>
+        </div>
+      </SettingsGroup>
+
+      <SettingsGroup
+        title="Blocked patterns"
+        description="Blocked from every destination, including local models. Overrides every zone."
+      >
+        <div className={styles.blockedBox}>
+          <PatternChips
+            addLabel="Add blocked pattern"
+            disabled={updateState.isLoading}
+            emptyLabel="Nothing is globally blocked"
+            patterns={data.policy.blocked}
+            placeholder="e.g. id_rsa"
+            onChange={(blocked) => void save({ ...data.policy, blocked })}
+          />
+        </div>
+      </SettingsGroup>
+
+      <SettingsGroup
+        title="Who may touch what"
+        description="Open a destination to choose which zones it may receive. Model providers can additionally be limited to a subset of MCP servers."
+      >
+        <div className={styles.groupContent}>
+          <SaveStatus state={saveStatus} />
+          <DestinationAccess
+            destinations={data.destinations}
+            matchCounts={data.match_counts}
+            mcpServers={mcpServers}
+            saving={updateState.isLoading}
+            toolAccess={data.policy.tool_access}
+            zones={data.policy.zones}
+            onToggleMcp={handleMcpToggle}
+            onToggleZone={handleZoneToggle}
+          />
+        </div>
         {blockedProviders.length > 0 ? (
           <p className={styles.noteLine}>
             {blockedProviders.length} provider
@@ -430,31 +435,28 @@ export function PrivacySettingsSection() {
         />
       </SettingsGroup>
 
-      <SettingsGroup title="Audit">
-        <SettingItem
-          layout="stack"
-          title="Access matrix"
-          description="Read-only overview of every zone against every destination."
-          control={
-            <div className={styles.auditBox}>
-              <Button
-                aria-expanded={matrixOpen}
-                size="sm"
-                variant="ghost"
-                onClick={() => setMatrixOpen((open) => !open)}
-              >
-                {matrixOpen ? "Hide matrix" : "Show matrix"}
-              </Button>
-              {matrixOpen ? (
-                <AccessMatrix
-                  destinations={data.destinations}
-                  matchCounts={data.match_counts}
-                  zones={data.policy.zones}
-                />
-              ) : null}
-            </div>
-          }
-        />
+      <SettingsGroup
+        title="Access matrix"
+        description="Read-only overview of every zone against every destination."
+      >
+        <div className={styles.auditBox}>
+          <Button
+            aria-expanded={matrixOpen}
+            size="sm"
+            variant="ghost"
+            onClick={() => setMatrixOpen((open) => !open)}
+          >
+            {matrixOpen ? "Hide matrix" : "Show matrix"}
+          </Button>
+          {matrixOpen ? (
+            <AccessMatrix
+              containerRef={matrixRef}
+              destinations={data.destinations}
+              matchCounts={data.match_counts}
+              zones={data.policy.zones}
+            />
+          ) : null}
+        </div>
       </SettingsGroup>
     </SettingsSection>
   );

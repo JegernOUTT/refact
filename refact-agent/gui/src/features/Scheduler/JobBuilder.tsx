@@ -7,11 +7,13 @@ import {
   FieldText,
   FieldTextarea,
   SegmentedControl,
+  SettingItem,
 } from "../../components/ui";
 import {
   type CreateCronRequest,
   schedulerErrorMessage,
 } from "../../services/refact/schedulerApi";
+import { SettingsGroup } from "../Settings/SettingsSection";
 import styles from "./Scheduler.module.css";
 
 type CronPreset = "hourly" | "daily" | "weekdays" | "five-min" | "custom";
@@ -333,14 +335,10 @@ export const JobBuilder: React.FC<JobBuilderProps> = ({
 
   return (
     <form className={styles.form} onSubmit={submitForm}>
-      <p className={styles.sectionHint}>
-        Build a job from one trigger, one action, and one delivery target. Cron,
-        interval, and one-shot triggers run on time; webhook triggers wait for a
-        daemon hook call.
-      </p>
-
-      <fieldset className={styles.builderSection}>
-        <legend className={styles.builderLegend}>Trigger</legend>
+      <SettingsGroup
+        title="Trigger"
+        description="Cron, interval, and one-shot triggers run on time; webhook triggers wait for a daemon hook call."
+      >
         <div className={styles.builderSectionContent}>
           <Field label="Trigger kind">
             <SegmentedControl
@@ -463,32 +461,37 @@ export const JobBuilder: React.FC<JobBuilderProps> = ({
             />
           </Field>
 
-          <div className={styles.toggles}>
-            {showRecurring ? (
-              <Field label="Recurring" helper="Run on every matching schedule.">
+          {showRecurring ? (
+            <SettingItem
+              title="Recurring"
+              description="Run on every matching schedule."
+              control={
                 <FieldSwitch
                   checked={recurring}
                   onChange={setRecurring}
                   aria-label="Recurring"
                 />
-              </Field>
-            ) : null}
-            <Field
-              label="Durable"
-              helper="Persist this schedule for the project."
-            >
+              }
+            />
+          ) : null}
+          <SettingItem
+            title="Durable"
+            description="Persist this schedule for the project."
+            control={
               <FieldSwitch
                 checked={durable}
                 onChange={setDurable}
                 aria-label="Durable"
               />
-            </Field>
-          </div>
+            }
+          />
         </div>
-      </fieldset>
+      </SettingsGroup>
 
-      <fieldset className={styles.builderSection}>
-        <legend className={styles.builderLegend}>Action</legend>
+      <SettingsGroup
+        title="Action"
+        description="Choose an agent turn or run a command directly."
+      >
         <div className={styles.builderSectionContent}>
           <Field label="Action">
             <SegmentedControl
@@ -566,10 +569,12 @@ export const JobBuilder: React.FC<JobBuilderProps> = ({
             </>
           ) : null}
         </div>
-      </fieldset>
+      </SettingsGroup>
 
-      <fieldset className={styles.builderSection}>
-        <legend className={styles.builderLegend}>Delivery</legend>
+      <SettingsGroup
+        title="Delivery"
+        description="Send results to this chat, a webhook, or a notifier integration."
+      >
         <div className={styles.builderSectionContent}>
           <Field label="Delivery">
             <SegmentedControl
@@ -630,7 +635,7 @@ export const JobBuilder: React.FC<JobBuilderProps> = ({
             </div>
           ) : null}
         </div>
-      </fieldset>
+      </SettingsGroup>
 
       {errorMessage ? <FieldError>{errorMessage}</FieldError> : null}
 

@@ -6,7 +6,6 @@ import {
   Button,
   Card,
   DataTable,
-  EditableTable,
   ErrorState,
   FieldSelect,
   FieldSwitch,
@@ -32,8 +31,8 @@ import {
   useUpdateShellPolicyMutation,
 } from "../../services/refact/shellPolicy";
 import { SettingsGroup, SettingsSection } from "../Settings/SettingsSection";
-
-type RuleRow = { rule: string };
+import { ShellRuleList } from "./ShellRuleList";
+import styles from "./ShellSettingsSection.module.css";
 
 const MODE_OPTIONS = [
   { value: "strict", label: "Strict — ask for anything not allow-listed" },
@@ -49,8 +48,7 @@ const MODE_DESCRIPTIONS: Record<ShellApprovalMode, string> = {
   strict: "Ask before every command that is not explicitly allow-listed.",
   balanced: "Ask before running commands classified Medium risk or higher.",
   permissive: "Ask only for High and Critical risk commands.",
-  yolo:
-    "Never ask, except when a deny rule matches or the model explicitly requests confirmation.",
+  yolo: "Never ask, except when a deny rule matches or the model explicitly requests confirmation.",
 };
 
 const RISK_OPTIONS = [
@@ -76,7 +74,8 @@ function decisionTone(decision: ShellGateDecision) {
 function formatRelativeTime(timestampMs: number): string {
   const elapsed = Math.max(0, Date.now() - timestampMs);
   if (elapsed < MINUTE_MS) return "just now";
-  if (elapsed < HOUR_MS) return `${String(Math.floor(elapsed / MINUTE_MS))}m ago`;
+  if (elapsed < HOUR_MS)
+    return `${String(Math.floor(elapsed / MINUTE_MS))}m ago`;
   if (elapsed < DAY_MS) return `${String(Math.floor(elapsed / HOUR_MS))}h ago`;
   return `${String(Math.floor(elapsed / DAY_MS))}d ago`;
 }
@@ -97,7 +96,11 @@ function errorMessage(error: unknown): string {
     if ("error" in error && typeof error.error === "string") {
       return error.error;
     }
-    if ("data" in error && typeof error.data === "object" && error.data !== null) {
+    if (
+      "data" in error &&
+      typeof error.data === "object" &&
+      error.data !== null
+    ) {
       if ("message" in error.data && typeof error.data.message === "string") {
         return error.data.message;
       }
@@ -107,57 +110,6 @@ function errorMessage(error: unknown): string {
     }
   }
   return "The command could not be evaluated.";
-}
-
-interface RuleEditorProps {
-  title: string;
-  rules: string[];
-  savedRules: string[];
-  disabled: boolean;
-  onChange: (rules: string[]) => void;
-}
-
-function RuleEditor({
-  disabled,
-  onChange,
-  rules,
-  savedRules,
-  title,
-}: RuleEditorProps) {
-  return (
-    <SettingItem
-      layout="stack"
-      title={title}
-      control={
-        <Flex direction="column" gap="2" align="start">
-          <EditableTable<RuleRow>
-            addLabel="Add rule"
-            columns={[
-              {
-                id: "rule",
-                header: "Rule",
-                placeholder: "Command rule",
-                getInputProps: () => ({ disabled }),
-              },
-            ]}
-            createRow={() => ({ rule: "" })}
-            emptyMessage="No rules"
-            removeLabel="Remove rule"
-            value={rules.map((rule) => ({ rule }))}
-            onChange={(rows) => onChange(rows.map((row) => row.rule))}
-          />
-          <Button
-            disabled={disabled}
-            size="sm"
-            variant="soft"
-            onClick={() => onChange([...savedRules])}
-          >
-            Revert changes
-          </Button>
-        </Flex>
-      }
-    />
-  );
 }
 
 export function ShellSettingsSection() {
@@ -275,31 +227,32 @@ export function ShellSettingsSection() {
         />
       </SettingsGroup>
 
-      <SettingsGroup title="Rules">
-        <Card padding="sm" variant="surface-2">
-          <Text as="p" color="gray">
-            A rule with no spaces matches the program name (rm, mkfs*); a rule
-            with spaces matches the whole command (git push*). Prefixes exec:,
-            argv:, re:, and raw: force a specific target; raw: is the old
-            whole-line matching.
-          </Text>
-        </Card>
-        <RuleEditor
+      <SettingsGroup
+        title="Rules"
+        description="A rule with no spaces matches the program name (rm, mkfs*); a rule with spaces matches the whole command (git push*). Prefixes exec:, argv:, re:, and raw: force a specific target; raw: is the old whole-line matching."
+      >
+        <ShellRuleList
+          tone="deny"
           title="Never run (deny)"
+          hint="Always blocked, in every mode."
           rules={draft.deny}
           savedRules={serverPolicy.deny}
           disabled={saving}
           onChange={(deny) => setDraft({ ...draft, deny })}
         />
-        <RuleEditor
+        <ShellRuleList
+          tone="ask"
           title="Always ask"
+          hint="Always requires your approval before running."
           rules={draft.ask}
           savedRules={serverPolicy.ask}
           disabled={saving}
           onChange={(ask) => setDraft({ ...draft, ask })}
         />
-        <RuleEditor
+        <ShellRuleList
+          tone="allow"
           title="Never ask (allow)"
+          hint="Runs without confirmation. Deny rules still win."
           rules={draft.allow}
           savedRules={serverPolicy.allow}
           disabled={saving}
@@ -313,11 +266,13 @@ export function ShellSettingsSection() {
           title="Command"
           control={
             <Flex direction="column" gap="2" align="stretch">
-              <Flex gap="2" align="center">
+              <div className={styles.testRow}>
                 <FieldText
                   aria-label="Command to evaluate"
+                  className={styles.testInput}
                   disabled={testState.isLoading}
                   placeholder="git push origin main"
+                  spellCheck={false}
                   value={command}
                   onChange={setCommand}
                   onKeyDown={(event) => {
@@ -331,7 +286,7 @@ export function ShellSettingsSection() {
                 >
                   {testState.isLoading ? "Evaluating…" : "Evaluate"}
                 </Button>
-              </Flex>
+              </div>
               {testState.data ? (
                 <Callout.Root
                   color={
@@ -353,8 +308,11 @@ export function ShellSettingsSection() {
                         <span>Risk level: {testState.data.risk_level}</span>
                       ) : null}
                       <span>
-                        Segments: {testState.data.segments.map((segment, index) => (
-                          <code key={`${segment}-${String(index)}`}>{segment} </code>
+                        Segments:{" "}
+                        {testState.data.segments.map((segment, index) => (
+                          <code key={`${segment}-${String(index)}`}>
+                            {segment}{" "}
+                          </code>
                         ))}
                       </span>
                     </Flex>
@@ -378,23 +336,25 @@ export function ShellSettingsSection() {
             title={`${entry.id} — ${entry.exec}`}
             description={entry.reason}
             control={
-              <Flex align="center" gap="2" wrap="wrap">
-                <FieldSelect
-                  aria-label={`Risk level for ${entry.id}`}
-                  disabled={saving}
-                  options={RISK_OPTIONS}
-                  value={entry.level}
-                  onChange={(value) =>
-                    setDraft({
-                      ...draft,
-                      catalogue: draft.catalogue.map((item, itemIndex) =>
-                        itemIndex === index
-                          ? { ...item, level: value as ShellRiskLevel }
-                          : item,
-                      ),
-                    })
-                  }
-                />
+              <div className={styles.riskControl}>
+                <span className={styles.riskSelect}>
+                  <FieldSelect
+                    aria-label={`Risk level for ${entry.id}`}
+                    disabled={saving}
+                    options={RISK_OPTIONS}
+                    value={entry.level}
+                    onChange={(value) =>
+                      setDraft({
+                        ...draft,
+                        catalogue: draft.catalogue.map((item, itemIndex) =>
+                          itemIndex === index
+                            ? { ...item, level: value as ShellRiskLevel }
+                            : item,
+                        ),
+                      })
+                    }
+                  />
+                </span>
                 <FieldSwitch
                   aria-label={`Enable ${entry.id}`}
                   checked={entry.enabled}
@@ -410,7 +370,7 @@ export function ShellSettingsSection() {
                     })
                   }
                 />
-              </Flex>
+              </div>
             }
           />
         ))}
@@ -640,7 +600,9 @@ export function ShellSettingsSection() {
                 id: "command",
                 header: "Command",
                 cell: (entry) => (
-                  <code title={entry.command}>{commandPreview(entry.command)}</code>
+                  <code title={entry.command}>
+                    {commandPreview(entry.command)}
+                  </code>
                 ),
               },
               {
@@ -674,7 +636,8 @@ export function ShellSettingsSection() {
                       size="sm"
                       variant="soft"
                       onClick={() => {
-                        if (rule) setDraft({ ...draft, ask: [...draft.ask, rule] });
+                        if (rule)
+                          setDraft({ ...draft, ask: [...draft.ask, rule] });
                       }}
                     >
                       Always ask for this
@@ -698,10 +661,7 @@ export function ShellSettingsSection() {
       </SettingsGroup>
 
       <Flex align="center" gap="2" wrap="wrap">
-        <Button
-          loading={saving}
-          onClick={() => void updatePolicy(draft)}
-        >
+        <Button loading={saving} onClick={() => void updatePolicy(draft)}>
           Save
         </Button>
         <SaveStatus state={saveStatus} />

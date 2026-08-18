@@ -8,6 +8,7 @@ import {
   MessageCircle,
   MessagesSquare,
   Rabbit,
+  RotateCcw,
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -16,11 +17,17 @@ import { skipToken } from "@reduxjs/toolkit/query";
 import { PageWrapper } from "../../components/PageWrapper";
 import { Spinner } from "../../components/Spinner";
 import { ModelSelector } from "../../components/Chat/ModelSelector";
+import type { SamplingValues } from "../../components/ModelSamplingParams";
 import {
-  ModelSamplingParams,
-  type SamplingValues,
-} from "../../components/ModelSamplingParams";
-import { Button, Icon, SettingItem, Tabs } from "../../components/ui";
+  Button,
+  FieldSlider,
+  FieldSwitch,
+  Icon,
+  IconButton,
+  SegmentedControl,
+  SettingItem,
+  Tabs,
+} from "../../components/ui";
 
 import {
   useGetDefaultsQuery,
@@ -33,6 +40,7 @@ import { useGetDraftQuery } from "../../services/refact/buddy";
 
 import type { Config } from "../Config/configSlice";
 import { BuddyDraftPreview } from "../Buddy/BuddyDraftPreview";
+import { ReasoningIcon } from "../Providers/ProviderForm/ProviderModelsList/components/CapabilityIcons";
 import { SettingsGroup, SettingsSection } from "../Settings/SettingsSection";
 
 import styles from "./DefaultModels.module.css";
@@ -98,6 +106,13 @@ const MODEL_TYPE_LABELS: Record<
 
 const MODEL_TYPE_KEYS = Object.keys(MODEL_TYPE_LABELS) as ModelTypeKey[];
 
+function formatTokens(tokens: number): string {
+  if (tokens >= 1000000) {
+    return `${(tokens / 1000000).toFixed(tokens % 1000000 === 0 ? 0 : 1)}M`;
+  }
+  return `${Math.round(tokens / 1000)}K`;
+}
+
 const ModelTypeSection: React.FC<{
   typeKey: ModelTypeKey;
   config: ModelTypeDefaults;
@@ -105,6 +120,7 @@ const ModelTypeSection: React.FC<{
   onChange: (key: ModelTypeKey, config: ModelTypeDefaults) => void;
 }> = ({ typeKey, config, capsDefault, onChange }) => {
   const { title, description } = MODEL_TYPE_LABELS[typeKey];
+  const { data: capsData } = useGetCapsQuery(undefined);
 
   const handleModelChange = useCallback(
     (model: string) => {
@@ -121,22 +137,35 @@ const ModelTypeSection: React.FC<{
   );
 
   const effectiveModel = config.model ?? capsDefault;
+  const chatModels: Record<string, unknown> | undefined = capsData?.chat_models;
+  const modelDetail = effectiveModel
+    ? (chatModels?.[effectiveModel] as
+        | {
+            default_max_tokens?: number | null;
+            max_output_tokens?: number | null;
+            reasoning_effort_options?: string[] | null;
+            supports_thinking_budget?: boolean;
+            supports_adaptive_thinking_budget?: boolean;
+          }
+        | undefined)
+    : undefined;
+  const defaultMaxTokens = modelDetail?.default_max_tokens ?? 4096;
+  const maxOutputTokens = modelDetail?.max_output_tokens ?? 16384;
+  const reasoningEffortOptions = modelDetail?.reasoning_effort_options;
+  const supportsThinkingBudget = modelDetail?.supports_thinking_budget ?? false;
+  const supportsReasoning =
+    (reasoningEffortOptions != null && reasoningEffortOptions.length > 0) ||
+    supportsThinkingBudget;
 
   return (
     <div className={`${styles.content} rf-enter`}>
-      <div className={styles.roleHeader}>
-        <Icon icon={MODEL_TYPE_LABELS[typeKey].icon} size="lg" tone="accent" />
-        <h2 className={styles.roleTitle}>{title}</h2>
-        <p className={styles.description}>{description}</p>
-      </div>
-
-      <SettingsGroup title="Model Slot">
+      <SettingsGroup title={title} description={description}>
         <SettingItem
           className="rf-enter"
           title="Model"
           description="Choose the model override for this slot, or leave it empty to use the server default."
           control={
-            <div className={styles.selectorWrap}>
+            <div className={styles.selectorWrap} title={effectiveModel}>
               <ModelSelector
                 value={config.model}
                 onValueChange={handleModelChange}
@@ -149,34 +178,146 @@ const ModelTypeSection: React.FC<{
             </div>
           }
         />
-      </SettingsGroup>
 
-      {effectiveModel ? (
-        <SettingsGroup title="Sampling">
-          <SettingItem
-            className="rf-enter"
-            title="Sampling"
-            description="Tune output length and reasoning behavior for this model slot."
-            layout="stack"
-          >
-            <div className={styles.samplingWrap}>
-              <ModelSamplingParams
-                model={effectiveModel}
-                values={config}
-                onChange={handleSamplingChange}
+        {effectiveModel ? (
+          <>
+            {supportsReasoning ? (
+              <SettingItem
+                className="rf-enter"
+                title={
+                  <span className={styles.reasoningLabel}>
+                    <ReasoningIcon />
+                    Reasoning
+                  </span>
+                }
+                description="Use additional reasoning controls for this model."
+                control={
+                  <FieldSwitch
+                    aria-label="Reasoning"
+                    checked={config.boost_reasoning ?? false}
+                    onChange={(checked) => {
+                      handleSamplingChange(
+                        "boost_reasoning",
+                        checked || undefined,
+                      );
+                      if (!checked) {
+                        handleSamplingChange("reasoning_effort", undefined);
+                        handleSamplingChange("thinking_budget", undefined);
+                      }
+                    }}
+                  />
+                }
               />
-            </div>
-          </SettingItem>
-        </SettingsGroup>
-      ) : (
-        <div className={`${styles.notice} rf-enter`}>
-          <Icon icon={Info} size="sm" tone="muted" />
-          <span>
-            No model selected. Features that require this model type will ask
-            you to configure it.
-          </span>
-        </div>
-      )}
+            ) : null}
+
+            {supportsReasoning && config.boost_reasoning ? (
+              <>
+                {reasoningEffortOptions != null &&
+                reasoningEffortOptions.length > 0 ? (
+                  <SettingItem
+                    className="rf-enter"
+                    title="Effort"
+                    description="Choose how much reasoning the model should apply."
+                    control={
+                      <SegmentedControl
+                        className={styles.segmented}
+                        size="sm"
+                        value={config.reasoning_effort ?? "medium"}
+                        onValueChange={(level) =>
+                          handleSamplingChange("reasoning_effort", level)
+                        }
+                        options={reasoningEffortOptions.map((level) => ({
+                          value: level,
+                          label: level,
+                        }))}
+                      />
+                    }
+                  />
+                ) : null}
+
+                {supportsThinkingBudget ? (
+                  <SettingItem
+                    className="rf-enter"
+                    title="Thinking tokens"
+                    description="Set the token budget available for reasoning."
+                    layout="stack"
+                    control={
+                      <div className={styles.sliderControl}>
+                        <span className={styles.boundary}>1K</span>
+                        <FieldSlider
+                          className={styles.slider}
+                          min={1024}
+                          max={32768}
+                          step={1024}
+                          value={[config.thinking_budget ?? 16384]}
+                          onChange={(value) =>
+                            handleSamplingChange("thinking_budget", value[0])
+                          }
+                          aria-label="Thinking tokens"
+                        />
+                        <span className={styles.boundary}>32K</span>
+                        <span className={styles.sliderValue}>
+                          {config.thinking_budget ?? 16384}
+                        </span>
+                      </div>
+                    }
+                  />
+                ) : null}
+              </>
+            ) : null}
+
+            <SettingItem
+              className="rf-enter"
+              title="Max tokens"
+              description="Set the maximum length of the model response."
+              layout="stack"
+              control={
+                <div className={styles.sliderControl}>
+                  <span className={styles.boundary}>1K</span>
+                  <FieldSlider
+                    className={styles.slider}
+                    min={1024}
+                    max={maxOutputTokens}
+                    step={1024}
+                    value={[config.max_new_tokens ?? defaultMaxTokens]}
+                    onChange={(value) =>
+                      handleSamplingChange("max_new_tokens", value[0])
+                    }
+                    aria-label="Max tokens"
+                  />
+                  <span className={styles.boundary}>
+                    {formatTokens(maxOutputTokens)}
+                  </span>
+                  <span className={styles.valueControl}>
+                    <span className={styles.sliderValue}>
+                      {config.max_new_tokens ?? `${defaultMaxTokens} (default)`}
+                    </span>
+                    {config.max_new_tokens != null ? (
+                      <IconButton
+                        icon={RotateCcw}
+                        size="sm"
+                        variant="plain"
+                        onClick={() =>
+                          handleSamplingChange("max_new_tokens", undefined)
+                        }
+                        aria-label="Reset max tokens"
+                      />
+                    ) : null}
+                  </span>
+                </div>
+              }
+            />
+          </>
+        ) : (
+          <div className={`${styles.notice} rf-enter`}>
+            <Icon icon={Info} size="sm" tone="muted" />
+            <span>
+              No model selected. Features that require this model type will ask
+              you to configure it.
+            </span>
+          </div>
+        )}
+      </SettingsGroup>
     </div>
   );
 };
