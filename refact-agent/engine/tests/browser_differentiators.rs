@@ -899,6 +899,8 @@ async fn differentiator_12_password_masking_survives_final_serialization() {
                 },
                 BrowserStep::WaitForResponse {
                     pattern: UrlPattern::Text("/slow-echo".to_string()),
+                    method: None,
+                    status: None,
                     timeout_ms: Some(2_000),
                 },
             ],

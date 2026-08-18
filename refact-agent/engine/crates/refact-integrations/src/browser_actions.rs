@@ -536,6 +536,7 @@ pub fn to_browser_steps(action: &BrowserAction) -> Option<Vec<BrowserStep>> {
         BrowserAction::WaitForSelector { selector, .. } => {
             Some(vec![BrowserStep::WaitForSelector {
                 locator: BrowserLocator::css(selector),
+                state: None,
                 timeout_ms: None,
             }])
         }

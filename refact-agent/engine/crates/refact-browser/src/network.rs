@@ -504,24 +504,27 @@ impl NetworkMonitorHandle {
     pub fn wait_for_request(
         &self,
         matcher: &UrlMatcher,
+        filters: &NetworkWaitFilters,
         after: u64,
         timeout: Duration,
     ) -> Result<NetworkEntry, String> {
-        self.wait_for_entry(matcher, after, timeout, false)
+        self.wait_for_entry(matcher, filters, after, timeout, false)
     }
 
     pub fn wait_for_response(
         &self,
         matcher: &UrlMatcher,
+        filters: &NetworkWaitFilters,
         after: u64,
         timeout: Duration,
     ) -> Result<NetworkEntry, String> {
-        self.wait_for_entry(matcher, after, timeout, true)
+        self.wait_for_entry(matcher, filters, after, timeout, true)
     }
 
     fn wait_for_entry(
         &self,
         matcher: &UrlMatcher,
+        filters: &NetworkWaitFilters,
         after: u64,
         timeout: Duration,
         response: bool,
@@ -534,10 +537,11 @@ impl NetworkMonitorHandle {
             } else {
                 &state.requests
             };
-            if let Some(found) = entries
-                .iter()
-                .find(|event| event.sequence > after && matcher.is_match(&event.matching_url))
-            {
+            if let Some(found) = entries.iter().find(|event| {
+                event.sequence > after
+                    && matcher.is_match(&event.matching_url)
+                    && filters.matches(&event.entry)
+            }) {
                 return Ok(found.entry.clone());
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -572,6 +576,25 @@ impl NetworkMonitorHandle {
             let (next, _) = self.changed.wait_timeout(state, wake).unwrap();
             state = next;
         }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NetworkWaitFilters {
+    pub method: Option<String>,
+    pub status: Option<u16>,
+}
+
+impl NetworkWaitFilters {
+    pub fn matches(&self, entry: &NetworkEntry) -> bool {
+        let method_matches = self
+            .method
+            .as_ref()
+            .is_none_or(|method| entry.method.eq_ignore_ascii_case(method.trim()));
+        let status_matches = self
+            .status
+            .is_none_or(|status| entry.status == Some(status));
+        method_matches && status_matches
     }
 }
 
@@ -835,6 +858,7 @@ mod tests {
         let request = monitor
             .wait_for_request(
                 &UrlMatcher::glob("https://x.test/**?token=*").unwrap(),
+                &NetworkWaitFilters::default(),
                 request_cursor,
                 Duration::ZERO,
             )
@@ -842,6 +866,7 @@ mod tests {
         let response = monitor
             .wait_for_response(
                 &UrlMatcher::regex(r"/api/items\?token=secret$", "").unwrap(),
+                &NetworkWaitFilters::default(),
                 response_cursor,
                 Duration::ZERO,
             )
@@ -849,6 +874,114 @@ mod tests {
 
         assert!(!request.url.contains("secret"));
         assert_eq!(response.status, Some(200));
+    }
+
+    #[test]
+    fn method_and_status_filters_cover_every_combination() {
+        let entry = NetworkEntry {
+            method: "POST".to_string(),
+            status: Some(404),
+            ..NetworkEntry::default()
+        };
+        let cases = [
+            (None, None, true),
+            (Some("POST"), None, true),
+            (Some("post"), None, true),
+            (Some(" post "), None, true),
+            (Some("GET"), None, false),
+            (None, Some(404), true),
+            (None, Some(200), false),
+            (Some("POST"), Some(404), true),
+            (Some("POST"), Some(200), false),
+            (Some("GET"), Some(404), false),
+            (Some("GET"), Some(200), false),
+        ];
+        for (method, status, expected) in cases {
+            let filters = NetworkWaitFilters {
+                method: method.map(str::to_string),
+                status,
+            };
+            assert_eq!(
+                filters.matches(&entry),
+                expected,
+                "method={method:?} status={status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_filter_never_matches_a_request_event_because_requests_carry_no_status() {
+        let pending = NetworkEntry {
+            method: "GET".to_string(),
+            status: None,
+            ..NetworkEntry::default()
+        };
+        let method_only = NetworkWaitFilters {
+            method: Some("GET".to_string()),
+            status: None,
+        };
+        let with_status = NetworkWaitFilters {
+            method: None,
+            status: Some(200),
+        };
+
+        assert!(method_only.matches(&pending));
+        assert!(!with_status.matches(&pending));
+    }
+
+    #[test]
+    fn filtered_response_wait_skips_the_first_status_and_matches_the_second() {
+        let monitor = NetworkMonitorHandle::default();
+        monitor.attach_frame("main".to_string(), None);
+        let cursor = monitor.response_cursor();
+        monitor.request_started(request(
+            "missing",
+            "main",
+            "https://x.test/probe/a",
+            "Fetch",
+        ));
+        monitor.response_received(response("missing", 404, BTreeMap::new()));
+        monitor.request_started(request("found", "main", "https://x.test/probe/b", "Fetch"));
+        monitor.response_received(response("found", 200, BTreeMap::new()));
+
+        let matcher = UrlMatcher::glob("https://x.test/probe/*").unwrap();
+        let matched = monitor
+            .wait_for_response(
+                &matcher,
+                &NetworkWaitFilters {
+                    method: Some("get".to_string()),
+                    status: Some(200),
+                },
+                cursor,
+                Duration::ZERO,
+            )
+            .unwrap();
+
+        assert_eq!(matched.url, "https://x.test/probe/b");
+        assert_eq!(matched.status, Some(200));
+        assert_eq!(
+            monitor
+                .wait_for_response(
+                    &matcher,
+                    &NetworkWaitFilters::default(),
+                    cursor,
+                    Duration::ZERO
+                )
+                .unwrap()
+                .url,
+            "https://x.test/probe/a"
+        );
+        assert!(monitor
+            .wait_for_response(
+                &matcher,
+                &NetworkWaitFilters {
+                    method: Some("POST".to_string()),
+                    status: None,
+                },
+                cursor,
+                Duration::ZERO,
+            )
+            .is_err());
     }
 
     #[test]

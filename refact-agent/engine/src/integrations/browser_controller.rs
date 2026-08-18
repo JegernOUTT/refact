@@ -24,10 +24,10 @@ use refact_browser::{
     HitTargetController, HitTargetPoint, HitTargetResult, Keyboard, LocatorGenerationOptions,
     LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation, LocatorHandlerProbe,
     LocatorHandlerRegistry, LocatorOutcome, MainFrameCssPoint, Mouse, MouseButton, MouseState,
-    NetworkLoadState, NetworkMonitorHandle, Ref, ScrollStrategy, SnapshotMode, SnapshotOptions,
-    SystemClock, UrlMatcher, WebSocketRegistry, WorldManager, apply_network_report_mode,
-    classify_cdp_command, current_wall_ms, parse_clock_ticks, parse_clock_time,
-    redact_cdp_result, required_states,
+    NetworkLoadState, NetworkMonitorHandle, NetworkWaitFilters, Ref, ScrollStrategy,
+    SnapshotMode, SnapshotOptions, SystemClock, UrlMatcher, WebSocketRegistry, WorldManager,
+    apply_network_report_mode, classify_cdp_command, current_wall_ms, parse_clock_ticks,
+    parse_clock_time, redact_cdp_result, required_states,
 };
 use refact_browser::artifacts::{
     ComposeLayout, ElementStateAction, ScreenshotMetrics, compose_sheet, element_state_sequence,
@@ -81,6 +81,10 @@ fn clamp_wait_seconds(requested: f64) -> f64 {
 const DEFAULT_POLL_INTERVAL_MS: u64 = 200;
 const REPORT_STABILIZATION_TIMEOUT_MS: u64 = 3_000;
 const REPORT_STABILITY_INTERVAL_MS: u64 = 200;
+const CONSOLE_POLL_INTERVAL_MS: u64 = 50;
+
+const VISIBLE_BOUNDING_BOX_JS: &str =
+    "function() { const r = this.getBoundingClientRect(); return r.width > 0 && r.height > 0; }";
 
 #[allow(dead_code)]
 pub fn resolve_tab(runtime: &BrowserRuntime, target: &TabTarget) -> Result<Arc<Tab>, String> {
@@ -2523,10 +2527,11 @@ pub async fn execute_request_with_runtime(
             _ => None,
         })
         .collect::<std::collections::HashMap<_, _>>();
-    let initial_tab_ids = {
+    let (initial_tab_ids, armed_console_cursor) = {
         let mut rt = runtime_arc.lock().await;
         refact_browser::adopt_new_tabs(&mut rt, None);
-        rt.known_tab_ids()
+        rt.drain_raw_events();
+        (rt.known_tab_ids(), rt.console_buffer.len())
     };
     let mut results: Vec<StepResult> = Vec::new();
     let mut locator_handlers = Vec::new();
@@ -2556,6 +2561,37 @@ pub async fn execute_request_with_runtime(
         } = step
         {
             let timeout = Duration::from_millis(clamp_timeout_ms(*timeout_ms));
+            match tokio::task::block_in_place(|| {
+                download_monitor.wait_for_download(
+                    armed_network_waits
+                        .get(&idx)
+                        .copied()
+                        .unwrap_or_else(|| download_monitor.cursor()),
+                    timeout,
+                    save_as.as_deref(),
+                )
+            }) {
+                Ok(download) => {
+                    StepResult::success(idx, format!("Downloaded {}", download.suggested_filename))
+                        .with_data(serde_json::to_value(download).unwrap_or_default())
+                }
+                Err(error) => StepResult::failure(idx, "Wait for download", error),
+            }
+        } else if let BrowserStep::WaitForConsoleMessage {
+            contains,
+            level,
+            timeout_ms,
+        } = step
+        {
+            wait_for_console_message(
+                &runtime_arc,
+                idx,
+                contains.as_deref(),
+                *level,
+                armed_console_cursor,
+                clamp_timeout_ms(*timeout_ms),
+            )
+            .await
             download_step_result(
                 idx,
                 tokio::task::block_in_place(|| {
@@ -3560,22 +3596,33 @@ fn execute_runtime_network_step(
         }
         BrowserStep::WaitForRequest {
             pattern,
+            method,
             timeout_ms,
         } => wait_for_network_entry(
             network_monitor,
             idx,
             pattern,
+            &NetworkWaitFilters {
+                method: method.clone(),
+                status: None,
+            },
             armed_cursor.unwrap_or_else(|| network_monitor.request_cursor()),
             clamp_timeout_ms(*timeout_ms),
             false,
         ),
         BrowserStep::WaitForResponse {
             pattern,
+            method,
+            status,
             timeout_ms,
         } => wait_for_network_entry(
             network_monitor,
             idx,
             pattern,
+            &NetworkWaitFilters {
+                method: method.clone(),
+                status: *status,
+            },
             armed_cursor.unwrap_or_else(|| network_monitor.response_cursor()),
             clamp_timeout_ms(*timeout_ms),
             true,
@@ -3620,6 +3667,7 @@ fn wait_for_network_entry(
     monitor: &NetworkMonitorHandle,
     idx: usize,
     pattern: &UrlPattern,
+    filters: &NetworkWaitFilters,
     cursor: u64,
     timeout_ms: u64,
     response: bool,
@@ -3633,9 +3681,9 @@ fn wait_for_network_entry(
         Err(error) => return StepResult::failure(idx, "Invalid URL pattern", error),
     };
     let result = if response {
-        monitor.wait_for_response(&matcher, cursor, Duration::from_millis(timeout_ms))
+        monitor.wait_for_response(&matcher, filters, cursor, Duration::from_millis(timeout_ms))
     } else {
-        monitor.wait_for_request(&matcher, cursor, Duration::from_millis(timeout_ms))
+        monitor.wait_for_request(&matcher, filters, cursor, Duration::from_millis(timeout_ms))
     };
     match result {
         Ok(entry) => {
@@ -3934,8 +3982,9 @@ fn bound_handler_step(step: &BrowserStep, deadline: Instant) -> BrowserStep {
         .as_millis()
         .min(u64::MAX as u128) as u64;
     match step {
-        BrowserStep::WaitForSelector { locator, .. } => BrowserStep::WaitForSelector {
+        BrowserStep::WaitForSelector { locator, state, .. } => BrowserStep::WaitForSelector {
             locator: locator.clone(),
+            state: *state,
             timeout_ms: Some(remaining_ms),
         },
         BrowserStep::WaitForNavigation { .. } => BrowserStep::WaitForNavigation {
@@ -4361,8 +4410,16 @@ fn execute_single_step(
         ),
         BrowserStep::WaitForSelector {
             locator,
+            state,
             timeout_ms,
-        } => step_wait_for_selector(tab, world, idx, locator, clamp_timeout_ms(*timeout_ms)),
+        } => step_wait_for_selector(
+            tab,
+            world,
+            idx,
+            locator,
+            *state,
+            clamp_timeout_ms(*timeout_ms),
+        ),
         BrowserStep::WaitForNavigation { timeout_ms } => {
             step_wait_for_navigation(tab, idx, clamp_timeout_ms(*timeout_ms), pre_step_url)
         }
@@ -4384,6 +4441,11 @@ fn execute_single_step(
             idx,
             "Network wait",
             "Network waits require a browser runtime",
+        ),
+        BrowserStep::WaitForConsoleMessage { .. } => StepResult::failure(
+            idx,
+            "Wait for console message",
+            "Console waits require a browser runtime",
         ),
         BrowserStep::WaitForElementHidden {
             locator,
@@ -6668,8 +6730,92 @@ fn mask_console_entry(
     entry
 }
 
-fn wait_for_selector_matches(handles: &[ElementHandle]) -> Option<usize> {
-    (!handles.is_empty()).then_some(handles.len())
+fn console_entry_matches(
+    entry: &refact_integrations::browser_types::ConsoleEntry,
+    contains: Option<&str>,
+    level: Option<BrowserConsoleLevel>,
+) -> bool {
+    let text_matches = contains.is_none_or(|needle| entry.text.contains(needle));
+    let level_matches = level.is_none_or(|level| level.matches_level(&entry.level));
+    text_matches && level_matches
+}
+
+async fn wait_for_console_message(
+    runtime_arc: &Arc<AMutex<BrowserRuntime>>,
+    idx: usize,
+    contains: Option<&str>,
+    level: Option<BrowserConsoleLevel>,
+    armed_cursor: usize,
+    timeout_ms: u64,
+) -> StepResult {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut cursor = armed_cursor;
+    loop {
+        let matched = {
+            let mut rt = runtime_arc.lock().await;
+            rt.drain_raw_events();
+            cursor = cursor.min(rt.console_buffer.len());
+            let found = rt.console_buffer[cursor..]
+                .iter()
+                .position(|entry| console_entry_matches(entry, contains, level));
+            match found {
+                Some(offset) => {
+                    let entry = rt.console_buffer[cursor + offset].clone();
+                    cursor += offset + 1;
+                    Some(mask_console_entry(entry))
+                }
+                None => {
+                    cursor = rt.console_buffer.len();
+                    None
+                }
+            }
+        };
+        if let Some(entry) = matched {
+            return StepResult::success(
+                idx,
+                format!("Matched console {}: {}", entry.level, entry.text),
+            )
+            .with_data(serde_json::to_value(entry).unwrap_or_default());
+        }
+        if Instant::now() >= deadline {
+            return StepResult::failure(
+                idx,
+                "Wait for console message",
+                format!("Timed out after {timeout_ms}ms"),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(CONSOLE_POLL_INTERVAL_MS)).await;
+    }
+}
+
+fn wait_for_selector_matches(
+    state: BrowserWaitState,
+    attached: usize,
+    visible: usize,
+) -> Option<usize> {
+    match state {
+        BrowserWaitState::Attached => (attached > 0).then_some(attached),
+        BrowserWaitState::Detached => (attached == 0).then_some(0),
+        BrowserWaitState::Visible => (visible > 0).then_some(visible),
+        BrowserWaitState::Hidden => (visible == 0).then_some(attached),
+    }
+}
+
+fn count_visible_handles(
+    tab: &Tab,
+    world: &WorldManager,
+    handles: &[ElementHandle],
+) -> Result<usize, String> {
+    let mut visible = 0;
+    for handle in handles {
+        let value = world
+            .call_function_on(tab, handle, VISIBLE_BOUNDING_BOX_JS, Vec::new())
+            .map_err(|error| error.to_string())?;
+        if value == serde_json::Value::Bool(true) {
+            visible += 1;
+        }
+    }
+    Ok(visible)
 }
 
 fn step_wait_for_selector(
@@ -6677,17 +6823,24 @@ fn step_wait_for_selector(
     world: &WorldManager,
     idx: usize,
     locator: &BrowserLocator,
+    state: Option<BrowserWaitState>,
     timeout_ms: u64,
 ) -> StepResult {
+    let state = state.unwrap_or_default();
     match poll_locator_until(tab, world, locator, timeout_ms, |handles| {
-        let matched = wait_for_selector_matches(&handles);
+        let visible = if state.needs_visibility() {
+            count_visible_handles(tab, world, &handles)
+        } else {
+            Ok(0)
+        };
         release_locator_handles(tab, world, &handles);
-        Ok(matched)
+        Ok(wait_for_selector_matches(state, handles.len(), visible?))
     }) {
         Ok(matched) => StepResult::success(
             idx,
             format!(
-                "Element found ({}), {matched} match(es)",
+                "{} ({}), {matched} match(es)",
+                state.reached_label(),
                 describe_locator(locator)
             ),
         ),
@@ -6773,16 +6926,11 @@ fn step_wait_for_element_hidden(
         let Some(handle) = strict_locator_handle(tab, world, locator, handles)? else {
             return Ok(Some(()));
         };
-        let hidden = world
-            .call_function_on(
-                tab,
-                &handle,
-                "function() { const r = this.getBoundingClientRect(); return r.width === 0 || r.height === 0; }",
-                Vec::new(),
-            )
+        let visible = world
+            .call_function_on(tab, &handle, VISIBLE_BOUNDING_BOX_JS, Vec::new())
             .map_err(|error| error.to_string());
         let _ = world.release_handle(tab, &handle);
-        hidden.map(|hidden| (hidden == serde_json::Value::Bool(true)).then_some(()))
+        visible.map(|visible| (visible != serde_json::Value::Bool(true)).then_some(()))
     }) {
         Ok(()) => StepResult::success(idx, "Element is hidden".to_string()),
         Err(e) => StepResult::failure(idx, "Wait for element hidden", e),
@@ -8803,6 +8951,100 @@ mod tests {
             .collect()
     }
 
+    fn console_entry(level: &str, text: &str) -> refact_integrations::browser_types::ConsoleEntry {
+        refact_integrations::browser_types::ConsoleEntry {
+            timestamp: 1.0,
+            level: level.to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn wait_for_selector_states_stay_non_strict_across_the_match_matrix() {
+        let cases = [
+            (BrowserWaitState::Attached, 0, 0, None),
+            (BrowserWaitState::Attached, 3, 0, Some(3)),
+            (BrowserWaitState::Detached, 0, 0, Some(0)),
+            (BrowserWaitState::Detached, 3, 1, None),
+            (BrowserWaitState::Visible, 3, 0, None),
+            (BrowserWaitState::Visible, 3, 2, Some(2)),
+            (BrowserWaitState::Visible, 0, 0, None),
+            (BrowserWaitState::Hidden, 3, 0, Some(3)),
+            (BrowserWaitState::Hidden, 3, 1, None),
+            (BrowserWaitState::Hidden, 0, 0, Some(0)),
+        ];
+        for (state, attached, visible, expected) in cases {
+            assert_eq!(
+                wait_for_selector_matches(state, attached, visible),
+                expected,
+                "state={state:?} attached={attached} visible={visible}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_wait_for_selector_state_keeps_the_attached_behavior_and_summary() {
+        let state = Option::<BrowserWaitState>::None.unwrap_or_default();
+
+        assert_eq!(state, BrowserWaitState::Attached);
+        assert!(!state.needs_visibility());
+        assert!(BrowserWaitState::Visible.needs_visibility());
+        assert!(BrowserWaitState::Hidden.needs_visibility());
+        assert!(!BrowserWaitState::Detached.needs_visibility());
+        assert_eq!(state.reached_label(), "Element found");
+    }
+
+    #[test]
+    fn console_filters_combine_substring_and_level() {
+        let error = console_entry("Error", "boom while loading");
+        let log = console_entry("Log", "boom later");
+        let page_error = console_entry("page_error", "Uncaught boom");
+
+        assert!(console_entry_matches(&error, None, None));
+        assert!(console_entry_matches(
+            &error,
+            Some("boom"),
+            Some(BrowserConsoleLevel::Error)
+        ));
+        assert!(!console_entry_matches(
+            &error,
+            Some("missing"),
+            Some(BrowserConsoleLevel::Error)
+        ));
+        assert!(!console_entry_matches(
+            &log,
+            Some("boom"),
+            Some(BrowserConsoleLevel::Error)
+        ));
+        assert!(console_entry_matches(
+            &log,
+            Some("boom"),
+            Some(BrowserConsoleLevel::Log)
+        ));
+        assert!(console_entry_matches(
+            &page_error,
+            Some("boom"),
+            Some(BrowserConsoleLevel::Error)
+        ));
+        assert!(!console_entry_matches(
+            &page_error,
+            None,
+            Some(BrowserConsoleLevel::Warning)
+        ));
+        assert!(console_entry_matches(
+            &console_entry("Warning", "slow"),
+            None,
+            Some(BrowserConsoleLevel::Warning)
+        ));
+    }
+
+    #[test]
+    fn matched_console_entries_are_redacted_before_they_are_reported() {
+        let entry = mask_console_entry(console_entry("Error", "token=super-secret-value failed"));
+
+        assert!(!entry.text.contains("super-secret-value"), "{}", entry.text);
+    }
+
     #[test]
     fn click_if_exists_skips_attached_but_non_actionable_elements() {
         let mut invisible = actionable_state();
@@ -8905,9 +9147,23 @@ mod tests {
 
     #[test]
     fn wait_for_selector_is_satisfied_by_multiple_matches() {
-        assert_eq!(wait_for_selector_matches(&locator_handles(13)), Some(13));
-        assert_eq!(wait_for_selector_matches(&locator_handles(1)), Some(1));
-        assert_eq!(wait_for_selector_matches(&locator_handles(0)), None);
+        let attached = BrowserWaitState::Attached;
+        assert_eq!(
+            wait_for_selector_matches(attached, locator_handles(13).len(), 0),
+            Some(13)
+        );
+        assert_eq!(
+            wait_for_selector_matches(attached, locator_handles(1).len(), 0),
+            Some(1)
+        );
+        assert_eq!(
+            wait_for_selector_matches(attached, locator_handles(0).len(), 0),
+            None
+        );
+        assert_eq!(
+            wait_for_selector_matches(BrowserWaitState::Visible, 13, 13),
+            Some(13)
+        );
     }
 
     #[test]

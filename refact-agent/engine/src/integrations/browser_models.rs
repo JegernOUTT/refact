@@ -379,6 +379,14 @@ mod tests {
     }
 
     #[test]
+    fn network_waits_keep_their_bare_shape_and_accept_method_and_status_filters() {
+        let bare = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "wait_for_request", "pattern": "/api"},
+                {"action": "wait_for_response", "pattern": "/api"}
+            ]
+}
+
     fn page_manipulation_steps_parse_with_their_optional_fields() {
         let request = parse_browser_action_request(serde_json::json!({
             "steps": [
@@ -397,6 +405,61 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
+            bare.steps.as_slice(),
+            [
+                BrowserStep::WaitForRequest { method: None, .. },
+                BrowserStep::WaitForResponse {
+                    method: None,
+                    status: None,
+                    ..
+                }
+            ]
+        ));
+        assert_eq!(
+            serde_json::to_value(&bare.steps[1]).unwrap(),
+            serde_json::json!({"action": "wait_for_response", "pattern": "/api", "timeout_ms": null})
+        );
+
+        let filtered = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "wait_for_request", "pattern": "**/api/**", "method": "POST"},
+                {"action": "wait_for_response", "pattern": "**/api/**", "method": "get", "status": 404}
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            filtered.steps.as_slice(),
+            [
+                BrowserStep::WaitForRequest { method: Some(method), .. },
+                BrowserStep::WaitForResponse {
+                    status: Some(404),
+                    ..
+                }
+            ] if method == "POST"
+        ));
+    }
+
+    #[test]
+    fn wait_for_request_rejects_a_status_filter_because_requests_have_no_status() {
+        let error = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "wait_for_request", "pattern": "/api", "status": 200}]
+        }))
+        .unwrap_err();
+
+        assert!(
+            error.starts_with("step[0] (wait_for_request): "),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("status"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn wait_for_selector_state_is_optional_and_rejects_load_states() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "wait_for_selector", "locator": {"by": "css", "value": "#a"}},
+                {"action": "wait_for_selector", "locator": {"by": "css", "value": "#b"}, "state": "hidden"}
             request.steps.as_slice(),
             [
                 BrowserStep::CancelDownload { id: None },
@@ -438,6 +501,9 @@ mod tests {
         assert!(matches!(
             request.steps.as_slice(),
             [
+                BrowserStep::WaitForSelector { state: None, .. },
+                BrowserStep::WaitForSelector {
+                    state: Some(BrowserWaitState::Hidden),
                 BrowserStep::SetContent {
                     wait_until: None,
                     ..
@@ -511,6 +577,29 @@ mod tests {
         ));
         assert_eq!(
             serde_json::to_value(&request.steps[0]).unwrap(),
+            serde_json::json!({
+                "action": "wait_for_selector",
+                "locator": {"by": "css", "value": "#a"},
+                "timeout_ms": null
+            })
+        );
+
+        let error = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "wait_for_selector", "locator": {"by": "css", "value": "#a"}, "state": "networkidle"}]
+        }))
+        .unwrap_err();
+        assert!(
+            error.starts_with("step[0] (wait_for_selector): "),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn wait_for_console_message_filters_are_all_optional() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "wait_for_console_message"},
+                {"action": "wait_for_console_message", "contains": "boom", "level": "error", "timeout_ms": 2000}
             serde_json::json!({"action": "grant_permissions", "permissions": ["geolocation"]})
         );
         assert_eq!(
@@ -539,6 +628,14 @@ mod tests {
         assert!(matches!(
             request.steps.as_slice(),
             [
+                BrowserStep::WaitForConsoleMessage {
+                    contains: None,
+                    level: None,
+                    timeout_ms: None
+                },
+                BrowserStep::WaitForConsoleMessage {
+                    level: Some(BrowserConsoleLevel::Error),
+                    timeout_ms: Some(2000),
                 BrowserStep::StartHarRecording {
                     path: None,
                     update: Some(_),
@@ -573,6 +670,18 @@ mod tests {
             ]
         ));
         assert_eq!(
+            serde_json::to_value(&request.steps[0]).unwrap(),
+            serde_json::json!({"action": "wait_for_console_message", "timeout_ms": null})
+        );
+
+        for (step, expected) in [
+            (
+                serde_json::json!({"action": "wait_for_console_message", "level": "debug"}),
+                "debug",
+            ),
+            (
+                serde_json::json!({"action": "wait_for_console_message", "containss": "boom"}),
+                "containss",
             serde_json::to_value(&defaults.steps[1]).unwrap(),
             serde_json::json!({"action": "storage_state"})
         let BrowserStep::CdpSend {
@@ -676,6 +785,8 @@ mod tests {
                 "expected {expected} in error for {step}, got {error}"
             );
             assert!(
+                error.starts_with("step[0] (wait_for_console_message): "),
+                "unexpected error: {error}"
                 error.starts_with("step[0] (cdp_send): "),
                 "unexpected error for {step}: {error}"
             );

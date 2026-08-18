@@ -156,11 +156,14 @@ const CHROME_DESCRIPTION: &str = concat!(
     "expect_poll evaluates `expression` and retries until the value satisfies `matcher` (equals, contains, gt, lt, matches_regex) against `expected`, reporting attempts and elapsed like expect; it also honours soft.\n",
     "Waiting: wait_for_function is the way to wait on arbitrary app state: it evaluates `expression` until the result is truthy, defaults to 100/250/500/1000ms poll intervals unless `polling_ms` fixes one, and with a `locator` re-resolves the element each retry and passes it as the first argument, so a re-rendered node is tolerated. A thrown expression fails immediately instead of retrying. ",
     "wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. wait_for_url takes a plain substring in `pattern` and matches when the current URL contains it, unlike the glob/regex `pattern` used by route and wait_for_request. ",
+    "wait_for_selector takes an optional `state`: attached (the default, any match in the DOM), visible (a match with a non-empty box), hidden (no visible match, including no match at all), or detached (no match). Every state stays non-strict, so several matches never fail the step. ",
+    "wait_for_console_message is the active console wait: it blocks until a console entry matches optional `contains` and `level` (log, warning, or error, where error also covers uncaught page errors), returns that entry redacted, and sees messages produced earlier in the same batch. tab_log stays the passive read of buffered output.\n",
     "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, or `wait_for_selector` for genuine synchronization.\n",
     "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, screenshot_elements, capture_element_states, pdf, styles, tab_log. Screenshots support full_page, clip, type, quality, scale, omit_background, animations, caret, mask, mask_color, and style; screenshot_element uses locator or ref. screenshot_elements takes locators plus compose (grid composes one labeled contact sheet, separate returns one image per locator). capture_element_states captures one locator across states (default, hover, focus, active) as a labeled strip. PDF supports Chromium print options and returns an artifact path.\n",
     "Readouts (never fake these with eval or expect): bounding_box returns viewport CSS-pixel x/y/width/height or null when the element is not visible; count returns the match count without strictness; input_value returns the live value property of an input, textarea, or select and fails on any other element; all_texts returns the text of every match with `mode` inner_text or text_content plus an optional `limit`, reporting the true total; element_state returns visible, enabled, editable, checked, and stable in one read.\n",
     "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, or continue modifications; unroute removes one pattern or all routes; list_routes returns active routes. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. Page-level routes may not observe requests served by a service worker.\n",
     "Window vs viewport: set_viewport is device-metrics emulation (it changes what the page measures, not the window on screen); set_window_bounds moves and resizes the actual OS window with x/y/width/height, any subset. set_window_bounds needs a headed browser: in headless there is no OS window, so it succeeds without applying and tells you to use set_viewport. reset does not touch window bounds.\n",
+    "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; both also take an optional `method` filter and wait_for_response an optional `status`, so a wait can skip an early 404 and land on the following 200 for the same pattern. Completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, continue, fallback, or fetch_and_fulfill; unroute removes one pattern or all routes; list_routes returns active routes in evaluation order with `order` and `times_remaining`. Several routes may share a pattern: the newest matching route runs first, a fallback handler hands the request to the next older matching route, then to the HAR replay, then to the network. Optional `times` on a route expires it after that many matches, including matches consumed by a traversed fallback. fulfill takes `body`, or `path` to serve a file (relative paths stay inside the runtime artifact directory, content type inferred from the extension), or `json` for a JSON body; status defaults to 200. fetch_and_fulfill performs the real request from the engine (up to 20 redirects, forwarding the page's own request headers) and fulfills with the real response, optionally overriding status, response_headers, and body. Cookie, Host, and Content-Length request headers keep their original values on continue and fetch_and_fulfill. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. URL patterns are globs (`*`, `**`, `{a,b}`) or `{source,flags}` regexes; `?` is literal and JavaScript route predicates are not supported. Page-level routes may not observe requests served by a service worker.\n",
     "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, continue, fallback, or fetch_and_fulfill; unroute removes one pattern or all routes; list_routes returns active routes in evaluation order with `order` and `times_remaining`. Several routes may share a pattern: the newest matching route runs first, a fallback handler hands the request to the next older matching route, then to the HAR replay, then to the network. Optional `times` on a route expires it after that many matches, including matches consumed by a traversed fallback. fulfill takes `body`, or `path` to serve a file (relative paths stay inside the runtime artifact directory, content type inferred from the extension), or `json` for a JSON body; status defaults to 200. fetch_and_fulfill performs the real request from the engine (up to 20 redirects, forwarding the page's own request headers) and fulfills with the real response, optionally overriding status, response_headers, and body. Cookie, Host, and Content-Length request headers keep their original values on continue and fetch_and_fulfill. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. URL patterns are globs (`*`, `**`, `{a,b}`) or `{source,flags}` regexes; `?` is literal and JavaScript route predicates are not supported. Page-level routes may not observe requests served by a service worker.\n",
     "Context: set_viewport, emulate_media, set_locale, set_timezone, set_user_agent, set_geolocation, set_offline, and set_extra_http_headers persist across adopted tabs and popups. Cookie state uses get_cookies, set_cookies, clear_cookies. Web storage uses get_storage, set_storage, clear_storage with kind local or session. storage_state and set_storage_state use Playwright's {cookies,origins:[{origin,local_storage}]} login-reuse shape, and indexed_db true additionally snapshots or restores IndexedDB best-effort: every database and object store of the current origin, capped at 200 records per store with truncated flagged, values must survive JSON round-trip so Blob, File, and ArrayBuffer entries are lost, and restore recreates each named database from scratch. grant_permissions state granted, denied, or prompt and clear_permissions control origin permissions. set_http_credentials shares the lazy Fetch path with routing. Cookie, storage, and credential values are redacted in reports.\n",
     "Files: set_input_files, expect_file_chooser, wait_for_download, cancel_download. Failed downloads report failure_reason.\n",
@@ -552,7 +555,23 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "state".to_string(),
-        serde_json::json!({"type": "string", "enum": ["domcontentloaded", "load", "networkidle"]}),
+        serde_json::json!({
+            "type": "string",
+            "enum": ["domcontentloaded", "load", "networkidle", "attached", "detached", "visible", "hidden"],
+            "description": "Load state for wait_for_load_state, or element state for wait_for_selector (attached by default)"
+        }),
+    );
+    properties.insert(
+        "status".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 100, "maximum": 599, "description": "Response status filter for wait_for_response"}),
+    );
+    properties.insert(
+        "contains".to_string(),
+        serde_json::json!({"type": "string", "description": "Substring filter for wait_for_console_message"}),
+    );
+    properties.insert(
+        "level".to_string(),
+        serde_json::json!({"type": "string", "enum": ["log", "warning", "error"], "description": "Level filter for wait_for_console_message"}),
     );
     properties.insert(
         "wait_until".to_string(),
@@ -755,6 +774,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "method".to_string(),
+        serde_json::json!({"type": "string", "description": "HTTP method for http_request (GET by default), or a method filter for wait_for_request and wait_for_response"}),
         serde_json::json!({"type": "string", "description": "HTTP method for http_request, GET by default; CDP method such as Runtime.evaluate for cdp_send"}),
     );
     properties.insert(
@@ -1404,12 +1424,18 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap();
         assert_eq!(url_pattern_required, &[Value::String("source".to_string())]);
-        for legacy_field in ["url_or_pattern", "contains"] {
+        for legacy_field in ["url_or_pattern", "root", "data"] {
             assert!(
                 !properties.contains_key(legacy_field),
                 "legacy field {legacy_field} must not appear in the schema"
             );
         }
+        assert!(
+            properties["contains"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("wait_for_console_message")),
+            "contains belongs to wait_for_console_message, never to wait_for_url"
+        );
         let handler_types = schema
             .pointer("/properties/request/properties/steps/items/properties/handler/oneOf/1/oneOf")
             .and_then(Value::as_array)

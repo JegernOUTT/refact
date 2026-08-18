@@ -22,14 +22,14 @@ use refact_lsp::integrations::browser_controller::execute_steps as execute_steps
 use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
-    AccessibilitySnapshotOptions, BrowserActionRequest, BrowserComposeMode, BrowserCookie,
-    BrowserCookieSameSite, BrowserElementState, BrowserExpectation, BrowserExpectedText,
-    BrowserExpectedTextOrList, BrowserHttpRequest, BrowserLoadState, BrowserLocator,
-    BrowserPdfOptions, BrowserPollMatcher, BrowserPseudoElement, BrowserScreenshotAnimations,
-    BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep, BrowserStorageItem,
-    BrowserStorageKind, BrowserTextMode, CdpTarget, ClockTicks, ClockTime, ExecutionReport,
-    FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode, PageContextMode,
-    RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
+    AccessibilitySnapshotOptions, BrowserActionRequest, BrowserComposeMode, BrowserConsoleLevel,
+    BrowserCookie, BrowserCookieSameSite, BrowserElementState, BrowserExpectation,
+    BrowserExpectedText, BrowserExpectedTextOrList, BrowserHttpRequest, BrowserLoadState,
+    BrowserLocator, BrowserPdfOptions, BrowserPollMatcher, BrowserPseudoElement,
+    BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
+    BrowserStorageItem, BrowserStorageKind, BrowserTextMode, CdpTarget, ClockTicks, ClockTime,
+    ExecutionReport, FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode,
+    PageContextMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
     WebSocketFrameDisposition, WebSocketMessageAction, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::devices;
@@ -806,6 +806,108 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn status_filtered_response_wait_skips_the_first_failure_and_matches_the_retry() {
+    let Some(mut case) = BrowserCase::start("fetch-after-click.html").await else {
+        return;
+    };
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let report = execute_request_with_runtime(
+        runtime,
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: None,
+            page_context: None,
+            network: NetworkReportMode::Full,
+            steps: vec![
+                BrowserStep::Eval {
+                    expression: "fetch('/probe-status-missing').then(function() { return fetch('/slow-echo?probe-status=retry&ms=200'); }); 'started'".to_string(),
+                },
+                BrowserStep::WaitForResponse {
+                    pattern: UrlPattern::Regex {
+                        source: "probe-status".to_string(),
+                        flags: String::new(),
+                    },
+                    method: Some("GET".to_string()),
+                    status: Some(200),
+                    timeout_ms: Some(5_000),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        report.ok,
+        "status-filtered response wait failed: {report:?}"
+    );
+    let matched = report.steps[1].data.as_ref().unwrap();
+    assert_eq!(matched["status"], 200);
+    assert!(
+        matched["url"].as_str().unwrap().contains("slow-echo"),
+        "status filter matched the 404 instead of the retry: {matched}"
+    );
+    assert!(
+        report
+            .network
+            .iter()
+            .any(|entry| entry.url.contains("probe-status-missing") && entry.status == Some(404)),
+        "the skipped 404 should still be reported: {report:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn console_wait_catches_a_delayed_error_and_ignores_quieter_levels() {
+    let Some(mut case) = BrowserCase::start("fetch-after-click.html").await else {
+        return;
+    };
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let report = execute_request_with_runtime(
+        runtime,
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: None,
+            page_context: None,
+            network: NetworkReportMode::default(),
+            steps: vec![
+                BrowserStep::Eval {
+                    expression: "console.log('console-probe quiet'); setTimeout(function() { console.error('console-probe late boom'); }, 400); 'started'".to_string(),
+                },
+                BrowserStep::WaitForConsoleMessage {
+                    contains: Some("console-probe".to_string()),
+                    level: Some(BrowserConsoleLevel::Error),
+                    timeout_ms: Some(5_000),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.ok, "console wait failed: {report:?}");
+    let matched = report.steps[1].data.as_ref().unwrap();
+    assert!(
+        matched["text"].as_str().unwrap().contains("late boom"),
+        "console wait returned the quiet log instead of the delayed error: {matched}"
+    );
+    assert!(
+        matched["level"]
+            .as_str()
+            .unwrap()
+            .eq_ignore_ascii_case("error"),
+        "unexpected console level: {matched}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() {
     let Some(mut case) = BrowserCase::start("slow-network.html").await else {
         return;
@@ -843,6 +945,8 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
                         source: "/missing-network-resource$".to_string(),
                         flags: String::new(),
                     },
+                    method: None,
+                    status: None,
                     timeout_ms: Some(3_000),
                 },
                 BrowserStep::WaitForLoadState {
@@ -2212,6 +2316,7 @@ async fn hover_reveals_css_menu() {
             },
             BrowserStep::WaitForSelector {
                 locator: BrowserLocator::css("#menu a"),
+                state: None,
                 timeout_ms: Some(2_000),
             },
         ],
@@ -2743,6 +2848,7 @@ async fn wait_for_selector_accepts_multiple_matches() {
         &case.tab,
         &[BrowserStep::WaitForSelector {
             locator: BrowserLocator::css(".duplicate"),
+            state: None,
             timeout_ms: Some(2_000),
         }],
     );
@@ -4164,6 +4270,7 @@ async fn iframe_form_submit_reaches_same_origin_frame() {
             BrowserStep::WaitForSelector {
                 locator: BrowserLocator::role("button", Some("Submit"))
                     .in_frames(vec![BrowserLocator::css("#form-frame")]),
+                state: None,
                 timeout_ms: Some(2_000),
             },
             BrowserStep::Click {
@@ -4217,6 +4324,7 @@ async fn ambiguous_iframe_owner_reports_strict_violation() {
         &[BrowserStep::WaitForSelector {
             locator: BrowserLocator::role("button", Some("Hide status"))
                 .in_frames(vec![BrowserLocator::css("iframe.owner")]),
+            state: None,
             timeout_ms: Some(2_000),
         }],
     );
@@ -4790,6 +4898,7 @@ async fn html5_drag_and_drop_reaches_page_handler() {
         &[
             BrowserStep::WaitForSelector {
                 locator: BrowserLocator::css("#source"),
+                state: None,
                 timeout_ms: Some(2_000),
             },
             BrowserStep::DragAndDrop {
@@ -4822,6 +4931,7 @@ async fn file_drop_and_coordinate_mouse_reach_page_handlers() {
         &[
             BrowserStep::WaitForSelector {
                 locator: BrowserLocator::css("#files"),
+                state: None,
                 timeout_ms: Some(2_000),
             },
             BrowserStep::DropFiles {

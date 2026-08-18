@@ -1663,6 +1663,8 @@ pub enum BrowserStep {
     },
     WaitForSelector {
         locator: BrowserLocator,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<BrowserWaitState>,
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
@@ -1693,12 +1695,26 @@ pub enum BrowserStep {
     WaitForRequest {
         #[serde(alias = "url_or_pattern")]
         pattern: UrlPattern,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
     WaitForResponse {
         #[serde(alias = "url_or_pattern")]
         pattern: UrlPattern,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    WaitForConsoleMessage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contains: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<BrowserConsoleLevel>,
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
@@ -1961,6 +1977,51 @@ pub enum BrowserLoadState {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum BrowserWaitState {
+    #[default]
+    Attached,
+    Detached,
+    Visible,
+    Hidden,
+}
+
+impl BrowserWaitState {
+    pub fn needs_visibility(self) -> bool {
+        matches!(self, Self::Visible | Self::Hidden)
+    }
+
+    pub fn reached_label(self) -> &'static str {
+        match self {
+            Self::Attached => "Element found",
+            Self::Detached => "Element detached",
+            Self::Visible => "Element visible",
+            Self::Hidden => "Element hidden",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserConsoleLevel {
+    Log,
+    Warning,
+    Error,
+}
+
+impl BrowserConsoleLevel {
+    pub fn matches_level(self, level: &str) -> bool {
+        match self {
+            Self::Log => level.eq_ignore_ascii_case("log"),
+            Self::Warning => level.eq_ignore_ascii_case("warning"),
+            Self::Error => {
+                level.eq_ignore_ascii_case("error") || level.eq_ignore_ascii_case("page_error")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum BrowserTextMode {
     #[default]
     InnerText,
@@ -2129,6 +2190,7 @@ impl BrowserStep {
         "wait_for_load_state",
         "wait_for_request",
         "wait_for_response",
+        "wait_for_console_message",
         "wait_for_download",
         "cancel_download",
         "wait_for_element_hidden",
@@ -3162,6 +3224,7 @@ mod tests {
             },
             BrowserStep::WaitForSelector {
                 locator: locator(),
+                state: Some(BrowserWaitState::Visible),
                 timeout_ms: Some(1_000),
             },
             BrowserStep::WaitForNavigation {
@@ -3184,6 +3247,7 @@ mod tests {
             },
             BrowserStep::WaitForRequest {
                 pattern: UrlPattern::Text("/api".to_string()),
+                method: Some("GET".to_string()),
                 timeout_ms: Some(1_000),
             },
             BrowserStep::WaitForResponse {
@@ -3191,6 +3255,13 @@ mod tests {
                     source: "/api".to_string(),
                     flags: "i".to_string(),
                 },
+                method: Some("POST".to_string()),
+                status: Some(200),
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::WaitForConsoleMessage {
+                contains: Some("ready".to_string()),
+                level: Some(BrowserConsoleLevel::Error),
                 timeout_ms: Some(1_000),
             },
             BrowserStep::WaitForDownload {
@@ -3911,6 +3982,8 @@ mod tests {
             response,
             BrowserStep::WaitForResponse {
                 pattern: UrlPattern::Regex { source, flags },
+                method: None,
+                status: None,
                 timeout_ms: None
             } if source == "/api/.*" && flags == "i"
         ));
@@ -3922,6 +3995,7 @@ mod tests {
             request,
             BrowserStep::WaitForRequest {
                 pattern: UrlPattern::Regex { source, flags },
+                method: None,
                 timeout_ms: None
             } if source == "/api/.*" && flags.is_empty()
         ));
