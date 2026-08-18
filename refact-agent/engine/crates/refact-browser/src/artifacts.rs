@@ -1,7 +1,10 @@
+use std::io::Cursor;
+
 use headless_chrome::protocol::cdp::Page;
+use image::{imageops, ImageFormat as CodecFormat, Rgba, RgbaImage};
 use refact_integrations::browser_models::{
-    BrowserPdfOptions, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserScreenshotScale,
-    BrowserScreenshotType,
+    BrowserElementState, BrowserPdfOptions, BrowserScreenshotClip, BrowserScreenshotOptions,
+    BrowserScreenshotScale, BrowserScreenshotType,
 };
 
 const PX_PER_INCH: f64 = 96.0;
@@ -224,6 +227,391 @@ fn parse_dimension(value: Option<&str>) -> Result<Option<f64>, String> {
     Ok(Some(pixels / PX_PER_INCH))
 }
 
+const GLYPH_WIDTH: u32 = 5;
+const GLYPH_HEIGHT: u32 = 7;
+const GLYPH_SCALE: u32 = 2;
+const GLYPH_ADVANCE: u32 = (GLYPH_WIDTH + 1) * GLYPH_SCALE;
+const LABEL_PADDING: u32 = 3;
+const LABEL_BAND_HEIGHT: u32 = GLYPH_HEIGHT * GLYPH_SCALE + LABEL_PADDING * 2;
+const TILE_GAP: u32 = 8;
+const SHEET_PADDING: u32 = 8;
+const ELLIPSIS: &str = "..";
+
+const SHEET_BACKGROUND: Rgba<u8> = Rgba([245, 245, 245, 255]);
+const TILE_BORDER: Rgba<u8> = Rgba([203, 203, 203, 255]);
+const LABEL_TEXT: Rgba<u8> = Rgba([17, 17, 17, 255]);
+
+#[rustfmt::skip]
+const FONT_5X7: &[(char, [u8; 5])] = &[
+    (' ', [0x00, 0x00, 0x00, 0x00, 0x00]),
+    ('!', [0x00, 0x00, 0x5F, 0x00, 0x00]),
+    ('"', [0x00, 0x07, 0x00, 0x07, 0x00]),
+    ('#', [0x14, 0x7F, 0x14, 0x7F, 0x14]),
+    ('$', [0x24, 0x2A, 0x7F, 0x2A, 0x12]),
+    ('%', [0x23, 0x13, 0x08, 0x64, 0x62]),
+    ('&', [0x36, 0x49, 0x55, 0x22, 0x50]),
+    ('\'', [0x00, 0x05, 0x03, 0x00, 0x00]),
+    ('(', [0x00, 0x1C, 0x22, 0x41, 0x00]),
+    (')', [0x00, 0x41, 0x22, 0x1C, 0x00]),
+    ('*', [0x14, 0x08, 0x3E, 0x08, 0x14]),
+    ('+', [0x08, 0x08, 0x3E, 0x08, 0x08]),
+    (',', [0x00, 0x50, 0x30, 0x00, 0x00]),
+    ('-', [0x08, 0x08, 0x08, 0x08, 0x08]),
+    ('.', [0x00, 0x60, 0x60, 0x00, 0x00]),
+    ('/', [0x20, 0x10, 0x08, 0x04, 0x02]),
+    ('0', [0x3E, 0x51, 0x49, 0x45, 0x3E]),
+    ('1', [0x00, 0x42, 0x7F, 0x40, 0x00]),
+    ('2', [0x42, 0x61, 0x51, 0x49, 0x46]),
+    ('3', [0x21, 0x41, 0x45, 0x4B, 0x31]),
+    ('4', [0x18, 0x14, 0x12, 0x7F, 0x10]),
+    ('5', [0x27, 0x45, 0x45, 0x45, 0x39]),
+    ('6', [0x3C, 0x4A, 0x49, 0x49, 0x30]),
+    ('7', [0x01, 0x71, 0x09, 0x05, 0x03]),
+    ('8', [0x36, 0x49, 0x49, 0x49, 0x36]),
+    ('9', [0x06, 0x49, 0x49, 0x29, 0x1E]),
+    (':', [0x00, 0x36, 0x36, 0x00, 0x00]),
+    (';', [0x00, 0x56, 0x36, 0x00, 0x00]),
+    ('<', [0x08, 0x14, 0x22, 0x41, 0x00]),
+    ('=', [0x14, 0x14, 0x14, 0x14, 0x14]),
+    ('>', [0x00, 0x41, 0x22, 0x14, 0x08]),
+    ('?', [0x02, 0x01, 0x51, 0x09, 0x06]),
+    ('@', [0x32, 0x49, 0x79, 0x41, 0x3E]),
+    ('A', [0x7E, 0x11, 0x11, 0x11, 0x7E]),
+    ('B', [0x7F, 0x49, 0x49, 0x49, 0x36]),
+    ('C', [0x3E, 0x41, 0x41, 0x41, 0x22]),
+    ('D', [0x7F, 0x41, 0x41, 0x22, 0x1C]),
+    ('E', [0x7F, 0x49, 0x49, 0x49, 0x41]),
+    ('F', [0x7F, 0x09, 0x09, 0x09, 0x01]),
+    ('G', [0x3E, 0x41, 0x49, 0x49, 0x7A]),
+    ('H', [0x7F, 0x08, 0x08, 0x08, 0x7F]),
+    ('I', [0x00, 0x41, 0x7F, 0x41, 0x00]),
+    ('J', [0x20, 0x40, 0x41, 0x3F, 0x01]),
+    ('K', [0x7F, 0x08, 0x14, 0x22, 0x41]),
+    ('L', [0x7F, 0x40, 0x40, 0x40, 0x40]),
+    ('M', [0x7F, 0x02, 0x0C, 0x02, 0x7F]),
+    ('N', [0x7F, 0x04, 0x08, 0x10, 0x7F]),
+    ('O', [0x3E, 0x41, 0x41, 0x41, 0x3E]),
+    ('P', [0x7F, 0x09, 0x09, 0x09, 0x06]),
+    ('Q', [0x3E, 0x41, 0x51, 0x21, 0x5E]),
+    ('R', [0x7F, 0x09, 0x19, 0x29, 0x46]),
+    ('S', [0x46, 0x49, 0x49, 0x49, 0x31]),
+    ('T', [0x01, 0x01, 0x7F, 0x01, 0x01]),
+    ('U', [0x3F, 0x40, 0x40, 0x40, 0x3F]),
+    ('V', [0x1F, 0x20, 0x40, 0x20, 0x1F]),
+    ('W', [0x3F, 0x40, 0x38, 0x40, 0x3F]),
+    ('X', [0x63, 0x14, 0x08, 0x14, 0x63]),
+    ('Y', [0x07, 0x08, 0x70, 0x08, 0x07]),
+    ('Z', [0x61, 0x51, 0x49, 0x45, 0x43]),
+    ('[', [0x00, 0x7F, 0x41, 0x41, 0x00]),
+    ('\\', [0x02, 0x04, 0x08, 0x10, 0x20]),
+    (']', [0x00, 0x41, 0x41, 0x7F, 0x00]),
+    ('^', [0x04, 0x02, 0x01, 0x02, 0x04]),
+    ('_', [0x40, 0x40, 0x40, 0x40, 0x40]),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposeLayout {
+    Grid,
+    Strip,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposeTile {
+    pub label: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TilePlacement {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub label_x: u32,
+    pub label_y: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposePlan {
+    pub width: u32,
+    pub height: u32,
+    pub columns: u32,
+    pub rows: u32,
+    pub label_band: u32,
+    pub placements: Vec<TilePlacement>,
+}
+
+pub fn compose_plan(
+    tiles: &[ComposeTile],
+    layout: ComposeLayout,
+    labels: bool,
+) -> Result<ComposePlan, String> {
+    if tiles.is_empty() {
+        return Err("Composition needs at least one capture".to_string());
+    }
+    if tiles.iter().any(|tile| tile.width == 0 || tile.height == 0) {
+        return Err("Composition tiles must have a positive size".to_string());
+    }
+    let count = tiles.len() as u32;
+    let columns = match layout {
+        ComposeLayout::Strip => count,
+        ComposeLayout::Grid => (count as f64).sqrt().ceil() as u32,
+    }
+    .max(1);
+    let rows = count.div_ceil(columns);
+    let cell_width = tiles.iter().map(|tile| tile.width).max().unwrap_or(1);
+    let cell_height = tiles.iter().map(|tile| tile.height).max().unwrap_or(1);
+    let label_band = if labels { LABEL_BAND_HEIGHT } else { 0 };
+    let placements = tiles
+        .iter()
+        .enumerate()
+        .map(|(index, tile)| {
+            let column = index as u32 % columns;
+            let row = index as u32 / columns;
+            let cell_x = SHEET_PADDING + column * (cell_width + TILE_GAP);
+            let cell_y = SHEET_PADDING + row * (cell_height + label_band + TILE_GAP);
+            TilePlacement {
+                x: cell_x + (cell_width - tile.width) / 2,
+                y: cell_y + label_band + (cell_height - tile.height) / 2,
+                width: tile.width,
+                height: tile.height,
+                label_x: cell_x,
+                label_y: cell_y + LABEL_PADDING,
+            }
+        })
+        .collect();
+    Ok(ComposePlan {
+        width: SHEET_PADDING * 2 + columns * cell_width + (columns - 1) * TILE_GAP,
+        height: SHEET_PADDING * 2
+            + rows * (cell_height + label_band)
+            + rows.saturating_sub(1) * TILE_GAP,
+        columns,
+        rows,
+        label_band,
+        placements,
+    })
+}
+
+pub fn compose_sheet(
+    tiles: &[(String, Vec<u8>)],
+    layout: ComposeLayout,
+    labels: bool,
+) -> Result<Vec<u8>, String> {
+    let decoded = tiles
+        .iter()
+        .map(|(label, bytes)| {
+            image::load_from_memory(bytes)
+                .map(|image| (label.clone(), image.to_rgba8()))
+                .map_err(|error| format!("Capture decode failed: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let descriptors = decoded
+        .iter()
+        .map(|(label, image)| ComposeTile {
+            label: label.clone(),
+            width: image.width(),
+            height: image.height(),
+        })
+        .collect::<Vec<_>>();
+    let plan = compose_plan(&descriptors, layout, labels)?;
+    let cell_width = descriptors.iter().map(|tile| tile.width).max().unwrap_or(1);
+    let mut sheet = RgbaImage::from_pixel(plan.width, plan.height, SHEET_BACKGROUND);
+    for ((label, tile), placement) in decoded.iter().zip(plan.placements.iter()) {
+        draw_border(&mut sheet, placement);
+        imageops::overlay(&mut sheet, tile, placement.x as i64, placement.y as i64);
+        if labels {
+            draw_text(
+                &mut sheet,
+                &fit_label(label, cell_width),
+                placement.label_x,
+                placement.label_y,
+            );
+        }
+    }
+    let mut output = Vec::new();
+    sheet
+        .write_to(&mut Cursor::new(&mut output), CodecFormat::Png)
+        .map_err(|error| format!("Composition encode failed: {error}"))?;
+    Ok(output)
+}
+
+fn draw_border(sheet: &mut RgbaImage, placement: &TilePlacement) {
+    let left = placement.x.saturating_sub(1);
+    let top = placement.y.saturating_sub(1);
+    let right = (placement.x + placement.width).min(sheet.width() - 1);
+    let bottom = (placement.y + placement.height).min(sheet.height() - 1);
+    for x in left..=right {
+        sheet.put_pixel(x, top, TILE_BORDER);
+        sheet.put_pixel(x, bottom, TILE_BORDER);
+    }
+    for y in top..=bottom {
+        sheet.put_pixel(left, y, TILE_BORDER);
+        sheet.put_pixel(right, y, TILE_BORDER);
+    }
+}
+
+fn fit_label(label: &str, available_width: u32) -> String {
+    let capacity = (available_width / GLYPH_ADVANCE) as usize;
+    let normalized = label
+        .chars()
+        .map(|character| character.to_ascii_uppercase())
+        .collect::<String>();
+    if capacity == 0 {
+        return String::new();
+    }
+    if normalized.chars().count() <= capacity {
+        return normalized;
+    }
+    if capacity <= ELLIPSIS.len() {
+        return normalized.chars().take(capacity).collect();
+    }
+    let kept = normalized
+        .chars()
+        .take(capacity - ELLIPSIS.len())
+        .collect::<String>();
+    format!("{kept}{ELLIPSIS}")
+}
+
+fn draw_text(sheet: &mut RgbaImage, text: &str, x: u32, y: u32) {
+    for (index, character) in text.chars().enumerate() {
+        let Some(glyph) = glyph_for(character) else {
+            continue;
+        };
+        let origin_x = x + index as u32 * GLYPH_ADVANCE;
+        for (column_index, column) in glyph.iter().enumerate() {
+            for row in 0..GLYPH_HEIGHT {
+                if column >> row & 1 == 0 {
+                    continue;
+                }
+                let pixel_x = origin_x + column_index as u32 * GLYPH_SCALE;
+                let pixel_y = y + row * GLYPH_SCALE;
+                for offset_x in 0..GLYPH_SCALE {
+                    for offset_y in 0..GLYPH_SCALE {
+                        let target_x = pixel_x + offset_x;
+                        let target_y = pixel_y + offset_y;
+                        if target_x < sheet.width() && target_y < sheet.height() {
+                            sheet.put_pixel(target_x, target_y, LABEL_TEXT);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn glyph_for(character: char) -> Option<&'static [u8; 5]> {
+    let upper = character.to_ascii_uppercase();
+    FONT_5X7
+        .iter()
+        .find(|(candidate, _)| *candidate == upper)
+        .map(|(_, glyph)| glyph)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElementStateAction {
+    ReleaseMouse,
+    MoveMouseAway,
+    Blur,
+    Hover,
+    Focus,
+    PressAndHold,
+    Capture(BrowserElementState),
+}
+
+pub const DEFAULT_ELEMENT_STATES: [BrowserElementState; 4] = [
+    BrowserElementState::Default,
+    BrowserElementState::Hover,
+    BrowserElementState::Focus,
+    BrowserElementState::Active,
+];
+
+pub fn element_state_sequence(states: &[BrowserElementState]) -> Vec<ElementStateAction> {
+    let requested: &[BrowserElementState] = if states.is_empty() {
+        &DEFAULT_ELEMENT_STATES
+    } else {
+        states
+    };
+    let mut unique = Vec::new();
+    for state in requested {
+        if !unique.contains(state) {
+            unique.push(*state);
+        }
+    }
+    let mut actions = Vec::new();
+    let mut pressed = false;
+    let mut hovered = false;
+    let mut focused = false;
+    for state in unique {
+        match state {
+            BrowserElementState::Default => {
+                if pressed {
+                    actions.push(ElementStateAction::ReleaseMouse);
+                    pressed = false;
+                }
+                if hovered {
+                    actions.push(ElementStateAction::MoveMouseAway);
+                    hovered = false;
+                }
+                if focused {
+                    actions.push(ElementStateAction::Blur);
+                    focused = false;
+                }
+            }
+            BrowserElementState::Hover => {
+                if pressed {
+                    actions.push(ElementStateAction::ReleaseMouse);
+                    pressed = false;
+                }
+                if focused {
+                    actions.push(ElementStateAction::Blur);
+                    focused = false;
+                }
+                if !hovered {
+                    actions.push(ElementStateAction::Hover);
+                    hovered = true;
+                }
+            }
+            BrowserElementState::Focus => {
+                if pressed {
+                    actions.push(ElementStateAction::ReleaseMouse);
+                    pressed = false;
+                }
+                if hovered {
+                    actions.push(ElementStateAction::MoveMouseAway);
+                    hovered = false;
+                }
+                if !focused {
+                    actions.push(ElementStateAction::Focus);
+                    focused = true;
+                }
+            }
+            BrowserElementState::Active => {
+                if !hovered {
+                    actions.push(ElementStateAction::Hover);
+                    hovered = true;
+                }
+                if !pressed {
+                    actions.push(ElementStateAction::PressAndHold);
+                    pressed = true;
+                }
+                focused = true;
+            }
+        }
+        actions.push(ElementStateAction::Capture(state));
+    }
+    if pressed {
+        actions.push(ElementStateAction::ReleaseMouse);
+    }
+    if hovered {
+        actions.push(ElementStateAction::MoveMouseAway);
+    }
+    if focused {
+        actions.push(ElementStateAction::Blur);
+    }
+    actions
+}
+
 fn paper_format(format: &str) -> Option<(f64, f64)> {
     match format.to_ascii_lowercase().as_str() {
         "letter" => Some((8.5, 11.0)),
@@ -406,6 +794,192 @@ mod tests {
         assert_eq!(
             payload.transfer_mode,
             Some(Page::PrintToPDFTransfer_modeOption::ReturnAsStream)
+        );
+    }
+
+    fn tile(label: &str, width: u32, height: u32) -> ComposeTile {
+        ComposeTile {
+            label: label.to_string(),
+            width,
+            height,
+        }
+    }
+
+    fn encoded_tile(width: u32, height: u32, color: Rgba<u8>) -> Vec<u8> {
+        let image = RgbaImage::from_pixel(width, height, color);
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), CodecFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn grid_layout_uses_square_columns_and_uniform_cells() {
+        let plan = compose_plan(
+            &[
+                tile("a", 100, 50),
+                tile("b", 60, 80),
+                tile("c", 40, 40),
+                tile("d", 20, 20),
+                tile("e", 20, 20),
+            ],
+            ComposeLayout::Grid,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(plan.columns, 3);
+        assert_eq!(plan.rows, 2);
+        assert_eq!(plan.label_band, LABEL_BAND_HEIGHT);
+        assert_eq!(plan.width, SHEET_PADDING * 2 + 3 * 100 + 2 * TILE_GAP);
+        assert_eq!(
+            plan.height,
+            SHEET_PADDING * 2 + 2 * (80 + LABEL_BAND_HEIGHT) + TILE_GAP
+        );
+        assert_eq!(plan.placements[0].x, SHEET_PADDING);
+        assert_eq!(plan.placements[0].y, SHEET_PADDING + LABEL_BAND_HEIGHT + 15);
+        assert_eq!(plan.placements[1].x, SHEET_PADDING + 100 + TILE_GAP + 20);
+        assert_eq!(
+            plan.placements[3].y,
+            SHEET_PADDING + 80 + LABEL_BAND_HEIGHT + TILE_GAP + LABEL_BAND_HEIGHT + 30
+        );
+    }
+
+    #[test]
+    fn strip_layout_is_one_row_and_labels_are_optional() {
+        let tiles = [tile("default", 30, 40), tile("hover", 30, 40)];
+        let strip = compose_plan(&tiles, ComposeLayout::Strip, true).unwrap();
+        assert_eq!((strip.columns, strip.rows), (2, 1));
+        assert_eq!(strip.height, SHEET_PADDING * 2 + 40 + LABEL_BAND_HEIGHT);
+
+        let unlabelled = compose_plan(&tiles, ComposeLayout::Strip, false).unwrap();
+        assert_eq!(unlabelled.label_band, 0);
+        assert_eq!(unlabelled.height, SHEET_PADDING * 2 + 40);
+        assert_eq!(unlabelled.placements[0].y, SHEET_PADDING);
+    }
+
+    #[test]
+    fn compose_plan_rejects_empty_and_degenerate_tiles() {
+        assert!(compose_plan(&[], ComposeLayout::Grid, true).is_err());
+        assert!(compose_plan(&[tile("a", 0, 10)], ComposeLayout::Grid, true).is_err());
+    }
+
+    #[test]
+    fn compose_sheet_draws_every_tile_and_its_label() {
+        let red = Rgba([255, 0, 0, 255]);
+        let blue = Rgba([0, 0, 255, 255]);
+        let bytes = compose_sheet(
+            &[
+                ("default".to_string(), encoded_tile(40, 30, red)),
+                ("hover".to_string(), encoded_tile(40, 30, blue)),
+            ],
+            ComposeLayout::Strip,
+            true,
+        )
+        .unwrap();
+        let sheet = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        let plan = compose_plan(
+            &[tile("default", 40, 30), tile("hover", 40, 30)],
+            ComposeLayout::Strip,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!((sheet.width(), sheet.height()), (plan.width, plan.height));
+        assert_eq!(
+            *sheet.get_pixel(plan.placements[0].x, plan.placements[0].y),
+            red
+        );
+        assert_eq!(
+            *sheet.get_pixel(plan.placements[1].x, plan.placements[1].y),
+            blue
+        );
+        let label_band_has_text = (plan.placements[0].label_x..plan.placements[0].label_x + 40)
+            .any(|x| {
+                (plan.placements[0].label_y
+                    ..plan.placements[0].label_y + GLYPH_HEIGHT * GLYPH_SCALE)
+                    .any(|y| *sheet.get_pixel(x, y) == LABEL_TEXT)
+            });
+        assert!(label_band_has_text);
+    }
+
+    #[test]
+    fn unlabelled_composition_leaves_no_text_pixels() {
+        let bytes = compose_sheet(
+            &[(
+                "hover".to_string(),
+                encoded_tile(20, 20, Rgba([9, 9, 9, 255])),
+            )],
+            ComposeLayout::Grid,
+            false,
+        )
+        .unwrap();
+        let sheet = image::load_from_memory(&bytes).unwrap().to_rgba8();
+
+        assert!(sheet.pixels().all(|pixel| *pixel != LABEL_TEXT));
+    }
+
+    #[test]
+    fn labels_are_uppercased_and_truncated_to_the_cell() {
+        assert_eq!(fit_label("hover", 1_000), "HOVER");
+        assert_eq!(fit_label("hover", GLYPH_ADVANCE * 5), "HOVER");
+        assert_eq!(fit_label("hover", GLYPH_ADVANCE * 4), "HO..");
+        assert_eq!(fit_label("hover", GLYPH_ADVANCE), "H");
+        assert_eq!(fit_label("hover", 0), "");
+    }
+
+    #[test]
+    fn element_state_sequence_drives_and_unwinds_every_state() {
+        assert_eq!(
+            element_state_sequence(&[
+                BrowserElementState::Default,
+                BrowserElementState::Hover,
+                BrowserElementState::Focus,
+                BrowserElementState::Active,
+            ]),
+            vec![
+                ElementStateAction::Capture(BrowserElementState::Default),
+                ElementStateAction::Hover,
+                ElementStateAction::Capture(BrowserElementState::Hover),
+                ElementStateAction::MoveMouseAway,
+                ElementStateAction::Focus,
+                ElementStateAction::Capture(BrowserElementState::Focus),
+                ElementStateAction::Hover,
+                ElementStateAction::PressAndHold,
+                ElementStateAction::Capture(BrowserElementState::Active),
+                ElementStateAction::ReleaseMouse,
+                ElementStateAction::MoveMouseAway,
+                ElementStateAction::Blur,
+            ]
+        );
+    }
+
+    #[test]
+    fn element_state_sequence_defaults_deduplicates_and_returns_to_rest() {
+        assert_eq!(
+            element_state_sequence(&[]),
+            element_state_sequence(&DEFAULT_ELEMENT_STATES)
+        );
+        assert_eq!(
+            element_state_sequence(&[BrowserElementState::Hover, BrowserElementState::Hover]),
+            vec![
+                ElementStateAction::Hover,
+                ElementStateAction::Capture(BrowserElementState::Hover),
+                ElementStateAction::MoveMouseAway,
+            ]
+        );
+        assert_eq!(
+            element_state_sequence(&[BrowserElementState::Active, BrowserElementState::Default]),
+            vec![
+                ElementStateAction::Hover,
+                ElementStateAction::PressAndHold,
+                ElementStateAction::Capture(BrowserElementState::Active),
+                ElementStateAction::ReleaseMouse,
+                ElementStateAction::MoveMouseAway,
+                ElementStateAction::Blur,
+                ElementStateAction::Capture(BrowserElementState::Default),
+            ]
         );
     }
 

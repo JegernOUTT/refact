@@ -99,7 +99,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Waiting: wait_for_function is the way to wait on arbitrary app state: it evaluates `expression` until the result is truthy, defaults to 100/250/500/1000ms poll intervals unless `polling_ms` fixes one, and with a `locator` re-resolves the element each retry and passes it as the first argument, so a re-rendered node is tolerated. A thrown expression fails immediately instead of retrying. ",
     "wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. wait_for_url takes a plain substring in `pattern` and matches when the current URL contains it, unlike the glob/regex `pattern` used by route and wait_for_request. ",
     "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, or `wait_for_selector` for genuine synchronization.\n",
-    "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, pdf, styles, tab_log. Screenshots support full_page, clip, type, quality, scale, omit_background, animations, caret, mask, mask_color, and style; screenshot_element uses locator or ref. PDF supports Chromium print options and returns an artifact path.\n",
+    "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, screenshot_elements, capture_element_states, pdf, styles, tab_log. Screenshots support full_page, clip, type, quality, scale, omit_background, animations, caret, mask, mask_color, and style; screenshot_element uses locator or ref. screenshot_elements takes locators plus compose (grid composes one labeled contact sheet, separate returns one image per locator). capture_element_states captures one locator across states (default, hover, focus, active) as a labeled strip. PDF supports Chromium print options and returns an artifact path.\n",
     "Readouts (never fake these with eval or expect): bounding_box returns viewport CSS-pixel x/y/width/height or null when the element is not visible; count returns the match count without strictness; input_value returns the live value property of an input, textarea, or select and fails on any other element; all_texts returns the text of every match with `mode` inner_text or text_content plus an optional `limit`, reporting the true total; element_state returns visible, enabled, editable, checked, and stable in one read.\n",
     "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, or continue modifications; unroute removes one pattern or all routes; list_routes returns active routes. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. Page-level routes may not observe requests served by a service worker.\n",
     "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, continue, fallback, or fetch_and_fulfill; unroute removes one pattern or all routes; list_routes returns active routes in evaluation order with `order` and `times_remaining`. Several routes may share a pattern: the newest matching route runs first, a fallback handler hands the request to the next older matching route, then to the HAR replay, then to the network. Optional `times` on a route expires it after that many matches, including matches consumed by a traversed fallback. fulfill takes `body`, or `path` to serve a file (relative paths stay inside the runtime artifact directory, content type inferred from the extension), or `json` for a JSON body; status defaults to 200. fetch_and_fulfill performs the real request from the engine (up to 20 redirects, forwarding the page's own request headers) and fulfills with the real response, optionally overriding status, response_headers, and body. Cookie, Host, and Content-Length request headers keep their original values on continue and fetch_and_fulfill. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. URL patterns are globs (`*`, `**`, `{a,b}`) or `{source,flags}` regexes; `?` is literal and JavaScript route predicates are not supported. Page-level routes may not observe requests served by a service worker.\n",
@@ -485,6 +485,19 @@ fn browser_step_schema_with_actions(
         serde_json::json!({"type": "string"}),
     );
     properties.insert("style".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "locators".to_string(),
+        serde_json::json!({"type": "array", "items": browser_locator_schema()}),
+    );
+    properties.insert(
+        "compose".to_string(),
+        serde_json::json!({"type": "string", "enum": ["grid", "separate"], "description": "grid composes one labeled contact sheet, separate returns one image per locator"}),
+    );
+    properties.insert(
+        "states".to_string(),
+        serde_json::json!({"type": "array", "items": {"type": "string", "enum": ["default", "hover", "focus", "active"]}}),
+    );
+    properties.insert("labels".to_string(), serde_json::json!({"type": "boolean"}));
     properties.insert("label".to_string(), serde_json::json!({"type": "string"}));
     properties.insert(
         "landscape".to_string(),
@@ -1138,6 +1151,7 @@ mod tests {
             "clear_first",
             "click_count",
             "clip",
+            "compose",
             "credential",
             "css",
             "delay",
@@ -1160,9 +1174,11 @@ mod tests {
             "js",
             "key",
             "label",
+            "labels",
             "landscape",
             "limit",
             "locator",
+            "locators",
             "margins",
             "max_chars",
             "mask",
@@ -1194,6 +1210,7 @@ mod tests {
             "start_x",
             "start_y",
             "state",
+            "states",
             "steps",
             "style",
             "tab",
@@ -1370,6 +1387,38 @@ mod tests {
     fn chrome_description_documents_wait_for_url_substring_semantics() {
         let description = ToolChrome::default().tool_description().description;
         assert!(description.contains("wait_for_url takes a plain substring in `pattern`"));
+    }
+
+    #[test]
+    fn chrome_schema_offers_the_gallery_and_element_state_captures() {
+        let schema = chrome_input_schema();
+        let properties = schema
+            .pointer("/properties/request/properties/steps/items/properties")
+            .and_then(Value::as_object)
+            .unwrap();
+
+        assert_eq!(
+            properties["compose"]["enum"],
+            serde_json::json!(["grid", "separate"])
+        );
+        assert_eq!(
+            properties["states"]["items"]["enum"],
+            serde_json::json!(["default", "hover", "focus", "active"])
+        );
+        assert_eq!(properties["labels"]["type"], "boolean");
+        assert_eq!(properties["locators"]["type"], "array");
+
+        let actions = properties["action"]["enum"].as_array().unwrap();
+        for action in ["screenshot_elements", "capture_element_states"] {
+            assert!(
+                actions.iter().any(|value| value == action),
+                "missing action {action}"
+            );
+            assert!(
+                CHROME_DESCRIPTION.contains(action),
+                "description must mention {action}"
+            );
+        }
     }
 
     #[test]
@@ -1897,6 +1946,19 @@ fn format_controller_report(
         }
 
         if let Some(ref data) = result.data {
+            for (mime, encoded) in step_gallery_images(data) {
+                match resize_screenshot_b64(&encoded, &mime, image_policy) {
+                    Ok((resized, resized_mime)) => {
+                        if let Ok(element) = MultimodalElement::new(resized_mime, resized) {
+                            multimodal.push(element);
+                        }
+                    }
+                    Err(error) => log.push(format!("Screenshot processing: {error}")),
+                }
+            }
+        }
+
+        if let Some(ref data) = result.data {
             if data["artifact"]["kind"] == "pdf" {
                 if let (Some(path), Some(bytes)) = (
                     data["artifact"]["path"].as_str(),
@@ -1958,21 +2020,28 @@ fn execution_report_to_multimodal(
         .map_err(|e| format!("Failed to pretty-print browser report: {}", e))?;
     content.push(MultimodalElement::new("text".to_string(), text_pretty)?);
 
-    if report.screenshot.is_none() {
-        for result in &report.steps {
-            if let Some(ref data) = result.data {
-                if let (Some(mime), Some(b64_data)) = (
-                    data.get("mime").and_then(|v| v.as_str()),
-                    data.get("data").and_then(|v| v.as_str()),
-                ) {
-                    if mime.starts_with("image/") {
-                        let (resized, resized_mime) =
-                            resize_screenshot_b64(b64_data, mime, image_policy)?;
-                        if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
-                            content.push(el);
-                        }
+    for result in &report.steps {
+        let Some(ref data) = result.data else {
+            continue;
+        };
+        if report.screenshot.is_none() {
+            if let (Some(mime), Some(b64_data)) = (
+                data.get("mime").and_then(|v| v.as_str()),
+                data.get("data").and_then(|v| v.as_str()),
+            ) {
+                if mime.starts_with("image/") {
+                    let (resized, resized_mime) =
+                        resize_screenshot_b64(b64_data, mime, image_policy)?;
+                    if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
+                        content.push(el);
                     }
                 }
+            }
+        }
+        for (mime, encoded) in step_gallery_images(data) {
+            let (resized, resized_mime) = resize_screenshot_b64(&encoded, &mime, image_policy)?;
+            if let Ok(element) = MultimodalElement::new(resized_mime, resized) {
+                content.push(element);
             }
         }
     }
@@ -2040,6 +2109,23 @@ mod browser_credential_redaction_tests {
         assert!(!serialized.contains("secret-handle"));
         assert!(serialized.contains("example.com"));
     }
+}
+
+fn step_gallery_images(data: &serde_json::Value) -> Vec<(String, String)> {
+    data.get("images")
+        .and_then(|images| images.as_array())
+        .map(|images| {
+            images
+                .iter()
+                .filter_map(|image| {
+                    let mime = image.get("mime").and_then(|value| value.as_str())?;
+                    let encoded = image.get("data").and_then(|value| value.as_str())?;
+                    mime.starts_with("image/")
+                        .then(|| (mime.to_string(), encoded.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn strip_binary_data_for_text(value: &mut serde_json::Value) {

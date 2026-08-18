@@ -1022,6 +1022,35 @@ pub struct BrowserScreenshotOptions {
     pub style: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserComposeMode {
+    #[default]
+    Grid,
+    Separate,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserElementState {
+    #[default]
+    Default,
+    Hover,
+    Focus,
+    Active,
+}
+
+impl BrowserElementState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Hover => "hover",
+            Self::Focus => "focus",
+            Self::Active => "active",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct BrowserPdfMargin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1561,6 +1590,24 @@ pub enum BrowserStep {
         #[serde(flatten)]
         options: BrowserScreenshotOptions,
     },
+    ScreenshotElements {
+        locators: Vec<BrowserLocator>,
+        #[serde(default)]
+        compose: BrowserComposeMode,
+        #[serde(default)]
+        labels: Option<bool>,
+        #[serde(flatten)]
+        options: BrowserScreenshotOptions,
+    },
+    CaptureElementStates {
+        locator: BrowserLocator,
+        #[serde(default)]
+        states: Vec<BrowserElementState>,
+        #[serde(default)]
+        labels: Option<bool>,
+        #[serde(flatten)]
+        options: BrowserScreenshotOptions,
+    },
     Pdf {
         #[serde(flatten)]
         options: BrowserPdfOptions,
@@ -1825,6 +1872,8 @@ impl BrowserStep {
         "accessibility_snapshot",
         "screenshot",
         "screenshot_element",
+        "screenshot_elements",
+        "capture_element_states",
         "pdf",
         "eval",
         "styles",
@@ -2700,6 +2749,18 @@ mod tests {
                 locator: locator(),
                 options: BrowserScreenshotOptions::default(),
             },
+            BrowserStep::ScreenshotElements {
+                locators: vec![locator()],
+                compose: BrowserComposeMode::Grid,
+                labels: Some(true),
+                options: BrowserScreenshotOptions::default(),
+            },
+            BrowserStep::CaptureElementStates {
+                locator: locator(),
+                states: vec![BrowserElementState::Default, BrowserElementState::Hover],
+                labels: Some(true),
+                options: BrowserScreenshotOptions::default(),
+            },
             BrowserStep::Pdf {
                 options: BrowserPdfOptions::default(),
             },
@@ -3362,6 +3423,94 @@ mod tests {
             BrowserStep::ExtractTable { limit, .. } => assert_eq!(limit, None),
             _ => panic!("Expected ExtractTable"),
         }
+    }
+
+    #[test]
+    fn test_step_screenshot_elements_serde() {
+        let json_str = r##"{"action": "screenshot_elements", "locators": [{"by": "css", "value": ".card"}, {"by": "ref", "value": "e7"}], "compose": "separate", "labels": false, "type": "webp", "mask_color": "#00FF00"}"##;
+        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
+        match step {
+            BrowserStep::ScreenshotElements {
+                locators,
+                compose,
+                labels,
+                options,
+            } => {
+                assert_eq!(locators.len(), 2);
+                assert_eq!(compose, BrowserComposeMode::Separate);
+                assert_eq!(labels, Some(false));
+                assert_eq!(options.image_type, Some(BrowserScreenshotType::Webp));
+                assert_eq!(options.mask_color.as_deref(), Some("#00FF00"));
+            }
+            _ => panic!("Expected ScreenshotElements"),
+        }
+    }
+
+    #[test]
+    fn test_step_screenshot_elements_defaults_to_a_labelled_grid() {
+        let json_str =
+            r#"{"action": "screenshot_elements", "locators": [{"by": "css", "value": ".card"}]}"#;
+        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
+        match step {
+            BrowserStep::ScreenshotElements {
+                compose,
+                labels,
+                options,
+                ..
+            } => {
+                assert_eq!(compose, BrowserComposeMode::Grid);
+                assert_eq!(labels, None);
+                assert_eq!(options, BrowserScreenshotOptions::default());
+            }
+            _ => panic!("Expected ScreenshotElements"),
+        }
+    }
+
+    #[test]
+    fn test_step_capture_element_states_serde() {
+        let json_str = r#"{"action": "capture_element_states", "locator": {"by": "css", "value": "button"}, "states": ["default", "hover", "focus", "active"], "full_page": false}"#;
+        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
+        match step {
+            BrowserStep::CaptureElementStates {
+                states,
+                labels,
+                options,
+                ..
+            } => {
+                assert_eq!(
+                    states,
+                    vec![
+                        BrowserElementState::Default,
+                        BrowserElementState::Hover,
+                        BrowserElementState::Focus,
+                        BrowserElementState::Active,
+                    ]
+                );
+                assert_eq!(labels, None);
+                assert!(!options.full_page);
+            }
+            _ => panic!("Expected CaptureElementStates"),
+        }
+    }
+
+    #[test]
+    fn test_element_states_round_trip_on_the_wire() {
+        for (state, wire) in [
+            (BrowserElementState::Default, "default"),
+            (BrowserElementState::Hover, "hover"),
+            (BrowserElementState::Focus, "focus"),
+            (BrowserElementState::Active, "active"),
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), wire);
+            assert_eq!(state.label(), wire);
+            assert_eq!(
+                serde_json::from_value::<BrowserElementState>(serde_json::json!(wire)).unwrap(),
+                state
+            );
+        }
+        assert!(
+            serde_json::from_value::<BrowserElementState>(serde_json::json!("visited")).is_err()
+        );
     }
 
     #[test]

@@ -26,7 +26,10 @@ use refact_browser::{
     DEFAULT_DISMISS_OVERLAYS_HANDLER, FUNCTION_POLL_BACKOFF_MS, apply_network_report_mode,
     required_states,
 };
-use refact_browser::artifacts::{pdf_payload, screenshot_capture, ScreenshotMetrics};
+use refact_browser::artifacts::{
+    ComposeLayout, ElementStateAction, ScreenshotMetrics, compose_sheet, element_state_sequence,
+    pdf_payload, screenshot_capture,
+};
 use refact_browser::http_client;
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 
@@ -2787,6 +2790,8 @@ fn needs_locator_handler_checkpoint(step: &BrowserStep) -> bool {
             | BrowserStep::InputValue { .. }
             | BrowserStep::ElementState { .. }
             | BrowserStep::ScreenshotElement { .. }
+            | BrowserStep::ScreenshotElements { .. }
+            | BrowserStep::CaptureElementStates { .. }
             | BrowserStep::Styles { .. }
             | BrowserStep::HighlightElement { .. }
             | BrowserStep::Highlight { .. }
@@ -3507,6 +3512,36 @@ fn execute_single_step(
         BrowserStep::ScreenshotElement { locator, options } => {
             step_screenshot_element(tab, world, idx, locator, options, image_policy)
         }
+        BrowserStep::ScreenshotElements {
+            locators,
+            compose,
+            labels,
+            options,
+        } => step_screenshot_elements(
+            tab,
+            world,
+            idx,
+            locators,
+            *compose,
+            *labels,
+            options,
+            image_policy,
+        ),
+        BrowserStep::CaptureElementStates {
+            locator,
+            states,
+            labels,
+            options,
+        } => step_capture_element_states(
+            tab,
+            world,
+            idx,
+            locator,
+            states,
+            *labels,
+            options,
+            image_policy,
+        ),
         BrowserStep::Pdf { .. } => {
             StepResult::failure(idx, "PDF", "PDF generation requires a browser runtime")
         }
@@ -6259,6 +6294,21 @@ fn screenshot_metrics(tab: &Tab) -> Result<ScreenshotMetrics, String> {
     })
 }
 
+fn omit_background_applies(options: &BrowserScreenshotOptions) -> bool {
+    options.omit_background && options.image_type.unwrap_or_default() != BrowserScreenshotType::Jpeg
+}
+
+fn screenshot_policy(options: &BrowserScreenshotOptions, policy: &ImagePolicy) -> ImagePolicy {
+    policy.clone().with_format(
+        match options.image_type.unwrap_or_default() {
+            BrowserScreenshotType::Png => ImageFormat::Png,
+            BrowserScreenshotType::Jpeg => ImageFormat::Jpeg,
+            BrowserScreenshotType::Webp => ImageFormat::Webp,
+        },
+        options.quality.or(policy.quality),
+    )
+}
+
 fn capture_screenshot(
     tab: &Tab,
     world: &WorldManager,
@@ -6269,7 +6319,7 @@ fn capture_screenshot(
     let metrics = screenshot_metrics(tab)?;
     let capture = screenshot_capture(options, metrics, element)?;
     let cleanup = prepare_screenshot(tab, world, options)?;
-    let transparent = options.omit_background;
+    let transparent = omit_background_applies(options);
     let background_result = if transparent {
         tab.call_method(Emulation::SetDefaultBackgroundColorOverride {
             color: Some(DOM::RGBA {
@@ -6310,15 +6360,11 @@ fn capture_screenshot(
     let raw_bytes = base64::prelude::BASE64_STANDARD
         .decode(raw.data)
         .map_err(|error| format!("Screenshot decode failed: {error}"))?;
-    let capture_policy = policy.clone().with_format(
-        match options.image_type.unwrap_or_default() {
-            BrowserScreenshotType::Png => ImageFormat::Png,
-            BrowserScreenshotType::Jpeg => ImageFormat::Jpeg,
-            BrowserScreenshotType::Webp => ImageFormat::Webp,
-        },
-        options.quality.or(policy.quality),
-    );
-    let (processed, mime) = resize_to_policy(&raw_bytes, capture.mime, &capture_policy)?;
+    let (processed, mime) = resize_to_policy(
+        &raw_bytes,
+        capture.mime,
+        &screenshot_policy(options, policy),
+    )?;
     let decoded = image::load_from_memory(&processed)
         .map_err(|error| format!("Processed screenshot decode failed: {error}"))?;
     Ok(PolicyScreenshot {
@@ -6360,14 +6406,50 @@ fn prepare_screenshot(
     if boxes.is_empty() && options.style.is_none() && !hide_caret && !disable_animations {
         return Ok(false);
     }
-    let script = format!(
+    let script = prepare_screenshot_script(
+        &boxes,
+        options.style.as_deref().unwrap_or(""),
+        hide_caret,
+        disable_animations,
+        options.mask_color.as_deref().unwrap_or("#FF00FF"),
+    )?;
+    world.eval_in_utility(tab, &script)?;
+    Ok(true)
+}
+
+fn prepare_screenshot_script(
+    boxes: &[serde_json::Value],
+    style: &str,
+    hide_caret: bool,
+    disable_animations: bool,
+    mask_color: &str,
+) -> Result<String, String> {
+    Ok(format!(
         r#"(() => {{
   window.__refactScreenshotCleanup?.();
   const root = document.documentElement;
-  const style = document.createElement('style');
-  style.dataset.refactScreenshot = 'true';
-  style.textContent = {} + {} + {};
-  root.appendChild(style);
+  const css = {} + {} + {};
+  const collectRoots = (scope, roots) => {{
+    roots.push(scope);
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_ELEMENT);
+    do {{
+      const node = walker.currentNode;
+      const shadow = node instanceof Element ? node.shadowRoot : null;
+      if (shadow) collectRoots(shadow, roots);
+    }} while (walker.nextNode());
+    return roots;
+  }};
+  const roots = css || {} ? collectRoots(document, []) : [];
+  const styles = [];
+  if (css) {{
+    for (const scope of roots) {{
+      const style = document.createElement('style');
+      style.dataset.refactScreenshot = 'true';
+      style.textContent = css;
+      (scope === document ? root : scope).appendChild(style);
+      styles.push(style);
+    }}
+  }}
   const maskRoot = document.createElement('div');
   maskRoot.dataset.refactScreenshotMask = 'true';
   Object.assign(maskRoot.style, {{position:'absolute',left:'0',top:'0',pointerEvents:'none',zIndex:'2147483647'}});
@@ -6379,17 +6461,18 @@ fn prepare_screenshot(
     maskRoot.appendChild(mask);
   }}
   root.appendChild(maskRoot);
-  const animations = {} ? document.getAnimations().map(animation => ({{animation,currentTime:animation.currentTime,playState:animation.playState}})) : [];
+  const animations = {} ? roots.flatMap(scope => scope.getAnimations()).map(animation => ({{animation,currentTime:animation.currentTime,playState:animation.playState}})) : [];
   for (const saved of animations) {{ try {{ saved.animation.finish(); }} catch {{ saved.animation.cancel(); }} }}
   window.__refactScreenshotCleanup = () => {{
-    style.remove(); maskRoot.remove();
+    for (const style of styles) style.remove();
+    maskRoot.remove();
     for (const saved of animations) {{
       try {{ saved.animation.currentTime = saved.currentTime; if (saved.playState === 'running') saved.animation.play(); else saved.animation.pause(); }} catch {{}}
     }}
     delete window.__refactScreenshotCleanup;
   }};
 }})()"#,
-        js_string_literal(options.style.as_deref().unwrap_or("")),
+        js_string_literal(style),
         if hide_caret {
             js_string_literal("\n*,*::before,*::after{caret-color:transparent!important}")
         } else {
@@ -6400,12 +6483,11 @@ fn prepare_screenshot(
         } else {
             js_string_literal("")
         },
-        serde_json::to_string(&boxes).map_err(|error| error.to_string())?,
-        js_string_literal(options.mask_color.as_deref().unwrap_or("#FF00FF")),
         disable_animations,
-    );
-    world.eval_in_utility(tab, &script)?;
-    Ok(true)
+        serde_json::to_string(boxes).map_err(|error| error.to_string())?,
+        js_string_literal(mask_color),
+        disable_animations,
+    ))
 }
 
 fn step_screenshot(
@@ -6473,6 +6555,266 @@ fn step_screenshot_element(
             })),
         Err(e) => StepResult::failure(idx, "Element screenshot failed", e),
     }
+}
+
+fn element_viewport_rect(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: &ElementHandle,
+) -> Result<BrowserScreenshotClip, String> {
+    let value = call_handle_json(
+        tab,
+        world,
+        handle,
+        "function() { const r = this.getBoundingClientRect(); return JSON.stringify({x:r.x,y:r.y,width:r.width,height:r.height}); }",
+    )?;
+    let rect: BrowserScreenshotClip = serde_json::from_value(value)
+        .map_err(|error| format!("Failed to read element bounds: {error}"))?;
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return Err("Element has no visible bounds".to_string());
+    }
+    Ok(rect)
+}
+
+fn capture_element(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: &ElementHandle,
+    options: &BrowserScreenshotOptions,
+    policy: &ImagePolicy,
+) -> Result<PolicyScreenshot, String> {
+    let rect = element_viewport_rect(tab, world, handle)?;
+    let metrics = screenshot_metrics(tab)?;
+    capture_screenshot(
+        tab,
+        world,
+        options,
+        Some(BrowserScreenshotClip {
+            x: metrics.page_x + rect.x,
+            y: metrics.page_y + rect.y,
+            width: rect.width,
+            height: rect.height,
+        }),
+        policy,
+    )
+}
+
+fn compose_captures(
+    captures: &[(String, PolicyScreenshot)],
+    layout: ComposeLayout,
+    labels: bool,
+    options: &BrowserScreenshotOptions,
+    policy: &ImagePolicy,
+) -> Result<PolicyScreenshot, String> {
+    let tiles = captures
+        .iter()
+        .map(|(label, capture)| {
+            base64::prelude::BASE64_STANDARD
+                .decode(&capture.data)
+                .map(|bytes| (label.clone(), bytes))
+                .map_err(|error| format!("Capture decode failed: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let sheet = compose_sheet(&tiles, layout, labels)?;
+    let (processed, mime) =
+        resize_to_policy(&sheet, "image/png", &screenshot_policy(options, policy))?;
+    let decoded = image::load_from_memory(&processed)
+        .map_err(|error| format!("Composed sheet decode failed: {error}"))?;
+    Ok(PolicyScreenshot {
+        data: base64::prelude::BASE64_STANDARD.encode(&processed),
+        mime,
+        width: decoded.width(),
+        height: decoded.height(),
+        bytes: processed.len(),
+    })
+}
+
+fn capture_json(label: &str, capture: &PolicyScreenshot) -> serde_json::Value {
+    serde_json::json!({
+        "label": label,
+        "mime": capture.mime,
+        "data": capture.data,
+        "width": capture.width,
+        "height": capture.height,
+        "bytes": capture.bytes,
+    })
+}
+
+fn step_screenshot_elements(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locators: &[BrowserLocator],
+    compose: BrowserComposeMode,
+    labels: Option<bool>,
+    options: &BrowserScreenshotOptions,
+    policy: &ImagePolicy,
+) -> StepResult {
+    if locators.is_empty() {
+        return StepResult::failure(
+            idx,
+            "Screenshot elements",
+            "screenshot_elements requires at least one locator",
+        );
+    }
+    if locators.len() > policy.max_images {
+        return StepResult::failure(
+            idx,
+            "Screenshot elements",
+            format!(
+                "screenshot_elements accepts at most {} locators, got {}",
+                policy.max_images,
+                locators.len()
+            ),
+        );
+    }
+    let mut captures = Vec::with_capacity(locators.len());
+    for locator in locators {
+        let label = describe_locator(locator);
+        let resolved = match resolve_element(tab, world, locator) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return StepResult::failure(
+                    idx,
+                    "Screenshot elements",
+                    format!("{label}: {error}"),
+                );
+            }
+        };
+        let capture = capture_element(tab, world, &resolved.handle, options, policy);
+        let _ = world.release_handle(tab, &resolved.handle);
+        match capture {
+            Ok(capture) => captures.push((label, capture)),
+            Err(error) => {
+                return StepResult::failure(
+                    idx,
+                    "Screenshot elements",
+                    format!("{label}: {error}"),
+                );
+            }
+        }
+    }
+    let labels = labels.unwrap_or(true);
+    match compose {
+        BrowserComposeMode::Separate => StepResult::success(
+            idx,
+            format!("Captured {} element screenshots", captures.len()),
+        )
+        .with_data(serde_json::json!({
+            "compose": "separate",
+            "count": captures.len(),
+            "images": captures
+                .iter()
+                .map(|(label, capture)| capture_json(label, capture))
+                .collect::<Vec<_>>(),
+        })),
+        BrowserComposeMode::Grid => {
+            match compose_captures(&captures, ComposeLayout::Grid, labels, options, policy) {
+                Ok(sheet) => StepResult::success(
+                    idx,
+                    format!("Composed {} element screenshots into a grid", captures.len()),
+                )
+                .with_data(serde_json::json!({
+                    "compose": "grid",
+                    "count": captures.len(),
+                    "labels": captures.iter().map(|(label, _)| label).collect::<Vec<_>>(),
+                    "artifact": {"kind": "image", "mime": sheet.mime, "width": sheet.width, "height": sheet.height, "bytes": sheet.bytes},
+                    "images": [capture_json("grid", &sheet)],
+                })),
+                Err(error) => StepResult::failure(idx, "Screenshot elements", error),
+            }
+        }
+    }
+}
+
+fn step_capture_element_states(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    states: &[BrowserElementState],
+    labels: Option<bool>,
+    options: &BrowserScreenshotOptions,
+    policy: &ImagePolicy,
+) -> StepResult {
+    let resolved = match resolve_element(tab, world, locator) {
+        Ok(resolved) => resolved,
+        Err(error) => return StepResult::failure(idx, "Capture element states", error),
+    };
+    let outcome = drive_element_states(tab, world, &resolved.handle, states, options, policy);
+    let _ = world.release_handle(tab, &resolved.handle);
+    let captures = match outcome {
+        Ok(captures) => captures,
+        Err(error) => return StepResult::failure(idx, "Capture element states", error),
+    };
+    match compose_captures(
+        &captures,
+        ComposeLayout::Strip,
+        labels.unwrap_or(true),
+        options,
+        policy,
+    ) {
+        Ok(strip) => StepResult::success(
+            idx,
+            format!(
+                "Captured <{}> in {} states",
+                resolved.info.tag,
+                captures.len()
+            ),
+        )
+        .with_data(serde_json::json!({
+            "states": captures.iter().map(|(label, _)| label).collect::<Vec<_>>(),
+            "artifact": {"kind": "image", "mime": strip.mime, "width": strip.width, "height": strip.height, "bytes": strip.bytes},
+            "images": [capture_json("states", &strip)],
+        })),
+        Err(error) => StepResult::failure(idx, "Capture element states", error),
+    }
+}
+
+fn drive_element_states(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: &ElementHandle,
+    states: &[BrowserElementState],
+    options: &BrowserScreenshotOptions,
+    policy: &ImagePolicy,
+) -> Result<Vec<(String, PolicyScreenshot)>, String> {
+    let dispatcher = CdpMouseDispatcher::new(tab);
+    let point = dispatcher
+        .clickable_point(handle)
+        .map_err(|error| error.to_string())?;
+    let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
+    let mut mouse = Mouse::new(dispatcher, &keyboard);
+    let mut captures = Vec::new();
+    for action in element_state_sequence(states) {
+        match action {
+            ElementStateAction::Hover => mouse
+                .hover(point.x, point.y)
+                .map_err(|error| error.to_string())?,
+            ElementStateAction::MoveMouseAway => mouse
+                .move_to(0.0, 0.0, 1)
+                .map_err(|error| error.to_string())?,
+            ElementStateAction::PressAndHold => mouse
+                .down(MouseButton::Left, 1)
+                .map_err(|error| error.to_string())?,
+            ElementStateAction::ReleaseMouse => mouse
+                .up(MouseButton::Left, 1)
+                .map_err(|error| error.to_string())?,
+            ElementStateAction::Focus => {
+                call_handle_json(tab, world, handle, &browser_locators::js_focus_element())
+                    .map(|_| ())?
+            }
+            ElementStateAction::Blur => {
+                call_handle_json(tab, world, handle, &browser_locators::js_blur_element())
+                    .map(|_| ())?
+            }
+            ElementStateAction::Capture(state) => {
+                let capture = capture_element(tab, world, handle, options, policy)?;
+                captures.push((state.label().to_string(), capture));
+            }
+        }
+    }
+    Ok(captures)
 }
 
 const PDF_INLINE_LIMIT_BYTES: usize = 256 * 1024;
@@ -8081,6 +8423,77 @@ mod tests {
         );
         assert_eq!(websocket_registry.route_count(), 0);
         assert_eq!(locator_handlers.lock().unwrap().handlers().len(), 1);
+    }
+
+    #[test]
+    fn omit_background_is_skipped_for_jpeg_because_jpeg_has_no_alpha() {
+        let transparent = BrowserScreenshotOptions {
+            omit_background: true,
+            ..Default::default()
+        };
+        assert!(omit_background_applies(&transparent));
+        assert!(omit_background_applies(&BrowserScreenshotOptions {
+            image_type: Some(BrowserScreenshotType::Webp),
+            ..transparent.clone()
+        }));
+        assert!(!omit_background_applies(&BrowserScreenshotOptions {
+            image_type: Some(BrowserScreenshotType::Jpeg),
+            ..transparent.clone()
+        }));
+        assert!(!omit_background_applies(
+            &BrowserScreenshotOptions::default()
+        ));
+    }
+
+    #[test]
+    fn screenshot_policy_prefers_step_format_and_quality_over_the_image_policy() {
+        let policy = ImagePolicy {
+            format: ImageFormat::Webp,
+            quality: Some(80),
+            ..ImagePolicy::default()
+        };
+        let inherited = screenshot_policy(&BrowserScreenshotOptions::default(), &policy);
+        assert_eq!(inherited.format, ImageFormat::Png);
+        assert_eq!(inherited.quality, Some(80));
+
+        let overridden = screenshot_policy(
+            &BrowserScreenshotOptions {
+                image_type: Some(BrowserScreenshotType::Jpeg),
+                quality: Some(35),
+                ..Default::default()
+            },
+            &policy,
+        );
+        assert_eq!(overridden.format, ImageFormat::Jpeg);
+        assert_eq!(overridden.quality, Some(35));
+        assert_eq!(overridden.max_side, policy.max_side);
+    }
+
+    #[test]
+    fn screenshot_preparation_pierces_shadow_roots_and_restores_every_style() {
+        let script =
+            prepare_screenshot_script(&[], "body{background:red}", true, true, "#FF00FF").unwrap();
+
+        assert!(script.contains("createTreeWalker"));
+        assert!(script.contains("node.shadowRoot"));
+        assert!(script.contains("(scope === document ? root : scope).appendChild(style)"));
+        assert!(script.contains("roots.flatMap(scope => scope.getAnimations())"));
+        assert!(script.contains("for (const style of styles) style.remove()"));
+    }
+
+    #[test]
+    fn screenshot_preparation_skips_the_dom_walk_when_only_masks_are_requested() {
+        let masked = prepare_screenshot_script(
+            &[serde_json::json!({"x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0})],
+            "",
+            false,
+            false,
+            "#FF00FF",
+        )
+        .unwrap();
+
+        assert!(masked.contains("const roots = css || false ? collectRoots(document, []) : []"));
+        assert!(masked.contains("\"x\":1.0"));
     }
 
     #[test]

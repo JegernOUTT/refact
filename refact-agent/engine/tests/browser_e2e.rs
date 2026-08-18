@@ -22,13 +22,13 @@ use refact_lsp::integrations::browser_controller::execute_steps as execute_steps
 use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
-    AccessibilitySnapshotOptions, BrowserActionRequest, BrowserCookie, BrowserCookieSameSite,
-    BrowserExpectation, BrowserExpectedText, BrowserHttpRequest, BrowserLoadState,
-    BrowserLocator, BrowserPdfOptions, BrowserPollMatcher, BrowserScreenshotAnimations,
-    BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep, BrowserStorageItem,
-    BrowserStorageKind, BrowserTextMode, FillStrategy, LocatorHandlerAction, LocatorRegex,
-    NetworkReportMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
-    WebSocketRouteMode,
+    AccessibilitySnapshotOptions, BrowserActionRequest, BrowserComposeMode, BrowserCookie,
+    BrowserCookieSameSite, BrowserElementState, BrowserExpectation, BrowserExpectedText,
+    BrowserHttpRequest, BrowserLoadState, BrowserLocator, BrowserPdfOptions, BrowserPollMatcher,
+    BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
+    BrowserStorageItem, BrowserStorageKind, BrowserTextMode, FillStrategy, LocatorHandlerAction,
+    LocatorRegex, NetworkReportMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern,
+    WebSocketEventKind, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -83,6 +83,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "generator.html",
     "ws-echo.html",
     "har-target.html",
+    "visual-states.html",
     "poll-state.html",
 ];
 
@@ -5009,4 +5010,257 @@ async fn composed_locators_match_playwright_semantics() {
     );
     assert!(multi.ok, "multi-element extract_links failed: {multi:?}");
     assert_eq!(multi.steps[0].data.as_ref().unwrap()["total"], json!(2));
+}
+
+fn decode_step_image(
+    report: &refact_lsp::integrations::browser_models::ExecutionReport,
+) -> Vec<u8> {
+    let data = report.steps[0]
+        .data
+        .as_ref()
+        .expect("step must return data");
+    let encoded = data["images"][0]["data"]
+        .as_str()
+        .expect("step must return an image");
+    base64::prelude::BASE64_STANDARD.decode(encoded).unwrap()
+}
+
+fn dominant_color(bytes: &[u8]) -> (u8, u8, u8) {
+    let image = image::load_from_memory(bytes).unwrap().to_rgb8();
+    let mut counts: BTreeMap<(u8, u8, u8), usize> = BTreeMap::new();
+    for pixel in image.pixels() {
+        *counts.entry((pixel[0], pixel[1], pixel[2])).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(color, _)| color)
+        .unwrap()
+}
+
+fn channel_leader(color: (u8, u8, u8)) -> &'static str {
+    if color.0 > color.1 && color.0 > color.2 {
+        "red"
+    } else if color.1 > color.0 && color.1 > color.2 {
+        "green"
+    } else if color.2 > color.0 && color.2 > color.1 {
+        "blue"
+    } else if color.0 > 128 && color.1 > 128 && color.2 < 128 {
+        "yellow"
+    } else {
+        "neutral"
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn screenshot_mask_hides_a_fixture_element_and_restores_the_dom() {
+    let Some(case) = BrowserCase::start("visual-states.html").await else {
+        return;
+    };
+
+    let unmasked = execute_steps(
+        &case.tab,
+        &[BrowserStep::ScreenshotElement {
+            locator: BrowserLocator::css("#secret"),
+            options: BrowserScreenshotOptions::default(),
+        }],
+    );
+    assert!(unmasked.ok, "unmasked capture failed: {unmasked:?}");
+
+    let masked = execute_steps(
+        &case.tab,
+        &[BrowserStep::ScreenshotElement {
+            locator: BrowserLocator::css("#secret"),
+            options: BrowserScreenshotOptions {
+                mask: vec![BrowserLocator::css("#secret")],
+                mask_color: Some("#FF00FF".to_string()),
+                ..Default::default()
+            },
+        }],
+    );
+    assert!(masked.ok, "masked capture failed: {masked:?}");
+
+    let unmasked_data = unmasked.steps[0].data.as_ref().unwrap();
+    let masked_data = masked.steps[0].data.as_ref().unwrap();
+    let unmasked_bytes = base64::prelude::BASE64_STANDARD
+        .decode(unmasked_data["data"].as_str().unwrap())
+        .unwrap();
+    let masked_bytes = base64::prelude::BASE64_STANDARD
+        .decode(masked_data["data"].as_str().unwrap())
+        .unwrap();
+
+    assert_eq!(dominant_color(&unmasked_bytes), (0, 0, 128));
+    assert_eq!(dominant_color(&masked_bytes), (255, 0, 255));
+
+    let leftovers = case
+        .tab
+        .evaluate(
+            "document.querySelectorAll('[data-refact-screenshot-mask],[data-refact-screenshot]').length",
+            false,
+        )
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(leftovers, json!(0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn hover_state_capture_differs_from_the_default_state_capture() {
+    let Some(case) = BrowserCase::start("visual-states.html").await else {
+        return;
+    };
+
+    let default_only = execute_steps(
+        &case.tab,
+        &[BrowserStep::CaptureElementStates {
+            locator: BrowserLocator::css("#swatch"),
+            states: vec![BrowserElementState::Default],
+            labels: Some(false),
+            options: BrowserScreenshotOptions::default(),
+        }],
+    );
+    assert!(default_only.ok, "default capture failed: {default_only:?}");
+
+    let hover_only = execute_steps(
+        &case.tab,
+        &[BrowserStep::CaptureElementStates {
+            locator: BrowserLocator::css("#swatch"),
+            states: vec![BrowserElementState::Hover],
+            labels: Some(false),
+            options: BrowserScreenshotOptions::default(),
+        }],
+    );
+    assert!(hover_only.ok, "hover capture failed: {hover_only:?}");
+
+    let default_bytes = decode_step_image(&default_only);
+    let hover_bytes = decode_step_image(&hover_only);
+    assert_eq!(channel_leader(dominant_color(&default_bytes)), "blue");
+    assert_eq!(channel_leader(dominant_color(&hover_bytes)), "green");
+    assert_ne!(default_bytes, hover_bytes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn element_state_strip_captures_every_state_and_returns_the_element_to_rest() {
+    let Some(case) = BrowserCase::start("visual-states.html").await else {
+        return;
+    };
+
+    let report = execute_steps(
+        &case.tab,
+        &[BrowserStep::CaptureElementStates {
+            locator: BrowserLocator::css("#swatch"),
+            states: Vec::new(),
+            labels: Some(true),
+            options: BrowserScreenshotOptions::default(),
+        }],
+    );
+    assert!(report.ok, "state strip failed: {report:?}");
+
+    let data = report.steps[0].data.as_ref().unwrap();
+    assert_eq!(
+        data["states"],
+        json!(["default", "hover", "focus", "active"])
+    );
+    assert_eq!(data["images"].as_array().unwrap().len(), 1);
+
+    let strip = image::load_from_memory(&decode_step_image(&report)).unwrap();
+    assert!(strip.width() > strip.height());
+
+    let resting = case
+        .tab
+        .evaluate(
+            "document.activeElement === document.body || document.activeElement === document.documentElement",
+            false,
+        )
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(resting, json!(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn element_gallery_composes_a_grid_or_returns_separate_captures() {
+    let Some(case) = BrowserCase::start("visual-states.html").await else {
+        return;
+    };
+    let locators = vec![
+        BrowserLocator::css("#secret"),
+        BrowserLocator::css("#plain"),
+    ];
+
+    let separate = execute_steps(
+        &case.tab,
+        &[BrowserStep::ScreenshotElements {
+            locators: locators.clone(),
+            compose: BrowserComposeMode::Separate,
+            labels: Some(false),
+            options: BrowserScreenshotOptions::default(),
+        }],
+    );
+    assert!(separate.ok, "separate gallery failed: {separate:?}");
+    let separate_images = separate.steps[0].data.as_ref().unwrap()["images"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(separate_images.len(), 2);
+    let first = base64::prelude::BASE64_STANDARD
+        .decode(separate_images[0]["data"].as_str().unwrap())
+        .unwrap();
+    let second = base64::prelude::BASE64_STANDARD
+        .decode(separate_images[1]["data"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(dominant_color(&first), (0, 0, 128));
+    assert_eq!(dominant_color(&second), (128, 128, 128));
+
+    let grid = execute_steps(
+        &case.tab,
+        &[BrowserStep::ScreenshotElements {
+            locators,
+            compose: BrowserComposeMode::Grid,
+            labels: Some(true),
+            options: BrowserScreenshotOptions::default(),
+        }],
+    );
+    assert!(grid.ok, "grid gallery failed: {grid:?}");
+    let grid_data = grid.steps[0].data.as_ref().unwrap();
+    assert_eq!(grid_data["count"], json!(2));
+    assert_eq!(grid_data["images"].as_array().unwrap().len(), 1);
+    assert_eq!(grid_data["labels"], json!(["css=#secret", "css=#plain"]));
+
+    let sheet = image::load_from_memory(&decode_step_image(&grid)).unwrap();
+    assert!(sheet.width() > 120 && sheet.height() > 60);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn screenshot_style_pierces_shadow_dom() {
+    let Some(case) = BrowserCase::start("shadow-dom.html").await else {
+        return;
+    };
+
+    let report = execute_steps(
+        &case.tab,
+        &[BrowserStep::Screenshot {
+            options: BrowserScreenshotOptions {
+                style: Some("* { visibility: hidden !important }".to_string()),
+                ..Default::default()
+            },
+        }],
+    );
+    assert!(report.ok, "styled capture failed: {report:?}");
+
+    let injected = case
+        .tab
+        .evaluate(
+            "Array.from(document.querySelectorAll('*')).filter(el => el.shadowRoot).every(el => el.shadowRoot.querySelector('style[data-refact-screenshot]') === null)",
+            false,
+        )
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(injected, json!(true));
 }

@@ -4056,6 +4056,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "headless_chrome",
+ "image",
  "refact-chat-api",
  "refact-core",
  "refact-integrations",

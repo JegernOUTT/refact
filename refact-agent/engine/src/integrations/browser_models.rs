@@ -588,4 +588,62 @@ mod tests {
         assert!(!error.contains('\n'), "unexpected error: {error}");
         assert!(error.chars().count() < 600, "unexpected error: {error}");
     }
+
+    #[test]
+    fn gallery_and_state_steps_parse_with_flattened_screenshot_options() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "screenshot_elements", "locators": [{"by": "css", "value": ".card"}], "compose": "separate", "mask": [{"by": "css", "value": ".secret"}]},
+                {"action": "capture_element_states", "locator": {"by": "css", "value": "button"}, "states": ["hover", "active"], "labels": true}
+            ]
+        }))
+        .unwrap();
+
+        match &request.steps[0] {
+            BrowserStep::ScreenshotElements {
+                locators,
+                compose,
+                options,
+                ..
+            } => {
+                assert_eq!(locators.len(), 1);
+                assert_eq!(*compose, BrowserComposeMode::Separate);
+                assert_eq!(options.mask.len(), 1);
+            }
+            other => panic!("unexpected step: {other:?}"),
+        }
+        match &request.steps[1] {
+            BrowserStep::CaptureElementStates { states, labels, .. } => {
+                assert_eq!(
+                    states,
+                    &[BrowserElementState::Hover, BrowserElementState::Active]
+                );
+                assert_eq!(*labels, Some(true));
+            }
+            other => panic!("unexpected step: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gallery_and_state_steps_reject_unknown_fields_and_bad_enum_values() {
+        for (step, expected) in [
+            (
+                serde_json::json!({"action": "screenshot_elements", "locators": [], "composee": "grid"}),
+                "composee",
+            ),
+            (
+                serde_json::json!({"action": "screenshot_elements", "locators": [], "compose": "mosaic"}),
+                "mosaic",
+            ),
+            (
+                serde_json::json!({"action": "capture_element_states", "locator": {"by": "css", "value": "button"}, "states": ["visited"]}),
+                "visited",
+            ),
+        ] {
+            let error = parse_browser_action_request(serde_json::json!({"steps": [step.clone()]}))
+                .unwrap_err();
+            assert!(error.starts_with("step[0] ("), "unexpected error: {error}");
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+    }
 }
