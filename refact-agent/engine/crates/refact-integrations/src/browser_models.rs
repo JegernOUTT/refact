@@ -2490,6 +2490,8 @@ pub struct BrowserPageContext {
 pub struct ExecutionReport {
     pub ok: bool,
     pub steps: Vec<StepResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4794,6 +4796,7 @@ mod tests {
     fn test_execution_report_serde() {
         let report = ExecutionReport {
             ok: true,
+            warnings: vec!["browser session was dead; relaunched and retried".to_string()],
             steps: vec![
                 StepResult::success(0, "nav ok"),
                 StepResult::success(1, "click ok"),
@@ -4859,6 +4862,33 @@ mod tests {
         let parsed: ExecutionReport = serde_json::from_value(json).unwrap();
         assert!(parsed.ok);
         assert_eq!(parsed.page, report.page);
+        assert_eq!(parsed.warnings, report.warnings);
+    }
+
+    #[test]
+    fn execution_report_warnings_stay_optional_on_the_wire() {
+        let without_warnings = ExecutionReport {
+            warnings: Vec::new(),
+            ..serde_json::from_value::<ExecutionReport>(serde_json::json!({
+                "ok": true,
+                "steps": [],
+                "dialogs": [],
+                "new_tabs": [],
+            }))
+            .unwrap()
+        };
+
+        let json = serde_json::to_value(&without_warnings).unwrap();
+        assert!(json.get("warnings").is_none());
+
+        let legacy: ExecutionReport = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "steps": [],
+            "dialogs": [],
+            "new_tabs": [],
+        }))
+        .unwrap();
+        assert!(legacy.warnings.is_empty());
     }
 
     #[test]

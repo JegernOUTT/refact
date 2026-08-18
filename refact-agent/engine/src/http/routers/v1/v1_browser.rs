@@ -14,9 +14,9 @@ use crate::chat::types::{BrowserTabInfo, ChatEvent, TimelineEntry};
 use crate::custom_error::ScratchError;
 use crate::integrations::browser_runtime::{
     BrowserLaunchOptions, BrowserProxyOptions, BrowserRuntime, PICKER_PAGE_TIMEOUT_MS,
-    compute_frame_hash, ensure_injection_into_all_tabs, get_browser_profile_dir,
-    register_browser_runtime, remove_browser_runtime, find_runtime_by_chat_id,
-    setup_recording_for_runtime,
+    compute_frame_hash, ensure_frame_emitter, ensure_injection_into_all_tabs,
+    get_browser_profile_dir, register_browser_runtime, relaunch_runtime_for_chat,
+    remove_browser_runtime, find_runtime_by_chat_id, setup_recording_for_runtime,
 };
 use crate::integrations::browser_types::{RecorderEvent, ConsoleEntry, NetworkEntry};
 use crate::integrations::browser_models::BrowserActionRequest;
@@ -248,45 +248,19 @@ pub async fn handle_browser_start(
         });
         if requested_options.headless != current_options.headless {
             drop(runtime_arc);
-            let removed = remove_browser_runtime(app.clone(), &rid).await;
-            drop(removed);
-            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-
             let mode = requested_options.mode_label();
-            let runtime =
-                BrowserRuntime::launch(profile_dir, requested_options.clone()).map_err(|e| {
-                    ScratchError::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to relaunch browser in {} mode: {}", mode, e),
-                    )
-                })?;
+            let window_bounds = requested_options.window_bounds.clone();
+            let runtime_id = relaunch_runtime_for_chat(
+                app.clone(),
+                &post.chat_id,
+                profile_dir,
+                requested_options.clone(),
+                window_bounds,
+            )
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-            let mut rt = runtime;
-            rt.reattach(&post.chat_id);
-            let runtime_id = register_browser_runtime(app.clone(), rt).await;
-
-            let browser_runtimes = gcx.browser_runtimes.clone();
-            let runtime_arc = {
-                let browser_runtimes = browser_runtimes.lock().await;
-                browser_runtimes.get(&runtime_id).cloned()
-            };
-            if let Some(runtime_arc) = runtime_arc {
-                let mut rt = runtime_arc.lock().await;
-                if let Err(e) = setup_recording_for_runtime(&mut rt) {
-                    tracing::warn!(
-                        "Browser recording setup failed after {} relaunch (non-fatal): {}",
-                        mode,
-                        e
-                    );
-                }
-                rt.frame_emitter_active = true;
-            }
-
-            tokio::spawn(browser_frame_emission_task(
-                gcx.clone(),
-                post.chat_id.clone(),
-                runtime_id.clone(),
-            ));
+            ensure_frame_emitter(app.clone(), &post.chat_id, &runtime_id).await;
 
             return Ok(json_response(
                 StatusCode::OK,
@@ -300,7 +274,7 @@ pub async fn handle_browser_start(
             ));
         }
 
-        let should_spawn_emitter = {
+        {
             let mut rt = runtime_arc.lock().await;
             if rt.recording_tab_target_id.is_none() {
                 if let Err(e) = setup_recording_for_runtime(&mut rt) {
@@ -310,20 +284,8 @@ pub async fn handle_browser_start(
                     );
                 }
             }
-            if !rt.frame_emitter_active {
-                rt.frame_emitter_active = true;
-                true
-            } else {
-                false
-            }
-        };
-        if should_spawn_emitter {
-            tokio::spawn(browser_frame_emission_task(
-                gcx.clone(),
-                post.chat_id.clone(),
-                rid.clone(),
-            ));
         }
+        ensure_frame_emitter(app.clone(), &post.chat_id, &rid).await;
         return Ok(json_response(
             StatusCode::OK,
             serde_json::json!({
@@ -1697,7 +1659,11 @@ fn recorder_events_to_timeline(
     entries
 }
 
-async fn browser_frame_emission_task(gcx: Arc<GlobalContext>, chat_id: String, runtime_id: String) {
+pub async fn browser_frame_emission_task(
+    gcx: Arc<GlobalContext>,
+    chat_id: String,
+    runtime_id: String,
+) {
     let sessions = gcx.chat_sessions.clone();
     let mut last_status_json: Option<String> = None;
 

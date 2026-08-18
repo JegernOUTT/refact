@@ -182,7 +182,7 @@ pub mod sync_files;
 pub mod system_prompt;
 pub mod tasks;
 mod trajectory_ops;
-mod v1_browser;
+pub mod v1_browser;
 mod v1_integrations;
 pub mod vecdb;
 pub mod voice;

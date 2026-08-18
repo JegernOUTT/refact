@@ -22,8 +22,8 @@ use crate::integrations::browser_controller;
 use crate::integrations::browser_models::{ExecutionReport, parse_browser_action_request};
 use crate::integrations::browser_runtime::{
     BrowserLaunchOptions, BrowserProxyOptions, BrowserRuntime, find_runtime_by_chat_id,
-    register_browser_runtime, get_browser_profile_dir, setup_recording_for_runtime,
-    setup_recording_for_tab,
+    register_browser_runtime, get_browser_profile_dir, remove_browser_runtime,
+    setup_recording_for_runtime, setup_recording_for_tab,
 };
 
 use chrono::DateTime;
@@ -1896,7 +1896,15 @@ async fn setup_chrome_session(
         if runtime_healthy {
             return Ok(setup_log);
         } else {
-            setup_log.push("Browser session is disconnected. Trying to reconnect.".to_string());
+            setup_log.push(
+                "Browser session was dead; relaunching (open tabs lost, cookies/localStorage kept)."
+                    .to_string(),
+            );
+            remove_browser_runtime(
+                crate::app_state::AppState::from_gcx(gcx.clone()).await,
+                &runtime_id,
+            )
+            .await;
             let integration_sessions = gcx.integration_sessions.clone();
             let mut integration_sessions = integration_sessions.lock().await;
             let should_remove = integration_sessions
@@ -2282,6 +2290,10 @@ fn format_controller_report(
 ) -> (Vec<String>, Vec<MultimodalElement>) {
     let mut log = Vec::new();
     let mut multimodal = Vec::new();
+
+    for warning in &report.warnings {
+        log.push(format!("warning: {}", warning));
+    }
 
     for result in &report.steps {
         if result.ok {

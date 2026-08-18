@@ -8,6 +8,8 @@ use refact_chat_api::WindowBounds;
 
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
+pub const TRANSPORT_READ_TIMEOUT: Duration = Duration::from_secs(86_400);
+
 pub const MANDATORY_CHROME_ARGS: [&str; 7] = [
     "--no-restore-last-session",
     "--no-first-run",
@@ -71,6 +73,10 @@ impl BrowserLaunchOptions {
         self.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT)
     }
 
+    pub fn transport_read_timeout(&self) -> Duration {
+        TRANSPORT_READ_TIMEOUT
+    }
+
     pub fn window_size(&self) -> Option<(u32, u32)> {
         self.window_bounds
             .as_ref()
@@ -132,6 +138,7 @@ mod tests {
         assert!(options.extra_args.is_empty());
         assert!(options.downloads_dir.is_none());
         assert_eq!(options.idle_timeout_or_default(), DEFAULT_IDLE_TIMEOUT);
+        assert_eq!(options.transport_read_timeout(), TRANSPORT_READ_TIMEOUT);
         assert_eq!(options.window_size(), None);
         assert_eq!(args_of(&options), MANDATORY_CHROME_ARGS.to_vec());
     }
@@ -220,6 +227,18 @@ mod tests {
             MANDATORY_CHROME_ARGS.contains(&"--disable-blink-features=AutomationControlled"),
             "stealth arg must stay mandatory"
         );
+    }
+
+    #[test]
+    fn transport_read_timeout_is_independent_of_the_idle_eviction_knob() {
+        let short_idle = BrowserLaunchOptions {
+            idle_timeout: Some(Duration::from_secs(5)),
+            ..BrowserLaunchOptions::default()
+        };
+
+        assert_eq!(short_idle.idle_timeout_or_default(), Duration::from_secs(5));
+        assert_eq!(short_idle.transport_read_timeout(), TRANSPORT_READ_TIMEOUT);
+        assert!(TRANSPORT_READ_TIMEOUT > DEFAULT_IDLE_TIMEOUT * 100);
     }
 
     #[test]

@@ -810,6 +810,7 @@ fn execute_steps_with_world(
     ExecutionReport {
         ok: all_ok,
         steps: results,
+        warnings: Vec::new(),
         url: Some(tab.get_url()),
         title: tab.get_title().ok(),
         page: None,
@@ -2458,8 +2459,75 @@ pub async fn execute_request_with_runtime_validated(
     image_policy: &ImagePolicy,
     gcx: Arc<GlobalContext>,
 ) -> Result<ExecutionReport, String> {
-    validate_upload_paths(gcx, &request).await?;
-    execute_request_with_runtime(runtime_arc, request, image_policy).await
+    validate_upload_paths(gcx.clone(), &request).await?;
+
+    let plan = {
+        let rt = runtime_arc.lock().await;
+        rt.attached_chat_id
+            .clone()
+            .map(|chat_id| (chat_id, rt.profile_dir.clone(), rt.launch_options.clone()))
+    };
+    let Some((chat_id, profile_dir, launch_options)) = plan else {
+        return execute_request_with_runtime(runtime_arc, request, image_policy).await;
+    };
+
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    let transport_alive = {
+        let mut rt = runtime_arc.lock().await;
+        tokio::task::block_in_place(|| rt.check_connection())
+    };
+
+    if transport_alive {
+        let outcome =
+            execute_request_with_runtime(runtime_arc, request.clone(), image_policy).await;
+        if !report_hit_dead_transport(&outcome) {
+            return outcome;
+        }
+    }
+
+    let runtime_arc = relaunch_and_resolve(app, &chat_id, profile_dir, launch_options).await?;
+    let mut report = execute_request_with_runtime(runtime_arc, request, image_policy).await?;
+    report
+        .warnings
+        .push(crate::integrations::browser_runtime::RELAUNCH_WARNING.to_string());
+    Ok(report)
+}
+
+fn report_hit_dead_transport(outcome: &Result<ExecutionReport, String>) -> bool {
+    match outcome {
+        Err(error) => refact_browser::is_transport_dead_error(error),
+        Ok(report) => {
+            !report.ok
+                && report.steps.iter().any(|step| {
+                    step.error
+                        .as_deref()
+                        .is_some_and(refact_browser::is_transport_dead_error)
+                })
+        }
+    }
+}
+
+async fn relaunch_and_resolve(
+    app: crate::app_state::AppState,
+    chat_id: &str,
+    profile_dir: PathBuf,
+    launch_options: refact_browser::BrowserLaunchOptions,
+) -> Result<Arc<AMutex<BrowserRuntime>>, String> {
+    let window_bounds = launch_options.window_bounds.clone();
+    let runtime_id = crate::integrations::browser_runtime::relaunch_runtime_for_chat(
+        app.clone(),
+        chat_id,
+        profile_dir,
+        launch_options,
+        window_bounds,
+    )
+    .await?;
+    let browser_runtimes = app.integrations.browser_runtimes.clone();
+    let browser_runtimes = browser_runtimes.lock().await;
+    browser_runtimes
+        .get(&runtime_id)
+        .cloned()
+        .ok_or_else(|| format!("Relaunched BrowserRuntime {} disappeared", runtime_id))
 }
 
 pub async fn execute_request_with_runtime(
@@ -3025,6 +3093,7 @@ pub async fn execute_request_with_runtime(
     let mut report = ExecutionReport {
         ok: all_ok,
         steps: results,
+        warnings: Vec::new(),
         url,
         title,
         page: (page != BrowserPageContext::default()).then_some(page),
@@ -3160,7 +3229,9 @@ pub fn execute_steps_with_runtime(
                         let _ = new_tab.close(false);
                         return ExecutionReport {
                             ok: false,
+
                             steps: vec![StepResult::failure(idx, "OpenTab", error)],
+                            warnings: Vec::new(),
                             url: current_tab.as_ref().map(|tab| tab.get_url()),
                             title: current_tab.as_ref().and_then(|tab| tab.get_title().ok()),
                             page: None,
@@ -3518,7 +3589,9 @@ pub fn execute_steps_with_runtime(
     new_tabs.retain(|tab| seen_new_tabs.insert(tab.id.clone()));
     ExecutionReport {
         ok: all_ok,
+
         steps: results,
+        warnings: Vec::new(),
         url,
         title,
         page: None,
@@ -8952,6 +9025,75 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    fn report_with_step_error(error: Option<&str>) -> ExecutionReport {
+        let step = match error {
+            Some(error) => StepResult::failure(0, "OpenTab", error.to_string()),
+            None => StepResult::success(0, "OpenTab"),
+        };
+        ExecutionReport {
+            ok: error.is_none(),
+            steps: vec![step],
+            warnings: Vec::new(),
+            url: None,
+            title: None,
+            page: None,
+            stabilized: false,
+            console: vec![],
+            page_errors: vec![],
+            network: vec![],
+            network_summary: vec![],
+            websockets: vec![],
+            locator_handlers: vec![],
+            dialogs: vec![],
+            uploads: vec![],
+            downloads: vec![],
+            new_tabs: vec![],
+            active_routes: vec![],
+            intercepted_requests: vec![],
+            context: None,
+            screenshot: None,
+        }
+    }
+
+    #[test]
+    fn dead_transport_is_detected_from_step_errors_and_dispatch_errors() {
+        assert!(report_hit_dead_transport(&Ok(report_with_step_error(
+            Some("Unable to make method calls because underlying connection is closed")
+        ))));
+        assert!(report_hit_dead_transport(&Err(
+            "MethodCallError(ConnectionClosed)".to_string()
+        )));
+
+        assert!(!report_hit_dead_transport(&Ok(report_with_step_error(
+            Some("Timed out after 5000ms")
+        ))));
+        assert!(!report_hit_dead_transport(&Ok(report_with_step_error(
+            None
+        ))));
+        assert!(!report_hit_dead_transport(&Err(
+            "No tab found with id=abc".to_string()
+        )));
+    }
+
+    #[test]
+    fn dispatch_boundary_relaunches_and_retries_once_with_a_visible_warning() {
+        let dispatch = include_str!("browser_controller.rs")
+            .split_once("pub async fn execute_request_with_runtime_validated(")
+            .unwrap()
+            .1
+            .split_once("\nfn report_hit_dead_transport(")
+            .unwrap()
+            .0;
+
+        assert!(dispatch.contains("tokio::task::block_in_place(|| rt.check_connection())"));
+        assert!(dispatch.contains("if !report_hit_dead_transport(&outcome)"));
+        assert!(
+            dispatch.contains("relaunch_and_resolve(app, &chat_id, profile_dir, launch_options)")
+        );
+        assert!(dispatch.contains("crate::integrations::browser_runtime::RELAUNCH_WARNING"));
+        assert_eq!(dispatch.matches("execute_request_with_runtime(").count(), 3);
+    }
 
     fn actionable_state() -> refact_browser::ElementState {
         refact_browser::ElementState {

@@ -1176,6 +1176,167 @@ async fn navigated_fixture_context_contains_screenshot_image() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn an_idle_session_outlives_its_own_idle_eviction_window() {
+    if !e2e_enabled() {
+        print_skip();
+        return;
+    }
+    let server = FixtureServer::start().await.unwrap();
+    let profile = tempdir().unwrap();
+    let idle_window = Duration::from_secs(2);
+    let mut runtime = BrowserRuntime::launch(
+        profile.path().to_path_buf(),
+        BrowserLaunchOptions {
+            headless: true,
+            chrome_path: discover_chrome(),
+            idle_timeout: Some(idle_window),
+            ..BrowserLaunchOptions::default()
+        },
+    )
+    .expect("browser launch must succeed after e2e_enabled");
+    let tab = runtime.browser.new_tab().unwrap();
+    runtime.set_active_tab_target_id(tab.get_target_id().to_string());
+
+    assert_eq!(runtime.idle_timeout, idle_window);
+    tokio::time::sleep(idle_window * 3).await;
+
+    assert!(
+        runtime.check_connection(),
+        "cdp transport must survive silence longer than the idle eviction window"
+    );
+    assert!(
+        runtime.is_idle_expired(),
+        "our own idle knob must still measure inactivity"
+    );
+
+    let runtime = Arc::new(tokio::sync::Mutex::new(runtime));
+    let report = execute_request_with_runtime(
+        runtime,
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: None,
+            page_context: None,
+            network: NetworkReportMode::default(),
+            block_service_workers: None,
+            steps: vec![BrowserStep::Navigate {
+                url: server.url("delayed-button.html"),
+            }],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .expect("idle session must still accept a batch");
+    assert!(report.ok, "idle session batch failed: {report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn dead_cdp_transport_is_relaunched_and_the_batch_is_retried_once() {
+    let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
+        return;
+    };
+    const CHAT_ID: &str = "browser-dead-transport-e2e";
+    let cache_dir = tempdir().unwrap();
+    let config_dir = tempdir().unwrap();
+    let command_line = refact_lsp::global_context::CommandLine::from_iter_safe([
+        "browser-e2e",
+        "--http-port",
+        "0",
+        "--lsp-port",
+        "0",
+        "--no-scheduler",
+    ])
+    .unwrap();
+    let (gcx, _) = refact_lsp::global_context::create_global_context(
+        cache_dir.path().to_path_buf(),
+        config_dir.path().to_path_buf(),
+        command_line,
+    )
+    .await;
+    let app = refact_lsp::app_state::AppState::from_gcx(gcx.clone()).await;
+    case.runtime.reattach(CHAT_ID);
+    let dead_runtime_id = refact_lsp::integrations::browser_runtime::register_browser_runtime(
+        app.clone(),
+        case.runtime,
+    )
+    .await;
+
+    let (_, runtime_arc) =
+        refact_lsp::integrations::browser_runtime::find_runtime_by_chat_id(app.clone(), CHAT_ID)
+            .await
+            .expect("registered runtime must resolve by chat id");
+
+    {
+        let mut rt = runtime_arc.lock().await;
+        let session = rt.cdp_session().expect("raw cdp session must connect");
+        let _ = session.send("Browser.close", None, None);
+    }
+    for _ in 0..50 {
+        let dead = {
+            let mut rt = runtime_arc.lock().await;
+            !rt.check_connection()
+        };
+        if dead {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    {
+        let mut rt = runtime_arc.lock().await;
+        assert!(
+            !rt.check_connection(),
+            "closing the browser must kill the cdp transport"
+        );
+    }
+
+    let report =
+        refact_lsp::integrations::browser_controller::execute_request_with_runtime_validated(
+            runtime_arc,
+            BrowserActionRequest {
+                session: SessionPolicy::SharedDefault,
+                target: TabTarget::Active,
+                attach_screenshot: None,
+                page_context: None,
+                network: NetworkReportMode::default(),
+                block_service_workers: None,
+                steps: vec![BrowserStep::Navigate {
+                    url: case.server.url("delayed-button.html"),
+                }],
+            },
+            &ImagePolicy::browser_capture(),
+            gcx.clone(),
+        )
+        .await
+        .expect("dead transport must be recovered, not surfaced");
+
+    assert!(report.ok, "relaunched batch must succeed: {report:?}");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning == refact_lsp::integrations::browser_runtime::RELAUNCH_WARNING),
+        "recovery must be visible in the report: {:?}",
+        report.warnings
+    );
+
+    let (live_runtime_id, live_runtime) =
+        refact_lsp::integrations::browser_runtime::find_runtime_by_chat_id(app.clone(), CHAT_ID)
+            .await
+            .expect("chat must own a live runtime after recovery");
+    assert_ne!(live_runtime_id, dead_runtime_id);
+    {
+        let mut rt = live_runtime.lock().await;
+        assert!(rt.check_connection());
+        assert_eq!(rt.attached_chat_id.as_deref(), Some(CHAT_ID));
+        assert_eq!(rt.profile_dir, case._profile.path());
+    }
+
+    refact_lsp::integrations::browser_runtime::remove_browser_runtime(app, &live_runtime_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn artifacts_capture_page_clip_element_pdf_and_highlight_lifecycle() {
     let Some(mut case) = BrowserCase::start("moving-target.html").await else {
         return;

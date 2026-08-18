@@ -57,6 +57,108 @@ pub async fn find_runtime_by_chat_id(
     None
 }
 
+pub const RELAUNCH_SETTLE: Duration = Duration::from_millis(800);
+
+pub const RELAUNCH_WARNING: &str =
+    "browser session was dead; relaunched and retried (open tabs lost, cookies/localStorage kept)";
+
+#[derive(Debug, Clone)]
+pub struct RuntimeRecoveryPlan {
+    pub runtime_id: String,
+    pub chat_id: String,
+    pub profile_dir: PathBuf,
+    pub launch_options: BrowserLaunchOptions,
+}
+
+pub async fn ensure_frame_emitter(
+    app: crate::app_state::AppState,
+    chat_id: &str,
+    runtime_id: &str,
+) {
+    let runtime_arc = {
+        let browser_runtimes = app.integrations.browser_runtimes.clone();
+        let browser_runtimes = browser_runtimes.lock().await;
+        browser_runtimes.get(runtime_id).cloned()
+    };
+    let Some(runtime_arc) = runtime_arc else {
+        return;
+    };
+    let should_spawn = {
+        let mut rt = runtime_arc.lock().await;
+        if rt.frame_emitter_active {
+            false
+        } else {
+            rt.frame_emitter_active = true;
+            true
+        }
+    };
+    if should_spawn {
+        tokio::spawn(
+            crate::http::routers::v1::v1_browser::browser_frame_emission_task(
+                app.gcx.clone(),
+                chat_id.to_string(),
+                runtime_id.to_string(),
+            ),
+        );
+    }
+}
+
+pub async fn relaunch_runtime_for_chat(
+    app: crate::app_state::AppState,
+    chat_id: &str,
+    profile_dir: PathBuf,
+    launch_options: BrowserLaunchOptions,
+    window_bounds: Option<refact_chat_api::WindowBounds>,
+) -> Result<String, String> {
+    let options = BrowserLaunchOptions {
+        window_bounds: window_bounds.or(launch_options.window_bounds.clone()),
+        ..launch_options
+    };
+
+    let previous_emitter_active = match find_runtime_by_chat_id(app.clone(), chat_id).await {
+        Some((runtime_id, runtime_arc)) => {
+            let emitter_active = runtime_arc.lock().await.frame_emitter_active;
+            drop(runtime_arc);
+            let removed = remove_browser_runtime(app.clone(), &runtime_id).await;
+            drop(removed);
+            tokio::time::sleep(RELAUNCH_SETTLE).await;
+            emitter_active
+        }
+        None => false,
+    };
+
+    let mode = options.mode_label();
+    let mut runtime = BrowserRuntime::launch(profile_dir, options)
+        .map_err(|e| format!("Failed to relaunch browser in {} mode: {}", mode, e))?;
+    runtime.reattach(chat_id);
+    let runtime_id = register_browser_runtime(app.clone(), runtime).await;
+
+    let runtime_arc = {
+        let browser_runtimes = app.integrations.browser_runtimes.clone();
+        let browser_runtimes = browser_runtimes.lock().await;
+        browser_runtimes.get(&runtime_id).cloned()
+    };
+    if let Some(runtime_arc) = runtime_arc {
+        let mut rt = runtime_arc.lock().await;
+        if let Err(e) = setup_recording_for_runtime(&mut rt) {
+            warn!(
+                "Browser recording setup failed after {} relaunch (non-fatal): {}",
+                mode, e
+            );
+        }
+    }
+
+    if previous_emitter_active {
+        ensure_frame_emitter(app, chat_id, &runtime_id).await;
+    }
+
+    info!(
+        "BrowserRuntime {} relaunched ({}) for chat {}",
+        runtime_id, mode, chat_id
+    );
+    Ok(runtime_id)
+}
+
 pub async fn browser_snapshot_for_chat(
     app: crate::app_state::AppState,
     chat_id: &str,
@@ -111,6 +213,7 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
         };
 
         let mut to_remove = Vec::new();
+        let mut to_relaunch: Vec<RuntimeRecoveryPlan> = Vec::new();
         for rid in &runtime_ids {
             let runtime_arc = {
                 let browser_runtimes = app.integrations.browser_runtimes.clone();
@@ -141,15 +244,46 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                     rt.runtime_id, rt.idle_timeout, rt.attached_chat_id
                 );
                 to_remove.push(rid.clone());
+                continue;
             }
 
-            if !still_connected && rt.attached_chat_id.is_none() {
-                to_remove.push(rid.clone());
+            if !still_connected {
+                match rt.attached_chat_id.clone() {
+                    Some(chat_id) => to_relaunch.push(RuntimeRecoveryPlan {
+                        runtime_id: rid.clone(),
+                        chat_id,
+                        profile_dir: rt.profile_dir.clone(),
+                        launch_options: rt.launch_options.clone(),
+                    }),
+                    None => to_remove.push(rid.clone()),
+                }
             }
         }
 
         for rid in to_remove {
             remove_browser_runtime(app.clone(), &rid).await;
+        }
+
+        for plan in to_relaunch {
+            warn!(
+                "BrowserRuntime {} is dead while attached to chat {}, relaunching",
+                plan.runtime_id, plan.chat_id
+            );
+            if let Err(error) = relaunch_runtime_for_chat(
+                app.clone(),
+                &plan.chat_id,
+                plan.profile_dir.clone(),
+                plan.launch_options.clone(),
+                None,
+            )
+            .await
+            {
+                warn!(
+                    "Failed to relaunch dead BrowserRuntime {} for chat {}: {}",
+                    plan.runtime_id, plan.chat_id, error
+                );
+                remove_browser_runtime(app.clone(), &plan.runtime_id).await;
+            }
         }
     }
 }
@@ -166,6 +300,98 @@ mod tests {
         assert_eq!(
             profile,
             PathBuf::from("/tmp/refact-cache/browser_profiles/thread-abc-123")
+        );
+    }
+
+    #[test]
+    fn monitor_evicts_dead_runtimes_regardless_of_chat_attachment() {
+        let source = include_str!("browser_runtime.rs");
+        let monitor = source
+            .split_once("pub async fn browser_monitor_background_task(")
+            .unwrap()
+            .1
+            .split_once("\n#[cfg(test)]")
+            .unwrap()
+            .0;
+
+        assert!(
+            !monitor.contains("if !still_connected && rt.attached_chat_id.is_none()"),
+            "dead runtimes attached to a chat are still leaked forever"
+        );
+        assert!(monitor.contains("if !still_connected {"));
+        assert!(monitor.contains("Some(chat_id) => to_relaunch.push(RuntimeRecoveryPlan {"));
+        assert!(monitor.contains("None => to_remove.push(rid.clone()),"));
+        assert!(monitor.contains("relaunch_runtime_for_chat("));
+    }
+
+    #[test]
+    fn relaunch_sequence_lives_only_in_the_shared_helper() {
+        let helper = include_str!("browser_runtime.rs")
+            .split_once("pub async fn relaunch_runtime_for_chat(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+
+        for step in [
+            "remove_browser_runtime(app.clone(), &runtime_id)",
+            "tokio::time::sleep(RELAUNCH_SETTLE)",
+            "BrowserRuntime::launch(profile_dir, options)",
+            "runtime.reattach(chat_id)",
+            "register_browser_runtime(app.clone(), runtime)",
+            "setup_recording_for_runtime(&mut rt)",
+            "ensure_frame_emitter(app, chat_id, &runtime_id)",
+        ] {
+            assert!(helper.contains(step), "relaunch helper lost step: {step}");
+        }
+
+        let router = include_str!("../http/routers/v1/v1_browser.rs");
+        assert!(router.contains("relaunch_runtime_for_chat("));
+        assert!(
+            !router.contains("Failed to relaunch browser in {} mode"),
+            "router still duplicates the relaunch sequence"
+        );
+
+        let controller = include_str!("browser_controller.rs");
+        assert!(controller.contains("relaunch_runtime_for_chat("));
+        assert!(!controller.contains("BrowserRuntime::launch("));
+    }
+
+    #[test]
+    fn relaunch_preserves_profile_launch_options_and_window_bounds() {
+        let helper = include_str!("browser_runtime.rs")
+            .split_once("pub async fn relaunch_runtime_for_chat(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+
+        assert!(helper
+            .contains("window_bounds: window_bounds.or(launch_options.window_bounds.clone())"));
+        assert!(helper.contains("..launch_options"));
+        assert!(RELAUNCH_WARNING.contains("relaunched and retried"));
+        assert!(RELAUNCH_WARNING.contains("open tabs lost"));
+    }
+
+    #[test]
+    fn setup_chrome_session_cannot_hand_back_the_dead_runtime() {
+        let session = include_str!("../tools/tool_chrome.rs")
+            .split_once("async fn setup_chrome_session(")
+            .unwrap()
+            .1;
+        let unhealthy = session
+            .split_once("if runtime_healthy {")
+            .unwrap()
+            .1
+            .split_once("find_runtime_by_chat_id(")
+            .unwrap()
+            .0;
+
+        assert!(
+            unhealthy.contains("remove_browser_runtime("),
+            "dead runtime is not evicted before re-resolving it by chat id"
         );
     }
 

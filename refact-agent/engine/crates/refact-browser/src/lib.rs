@@ -77,7 +77,7 @@ pub use keyboard::{
 };
 pub use launch::{
     BrowserLaunchOptions, BrowserProxyOptions, DEFAULT_IDLE_TIMEOUT, IGNORED_CHROME_DEFAULT_ARGS,
-    MANDATORY_CHROME_ARGS,
+    MANDATORY_CHROME_ARGS, TRANSPORT_READ_TIMEOUT,
 };
 pub use locator_handlers::{
     DEFAULT_DISMISS_OVERLAYS_HANDLER, LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation,
@@ -538,7 +538,7 @@ impl BrowserRuntime {
             sandbox: options.chromium_sandbox,
             ignore_certificate_errors: options.ignore_https_errors,
             window_size: options.window_size(),
-            idle_browser_timeout: idle_timeout,
+            idle_browser_timeout: options.transport_read_timeout(),
             user_data_dir: Some(profile_dir.clone()),
             path: options.chrome_path.clone(),
             proxy_server: options.proxy.as_ref().map(|proxy| proxy.server.as_str()),
@@ -610,8 +610,9 @@ impl BrowserRuntime {
     pub fn connect(ws_url: String, options: BrowserLaunchOptions) -> Result<Self, String> {
         let idle_timeout = options.idle_timeout_or_default();
         let mask_passwords = options.mask_passwords;
-        let browser = Browser::connect_with_timeout(ws_url.clone(), idle_timeout)
-            .map_err(|e| format!("Failed to connect to browser at {}: {}", ws_url, e))?;
+        let browser =
+            Browser::connect_with_timeout(ws_url.clone(), options.transport_read_timeout())
+                .map_err(|e| format!("Failed to connect to browser at {}: {}", ws_url, e))?;
         let runtime_id = Uuid::new_v4().to_string();
         let downloads_dir = options.downloads_dir.clone().unwrap_or_else(|| {
             std::env::temp_dir()
@@ -847,13 +848,18 @@ impl BrowserRuntime {
     }
 
     pub fn check_connection(&mut self) -> bool {
-        let connected = self.browser.get_version().is_ok();
-        if self.is_connected && !connected {
-            warn!(
-                "BrowserRuntime {} detected browser disconnect",
-                self.runtime_id
-            );
-        }
+        let connected = match self.browser.get_version() {
+            Ok(_) => true,
+            Err(error) => {
+                if self.is_connected {
+                    warn!(
+                        "BrowserRuntime {} detected browser disconnect: {}",
+                        self.runtime_id, error
+                    );
+                }
+                false
+            }
+        };
         self.is_connected = connected;
         connected
     }
@@ -978,6 +984,19 @@ impl BrowserRuntime {
         }
         tabs_guard.first().cloned()
     }
+}
+
+pub const TRANSPORT_DEAD_MARKERS: [&str; 3] = [
+    "underlying connection is closed",
+    "connectionclosed",
+    "connection closed",
+];
+
+pub fn is_transport_dead_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    TRANSPORT_DEAD_MARKERS
+        .iter()
+        .any(|marker| error.contains(marker))
 }
 
 fn tab_fallback_after_close(adopted: &mut Vec<String>, closed_target_id: &str) -> Option<String> {
@@ -1820,6 +1839,70 @@ mod tests {
             opener: None,
             opened_by_step: None,
         }
+    }
+
+    #[test]
+    fn transport_dead_errors_are_recognised_and_ordinary_failures_are_not() {
+        for dead in [
+            "Unable to make method calls because underlying connection is closed",
+            "ConnectionClosed",
+            "MethodCallError(ConnectionClosed)",
+            "OpenTab: Failed: Unable to make method calls because underlying connection is closed",
+            "WebSocket connection closed",
+        ] {
+            assert!(
+                is_transport_dead_error(dead),
+                "missed dead transport: {dead}"
+            );
+        }
+
+        for alive in [
+            "",
+            "Timed out after 5000ms",
+            "No tab found with id=abc",
+            "Element is not visible",
+            "Navigation failed: net::ERR_NAME_NOT_RESOLVED",
+            "Failed to create profile dir",
+        ] {
+            assert!(
+                !is_transport_dead_error(alive),
+                "false positive dead transport: {alive}"
+            );
+        }
+    }
+
+    #[test]
+    fn transport_read_timeout_is_not_wired_to_the_idle_eviction_knob() {
+        let source = include_str!("lib.rs");
+        let launch = source
+            .split_once("pub fn launch(profile_dir: PathBuf, options: BrowserLaunchOptions)")
+            .unwrap()
+            .1
+            .split_once("pub fn connect(")
+            .unwrap()
+            .0;
+        let connect = source
+            .split_once("pub fn connect(ws_url: String, options: BrowserLaunchOptions)")
+            .unwrap()
+            .1
+            .split_once("pub fn mask_passwords(")
+            .unwrap()
+            .0;
+        let shared_knob = concat!("idle_browser_timeout: ", "idle_timeout");
+
+        assert!(launch.contains("idle_browser_timeout: options.transport_read_timeout()"));
+        assert!(!launch.contains(shared_knob));
+        assert!(connect
+            .contains("connect_with_timeout(ws_url.clone(), options.transport_read_timeout())"));
+        assert!(!connect.contains("connect_with_timeout(ws_url.clone(), idle_timeout)"));
+        assert!(
+            launch.contains("idle_timeout,"),
+            "runtime keeps its own eviction knob"
+        );
+        assert!(
+            connect.contains("idle_timeout,"),
+            "runtime keeps its own eviction knob"
+        );
     }
 
     #[test]
