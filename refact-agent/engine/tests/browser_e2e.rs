@@ -320,6 +320,26 @@ struct WsEchoServer {
     task: tokio::task::JoinHandle<()>,
 }
 
+fn negotiate_subprotocol(
+    request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+    mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+) -> Result<
+    tokio_tungstenite::tungstenite::handshake::server::Response,
+    tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+> {
+    const PROTOCOL: &str = "sec-websocket-protocol";
+    let selected = request
+        .headers()
+        .get(PROTOCOL)
+        .and_then(|offered| offered.to_str().ok())
+        .and_then(|offered| offered.split(',').next())
+        .and_then(|offered| offered.trim().parse().ok());
+    if let Some(selected) = selected {
+        response.headers_mut().insert(PROTOCOL, selected);
+    }
+    Ok(response)
+}
+
 impl WsEchoServer {
     async fn start() -> Result<Self, String> {
         use futures::{SinkExt, StreamExt};
@@ -332,7 +352,9 @@ impl WsEchoServer {
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 tokio::spawn(async move {
-                    let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+                    let Ok(mut socket) =
+                        tokio_tungstenite::accept_hdr_async(stream, negotiate_subprotocol).await
+                    else {
                         return;
                     };
                     while let Some(Ok(message)) = socket.next().await {
@@ -4104,11 +4126,20 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
     );
 }
 
+struct InterceptCase {
+    report: ExecutionReport,
+    tab: Arc<Tab>,
+    _echo: WsEchoServer,
+    _runtime: Arc<tokio::sync::Mutex<BrowserRuntime>>,
+    _server: FixtureServer,
+    _profile: TempDir,
+}
+
 async fn intercept_case(
     on_page_message: WebSocketMessageAction,
     on_server_message: WebSocketMessageAction,
     extra: Vec<BrowserStep>,
-) -> Option<(ExecutionReport, WsEchoServer)> {
+) -> Option<InterceptCase> {
     let mut case = BrowserCase::start("states.html").await?;
     case.setup_world();
     let echo = WsEchoServer::start().await.unwrap();
@@ -4128,7 +4159,7 @@ async fn intercept_case(
     steps.extend(extra);
 
     let report = execute_request_with_runtime(
-        runtime,
+        runtime.clone(),
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
@@ -4142,13 +4173,20 @@ async fn intercept_case(
     )
     .await
     .unwrap();
-    Some((report, echo))
+    Some(InterceptCase {
+        report,
+        tab: case.tab,
+        _echo: echo,
+        _runtime: runtime,
+        _server: case.server,
+        _profile: case._profile,
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn websocket_intercept_mode_round_trips_through_the_real_server() {
-    let Some((report, _echo)) = intercept_case(
+    let Some(case) = intercept_case(
         WebSocketMessageAction::Forward,
         WebSocketMessageAction::Forward,
         vec![BrowserStep::WaitForText {
@@ -4160,6 +4198,7 @@ async fn websocket_intercept_mode_round_trips_through_the_real_server() {
     else {
         return;
     };
+    let report = &case.report;
 
     assert!(report.ok, "intercept round-trip failed: {report:?}");
     assert!(
@@ -4198,42 +4237,43 @@ async fn websocket_intercept_mode_round_trips_through_the_real_server() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn websocket_drop_blocks_the_page_frame_from_reaching_the_server() {
-    let Some((report, _echo)) = intercept_case(
+    let Some(case) = intercept_case(
         WebSocketMessageAction::Drop,
         WebSocketMessageAction::Forward,
-        vec![
-            BrowserStep::WaitForWebSocketFrame {
-                pattern: None,
-                timeout_ms: Some(1_500),
-            },
-            BrowserStep::Expect {
-                locator: Some(BrowserLocator::css("#received")),
-                matcher: BrowserExpectation::ToHaveText {
-                    expected: refact_lsp::integrations::browser_models::BrowserExpectedTextOrList::One(
-                        BrowserExpectedText::Text("waiting".to_string()),
-                    ),
-                    ignore_case: false,
-                },
-                not: None,
-                timeout_ms: Some(1_000),
-                soft: true,
-            },
-        ],
+        vec![BrowserStep::WaitForWebSocketFrame {
+            pattern: None,
+            timeout_ms: Some(1_500),
+        }],
     )
     .await
     else {
         return;
     };
+    let report = &case.report;
 
     assert!(
         !report.steps[2].ok,
         "a dropped frame must not satisfy wait_for_web_socket_frame: {:?}",
         report.steps[2]
     );
+    let echoed = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::Expect {
+            locator: Some(BrowserLocator::css("#received")),
+            matcher: BrowserExpectation::ToHaveText {
+                expected: refact_lsp::integrations::browser_models::BrowserExpectedTextOrList::One(
+                    BrowserExpectedText::Text("waiting".to_string()),
+                ),
+                ignore_case: false,
+            },
+            not: None,
+            timeout_ms: Some(1_000),
+            soft: false,
+        }],
+    );
     assert!(
-        report.steps[3].ok,
-        "the server never echoed, so #received must still read 'waiting': {:?}",
-        report.steps[3]
+        echoed.ok,
+        "the server never echoed, so #received must still read 'waiting': {echoed:?}"
     );
     assert!(
         report.websockets.iter().any(|event| {
@@ -4249,7 +4289,7 @@ async fn websocket_drop_blocks_the_page_frame_from_reaching_the_server() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn websocket_close_delivers_code_and_reason_to_the_page() {
-    let Some((report, _echo)) = intercept_case(
+    let Some(case) = intercept_case(
         WebSocketMessageAction::Forward,
         WebSocketMessageAction::Forward,
         vec![
@@ -4272,6 +4312,8 @@ async fn websocket_close_delivers_code_and_reason_to_the_page() {
     else {
         return;
     };
+
+    let report = &case.report;
 
     assert!(report.ok, "close simulation failed: {report:?}");
     assert_eq!(report.steps[3].summary, "Closed 1 WebSocket(s)");

@@ -431,14 +431,14 @@ impl WebSocketRegistry {
     }
 
     pub fn flush_commands(&self, tabs: &[std::sync::Arc<Tab>]) -> Result<(), String> {
-        let commands = std::mem::take(&mut self.state.lock().unwrap().commands);
-        for (tab_target_id, command) in commands {
-            let Some(tab) = tabs
-                .iter()
-                .find(|tab| tab.get_target_id() == &tab_target_id)
-            else {
-                continue;
-            };
+        for tab in tabs {
+            self.flush_tab_commands(tab)?;
+        }
+        Ok(())
+    }
+
+    pub fn flush_tab_commands(&self, tab: &Tab) -> Result<(), String> {
+        for command in self.take_commands_for(tab.get_target_id()) {
             let command = serde_json::to_string(&command)
                 .map_err(|error| format!("Failed to serialize WebSocket command: {error}"))?;
             tab.evaluate(
@@ -448,6 +448,15 @@ impl WebSocketRegistry {
             .map_err(|error| format!("Failed to dispatch WebSocket command: {error}"))?;
         }
         Ok(())
+    }
+
+    fn take_commands_for(&self, tab_target_id: &str) -> Vec<Value> {
+        let mut state = self.state.lock().unwrap();
+        let (mine, rest) = std::mem::take(&mut state.commands)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(target_id, _)| target_id == tab_target_id);
+        state.commands = rest;
+        mine.into_iter().map(|(_, command)| command).collect()
     }
 
     fn matching_sockets(&self, matcher: &UrlMatcher) -> Vec<RoutedSocket> {
@@ -569,10 +578,11 @@ fn websocket_event_from_binding_payload(payload: &Value) -> Option<Value> {
 }
 
 pub fn install_websocket_router(
-    tab: &Tab,
+    tab: &std::sync::Arc<Tab>,
     registry: std::sync::Arc<WebSocketRegistry>,
 ) -> Result<(), String> {
     let target_id = tab.get_target_id().to_string();
+    let dispatch_tab = std::sync::Arc::downgrade(tab);
     tab.expose_function(
         WEBSOCKET_BINDING,
         std::sync::Arc::new(move |payload: Value| {
@@ -580,6 +590,11 @@ pub fn install_websocket_router(
                 return;
             };
             registry.handle_page_event(&target_id, &event);
+            if let Some(tab) = dispatch_tab.upgrade() {
+                if let Err(error) = registry.flush_tab_commands(&tab) {
+                    tracing::warn!("WebSocket command dispatch failed: {error}");
+                }
+            }
         }),
     )
     .map_err(|error| format!("Failed to expose WebSocket route binding: {error}"))?;
@@ -670,6 +685,7 @@ fn websocket_mock_script() -> String {
       this.server.onmessage = event => toWire(event.data).then(wire => emit({{ type: 'server_message', id: this.id, ...wire }}));
       this.server.onerror = () => emit({{ type: 'error', id: this.id, message: 'WebSocket server error' }});
       this.server.onclose = event => {{
+        if (this.readyState === 3) return;
         this.readyState = 3;
         const close = new CloseEvent('close', {{ code: event.code, reason: event.reason, wasClean: event.wasClean }});
         this.dispatchEvent(close); this.onclose?.(close);
@@ -1082,10 +1098,52 @@ mod tests {
     }
 
     #[test]
+    fn each_tab_only_drains_its_own_pending_commands() {
+        let registry = routed_registry(
+            &UrlPattern::Text("ws://**/ws-echo".to_string()),
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        );
+
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "created", "id": "route-1", "url": "ws://127.0.0.1:9/ws-echo"}),
+        );
+        registry.handle_page_event(
+            "tab-2",
+            &json!({"type": "created", "id": "route-2", "url": "ws://127.0.0.1:9/ws-echo"}),
+        );
+
+        let first = registry.take_commands_for("tab-1");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["id"], json!("route-1"));
+
+        assert!(registry.take_commands_for("tab-3").is_empty());
+
+        let remaining = registry.take_commands();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0]["id"], json!("route-2"));
+    }
+
+    #[test]
     fn shim_reports_protocols_and_handles_a_simulated_server_close() {
         let script = websocket_mock_script();
         assert!(script.contains("protocols: this.protocols"));
         assert!(script.contains("serverClose(code, reason)"));
         assert!(script.contains("if (request.type === 'close') socket.serverClose"));
+    }
+
+    #[test]
+    fn shim_ignores_the_upstream_close_once_the_page_socket_is_already_closed() {
+        let script = websocket_mock_script();
+        let handler = script
+            .split("this.server.onclose = event => {")
+            .nth(1)
+            .unwrap();
+        assert!(
+            handler.starts_with("\n        if (this.readyState === 3) return;"),
+            "a simulated close must not be overwritten by the upstream close event: {handler}"
+        );
     }
 }
