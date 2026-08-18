@@ -20,14 +20,15 @@ use refact_browser::{
     ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
     ActionabilityExecutionMode, ActionabilityTimeouts, CDP_INLINE_RESULT_LIMIT_BYTES,
     CdpDragObserver, CdpGuardrail, CdpKeyboardDispatcher, CdpMouseDispatcher, ClockOp,
-    DEFAULT_DISMISS_OVERLAYS_HANDLER, ElementHandle, ElementStateName, ExpectPollResult,
+DEFAULT_DISMISS_OVERLAYS_HANDLER, ElementHandle, ElementStateName, ExpectPollResult,
     FUNCTION_POLL_BACKOFF_MS, HitTargetController, HitTargetPoint, HitTargetResult, Keyboard,
-    LocatorGenerationOptions, LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation,
-    LocatorHandlerProbe, LocatorHandlerRegistry, LocatorOutcome, MainFrameCssPoint, Mouse,
-    MouseButton, MouseState, NetworkLoadState, NetworkMonitorHandle, NetworkWaitFilters, Ref,
-    ScrollStrategy, SnapshotMode, SnapshotOptions, SystemClock, UrlMatcher, WebSocketRegistry,
-    WorldManager, apply_network_report_mode, classify_cdp_command, current_wall_ms,
-    parse_clock_ticks, parse_clock_time, redact_cdp_result, required_states,
+    KeyboardDispatcher, LocatorGenerationOptions, LocatorHandler, LocatorHandlerLease,
+    LocatorHandlerOperation, LocatorHandlerProbe, LocatorHandlerRegistry, LocatorOutcome,
+    MainFrameCssPoint, Mouse, MouseButton, MouseDispatcher, MouseState, NetworkLoadState,
+    NetworkMonitorHandle, NetworkWaitFilters, Ref, ScrollStrategy, SnapshotMode, SnapshotOptions,
+    SystemClock, TabScopedHandle, UrlMatcher, WebSocketRegistry, WorldManager,
+    apply_network_report_mode, classify_cdp_command, current_wall_ms, parse_clock_ticks,
+    parse_clock_time, redact_cdp_result, required_states,
 };
 use refact_browser::artifacts::{
     ComposeLayout, ElementStateAction, ScreenshotMetrics, compose_sheet, element_state_sequence,
@@ -175,6 +176,31 @@ impl std::ops::Deref for ResolvedElement {
     fn deref(&self) -> &Self::Target {
         &self.info
     }
+}
+
+struct ScopedElement<'a> {
+    handle: TabScopedHandle<'a>,
+    info: ElementInfo,
+}
+
+impl std::ops::Deref for ScopedElement<'_> {
+    type Target = ElementInfo;
+
+    fn deref(&self) -> &Self::Target {
+        &self.info
+    }
+}
+
+fn resolve_scoped_element<'a>(
+    tab: &'a Tab,
+    world: &'a WorldManager,
+    locator: &BrowserLocator,
+) -> Result<ScopedElement<'a>, String> {
+    let resolved = resolve_element(tab, world, locator)?;
+    Ok(ScopedElement {
+        handle: world.wrap_scoped(tab, resolved.handle),
+        info: resolved.info,
+    })
 }
 
 struct BrowserActionDriver<'a> {
@@ -654,13 +680,13 @@ fn strict_locator_handle_result(
         .unwrap_or(StrictLocatorHandle::None)
 }
 
-fn strict_locator_previews(
+fn strict_locator_previews<'h>(
     tab: &Tab,
     world: &WorldManager,
-    handles: &[ElementHandle],
+    handles: impl IntoIterator<Item = &'h ElementHandle>,
 ) -> Vec<String> {
     handles
-        .iter()
+        .into_iter()
         .take(5)
         .filter_map(|handle| {
             world
@@ -3439,6 +3465,8 @@ pub fn execute_steps_with_runtime(
                 let target_id = tab.get_target_id().to_string();
                 match tab.close(false) {
                     Ok(_) => {
+                        runtime.world_manager.tab_closed(&target_id);
+                        runtime.mouse_states.remove(&target_id);
                         runtime.select_tab_after_close(&target_id);
                         current_tab = runtime.get_active_tab();
                         StepResult::success(
@@ -5091,8 +5119,8 @@ fn sample_poll_expression(
     let Some(handle) = strict_locator_handle(tab, world, locator, handles)? else {
         return Ok(Value::Null);
     };
+    let handle = world.wrap_scoped(tab, handle);
     let value = world.call_function_on(tab, &handle, &element_poll_js(expression), Vec::new());
-    let _ = world.release_handle(tab, &handle);
     match value {
         Ok(value) => Ok(value),
         Err(refact_browser::HandleError::Invalidated { .. }) => Ok(Value::Null),
@@ -5441,11 +5469,9 @@ fn sample_expectation(
         Err(error) if matches!(locator.strategy, LocatorStrategy::Ref { .. }) => return Err(error),
         Err(_) => Vec::new(),
     };
+    let handles = world.wrap_scoped_all(tab, handles);
     if let BrowserExpectation::ToHaveCount { expected } = matcher {
         let count = handles.len();
-        for handle in &handles {
-            let _ = world.release_handle(tab, handle);
-        }
         return Ok((count == *expected, Value::from(count)));
     }
     if let BrowserExpectation::ToBeHidden = matcher {
@@ -5454,10 +5480,8 @@ fn sample_expectation(
         }
     }
     if handles.len() > 1 && !matcher.is_multi_element() {
-        let previews = strict_locator_previews(tab, world, &handles);
-        let error = strict_expectation_error(matcher, locator, handles.len(), &previews).unwrap();
-        release_locator_handles(tab, world, &handles);
-        return Err(error);
+        let previews = strict_locator_previews(tab, world, handles.iter().map(|handle| &**handle));
+        return Err(strict_expectation_error(matcher, locator, handles.len(), &previews).unwrap());
     }
     if let BrowserExpectation::ToHaveValues {
         expected,
@@ -5465,11 +5489,10 @@ fn sample_expectation(
     } = matcher
     {
         let mut received = Vec::new();
-        for handle in handles {
+        for handle in &handles {
             let values = world
-                .expectation_values(tab, &handle)
+                .expectation_values(tab, handle)
                 .map_err(|error| error.to_string())?;
-            let _ = world.release_handle(tab, &handle);
             let value = values
                 .get("value")
                 .and_then(Value::as_str)
@@ -5491,11 +5514,10 @@ fn sample_expectation(
     }
     if let Some((expected, ignore_case, kind)) = expectation_text_list(matcher) {
         let mut received = Vec::new();
-        for handle in handles {
+        for handle in &handles {
             let values = world
-                .expectation_values(tab, &handle)
+                .expectation_values(tab, handle)
                 .map_err(|error| error.to_string())?;
-            let _ = world.release_handle(tab, &handle);
             received.push(
                 values
                     .get("text")
@@ -5508,12 +5530,10 @@ fn sample_expectation(
             refact_browser::assertions::matches_text_list(&received, expected, kind, ignore_case)?;
         return Ok((matches, serde_json::to_value(received).unwrap_or_default()));
     }
-    let Some(handle) = handles.into_iter().next() else {
+    let Some(handle) = handles.first() else {
         return Ok((false, Value::String("detached".to_string())));
     };
-    let sampled = sample_single_element(tab, world, &handle, matcher);
-    let _ = world.release_handle(tab, &handle);
-    sampled
+    sample_single_element(tab, world, handle, matcher)
 }
 
 fn expectation_text_list(
@@ -6010,7 +6030,7 @@ fn step_set_input_files(
     locator: &BrowserLocator,
     paths: &[String],
 ) -> StepResult {
-    let resolved = match resolve_element(tab, world, locator) {
+    let resolved = match resolve_scoped_element(tab, world, locator) {
         Ok(resolved) => resolved,
         Err(error) => return StepResult::failure(idx, "Set input files: resolution failed", error),
     };
@@ -6795,7 +6815,7 @@ fn step_fill(
     clear_first: bool,
     verify: bool,
 ) -> StepResult {
-    let info = match resolve_element(tab, world, locator) {
+    let info = match resolve_scoped_element(tab, world, locator) {
         Ok(i) => i,
         Err(e) => return StepResult::failure(idx, "Fill: element resolution failed", e),
     };
@@ -6842,7 +6862,7 @@ fn step_clear(
     locator: &BrowserLocator,
     verify: bool,
 ) -> StepResult {
-    let info = match resolve_element(tab, world, locator) {
+    let info = match resolve_scoped_element(tab, world, locator) {
         Ok(i) => i,
         Err(e) => return StepResult::failure(idx, "Clear: element resolution failed", e),
     };
@@ -6874,7 +6894,7 @@ fn step_select_option(
     locator: &BrowserLocator,
     value: &str,
 ) -> StepResult {
-    match resolve_element(tab, world, locator) {
+    match resolve_scoped_element(tab, world, locator) {
         Ok(info) => match refact_browser::forms::select_option(tab, world, &info.handle, value) {
             Ok(outcome) => {
                 let mut result =
@@ -6903,7 +6923,7 @@ fn step_check_uncheck(
     check: bool,
 ) -> StepResult {
     let action = if check { "check" } else { "uncheck" };
-    let info = match resolve_element(tab, world, locator) {
+    let info = match resolve_scoped_element(tab, world, locator) {
         Ok(i) => i,
         Err(e) => return StepResult::failure(idx, "Check/uncheck: resolution failed", e),
     };
@@ -7242,11 +7262,11 @@ fn step_wait_for_element_hidden(
         let Some(handle) = strict_locator_handle(tab, world, locator, handles)? else {
             return Ok(Some(()));
         };
-        let visible = world
+        let handle = world.wrap_scoped(tab, handle);
+        world
             .call_function_on(tab, &handle, VISIBLE_BOUNDING_BOX_JS, Vec::new())
-            .map_err(|error| error.to_string());
-        let _ = world.release_handle(tab, &handle);
-        visible.map(|visible| (visible != serde_json::Value::Bool(true)).then_some(()))
+            .map_err(|error| error.to_string())
+            .map(|visible| (visible != serde_json::Value::Bool(true)).then_some(()))
     }) {
         Ok(()) => StepResult::success(idx, "Element is hidden".to_string()),
         Err(e) => StepResult::failure(idx, "Wait for element hidden", e),
@@ -7271,9 +7291,10 @@ fn step_wait_for_element_stable(
         let Some(handle) = strict_locator_handle(tab, world, locator, handles)? else {
             return Ok(None);
         };
-        let state = world.element_state(tab, &handle, ElementStateName::Stable);
-        let _ = world.release_handle(tab, &handle);
-        let state = state.map_err(|error| error.to_string())?;
+        let handle = world.wrap_scoped(tab, handle);
+        let state = world
+            .element_state(tab, &handle, ElementStateName::Stable)
+            .map_err(|error| error.to_string())?;
         Ok(injected_state_is_stable(&state).then_some(()))
     }) {
         Ok(()) => StepResult::success(idx, "Element is stable".to_string()),
@@ -7416,7 +7437,7 @@ fn step_get_text(
     idx: usize,
     locator: &BrowserLocator,
 ) -> StepResult {
-    match resolve_element(tab, world, locator) {
+    match resolve_scoped_element(tab, world, locator) {
         Ok(info) => {
             match call_handle_json(tab, world, &info.handle, browser_locators::js_get_text()) {
                 Ok(result) => {
@@ -7437,7 +7458,7 @@ fn step_get_html(
     idx: usize,
     locator: &BrowserLocator,
 ) -> StepResult {
-    match resolve_element(tab, world, locator) {
+    match resolve_scoped_element(tab, world, locator) {
         Ok(info) => {
             match call_handle_json(tab, world, &info.handle, browser_locators::js_get_html()) {
                 Ok(result) => {
@@ -7459,7 +7480,7 @@ fn step_get_attribute(
     locator: &BrowserLocator,
     attribute: &str,
 ) -> StepResult {
-    match resolve_element(tab, world, locator) {
+    match resolve_scoped_element(tab, world, locator) {
         Ok(info) => {
             let js = browser_locators::js_get_attribute(attribute);
             match call_handle_json(tab, world, &info.handle, &js) {
@@ -7654,7 +7675,7 @@ fn step_extract_table(
     locator: &BrowserLocator,
     limit: Option<usize>,
 ) -> StepResult {
-    match resolve_element(tab, world, locator) {
+    match resolve_scoped_element(tab, world, locator) {
         Ok(info) => match call_handle_json(
             tab,
             world,
@@ -8177,7 +8198,7 @@ fn step_screenshot_element(
     options: &BrowserScreenshotOptions,
     policy: &ImagePolicy,
 ) -> StepResult {
-    let info = match resolve_element(tab, world, locator) {
+    let info = match resolve_scoped_element(tab, world, locator) {
         Ok(i) => i,
         Err(e) => return StepResult::failure(idx, "Screenshot element: resolution failed", e),
     };
@@ -8433,53 +8454,86 @@ pub fn run_element_state_sequence<T, F>(
     world: &WorldManager,
     handle: &ElementHandle,
     states: &[BrowserElementState],
-    mut observe: F,
+    observe: F,
 ) -> Result<Vec<(BrowserElementState, T)>, String>
 where
     F: FnMut(BrowserElementState) -> Result<T, String>,
 {
     let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
     let mut mouse = Mouse::new(CdpMouseDispatcher::new(tab), &keyboard);
+    drive_element_state_actions(
+        &mut mouse,
+        element_state_sequence(states),
+        || {
+            CdpMouseDispatcher::new(tab)
+                .clickable_point(handle)
+                .map_err(|error| error.to_string())
+        },
+        |focused| {
+            let script = if focused {
+                browser_locators::js_focus_element()
+            } else {
+                browser_locators::js_blur_element()
+            };
+            call_handle_json(tab, world, handle, &script).map(|_| ())
+        },
+        observe,
+    )
+}
+
+fn drive_element_state_actions<D, K, T, F>(
+    mouse: &mut Mouse<'_, D, K>,
+    actions: impl IntoIterator<Item = ElementStateAction>,
+    mut hover_point: impl FnMut() -> Result<MainFrameCssPoint, String>,
+    mut set_focus: impl FnMut(bool) -> Result<(), String>,
+    mut observe: F,
+) -> Result<Vec<(BrowserElementState, T)>, String>
+where
+    D: MouseDispatcher,
+    K: KeyboardDispatcher,
+    F: FnMut(BrowserElementState) -> Result<T, String>,
+{
     let mut point: Option<MainFrameCssPoint> = None;
     let mut observations = Vec::new();
-    for action in element_state_sequence(states) {
-        match action {
-            ElementStateAction::Hover => {
-                let target = match point {
-                    Some(target) => target,
-                    None => {
-                        let resolved = CdpMouseDispatcher::new(tab)
-                            .clickable_point(handle)
-                            .map_err(|error| error.to_string())?;
-                        point = Some(resolved);
-                        resolved
-                    }
-                };
+    let mut held = false;
+    let mut outcome = Ok(());
+    for action in actions {
+        let step = match action {
+            ElementStateAction::Hover => match point {
+                Some(target) => Ok(target),
+                None => hover_point().inspect(|resolved| point = Some(*resolved)),
+            }
+            .and_then(|target| {
                 mouse
                     .hover(target.x, target.y)
-                    .map_err(|error| error.to_string())?
-            }
+                    .map_err(|error| error.to_string())
+            }),
             ElementStateAction::MoveMouseAway => mouse
                 .move_to(0.0, 0.0, 1)
-                .map_err(|error| error.to_string())?,
+                .map_err(|error| error.to_string()),
             ElementStateAction::PressAndHold => mouse
                 .down(MouseButton::Left, 1)
-                .map_err(|error| error.to_string())?,
+                .map_err(|error| error.to_string())
+                .inspect(|_| held = true),
             ElementStateAction::ReleaseMouse => mouse
                 .up(MouseButton::Left, 1)
-                .map_err(|error| error.to_string())?,
-            ElementStateAction::Focus => {
-                call_handle_json(tab, world, handle, &browser_locators::js_focus_element())
-                    .map(|_| ())?
+                .map_err(|error| error.to_string())
+                .inspect(|_| held = false),
+            ElementStateAction::Focus => set_focus(true),
+            ElementStateAction::Blur => set_focus(false),
+            ElementStateAction::Capture(state) => {
+                observe(state).map(|observed| observations.push((state, observed)))
             }
-            ElementStateAction::Blur => {
-                call_handle_json(tab, world, handle, &browser_locators::js_blur_element())
-                    .map(|_| ())?
-            }
-            ElementStateAction::Capture(state) => observations.push((state, observe(state)?)),
+        };
+        if let Err(error) = step {
+            outcome = Err(error);
+            break;
         }
     }
-    Ok(observations)
+    if held {
+        let _ = mouse.up(MouseButton::Left, 1);
+    }
+    outcome.map(|()| observations)
 }
 
 fn drive_element_states(
@@ -8931,7 +8985,7 @@ fn step_dispatch_event(
     event_type: &str,
     event_init: Option<&Value>,
 ) -> StepResult {
-    let info = match resolve_element(tab, world, locator) {
+    let info = match resolve_scoped_element(tab, world, locator) {
         Ok(info) => info,
         Err(error) => return StepResult::failure(idx, "Dispatch event: resolution failed", error),
     };
@@ -8953,7 +9007,7 @@ fn step_styles(
     locator: &BrowserLocator,
     property_filter: Option<&str>,
 ) -> StepResult {
-    match resolve_element(tab, world, locator) {
+    match resolve_scoped_element(tab, world, locator) {
         Ok(info) => {
             let filter_js = match property_filter {
                 Some(f) if !f.is_empty() => format!(
@@ -9166,7 +9220,7 @@ fn step_highlight(
     label: Option<&str>,
     legacy: bool,
 ) -> StepResult {
-    let info = match resolve_element(tab, world, locator) {
+    let info = match resolve_scoped_element(tab, world, locator) {
         Ok(info) => info,
         Err(error) => return StepResult::failure(idx, "Highlight: resolution failed", error),
     };
@@ -9279,6 +9333,130 @@ mod tests {
 
     const DEAD_TRANSPORT: &str =
         "Unable to make method calls because underlying connection is closed";
+
+    #[derive(Clone, Default)]
+    struct RecordingMouse {
+        events: Arc<Mutex<Vec<(refact_browser::MouseEventType, Option<MouseButton>)>>>,
+    }
+
+    impl MouseDispatcher for RecordingMouse {
+        fn dispatch(&mut self, event: refact_browser::MouseDispatch) -> Result<(), String> {
+            if let refact_browser::MouseDispatch::Mouse(payload) = event {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push((payload.event_type, payload.button));
+            }
+            Ok(())
+        }
+    }
+
+    struct SilentKeyboard;
+
+    impl KeyboardDispatcher for SilentKeyboard {
+        fn dispatch(&mut self, _event: refact_browser::KeyboardDispatch) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn button_events(
+        recorded: &RecordingMouse,
+    ) -> Vec<(refact_browser::MouseEventType, Option<MouseButton>)> {
+        recorded
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(event_type, _)| {
+                matches!(
+                    event_type,
+                    refact_browser::MouseEventType::Pressed
+                        | refact_browser::MouseEventType::Released
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn drive_states<F>(
+        recorded: &RecordingMouse,
+        states: &[BrowserElementState],
+        observe: F,
+    ) -> Result<Vec<(BrowserElementState, ())>, String>
+    where
+        F: FnMut(BrowserElementState) -> Result<(), String>,
+    {
+        let keyboard = Keyboard::new(SilentKeyboard);
+        let mut mouse = Mouse::new(recorded.clone(), &keyboard);
+        drive_element_state_actions(
+            &mut mouse,
+            element_state_sequence(states),
+            || Ok(MainFrameCssPoint { x: 5.0, y: 5.0 }),
+            |_| Ok(()),
+            observe,
+        )
+    }
+
+    #[test]
+    fn a_failed_capture_while_pressed_still_releases_the_mouse_button() {
+        let recorded = RecordingMouse::default();
+        let outcome = drive_states(
+            &recorded,
+            &[BrowserElementState::Active, BrowserElementState::Default],
+            |state| match state {
+                BrowserElementState::Active => Err("screenshot failed".to_string()),
+                _ => Ok(()),
+            },
+        );
+
+        assert_eq!(outcome.unwrap_err(), "screenshot failed");
+        let events = button_events(&recorded);
+        assert_eq!(
+            events,
+            vec![
+                (
+                    refact_browser::MouseEventType::Pressed,
+                    Some(MouseButton::Left)
+                ),
+                (
+                    refact_browser::MouseEventType::Released,
+                    Some(MouseButton::Left)
+                ),
+            ],
+            "a held button must never outlive the failing sequence"
+        );
+    }
+
+    #[test]
+    fn a_completed_sequence_does_not_release_the_button_twice() {
+        let recorded = RecordingMouse::default();
+        let observed = drive_states(
+            &recorded,
+            &[BrowserElementState::Active, BrowserElementState::Default],
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(observed.len(), 2);
+        assert_eq!(
+            button_events(&recorded)
+                .iter()
+                .filter(|(event_type, _)| *event_type == refact_browser::MouseEventType::Released)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_failure_before_the_press_leaves_the_button_untouched() {
+        let recorded = RecordingMouse::default();
+        let outcome = drive_states(&recorded, &[BrowserElementState::Hover], |_| {
+            Err("capture failed".to_string())
+        });
+
+        assert_eq!(outcome.unwrap_err(), "capture failed");
+        assert!(button_events(&recorded).is_empty());
+    }
 
     fn report_with_step_error(error: Option<&str>) -> ExecutionReport {
         let step = match error {

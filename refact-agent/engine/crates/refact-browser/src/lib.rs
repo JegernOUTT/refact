@@ -102,8 +102,8 @@ pub use us_keyboard_layout::{
     KEYPAD_LOCATION, KeyDefinition, KeyDescription, ShiftedKeyDefinition, US_KEYBOARD_LAYOUT,
 };
 pub use world::{
-    BINDING_NAME, BindingCall, BindingCallback, INJECTED_INSTANCE_NAME, UTILITY_WORLD_NAME,
-    WorldManager,
+    BINDING_NAME, BindingCall, BindingCallback, HandleReleaser, INJECTED_INSTANCE_NAME,
+    ScopedHandle, TabHandleReleaser, TabScopedHandle, UTILITY_WORLD_NAME, WorldManager,
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, hash_map::DefaultHasher};
@@ -122,7 +122,8 @@ use uuid::Uuid;
 use refact_chat_api::WindowBounds;
 use refact_integrations::browser_types::{
     RecorderEvent, ConsoleEntry, NetworkEntry, MutationSummaryEntry, MAX_BUFFER_SIZE,
-    SCROLL_DEBOUNCE_MS, apply_password_masking, enforce_buffer_limit, flush_buffer_since,
+    SCROLL_DEBOUNCE_MS, apply_password_masking, enforce_buffer_limit, enforce_buffer_limit_for,
+    flush_buffer_since,
 };
 
 const FRAME_RATE_LIMIT_MS: u128 = 500;
@@ -347,9 +348,12 @@ impl BrowserBuffers {
                     }
                     _ => {
                         self.action_buffer.push(event);
-                        enforce_buffer_limit(
+                        enforce_buffer_limit_for(
                             &mut self.action_buffer,
-                            &mut self.last_send_action_cursor,
+                            &mut [
+                                &mut self.last_send_action_cursor,
+                                &mut self.last_timeline_action_cursor,
+                            ],
                         );
                     }
                 }
@@ -1566,6 +1570,9 @@ pub fn setup_network_capture(
                 Some(event.params.parent_frame_id.clone()),
             ),
             Event::PageFrameDetached(event) => monitor.detach_frame(&event.params.frame_id),
+            Event::PageFrameNavigated(event) if event.params.frame.parent_id.is_none() => {
+                websocket_registry.top_level_navigation(event_tab.get_target_id());
+            }
             _ => {}
         }
         let completed = monitor.drain_completed();
@@ -2209,6 +2216,38 @@ mod tests {
             ));
         }
         assert_eq!(buf.action_buffer.len(), MAX_BUFFER_SIZE);
+    }
+
+    #[test]
+    fn action_overflow_rewinds_every_action_cursor_not_just_the_send_cursor() {
+        let mut buf = make_test_buffers();
+        for i in 0..MAX_BUFFER_SIZE {
+            buf.handle_recorder_event(&format!(
+                r##"{{"type":"click","selector":"#btn","text":"OK","x":{},"y":0,"timestamp":{}}}"##,
+                i, i
+            ));
+        }
+        assert_eq!(buf.flush_action_buffer().len(), MAX_BUFFER_SIZE);
+        assert_eq!(buf.flush_timeline_events().0.len(), MAX_BUFFER_SIZE);
+        assert_eq!(buf.last_send_action_cursor, MAX_BUFFER_SIZE);
+        assert_eq!(buf.last_timeline_action_cursor, MAX_BUFFER_SIZE);
+
+        let overflow = 25;
+        for i in 0..overflow {
+            buf.handle_recorder_event(&format!(
+                r##"{{"type":"click","selector":"#late","text":"OK","x":{},"y":0,"timestamp":{}}}"##,
+                i, i
+            ));
+        }
+        assert_eq!(buf.action_buffer.len(), MAX_BUFFER_SIZE);
+        assert_eq!(buf.last_send_action_cursor, MAX_BUFFER_SIZE - overflow);
+        assert_eq!(
+            buf.last_timeline_action_cursor,
+            MAX_BUFFER_SIZE - overflow,
+            "a stale timeline cursor would silently drop the newest actions"
+        );
+        assert_eq!(buf.flush_timeline_events().0.len(), overflow);
+        assert_eq!(buf.flush_action_buffer().len(), overflow);
     }
 
     #[test]

@@ -215,10 +215,17 @@ pub fn current_wall_ms() -> i64 {
 }
 
 #[derive(Default)]
+struct TabClockScripts {
+    bootstrap: Page::ScriptIdentifier,
+    replay: Option<Page::ScriptIdentifier>,
+}
+
+#[derive(Default)]
 pub struct ClockManager {
     state: ClockState,
-    scripts: Vec<String>,
-    tab_scripts: HashMap<String, Vec<Page::ScriptIdentifier>>,
+    installed: bool,
+    replay_log: Vec<String>,
+    tab_scripts: HashMap<String, TabClockScripts>,
 }
 
 impl ClockManager {
@@ -243,7 +250,8 @@ impl ClockManager {
             ));
         }
         self.ensure_bootstrap(tabs)?;
-        self.push_script(tabs, clock_log_script(&op, at_ms))?;
+        self.replay_log.push(clock_log_script(&op, at_ms));
+        self.refresh_replay_script(tabs)?;
         let call = clock_call_script(&op);
         for tab in tabs {
             evaluate_main_world(tab, &call)?;
@@ -253,24 +261,30 @@ impl ClockManager {
     }
 
     pub fn apply_to_tab(&mut self, tab: &Tab) -> Result<(), String> {
-        if self.scripts.is_empty() {
+        if !self.installed {
             return Ok(());
         }
         let target_id = tab.get_target_id().to_string();
         if self.tab_scripts.contains_key(&target_id) {
             return Ok(());
         }
-        let mut identifiers = Vec::with_capacity(self.scripts.len());
-        for source in &self.scripts {
-            identifiers.push(add_init_script(tab, source)?);
-            evaluate_main_world(tab, source)?;
-        }
-        self.tab_scripts.insert(target_id, identifiers);
+        let bootstrap = add_init_script(tab, CLOCK_SOURCE)?;
+        evaluate_main_world(tab, CLOCK_SOURCE)?;
+        let replay = match self.replay_source() {
+            Some(source) => {
+                let identifier = add_init_script(tab, &source)?;
+                evaluate_main_world(tab, &source)?;
+                Some(identifier)
+            }
+            None => None,
+        };
+        self.tab_scripts
+            .insert(target_id, TabClockScripts { bootstrap, replay });
         Ok(())
     }
 
     pub fn reset(&mut self, tabs: &[Arc<Tab>]) -> Result<bool, String> {
-        if self.scripts.is_empty() {
+        if !self.installed {
             self.tab_scripts.clear();
             self.state = ClockState::default();
             return Ok(false);
@@ -278,13 +292,10 @@ impl ClockManager {
         let uninstall = clock_uninstall_script();
         let mut first_error = None;
         for tab in tabs {
-            if let Some(identifiers) = self.tab_scripts.get(tab.get_target_id()) {
-                for identifier in identifiers {
-                    if let Err(error) = tab.call_method(Page::RemoveScriptToEvaluateOnNewDocument {
-                        identifier: identifier.clone(),
-                    }) {
-                        first_error
-                            .get_or_insert(format!("Failed to remove clock init script: {error}"));
+            if let Some(scripts) = self.tab_scripts.get(tab.get_target_id()) {
+                for identifier in std::iter::once(&scripts.bootstrap).chain(scripts.replay.iter()) {
+                    if let Err(error) = remove_init_script(tab, identifier) {
+                        first_error.get_or_insert(error);
                     }
                 }
             }
@@ -292,7 +303,8 @@ impl ClockManager {
                 first_error.get_or_insert(error);
             }
         }
-        self.scripts.clear();
+        self.installed = false;
+        self.replay_log.clear();
         self.tab_scripts.clear();
         self.state = ClockState::default();
         match first_error {
@@ -302,26 +314,53 @@ impl ClockManager {
     }
 
     fn ensure_bootstrap(&mut self, tabs: &[Arc<Tab>]) -> Result<(), String> {
-        if !self.scripts.is_empty() {
+        if self.installed {
             return Ok(());
         }
-        self.push_script(tabs, CLOCK_SOURCE.to_string())?;
         for tab in tabs {
+            let bootstrap = add_init_script(tab, CLOCK_SOURCE)?;
             evaluate_main_world(tab, CLOCK_SOURCE)?;
+            self.tab_scripts.insert(
+                tab.get_target_id().to_string(),
+                TabClockScripts {
+                    bootstrap,
+                    replay: None,
+                },
+            );
+        }
+        self.installed = true;
+        Ok(())
+    }
+
+    fn refresh_replay_script(&mut self, tabs: &[Arc<Tab>]) -> Result<(), String> {
+        let Some(source) = self.replay_source() else {
+            return Ok(());
+        };
+        for tab in tabs {
+            let identifier = add_init_script(tab, &source)?;
+            let stale = self
+                .tab_scripts
+                .entry(tab.get_target_id().to_string())
+                .or_default()
+                .replay
+                .replace(identifier);
+            if let Some(stale) = stale {
+                remove_init_script(tab, &stale)?;
+            }
         }
         Ok(())
     }
 
-    fn push_script(&mut self, tabs: &[Arc<Tab>], source: String) -> Result<(), String> {
-        for tab in tabs {
-            let identifier = add_init_script(tab, &source)?;
-            self.tab_scripts
-                .entry(tab.get_target_id().to_string())
-                .or_default()
-                .push(identifier);
-        }
-        self.scripts.push(source);
-        Ok(())
+    fn replay_source(&self) -> Option<String> {
+        (!self.replay_log.is_empty()).then(|| self.replay_log.join(";\n"))
+    }
+
+    #[cfg(test)]
+    fn script_count(&self, target_id: &str) -> usize {
+        self.tab_scripts
+            .get(target_id)
+            .map(|scripts| 1 + usize::from(scripts.replay.is_some()))
+            .unwrap_or(0)
     }
 }
 
@@ -338,6 +377,14 @@ fn add_init_script(tab: &Tab, source: &str) -> Result<Page::ScriptIdentifier, St
     tab.call_method(clock_init_script(source))
         .map(|response| response.identifier)
         .map_err(|error| format!("Failed to install clock init script: {error}"))
+}
+
+fn remove_init_script(tab: &Tab, identifier: &Page::ScriptIdentifier) -> Result<(), String> {
+    tab.call_method(Page::RemoveScriptToEvaluateOnNewDocument {
+        identifier: identifier.clone(),
+    })
+    .map(|_| ())
+    .map_err(|error| format!("Failed to remove clock init script: {error}"))
 }
 
 fn evaluate_main_world(tab: &Tab, expression: &str) -> Result<(), String> {
@@ -595,6 +642,91 @@ mod tests {
         assert!(!manager.is_paused());
         assert_eq!(manager.reset(&[]).unwrap(), false);
         assert_eq!(manager.state(), ClockState::default());
+    }
+
+    #[test]
+    fn every_op_collapses_into_a_single_replay_script_per_tab() {
+        let mut manager = ClockManager::default();
+        manager.installed = true;
+        manager.tab_scripts.insert(
+            "tab".to_string(),
+            TabClockScripts {
+                bootstrap: "bootstrap-1".to_string(),
+                replay: None,
+            },
+        );
+        assert_eq!(manager.script_count("tab"), 1);
+        assert_eq!(manager.replay_source(), None);
+
+        let ops = [
+            ClockOp::Install { time_ms: 1_000 },
+            ClockOp::FastForward { ticks_ms: 500 },
+            ClockOp::PauseAt { time_ms: 2_000 },
+            ClockOp::Resume,
+            ClockOp::SetFixedTime { time_ms: 3_000 },
+        ];
+        let mut stale = Vec::new();
+        for (index, op) in ops.iter().cycle().take(40).enumerate() {
+            manager.replay_log.push(clock_log_script(op, index as i64));
+            let source = manager.replay_source().unwrap();
+            if let Some(previous) = manager
+                .tab_scripts
+                .get_mut("tab")
+                .unwrap()
+                .replay
+                .replace(format!("replay-{index}"))
+            {
+                stale.push(previous);
+            }
+            assert_eq!(
+                manager.script_count("tab"),
+                2,
+                "op {index} must not add another init script"
+            );
+            assert_eq!(source.lines().count(), index + 1);
+        }
+        assert_eq!(
+            stale.len(),
+            39,
+            "each op after the first retires one script"
+        );
+        assert_eq!(stale.last().unwrap(), "replay-38");
+
+        let source = manager.replay_source().unwrap();
+        for op in ops {
+            assert!(source.contains(op.method()), "{} is replayed", op.method());
+        }
+    }
+
+    #[test]
+    fn an_adopted_tab_registers_the_bootstrap_plus_the_current_replay_only() {
+        let mut manager = ClockManager::default();
+        assert_eq!(manager.replay_source(), None);
+        manager.installed = true;
+        for (index, op) in [
+            ClockOp::Install { time_ms: 10 },
+            ClockOp::FastForward { ticks_ms: 20 },
+            ClockOp::PauseAt { time_ms: 30 },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            manager.replay_log.push(clock_log_script(&op, index as i64));
+        }
+        manager.tab_scripts.insert(
+            "adopted".to_string(),
+            TabClockScripts {
+                bootstrap: "bootstrap-adopted".to_string(),
+                replay: Some("replay-adopted".to_string()),
+            },
+        );
+        assert_eq!(manager.script_count("adopted"), 2);
+        assert_eq!(manager.replay_source().unwrap().lines().count(), 3);
+
+        manager.installed = false;
+        manager.replay_log.clear();
+        manager.tab_scripts.clear();
+        assert_eq!(manager.script_count("adopted"), 0);
     }
 
     #[test]

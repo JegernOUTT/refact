@@ -230,6 +230,26 @@ impl RefRegistry {
         let tab = state.tabs.entry(target_id.to_string()).or_default();
         tab.document_generation = tab.document_generation.saturating_add(1);
         tab.frame_generation = tab.frame_generation.saturating_add(1);
+        tab.known_refs = tab
+            .latest
+            .as_ref()
+            .map(|snapshot| snapshot.refs.keys().cloned().collect())
+            .unwrap_or_default();
+    }
+
+    pub fn tab_closed(&self, target_id: &str) {
+        self.state.lock().unwrap().tabs.remove(target_id);
+    }
+
+    #[cfg(test)]
+    fn known_ref_count(&self, target_id: &str) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .tabs
+            .get(target_id)
+            .map(|tab| tab.known_refs.len())
+            .unwrap_or(0)
     }
 
     pub fn ref_prefix(&self, target_id: &str) -> Option<String> {
@@ -424,6 +444,67 @@ mod tests {
             ),
             "refs outside the scoped subtree go stale, not generation-mismatched"
         );
+    }
+
+    #[test]
+    fn navigation_trims_known_refs_to_the_previous_generation() {
+        let registry = RefRegistry::default();
+        let first: Ref = "e1".parse().unwrap();
+        let second: Ref = "e2".parse().unwrap();
+        let third: Ref = "e3".parse().unwrap();
+        registry.replace_snapshot("tab", HashMap::from([(first.clone(), info("First"))]));
+        registry.replace_snapshot("tab", HashMap::from([(second.clone(), info("Second"))]));
+        assert_eq!(registry.known_ref_count("tab"), 2);
+
+        registry.top_level_navigation("tab");
+        assert_eq!(
+            registry.known_ref_count("tab"),
+            1,
+            "only the generation being left stays addressable for stale reporting"
+        );
+
+        registry.replace_snapshot("tab", HashMap::from([(third.clone(), info("Third"))]));
+        assert!(
+            matches!(
+                registry.resolve_current("tab", &second),
+                Err(RefError::Stale { .. })
+            ),
+            "the previous generation's refs still report as stale, not unknown"
+        );
+        assert!(matches!(
+            registry.resolve_current("tab", &first),
+            Err(RefError::Unknown { .. })
+        ));
+        assert_eq!(
+            registry.resolve_current("tab", &third).unwrap(),
+            info("Third")
+        );
+    }
+
+    #[test]
+    fn repeated_navigation_does_not_grow_the_known_ref_set() {
+        let registry = RefRegistry::default();
+        for generation in 0..50u64 {
+            let reference: Ref = format!("e{}", generation + 1).parse().unwrap();
+            registry.replace_snapshot("tab", HashMap::from([(reference, info("Row"))]));
+            registry.top_level_navigation("tab");
+        }
+        assert_eq!(registry.known_ref_count("tab"), 1);
+    }
+
+    #[test]
+    fn closing_a_tab_drops_its_generation_store() {
+        let registry = RefRegistry::default();
+        let reference: Ref = "e1".parse().unwrap();
+        registry.replace_snapshot("tab", HashMap::from([(reference.clone(), info("Save"))]));
+        registry.top_level_navigation("tab");
+        registry.tab_closed("tab");
+        assert_eq!(registry.known_ref_count("tab"), 0);
+        assert_eq!(registry.ref_prefix("tab"), None);
+        assert!(matches!(
+            registry.resolve_current("tab", &reference),
+            Err(RefError::Unknown { .. })
+        ));
     }
 
     #[test]

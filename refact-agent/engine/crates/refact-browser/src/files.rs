@@ -226,11 +226,44 @@ struct TrackedDownload {
     reported: bool,
 }
 
+const RETAINED_TERMINAL_DOWNLOADS: usize = 50;
+
 #[derive(Default)]
 struct DownloadTrackerState {
     sequence: u64,
     downloads: Vec<TrackedDownload>,
     indexes: HashMap<String, usize>,
+}
+
+impl DownloadTrackerState {
+    fn prune_terminal(&mut self) {
+        let terminal = self
+            .downloads
+            .iter()
+            .filter(|download| is_terminal(&download.info.state))
+            .count();
+        if terminal <= RETAINED_TERMINAL_DOWNLOADS {
+            return;
+        }
+        let mut droppable = terminal - RETAINED_TERMINAL_DOWNLOADS;
+        self.downloads.retain(|download| {
+            if droppable == 0 || !is_terminal(&download.info.state) {
+                return true;
+            }
+            droppable -= 1;
+            false
+        });
+        self.indexes = self
+            .downloads
+            .iter()
+            .enumerate()
+            .map(|(index, download)| (download.info.guid.clone(), index))
+            .collect();
+    }
+}
+
+fn is_terminal(state: &DownloadState) -> bool {
+    matches!(state, DownloadState::Completed | DownloadState::Canceled)
 }
 
 #[derive(Default)]
@@ -252,6 +285,7 @@ impl DownloadTracker {
         local_path: String,
     ) {
         let mut state = self.state.lock().unwrap();
+        state.prune_terminal();
         state.sequence += 1;
         let sequence = state.sequence;
         let index = state.downloads.len();
@@ -293,7 +327,11 @@ impl DownloadTracker {
                 .clone()
                 .unwrap_or(CANCELED_REASON.to_string())
         });
+        let terminal = is_terminal(&state);
         download.state = state;
+        if terminal {
+            tracker.prune_terminal();
+        }
     }
 
     pub fn latest_active(&self) -> Option<String> {
@@ -322,13 +360,7 @@ impl DownloadTracker {
             .unwrap()
             .downloads
             .iter()
-            .find(|download| {
-                download.sequence > cursor
-                    && matches!(
-                        download.info.state,
-                        DownloadState::Completed | DownloadState::Canceled
-                    )
-            })
+            .find(|download| download.sequence > cursor && is_terminal(&download.info.state))
             .map(|download| download.info.clone())
     }
 
@@ -338,12 +370,7 @@ impl DownloadTracker {
             .downloads
             .iter_mut()
             .filter_map(|download| {
-                if download.reported
-                    || !matches!(
-                        download.info.state,
-                        DownloadState::Completed | DownloadState::Canceled
-                    )
-                {
+                if download.reported || !is_terminal(&download.info.state) {
                     return None;
                 }
                 download.reported = true;
@@ -612,6 +639,85 @@ mod tests {
             multiple,
             webkitdirectory: false,
         }
+    }
+
+    fn begin_download(tracker: &DownloadTracker, guid: &str) {
+        tracker.begin(
+            guid.to_string(),
+            format!("https://example.test/{guid}"),
+            "frame".to_string(),
+            format!("{guid}.bin"),
+            format!("/tmp/{guid}.bin"),
+        );
+    }
+
+    fn tracked_guids(tracker: &DownloadTracker) -> Vec<String> {
+        tracker
+            .state
+            .lock()
+            .unwrap()
+            .downloads
+            .iter()
+            .map(|download| download.info.guid.clone())
+            .collect()
+    }
+
+    #[test]
+    fn terminal_downloads_are_pruned_to_the_retained_window() {
+        let tracker = DownloadTracker::default();
+        for index in 0..(RETAINED_TERMINAL_DOWNLOADS + 20) {
+            let guid = format!("done-{index}");
+            begin_download(&tracker, &guid);
+            tracker.progress(&guid, 4, 4, DownloadState::Completed);
+        }
+        let retained = tracked_guids(&tracker);
+        assert_eq!(retained.len(), RETAINED_TERMINAL_DOWNLOADS);
+        assert_eq!(retained.first().unwrap(), "done-20");
+        assert_eq!(retained.last().unwrap(), "done-69");
+    }
+
+    #[test]
+    fn pruning_keeps_active_downloads_and_a_consistent_index_map() {
+        let tracker = DownloadTracker::default();
+        begin_download(&tracker, "still-running");
+        for index in 0..(RETAINED_TERMINAL_DOWNLOADS + 5) {
+            let guid = format!("done-{index}");
+            begin_download(&tracker, &guid);
+            tracker.progress(&guid, 1, 1, DownloadState::Completed);
+        }
+        let retained = tracked_guids(&tracker);
+        assert!(retained.contains(&"still-running".to_string()));
+        assert_eq!(tracker.latest_active().as_deref(), Some("still-running"));
+
+        let state = tracker.state.lock().unwrap();
+        for (guid, index) in &state.indexes {
+            assert_eq!(&state.downloads[*index].info.guid, guid);
+        }
+        assert_eq!(state.indexes.len(), state.downloads.len());
+        drop(state);
+
+        tracker.progress("done-54", 9, 9, DownloadState::Canceled);
+        assert_eq!(
+            tracker
+                .mark_canceled("still-running", "aborted")
+                .map(|info| info.guid)
+                .as_deref(),
+            Some("still-running")
+        );
+    }
+
+    #[test]
+    fn pruning_preserves_wait_cursor_semantics_for_the_retained_window() {
+        let tracker = DownloadTracker::default();
+        begin_download(&tracker, "first");
+        tracker.progress("first", 1, 1, DownloadState::Completed);
+        let cursor = tracker.cursor();
+        begin_download(&tracker, "second");
+        tracker.progress("second", 1, 1, DownloadState::Completed);
+        assert_eq!(
+            tracker.completed_after(cursor).map(|info| info.guid),
+            Some("second".to_string())
+        );
     }
 
     #[test]

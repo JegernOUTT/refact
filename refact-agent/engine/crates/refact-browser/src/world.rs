@@ -14,6 +14,56 @@ pub const INJECTED_INSTANCE_NAME: &str = "__refact_injected__";
 
 pub type BindingCallback = Arc<dyn Fn(BindingCall) + Send + Sync>;
 
+pub trait HandleReleaser {
+    fn release_scoped(&self, handle: &ElementHandle);
+}
+
+#[derive(Clone, Copy)]
+pub struct TabHandleReleaser<'a> {
+    world: &'a WorldManager,
+    tab: &'a Tab,
+}
+
+impl HandleReleaser for TabHandleReleaser<'_> {
+    fn release_scoped(&self, handle: &ElementHandle) {
+        let _ = self.world.release_handle(self.tab, handle);
+    }
+}
+
+pub struct ScopedHandle<R: HandleReleaser> {
+    releaser: R,
+    handle: Option<ElementHandle>,
+}
+
+pub type TabScopedHandle<'a> = ScopedHandle<TabHandleReleaser<'a>>;
+
+impl<R: HandleReleaser> ScopedHandle<R> {
+    pub fn new(releaser: R, handle: ElementHandle) -> Self {
+        Self {
+            releaser,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl<R: HandleReleaser> std::ops::Deref for ScopedHandle<R> {
+    type Target = ElementHandle;
+
+    fn deref(&self) -> &Self::Target {
+        self.handle
+            .as_ref()
+            .expect("scoped element handle is only cleared while dropping")
+    }
+}
+
+impl<R: HandleReleaser> Drop for ScopedHandle<R> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.releaser.release_scoped(&handle);
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct BindingCall {
     pub tab_target_id: String,
@@ -53,6 +103,27 @@ impl WorldManager {
             .entry(name.into())
             .or_default()
             .push(callback);
+    }
+
+    pub fn wrap_scoped<'a>(&'a self, tab: &'a Tab, handle: ElementHandle) -> TabScopedHandle<'a> {
+        ScopedHandle::new(TabHandleReleaser { world: self, tab }, handle)
+    }
+
+    pub fn wrap_scoped_all<'a>(
+        &'a self,
+        tab: &'a Tab,
+        handles: Vec<ElementHandle>,
+    ) -> Vec<TabScopedHandle<'a>> {
+        handles
+            .into_iter()
+            .map(|handle| self.wrap_scoped(tab, handle))
+            .collect()
+    }
+
+    pub fn tab_closed(&self, target_id: &str) {
+        self.handles.contexts_cleared(target_id);
+        self.refs.tab_closed(target_id);
+        self.state.lock().unwrap().tabs.remove(target_id);
     }
 
     pub fn ensure_utility_world(&self, tab: &Tab) -> Result<Runtime::ExecutionContextId, String> {
@@ -1027,6 +1098,87 @@ mod tests {
 
     const TAB: &str = "tab";
     const FRAME: &str = "frame";
+
+    #[derive(Clone, Default)]
+    struct RecordingReleaser {
+        released: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl HandleReleaser for RecordingReleaser {
+        fn release_scoped(&self, handle: &ElementHandle) {
+            self.released.lock().unwrap().push(handle.object_id.clone());
+        }
+    }
+
+    fn element(object_id: &str) -> ElementHandle {
+        ElementHandle {
+            object_id: object_id.to_string(),
+            backend_node_id: Some(1),
+            context_id: 7,
+            frame_id: FRAME.to_string(),
+        }
+    }
+
+    #[test]
+    fn scoped_handle_releases_once_when_it_leaves_scope() {
+        let releaser = RecordingReleaser::default();
+        {
+            let scoped = ScopedHandle::new(releaser.clone(), element("object-1"));
+            assert_eq!(scoped.object_id, "object-1");
+            assert!(releaser.released.lock().unwrap().is_empty());
+        }
+        assert_eq!(*releaser.released.lock().unwrap(), vec!["object-1"]);
+    }
+
+    #[test]
+    fn scoped_handle_releases_while_unwinding_a_panic() {
+        let releaser = RecordingReleaser::default();
+        let panicking = releaser.clone();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _scoped = ScopedHandle::new(panicking, element("object-panic"));
+            panic!("step failed before an explicit release");
+        }));
+        assert!(outcome.is_err());
+        assert_eq!(*releaser.released.lock().unwrap(), vec!["object-panic"]);
+    }
+
+    #[test]
+    fn early_return_from_a_guarded_vector_releases_every_handle() {
+        let releaser = RecordingReleaser::default();
+        let read_second = |scoped: &[ScopedHandle<RecordingReleaser>]| -> Result<(), String> {
+            for handle in scoped {
+                if handle.object_id == "object-2" {
+                    return Err("read failed".to_string());
+                }
+            }
+            Ok(())
+        };
+        let outcome = {
+            let scoped = ["object-1", "object-2", "object-3"]
+                .into_iter()
+                .map(|object_id| ScopedHandle::new(releaser.clone(), element(object_id)))
+                .collect::<Vec<_>>();
+            read_second(&scoped)
+        };
+        assert!(outcome.is_err());
+        assert_eq!(
+            *releaser.released.lock().unwrap(),
+            vec!["object-1", "object-2", "object-3"]
+        );
+    }
+
+    #[test]
+    fn closing_a_tab_forgets_its_world_and_ref_state() {
+        let manager = WorldManager::default();
+        manager.context_created(TAB, 7, UTILITY_WORLD_NAME);
+        manager.record_context(TAB, FRAME.to_string(), 7);
+        manager.refs.top_level_navigation(TAB);
+        assert_eq!(manager.refs.ref_prefix(TAB).as_deref(), Some("f1"));
+        manager.tab_closed(TAB);
+        assert_eq!(manager.context_for_frame(TAB, &FRAME.to_string()), None);
+        assert!(manager.frame_tree(TAB).is_none());
+        assert_eq!(manager.refs.ref_prefix(TAB), None);
+    }
 
     #[test]
     fn created_then_recorded_context_is_tracked() {

@@ -142,6 +142,20 @@ impl WebSocketRegistry {
         self.state.lock().unwrap().routes.len()
     }
 
+    pub fn top_level_navigation(&self, tab_target_id: &str) -> usize {
+        let mut state = self.state.lock().unwrap();
+        let previous = state.routed_sockets.len();
+        state
+            .routed_sockets
+            .retain(|_, socket| socket.tab_target_id != tab_target_id);
+        previous - state.routed_sockets.len()
+    }
+
+    #[cfg(test)]
+    fn routed_socket_count(&self) -> usize {
+        self.state.lock().unwrap().routed_sockets.len()
+    }
+
     pub fn cursor(&self) -> u64 {
         self.state.lock().unwrap().sequence
     }
@@ -803,6 +817,63 @@ mod tests {
             &json!({"type": "created", "id": "route-1", "url": url, "protocols": protocols}),
         );
         registry.take_commands();
+    }
+
+    #[test]
+    fn top_level_navigation_drops_only_the_navigating_tabs_routed_sockets() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        );
+        for (tab, route) in [
+            ("tab-1", "route-1"),
+            ("tab-1", "route-2"),
+            ("tab-2", "route-3"),
+        ] {
+            registry.handle_page_event(
+                tab,
+                &json!({"type": "created", "id": route, "url": "ws://127.0.0.1:9/ws-echo", "protocols": []}),
+            );
+        }
+        registry.take_commands();
+        assert_eq!(registry.routed_socket_count(), 3);
+
+        assert_eq!(registry.top_level_navigation("tab-1"), 2);
+        assert_eq!(registry.routed_socket_count(), 1);
+        assert_eq!(
+            registry.send_to_page(&pattern, "still routed").unwrap(),
+            1,
+            "the untouched tab keeps its routed socket"
+        );
+
+        assert_eq!(
+            registry.top_level_navigation("tab-1"),
+            0,
+            "navigating again cannot remove what is already gone"
+        );
+    }
+
+    #[test]
+    fn repeated_navigation_keeps_the_routed_socket_map_bounded() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        );
+        for document in 0..100 {
+            registry.handle_page_event(
+                "tab-1",
+                &json!({"type": "created", "id": format!("route-{document}"), "url": "ws://127.0.0.1:9/ws-echo", "protocols": []}),
+            );
+            registry.take_commands();
+            registry.top_level_navigation("tab-1");
+            assert_eq!(registry.routed_socket_count(), 0);
+        }
     }
 
     #[test]

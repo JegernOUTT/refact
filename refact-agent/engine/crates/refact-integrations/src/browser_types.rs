@@ -184,10 +184,17 @@ pub fn apply_password_masking(event: &RecorderEvent) -> RecorderEvent {
 }
 
 pub fn enforce_buffer_limit<T>(buffer: &mut Vec<T>, cursor: &mut usize) {
-    if buffer.len() > MAX_BUFFER_SIZE {
-        let excess = buffer.len() - MAX_BUFFER_SIZE;
-        buffer.drain(..excess);
-        *cursor = cursor.saturating_sub(excess);
+    enforce_buffer_limit_for(buffer, &mut [cursor]);
+}
+
+pub fn enforce_buffer_limit_for<T>(buffer: &mut Vec<T>, cursors: &mut [&mut usize]) {
+    if buffer.len() <= MAX_BUFFER_SIZE {
+        return;
+    }
+    let excess = buffer.len() - MAX_BUFFER_SIZE;
+    buffer.drain(..excess);
+    for cursor in cursors {
+        **cursor = cursor.saturating_sub(excess);
     }
 }
 

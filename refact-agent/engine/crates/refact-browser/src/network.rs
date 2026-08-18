@@ -202,6 +202,7 @@ struct NetworkMonitor {
     active: HashMap<String, TrackedRequest>,
     request_extra: HashMap<String, BTreeMap<String, String>>,
     response_extra: HashMap<String, BTreeMap<String, String>>,
+    response_extra_order: VecDeque<String>,
     completed: Vec<NetworkEntry>,
     requests: VecDeque<SequencedEntry>,
     responses: VecDeque<SequencedEntry>,
@@ -217,6 +218,7 @@ impl Default for NetworkMonitor {
             active: HashMap::new(),
             request_extra: HashMap::new(),
             response_extra: HashMap::new(),
+            response_extra_order: VecDeque::new(),
             completed: Vec::new(),
             requests: VecDeque::new(),
             responses: VecDeque::new(),
@@ -344,8 +346,20 @@ impl NetworkMonitor {
     fn record_response_extra(&mut self, request_id: String, headers: BTreeMap<String, String>) {
         if let Some(request) = self.active.get_mut(&request_id) {
             request.entry.response_headers = mask_headers(headers);
-        } else {
-            self.response_extra.insert(request_id, headers);
+            return;
+        }
+        if self
+            .response_extra
+            .insert(request_id.clone(), headers)
+            .is_none()
+        {
+            self.response_extra_order.push_back(request_id);
+        }
+        while self.response_extra_order.len() > RECENT_EVENT_CAP {
+            let Some(stale) = self.response_extra_order.pop_front() else {
+                break;
+            };
+            self.response_extra.remove(&stale);
         }
     }
 
@@ -807,6 +821,42 @@ mod tests {
             request_start: Some(10.1),
             response_start: Some(10.5),
         }
+    }
+
+    #[test]
+    fn orphan_response_headers_stay_capped_at_the_recent_event_ring() {
+        let monitor = NetworkMonitorHandle::default();
+        for index in 0..(RECENT_EVENT_CAP + 250) {
+            monitor.response_extra(
+                format!("orphan-{index}"),
+                BTreeMap::from([("x-trace".to_string(), index.to_string())]),
+            );
+        }
+        let state = monitor.state.lock().unwrap();
+        assert_eq!(state.response_extra.len(), RECENT_EVENT_CAP);
+        assert_eq!(state.response_extra_order.len(), RECENT_EVENT_CAP);
+        assert!(!state.response_extra.contains_key("orphan-0"));
+        assert!(state
+            .response_extra
+            .contains_key(&format!("orphan-{}", RECENT_EVENT_CAP + 249)));
+    }
+
+    #[test]
+    fn retained_orphan_headers_are_still_adopted_by_a_late_response() {
+        let monitor = NetworkMonitorHandle::default();
+        monitor.response_extra(
+            "req-1".to_string(),
+            BTreeMap::from([("x-trace".to_string(), "kept".to_string())]),
+        );
+        monitor.request_started(request("req-1", "frame", "https://example.com/a", "xhr"));
+        monitor.response_received(response("req-1", 200, BTreeMap::new()));
+
+        let state = monitor.state.lock().unwrap();
+        assert_eq!(
+            state.active["req-1"].entry.response_headers["x-trace"],
+            "kept"
+        );
+        assert!(!state.response_extra.contains_key("req-1"));
     }
 
     #[test]
