@@ -20,14 +20,14 @@ use refact_browser::{
     ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
     ActionabilityExecutionMode, ActionabilityTimeouts, CDP_INLINE_RESULT_LIMIT_BYTES,
     CdpDragObserver, CdpGuardrail, CdpKeyboardDispatcher, CdpMouseDispatcher, ClockOp,
-    DEFAULT_DISMISS_OVERLAYS_HANDLER, ElementHandle, ExpectPollResult, FUNCTION_POLL_BACKOFF_MS,
-    HitTargetController, HitTargetPoint, HitTargetResult, Keyboard, LocatorGenerationOptions,
-    LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation, LocatorHandlerProbe,
-    LocatorHandlerRegistry, LocatorOutcome, MainFrameCssPoint, Mouse, MouseButton, MouseState,
-    NetworkLoadState, NetworkMonitorHandle, NetworkWaitFilters, Ref, ScrollStrategy,
-    SnapshotMode, SnapshotOptions, SystemClock, UrlMatcher, WebSocketRegistry, WorldManager,
-    apply_network_report_mode, classify_cdp_command, current_wall_ms, parse_clock_ticks,
-    parse_clock_time, redact_cdp_result, required_states,
+    DEFAULT_DISMISS_OVERLAYS_HANDLER, ElementHandle, ElementStateName, ExpectPollResult,
+    FUNCTION_POLL_BACKOFF_MS, HitTargetController, HitTargetPoint, HitTargetResult, Keyboard,
+    LocatorGenerationOptions, LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation,
+    LocatorHandlerProbe, LocatorHandlerRegistry, LocatorOutcome, MainFrameCssPoint, Mouse,
+    MouseButton, MouseState, NetworkLoadState, NetworkMonitorHandle, NetworkWaitFilters, Ref,
+    ScrollStrategy, SnapshotMode, SnapshotOptions, SystemClock, UrlMatcher, WebSocketRegistry,
+    WorldManager, apply_network_report_mode, classify_cdp_command, current_wall_ms,
+    parse_clock_ticks, parse_clock_time, redact_cdp_result, required_states,
 };
 use refact_browser::artifacts::{
     ComposeLayout, ElementStateAction, ScreenshotMetrics, compose_sheet, element_state_sequence,
@@ -2577,6 +2577,74 @@ async fn relaunch_and_resolve(
         .ok_or_else(|| format!("Relaunched BrowserRuntime {} disappeared", runtime_id))
 }
 
+struct PendingPopupWait {
+    step_index: usize,
+    result_index: usize,
+    deadline: Instant,
+    timeout_ms: u64,
+    baseline: std::collections::BTreeSet<String>,
+}
+
+impl PendingPopupWait {
+    fn arm(
+        step_index: usize,
+        result_index: usize,
+        timeout_ms: Option<u64>,
+        baseline: std::collections::BTreeSet<String>,
+    ) -> Self {
+        let timeout_ms = clamp_timeout_ms(timeout_ms);
+        Self {
+            step_index,
+            result_index,
+            deadline: Instant::now() + Duration::from_millis(timeout_ms),
+            timeout_ms,
+            baseline,
+        }
+    }
+}
+
+fn popup_wait_conflict(armed_step_index: Option<usize>) -> Option<String> {
+    armed_step_index.map(|index| format!("a popup wait is already armed at step {index}"))
+}
+
+fn popup_wait_opened_result(step_index: usize, tab_id: &str) -> StepResult {
+    StepResult::success(step_index, format!("Popup opened: {tab_id}"))
+        .with_data(serde_json::json!({"tab_id": tab_id}))
+}
+
+fn popup_wait_timeout_result(step_index: usize, timeout_ms: u64) -> StepResult {
+    StepResult::failure(
+        step_index,
+        "Wait for popup",
+        format!("Timed out after {timeout_ms}ms"),
+    )
+}
+
+#[derive(Default)]
+struct TabManagementSections {
+    new_tabs: Vec<TabInfo>,
+    intercepted_requests: Vec<RouteInterception>,
+    locator_handlers: Vec<LocatorHandlerFiring>,
+    dialogs: Vec<DialogInfo>,
+    uploads: Vec<UploadInfo>,
+    downloads: Vec<DownloadInfo>,
+    websockets: Vec<WebSocketEvent>,
+}
+
+impl TabManagementSections {
+    fn absorb(&mut self, report: ExecutionReport) -> Option<StepResult> {
+        self.new_tabs.extend(report.new_tabs);
+        self.intercepted_requests
+            .extend(report.intercepted_requests);
+        self.locator_handlers.extend(report.locator_handlers);
+        self.dialogs.extend(report.dialogs);
+        self.uploads.extend(report.uploads);
+        self.downloads.extend(report.downloads);
+        self.websockets.extend(report.websockets);
+        report.steps.into_iter().next()
+    }
+}
+
 pub async fn execute_request_with_runtime(
     runtime_arc: Arc<AMutex<BrowserRuntime>>,
     request: BrowserActionRequest,
@@ -2662,10 +2730,10 @@ pub async fn execute_request_with_runtime(
     let mut results: Vec<StepResult> = Vec::new();
     let mut locator_handlers = Vec::new();
     let mut all_ok = true;
-    let mut pending_popup_wait: Option<(usize, Instant, u64, std::collections::BTreeSet<String>)> =
-        None;
+    let mut pending_popup_wait: Option<PendingPopupWait> = None;
     let mut new_tabs = Vec::new();
     let mut routed_requests = Vec::new();
+    let mut nested_sections = TabManagementSections::default();
     for (idx, step) in request.steps.iter().enumerate() {
         let step_tab_ids = runtime_arc.lock().await.known_tab_ids();
         if let Some(tab) = &current_tab {
@@ -2673,14 +2741,19 @@ pub async fn execute_request_with_runtime(
         }
         let file_chooser_was_armed = file_chooser_manager.is_armed();
         let mut result = if let BrowserStep::WaitForPopup { timeout_ms } = step {
-            let baseline = runtime_arc.lock().await.known_tab_ids();
-            pending_popup_wait = Some((
-                results.len(),
-                Instant::now(),
-                clamp_timeout_ms(*timeout_ms),
-                baseline,
-            ));
-            StepResult::success(idx, "Armed popup wait")
+            match popup_wait_conflict(pending_popup_wait.as_ref().map(|wait| wait.step_index)) {
+                Some(error) => StepResult::failure(idx, "Wait for popup", error),
+                None => {
+                    let baseline = runtime_arc.lock().await.known_tab_ids();
+                    pending_popup_wait = Some(PendingPopupWait::arm(
+                        idx,
+                        results.len(),
+                        *timeout_ms,
+                        baseline,
+                    ));
+                    StepResult::success(idx, "Armed popup wait")
+                }
+            }
         } else if let BrowserStep::WaitForDownload {
             timeout_ms,
             save_as,
@@ -2842,9 +2915,11 @@ pub async fn execute_request_with_runtime(
                 rt.touch();
                 current_tab = rt.get_active_tab();
             }
-            new_tabs.extend(step_report.new_tabs);
-            routed_requests.extend(step_report.intercepted_requests);
-            step_report.steps.into_iter().next().unwrap_or_else(|| {
+            let nested_step = nested_sections.absorb(step_report);
+            new_tabs.append(&mut nested_sections.new_tabs);
+            routed_requests.append(&mut nested_sections.intercepted_requests);
+            locator_handlers.append(&mut nested_sections.locator_handlers);
+            nested_step.unwrap_or_else(|| {
                 StepResult::failure(idx, "Browser action", "No step result produced")
             })
         } else {
@@ -2927,8 +3002,7 @@ pub async fn execute_request_with_runtime(
             && !is_tab_management_step(step);
         if !matches!(step, BrowserStep::WaitForPopup { .. }) {
             if resolves_popup_wait {
-                let (result_index, started, timeout_ms, baseline) = pending_popup_wait.unwrap();
-                let deadline = started + Duration::from_millis(timeout_ms);
+                let wait = pending_popup_wait.take().unwrap();
                 let popup = loop {
                     let popup = {
                         let mut rt = runtime_arc.lock().await;
@@ -2936,7 +3010,7 @@ pub async fn execute_request_with_runtime(
                         let popup_id = rt
                             .list_tab_infos()
                             .into_iter()
-                            .find(|tab| !baseline.contains(&tab.id))
+                            .find(|tab| !wait.baseline.contains(&tab.id))
                             .map(|tab| tab.id);
                         popup_id.and_then(|tab_id| {
                             rt.tab_opened_by_step.entry(tab_id.clone()).or_insert(idx);
@@ -2947,29 +3021,24 @@ pub async fn execute_request_with_runtime(
                     if let Some(tab) = popup {
                         break Some(tab);
                     }
-                    if Instant::now() >= deadline {
+                    if Instant::now() >= wait.deadline {
                         break None;
                     }
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 };
-                pending_popup_wait = None;
                 match popup {
                     Some(tab) => {
                         new_tabs.push(tab.clone());
-                        if let Some(wait_result) = results.get_mut(result_index) {
-                            wait_result.summary = format!("Popup opened: {}", tab.id);
-                            wait_result.data = Some(serde_json::json!({"tab_id": tab.id}));
+                        if let Some(wait_result) = results.get_mut(wait.result_index) {
+                            *wait_result = popup_wait_opened_result(wait.step_index, &tab.id);
                         }
                         let rt = runtime_arc.lock().await;
                         current_tab = rt.get_active_tab();
                     }
                     None => {
-                        if let Some(wait_result) = results.get_mut(result_index) {
-                            *wait_result = StepResult::failure(
-                                wait_result.step_index,
-                                "Wait for popup",
-                                format!("Timed out after {timeout_ms}ms"),
-                            );
+                        if let Some(wait_result) = results.get_mut(wait.result_index) {
+                            *wait_result =
+                                popup_wait_timeout_result(wait.step_index, wait.timeout_ms);
                         }
                         all_ok = false;
                     }
@@ -3018,13 +3087,9 @@ pub async fn execute_request_with_runtime(
         }
     }
 
-    if let Some((result_index, _, timeout_ms, _)) = pending_popup_wait.take() {
-        if let Some(wait_result) = results.get_mut(result_index) {
-            *wait_result = StepResult::failure(
-                wait_result.step_index,
-                "Wait for popup",
-                format!("Timed out after {timeout_ms}ms"),
-            );
+    if let Some(wait) = pending_popup_wait.take() {
+        if let Some(wait_result) = results.get_mut(wait.result_index) {
+            *wait_result = popup_wait_timeout_result(wait.step_index, wait.timeout_ms);
         }
         all_ok = false;
     }
@@ -3128,10 +3193,14 @@ pub async fn execute_request_with_runtime(
             .collect();
         console.retain(|entry| entry.level != "page_error");
         let network = rt.flush_report_network();
-        let websockets = rt.websocket_registry.drain_report();
-        let dialogs = rt.dialog_manager.take_reports();
-        let uploads = rt.file_chooser_manager.take_uploads();
-        let downloads = rt.download_monitor.take_report();
+        let mut websockets = nested_sections.websockets;
+        websockets.extend(rt.websocket_registry.drain_report());
+        let mut dialogs = nested_sections.dialogs;
+        dialogs.extend(rt.dialog_manager.take_reports());
+        let mut uploads = nested_sections.uploads;
+        uploads.extend(rt.file_chooser_manager.take_uploads());
+        let mut downloads = nested_sections.downloads;
+        downloads.extend(rt.download_monitor.take_report());
         let active_routes = rt.route_registry.list();
         routed_requests.extend(rt.route_registry.drain_interceptions());
         (
@@ -3246,6 +3315,36 @@ async fn validate_upload_path(gcx: Arc<GlobalContext>, path: &str) -> Result<(),
     Ok(())
 }
 
+fn resolve_pending_popup(
+    runtime: &mut BrowserRuntime,
+    wait: &PendingPopupWait,
+    step_index: usize,
+) -> Option<TabInfo> {
+    loop {
+        refact_browser::adopt_new_tabs(runtime, Some(step_index));
+        let popup_id = runtime
+            .list_tab_infos()
+            .into_iter()
+            .find(|tab| !wait.baseline.contains(&tab.id))
+            .map(|tab| tab.id);
+        if let Some(tab_id) = popup_id {
+            runtime
+                .tab_opened_by_step
+                .entry(tab_id.clone())
+                .or_insert(step_index);
+            runtime.set_active_tab_target_id(tab_id.clone());
+            return runtime
+                .list_tab_infos()
+                .into_iter()
+                .find(|tab| tab.id == tab_id);
+        }
+        if Instant::now() >= wait.deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 pub fn execute_steps_with_runtime(
     runtime: &mut BrowserRuntime,
     steps: &[BrowserStep],
@@ -3263,6 +3362,7 @@ pub fn execute_steps_with_runtime(
     let handlers = runtime.locator_handlers.clone();
     let mut locator_handlers = Vec::new();
     let mut all_ok = true;
+    let mut pending_popup_wait: Option<PendingPopupWait> = None;
     let mut pre_step_url: Option<String> = current_tab.as_ref().map(|t| t.get_url());
     let armed_download_waits = steps
         .iter()
@@ -3289,30 +3389,9 @@ pub fn execute_steps_with_runtime(
                         )
                     {
                         let _ = new_tab.close(false);
-                        return ExecutionReport {
-                            ok: false,
-
-                            steps: vec![StepResult::failure(idx, "OpenTab", error)],
-                            warnings: Vec::new(),
-                            url: current_tab.as_ref().map(|tab| tab.get_url()),
-                            title: current_tab.as_ref().and_then(|tab| tab.get_title().ok()),
-                            page: None,
-                            stabilized: false,
-                            console: vec![],
-                            page_errors: vec![],
-                            network: vec![],
-                            network_summary: vec![],
-                            websockets: runtime.websocket_registry.drain_report(),
-                            locator_handlers,
-                            dialogs: runtime.dialog_manager.take_reports(),
-                            uploads: runtime.file_chooser_manager.take_uploads(),
-                            downloads: runtime.download_monitor.take_report(),
-                            new_tabs,
-                            active_routes: runtime.route_registry.list(),
-                            intercepted_requests: runtime.route_registry.drain_interceptions(),
-                            context: Some(context_summary(runtime)),
-                            screenshot: None,
-                        };
+                        all_ok = false;
+                        results.push(StepResult::failure(idx, "OpenTab", error));
+                        break;
                     }
                     let navigation = url.as_ref().map(|url| {
                         run_and_wait_for_navigation(&new_tab, DEFAULT_WAIT_TIMEOUT_MS, || {
@@ -3452,28 +3531,25 @@ pub fn execute_steps_with_runtime(
                 execute_context_management_step(runtime, step, idx)
             }
             BrowserStep::WaitForPopup { timeout_ms } => {
-                let before = runtime.known_tab_ids();
-                let timeout_ms = clamp_timeout_ms(*timeout_ms);
-                let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-                loop {
-                    let adopted = refact_browser::adopt_new_tabs(runtime, Some(idx));
-                    if let Some(tab) = adopted.into_iter().find(|tab| !before.contains(&tab.id)) {
-                        runtime.set_active_tab_target_id(tab.id.clone());
-                        current_tab = runtime.get_active_tab();
-                        new_tabs.push(tab.clone());
-                        break StepResult::success(idx, format!("Popup opened: {}", tab.id))
-                            .with_data(serde_json::json!({"tab_id": tab.id}));
-                    }
-                    if Instant::now() >= deadline {
-                        break StepResult::failure(
+                match popup_wait_conflict(pending_popup_wait.as_ref().map(|wait| wait.step_index)) {
+                    Some(error) => StepResult::failure(idx, "Wait for popup", error),
+                    None => {
+                        pending_popup_wait = Some(PendingPopupWait::arm(
                             idx,
-                            "Wait for popup",
-                            format!("Timed out after {timeout_ms}ms"),
-                        );
+                            results.len(),
+                            *timeout_ms,
+                            runtime.known_tab_ids(),
+                        ));
+                        StepResult::success(idx, "Armed popup wait")
                     }
-                    std::thread::sleep(Duration::from_millis(25));
                 }
             }
+            BrowserStep::WaitForNetworkIdle { timeout_ms } => wait_for_load_state(
+                &runtime.network_monitor,
+                idx,
+                BrowserLoadState::Networkidle,
+                clamp_timeout_ms(*timeout_ms),
+            ),
             BrowserStep::HandleDialog {
                 accept,
                 prompt_text,
@@ -3607,6 +3683,28 @@ pub fn execute_steps_with_runtime(
             },
         };
 
+        let resolves_popup_wait = pending_popup_wait.is_some()
+            && !matches!(step, BrowserStep::WaitForPopup { .. })
+            && !is_tab_management_step(step);
+        if resolves_popup_wait {
+            let wait = pending_popup_wait.take().unwrap();
+            match resolve_pending_popup(runtime, &wait, idx) {
+                Some(tab) => {
+                    current_tab = runtime.get_active_tab();
+                    new_tabs.push(tab.clone());
+                    if let Some(wait_result) = results.get_mut(wait.result_index) {
+                        *wait_result = popup_wait_opened_result(wait.step_index, &tab.id);
+                    }
+                }
+                None => {
+                    if let Some(wait_result) = results.get_mut(wait.result_index) {
+                        *wait_result = popup_wait_timeout_result(wait.step_index, wait.timeout_ms);
+                    }
+                    all_ok = false;
+                }
+            }
+        }
+
         let is_non_fatal = is_non_fatal_step(step);
         if !result.ok && !is_non_fatal {
             all_ok = false;
@@ -3619,22 +3717,34 @@ pub fn execute_steps_with_runtime(
             }
         }
         pre_step_url = current_tab.as_ref().map(|t| t.get_url());
-        if result.ok
-            && matches!(
-                step,
-                BrowserStep::Click { .. } | BrowserStep::ClickIfExists { .. }
-            )
-        {
-            new_tabs.extend(refact_browser::wait_for_new_tabs(
-                runtime,
-                &step_tab_ids,
-                Some(idx),
-                Duration::from_millis(500),
-            ));
-        } else {
-            new_tabs.extend(refact_browser::adopt_new_tabs(runtime, Some(idx)));
+        if !resolves_popup_wait && pending_popup_wait.is_none() {
+            if result.ok
+                && matches!(
+                    step,
+                    BrowserStep::Click { .. } | BrowserStep::ClickIfExists { .. }
+                )
+            {
+                new_tabs.extend(refact_browser::wait_for_new_tabs(
+                    runtime,
+                    &step_tab_ids,
+                    Some(idx),
+                    Duration::from_millis(500),
+                ));
+            } else {
+                new_tabs.extend(refact_browser::adopt_new_tabs(runtime, Some(idx)));
+            }
         }
         results.push(result);
+        if !all_ok {
+            break;
+        }
+    }
+
+    if let Some(wait) = pending_popup_wait.take() {
+        if let Some(wait_result) = results.get_mut(wait.result_index) {
+            *wait_result = popup_wait_timeout_result(wait.step_index, wait.timeout_ms);
+        }
+        all_ok = false;
     }
 
     let (url, title) = match &current_tab {
@@ -7143,6 +7253,13 @@ fn step_wait_for_element_hidden(
     }
 }
 
+fn injected_state_is_stable(state: &Value) -> bool {
+    state
+        .get("stable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn step_wait_for_element_stable(
     tab: &Tab,
     world: &WorldManager,
@@ -7150,23 +7267,14 @@ fn step_wait_for_element_stable(
     locator: &BrowserLocator,
     timeout_ms: u64,
 ) -> StepResult {
-    let mut previous = None;
     match poll_locator_until(tab, world, locator, timeout_ms, |handles| {
         let Some(handle) = strict_locator_handle(tab, world, locator, handles)? else {
-            previous = None;
             return Ok(None);
         };
-        let bbox = world.call_function_on(
-            tab,
-            &handle,
-            "function() { const r = this.getBoundingClientRect(); return {x: r.x, y: r.y, w: r.width, h: r.height}; }",
-            Vec::new(),
-        );
+        let state = world.element_state(tab, &handle, ElementStateName::Stable);
         let _ = world.release_handle(tab, &handle);
-        let bbox = bbox.map_err(|error| error.to_string())?;
-        let stable = previous.as_ref() == Some(&bbox);
-        previous = Some(bbox);
-        Ok(stable.then_some(()))
+        let state = state.map_err(|error| error.to_string())?;
+        Ok(injected_state_is_stable(&state).then_some(()))
     }) {
         Ok(()) => StepResult::success(idx, "Element is stable".to_string()),
         Err(error) => StepResult::failure(idx, "Wait for element stable", error),
@@ -7200,7 +7308,7 @@ fn step_wait_seconds(idx: usize, seconds: f64) -> StepResult {
     StepResult::success(idx, format!("Waited {:.1}s", seconds))
 }
 
-const NETWORK_IDLE_WINDOW_MS: u64 = 500;
+const NETWORK_IDLE_WINDOW_MS: u64 = refact_browser::NETWORK_IDLE_MS;
 
 const NETWORK_INFLIGHT_TRACKER_JS: &str = r#"(function() {
   if (window.__refact_inflight_installed) return;
@@ -9204,6 +9312,151 @@ mod tests {
             context: None,
             screenshot: None,
         }
+    }
+
+    fn section<T: serde::de::DeserializeOwned>(value: Value) -> Vec<T> {
+        vec![serde_json::from_value(value).unwrap()]
+    }
+
+    fn nested_tab_management_report() -> ExecutionReport {
+        let mut report = report_with_steps(vec![StepResult::success(0, "Opened new desktop tab")]);
+        report.new_tabs = section(serde_json::json!({
+            "id": "popup",
+            "target_id": "popup",
+            "url": "https://example.test/popup",
+            "title": "Popup",
+            "active": true,
+        }));
+        report.intercepted_requests = section(serde_json::json!({
+            "url": "https://example.test/api",
+            "method": "GET",
+            "pattern": "**/api",
+            "action": "fulfill",
+        }));
+        report.locator_handlers = section(serde_json::json!({
+            "name": "dismiss_overlays",
+            "action": "dismiss_overlays",
+            "outcome": "dismissed 1 overlay",
+            "ok": true,
+        }));
+        report.dialogs = section(serde_json::json!({
+            "type": "confirm",
+            "message": "Leave?",
+            "default_value": "",
+            "action": "accepted",
+            "automatic": true,
+        }));
+        report.uploads = section(serde_json::json!({
+            "paths": ["/tmp/report.pdf"],
+            "source": "file_chooser",
+            "in_memory_payloads": false,
+        }));
+        report.downloads = section(serde_json::json!({
+            "guid": "download-1",
+            "url": "https://example.test/report.pdf",
+            "frame_id": "frame-1",
+            "suggested_filename": "report.pdf",
+            "local_path": "/tmp/report.pdf",
+            "received_bytes": 10,
+            "total_bytes": 10,
+            "state": "completed",
+        }));
+        report.websockets = section(serde_json::json!({
+            "sequence": 1,
+            "socket_id": "socket-1",
+            "url": "wss://example.test/live",
+            "kind": "frame_received",
+        }));
+        report
+    }
+
+    #[test]
+    fn arming_a_popup_wait_while_one_is_pending_fails_that_step() {
+        assert_eq!(popup_wait_conflict(None), None);
+        assert_eq!(
+            popup_wait_conflict(Some(3)).as_deref(),
+            Some("a popup wait is already armed at step 3")
+        );
+    }
+
+    #[test]
+    fn popup_wait_arming_clamps_the_timeout_and_remembers_the_armed_step() {
+        let armed = PendingPopupWait::arm(
+            4,
+            2,
+            Some(MAX_WAIT_TIMEOUT_MS + 1_000),
+            std::collections::BTreeSet::new(),
+        );
+        assert_eq!(armed.step_index, 4);
+        assert_eq!(armed.result_index, 2);
+        assert_eq!(armed.timeout_ms, MAX_WAIT_TIMEOUT_MS);
+
+        let defaulted = PendingPopupWait::arm(0, 0, None, std::collections::BTreeSet::new());
+        assert_eq!(defaulted.timeout_ms, DEFAULT_WAIT_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn popup_wait_outcomes_report_the_armed_step_index() {
+        let opened = popup_wait_opened_result(1, "tab-9");
+        assert!(opened.ok);
+        assert_eq!(opened.step_index, 1);
+        assert_eq!(opened.summary, "Popup opened: tab-9");
+        assert_eq!(opened.data.unwrap()["tab_id"], "tab-9");
+
+        let timed_out = popup_wait_timeout_result(1, 5_000);
+        assert!(!timed_out.ok);
+        assert_eq!(timed_out.step_index, 1);
+        assert_eq!(timed_out.error.as_deref(), Some("Timed out after 5000ms"));
+    }
+
+    #[test]
+    fn nested_tab_management_reports_merge_every_section() {
+        let nested = nested_tab_management_report();
+        let mut sections = TabManagementSections::default();
+        let step = sections.absorb(nested.clone()).unwrap();
+
+        assert_eq!(step.summary, "Opened new desktop tab");
+        assert_eq!(sections.new_tabs, nested.new_tabs);
+        assert_eq!(sections.intercepted_requests, nested.intercepted_requests);
+        assert_eq!(sections.locator_handlers, nested.locator_handlers);
+        assert_eq!(sections.dialogs, nested.dialogs);
+        assert_eq!(sections.uploads, nested.uploads);
+        assert_eq!(sections.downloads, nested.downloads);
+        assert_eq!(sections.websockets, nested.websockets);
+    }
+
+    #[test]
+    fn absorbing_two_nested_reports_keeps_every_section_in_order() {
+        let mut sections = TabManagementSections::default();
+        sections.absorb(nested_tab_management_report()).unwrap();
+        sections.absorb(nested_tab_management_report()).unwrap();
+
+        assert_eq!(sections.new_tabs.len(), 2);
+        assert_eq!(sections.intercepted_requests.len(), 2);
+        assert_eq!(sections.locator_handlers.len(), 2);
+        assert_eq!(sections.dialogs.len(), 2);
+        assert_eq!(sections.uploads.len(), 2);
+        assert_eq!(sections.downloads.len(), 2);
+        assert_eq!(sections.websockets.len(), 2);
+    }
+
+    #[test]
+    fn element_stability_is_read_from_the_injected_predicate() {
+        assert!(injected_state_is_stable(&serde_json::json!({
+            "stable": true,
+            "matches": true
+        })));
+        assert!(!injected_state_is_stable(&serde_json::json!({
+            "stable": false,
+            "unstable": "deadline",
+            "matches": false
+        })));
+        assert!(!injected_state_is_stable(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn the_injected_idle_window_matches_the_network_monitor_definition() {
+        assert_eq!(NETWORK_IDLE_WINDOW_MS, refact_browser::NETWORK_IDLE_MS);
     }
 
     #[test]

@@ -3622,6 +3622,65 @@ async fn switch_tab_retargets_later_steps() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn wait_for_popup_defers_until_a_later_step_in_the_runtime_batch_path() {
+    let Some(mut case) = BrowserCase::start("popup.html").await else {
+        return;
+    };
+    case.setup_world();
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::WaitForPopup {
+                timeout_ms: Some(5_000),
+            },
+            BrowserStep::Click {
+                locator: BrowserLocator::css("#open"),
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(report.ok, "runtime popup batch failed: {report:?}");
+    assert_eq!(report.new_tabs.len(), 1);
+    assert_eq!(
+        report.steps[0].data.as_ref().unwrap()["tab_id"],
+        report.new_tabs[0].id
+    );
+    assert_eq!(
+        report.steps[0].summary,
+        format!("Popup opened: {}", report.new_tabs[0].id)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn arming_a_second_popup_wait_fails_in_the_runtime_batch_path() {
+    let Some(mut case) = BrowserCase::start("popup.html").await else {
+        return;
+    };
+    case.setup_world();
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::WaitForPopup {
+                timeout_ms: Some(1_000),
+            },
+            BrowserStep::WaitForPopup {
+                timeout_ms: Some(1_000),
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(!report.ok, "second popup arm should fail: {report:?}");
+    assert_eq!(
+        report.steps[1].error.as_deref(),
+        Some("a popup wait is already armed at step 0")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn wait_for_popup_click_and_popup_action_share_one_batch() {
     let Some(mut case) = BrowserCase::start("popup.html").await else {
         return;

@@ -91,8 +91,8 @@ pub use mouse::{
     ScrollStrategy, TouchEventPayload, TouchEventType, clickable_point_from_quads,
 };
 pub use network::{
-    NetworkLoadState, NetworkMonitorHandle, NetworkWaitFilters, RequestStarted, ResponseReceived,
-    UrlMatcher, apply_network_report_mode, mask_text, summarize_network_entry,
+    NETWORK_IDLE_MS, NetworkLoadState, NetworkMonitorHandle, NetworkWaitFilters, RequestStarted,
+    ResponseReceived, UrlMatcher, apply_network_report_mode, mask_text, summarize_network_entry,
 };
 pub use websocket::{WebSocketRegistry, install_websocket_router};
 pub use refs::{ElementHandleInfo, Ref, RefError, RefParseError, RefRegistry, SnapshotGeneration};
