@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,11 +15,90 @@ lazy_static::lazy_static! {
 }
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+const PROVIDER_FILE_LOCK_TIMEOUT_SECS: u64 = 30;
+
+pub struct ProviderFileLock {
+    file: File,
+}
+
+impl Drop for ProviderFileLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
 
 pub fn provider_config_path(config_dir: &Path, instance_id: &str) -> PathBuf {
     config_dir
         .join("providers.d")
         .join(format!("{}.yaml", instance_id))
+}
+
+pub async fn lock_provider_oauth_file(
+    config_dir: &Path,
+    instance_id: &str,
+) -> Result<ProviderFileLock, String> {
+    lock_provider_file(config_dir, instance_id, "oauth").await
+}
+
+async fn lock_provider_config_file(
+    config_dir: &Path,
+    instance_id: &str,
+) -> Result<ProviderFileLock, String> {
+    lock_provider_file(config_dir, instance_id, "config").await
+}
+
+async fn lock_provider_file(
+    config_dir: &Path,
+    instance_id: &str,
+    purpose: &str,
+) -> Result<ProviderFileLock, String> {
+    validate_provider_instance_id(instance_id)?;
+    let lock_path = config_dir
+        .join("providers.d")
+        .join(format!(".{instance_id}.{purpose}.lock"));
+    tokio::fs::create_dir_all(
+        lock_path
+            .parent()
+            .ok_or_else(|| "Provider lock path has no parent directory".to_string())?,
+    )
+    .await
+    .map_err(|error| format!("Failed to create provider lock directory: {error}"))?;
+
+    tokio::task::spawn_blocking(move || {
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&lock_path)
+            .map_err(|error| format!("Failed to open provider lock: {error}"))?;
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(PROVIDER_FILE_LOCK_TIMEOUT_SECS);
+        loop {
+            match fs2::FileExt::try_lock_exclusive(&file) {
+                Ok(()) => return Ok(ProviderFileLock { file }),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err(format!(
+                        "Provider lock timed out after {PROVIDER_FILE_LOCK_TIMEOUT_SECS}s"
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!("Failed to lock provider state: {error}"));
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|error| format!("Provider lock task failed: {error}"))?
 }
 
 fn provider_config_lock(path: &Path) -> Arc<AMutex<()>> {
@@ -109,6 +189,7 @@ pub async fn write_provider_config(
     let path = provider_config_path(config_dir, instance_id);
     let lock = provider_config_lock(&path);
     let _guard = lock.lock().await;
+    let _file_guard = lock_provider_config_file(config_dir, instance_id).await?;
     write_provider_config_value(&path, &settings).await
 }
 
@@ -117,6 +198,7 @@ pub async fn delete_provider_config(config_dir: &Path, instance_id: &str) -> Res
     let path = provider_config_path(config_dir, instance_id);
     let lock = provider_config_lock(&path);
     let _guard = lock.lock().await;
+    let _file_guard = lock_provider_config_file(config_dir, instance_id).await?;
     match tokio::fs::remove_file(&path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -138,6 +220,9 @@ where
     let path = provider_config_path(config_dir, instance_id);
     let lock = provider_config_lock(&path);
     let _guard = lock.lock().await;
+    let _file_guard = lock_provider_config_file(config_dir, instance_id)
+        .await
+        .map_err(&map_store_error)?;
     let existing = match read_provider_config_value(&path).await {
         Ok(existing) => existing,
         Err(error) => {
@@ -182,10 +267,59 @@ where
     let path = provider_config_path(config_dir, instance_id);
     let lock = provider_config_lock(&path);
     let _guard = lock.lock().await;
+    let _file_guard = lock_provider_config_file(config_dir, instance_id).await?;
     let existing = read_provider_config_value(&path).await?;
     let Some(updated) = update(existing)? else {
         return Ok(None);
     };
     write_provider_config_value(&path, &updated).await?;
     Ok(Some(updated))
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn oauth_file_lock_serializes_concurrent_process_handles() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let first = super::lock_provider_oauth_file(config_dir.path(), "claude_code")
+            .await
+            .unwrap();
+        let path = config_dir.path().to_path_buf();
+        let second = tokio::spawn(async move {
+            super::lock_provider_oauth_file(&path, "claude_code")
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!second.is_finished());
+        drop(first);
+        let second = tokio::time::timeout(std::time::Duration::from_secs(2), second)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn config_updates_wait_for_cross_process_file_lock() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let first = super::lock_provider_config_file(config_dir.path(), "claude_code")
+            .await
+            .unwrap();
+        let path = config_dir.path().to_path_buf();
+        let update = tokio::spawn(async move {
+            super::update_provider_config(&path, "claude_code", |_| {
+                Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+            })
+            .await
+            .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!update.is_finished());
+        drop(first);
+        tokio::time::timeout(std::time::Duration::from_secs(2), update)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }

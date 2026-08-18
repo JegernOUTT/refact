@@ -29,6 +29,7 @@ lazy_static = "1.4.0"
 chrono = { version = "0.4.31", features = ["serde"] }
 which = "7.0.2"
 home = "0.5"
+fs2 = "0.4.3"
 
 [dev-dependencies]
 tempfile = "3.8"

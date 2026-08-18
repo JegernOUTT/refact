@@ -625,6 +625,22 @@ pub async fn handle_v1_provider_get(
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
+    let is_claude_code = {
+        let registry = gcx.providers.read().await;
+        registry
+            .get(&params.name)
+            .is_some_and(|provider| provider.base_provider_name() == "claude_code")
+    };
+    if is_claude_code {
+        if let Err(error) = crate::providers::oauth_refresh::refresh_claude_code_instance_if_needed(
+            &gcx,
+            &params.name,
+        )
+        .await
+        {
+            tracing::warn!("Claude Code provider refresh before settings load failed: {error}");
+        }
+    }
     let (registry_provider, config_dir) = {
         let registry = gcx.providers.read().await;
         (
@@ -876,6 +892,15 @@ pub async fn handle_v1_provider_delete(
             OpenAICodexProvider::lock_refresh_guard()
                 .await
                 .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?,
+        )
+    } else {
+        None
+    };
+    let _claude_code_oauth_file_guard = if base_provider == "claude_code" {
+        Some(
+            config_store::lock_provider_oauth_file(&config_dir, &params.name)
+                .await
+                .map_err(|error| ScratchError::new(StatusCode::CONFLICT, error))?,
         )
     } else {
         None
@@ -3377,6 +3402,15 @@ async fn save_provider_oauth_tokens(
     } else {
         None
     };
+    let _claude_code_oauth_file_guard = if base_provider == "claude_code" {
+        Some(
+            config_store::lock_provider_oauth_file(config_dir, provider_name)
+                .await
+                .map_err(|error| ScratchError::new(StatusCode::CONFLICT, error))?,
+        )
+    } else {
+        None
+    };
     config_store::update_provider_config_with(
         config_dir,
         provider_name,
@@ -3713,6 +3747,54 @@ oauth_tokens:
         assert_eq!(body["display_name"], "Work OpenAI");
         assert_eq!(body["settings"]["base_provider"], "openai");
         assert_eq!(body["settings"]["display_name"], "Work OpenAI");
+    }
+
+    #[tokio::test]
+    async fn provider_get_adopts_claude_tokens_refreshed_by_another_worker() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let config_dir = gcx.config_dir.clone();
+        let providers_dir = config_dir.join("providers.d");
+        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
+        tokio::fs::write(
+            providers_dir.join("claude_code.yaml"),
+            "oauth_tokens:\n  access_token: fresh-access\n  refresh_token: fresh-refresh\n  expires_at: 9223372036854775807\nenabled_models:\n  - claude-sonnet-4-6\n",
+        )
+        .await
+        .unwrap();
+        let provider = ClaudeCodeProvider {
+            enabled: true,
+            enabled_models: vec!["claude-sonnet-4-6".to_string()],
+            oauth_tokens: crate::providers::claude_code_oauth::OAuthTokens {
+                access_token: "stale-access".to_string(),
+                refresh_token: "stale-refresh".to_string(),
+                expires_at: 1,
+            },
+            ..Default::default()
+        };
+        {
+            let mut registry = gcx.providers.write().await;
+            registry.add(Box::new(provider));
+        }
+
+        let response = handle_v1_provider_get(
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
+            Path(ProviderPathParams {
+                name: "claude_code".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        let body = response_json(response).await;
+
+        assert_eq!(body["settings"]["oauth_connected"], true);
+        assert_eq!(body["settings"]["auth_status"], "OK (OAuth login)");
+        let registry = gcx.providers.read().await;
+        let provider = registry.get("claude_code").unwrap();
+        let provider = provider
+            .as_any()
+            .downcast_ref::<ClaudeCodeProvider>()
+            .unwrap();
+        assert_eq!(provider.oauth_tokens.access_token, "fresh-access");
     }
 
     #[tokio::test]
