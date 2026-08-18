@@ -31,7 +31,7 @@ mod tool_ast_definition;
 pub mod tool_background_agents;
 mod tool_card_comment;
 mod tool_cat;
-mod tool_chrome;
+pub mod tool_chrome;
 mod tool_clean_background_processes;
 #[cfg(test)]
 pub mod tool_cmdline;

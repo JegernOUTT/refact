@@ -1901,6 +1901,11 @@ pub enum BrowserStep {
         locator: BrowserLocator,
         text: String,
     },
+
+    Help {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        topic: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2231,6 +2236,7 @@ impl BrowserStep {
         "highlight",
         "hide_highlight",
         "annotate",
+        "help",
     ];
 }
 
@@ -3391,7 +3397,29 @@ mod tests {
                 locator: locator(),
                 text: "Review".to_string(),
             },
+            BrowserStep::Help {
+                topic: Some("routes".to_string()),
+            },
         ]
+    }
+
+    #[test]
+    fn help_topic_is_optional_and_omitted_from_the_wire_when_unset() {
+        let bare: BrowserStep =
+            serde_json::from_value(serde_json::json!({"action": "help"})).unwrap();
+        assert!(matches!(bare, BrowserStep::Help { topic: None }));
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({"action": "help"})
+        );
+
+        let scoped: BrowserStep =
+            serde_json::from_value(serde_json::json!({"action": "help", "topic": "locators"}))
+                .unwrap();
+        assert!(matches!(
+            scoped,
+            BrowserStep::Help { topic: Some(ref topic) } if topic == "locators"
+        ));
     }
 
     #[test]

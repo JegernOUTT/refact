@@ -3522,6 +3522,11 @@ pub fn execute_steps_with_runtime(
             BrowserStep::AddInitScript { .. } | BrowserStep::RemoveInitScript { .. } => {
                 execute_init_script_step(runtime, step, idx)
             }
+            BrowserStep::Help { topic } => {
+                StepResult::success(idx, "chrome help").with_data(serde_json::json!({
+                    "text": crate::tools::tool_chrome::chrome_help_text(topic.as_deref()),
+                }))
+            }
             other => match &current_tab {
                 Some(tab) => {
                     let chooser_was_armed = runtime.file_chooser_manager.is_armed();
@@ -4725,6 +4730,11 @@ fn execute_single_step(
         BrowserStep::HideHighlight => step_hide_highlight(tab, world, idx),
         BrowserStep::Annotate { locator, text } => {
             step_highlight(tab, world, idx, locator, None, Some(text), false)
+        }
+        BrowserStep::Help { topic } => {
+            StepResult::success(idx, "chrome help").with_data(serde_json::json!({
+                "text": crate::tools::tool_chrome::chrome_help_text(topic.as_deref()),
+            }))
         }
         BrowserStep::ClockInstall { .. }
         | BrowserStep::ClockFastForward { .. }

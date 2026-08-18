@@ -124,61 +124,82 @@ pub struct ToolChrome {
 
 const MAX_CACHED_LOG_LINES: usize = 1000;
 
-const LOCATOR_HANDLER_STEP_ACTIONS: &[&str] =
-    crate::integrations::browser_models::BrowserStep::ACTION_NAMES;
+const CHROME_HELP: &str = include_str!("chrome_help.md");
+
+const CHROME_HELP_TOPICS: &str = "overview, locators, navigation, input, forms, waits, network, routes, websockets, har, tabs, frames, dialogs, uploads, downloads, emulation, devices, clock, screenshots, artifacts, screencast, assertions, readouts, handlers, cdp, authenticators, reset, troubleshooting";
 
 const CHROME_DESCRIPTION: &str = concat!(
     "Text-first batched browser automation. You read pages as text, not as pictures. Prefer the typed `request`: ONE call can carry many steps, unlike one-action-per-call servers. ",
     "The loop is: navigate -> read the returned snapshot refs -> act by ref -> repeat. Any batch that changes the page attaches a ref-annotated ARIA snapshot under `page.snapshot` automatically, so you do NOT need an `accessibility_snapshot` step after navigating; screenshots are opt-in and cost far more than the text tree. ",
-    "Each `[ref=eN]` handle in that snapshot is an element address: act with `locator.by=ref`; refs come from the most recent snapshot. ",
-    "Canonical batch: {\"steps\":[{\"action\":\"navigate\",\"url\":\"https://example.com\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]} Pass this object as `request`; e5/e7 stand for handles minted by the snapshot the previous batch returned. Use an explicit `accessibility_snapshot` step only to re-read a page that did NOT change, or to scope to a subtree with `locator`/`depth`.\n",
-    "Page report: a page-changing batch returns `page` with the final URL and title, `page.status` when the main document answered with a non-2xx status, `page.console` error/warning COUNTS (full text stays in `console` and `tab_log`), and `page.snapshot`. Snapshots inline their YAML when small; a large tree is written to a `text/yaml` artifact and `page.snapshot` carries the head plus `{artifact:{kind,mime,path,bytes}}`, `lines`, `bytes`, and `truncated:true`. Locator-driven actions echo a canonical Playwright-style locator in `locator_echo` so a run stays auditable after the refs expire.\n",
-    "Core: navigate, reload, go_back, go_forward, open_tab, close_tab, switch_tab, list_tabs, click, click_if_exists, hover, focus, blur, scroll_to, press_key, drag_and_drop, and drop_files. drag_and_drop accepts source/target locators or refs plus optional source_position/target_position. open_tab accepts optional device/url; close_tab accepts an optional tab and otherwise closes active. Closing active selects the preceding tab in adoption order, the next tab when closing the first, or leaves no active tab.\n",
-    "Coordinate mouse escape hatch: mouse_move, mouse_down, mouse_up, mouse_click_xy, mouse_drag_xy, and mouse_wheel use main-frame viewport CSS pixels and bypass locator resolution. Use these only for canvas, map, and vision-driven UIs with no addressable element; locator/ref actions remain the default. ",
-    "Locator handlers and overlay auto-dismiss do NOT guard `mouse_*` coordinate actions: an overlay that would be dismissed before a locator action will still swallow a coordinate click.\n",
-    "Network: route/unroute/list_routes control HTTP interception. route_web_socket and unroute_web_socket install page-level WebSocket routing; send_web_socket_message supplies mock page messages and wait_for_web_socket_frame waits for observed traffic. start_har_recording and stop_har_recording write a runtime-owned HAR artifact; start_har_recording update names an existing HAR to record into, replacing matched method+url entries and appending new ones. route_from_har replays it with abort or fallback for misses. HAR output is returned as a path and summary, never inlined. Batch-level block_service_workers bypasses service workers so route interception sees every request. ",
-    "reset is the escape hatch for sticky plumbing: one call drops every network route, HAR replay, WebSocket route, locator handler, virtual authenticator, and the fake clock, turns offline off, and clears media, viewport, device, geolocation, and permission overrides, reporting what it cleared with counts. It leaves cookies, storage, open tabs, and the current page untouched.\n",
-    "Network: route/unroute/list_routes control HTTP interception. route_web_socket and unroute_web_socket install page-level WebSocket routing; send_web_socket_message supplies mock page messages and wait_for_web_socket_frame waits for observed traffic. start_har_recording and stop_har_recording write a runtime-owned HAR artifact; route_from_har replays it with abort or fallback for misses. HAR output is returned as a path and summary, never inlined. ",
-    "WebSocket routes take `mode`: \"mock\" (default) answers the page entirely from send_web_socket_message and never reaches the real server, while \"intercept\" connects to the real server and relays both directions. Per-direction `on_page_message` and `on_server_message` take \"forward\" (default, relay and report), \"capture\" (report and satisfy wait_for_web_socket_frame but do NOT relay), or \"drop\" (block the frame; it is reported as dropped and never satisfies wait_for_web_socket_frame). close_web_socket simulates a server-side close with an optional `code` and `reason` delivered to the page's onclose. Frame reports carry the page-requested subprotocols per socket, and frame payloads are redacted.\n",
-    "reset is the escape hatch for sticky plumbing: one call drops every network route, HAR replay, WebSocket route, locator handler, virtual authenticator, and the fake clock, turns offline off, and clears media, viewport, device, geolocation, and permission overrides, reporting what it cleared with counts. It leaves cookies, storage, open tabs, and the current page untouched.\n",
-    "reset is the escape hatch for sticky plumbing: one call drops every network route, HAR replay, WebSocket route, locator handler, virtual authenticator, and the fake clock, turns offline off, drops network and CPU throttling, and clears media, viewport, device, geolocation, and permission overrides, reporting what it cleared with counts. It leaves cookies, storage, open tabs, and the current page untouched.\n",
-    "Clock: clock_install pins fake time (optional `time` as unix ms or ISO string, current time by default) and must run before the page caches Date; clock_fast_forward jumps ahead firing each due timer AT MOST ONCE while clock_run_for advances firing ALL callbacks along the way, so a 60s interval fires once under fast_forward and 60 times under run_for. clock_pause_at stops time at an instant, clock_resume restarts it, clock_set_fixed_time freezes Date.now while leaving timers running, and clock_set_system_time shifts time silently without firing timers. `ticks` takes milliseconds or \"MM:SS\"/\"HH:MM:SS\"; the clock is session-scoped across tabs and navigations until reset clears it.\n",
-    "reset is the escape hatch for sticky plumbing: one call drops every network route, HAR replay, WebSocket route, locator handler, and virtual authenticator, turns offline off, and clears media, viewport, device, geolocation, and permission overrides, reporting what it cleared with counts. It leaves cookies, storage, open tabs, and the current page untouched. ",
-    "cdp_send is the raw Chrome DevTools Protocol escape hatch for the long tail that has no dedicated step: send `method` plus optional `params`, with `target` \"page\" (default, the active tab) or \"browser\". Prefer a dedicated step whenever one exists, because those carry actionability, redaction, and reset bookkeeping that raw CDP does not. State set through cdp_send is invisible to list_routes and reset, so undo it yourself; Emulation and Network mutations come back with a warning saying exactly that. Browser.close is refused, and so is Target.closeTarget aimed at the tab this session drives. Results return inline as JSON under 8KB and as an artifact path beyond it, cookie and storage values are redacted, and CDP errors surface verbatim on one bounded line.\n",
-    "http_request sends an HTTP call that shares the page's cookie jar in both directions: matching cookies for the target domain and path are attached, and response Set-Cookie headers are written back into the browser, so a logged-in page and the API call see the same session. Send url plus optional method, headers, and exactly one of body, body_json (auto application/json), or form (auto urlencoded); http and https only. Results carry status, final URL after redirects, content-type/content-length (set full_headers=true for every header), and the body inline when it stays under 8KB, otherwise an artifact path. Cookie values are never inlined, only the count and names. Set fail_on_status=true to fail the step on a non-2xx status.\n",
-    "Instrumentation: start_coverage and stop_coverage opt into precise JavaScript and CSS usage tracking and return bounded per-URL summaries plus a full JSON artifact. add_virtual_authenticator enables passkey testing and mints the authenticator id it returns, so never send it an id; remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified address that returned id. Credential ids, private keys, user handles, blobs, and user names are redacted from reports.\n",
-    "Motion: capture_frames records a burst and returns ONE composed filmstrip image (up to a 4x6 grid, each cell labelled +NNNms) plus per-frame artifact paths and the percentage of pixels that changed against the previous frame, so animations and transient UI are readable even without looking at pixels. It takes duration_ms (defaults to 1000, capped at 10000) with either frame_count (2-24, defaults to 8) or interval_ms, and scopes to an element with locator or to the whole document with full_page. Out-of-range values are hard errors. screencast_start and screencast_stop bracket a manual session that auto-stops at 30000ms or 60 frames and reports that cap as a warning; screencast_stop composes a filmstrip unless compose=false. The filmstrip is always attached, even when attach_screenshot is false.\n",
-    "Touch and low-level keyboard: tap takes either a locator (full actionability and hit-target checks, like click) or x/y coordinates, and requires touch emulation from an earlier set_viewport step with has_touch true. insert_text types into the focused element with one input event and no key events, which suits IME-style entry but skips keyboard shortcuts; it focuses an optional locator first. press_sequentially focuses its locator and then sends real per-character key events with an optional delay_ms (default 0) for inputs driven by keystroke handlers such as autocomplete; prefer fill for ordinary form entry.\n",
-    "Forms: fill, clear, select_option, check, uncheck.\n",
-    "Page manipulation: set_content replaces the whole document with raw html, so fixtures need no server or file; it waits for wait_until (domcontentloaded, load, or networkidle; load by default) and re-bootstraps refs like a navigation, so take a fresh accessibility_snapshot afterwards. page_content returns the full serialized document including its doctype, inline under 8KB and otherwise as an artifact path. add_script_tag and add_style_tag inject into the current document and take exactly one of url or content, plus an optional script_type such as module; both wait for a url to finish loading and fail the step if it errors. add_init_script evaluates content before any page script on every later navigation in this session and mints the id it returns, so never send it an id; remove_init_script takes that id, and reset drops every init script. dispatch_event sends a synthetic DOM event to a locator regardless of visibility, inferring the event class from event_type (click gives MouseEvent, keydown KeyboardEvent, dragstart DragEvent, and so on); event_init supplies the initialisation properties, with bubbles, cancelable, and composed defaulting to true.\n",
-    "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch. ",
-    "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch. Set not=true to invert any matcher: the step retries until the matcher stops matching and a timeout reports the still-matching value. to_have_text and to_contain_text also accept an array of expectations across every match, exact and same-length for to_have_text, an ordered subset for to_contain_text. to_have_attribute without `expected` asserts presence only, to_have_css takes an optional pseudo of before or after, to_be_checked takes checked or indeterminate (never both), and to_be_in_viewport takes an optional ratio between 0 and 1. ",
-    "expect_poll evaluates `expression` and retries until the value satisfies `matcher` (equals, contains, gt, lt, matches_regex) against `expected`, reporting attempts and elapsed like expect; it also honours soft.\n",
-    "Waiting: wait_for_function is the way to wait on arbitrary app state: it evaluates `expression` until the result is truthy, defaults to 100/250/500/1000ms poll intervals unless `polling_ms` fixes one, and with a `locator` re-resolves the element each retry and passes it as the first argument, so a re-rendered node is tolerated. A thrown expression fails immediately instead of retrying. ",
-    "wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. wait_for_url takes a plain substring in `pattern` and matches when the current URL contains it, unlike the glob/regex `pattern` used by route and wait_for_request. ",
-    "wait_for_selector takes an optional `state`: attached (the default, any match in the DOM), visible (a match with a non-empty box), hidden (no visible match, including no match at all), or detached (no match). Every state stays non-strict, so several matches never fail the step. ",
-    "wait_for_console_message is the active console wait: it blocks until a console entry matches optional `contains` and `level` (log, warning, or error, where error also covers uncaught page errors), returns that entry redacted, and sees messages produced earlier in the same batch. tab_log stays the passive read of buffered output.\n",
-    "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, or `wait_for_selector` for genuine synchronization.\n",
-    "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, screenshot_elements, capture_element_states, pdf, styles, tab_log. Screenshots support full_page, clip, type, quality, scale, omit_background, animations, caret, mask, mask_color, and style; screenshot_element uses locator or ref. screenshot_elements takes locators plus compose (grid composes one labeled contact sheet, separate returns one image per locator). capture_element_states captures one locator across states (default, hover, focus, active) as a labeled strip. PDF supports Chromium print options and returns an artifact path.\n",
-    "Readouts (never fake these with eval or expect): bounding_box returns viewport CSS-pixel x/y/width/height or null when the element is not visible; count returns the match count without strictness; input_value returns the live value property of an input, textarea, or select and fails on any other element; all_texts returns the text of every match with `mode` inner_text or text_content plus an optional `limit`, reporting the true total; element_state returns visible, enabled, editable, checked, and stable in one read.\n",
-    "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, or continue modifications; unroute removes one pattern or all routes; list_routes returns active routes. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. Page-level routes may not observe requests served by a service worker.\n",
-    "Window vs viewport: set_viewport is device-metrics emulation (it changes what the page measures, not the window on screen); set_window_bounds moves and resizes the actual OS window with x/y/width/height, any subset. set_window_bounds needs a headed browser: in headless there is no OS window, so it succeeds without applying and tells you to use set_viewport. reset does not touch window bounds.\n",
-    "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; both also take an optional `method` filter and wait_for_response an optional `status`, so a wait can skip an early 404 and land on the following 200 for the same pattern. Completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, continue, fallback, or fetch_and_fulfill; unroute removes one pattern or all routes; list_routes returns active routes in evaluation order with `order` and `times_remaining`. Several routes may share a pattern: the newest matching route runs first, a fallback handler hands the request to the next older matching route, then to the HAR replay, then to the network. Optional `times` on a route expires it after that many matches, including matches consumed by a traversed fallback. fulfill takes `body`, or `path` to serve a file (relative paths stay inside the runtime artifact directory, content type inferred from the extension), or `json` for a JSON body; status defaults to 200. fetch_and_fulfill performs the real request from the engine (up to 20 redirects, forwarding the page's own request headers) and fulfills with the real response, optionally overriding status, response_headers, and body. Cookie, Host, and Content-Length request headers keep their original values on continue and fetch_and_fulfill. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. URL patterns are globs (`*`, `**`, `{a,b}`) or `{source,flags}` regexes; `?` is literal and JavaScript route predicates are not supported. Page-level routes may not observe requests served by a service worker.\n",
-    "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, continue, fallback, or fetch_and_fulfill; unroute removes one pattern or all routes; list_routes returns active routes in evaluation order with `order` and `times_remaining`. Several routes may share a pattern: the newest matching route runs first, a fallback handler hands the request to the next older matching route, then to the HAR replay, then to the network. Optional `times` on a route expires it after that many matches, including matches consumed by a traversed fallback. fulfill takes `body`, or `path` to serve a file (relative paths stay inside the runtime artifact directory, content type inferred from the extension), or `json` for a JSON body; status defaults to 200. fetch_and_fulfill performs the real request from the engine (up to 20 redirects, forwarding the page's own request headers) and fulfills with the real response, optionally overriding status, response_headers, and body. Cookie, Host, and Content-Length request headers keep their original values on continue and fetch_and_fulfill. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. URL patterns are globs (`*`, `**`, `{a,b}`) or `{source,flags}` regexes; `?` is literal and JavaScript route predicates are not supported. Page-level routes may not observe requests served by a service worker.\n",
-    "Context: set_viewport, emulate_media, set_locale, set_timezone, set_user_agent, set_geolocation, set_offline, and set_extra_http_headers persist across adopted tabs and popups. Cookie state uses get_cookies, set_cookies, clear_cookies. Web storage uses get_storage, set_storage, clear_storage with kind local or session. storage_state and set_storage_state use Playwright's {cookies,origins:[{origin,local_storage}]} login-reuse shape, and indexed_db true additionally snapshots or restores IndexedDB best-effort: every database and object store of the current origin, capped at 200 records per store with truncated flagged, values must survive JSON round-trip so Blob, File, and ArrayBuffer entries are lost, and restore recreates each named database from scratch. grant_permissions state granted, denied, or prompt and clear_permissions control origin permissions. set_http_credentials shares the lazy Fetch path with routing. Cookie, storage, and credential values are redacted in reports.\n",
-    "Files: set_input_files, expect_file_chooser, wait_for_download, cancel_download. Failed downloads report failure_reason.\n",
-    "Devices and throttling: emulate_device applies one named Playwright device (viewport, DPR, mobile, touch, and user agent together) — list_devices returns the 200+ names with an optional filter, and mobile, tablet, and desktop stay as aliases accepted by both emulate_device and open_tab. An unknown name is a hard error listing the closest matches. set_network_conditions takes latency_ms, download_kbps, upload_kbps, an optional offline flag, and an optional preset of slow-3g, fast-3g, or slow-4g using Chrome DevTools values; explicit parameters override the preset and omitted bandwidth stays unlimited. set_cpu_throttling takes rate, a slowdown multiplier where 1 is off. reset clears both.\n",
-    "Context: set_viewport, emulate_media, set_locale, set_timezone, set_user_agent, set_geolocation, set_offline, and set_extra_http_headers persist across adopted tabs and popups. Cookie state uses get_cookies, set_cookies, clear_cookies. Web storage uses get_storage, set_storage, clear_storage with kind local or session. storage_state and set_storage_state use Playwright's {cookies,origins:[{origin,local_storage}]} login-reuse shape. grant_permissions and clear_permissions control origin permissions. set_http_credentials shares the lazy Fetch path with routing. Cookie, storage, and credential values are redacted in reports.\n",
-    "Files: set_input_files, expect_file_chooser, wait_for_download.\n",
-    "Dialogs: handle_dialog arms the next dialog with `accept` and optional `prompt_text`; unarmed dialogs auto-dismiss except beforeunload, which is accepted.\n",
-    "Advanced: eval, add_locator_handler, remove_locator_handler, dismiss_overlays, highlight_element, highlight, hide_highlight, annotate, and fixed-delay wait_seconds. highlight accepts locator/ref plus optional style and label; annotate accepts locator/ref plus text. Locator handlers use `{type:\"click\"}` or `{type:\"steps\",steps:[...]}`.\n",
-    "Locator fallback vocabulary: ref; role with name/description, exact or regex, and checked/pressed/selected/expanded/disabled/level/include_hidden filters; test_id with configurable `attribute`; text, label, placeholder, alt_text, title, css, xpath, id, name, and autocomplete. ",
-    "Compose with zero-based `nth` (-1 is last), first/last, locator, filter (has/has_not/has_text/has_not_text/visible), and/or, or an outermost-first `frames` chain. Non-selecting actions are strict: ambiguous locators fail loudly with the match count. Same-process frames are supported; out-of-process frames fail explicitly.\n",
-    "`page_context` picks the page-changed context: `snapshot` (the default) attaches the ref-annotated ARIA snapshot and NO image, `screenshot` attaches a policy-sized image instead, `both` attaches each, `none` attaches only the page header. The snapshot is attached only when the batch actually changed the page. ",
-    "`attach_screenshot` remains the tri-state screenshot override and wins over `page_context`: true = always attach, false = never attach, omitted = follow `page_context`. An explicit `screenshot` step still returns its own image even when false, and still adds the report screenshot under the default `snapshot` mode.\n",
-    "`network` controls per-request report volume: `summary` (the default) emits one `method url status bytes ms` line per request, `full` keeps request and response headers, `none` drops per-request entries. Route interception telemetry and the detail returned by wait_for_request and wait_for_response stay visible in every mode. ",
-    "The legacy newline-separated `commands` input remains accepted but is deprecated; new callers must use `request.steps`."
+    "Each `[ref=eN]` handle in that snapshot is an element address: act with `locator.by=ref`; refs come from the most recent snapshot. Use an explicit `accessibility_snapshot` step only to re-read a page that did NOT change, or to scope to a subtree with `locator`/`depth`.\n",
+    "Canonical batch: {\"steps\":[{\"action\":\"navigate\",\"url\":\"https://example.com\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]} Pass this object as `request`; e5/e7 stand for handles minted by the snapshot the previous batch returned.\n",
+    "TUTORIAL: run {\"steps\":[{\"action\":\"help\"}]} for the full tutorial covering every action, parameter, and gotcha, or {\"action\":\"help\",\"topic\":\"<name>\"} for one section. Topics: ",
+    "overview, locators, navigation, input, forms, waits, network, routes, websockets, har, tabs, frames, dialogs, uploads, downloads, emulation, devices, clock, screenshots, artifacts, screencast, assertions, readouts, handlers, cdp, authenticators, reset, troubleshooting",
+    ". help answers from documentation and never launches the browser, so it is free to consult before a run.\n",
+    "Capability groups, each with a help topic: navigation and tabs; locator-driven input plus a mouse_*/tap coordinate escape hatch; forms; waits; assertions (expect, expect_poll); readouts (bounding_box, count, input_value, all_texts, element_state); inspection and snapshots; screenshots, pdf, and filmstrip capture; network interception (route, HAR, WebSocket) and http_request; emulation, devices, storage, and cookies; the fake clock; locator handlers and dialogs; coverage and virtual authenticators; cdp_send and reset. The `action` enum below is the authoritative action list.\n",
+    "Locators are ref-first with a fallback vocabulary (role, test_id, text, label, placeholder, alt_text, title, css, xpath, id, name, autocomplete) composable with nth/first/last, filter, and/or, and an outermost-first `frames` chain. Non-selecting actions are strict: ambiguous locators fail loudly with the match count.\n",
+    "Page report: a page-changing batch returns `page` with the final URL and title, `page.status` for a non-2xx main document, `page.console` error/warning COUNTS (full text stays in `console` and `tab_log`), and `page.snapshot`, inlined when small and otherwise a `text/yaml` artifact plus the head, `lines`, `bytes`, and `truncated:true`. Locator-driven actions echo a canonical Playwright-style locator in `locator_echo`.\n",
+    "`page_context` picks the page-changed context: `snapshot` (the default) attaches the ref-annotated ARIA snapshot and NO image, `screenshot` attaches a policy-sized image instead, `both` attaches each, `none` attaches only the page header. `attach_screenshot` is the tri-state override and wins over `page_context`: true = always attach, false = never attach, omitted = follow `page_context`. `network` controls per-request report volume: `summary` (the default) emits one `method url status bytes ms` line per request, `full` keeps headers, `none` drops per-request entries.\n",
+    "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, `wait_for_selector`, or `wait_for_function`."
 );
+
+pub fn chrome_help_text(topic: Option<&str>) -> String {
+    let sections = chrome_help_sections();
+    let index = format!(
+        "chrome help topics: {}\nCall {{\"action\":\"help\",\"topic\":\"<name>\"}} for one section.",
+        CHROME_HELP_TOPICS
+    );
+    let Some(topic) = topic.map(str::trim).filter(|topic| !topic.is_empty()) else {
+        let overview = sections
+            .iter()
+            .find(|(name, _)| name == "overview")
+            .map(|(_, body)| body.as_str())
+            .unwrap_or_default();
+        return format!("{index}\n\n## overview\n{overview}");
+    };
+    match sections
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(topic))
+    {
+        Some((name, body)) => format!("## {name}\n{body}"),
+        None => format!("Unknown help topic {topic:?}.\n\n{index}"),
+    }
+}
+
+fn chrome_help_sections() -> Vec<(String, String)> {
+    let mut sections = Vec::new();
+    for chunk in CHROME_HELP.split("\n## ").skip(1) {
+        let (name, body) = chunk.split_once('\n').unwrap_or((chunk, ""));
+        sections.push((name.trim().to_string(), body.trim().to_string()));
+    }
+    sections
+}
+
+pub fn help_only_request(request_value: &Value) -> bool {
+    request_value
+        .get("steps")
+        .and_then(Value::as_array)
+        .is_some_and(|steps| {
+            !steps.is_empty()
+                && steps
+                    .iter()
+                    .all(|step| step.get("action").and_then(Value::as_str) == Some("help"))
+        })
+}
+
+fn help_only_response(request_value: &Value) -> String {
+    request_value
+        .get("steps")
+        .and_then(Value::as_array)
+        .map(|steps| {
+            steps
+                .iter()
+                .map(|step| chrome_help_text(step.get("topic").and_then(Value::as_str)))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default()
+}
 
 fn locator_regex_schema() -> serde_json::Value {
     serde_json::json!({
@@ -194,27 +215,27 @@ fn locator_regex_schema() -> serde_json::Value {
 fn browser_locator_schema() -> serde_json::Value {
     let mut schema = serde_json::json!({
         "type": "object",
-        "description": "Ref-first element address or composable fallback locator. Ambiguous strict actions fail with the match count.",
+        "description": "Ref-first element address; see help topic 'locators' for the fallback vocabulary and composition rules.",
         "required": ["by"],
         "properties": {
             "by": {"type": "string", "enum": ["ref", "css", "id", "name", "text", "label", "role", "xpath", "placeholder", "alt_text", "title", "autocomplete", "test_id"]},
-            "value": {"type": "string", "description": "Snapshot ref such as e12 or f2e7, or selector value for non-role strategies"},
-            "frames": {"type": "array", "items": {"type": "object"}, "description": "Outermost-first iframe-owner locator chain. Each owner must resolve to exactly one iframe or frame element."},
-            "nth": {"type": "integer", "description": "Zero-based match index; -1 selects the last match. CSS :nth-match is one-based."},
-            "within": {"type": "string", "description": "Deprecated CSS scope kept for compatibility; use locator for chaining"},
-            "locator": {"type": "object", "description": "Nested BrowserLocator evaluated under each outer match"},
+            "value": {"type": "string", "description": "Snapshot ref such as e12, or selector value for non-role strategies"},
+            "frames": {"type": "array", "items": {"type": "object"}, "description": "Outermost-first iframe-owner locator chain"},
+            "nth": {"type": "integer", "description": "Zero-based match index; -1 selects the last match"},
+            "within": {"type": "string", "description": "Deprecated CSS scope; use locator for chaining"},
+            "locator": {"type": "object", "description": "Nested locator evaluated under each outer match"},
             "filter": {
                 "type": "object",
                 "properties": {
-                    "has": {"type": "object", "description": "Relative BrowserLocator required under the candidate"},
-                    "has_not": {"type": "object", "description": "Relative BrowserLocator forbidden under the candidate"},
+                    "has": {"type": "object", "description": "Locator required under the candidate"},
+                    "has_not": {"type": "object", "description": "Locator forbidden under the candidate"},
                     "has_text": {"oneOf": [{"type": "string"}, {"type": "object", "required": ["source"], "properties": {"source": {"type": "string"}, "flags": {"type": "string"}}}]},
                     "has_not_text": {"oneOf": [{"type": "string"}, {"type": "object", "required": ["source"], "properties": {"source": {"type": "string"}, "flags": {"type": "string"}}}]},
                     "visible": {"type": "boolean"}
                 }
             },
-            "and": {"type": "object", "description": "BrowserLocator whose matches intersect this locator"},
-            "or": {"type": "object", "description": "BrowserLocator whose matches union with this locator in DOM order"},
+            "and": {"type": "object", "description": "Locator whose matches intersect this one"},
+            "or": {"type": "object", "description": "Locator whose matches union with this one in DOM order"},
             "first": {"type": "boolean", "description": "Select the first match"},
             "last": {"type": "boolean", "description": "Select the last match"},
             "exact": {"type": "boolean", "description": "Case-sensitive whole-string match; regex ignores it"},
@@ -238,6 +259,13 @@ fn browser_locator_schema() -> serde_json::Value {
     properties.insert("name_regex".to_string(), locator_regex_schema());
     properties.insert("description_regex".to_string(), locator_regex_schema());
     schema
+}
+
+fn browser_locator_alias_schema(role: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": format!("{role}: same shape as `locator`; see help topic 'locators'")
+    })
 }
 
 fn tab_target_schema() -> serde_json::Value {
@@ -280,19 +308,29 @@ fn browser_step_schema_with_actions(
             "enum": actions
         }),
     );
-    properties.insert("url".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "topic".to_string(),
+        serde_json::json!({"type": "string", "description": "help section name; omitted returns the topic index plus the overview"}),
+    );
+    properties.insert(
+        "url".to_string(),
+        serde_json::json!({"type": "string", "description": "Target URL for navigate and open_tab, or the asset URL for add_script_tag and add_style_tag"}),
+    );
     properties.insert(
         "device".to_string(),
         serde_json::json!({"type": "string", "enum": ["desktop", "mobile", "tablet"]}),
     );
     properties.insert("tab".to_string(), tab_target_schema());
     properties.insert("locator".to_string(), browser_locator_schema());
-    properties.insert("source".to_string(), browser_locator_schema());
+    properties.insert(
+        "source".to_string(),
+        browser_locator_alias_schema("drag_and_drop source element"),
+    );
     properties.insert(
         "target".to_string(),
         serde_json::json!({
             "oneOf": [
-                browser_locator_schema(),
+                browser_locator_alias_schema("drop target element"),
                 {"type": "string", "enum": ["page", "browser"], "description": "cdp_send target, page by default"}
             ]
         }),
@@ -304,26 +342,38 @@ fn browser_step_schema_with_actions(
     });
     properties.insert("source_position".to_string(), position_schema.clone());
     properties.insert("target_position".to_string(), position_schema);
-    properties.insert("text".to_string(), serde_json::json!({"type": "string"}));
-    properties.insert("key".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "text".to_string(),
+        serde_json::json!({"type": "string", "description": "Text to fill, insert, type, wait for, or annotate with"}),
+    );
+    properties.insert(
+        "key".to_string(),
+        serde_json::json!({"type": "string", "description": "Key name for press_key, such as Enter, Escape, or ArrowDown"}),
+    );
     properties.insert(
         "modifiers".to_string(),
-        serde_json::json!({"type": "array", "items": {"type": "string", "enum": ["Alt", "Ctrl", "Meta", "Shift"]}}),
+        serde_json::json!({"type": "array", "items": {"type": "string", "enum": ["Alt", "Ctrl", "Meta", "Shift"]}, "description": "Modifier keys held during press_key"}),
     );
     properties.insert(
         "expression".to_string(),
-        serde_json::json!({"type": "string"}),
+        serde_json::json!({"type": "string", "description": "JavaScript for eval, wait_for_function, and expect_poll"}),
     );
     properties.insert(
         "selector".to_string(),
         serde_json::json!({"type": "string", "description": "CSS selector for dom_snapshot"}),
     );
-    properties.insert("value".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "value".to_string(),
+        serde_json::json!({"type": "string", "description": "Option value for select_option; locator values live inside locator"}),
+    );
     properties.insert(
         "attribute".to_string(),
-        serde_json::json!({"type": "string"}),
+        serde_json::json!({"type": "string", "description": "Attribute name read by get_attribute"}),
     );
-    properties.insert("seconds".to_string(), serde_json::json!({"type": "number"}));
+    properties.insert(
+        "seconds".to_string(),
+        serde_json::json!({"type": "number", "description": "Fixed delay for wait_seconds; never use it for readiness"}),
+    );
     properties.insert("x".to_string(), serde_json::json!({"type": "number"}));
     properties.insert("y".to_string(), serde_json::json!({"type": "number"}));
     properties.insert("start_x".to_string(), serde_json::json!({"type": "number"}));
@@ -334,7 +384,7 @@ fn browser_step_schema_with_actions(
     properties.insert("delta_y".to_string(), serde_json::json!({"type": "number"}));
     properties.insert(
         "steps".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1}),
+        serde_json::json!({"type": "integer", "minimum": 1, "description": "mouse_move interpolation steps; defaults to 1"}),
     );
     properties.insert(
         "button".to_string(),
@@ -346,15 +396,15 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "delay".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0}),
+        serde_json::json!({"type": "integer", "minimum": 0, "description": "mouse_click_xy hold time in milliseconds between press and release"}),
     );
     properties.insert(
         "delay_ms".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0}),
+        serde_json::json!({"type": "integer", "minimum": 0, "description": "press_sequentially per-character delay in milliseconds; defaults to 0"}),
     );
     properties.insert(
         "timeout_ms".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0}),
+        serde_json::json!({"type": "integer", "minimum": 0, "description": "Step timeout in milliseconds; waits and expect default to 5000"}),
     );
     properties.insert(
         "ticks".to_string(),
@@ -438,7 +488,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "limit".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0}),
+        serde_json::json!({"type": "integer", "minimum": 0, "description": "Maximum rows or matches returned; omitted returns all"}),
     );
     properties.insert(
         "clear_first".to_string(),
@@ -448,8 +498,14 @@ fn browser_step_schema_with_actions(
         "verify".to_string(),
         serde_json::json!({"type": "boolean", "description": "Defaults to true for fill and clear"}),
     );
-    properties.insert("js".to_string(), serde_json::json!({"type": "boolean"}));
-    properties.insert("css".to_string(), serde_json::json!({"type": "boolean"}));
+    properties.insert(
+        "js".to_string(),
+        serde_json::json!({"type": "boolean", "description": "Collect JavaScript coverage in start_coverage; defaults to true"}),
+    );
+    properties.insert(
+        "css".to_string(),
+        serde_json::json!({"type": "boolean", "description": "Collect CSS coverage in start_coverage; defaults to true"}),
+    );
     properties.insert(
         "reset_on_navigation".to_string(),
         serde_json::json!({"type": "boolean", "description": "Reset coverage on navigation; defaults to true"}),
@@ -527,7 +583,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "max_chars".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0}),
+        serde_json::json!({"type": "integer", "minimum": 0, "description": "Character cap for dom_snapshot and accessibility_snapshot output"}),
     );
     properties.insert(
         "property_filter".to_string(),
@@ -551,7 +607,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "paths".to_string(),
-        serde_json::json!({"type": "array", "items": {"type": "string"}}),
+        serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Absolute file paths for set_input_files, drop_files, and expect_file_chooser"}),
     );
     properties.insert(
         "state".to_string(),
@@ -597,11 +653,18 @@ fn browser_step_schema_with_actions(
         "event_init".to_string(),
         serde_json::json!({"type": "object", "description": "dispatch_event init properties; bubbles, cancelable, and composed default to true"}),
     );
-    properties.insert("pattern".to_string(), url_pattern_schema());
-    properties.insert("save_as".to_string(), serde_json::json!({"type": "string"}));
+    let mut pattern_schema = url_pattern_schema();
+    pattern_schema["description"] = serde_json::json!(
+        "Glob or {source,flags} regex; wait_for_url instead takes a plain substring"
+    );
+    properties.insert("pattern".to_string(), pattern_schema);
+    properties.insert(
+        "save_as".to_string(),
+        serde_json::json!({"type": "string", "description": "Artifact file name for storage_state and wait_for_download"}),
+    );
     properties.insert(
         "full_page".to_string(),
-        serde_json::json!({"type": "boolean"}),
+        serde_json::json!({"type": "boolean", "description": "Capture the whole scrollable page instead of the viewport"}),
     );
     properties.insert(
         "clip".to_string(),
@@ -622,7 +685,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "quality".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "maximum": 100}),
+        serde_json::json!({"type": "integer", "minimum": 0, "maximum": 100, "description": "JPEG or WebP quality 0-100; ignored for png"}),
     );
     properties.insert(
         "scale".to_string(),
@@ -642,16 +705,19 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "mask".to_string(),
-        serde_json::json!({"type": "array", "items": browser_locator_schema()}),
+        serde_json::json!({"type": "array", "items": browser_locator_alias_schema("masked element")}),
     );
     properties.insert(
         "mask_color".to_string(),
         serde_json::json!({"type": "string"}),
     );
-    properties.insert("style".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "style".to_string(),
+        serde_json::json!({"type": "string", "description": "Inline CSS applied by highlight, or extra stylesheet for screenshots"}),
+    );
     properties.insert(
         "locators".to_string(),
-        serde_json::json!({"type": "array", "items": browser_locator_schema()}),
+        serde_json::json!({"type": "array", "items": browser_locator_alias_schema("captured element")}),
     );
     properties.insert(
         "compose".to_string(),
@@ -662,7 +728,10 @@ fn browser_step_schema_with_actions(
         serde_json::json!({"type": "array", "items": {"type": "string", "enum": ["default", "hover", "focus", "active"]}}),
     );
     properties.insert("labels".to_string(), serde_json::json!({"type": "boolean"}));
-    properties.insert("label".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "label".to_string(),
+        serde_json::json!({"type": "string", "description": "Text label drawn by highlight"}),
+    );
     properties.insert(
         "landscape".to_string(),
         serde_json::json!({"type": "boolean"}),
@@ -813,7 +882,10 @@ fn browser_step_schema_with_actions(
         serde_json::json!({"type": "array", "items": {"type": "object"}}),
     );
     properties.insert("domain".to_string(), serde_json::json!({"type": "string"}));
-    properties.insert("path".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "path".to_string(),
+        serde_json::json!({"type": "string", "description": "File path for route_from_har, HAR recording, and cookie path filters"}),
+    );
     properties.insert(
         "kind".to_string(),
         serde_json::json!({"type": "string", "enum": ["local", "session"]}),
@@ -832,16 +904,22 @@ fn browser_step_schema_with_actions(
         "password".to_string(),
         serde_json::json!({"type": "string"}),
     );
-    properties.insert("name".to_string(), serde_json::json!({"type": "string"}));
+    properties.insert(
+        "name".to_string(),
+        serde_json::json!({"type": "string", "description": "Locator handler name, device name, cookie name, or matcher property name"}),
+    );
     properties.insert(
         "times".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1}),
+        serde_json::json!({"type": "integer", "minimum": 1, "description": "Expire a route or locator handler after this many matches"}),
     );
     properties.insert(
         "no_wait_after".to_string(),
         serde_json::json!({"type": "boolean"}),
     );
-    properties.insert("accept".to_string(), serde_json::json!({"type": "boolean"}));
+    properties.insert(
+        "accept".to_string(),
+        serde_json::json!({"type": "boolean", "description": "handle_dialog acceptance: true accepts, false dismisses"}),
+    );
     properties.insert(
         "prompt_text".to_string(),
         serde_json::json!({"type": "string"}),
@@ -925,23 +1003,6 @@ fn handler_schema() -> serde_json::Value {
 }
 
 fn locator_handler_schema() -> serde_json::Value {
-    let actions = LOCATOR_HANDLER_STEP_ACTIONS
-        .iter()
-        .copied()
-        .filter(|action| {
-            !matches!(
-                *action,
-                "route"
-                    | "unroute"
-                    | "list_routes"
-                    | "reset"
-                    | "http_request"
-                    | "add_init_script"
-                    | "remove_init_script"
-                    | "cdp_send"
-            ) && !action.starts_with("clock_")
-        })
-        .collect::<Vec<_>>();
     serde_json::json!({
         "oneOf": [
             {
@@ -956,7 +1017,10 @@ fn locator_handler_schema() -> serde_json::Value {
                     "type": {"type": "string", "enum": ["steps"]},
                     "steps": {
                         "type": "array",
-                        "items": browser_step_schema_with_actions(&actions, false)
+                        "items": {
+                            "type": "object",
+                            "description": "A browser step: same shape as request.steps items minus handler-forbidden actions; see help topic 'handlers'"
+                        }
                     }
                 }
             }
@@ -990,12 +1054,7 @@ fn chrome_input_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "request": browser_request_schema(),
-            "commands": {
-                "type": "string",
-                "description": "Deprecated compatibility-only newline-separated browser commands; use request.steps",
-                "deprecated": true
-            }
+            "request": browser_request_schema()
         }
     })
 }
@@ -1079,6 +1138,19 @@ impl Tool for ToolChrome {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        if let Some(request_value) = args.get("request") {
+            if help_only_request(request_value) {
+                let msg = ContextEnum::ChatMessage(ChatMessage {
+                    role: "tool".to_string(),
+                    content: ChatContent::SimpleText(help_only_response(request_value)),
+                    tool_calls: None,
+                    tool_call_id: tool_call_id.clone(),
+                    ..Default::default()
+                });
+                return Ok((false, vec![msg]));
+            }
+        }
+
         let (gcx, chat_id, current_model) = {
             let ccx_lock = ccx.lock().await;
             (
@@ -1412,9 +1484,9 @@ mod tests {
                 "missing schema field {field}"
             );
         }
-        assert_eq!(
-            schema.pointer("/properties/commands/deprecated"),
-            Some(&Value::Bool(true))
+        assert!(
+            schema.pointer("/properties/commands").is_none(),
+            "the deprecated commands input must be invisible to models"
         );
         let url_pattern_required = schema
             .pointer(
@@ -1512,13 +1584,15 @@ mod tests {
     }
 
     #[test]
-    fn chrome_description_documents_arbitrary_state_waiting() {
+    fn chrome_description_points_at_waiting_and_help_keeps_the_detail() {
         let description = ToolChrome::default().tool_description().description;
         assert!(description.contains("wait_for_function"));
-        assert!(description.contains("expect_poll"));
-        assert!(description.contains("polling_ms"));
-        assert!(description.contains("truthy"));
-        assert!(description.contains("re-resolves the element each retry"));
+        for term in ["expect_poll", "polling_ms", "truthy", "re-resolves"] {
+            assert!(
+                CHROME_HELP.contains(term),
+                "help must retain waiting documentation for {term}"
+            );
+        }
     }
 
     #[test]
@@ -1537,51 +1611,136 @@ mod tests {
     }
 
     #[test]
-    fn chrome_description_groups_capabilities_and_documents_locators() {
+    fn chrome_description_summarizes_capabilities_and_points_at_help() {
         let description = ToolChrome::default().tool_description().description;
-        for heading in [
-            "Core:",
-            "Forms:",
-            "Waiting:",
-            "Inspection:",
-            "Network:",
-            "Files:",
-            "Dialogs:",
-            "Advanced:",
-        ] {
-            assert!(description.contains(heading), "missing heading {heading}");
-        }
-        for locator_term in [
-            "ref;",
-            "role with",
+        for term in [
+            "Capability groups, each with a help topic",
+            "The `action` enum below is the authoritative action list",
             "test_id",
-            "text, label, placeholder, alt_text, title, css, xpath",
-            "zero-based `nth`",
-            "filter (has/has_not/has_text/has_not_text/visible)",
             "outermost-first `frames` chain",
             "ambiguous locators fail loudly with the match count",
         ] {
-            assert!(
-                description.contains(locator_term),
-                "missing locator documentation {locator_term}"
-            );
+            assert!(description.contains(term), "missing summary term {term}");
         }
-        assert!(description.contains("legacy newline-separated `commands` input"));
-        assert!(description.contains("deprecated"));
+        assert!(description.contains("{\"steps\":[{\"action\":\"help\"}]}"));
+        assert!(description.contains("never launches the browser"));
+        assert!(
+            !description.contains("`commands`"),
+            "the deprecated commands input must not be advertised to models"
+        );
     }
 
     #[test]
-    fn chrome_description_documents_the_coordinate_handler_bypass_caveat() {
-        let description = ToolChrome::default().tool_description().description;
-        assert!(description.contains(
+    fn every_advertised_help_topic_resolves_to_a_section() {
+        for topic in CHROME_HELP_TOPICS.split(", ") {
+            let rendered = chrome_help_text(Some(topic));
+            assert!(
+                rendered.starts_with(&format!("## {topic}")),
+                "advertised topic {topic} does not resolve to a section"
+            );
+            assert!(
+                rendered.len() > format!("## {topic}").len() + 20,
+                "help topic {topic} is empty"
+            );
+        }
+    }
+
+    #[test]
+    fn help_documents_every_action_the_schema_advertises() {
+        let undocumented = crate::integrations::browser_models::BrowserStep::ACTION_NAMES
+            .iter()
+            .filter(|action| !CHROME_HELP.contains(**action))
+            .collect::<Vec<_>>();
+        assert!(
+            undocumented.is_empty(),
+            "slimming the description must not lose capability knowledge: {undocumented:?}"
+        );
+    }
+
+    #[test]
+    fn chrome_tool_contract_stays_within_its_token_budget() {
+        let schema_len = serde_json::to_string(&chrome_input_schema()).unwrap().len();
+        let description_len = CHROME_DESCRIPTION.len();
+        let total = description_len + schema_len;
+        assert!(
+            total < 32_000,
+            "chrome description + schema is {total} chars (description {description_len}, schema {schema_len}), budget is 32000"
+        );
+        assert!(
+            description_len < 4_500,
+            "chrome description is {description_len} chars, budget is 4500"
+        );
+    }
+
+    #[test]
+    fn help_without_a_topic_returns_the_index_and_the_overview() {
+        let rendered = chrome_help_text(None);
+        assert!(rendered.starts_with("chrome help topics:"));
+        assert!(rendered.contains("routes"));
+        assert!(rendered.contains("## overview"));
+        assert!(rendered.contains("Text-first batched browser automation"));
+    }
+
+    #[test]
+    fn help_with_a_topic_returns_just_that_section() {
+        let rendered = chrome_help_text(Some("routes"));
+        assert!(rendered.starts_with("## routes"));
+        assert!(rendered.contains("fetch_and_fulfill"));
+        assert!(
+            !rendered.contains("## websockets"),
+            "a scoped topic must not leak the neighbouring section"
+        );
+    }
+
+    #[test]
+    fn an_unknown_help_topic_returns_the_index_with_an_error_note() {
+        let rendered = chrome_help_text(Some("teleportation"));
+        assert!(rendered.starts_with("Unknown help topic \"teleportation\""));
+        assert!(rendered.contains("chrome help topics:"));
+    }
+
+    #[test]
+    fn a_help_only_request_is_answered_without_a_browser_session() {
+        assert!(help_only_request(
+            &serde_json::json!({"steps": [{"action": "help"}]})
+        ));
+        assert!(help_only_request(
+            &serde_json::json!({"steps": [{"action": "help", "topic": "routes"}, {"action": "help"}]})
+        ));
+        assert!(!help_only_request(&serde_json::json!({"steps": []})));
+        assert!(!help_only_request(&serde_json::json!({
+            "steps": [{"action": "help"}, {"action": "navigate", "url": "https://example.com"}]
+        })));
+        assert!(!help_only_request(&serde_json::json!({
+            "steps": [{"action": "navigate", "url": "https://example.com"}]
+        })));
+    }
+
+    #[test]
+    fn a_help_only_request_answers_every_step_from_documentation() {
+        let response = help_only_response(&serde_json::json!({
+            "steps": [{"action": "help", "topic": "locators"}, {"action": "help", "topic": "clock"}]
+        }));
+        assert!(response.contains("## locators"));
+        assert!(response.contains("## clock"));
+    }
+
+    #[test]
+    fn chrome_help_documents_the_coordinate_handler_bypass_caveat() {
+        assert!(CHROME_HELP.contains(
             "Locator handlers and overlay auto-dismiss do NOT guard `mouse_*` coordinate actions"
         ));
     }
 
     #[test]
-    fn chrome_description_documents_wait_for_url_substring_semantics() {
-        let description = ToolChrome::default().tool_description().description;
-        assert!(description.contains("wait_for_url takes a plain substring in `pattern`"));
+    fn wait_for_url_substring_semantics_survive_in_the_schema_and_help() {
+        let schema = chrome_input_schema();
+        assert!(schema
+            .pointer("/properties/request/properties/steps/items/properties/pattern/description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains("wait_for_url")
+                && description.contains("plain substring")));
+        assert!(CHROME_HELP.contains("wait_for_url"));
     }
 
     #[test]
@@ -1609,10 +1768,7 @@ mod tests {
                 actions.iter().any(|value| value == action),
                 "missing action {action}"
             );
-            assert!(
-                CHROME_DESCRIPTION.contains(action),
-                "description must mention {action}"
-            );
+            assert!(CHROME_HELP.contains(action), "help must document {action}");
         }
     }
 
@@ -1626,7 +1782,7 @@ mod tests {
             Some("Screenshot override: true = always attach, false = never attach, omitted = follow page_context")
         );
         let description = ToolChrome::default().tool_description().description;
-        assert!(description.contains("`attach_screenshot` remains the tri-state screenshot override"));
+        assert!(description.contains("`attach_screenshot` is the tri-state override"));
         assert!(description.contains("false = never attach"));
         assert!(description.contains("omitted = follow `page_context`"));
     }
@@ -1665,8 +1821,9 @@ mod tests {
         assert!(description.contains("page.status"));
         assert!(description.contains("error/warning COUNTS"));
         assert!(description.contains("full text stays in `console` and `tab_log`"));
-        assert!(description.contains("{artifact:{kind,mime,path,bytes}}"));
+        assert!(description.contains("`text/yaml` artifact"));
         assert!(description.contains("locator_echo"));
+        assert!(CHROME_HELP.contains("{artifact:{kind,mime,path,bytes}}"));
     }
 
     #[test]
@@ -1685,7 +1842,7 @@ mod tests {
         assert!(description.contains("`network` controls per-request report volume"));
         assert!(description.contains("`summary` (the default)"));
         assert!(description.contains("`none` drops per-request entries"));
-        assert!(description.contains("Route interception telemetry"));
+        assert!(CHROME_HELP.contains("Route interception telemetry"));
     }
 
     #[test]
@@ -1848,10 +2005,9 @@ mod tests {
             properties["frame_count"]["maximum"],
             serde_json::json!(MAX_FRAME_COUNT)
         );
-        let description = ToolChrome::default().tool_description().description;
-        assert!(description.contains("capture_frames records a burst"));
-        assert!(description.contains(&MAX_SESSION_DURATION_MS.to_string()));
-        assert!(description.contains(&MAX_SESSION_FRAMES.to_string()));
+        assert!(CHROME_HELP.contains("capture_frames"));
+        assert!(CHROME_HELP.contains(&MAX_SESSION_DURATION_MS.to_string()));
+        assert!(CHROME_HELP.contains(&MAX_SESSION_FRAMES.to_string()));
     }
 }
 
