@@ -749,6 +749,337 @@ describe("ChromeTool", () => {
     );
   });
 
+  test("renders the text-first page envelope, snapshot pointer and locator echoes", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-envelope",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: {
+            steps: [
+              { action: "navigate", url: "https://example.com/pricing" },
+              { action: "click", locator: { by: "ref", value: "e1" } },
+            ],
+          },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-envelope",
+      content: JSON.stringify({
+        ok: true,
+        steps: [
+          {
+            step_index: 0,
+            ok: true,
+            summary: "Navigated to https://example.com/pricing",
+            retries: 0,
+          },
+          {
+            step_index: 1,
+            ok: true,
+            summary: "click on <button>",
+            retries: 0,
+            locator_echo: "getByRole('button', { name: 'Save' })",
+          },
+        ],
+        url: "https://example.com/pricing",
+        title: "Pricing",
+        console: [{ timestamp: 1, level: "Error", text: "boom" }],
+        page: {
+          status: 404,
+          console: { errors: 1, warnings: 2 },
+          snapshot: {
+            yaml: '- button "Save" [ref=e1]',
+            lines: 812,
+            bytes: 41231,
+            truncated: true,
+            artifact: {
+              kind: "aria_snapshot",
+              mime: "text/yaml",
+              path: "/artifacts/snapshot-1.yaml",
+              bytes: 41231,
+            },
+          },
+        },
+      }),
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+
+    expect(screen.getByTestId("browser-page-header")).toBeInTheDocument();
+    expect(screen.getByText("https://example.com/pricing")).toBeInTheDocument();
+    expect(screen.getByText("Pricing")).toBeInTheDocument();
+
+    const status = screen.getByTestId("browser-page-status");
+    expect(status).toHaveTextContent("HTTP 404");
+    expect(status).toHaveAttribute("data-status", "error");
+
+    const consoleChip = screen.getByTestId("browser-page-console");
+    expect(consoleChip).toHaveTextContent("1 error · 2 warnings");
+    expect(consoleChip).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Console")).not.toBeInTheDocument();
+    await user.click(consoleChip);
+    expect(consoleChip).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Console")).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("[Error] boom")),
+    ).toBeInTheDocument();
+
+    expect(screen.getByTestId("browser-step-rows")).toBeInTheDocument();
+    const echo = screen.getByTestId("browser-locator-echo");
+    expect(echo).toHaveTextContent("getByRole('button', { name: 'Save' })");
+    expect(screen.getByText("click on <button>")).toBeInTheDocument();
+
+    const snapshotTrigger = screen.getByRole("button", {
+      name: "Page Snapshot — 812 lines · 40.3 KB",
+    });
+    expect(snapshotTrigger).toHaveAttribute("aria-expanded", "false");
+    await user.click(snapshotTrigger);
+    expect(screen.getByTestId("page-snapshot-truncated")).toHaveTextContent(
+      "Truncated",
+    );
+    expect(screen.getByText("text/yaml")).toBeInTheDocument();
+    expect(screen.getByText("/artifacts/snapshot-1.yaml")).toBeInTheDocument();
+    expect(screen.getByText("button")).toBeInTheDocument();
+    expect(screen.getByText("“Save”")).toBeInTheDocument();
+    expect(screen.getByText("ref=e1")).toBeInTheDocument();
+  });
+
+  test("leaves pre-envelope payloads free of the new surfaces", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-legacy-envelope",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: { steps: [{ action: "navigate", url: "https://a.test" }] },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-legacy-envelope",
+      content: JSON.stringify({
+        ok: true,
+        steps: [
+          {
+            step_index: 0,
+            ok: true,
+            summary: "Navigated to https://a.test",
+            retries: 0,
+          },
+        ],
+        url: "https://a.test",
+        title: "A",
+        console: [{ timestamp: 1, level: "Log", text: "ready" }],
+      }),
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+
+    expect(screen.queryByTestId("browser-page-header")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("browser-step-rows")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("browser-locator-echo"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("page-snapshot")).not.toBeInTheDocument();
+    expect(screen.queryByText("Captures")).not.toBeInTheDocument();
+    expect(screen.getByText("Results")).toBeInTheDocument();
+    expect(screen.getByText("Console")).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("Navigated to https://a.test")),
+    ).toBeInTheDocument();
+  });
+
+  test("labels a filmstrip capture with frame chips and one zoomable image", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-filmstrip",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: {
+            steps: [{ action: "capture_frames", duration_ms: 900 }],
+          },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-filmstrip",
+      content: [
+        {
+          m_type: "text",
+          m_content: JSON.stringify({
+            ok: true,
+            steps: [
+              {
+                step_index: 0,
+                ok: true,
+                summary: "Captured 3 frame(s) over 900ms",
+                retries: 0,
+                data: {
+                  mime: "image/jpeg",
+                  data: "<omitted>",
+                  width: 640,
+                  height: 400,
+                  bytes: 2048,
+                  artifact: {
+                    kind: "filmstrip",
+                    mime: "image/jpeg",
+                    path: "/artifacts/burst-filmstrip.jpg",
+                    bytes: 2048,
+                    width: 640,
+                    height: 400,
+                  },
+                  frames: [
+                    { index: 0, offset_ms: 0 },
+                    { index: 1, offset_ms: 450, changed_percent: 12.5 },
+                    { index: 2, offset_ms: 900, changed_percent: 3 },
+                  ],
+                  frame_count: 3,
+                  columns: 3,
+                  rows: 1,
+                  duration_ms: 900,
+                  warnings: ["captured with timed screenshots instead"],
+                },
+              },
+            ],
+          }),
+        },
+        { m_type: "image/jpeg", m_content: "/9j/4AAQSkZJRgABAQAAAQABAAD/2w==" },
+      ],
+    });
+
+    const view = render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+
+    expect(screen.getByText("Captures")).toBeInTheDocument();
+    expect(screen.getByTestId("browser-capture-filmstrip")).toBeInTheDocument();
+    expect(screen.getByText("Filmstrip")).toBeInTheDocument();
+    expect(screen.getByText("3 frames · 900ms")).toBeInTheDocument();
+    expect(screen.getByText("+0ms")).toBeInTheDocument();
+    expect(screen.getByText("+450ms · 12.5% changed")).toBeInTheDocument();
+    expect(screen.getByText("+900ms · 3.0% changed")).toBeInTheDocument();
+    expect(
+      screen.getByText("captured with timed screenshots instead"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Filmstrip" })).toBeInTheDocument();
+    expect(view.container.querySelectorAll("img")).toHaveLength(1);
+  });
+
+  test("labels element galleries and state strips that carry no inline image", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-gallery",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: {
+            steps: [
+              { action: "screenshot_elements", compose: "grid" },
+              { action: "capture_element_states" },
+            ],
+          },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-gallery",
+      content: JSON.stringify({
+        ok: true,
+        steps: [
+          {
+            step_index: 0,
+            ok: true,
+            summary: "Composed 2 element screenshots into a grid",
+            retries: 0,
+            data: {
+              compose: "grid",
+              count: 2,
+              labels: ["header", "footer"],
+              artifact: {
+                kind: "image",
+                mime: "image/png",
+                width: 320,
+                height: 200,
+                bytes: 1024,
+              },
+              images: [{ label: "grid", mime: "image/png", data: "<omitted>" }],
+            },
+          },
+          {
+            step_index: 1,
+            ok: true,
+            summary: "Captured <button> in 3 states",
+            retries: 0,
+            data: {
+              states: ["default", "hover", "focus"],
+              artifact: {
+                kind: "image",
+                mime: "image/png",
+                width: 320,
+                height: 120,
+                bytes: 512,
+              },
+              images: [
+                { label: "states", mime: "image/png", data: "<omitted>" },
+              ],
+            },
+          },
+        ],
+      }),
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+
+    expect(
+      screen.getByTestId("browser-capture-element_gallery"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Element gallery")).toBeInTheDocument();
+    expect(screen.getByText("2 elements · grid")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("browser-capture-element_states"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Element states")).toBeInTheDocument();
+    expect(screen.getByText("default · hover · focus")).toBeInTheDocument();
+  });
+
   test("renders assertion pass failure values and ARIA diff", async () => {
     const user = userEvent.setup();
     const toolCall: ToolCall = {

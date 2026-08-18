@@ -1,0 +1,53 @@
+.header {
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--rf-space-1) var(--rf-space-2);
+  background: color-mix(in oklab, var(--rf-surface-glass) 48%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+}
+
+.icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.url {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--rf-color-accent);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+}
+
+.title {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.consoleChip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: var(--rf-space-1);
+  align-items: center;
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-warning);
+  font-size: var(--rf-text-1);
+  background: transparent;
+  border: var(--rf-hairline) solid var(--rf-color-warning);
+  border-radius: var(--rf-radius-pill);
+  cursor: pointer;
+}
+
+.consoleChip[data-tone="danger"] {
+  color: var(--rf-color-danger);
+  border-color: var(--rf-color-danger);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .header {
+    background: var(--rf-surface-glass);
+  }
+}

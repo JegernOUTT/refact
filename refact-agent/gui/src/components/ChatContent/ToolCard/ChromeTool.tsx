@@ -1,5 +1,5 @@
 import { Monitor, Image, FileText } from "lucide-react";
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { Box, Flex } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -13,7 +13,13 @@ import type {
   BrowserAssertionResult,
   BrowserAriaSnapshot,
   BrowserAriaSnapshotNode,
+  BrowserCaptureKind,
+  BrowserConsoleCounts,
   BrowserExecutionStep,
+  BrowserFrameRecord,
+  BrowserPageContext,
+  BrowserPageSnapshot,
+  BrowserSnapshotArtifact,
 } from "../../../services/refact/browser";
 import { ShikiCodeBlock } from "../../Markdown";
 import { DialogImage } from "../../DialogImage";
@@ -21,6 +27,8 @@ import { AriaSnapshotView } from "./AriaSnapshotView";
 import { ActionabilityLog } from "./ActionabilityLog";
 import { ArtifactsPanel } from "./ArtifactsPanel";
 import { NetworkPanel } from "./NetworkPanel";
+import { PageHeader } from "./PageHeader";
+import { PageSnapshot } from "./PageSnapshot";
 import styles from "./ChromeTool.module.css";
 
 interface ChromeArgs {
@@ -163,6 +171,149 @@ function optionalNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value)
     ? value
     : undefined;
+}
+
+function parseConsoleCounts(value: unknown): BrowserConsoleCounts {
+  if (!isRecord(value)) return { errors: 0, warnings: 0 };
+  return {
+    errors: optionalNumber(value.errors) ?? 0,
+    warnings: optionalNumber(value.warnings) ?? 0,
+  };
+}
+
+function parseSnapshotArtifact(value: unknown): BrowserSnapshotArtifact | null {
+  if (
+    !isRecord(value) ||
+    typeof value.kind !== "string" ||
+    typeof value.mime !== "string" ||
+    typeof value.path !== "string"
+  ) {
+    return null;
+  }
+  return {
+    kind: value.kind,
+    mime: value.mime,
+    path: value.path,
+    bytes: optionalNumber(value.bytes) ?? 0,
+  };
+}
+
+function parsePageSnapshot(value: unknown): BrowserPageSnapshot | null {
+  if (!isRecord(value) || typeof value.yaml !== "string") return null;
+  return {
+    yaml: value.yaml,
+    lines: optionalNumber(value.lines) ?? 0,
+    bytes: optionalNumber(value.bytes) ?? 0,
+    truncated: value.truncated === true,
+    artifact: parseSnapshotArtifact(value.artifact),
+  };
+}
+
+function parsePageContext(value: unknown): BrowserPageContext | null {
+  if (!isRecord(value)) return null;
+  return {
+    status: optionalNumber(value.status) ?? null,
+    console: parseConsoleCounts(value.console),
+    snapshot: parsePageSnapshot(value.snapshot),
+  };
+}
+
+const CAPTURE_LABELS: Record<BrowserCaptureKind, string> = {
+  filmstrip: "Filmstrip",
+  element_gallery: "Element gallery",
+  element_states: "Element states",
+};
+
+function captureKind(data: Record<string, unknown>): BrowserCaptureKind | null {
+  if (isRecord(data.artifact) && data.artifact.kind === "filmstrip") {
+    return "filmstrip";
+  }
+  if (Array.isArray(data.states) && Array.isArray(data.images)) {
+    return "element_states";
+  }
+  if (typeof data.compose === "string" && Array.isArray(data.images)) {
+    return "element_gallery";
+  }
+  return null;
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+function parseFrameRecords(value: unknown): BrowserFrameRecord[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!isRecord(entry)) return [];
+    const index = optionalNumber(entry.index);
+    const offset = optionalNumber(entry.offset_ms);
+    if (index === undefined || offset === undefined) return [];
+    return [
+      {
+        index,
+        offset_ms: offset,
+        changed_percent: optionalNumber(entry.changed_percent) ?? null,
+      },
+    ];
+  });
+}
+
+function captureDetail(
+  kind: BrowserCaptureKind,
+  data: Record<string, unknown>,
+): string | null {
+  const parts: string[] = [];
+  if (kind === "filmstrip") {
+    const frames = optionalNumber(data.frame_count);
+    const duration = optionalNumber(data.duration_ms);
+    if (frames !== undefined) {
+      parts.push(`${frames} frame${frames === 1 ? "" : "s"}`);
+    }
+    if (duration !== undefined) parts.push(`${duration}ms`);
+  } else if (kind === "element_gallery") {
+    const count = optionalNumber(data.count);
+    if (count !== undefined) {
+      parts.push(`${count} element${count === 1 ? "" : "s"}`);
+    }
+    if (typeof data.compose === "string") parts.push(data.compose);
+  } else {
+    parts.push(...stringList(data.states));
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+function isAttachableImageStep(
+  report: BrowserActionResponse,
+  data: Record<string, unknown>,
+): boolean {
+  const artifactKind = isRecord(data.artifact) ? data.artifact.kind : undefined;
+  if (report.screenshot && artifactKind !== "filmstrip") return false;
+  return (
+    typeof data.mime === "string" &&
+    data.mime.startsWith("image/") &&
+    typeof data.data === "string"
+  );
+}
+
+interface StepCaptureEntry {
+  stepIndex: number;
+  kind: BrowserCaptureKind;
+  label: string;
+  detail: string | null;
+  frames: BrowserFrameRecord[];
+  warnings: string[];
+  src?: string;
+}
+
+function formatFrameChip(frame: BrowserFrameRecord): string {
+  const changed =
+    frame.changed_percent === null || frame.changed_percent === undefined
+      ? null
+      : `${frame.changed_percent.toFixed(1)}% changed`;
+  return changed
+    ? `+${frame.offset_ms}ms · ${changed}`
+    : `+${frame.offset_ms}ms`;
 }
 
 function parseActionabilityDiagnostics(
@@ -492,6 +643,65 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     return typedResult.steps.map(summarizeStep).join("\n");
   }, [typedResult]);
 
+  const typedStepRows = useMemo(() => {
+    if (!typedResult) return null;
+    const rows = typedResult.steps.map((step) => ({
+      stepIndex: step.step_index,
+      summary: summarizeStep(step),
+      locatorEcho:
+        typeof step.locator_echo === "string" && step.locator_echo.length > 0
+          ? step.locator_echo
+          : null,
+    }));
+    return rows.some((row) => row.locatorEcho !== null) ? rows : null;
+  }, [typedResult]);
+
+  const pageContext = useMemo(
+    () => (typedResult ? parsePageContext(typedResult.page) : null),
+    [typedResult],
+  );
+
+  const { captures, usedImageIndexes } = useMemo(() => {
+    const entries: StepCaptureEntry[] = [];
+    const used = new Set<number>();
+    if (!typedResult) return { captures: entries, usedImageIndexes: used };
+
+    let cursor = 0;
+    for (const step of typedResult.steps) {
+      const data: unknown = step.data;
+      if (!isRecord(data)) continue;
+      const attachable = isAttachableImageStep(typedResult, data);
+      const imageIndex = attachable ? cursor : null;
+      if (attachable) cursor += 1;
+      const kind = captureKind(data);
+      if (!kind) continue;
+      const src = imageIndex === null ? undefined : images[imageIndex];
+      if (imageIndex !== null && src !== undefined) used.add(imageIndex);
+      entries.push({
+        stepIndex: step.step_index,
+        kind,
+        label: CAPTURE_LABELS[kind],
+        detail: captureDetail(kind, data),
+        frames: kind === "filmstrip" ? parseFrameRecords(data.frames) : [],
+        warnings: stringList(data.warnings),
+        src,
+      });
+    }
+    return { captures: entries, usedImageIndexes: used };
+  }, [typedResult, images]);
+
+  const looseImages = useMemo(
+    () => images.filter((_, index) => !usedImageIndexes.has(index)),
+    [images, usedImageIndexes],
+  );
+
+  const consoleCollapsible = Boolean(
+    pageContext &&
+      (pageContext.console.errors > 0 || pageContext.console.warnings > 0),
+  );
+  const [consoleOpen, setConsoleOpen] = useState(false);
+  const showConsoleSections = !consoleCollapsible || consoleOpen;
+
   const typedDiagnosticsBlock = useMemo(() => {
     if (!typedResult) return null;
     const lines = [
@@ -690,6 +900,17 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       onToggle={handleToggle}
       toolCall={toolCall}
     >
+      {pageContext && (
+        <PageHeader
+          console={pageContext.console}
+          consoleOpen={showConsoleSections}
+          onToggleConsole={() => setConsoleOpen((prev) => !prev)}
+          status={pageContext.status}
+          title={typedResult?.title}
+          url={typedResult?.url}
+        />
+      )}
+
       {typedStepsBlock && (
         <Box className={styles.section}>
           <Box className={styles.sectionLabel}>Request</Box>
@@ -701,12 +922,56 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         </Box>
       )}
 
-      {images.length > 0 && (
+      {looseImages.length > 0 && (
         <Flex py="2" gap="2" wrap="wrap">
-          {images.map((url, idx) => (
+          {looseImages.map((url, idx) => (
             <DialogImage key={idx} src={url} fallback="" size="8" />
           ))}
         </Flex>
+      )}
+
+      {captures.length > 0 && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Captures</Box>
+          <Box className={styles.captureList}>
+            {captures.map((capture) => (
+              <Box
+                className={styles.capture}
+                data-testid={`browser-capture-${capture.kind}`}
+                key={capture.stepIndex}
+              >
+                <Flex align="baseline" gap="2" wrap="wrap">
+                  <Box className={styles.captureLabel}>{capture.label}</Box>
+                  {capture.detail && (
+                    <Box className={styles.captureDetail}>{capture.detail}</Box>
+                  )}
+                </Flex>
+                {capture.src && (
+                  <DialogImage
+                    alt={capture.label}
+                    fallback=""
+                    size="9"
+                    src={capture.src}
+                  />
+                )}
+                {capture.frames.length > 0 && (
+                  <Flex gap="1" wrap="wrap">
+                    {capture.frames.map((frame) => (
+                      <Box className={styles.frameChip} key={frame.index}>
+                        {formatFrameChip(frame)}
+                      </Box>
+                    ))}
+                  </Flex>
+                )}
+                {capture.warnings.map((warning, index) => (
+                  <Box className={styles.captureWarning} key={index}>
+                    {warning}
+                  </Box>
+                ))}
+              </Box>
+            ))}
+          </Box>
+        </Box>
       )}
 
       {reportScreenshot && (
@@ -720,15 +985,40 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         downloads={typedResult?.downloads}
       />
 
-      {typedResultsBlock && (
+      {typedStepRows ? (
         <Box className={styles.section}>
           <Box className={styles.sectionLabel}>Results</Box>
-          <Box className={styles.logContent}>
-            <ShikiCodeBlock showLineNumbers={false}>
-              {typedResultsBlock}
-            </ShikiCodeBlock>
+          <Box className={styles.stepList} data-testid="browser-step-rows">
+            {typedStepRows.map((row) => (
+              <Box className={styles.stepRow} key={row.stepIndex}>
+                <Box className={styles.stepSummary}>{row.summary}</Box>
+                {row.locatorEcho && (
+                  <Box
+                    className={styles.locatorEcho}
+                    data-testid="browser-locator-echo"
+                  >
+                    {row.locatorEcho}
+                  </Box>
+                )}
+              </Box>
+            ))}
           </Box>
         </Box>
+      ) : (
+        typedResultsBlock && (
+          <Box className={styles.section}>
+            <Box className={styles.sectionLabel}>Results</Box>
+            <Box className={styles.logContent}>
+              <ShikiCodeBlock showLineNumbers={false}>
+                {typedResultsBlock}
+              </ShikiCodeBlock>
+            </Box>
+          </Box>
+        )
+      )}
+
+      {pageContext?.snapshot && (
+        <PageSnapshot snapshot={pageContext.snapshot} />
       )}
 
       {typedDiagnosticsBlock && (
@@ -742,7 +1032,7 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         </Box>
       )}
 
-      {typedConsoleBlock && (
+      {showConsoleSections && typedConsoleBlock && (
         <Box className={styles.section}>
           <Box className={styles.sectionLabel}>Console</Box>
           <Box className={styles.logContent}>
@@ -753,7 +1043,7 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         </Box>
       )}
 
-      {typedPageErrorsBlock && (
+      {showConsoleSections && typedPageErrorsBlock && (
         <Box className={styles.section}>
           <Box className={styles.sectionLabel}>Page Errors</Box>
           <Box className={styles.logContent}>

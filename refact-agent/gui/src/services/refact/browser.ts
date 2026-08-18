@@ -452,6 +452,53 @@ export type BrowserExecutionStep = {
   retries: number;
   actionability?: ActionabilityDiagnostics;
   assertion?: BrowserAssertionResult;
+  locator_echo?: string | null;
+};
+
+export type BrowserConsoleCounts = {
+  errors: number;
+  warnings: number;
+};
+
+export type BrowserSnapshotArtifact = {
+  kind: string;
+  mime: string;
+  path: string;
+  bytes: number;
+};
+
+export type BrowserPageSnapshot = {
+  yaml: string;
+  lines: number;
+  bytes: number;
+  truncated: boolean;
+  artifact?: BrowserSnapshotArtifact | null;
+};
+
+export type BrowserPageContext = {
+  status?: number | null;
+  console: BrowserConsoleCounts;
+  snapshot?: BrowserPageSnapshot | null;
+};
+
+export type BrowserFrameRecord = {
+  index: number;
+  offset_ms: number;
+  changed_percent?: number | null;
+};
+
+export type BrowserCaptureKind =
+  | "filmstrip"
+  | "element_gallery"
+  | "element_states";
+
+export type BrowserStepCapture = {
+  step_index: number;
+  kind: BrowserCaptureKind;
+  label: string;
+  detail: string | null;
+  frames: BrowserFrameRecord[];
+  warnings: string[];
 };
 
 export type BrowserTabOpener = {
@@ -539,6 +586,7 @@ export type BrowserActionResponse = {
   intercepted_requests?: BrowserRouteInterception[];
   context?: BrowserContextSummary | null;
   screenshot?: BrowserReportScreenshot | null;
+  page?: BrowserPageContext | null;
 };
 
 export const browserApi = createApi({

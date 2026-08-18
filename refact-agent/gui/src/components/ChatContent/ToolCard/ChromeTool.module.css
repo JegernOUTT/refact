@@ -109,3 +109,68 @@
 .handlerDetail {
   color: var(--rf-color-muted);
 }
+.stepList {
+  composes: resultList from "./ToolCardBody.module.css";
+}
+
+.stepRow {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.stepSummary {
+  min-width: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  overflow-wrap: anywhere;
+}
+
+.locatorEcho {
+  min-width: 0;
+  padding-inline-start: var(--rf-space-2);
+  color: var(--rf-color-accent);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  border-inline-start: var(--rf-hairline) solid var(--rf-border);
+  overflow-wrap: anywhere;
+}
+
+.captureList {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.capture {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  justify-items: start;
+}
+
+.captureLabel {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-1);
+}
+
+.captureDetail {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.frameChip {
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-pill);
+  white-space: nowrap;
+}
+
+.captureWarning {
+  color: var(--rf-color-warning);
+  font-size: var(--rf-text-1);
+  overflow-wrap: anywhere;
+}

@@ -1,0 +1,24 @@
+.section {
+  composes: section from "./ToolCardBody.module.css";
+}
+
+.pointer {
+  min-width: 0;
+  max-width: 100%;
+  padding-bottom: var(--rf-space-1);
+}
+
+.path {
+  min-width: 0;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  flex: 0 0 auto;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  white-space: nowrap;
+}
