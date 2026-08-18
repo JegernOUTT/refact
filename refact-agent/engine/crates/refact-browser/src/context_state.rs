@@ -11,9 +11,6 @@ use refact_integrations::browser_models::{
 
 pub const MAX_INDEXED_DB_RECORDS_PER_STORE: usize = 200;
 
-#[derive(Clone, Debug, Default)]
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewportState {
     pub width: u32,
@@ -205,7 +202,6 @@ impl ContextState {
             })
             .map_err(|error| format!("Failed to set geolocation: {error}"))?;
         }
-        apply_offline(tab, self.offline)?;
         apply_block_service_workers(tab, self.block_service_workers)?;
         apply_network_conditions(tab, self.offline, self.network_conditions.as_ref())?;
         apply_cpu_throttling(tab, self.cpu_throttling_rate)?;
@@ -253,7 +249,6 @@ impl ContextState {
             .map_err(|error| format!("Failed to clear user agent: {error}"))?;
             tab.call_method(Emulation::ClearGeolocationOverride(None))
                 .map_err(|error| format!("Failed to clear geolocation: {error}"))?;
-            apply_offline(tab, self.offline)?;
             apply_block_service_workers(tab, self.block_service_workers)?;
             apply_network_conditions(tab, self.offline, self.network_conditions.as_ref())?;
             apply_cpu_throttling(tab, self.cpu_throttling_rate)?;

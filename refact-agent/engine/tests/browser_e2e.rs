@@ -528,6 +528,7 @@ async fn context_state_roundtrips_and_reaches_adopted_popup() {
                     expression: "({language:navigator.language,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,dark:matchMedia('(prefers-color-scheme: dark)').matches,width:innerWidth,height:innerHeight,cookie:document.cookie,localStorage:Object.fromEntries(Object.entries(localStorage))})".to_string(),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -549,7 +550,7 @@ async fn context_state_roundtrips_and_reaches_adopted_popup() {
     let state = {
         let runtime = runtime.lock().await;
         let tab = runtime.get_active_tab().unwrap();
-        refact_lsp::refact_browser::context_state::storage_state(&tab).unwrap()
+        refact_lsp::refact_browser::context_state::storage_state(&tab, false).unwrap()
     };
     assert_eq!(
         state
@@ -568,7 +569,7 @@ async fn context_state_roundtrips_and_reaches_adopted_popup() {
     fresh_runtime.set_active_tab_target_id(fresh_tab.get_target_id().to_string());
     refact_lsp::refact_browser::setup_recording_for_tab(&mut fresh_runtime, fresh_tab.clone())
         .unwrap();
-    refact_lsp::refact_browser::context_state::set_storage_state(&fresh_tab, &state).unwrap();
+    refact_lsp::refact_browser::context_state::set_storage_state(&fresh_tab, &state, false).unwrap();
     fresh_tab
         .navigate_to(&case.server.url("context-probe.html"))
         .and_then(|tab| tab.wait_until_navigated())
@@ -647,6 +648,7 @@ async fn a_default_navigate_batch_returns_a_snapshot_context_and_zero_images() {
             steps: vec![BrowserStep::Navigate {
                 url: target.clone(),
             }],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -707,6 +709,7 @@ async fn page_context_screenshot_returns_a_png_instead_of_a_snapshot() {
             page_context: Some(PageContextMode::Screenshot),
             network: NetworkReportMode::default(),
             steps: vec![BrowserStep::Navigate { url: target }],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -733,6 +736,7 @@ async fn page_context_screenshot_returns_a_png_instead_of_a_snapshot() {
             page_context: Some(PageContextMode::Both),
             network: NetworkReportMode::default(),
             steps: vec![BrowserStep::Navigate { url: snapshot_page }],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -760,6 +764,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
         steps: vec![BrowserStep::Eval {
             expression: "document.querySelector('#fetch').click()".to_string(),
         }],
+        block_service_workers: None,
     };
 
     let report =
@@ -791,6 +796,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
                 page_context: None,
                 network: NetworkReportMode::default(),
                 steps: vec![],
+                block_service_workers: None,
             },
             &ImagePolicy::browser_capture(),
         )
@@ -834,6 +840,7 @@ async fn status_filtered_response_wait_skips_the_first_failure_and_matches_the_r
                     timeout_ms: Some(5_000),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -885,6 +892,7 @@ async fn console_wait_catches_a_delayed_error_and_ignores_quieter_levels() {
                     timeout_ms: Some(5_000),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -957,6 +965,7 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
                     locator: BrowserLocator::css("#result"),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -1181,6 +1190,7 @@ async fn artifacts_capture_page_clip_element_pdf_and_highlight_lifecycle() {
             attach_screenshot: None,
             page_context: None,
             network: NetworkReportMode::default(),
+            block_service_workers: None,
             steps: vec![
                 BrowserStep::Screenshot {
                     options: BrowserScreenshotOptions {
@@ -3391,6 +3401,7 @@ async fn locator_handler_clears_cookie_banner_before_click_and_records_firing() 
                     locator: BrowserLocator::css("#target"),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::default(),
     )
@@ -3451,6 +3462,7 @@ async fn locator_handler_clears_interstitial_that_appears_between_actions() {
                     locator: BrowserLocator::css("#target"),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::default(),
     )
@@ -3599,6 +3611,7 @@ async fn wait_for_popup_click_and_popup_action_share_one_batch() {
                 },
                 BrowserStep::CloseTab { tab: None },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3661,6 +3674,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                     timeout_ms: Some(5_000),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3705,6 +3719,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                     timeout_ms: Some(5_000),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3752,6 +3767,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                     timeout_ms: Some(5_000),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3795,6 +3811,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                 },
                 BrowserStep::ListRoutes,
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3840,6 +3857,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                     timeout_ms: Some(5_000),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3899,6 +3917,7 @@ async fn newest_route_falls_back_to_the_older_handler_and_times_expires_it() {
                     timeout_ms: Some(5_000),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3929,6 +3948,7 @@ async fn newest_route_falls_back_to_the_older_handler_and_times_expires_it() {
             page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![BrowserStep::ListRoutes],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3989,6 +4009,7 @@ async fn fetch_and_fulfill_replays_the_real_response_with_overrides() {
                     timeout_ms: Some(5_000),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -4039,6 +4060,7 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
                     timeout_ms: Some(5_000),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -4105,6 +4127,7 @@ async fn intercept_case(
             page_context: None,
             network: NetworkReportMode::default(),
             steps,
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -4177,9 +4200,12 @@ async fn websocket_drop_blocks_the_page_frame_from_reaching_the_server() {
             BrowserStep::Expect {
                 locator: Some(BrowserLocator::css("#received")),
                 matcher: BrowserExpectation::ToHaveText {
-                    expected: BrowserExpectedText::Text("waiting".to_string()),
+                    expected: refact_lsp::integrations::browser_models::BrowserExpectedTextOrList::One(
+                        BrowserExpectedText::Text("waiting".to_string()),
+                    ),
                     ignore_case: false,
                 },
+                not: None,
                 timeout_ms: Some(1_000),
                 soft: true,
             },
@@ -4388,6 +4414,7 @@ async fn dialog_fixture_auto_dismisses_confirm_and_reports_it() {
                     expression: "document.querySelector('#result').textContent".to_string(),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -4431,6 +4458,7 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
                     expression: "document.querySelector('#result').textContent".to_string(),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -4463,6 +4491,7 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
                     expression: "document.querySelector('#result').textContent".to_string(),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -6003,6 +6032,7 @@ fn clock_request(steps: Vec<BrowserStep>) -> BrowserActionRequest {
         page_context: None,
         network: NetworkReportMode::default(),
         steps,
+        block_service_workers: None,
     }
 }
 
@@ -6628,13 +6658,13 @@ async fn cdp_send_round_trips_raw_protocol_calls_on_page_and_browser_targets() {
     let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
 
     let report = execute_request_with_runtime(
-        runtime,
         runtime.clone(),
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: Some(false),
             network: NetworkReportMode::default(),
+            block_service_workers: None,
             steps: vec![
                 BrowserStep::SetContent {
                     html: "<!doctype html><html><body><h1>Fixture-less heading</h1><button>Press me</button></body></html>"
@@ -6646,6 +6676,48 @@ async fn cdp_send_round_trips_raw_protocol_calls_on_page_and_browser_targets() {
                 },
                 BrowserStep::PageContent,
             ],
+            page_context: None,
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.ok, "set_content batch failed: {report:?}");
+    let snapshot = serde_json::to_string(&report.steps[1].data).unwrap();
+    assert!(
+        snapshot.contains("Fixture-less heading") && snapshot.contains("Press me"),
+        "snapshot did not observe the new document: {snapshot}"
+    );
+    let content = report.steps[2]
+        .data
+        .as_ref()
+        .and_then(|data| data.get("html"))
+        .and_then(|html| html.as_str())
+        .unwrap_or_default();
+    assert!(content.starts_with("<!DOCTYPE html>"), "{content}");
+    assert!(content.contains("Fixture-less heading"), "{content}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn cdp_send_reaches_page_and_browser_targets_and_keeps_overrides() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+
+    let report = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: Some(false),
+            network: NetworkReportMode::default(),
+            block_service_workers: None,
+            page_context: None,
+            steps: vec![
                 BrowserStep::CdpSend {
                     method: "Runtime.evaluate".to_string(),
                     params: Some(json!({"expression": "40 + 2", "returnByValue": true})),
@@ -6670,27 +6742,12 @@ async fn cdp_send_round_trips_raw_protocol_calls_on_page_and_browser_targets() {
                     expression: "window.innerWidth".to_string(),
                 },
             ],
-            page_context: None,
         },
         &ImagePolicy::browser_capture(),
     )
     .await
     .unwrap();
 
-    assert!(report.ok, "set_content batch failed: {report:?}");
-    let snapshot = serde_json::to_string(&report.steps[1].data).unwrap();
-    assert!(
-        snapshot.contains("Fixture-less heading") && snapshot.contains("Press me"),
-        "snapshot did not observe the new document: {snapshot}"
-    );
-    let content = report.steps[2]
-        .data
-        .as_ref()
-        .and_then(|data| data.get("html"))
-        .and_then(|html| html.as_str())
-        .unwrap_or_default();
-    assert!(content.starts_with("<!DOCTYPE html>"), "{content}");
-    assert!(content.contains("Fixture-less heading"), "{content}");
     assert!(report.ok, "cdp_send batch failed: {report:?}");
 
     let evaluated = report.steps[0].data.as_ref().unwrap();
@@ -6729,9 +6786,6 @@ async fn cdp_send_round_trips_raw_protocol_calls_on_page_and_browser_targets() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
-}
-
-async fn cdp_send_guardrails_refuse_session_breaking_methods_and_surface_cdp_errors() {
     let Some(mut case) = BrowserCase::start("snapshot.html").await else {
         return;
     };
@@ -6758,6 +6812,7 @@ async fn cdp_send_guardrails_refuse_session_breaking_methods_and_surface_cdp_err
                     expression: "window.__refact_init_flag || 'missing'".to_string(),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -6791,6 +6846,7 @@ async fn cdp_send_guardrails_refuse_session_breaking_methods_and_surface_cdp_err
                     expression: "window.__refact_init_flag || 'missing'".to_string(),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -6817,6 +6873,7 @@ async fn cdp_send_guardrails_refuse_session_breaking_methods_and_surface_cdp_err
                     expression: "window.__refact_init_flag || 'missing'".to_string(),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -6938,6 +6995,7 @@ async fn dispatch_event_fires_listeners_with_the_inferred_class_and_detail() {
                         target,
                     }],
                     page_context: None,
+                    block_service_workers: None,
                 },
                 &ImagePolicy::browser_capture(),
             )

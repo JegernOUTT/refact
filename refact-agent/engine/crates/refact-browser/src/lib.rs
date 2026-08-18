@@ -53,9 +53,8 @@ pub use clock::{
     CLOCK_SOURCE, ClockManager, ClockOp, ClockState, current_wall_ms, parse_clock_ticks,
     parse_clock_time,
 };
-pub use context_state::{ContextState, MediaState, ViewportState};
-pub use init_scripts::{InitScript, InitScriptManager, page_init_script};
 pub use context_state::{ContextState, MediaState, NetworkConditions, ViewportState};
+pub use init_scripts::{InitScript, InitScriptManager, page_init_script};
 pub use devices::DeviceDescriptor;
 pub use handles::{
     CheckedState, ElementHandle, ElementState, ElementStateName, HandleError, HandleRegistry,

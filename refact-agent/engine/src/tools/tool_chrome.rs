@@ -774,8 +774,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "method".to_string(),
-        serde_json::json!({"type": "string", "description": "HTTP method for http_request (GET by default), or a method filter for wait_for_request and wait_for_response"}),
-        serde_json::json!({"type": "string", "description": "HTTP method for http_request, GET by default; CDP method such as Runtime.evaluate for cdp_send"}),
+        serde_json::json!({"type": "string", "description": "HTTP method for http_request (GET by default), a method filter for wait_for_request and wait_for_response, or a CDP method such as Runtime.evaluate for cdp_send"}),
     );
     properties.insert(
         "params".to_string(),
@@ -939,7 +938,7 @@ fn locator_handler_schema() -> serde_json::Value {
                     | "http_request"
                     | "add_init_script"
                     | "remove_init_script"
-                "route" | "unroute" | "list_routes" | "reset" | "http_request" | "cdp_send"
+                    | "cdp_send"
             ) && !action.starts_with("clock_")
         })
         .collect::<Vec<_>>();

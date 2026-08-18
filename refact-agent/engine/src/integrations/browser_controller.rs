@@ -1532,9 +1532,7 @@ struct BrowserResetCounts {
 impl BrowserResetCounts {
     fn summary(&self) -> String {
         format!(
-            "Reset: {}, {}, {}, {}, {}, {}, offline off, emulation cleared, {}",
-            "Reset: {}, {}, {}, {}, {}, offline off, emulation cleared, {}, {}",
-            "Reset: {}, {}, {}, {}, {}, offline off, throttling off, emulation and device cleared, {}",
+            "Reset: {}, {}, {}, {}, {}, {}, offline off, throttling off, emulation and device cleared, {}, {}",
             counted(self.routes, "route"),
             counted(self.har_replays, "har replay"),
             counted(self.websocket_routes, "ws route"),
@@ -2592,19 +2590,6 @@ pub async fn execute_request_with_runtime(
                 clamp_timeout_ms(*timeout_ms),
             )
             .await
-            download_step_result(
-                idx,
-                tokio::task::block_in_place(|| {
-                    download_monitor.wait_for_download(
-                        armed_network_waits
-                            .get(&idx)
-                            .copied()
-                            .unwrap_or_else(|| download_monitor.cursor()),
-                        timeout,
-                        save_as.as_deref(),
-                    )
-                }),
-            )
         } else if let BrowserStep::CancelDownload { id } = step {
             cancel_download_step_result(
                 idx,
@@ -10619,14 +10604,12 @@ mod tests {
             .unwrap();
         let locator_handlers = populated_locator_handlers();
 
-        let counts =
-            reset_sticky_registries(&routes, &websocket_registry, &locator_handlers, 1, 2, true)
-                .unwrap();
         let counts = reset_sticky_registries(
             &routes,
             &websocket_registry,
             &locator_handlers,
             1,
+            2,
             true,
             true,
         )
@@ -10648,9 +10631,7 @@ mod tests {
         );
         assert_eq!(
             counts.summary(),
-            "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, 2 init scripts, offline off, emulation cleared, clock cleared"
-            "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, offline off, emulation cleared, clock cleared, service worker block cleared"
-            "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, offline off, throttling off, emulation and device cleared, clock cleared"
+            "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, 2 init scripts, offline off, throttling off, emulation and device cleared, clock cleared, service worker block cleared"
         );
         assert!(route_registry.is_empty());
         assert_eq!(websocket_registry.route_count(), 0);
@@ -10693,21 +10674,16 @@ mod tests {
         let websocket_registry = WebSocketRegistry::default();
         let locator_handlers = populated_locator_handlers();
 
-        reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, 0, false).unwrap();
-        let repeated =
-            reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, 0, false)
-        reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, false, false)
+        reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, 0, false, false)
             .unwrap();
         let repeated =
-            reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, false, false)
+            reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, 0, false, false)
                 .unwrap();
 
         assert_eq!(repeated, BrowserResetCounts::default());
         assert_eq!(
             repeated.summary(),
-            "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, 0 init scripts, offline off, emulation cleared, clock off"
-            "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, offline off, emulation cleared, clock off, service worker block off"
-            "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, offline off, throttling off, emulation and device cleared, clock off"
+            "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, 0 init scripts, offline off, throttling off, emulation and device cleared, clock off, service worker block off"
         );
         assert_eq!(websocket_registry.route_count(), 0);
         assert_eq!(locator_handlers.lock().unwrap().handlers().len(), 1);
@@ -10916,9 +10892,21 @@ mod tests {
 
     #[test]
     fn set_content_forces_a_report_screenshot_even_though_the_url_never_changes() {
-        assert!(report_screenshot_requested(None, true, false));
-        assert!(!report_screenshot_requested(None, false, false));
-        assert!(!report_screenshot_requested(Some(false), true, false));
+        assert!(report_screenshot_requested(
+            None,
+            PageContextMode::Screenshot,
+            false
+        ));
+        assert!(!report_screenshot_requested(
+            None,
+            PageContextMode::Snapshot,
+            false
+        ));
+        assert!(!report_screenshot_requested(
+            Some(false),
+            PageContextMode::Screenshot,
+            false
+        ));
     }
 
     #[test]

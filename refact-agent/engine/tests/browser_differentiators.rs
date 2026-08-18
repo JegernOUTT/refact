@@ -188,6 +188,7 @@ fn websocket_inspection_and_har_replay_contracts_are_additive_and_masked() {
             HarMode::Full,
             HarContentPolicy::Embed,
             None,
+            None,
         )
         .unwrap();
     recorder.record(
@@ -730,6 +731,7 @@ async fn differentiator_09_tab_log_and_runtime_buffers_keep_independent_cursors(
                     timeout_ms: Some(2_000),
                 },
             ],
+            block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -887,6 +889,7 @@ async fn differentiator_12_password_masking_survives_final_serialization() {
             attach_screenshot: None,
             page_context: None,
             network: NetworkReportMode::default(),
+            block_service_workers: None,
             steps: vec![
                 BrowserStep::Fill {
                     locator: BrowserLocator::css("#password"),
