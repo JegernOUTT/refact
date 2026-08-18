@@ -27,8 +27,8 @@ use refact_lsp::integrations::browser_models::{
     BrowserHttpRequest, BrowserLoadState, BrowserLocator, BrowserPdfOptions, BrowserPollMatcher,
     BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
     BrowserStorageItem, BrowserStorageKind, BrowserTextMode, ClockTicks, ClockTime,
-    FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode, RouteHandler,
-    SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind, WebSocketRouteMode,
+    FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode, PageContextMode,
+    RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::devices;
 use refact_lsp::refact_browser::{
@@ -422,6 +422,7 @@ async fn context_state_roundtrips_and_reaches_adopted_popup() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::SetViewport {
@@ -575,6 +576,123 @@ async fn fixture_server_starts_and_serves_page() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn a_default_navigate_batch_returns_a_snapshot_context_and_zero_images() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    let target = case.server.url("getby.html");
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+
+    let report = execute_request_with_runtime(
+        runtime,
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: None,
+            page_context: None,
+            network: NetworkReportMode::default(),
+            steps: vec![BrowserStep::Navigate {
+                url: target.clone(),
+            }],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.ok, "navigate failed: {report:?}");
+    assert!(
+        report.screenshot.is_none(),
+        "the default page context must not attach an image"
+    );
+    let page = report
+        .page
+        .clone()
+        .expect("a navigate batch must return a page block");
+    let snapshot = page
+        .snapshot
+        .expect("a page-changing batch must attach the aria snapshot");
+    assert!(snapshot.bytes > 0);
+    assert!(snapshot.lines > 0);
+    assert!(
+        snapshot.yaml.contains("[ref="),
+        "the attached snapshot must carry actionable refs: {}",
+        snapshot.yaml
+    );
+    assert_eq!(snapshot.artifact.is_some(), snapshot.truncated);
+    assert_eq!(page.status, None, "a 200 document is not surfaced");
+    assert_eq!(report.url.as_deref(), Some(target.as_str()));
+    assert!(report.title.is_some());
+
+    let mut envelope = serde_json::to_value(&report).unwrap();
+    envelope["page"]["snapshot"]["yaml"] = serde_json::Value::String(String::new());
+    let header = serde_json::to_string(&envelope["page"]).unwrap();
+    assert!(
+        header.len() <= 600,
+        "page header was {} chars: {header}",
+        header.len()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn page_context_screenshot_returns_a_png_instead_of_a_snapshot() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    let target = case.server.url("getby.html");
+    let snapshot_page = case.server.url("snapshot.html");
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+
+    let report = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: None,
+            page_context: Some(PageContextMode::Screenshot),
+            network: NetworkReportMode::default(),
+            steps: vec![BrowserStep::Navigate { url: target }],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.ok, "navigate failed: {report:?}");
+    let screenshot = report
+        .screenshot
+        .expect("screenshot mode must attach an image");
+    assert!(screenshot.mime.starts_with("image/"));
+    assert!(!screenshot.data.is_empty());
+    assert!(
+        report.page.and_then(|page| page.snapshot).is_none(),
+        "screenshot mode must not attach the aria snapshot"
+    );
+
+    let both = execute_request_with_runtime(
+        runtime,
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: None,
+            page_context: Some(PageContextMode::Both),
+            network: NetworkReportMode::default(),
+            steps: vec![BrowserStep::Navigate { url: snapshot_page }],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+
+    assert!(both.screenshot.is_some());
+    assert!(both.page.and_then(|page| page.snapshot).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn transactional_report_settles_fetch_and_returns_console_once() {
     let Some(mut case) = BrowserCase::start("fetch-after-click.html").await else {
         return;
@@ -585,6 +703,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
         session: SessionPolicy::SharedDefault,
         target: TabTarget::Active,
         attach_screenshot: None,
+        page_context: None,
         network: NetworkReportMode::default(),
         steps: vec![BrowserStep::Eval {
             expression: "document.querySelector('#fetch').click()".to_string(),
@@ -617,6 +736,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
                 session: SessionPolicy::SharedDefault,
                 target: TabTarget::Active,
                 attach_screenshot: None,
+                page_context: None,
                 network: NetworkReportMode::default(),
                 steps: vec![],
             },
@@ -646,6 +766,7 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::Full,
             steps: vec![
                 BrowserStep::RemoveLocatorHandler {
@@ -902,6 +1023,7 @@ async fn artifacts_capture_page_clip_element_pdf_and_highlight_lifecycle() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Screenshot {
@@ -2905,6 +3027,7 @@ async fn locator_handler_clears_cookie_banner_before_click_and_records_firing() 
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::RemoveLocatorHandler {
@@ -2961,6 +3084,7 @@ async fn locator_handler_clears_interstitial_that_appears_between_actions() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::RemoveLocatorHandler {
@@ -3114,6 +3238,7 @@ async fn wait_for_popup_click_and_popup_action_share_one_batch() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::WaitForPopup {
@@ -3165,6 +3290,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::Full,
             steps: vec![
                 BrowserStep::Route {
@@ -3207,6 +3333,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Unroute {
@@ -3249,6 +3376,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::Full,
             steps: vec![
                 BrowserStep::Unroute { pattern: None },
@@ -3303,6 +3431,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Unroute { pattern: None },
@@ -3334,6 +3463,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Route {
@@ -3392,6 +3522,7 @@ async fn newest_route_falls_back_to_the_older_handler_and_times_expires_it() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Route {
@@ -3448,6 +3579,7 @@ async fn newest_route_falls_back_to_the_older_handler_and_times_expires_it() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![BrowserStep::ListRoutes],
         },
@@ -3479,6 +3611,7 @@ async fn fetch_and_fulfill_replays_the_real_response_with_overrides() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Route {
@@ -3540,6 +3673,7 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::RouteWebSocket {
@@ -3715,6 +3849,7 @@ async fn dialog_fixture_auto_dismisses_confirm_and_reports_it() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::Eval {
@@ -3753,6 +3888,7 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::HandleDialog {
@@ -3784,6 +3920,7 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
+            page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
                 BrowserStep::HandleDialog {
@@ -5332,6 +5469,7 @@ fn clock_request(steps: Vec<BrowserStep>) -> BrowserActionRequest {
         session: SessionPolicy::SharedDefault,
         target: TabTarget::Active,
         attach_screenshot: None,
+        page_context: None,
         network: NetworkReportMode::default(),
         steps,
     }

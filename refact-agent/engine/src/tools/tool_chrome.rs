@@ -128,9 +128,11 @@ const LOCATOR_HANDLER_STEP_ACTIONS: &[&str] =
     crate::integrations::browser_models::BrowserStep::ACTION_NAMES;
 
 const CHROME_DESCRIPTION: &str = concat!(
-    "Ref-first batched browser automation. Prefer the typed `request`: ONE call can carry many steps, unlike one-action-per-call servers. ",
-    "Take `accessibility_snapshot`, read its `[ref=eN]` handles, then act with `locator.by=ref`; refs come from the most recent snapshot. ",
-    "Canonical batch: {\"steps\":[{\"action\":\"accessibility_snapshot\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]} Pass this object as `request`; e5/e7 stand for handles minted by the latest snapshot.\n",
+    "Text-first batched browser automation. You read pages as text, not as pictures. Prefer the typed `request`: ONE call can carry many steps, unlike one-action-per-call servers. ",
+    "The loop is: navigate -> read the returned snapshot refs -> act by ref -> repeat. Any batch that changes the page attaches a ref-annotated ARIA snapshot under `page.snapshot` automatically, so you do NOT need an `accessibility_snapshot` step after navigating; screenshots are opt-in and cost far more than the text tree. ",
+    "Each `[ref=eN]` handle in that snapshot is an element address: act with `locator.by=ref`; refs come from the most recent snapshot. ",
+    "Canonical batch: {\"steps\":[{\"action\":\"navigate\",\"url\":\"https://example.com\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]} Pass this object as `request`; e5/e7 stand for handles minted by the snapshot the previous batch returned. Use an explicit `accessibility_snapshot` step only to re-read a page that did NOT change, or to scope to a subtree with `locator`/`depth`.\n",
+    "Page report: a page-changing batch returns `page` with the final URL and title, `page.status` when the main document answered with a non-2xx status, `page.console` error/warning COUNTS (full text stays in `console` and `tab_log`), and `page.snapshot`. Snapshots inline their YAML when small; a large tree is written to a `text/yaml` artifact and `page.snapshot` carries the head plus `{artifact:{kind,mime,path,bytes}}`, `lines`, `bytes`, and `truncated:true`. Locator-driven actions echo a canonical Playwright-style locator in `locator_echo` so a run stays auditable after the refs expire.\n",
     "Core: navigate, reload, go_back, go_forward, open_tab, close_tab, switch_tab, list_tabs, click, click_if_exists, hover, focus, blur, scroll_to, press_key, drag_and_drop, and drop_files. drag_and_drop accepts source/target locators or refs plus optional source_position/target_position. open_tab accepts optional device/url; close_tab accepts an optional tab and otherwise closes active. Closing active selects the preceding tab in adoption order, the next tab when closing the first, or leaves no active tab.\n",
     "Coordinate mouse escape hatch: mouse_move, mouse_down, mouse_up, mouse_click_xy, mouse_drag_xy, and mouse_wheel use main-frame viewport CSS pixels and bypass locator resolution. Use these only for canvas, map, and vision-driven UIs with no addressable element; locator/ref actions remain the default. ",
     "Locator handlers and overlay auto-dismiss do NOT guard `mouse_*` coordinate actions: an overlay that would be dismissed before a locator action will still swallow a coordinate click.\n",
@@ -160,7 +162,8 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Advanced: eval, add_locator_handler, remove_locator_handler, dismiss_overlays, highlight_element, highlight, hide_highlight, annotate, and fixed-delay wait_seconds. highlight accepts locator/ref plus optional style and label; annotate accepts locator/ref plus text. Locator handlers use `{type:\"click\"}` or `{type:\"steps\",steps:[...]}`.\n",
     "Locator fallback vocabulary: ref; role with name/description, exact or regex, and checked/pressed/selected/expanded/disabled/level/include_hidden filters; test_id with configurable `attribute`; text, label, placeholder, alt_text, title, css, xpath, id, name, and autocomplete. ",
     "Compose with zero-based `nth` (-1 is last), first/last, locator, filter (has/has_not/has_text/has_not_text/visible), and/or, or an outermost-first `frames` chain. Non-selecting actions are strict: ambiguous locators fail loudly with the match count. Same-process frames are supported; out-of-process frames fail explicitly.\n",
-    "`attach_screenshot` is tri-state for the policy-sized report screenshot: true = always attach, false = never attach, omitted = attach when the page changed. An explicit `screenshot` step still returns its own image even when false.\n",
+    "`page_context` picks the page-changed context: `snapshot` (the default) attaches the ref-annotated ARIA snapshot and NO image, `screenshot` attaches a policy-sized image instead, `both` attaches each, `none` attaches only the page header. The snapshot is attached only when the batch actually changed the page. ",
+    "`attach_screenshot` remains the tri-state screenshot override and wins over `page_context`: true = always attach, false = never attach, omitted = follow `page_context`. An explicit `screenshot` step still returns its own image even when false, and still adds the report screenshot under the default `snapshot` mode.\n",
     "`network` controls per-request report volume: `summary` (the default) emits one `method url status bytes ms` line per request, `full` keeps request and response headers, `none` drops per-request entries. Route interception telemetry and the detail returned by wait_for_request and wait_for_response stay visible in every mode. ",
     "The legacy newline-separated `commands` input remains accepted but is deprecated; new callers must use `request.steps`."
 );
@@ -889,7 +892,8 @@ fn browser_request_schema() -> serde_json::Value {
         "required": ["steps"],
         "properties": {
             "session": {"type": "string", "enum": ["shared_default"]},
-            "attach_screenshot": {"type": "boolean", "description": "true = always attach, false = never attach, omitted = attach when the page changed"},
+            "page_context": {"type": "string", "enum": ["snapshot", "screenshot", "both", "none"], "description": "What to attach as page-changed context. snapshot (default) attaches the ref-annotated aria snapshot and no image, screenshot attaches a policy-sized PNG instead, both attaches each, none attaches only the page header"},
+            "attach_screenshot": {"type": "boolean", "description": "Screenshot override: true = always attach, false = never attach, omitted = follow page_context"},
             "network": {"type": "string", "enum": ["none", "summary", "full"], "description": "Per-request report volume. summary (default) emits one `method url status bytes ms` line per request, full keeps request and response headers, none drops per-request entries"},
             "target": tab_target_schema(),
             "steps": {
@@ -1421,8 +1425,7 @@ mod tests {
     #[test]
     fn chrome_description_is_ref_first_batched_and_actionability_aware() {
         let description = ToolChrome::default().tool_description().description;
-        let canonical = "{\"steps\":[{\"action\":\"accessibility_snapshot\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]}";
-        assert!(description.starts_with("Ref-first batched browser automation."));
+        let canonical = "{\"steps\":[{\"action\":\"navigate\",\"url\":\"https://example.com\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]}";
         assert!(description.contains("ONE call can carry many steps"));
         assert!(description.contains(canonical));
         assert!(description.contains("refs come from the most recent snapshot"));
@@ -1521,12 +1524,50 @@ mod tests {
             schema
                 .pointer("/properties/request/properties/attach_screenshot/description")
                 .and_then(Value::as_str),
-            Some("true = always attach, false = never attach, omitted = attach when the page changed")
+            Some("Screenshot override: true = always attach, false = never attach, omitted = follow page_context")
         );
         let description = ToolChrome::default().tool_description().description;
-        assert!(description.contains("`attach_screenshot` is tri-state"));
+        assert!(description.contains("`attach_screenshot` remains the tri-state screenshot override"));
         assert!(description.contains("false = never attach"));
-        assert!(description.contains("omitted = attach when the page changed"));
+        assert!(description.contains("omitted = follow `page_context`"));
+    }
+
+    #[test]
+    fn chrome_schema_offers_every_page_context_mode() {
+        let schema = chrome_input_schema();
+        assert_eq!(
+            schema.pointer("/properties/request/properties/page_context/enum"),
+            Some(&serde_json::json!(["snapshot", "screenshot", "both", "none"]))
+        );
+        assert!(schema
+            .pointer("/properties/request/properties/page_context/description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains("snapshot (default)")
+                && description.contains("no image")));
+    }
+
+    #[test]
+    fn chrome_description_teaches_the_text_first_loop_with_opt_in_screenshots() {
+        let description = ToolChrome::default().tool_description().description;
+        assert!(description.starts_with("Text-first batched browser automation."));
+        assert!(description.contains("You read pages as text, not as pictures."));
+        assert!(description
+            .contains("navigate -> read the returned snapshot refs -> act by ref -> repeat"));
+        assert!(description.contains("screenshots are opt-in"));
+        assert!(description
+            .contains("you do NOT need an `accessibility_snapshot` step after navigating"));
+        assert!(description.contains("`snapshot` (the default) attaches the ref-annotated ARIA snapshot and NO image"));
+        assert!(description.contains("`none` attaches only the page header"));
+    }
+
+    #[test]
+    fn chrome_description_documents_the_page_header_and_snapshot_budget() {
+        let description = ToolChrome::default().tool_description().description;
+        assert!(description.contains("page.status"));
+        assert!(description.contains("error/warning COUNTS"));
+        assert!(description.contains("full text stays in `console` and `tab_log`"));
+        assert!(description.contains("{artifact:{kind,mime,path,bytes}}"));
+        assert!(description.contains("locator_echo"));
     }
 
     #[test]
@@ -1581,6 +1622,58 @@ mod tests {
             "screenshot": {"mime": "image/png", "data": TINY_PNG_BASE64},
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_snapshot_only_report_delivers_zero_image_bytes_to_the_model() {
+        let report: ExecutionReport = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "steps": [{"step_index": 0, "ok": true, "summary": "Navigated to https://example.com"}],
+            "url": "https://example.com",
+            "title": "Example",
+            "page": {
+                "console": {"errors": 0, "warnings": 0},
+                "snapshot": {
+                    "yaml": "- button \"Save\" [ref=e1]",
+                    "lines": 1,
+                    "bytes": 24,
+                    "truncated": false
+                }
+            },
+            "dialogs": [],
+            "new_tabs": [],
+        }))
+        .unwrap();
+
+        let content = execution_report_to_multimodal(&report, &ImagePolicy::default()).unwrap();
+
+        assert!(
+            !content.iter().any(|element| element.is_image()),
+            "the default page context must not ship any image bytes"
+        );
+        assert_eq!(content.len(), 1);
+        assert!(content[0].m_content.contains("[ref=e1]"));
+    }
+
+    #[test]
+    fn a_report_screenshot_reaches_the_model_on_the_typed_request_path() {
+        const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let report: ExecutionReport = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "steps": [{"step_index": 0, "ok": true, "summary": "Navigated"}],
+            "dialogs": [],
+            "new_tabs": [],
+            "screenshot": {"mime": "image/png", "data": TINY_PNG_BASE64},
+        }))
+        .unwrap();
+
+        let content = execution_report_to_multimodal(&report, &ImagePolicy::default()).unwrap();
+
+        assert_eq!(
+            content.iter().filter(|element| element.is_image()).count(),
+            1,
+            "page_context screenshot mode is useless if the image never reaches the model"
+        );
     }
 
     #[test]
@@ -2201,6 +2294,13 @@ fn execution_report_to_multimodal(
                     }
                 }
             }
+        }
+    }
+    if let Some(screenshot) = &report.screenshot {
+        let (resized, resized_mime) =
+            resize_screenshot_b64(&screenshot.data, &screenshot.mime, image_policy)?;
+        if let Ok(element) = MultimodalElement::new(resized_mime, resized) {
+            content.push(element);
         }
     }
     Ok(content)

@@ -17,6 +17,8 @@ struct BrowserActionRequestEnvelope {
     #[serde(default)]
     attach_screenshot: Option<bool>,
     #[serde(default)]
+    page_context: Option<PageContextMode>,
+    #[serde(default)]
     network: NetworkReportMode,
     steps: Vec<Value>,
 }
@@ -32,6 +34,7 @@ pub fn parse_browser_action_request(value: Value) -> Result<BrowserActionRequest
         session: envelope.session,
         target: envelope.target,
         attach_screenshot: envelope.attach_screenshot,
+        page_context: envelope.page_context,
         network: envelope.network,
         steps,
     })
@@ -618,6 +621,58 @@ mod tests {
         assert!(
             error.starts_with("step[0] (capture_frames): unknown field `frames`"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn page_context_defaults_to_snapshot_and_accepts_every_mode() {
+        let omitted = parse_browser_action_request(serde_json::json!({"steps": []})).unwrap();
+        assert_eq!(omitted.page_context, None);
+        assert_eq!(omitted.page_context_mode(), PageContextMode::Snapshot);
+
+        for (raw, expected) in [
+            ("snapshot", PageContextMode::Snapshot),
+            ("screenshot", PageContextMode::Screenshot),
+            ("both", PageContextMode::Both),
+            ("none", PageContextMode::None),
+        ] {
+            let parsed =
+                parse_browser_action_request(serde_json::json!({"page_context": raw, "steps": []}))
+                    .unwrap();
+            assert_eq!(parsed.page_context, Some(expected));
+            assert_eq!(parsed.page_context_mode(), expected);
+            assert_eq!(serde_json::to_value(expected).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn page_context_is_rejected_when_it_is_not_a_known_mode() {
+        for rejected in [
+            serde_json::json!({"page_context": "Snapshot", "steps": []}),
+            serde_json::json!({"page_context": "aria", "steps": []}),
+            serde_json::json!({"page_context": true, "steps": []}),
+        ] {
+            assert!(
+                parse_browser_action_request(rejected.clone()).is_err(),
+                "expected rejection: {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn page_context_composes_with_the_attach_screenshot_override() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "page_context": "none",
+            "attach_screenshot": true,
+            "steps": [{"action": "navigate", "url": "https://example.com"}]
+        }))
+        .unwrap();
+
+        assert_eq!(request.page_context_mode(), PageContextMode::None);
+        assert_eq!(request.attach_screenshot, Some(true));
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["page_context"],
+            serde_json::json!("none")
         );
     }
 

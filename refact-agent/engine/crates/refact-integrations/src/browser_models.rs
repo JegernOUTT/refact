@@ -2018,6 +2018,26 @@ pub enum NetworkReportMode {
     Full,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PageContextMode {
+    #[default]
+    Snapshot,
+    Screenshot,
+    Both,
+    None,
+}
+
+impl PageContextMode {
+    pub fn includes_snapshot(self) -> bool {
+        matches!(self, Self::Snapshot | Self::Both)
+    }
+
+    pub fn includes_screenshot(self) -> bool {
+        matches!(self, Self::Screenshot | Self::Both)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserActionRequest {
@@ -2028,8 +2048,16 @@ pub struct BrowserActionRequest {
     #[serde(default)]
     pub attach_screenshot: Option<bool>,
     #[serde(default)]
+    pub page_context: Option<PageContextMode>,
+    #[serde(default)]
     pub network: NetworkReportMode,
     pub steps: Vec<BrowserStep>,
+}
+
+impl BrowserActionRequest {
+    pub fn page_context_mode(&self) -> PageContextMode {
+        self.page_context.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2121,6 +2149,8 @@ pub struct StepResult {
     pub actionability: Option<ActionabilityDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assertion: Option<BrowserAssertionResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator_echo: Option<String>,
 }
 
 impl StepResult {
@@ -2137,6 +2167,7 @@ impl StepResult {
             retries: 0,
             actionability: None,
             assertion: None,
+            locator_echo: None,
         }
     }
 
@@ -2157,6 +2188,7 @@ impl StepResult {
             retries: 0,
             actionability: None,
             assertion: None,
+            locator_echo: None,
         }
     }
 
@@ -2164,6 +2196,54 @@ impl StepResult {
         self.data = Some(data);
         self
     }
+
+    pub fn with_locator_echo(mut self, locator_echo: Option<String>) -> Self {
+        self.locator_echo = locator_echo;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserConsoleCounts {
+    #[serde(default)]
+    pub errors: usize,
+    #[serde(default)]
+    pub warnings: usize,
+}
+
+impl BrowserConsoleCounts {
+    pub fn is_empty(&self) -> bool {
+        self.errors == 0 && self.warnings == 0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserSnapshotArtifact {
+    pub kind: String,
+    pub mime: String,
+    pub path: std::path::PathBuf,
+    pub bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserPageSnapshot {
+    pub yaml: String,
+    pub lines: usize,
+    pub bytes: usize,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<BrowserSnapshotArtifact>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserPageContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "BrowserConsoleCounts::is_empty")]
+    pub console: BrowserConsoleCounts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<BrowserPageSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2174,6 +2254,8 @@ pub struct ExecutionReport {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<BrowserPageContext>,
     #[serde(default)]
     pub stabilized: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4062,6 +4144,102 @@ mod tests {
     }
 
     #[test]
+    fn test_page_context_mode_defaults_to_snapshot_and_splits_the_two_attachments() {
+        let omitted: BrowserActionRequest = serde_json::from_str(r#"{"steps": []}"#).unwrap();
+        assert_eq!(omitted.page_context, None);
+        assert_eq!(omitted.page_context_mode(), PageContextMode::Snapshot);
+        assert_eq!(PageContextMode::default(), PageContextMode::Snapshot);
+
+        for (mode, snapshot, screenshot) in [
+            (PageContextMode::Snapshot, true, false),
+            (PageContextMode::Screenshot, false, true),
+            (PageContextMode::Both, true, true),
+            (PageContextMode::None, false, false),
+        ] {
+            assert_eq!(mode.includes_snapshot(), snapshot, "{mode:?}");
+            assert_eq!(mode.includes_screenshot(), screenshot, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn test_page_context_is_omitted_from_the_wire_when_unset() {
+        let request: BrowserActionRequest = serde_json::from_str(r#"{"steps": []}"#).unwrap();
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["page_context"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_execution_report_page_block_is_additive_for_existing_clients() {
+        let legacy = serde_json::json!({
+            "ok": true,
+            "steps": [{"step_index": 0, "ok": true, "summary": "Navigated"}],
+            "url": "https://example.com",
+            "title": "Example",
+            "dialogs": [],
+            "new_tabs": [],
+        });
+        let report: ExecutionReport = serde_json::from_value(legacy).unwrap();
+        assert!(report.page.is_none());
+        assert!(report.steps[0].locator_echo.is_none());
+
+        let serialized = serde_json::to_value(&report).unwrap();
+        assert!(serialized.get("page").is_none());
+        assert!(serialized["steps"][0].get("locator_echo").is_none());
+        assert_eq!(serialized["url"], "https://example.com");
+        assert_eq!(serialized["title"], "Example");
+    }
+
+    #[test]
+    fn test_page_context_round_trips_the_header_and_the_snapshot_pointer() {
+        let page = BrowserPageContext {
+            status: Some(404),
+            console: BrowserConsoleCounts {
+                errors: 1,
+                warnings: 0,
+            },
+            snapshot: Some(BrowserPageSnapshot {
+                yaml: "- heading \"Not Found\" [ref=e1]".to_string(),
+                lines: 1,
+                bytes: 12_000,
+                truncated: true,
+                artifact: Some(BrowserSnapshotArtifact {
+                    kind: "aria_snapshot".to_string(),
+                    mime: "text/yaml".to_string(),
+                    path: std::path::PathBuf::from("/tmp/artifacts/snapshot-1.yaml"),
+                    bytes: 12_000,
+                }),
+            }),
+        };
+
+        let value = serde_json::to_value(&page).unwrap();
+        assert_eq!(value["status"], 404);
+        assert_eq!(value["console"]["errors"], 1);
+        assert_eq!(value["snapshot"]["truncated"], true);
+        assert_eq!(value["snapshot"]["artifact"]["kind"], "aria_snapshot");
+        assert_eq!(value["snapshot"]["artifact"]["mime"], "text/yaml");
+        assert_eq!(
+            serde_json::from_value::<BrowserPageContext>(value).unwrap(),
+            page
+        );
+    }
+
+    #[test]
+    fn test_step_result_carries_the_canonical_locator_echo() {
+        let step = StepResult::success(0, "click on <button>")
+            .with_locator_echo(Some("getByRole('button', { name: 'Save' })".to_string()));
+
+        let value = serde_json::to_value(&step).unwrap();
+        assert_eq!(
+            value["locator_echo"],
+            "getByRole('button', { name: 'Save' })"
+        );
+        assert!(serde_json::to_value(StepResult::success(0, "noop"))
+            .unwrap()
+            .get("locator_echo")
+            .is_none());
+    }
+
+    #[test]
     fn test_request_network_mode_defaults_to_summary() {
         let omitted: BrowserActionRequest = serde_json::from_str(r#"{"steps": []}"#).unwrap();
         assert_eq!(omitted.network, NetworkReportMode::Summary);
@@ -4200,6 +4378,14 @@ mod tests {
             ],
             url: Some("https://example.com".to_string()),
             title: Some("Example".to_string()),
+            page: Some(BrowserPageContext {
+                status: Some(404),
+                console: BrowserConsoleCounts {
+                    errors: 1,
+                    warnings: 2,
+                },
+                snapshot: None,
+            }),
             stabilized: true,
             console: vec![],
             page_errors: vec![],
@@ -4243,8 +4429,13 @@ mod tests {
         assert_eq!(json["dialogs"][0]["automatic"], false);
         assert_eq!(json["uploads"][0]["source"], "direct");
         assert_eq!(json["downloads"][0]["state"], "completed");
+        assert_eq!(json["page"]["status"], 404);
+        assert_eq!(json["page"]["console"]["errors"], 1);
+        assert_eq!(json["page"]["console"]["warnings"], 2);
+        assert!(json["page"].get("snapshot").is_none());
         let parsed: ExecutionReport = serde_json::from_value(json).unwrap();
         assert!(parsed.ok);
+        assert_eq!(parsed.page, report.page);
     }
 
     #[test]

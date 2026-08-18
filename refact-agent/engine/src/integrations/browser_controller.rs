@@ -15,12 +15,13 @@ use crate::integrations::browser_locators::{
 };
 use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
+use crate::integrations::browser_types::{ConsoleEntry, NetworkEntry};
 use refact_browser::{
     ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
     ActionabilityExecutionMode, ActionabilityTimeouts, CdpDragObserver, CdpKeyboardDispatcher,
-    CdpMouseDispatcher, ClockOp, DEFAULT_DISMISS_OVERLAYS_HANDLER, ElementHandle,
-    ExpectPollResult, FUNCTION_POLL_BACKOFF_MS, HitTargetController, HitTargetPoint,
-    HitTargetResult, Keyboard, LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation,
+    CdpMouseDispatcher, ClockOp, DEFAULT_DISMISS_OVERLAYS_HANDLER, ElementHandle, ExpectPollResult,
+    FUNCTION_POLL_BACKOFF_MS, HitTargetController, HitTargetPoint, HitTargetResult, Keyboard,
+    LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation, LocatorGenerationOptions,
     LocatorHandlerProbe, LocatorHandlerRegistry, LocatorOutcome, MainFrameCssPoint, Mouse,
     MouseButton, MouseState, NetworkLoadState, NetworkMonitorHandle, Ref, ScrollStrategy,
     SnapshotMode, SnapshotOptions, SystemClock, UrlMatcher, WebSocketRegistry, WorldManager,
@@ -54,6 +55,8 @@ const DEFAULT_ALL_TEXTS: usize = 50;
 const MAX_ALL_TEXTS: usize = 500;
 const DEFAULT_ARIA_SNAPSHOT_CHARS: usize = 20_000;
 const MAX_ARIA_SNAPSHOT_CHARS: usize = 100_000;
+const MAX_INLINE_SNAPSHOT_BYTES: usize = 6 * 1024;
+const SNAPSHOT_SUMMARY_LINES: usize = 40;
 
 const TAP_AMBIGUOUS_TARGET: &str = "tap requires either a locator or both x and y";
 const TAP_REQUIRES_TOUCH: &str = "The page does not support tap: enable touch emulation first with a set_viewport step that sets has_touch to true";
@@ -165,6 +168,7 @@ struct BrowserActionDriver<'a> {
     image_policy: &'a ImagePolicy,
     precheck_deadline: Instant,
     resolved: Option<ResolvedElement>,
+    locator_echo: Option<String>,
 }
 
 struct DragActionabilityDriver<'a> {
@@ -303,6 +307,7 @@ impl<'a> BrowserActionDriver<'a> {
             image_policy,
             precheck_deadline: Instant::now() + Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS),
             resolved: None,
+            locator_echo: None,
         }
     }
 
@@ -364,6 +369,10 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
     }
 
     fn perform(&mut self) -> Result<Self::Output, ActionabilityDiagnostic> {
+        self.locator_echo = self
+            .resolved
+            .as_ref()
+            .and_then(|resolved| generate_locator_echo(self.tab, self.world, &resolved.handle));
         let resolved = self.resolved()?;
         let dispatcher = CdpMouseDispatcher::new(self.tab);
         if self.action == ActionKind::Focus {
@@ -478,6 +487,17 @@ fn intercepts_pointer_events(description: String) -> ActionabilityDiagnostic {
             .unwrap_or(&description)
             .to_string(),
     }
+}
+
+fn generate_locator_echo(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: &ElementHandle,
+) -> Option<String> {
+    world
+        .generate_locator(tab, handle, LocatorGenerationOptions::default())
+        .ok()
+        .filter(|locator| !locator.is_empty())
 }
 
 fn element_preview(tab: &Tab, world: &WorldManager, handle: &ElementHandle) -> String {
@@ -774,6 +794,7 @@ fn execute_steps_with_world(
         steps: results,
         url: Some(tab.get_url()),
         title: tab.get_title().ok(),
+        page: None,
         stabilized: false,
         console: vec![],
         page_errors: vec![],
@@ -2565,7 +2586,9 @@ pub async fn execute_request_with_runtime(
         Some(tab) => Some(tab),
         None => runtime_arc.lock().await.get_active_tab(),
     };
-    let (url, title, stabilized, screenshot) = if let Some(tab) = active_tab {
+    let page_context_mode = request.page_context_mode();
+    let artifacts_dir = runtime_arc.lock().await.artifacts_dir.clone();
+    let (url, title, stabilized, screenshot, snapshot) = if let Some(tab) = active_tab {
         let stabilized = tokio::task::block_in_place(|| {
             wait_for_report_stability(
                 &tab,
@@ -2578,7 +2601,7 @@ pub async fn execute_request_with_runtime(
         let page_changed = initial_url.as_deref() != Some(url.as_str());
         let capture_requested = report_screenshot_requested(
             request.attach_screenshot,
-            page_changed,
+            page_context_mode,
             request
                 .steps
                 .iter()
@@ -2589,9 +2612,20 @@ pub async fn execute_request_with_runtime(
         } else {
             None
         };
-        (Some(url), tab.get_title().ok(), stabilized, screenshot)
+        let snapshot = if report_snapshot_requested(page_context_mode, page_changed) {
+            tokio::task::block_in_place(|| capture_page_snapshot(&tab, &world, &artifacts_dir).ok())
+        } else {
+            None
+        };
+        (
+            Some(url),
+            tab.get_title().ok(),
+            stabilized,
+            screenshot,
+            snapshot,
+        )
     } else {
-        (None, None, false, None)
+        (None, None, false, None, None)
     };
     let (
         console,
@@ -2611,7 +2645,7 @@ pub async fn execute_request_with_runtime(
             .into_iter()
             .map(mask_console_entry)
             .collect::<Vec<_>>();
-        let page_errors = console
+        let page_errors: Vec<String> = console
             .iter()
             .filter(|entry| entry.level == "page_error")
             .map(|entry| entry.text.clone())
@@ -2637,11 +2671,17 @@ pub async fn execute_request_with_runtime(
         )
     };
 
+    let page = BrowserPageContext {
+        status: notable_main_document_status(&network, url.as_deref()),
+        console: console_counts(&console, &page_errors),
+        snapshot,
+    };
     let mut report = ExecutionReport {
         ok: all_ok,
         steps: results,
         url,
         title,
+        page: (page != BrowserPageContext::default()).then_some(page),
         stabilized,
         console,
         page_errors,
@@ -2777,6 +2817,7 @@ pub fn execute_steps_with_runtime(
                             steps: vec![StepResult::failure(idx, "OpenTab", error)],
                             url: current_tab.as_ref().map(|tab| tab.get_url()),
                             title: current_tab.as_ref().and_then(|tab| tab.get_title().ok()),
+                            page: None,
                             stabilized: false,
                             console: vec![],
                             page_errors: vec![],
@@ -3120,6 +3161,7 @@ pub fn execute_steps_with_runtime(
         steps: results,
         url,
         title,
+        page: None,
         stabilized: false,
         console: vec![],
         page_errors: vec![],
@@ -5591,6 +5633,7 @@ fn step_actionable_action_in_mode(
             if success.attempts > 0 {
                 result.actionability = Some(success.diagnostics(action_kind));
             }
+            result.locator_echo = driver.locator_echo.take();
             result
         }
         Err(error) => {
@@ -5912,6 +5955,7 @@ fn step_fill(
                 idx,
                 format!("Filled <{}> with {} chars", info.tag, text.len()),
             );
+            result.locator_echo = generate_locator_echo(tab, world, &info.handle);
             result.field_kind = Some(info.field_kind.clone());
             result.fill_strategy = Some(outcome.strategy);
             result.verified = outcome.verified;
@@ -5947,6 +5991,7 @@ fn step_clear(
     match refact_browser::forms::clear(tab, world, &info.handle, &info.info, verify) {
         Ok(outcome) => {
             let mut result = StepResult::success(idx, format!("Cleared <{}>", info.tag));
+            result.locator_echo = generate_locator_echo(tab, world, &info.handle);
             result.field_kind = Some(info.field_kind.clone());
             result.fill_strategy = outcome.strategy;
             result.verified = outcome.verified;
@@ -5976,7 +6021,8 @@ fn step_select_option(
             Ok(outcome) => {
                 let mut result =
                     StepResult::success(idx, format!("Selected '{}' in <{}>", value, info.tag))
-                        .with_data(serde_json::json!({"selected": outcome.selected}));
+                        .with_data(serde_json::json!({"selected": outcome.selected}))
+                        .with_locator_echo(generate_locator_echo(tab, world, &info.handle));
                 result.actionability = outcome.actionability;
                 result
             }
@@ -6010,7 +6056,8 @@ fn step_check_uncheck(
                     "checked": outcome.checked,
                     "changed": outcome.changed,
                     "verified": outcome.verified,
-                }));
+                }))
+                .with_locator_echo(generate_locator_echo(tab, world, &info.handle));
             result.actionability = outcome.actionability;
             result
         }
@@ -6777,13 +6824,111 @@ pub fn capture_viewport_screenshot(
 
 fn report_screenshot_requested(
     attach_screenshot: Option<bool>,
-    page_changed: bool,
+    page_context: PageContextMode,
     has_screenshot_step: bool,
 ) -> bool {
     match attach_screenshot {
         Some(attach) => attach,
-        None => page_changed || has_screenshot_step,
+        None => match page_context {
+            PageContextMode::None => false,
+            PageContextMode::Snapshot => has_screenshot_step,
+            PageContextMode::Screenshot | PageContextMode::Both => true,
+        },
     }
+}
+
+fn report_snapshot_requested(page_context: PageContextMode, page_changed: bool) -> bool {
+    page_context.includes_snapshot() && page_changed
+}
+
+fn console_counts(console: &[ConsoleEntry], page_errors: &[String]) -> BrowserConsoleCounts {
+    BrowserConsoleCounts {
+        errors: page_errors.len()
+            + console
+                .iter()
+                .filter(|entry| matches!(entry.level.as_str(), "error" | "assert"))
+                .count(),
+        warnings: console
+            .iter()
+            .filter(|entry| matches!(entry.level.as_str(), "warning" | "warn"))
+            .count(),
+    }
+}
+
+fn notable_main_document_status(network: &[NetworkEntry], url: Option<&str>) -> Option<u16> {
+    let status = network
+        .iter()
+        .filter(|entry| entry.resource_type.eq_ignore_ascii_case("document"))
+        .filter(|entry| url.is_none_or(|url| entry.url == url))
+        .filter_map(|entry| entry.status)
+        .next_back()?;
+    (!(200..300).contains(&status)).then_some(status)
+}
+
+fn snapshot_head(yaml: &str, max_lines: usize) -> String {
+    yaml.lines().take(max_lines).collect::<Vec<_>>().join("\n")
+}
+
+fn build_page_snapshot(yaml: String, artifacts_dir: &Path) -> Result<BrowserPageSnapshot, String> {
+    let bytes = yaml.len();
+    let lines = yaml.lines().count();
+    if bytes <= MAX_INLINE_SNAPSHOT_BYTES {
+        return Ok(BrowserPageSnapshot {
+            yaml,
+            lines,
+            bytes,
+            truncated: false,
+            artifact: None,
+        });
+    }
+    std::fs::create_dir_all(artifacts_dir).map_err(|error| {
+        format!(
+            "Failed to create browser artifacts directory {}: {error}",
+            artifacts_dir.display()
+        )
+    })?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = artifacts_dir.join(format!("snapshot-{nonce}.yaml"));
+    std::fs::write(&path, yaml.as_bytes()).map_err(|error| {
+        format!(
+            "Failed to save aria snapshot artifact {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(BrowserPageSnapshot {
+        yaml: snapshot_head(&yaml, SNAPSHOT_SUMMARY_LINES),
+        lines,
+        bytes,
+        truncated: true,
+        artifact: Some(BrowserSnapshotArtifact {
+            kind: "aria_snapshot".to_string(),
+            mime: "text/yaml".to_string(),
+            path,
+            bytes,
+        }),
+    })
+}
+
+fn capture_page_snapshot(
+    tab: &Tab,
+    world: &WorldManager,
+    artifacts_dir: &Path,
+) -> Result<BrowserPageSnapshot, String> {
+    let snapshot = world
+        .aria_snapshot(
+            tab,
+            None,
+            SnapshotOptions {
+                mode: SnapshotMode::Ai,
+                refs: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    build_page_snapshot(snapshot.yaml, artifacts_dir)
 }
 
 fn capture_report_screenshot(tab: &Tab, policy: &ImagePolicy) -> Result<BrowserScreenshot, String> {
@@ -7957,26 +8102,262 @@ mod tests {
     }
 
     #[test]
-    fn omitted_attach_screenshot_captures_when_the_page_changed() {
-        assert!(report_screenshot_requested(None, true, false));
-        assert!(report_screenshot_requested(None, false, true));
-        assert!(!report_screenshot_requested(None, false, false));
+    fn the_default_page_context_attaches_a_snapshot_and_no_screenshot() {
+        assert_eq!(PageContextMode::default(), PageContextMode::Snapshot);
+        assert!(report_snapshot_requested(PageContextMode::default(), true));
+        assert!(!report_screenshot_requested(
+            None,
+            PageContextMode::default(),
+            false
+        ));
     }
 
     #[test]
-    fn attach_screenshot_false_never_captures_even_on_navigation() {
-        assert!(!report_screenshot_requested(Some(false), true, false));
-        assert!(!report_screenshot_requested(Some(false), true, true));
+    fn the_page_context_matrix_pairs_each_mode_with_the_page_changed_flag() {
+        for (mode, page_changed, snapshot, screenshot) in [
+            (PageContextMode::Snapshot, true, true, false),
+            (PageContextMode::Snapshot, false, false, false),
+            (PageContextMode::Screenshot, true, false, true),
+            (PageContextMode::Screenshot, false, false, true),
+            (PageContextMode::Both, true, true, true),
+            (PageContextMode::Both, false, false, true),
+            (PageContextMode::None, true, false, false),
+            (PageContextMode::None, false, false, false),
+        ] {
+            assert_eq!(
+                report_snapshot_requested(mode, page_changed),
+                snapshot,
+                "snapshot for {mode:?} page_changed={page_changed}"
+            );
+            assert_eq!(
+                report_screenshot_requested(None, mode, false),
+                screenshot,
+                "screenshot for {mode:?} page_changed={page_changed}"
+            );
+        }
     }
 
     #[test]
-    fn attach_screenshot_true_captures_without_a_page_change() {
-        assert!(report_screenshot_requested(Some(true), false, false));
+    fn a_navigation_alone_no_longer_triggers_a_screenshot() {
+        for mode in [PageContextMode::Snapshot, PageContextMode::None] {
+            assert!(!report_screenshot_requested(None, mode, false));
+        }
+    }
+
+    #[test]
+    fn an_explicit_screenshot_step_still_attaches_the_report_screenshot() {
+        assert!(report_screenshot_requested(
+            None,
+            PageContextMode::Snapshot,
+            true
+        ));
+        assert!(!report_screenshot_requested(
+            None,
+            PageContextMode::None,
+            true
+        ));
+    }
+
+    #[test]
+    fn attach_screenshot_stays_the_authoritative_override_over_page_context() {
+        for mode in [
+            PageContextMode::Snapshot,
+            PageContextMode::Screenshot,
+            PageContextMode::Both,
+            PageContextMode::None,
+        ] {
+            assert!(report_screenshot_requested(Some(true), mode, false));
+            assert!(!report_screenshot_requested(Some(false), mode, true));
+        }
     }
 
     #[test]
     fn attach_screenshot_false_suppresses_only_the_report_screenshot() {
-        assert!(!report_screenshot_requested(Some(false), false, true));
+        assert!(!report_screenshot_requested(
+            Some(false),
+            PageContextMode::Screenshot,
+            true
+        ));
+    }
+
+    #[test]
+    fn console_counts_aggregate_levels_and_page_errors_without_the_text() {
+        let entry = |level: &str| ConsoleEntry {
+            timestamp: 0.0,
+            level: level.to_string(),
+            text: "secret detail".to_string(),
+        };
+        let counts = console_counts(
+            &[
+                entry("error"),
+                entry("assert"),
+                entry("warning"),
+                entry("warn"),
+                entry("info"),
+                entry("log"),
+            ],
+            &["boom".to_string()],
+        );
+
+        assert_eq!(counts.errors, 3);
+        assert_eq!(counts.warnings, 2);
+        assert!(!serde_json::to_string(&counts).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn an_all_clear_console_leaves_the_page_block_out_of_the_envelope() {
+        assert!(console_counts(&[], &[]).is_empty());
+        assert_eq!(
+            serde_json::to_value(BrowserPageContext::default()).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn only_a_non_2xx_main_document_status_is_surfaced() {
+        let document = |url: &str, status: u16| NetworkEntry {
+            url: url.to_string(),
+            resource_type: "Document".to_string(),
+            status: Some(status),
+            ..NetworkEntry::default()
+        };
+        let asset = |status: u16| NetworkEntry {
+            url: "https://example.com/app.js".to_string(),
+            resource_type: "Script".to_string(),
+            status: Some(status),
+            ..NetworkEntry::default()
+        };
+        let url = Some("https://example.com/missing");
+
+        assert_eq!(
+            notable_main_document_status(&[document("https://example.com/missing", 404)], url),
+            Some(404)
+        );
+        assert_eq!(
+            notable_main_document_status(&[document("https://example.com/missing", 200)], url),
+            None
+        );
+        assert_eq!(
+            notable_main_document_status(&[document("https://example.com/missing", 204)], url),
+            None
+        );
+        assert_eq!(
+            notable_main_document_status(&[asset(500)], Some("https://example.com/app.js")),
+            None,
+            "a failing subresource is not the main document"
+        );
+        assert_eq!(notable_main_document_status(&[asset(500)], url), None);
+        assert_eq!(notable_main_document_status(&[], url), None);
+    }
+
+    #[test]
+    fn a_followed_redirect_reports_the_final_document_status() {
+        let entries = vec![
+            NetworkEntry {
+                url: "https://example.com/old".to_string(),
+                resource_type: "Document".to_string(),
+                status: Some(301),
+                ..NetworkEntry::default()
+            },
+            NetworkEntry {
+                url: "https://example.com/new".to_string(),
+                resource_type: "Document".to_string(),
+                status: Some(200),
+                ..NetworkEntry::default()
+            },
+        ];
+
+        assert_eq!(
+            notable_main_document_status(&entries, Some("https://example.com/new")),
+            None
+        );
+        assert_eq!(notable_main_document_status(&entries, None), None);
+    }
+
+    #[test]
+    fn a_small_snapshot_is_inlined_whole_without_an_artifact() {
+        let directory = tempfile::tempdir().unwrap();
+        let yaml = "- button \"Save\" [ref=e1]\n- link \"Home\" [ref=e2]".to_string();
+
+        let snapshot = build_page_snapshot(yaml.clone(), directory.path()).unwrap();
+
+        assert_eq!(snapshot.yaml, yaml);
+        assert_eq!(snapshot.bytes, yaml.len());
+        assert_eq!(snapshot.lines, 2);
+        assert!(!snapshot.truncated);
+        assert!(snapshot.artifact.is_none());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn an_oversize_snapshot_spills_to_an_artifact_and_inlines_only_a_head() {
+        let directory = tempfile::tempdir().unwrap();
+        let yaml = (1..=400)
+            .map(|index| format!("- button \"Item {index}\" [ref=e{index}]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(yaml.len() > MAX_INLINE_SNAPSHOT_BYTES);
+
+        let snapshot = build_page_snapshot(yaml.clone(), directory.path()).unwrap();
+        let artifact = snapshot.artifact.as_ref().unwrap();
+
+        assert!(snapshot.truncated);
+        assert_eq!(snapshot.bytes, yaml.len());
+        assert_eq!(snapshot.lines, 400);
+        assert_eq!(snapshot.yaml.lines().count(), SNAPSHOT_SUMMARY_LINES);
+        assert!(snapshot.yaml.len() < yaml.len());
+        assert!(yaml.starts_with(&snapshot.yaml));
+        assert_eq!(artifact.kind, "aria_snapshot");
+        assert_eq!(artifact.mime, "text/yaml");
+        assert_eq!(artifact.bytes, yaml.len());
+        assert_eq!(std::fs::read_to_string(&artifact.path).unwrap(), yaml);
+        assert!(artifact.path.starts_with(directory.path()));
+    }
+
+    #[test]
+    fn the_inline_snapshot_budget_switches_exactly_at_the_cap() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let at_cap =
+            build_page_snapshot("a".repeat(MAX_INLINE_SNAPSHOT_BYTES), directory.path()).unwrap();
+        let over_cap =
+            build_page_snapshot("a".repeat(MAX_INLINE_SNAPSHOT_BYTES + 1), directory.path())
+                .unwrap();
+
+        assert!(at_cap.artifact.is_none());
+        assert!(!at_cap.truncated);
+        assert!(over_cap.artifact.is_some());
+        assert!(over_cap.truncated);
+    }
+
+    #[test]
+    fn the_page_header_stays_far_below_the_envelope_budget() {
+        let page = BrowserPageContext {
+            status: Some(404),
+            console: BrowserConsoleCounts {
+                errors: 1,
+                warnings: 0,
+            },
+            snapshot: None,
+        };
+        let report: ExecutionReport = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "steps": [],
+            "url": "https://example.com/missing",
+            "title": "Not Found",
+            "page": page,
+            "dialogs": [],
+            "new_tabs": [],
+        }))
+        .unwrap();
+
+        let envelope = serde_json::to_string(&report).unwrap();
+        assert!(report.screenshot.is_none());
+        assert!(
+            envelope.len() <= 600,
+            "envelope was {} chars",
+            envelope.len()
+        );
     }
 
     #[test]
