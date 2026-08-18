@@ -24,11 +24,10 @@ use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
     AccessibilitySnapshotOptions, BrowserActionRequest, BrowserCookie, BrowserCookieSameSite,
     BrowserExpectedText, BrowserExpectation, BrowserHttpRequest, BrowserLoadState, BrowserLocator,
-    BrowserPdfOptions,
-    BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
-    BrowserStorageItem, BrowserStorageKind, FillStrategy, LocatorHandlerAction, LocatorRegex,
-    NetworkReportMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
-    WebSocketRouteMode,
+    BrowserPdfOptions, BrowserPollMatcher, BrowserScreenshotAnimations, BrowserScreenshotClip,
+    BrowserScreenshotOptions, BrowserStep, BrowserStorageItem, BrowserStorageKind, FillStrategy,
+    LocatorHandlerAction, LocatorRegex, NetworkReportMode, RouteHandler, SessionPolicy, TabTarget,
+    UrlPattern, WebSocketEventKind, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -81,6 +80,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "generator.html",
     "ws-echo.html",
     "har-target.html",
+    "poll-state.html",
 ];
 
 fn execute_steps(
@@ -1792,6 +1792,119 @@ async fn hit_target_interceptor_suppresses_overlay_appearing_after_precheck() {
         .value
         .unwrap();
     assert_eq!(output, "idle");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn wait_for_function_resolves_a_delayed_main_world_flag() {
+    let Some(case) = BrowserCase::start("poll-state.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::WaitForFunction {
+            expression: "() => globalThis.__refactReady".to_string(),
+            locator: None,
+            timeout_ms: Some(5_000),
+            polling_ms: None,
+        }],
+    );
+
+    assert!(report.ok, "delayed flag must settle: {report:?}");
+    let data = report.steps[0].data.as_ref().unwrap();
+    assert_eq!(data["value"], json!(true));
+    assert!(data["attempts"].as_u64().unwrap() >= 1);
+    assert!(data["elapsed_ms"].as_u64().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn wait_for_function_re_resolves_its_locator_across_re_renders() {
+    let Some(case) = BrowserCase::start("poll-state.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::WaitForFunction {
+            expression: "el => el.dataset.state === 'ready' && el.dataset.render".to_string(),
+            locator: Some(BrowserLocator::css("#row")),
+            timeout_ms: Some(15_000),
+            polling_ms: Some(60),
+        }],
+    );
+
+    assert!(
+        report.ok,
+        "re-rendered element must be re-resolved: {report:?}"
+    );
+    let data = report.steps[0].data.as_ref().unwrap();
+    assert!(
+        data["attempts"].as_u64().unwrap() > 1,
+        "expected retries across re-renders: {data}"
+    );
+    let render = data["value"]
+        .as_str()
+        .unwrap_or_default()
+        .parse::<u64>()
+        .unwrap_or_default();
+    assert!(
+        render > 1,
+        "predicate must have run against a replacement node, not the original: {data}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn expect_poll_waits_for_a_numeric_threshold_and_reports_attempts() {
+    let Some(case) = BrowserCase::start("poll-state.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::ExpectPoll {
+            expression: "globalThis.__refactCounter".to_string(),
+            expected: json!(4),
+            matcher: BrowserPollMatcher::Gt,
+            timeout_ms: Some(5_000),
+            soft: None,
+        }],
+    );
+
+    assert!(report.ok, "counter must exceed the threshold: {report:?}");
+    let assertion = report.steps[0].assertion.as_ref().unwrap();
+    assert_eq!(assertion.matcher, "gt");
+    assert!(assertion.passed);
+    assert!(!assertion.soft);
+    assert_eq!(assertion.expected, json!(4));
+    assert!(assertion.received.as_f64().unwrap() > 4.0);
+    assert!(assertion.attempts > 1, "expected polling: {assertion:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn a_throwing_predicate_fails_immediately_instead_of_retrying() {
+    let Some(case) = BrowserCase::start("poll-state.html").await else {
+        return;
+    };
+    let started = std::time::Instant::now();
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::WaitForFunction {
+            expression: "() => globalThis.__refactExplode()".to_string(),
+            locator: None,
+            timeout_ms: Some(5_000),
+            polling_ms: None,
+        }],
+    );
+
+    assert!(!report.ok, "a throwing predicate must fail: {report:?}");
+    let error = report.steps[0].error.as_deref().unwrap_or_default();
+    assert!(error.contains("predicate exploded"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "a throw must not consume the whole timeout"
+    );
+    assert_eq!(report.steps[0].retries, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

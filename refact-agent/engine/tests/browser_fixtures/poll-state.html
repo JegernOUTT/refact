@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Poll state</title>
+</head>
+<body>
+  <p id="status">booting</p>
+  <div id="host"><span id="row" data-render="0" data-state="pending">pending</span></div>
+  <output id="counter">0</output>
+  <script>
+    globalThis.__refactReady = false;
+    globalThis.__refactCounter = 0;
+    globalThis.__refactLabel = 'order-0-pending';
+
+    setTimeout(() => {
+      globalThis.__refactReady = true;
+      document.querySelector('#status').textContent = 'ready';
+    }, 600);
+
+    const host = document.querySelector('#host');
+    const renderStart = performance.now();
+    let renders = 0;
+    const rerender = setInterval(() => {
+      renders += 1;
+      const ready = performance.now() - renderStart >= 3000;
+      const replacement = document.createElement('span');
+      replacement.id = 'row';
+      replacement.dataset.render = String(renders);
+      replacement.dataset.state = ready ? 'ready' : 'pending';
+      replacement.textContent = replacement.dataset.state;
+      host.replaceChildren(replacement);
+      if (ready) {
+        clearInterval(rerender);
+      }
+    }, 150);
+
+    const tick = setInterval(() => {
+      globalThis.__refactCounter += 1;
+      globalThis.__refactLabel = 'order-' + globalThis.__refactCounter + '-pending';
+      document.querySelector('#counter').textContent = String(globalThis.__refactCounter);
+      if (globalThis.__refactCounter >= 8) {
+        globalThis.__refactLabel = 'order-8-done';
+        clearInterval(tick);
+      }
+    }, 100);
+
+    globalThis.__refactExplode = () => {
+      throw new Error('predicate exploded');
+    };
+  </script>
+</body>
+</html>

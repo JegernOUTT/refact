@@ -8,6 +8,7 @@ use refact_integrations::browser_models::ActionabilityDiagnostics;
 pub const LOCATOR_RETRY_BACKOFF_MS: &[u64] = &[0, 20, 50, 100, 100, 500, 500];
 pub const ACTION_RETRY_BACKOFF_MS: &[u64] = &[0, 20, 100, 100, 500, 500];
 pub const EXPECT_RETRY_BACKOFF_MS: &[u64] = &[0, 20, 50, 100, 100, 500];
+pub const FUNCTION_POLL_BACKOFF_MS: &[u64] = &[0, 100, 250, 500, 1000];
 const FORM_ACTION_RETRY_BACKOFF_MS: &[u64] = &[100];
 const FORM_LOCATOR_RETRY_BACKOFF_MS: &[u64] = &[0, 100];
 pub const MAX_CALL_LOG_ENTRIES: usize = 50;
@@ -638,6 +639,15 @@ impl<C: Clock> ActionabilityEngine<C> {
     pub fn poll_expect<T>(
         &self,
         timeout: Duration,
+        check: impl FnMut() -> Result<(bool, T), String>,
+    ) -> ExpectPollResult<T> {
+        self.poll_expect_with_backoff(timeout, EXPECT_RETRY_BACKOFF_MS, check)
+    }
+
+    pub fn poll_expect_with_backoff<T>(
+        &self,
+        timeout: Duration,
+        schedule: &[u64],
         mut check: impl FnMut() -> Result<(bool, T), String>,
     ) -> ExpectPollResult<T> {
         let started_at = self.clock.now();
@@ -646,7 +656,7 @@ impl<C: Clock> ActionabilityEngine<C> {
         let mut last_received = None;
 
         loop {
-            let delay = backoff_delay(EXPECT_RETRY_BACKOFF_MS, attempt);
+            let delay = backoff_delay(schedule, attempt);
             if deadline.expired(&self.clock) {
                 return ExpectPollResult::TimedOut {
                     received: last_received,
@@ -1268,6 +1278,55 @@ mod tests {
             .map(|attempt| backoff_delay(EXPECT_RETRY_BACKOFF_MS, attempt).as_millis())
             .collect::<Vec<_>>();
         assert_eq!(expect, vec![0, 20, 50, 100, 100, 500, 500, 500, 500]);
+    }
+
+    #[test]
+    fn function_poll_ladder_probes_immediately_then_repeats_its_last_interval() {
+        let intervals = (0..8)
+            .map(|attempt| backoff_delay(FUNCTION_POLL_BACKOFF_MS, attempt).as_millis())
+            .collect::<Vec<_>>();
+
+        assert_eq!(intervals, vec![0, 100, 250, 500, 1000, 1000, 1000, 1000]);
+    }
+
+    #[test]
+    fn a_fixed_poll_interval_keeps_the_immediate_first_probe() {
+        let clock = MockClock::default();
+        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
+        let calls = Cell::new(0);
+
+        let result = engine.poll_expect_with_backoff(Duration::from_millis(500), &[0, 75], || {
+            let call = calls.get() + 1;
+            calls.set(call);
+            Ok((call == 3, call))
+        });
+
+        assert!(matches!(
+            result,
+            ExpectPollResult::Matched { attempts: 3, .. }
+        ));
+        assert_eq!(
+            *clock.sleeps.borrow(),
+            vec![Duration::from_millis(75), Duration::from_millis(75)]
+        );
+    }
+
+    #[test]
+    fn poll_expect_keeps_its_expect_ladder_when_no_schedule_is_supplied() {
+        let clock = MockClock::default();
+        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
+        let calls = Cell::new(0);
+
+        engine.poll_expect(Duration::from_millis(200), || {
+            let call = calls.get() + 1;
+            calls.set(call);
+            Ok((call == 3, call))
+        });
+
+        assert_eq!(
+            *clock.sleeps.borrow(),
+            vec![Duration::from_millis(20), Duration::from_millis(50)]
+        );
     }
 
     #[test]

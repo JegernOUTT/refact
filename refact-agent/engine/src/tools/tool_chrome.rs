@@ -93,8 +93,10 @@ const CHROME_DESCRIPTION: &str = concat!(
     "http_request sends an HTTP call that shares the page's cookie jar in both directions: matching cookies for the target domain and path are attached, and response Set-Cookie headers are written back into the browser, so a logged-in page and the API call see the same session. Send url plus optional method, headers, and exactly one of body, body_json (auto application/json), or form (auto urlencoded); http and https only. Results carry status, final URL after redirects, content-type/content-length (set full_headers=true for every header), and the body inline when it stays under 8KB, otherwise an artifact path. Cookie values are never inlined, only the count and names. Set fail_on_status=true to fail the step on a non-2xx status.\n",
     "Instrumentation: start_coverage and stop_coverage opt into precise JavaScript and CSS usage tracking and return bounded per-URL summaries plus a full JSON artifact. add_virtual_authenticator enables passkey testing and mints the authenticator id it returns, so never send it an id; remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified address that returned id. Credential ids, private keys, user handles, blobs, and user names are redacted from reports.\n",
     "Forms: fill, clear, select_option, check, uncheck.\n",
-    "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch.\n",
-    "Waiting: wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. wait_for_url takes a plain substring in `pattern` and matches when the current URL contains it, unlike the glob/regex `pattern` used by route and wait_for_request. ",
+    "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch. ",
+    "expect_poll evaluates `expression` and retries until the value satisfies `matcher` (equals, contains, gt, lt, matches_regex) against `expected`, reporting attempts and elapsed like expect; it also honours soft.\n",
+    "Waiting: wait_for_function is the way to wait on arbitrary app state: it evaluates `expression` until the result is truthy, defaults to 100/250/500/1000ms poll intervals unless `polling_ms` fixes one, and with a `locator` re-resolves the element each retry and passes it as the first argument, so a re-rendered node is tolerated. A thrown expression fails immediately instead of retrying. ",
+    "wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. wait_for_url takes a plain substring in `pattern` and matches when the current URL contains it, unlike the glob/regex `pattern` used by route and wait_for_request. ",
     "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, or `wait_for_selector` for genuine synchronization.\n",
     "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, pdf, styles, tab_log. Screenshots support full_page, clip, type, quality, scale, omit_background, animations, caret, mask, mask_color, and style; screenshot_element uses locator or ref. PDF supports Chromium print options and returns an artifact path.\n",
     "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, continue, fallback, or fetch_and_fulfill; unroute removes one pattern or all routes; list_routes returns active routes in evaluation order with `order` and `times_remaining`. Several routes may share a pattern: the newest matching route runs first, a fallback handler hands the request to the next older matching route, then to the HAR replay, then to the network. Optional `times` on a route expires it after that many matches, including matches consumed by a traversed fallback. fulfill takes `body`, or `path` to serve a file (relative paths stay inside the runtime artifact directory, content type inferred from the extension), or `json` for a JSON body; status defaults to 200. fetch_and_fulfill performs the real request from the engine (up to 20 redirects, forwarding the page's own request headers) and fulfills with the real response, optionally overriding status, response_headers, and body. Cookie, Host, and Content-Length request headers keep their original values on continue and fetch_and_fulfill. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. URL patterns are globs (`*`, `**`, `{a,b}`) or `{source,flags}` regexes; `?` is literal and JavaScript route predicates are not supported. Page-level routes may not observe requests served by a service worker.\n",
@@ -276,27 +278,51 @@ fn browser_step_schema_with_actions(
     properties.insert(
         "matcher".to_string(),
         serde_json::json!({
-            "type": "object",
-            "description": "Expectation matcher. Use type plus expected/name/ignore_case as required. Text expectations accept a string or {source,flags} regex.",
-            "required": ["type"],
-            "properties": {
-                "type": {
-                    "type": "string",
-                    "enum": [
-                        "to_be_attached", "to_be_visible", "to_be_hidden", "to_be_enabled",
-                        "to_be_disabled", "to_be_editable", "to_be_checked", "to_be_focused",
-                        "to_be_empty", "to_be_in_viewport", "to_have_text", "to_contain_text",
-                        "to_have_value", "to_have_values", "to_have_attribute", "to_have_class",
-                        "to_contain_class", "to_have_count", "to_have_css", "to_have_id",
-                        "to_have_js_property", "to_have_role", "to_have_accessible_name",
-                        "to_have_accessible_description", "to_have_url", "to_have_title",
-                        "to_match_aria_snapshot"
-                    ]
+            "description": "Matcher for expect (object) or expect_poll (comparator name).",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "description": "Expectation matcher. Use type plus expected/name/ignore_case as required. Text expectations accept a string or {source,flags} regex.",
+                    "required": ["type"],
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": [
+                                "to_be_attached", "to_be_visible", "to_be_hidden", "to_be_enabled",
+                                "to_be_disabled", "to_be_editable", "to_be_checked", "to_be_focused",
+                                "to_be_empty", "to_be_in_viewport", "to_have_text", "to_contain_text",
+                                "to_have_value", "to_have_values", "to_have_attribute", "to_have_class",
+                                "to_contain_class", "to_have_count", "to_have_css", "to_have_id",
+                                "to_have_js_property", "to_have_role", "to_have_accessible_name",
+                                "to_have_accessible_description", "to_have_url", "to_have_title",
+                                "to_match_aria_snapshot"
+                            ]
+                        },
+                        "expected": {},
+                        "name": {"type": "string"},
+                        "ignore_case": {"type": "boolean"}
+                    }
                 },
-                "expected": {},
-                "name": {"type": "string"},
-                "ignore_case": {"type": "boolean"}
-            }
+                {
+                    "type": "string",
+                    "description": "expect_poll comparator applied to the evaluated value against `expected`.",
+                    "enum": ["equals", "contains", "gt", "lt", "matches_regex"]
+                }
+            ]
+        }),
+    );
+    properties.insert(
+        "expected".to_string(),
+        serde_json::json!({
+            "description": "expect_poll expectation compared against the evaluated value. matches_regex takes a regex string or {source,flags}."
+        }),
+    );
+    properties.insert(
+        "polling_ms".to_string(),
+        serde_json::json!({
+            "type": "integer",
+            "minimum": 0,
+            "description": "wait_for_function fixed poll interval; defaults to 100/250/500/1000ms repeating the last"
         }),
     );
     properties.insert(
@@ -1114,6 +1140,7 @@ mod tests {
             "device",
             "end_x",
             "end_y",
+            "expected",
             "expression",
             "format",
             "full_page",
@@ -1142,6 +1169,7 @@ mod tests {
             "page_ranges",
             "paths",
             "pattern",
+            "polling_ms",
             "prefer_css_page_size",
             "print_background",
             "prompt_text",
@@ -1228,6 +1256,49 @@ mod tests {
             .pointer("/properties/request/properties/steps/items/properties/handler/oneOf/1/oneOf/0/properties/body/description")
             .and_then(Value::as_str)
             .is_some_and(|description| description.contains("UTF-8") && description.contains("base64")));
+    }
+
+    #[test]
+    fn chrome_schema_matcher_accepts_expectation_objects_and_poll_comparators() {
+        let schema = chrome_input_schema();
+        let matcher = schema
+            .pointer("/properties/request/properties/steps/items/properties/matcher/oneOf")
+            .and_then(Value::as_array)
+            .unwrap();
+
+        assert_eq!(
+            matcher[0].pointer("/type").and_then(Value::as_str),
+            Some("object")
+        );
+        assert!(matcher[0]
+            .pointer("/properties/type/enum")
+            .and_then(Value::as_array)
+            .unwrap()
+            .contains(&Value::String("to_match_aria_snapshot".to_string())));
+        assert_eq!(
+            matcher[1].pointer("/type").and_then(Value::as_str),
+            Some("string")
+        );
+        let comparators = matcher[1]
+            .pointer("/enum")
+            .and_then(Value::as_array)
+            .unwrap();
+        for comparator in ["equals", "contains", "gt", "lt", "matches_regex"] {
+            assert!(
+                comparators.contains(&Value::String(comparator.to_string())),
+                "missing comparator {comparator}"
+            );
+        }
+    }
+
+    #[test]
+    fn chrome_description_documents_arbitrary_state_waiting() {
+        let description = ToolChrome::default().tool_description().description;
+        assert!(description.contains("wait_for_function"));
+        assert!(description.contains("expect_poll"));
+        assert!(description.contains("polling_ms"));
+        assert!(description.contains("truthy"));
+        assert!(description.contains("re-resolves the element each retry"));
     }
 
     #[test]

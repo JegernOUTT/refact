@@ -31,8 +31,8 @@ pub use actionability::{
     ACTION_RETRY_BACKOFF_MS, EXPECT_RETRY_BACKOFF_MS, LOCATOR_RETRY_BACKOFF_MS,
     MAX_CALL_LOG_ENTRIES, ActionKind, ActionabilityDiagnostic, ActionabilityDriver,
     ActionabilityEngine, ActionabilityError, ActionabilityExecutionMode, ActionabilitySuccess,
-    ActionabilityTimeouts, CallLog, Clock, Deadline, ExpectPollResult, LocatorOutcome,
-    RequiredStates, SystemClock, TimeoutError, TimeoutKind, required_states,
+    ActionabilityTimeouts, CallLog, Clock, Deadline, ExpectPollResult, FUNCTION_POLL_BACKOFF_MS,
+    LocatorOutcome, RequiredStates, SystemClock, TimeoutError, TimeoutKind, required_states,
 };
 pub use dialogs::{DialogDecision, DialogManager, DialogResponse};
 pub use drag::{

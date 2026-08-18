@@ -766,6 +766,28 @@ pub enum BrowserExpectedText {
     Regex(LocatorRegex),
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserPollMatcher {
+    Equals,
+    Contains,
+    Gt,
+    Lt,
+    MatchesRegex,
+}
+
+impl BrowserPollMatcher {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Equals => "equals",
+            Self::Contains => "contains",
+            Self::Gt => "gt",
+            Self::Lt => "lt",
+            Self::MatchesRegex => "matches_regex",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrowserExpectation {
@@ -1281,6 +1303,15 @@ pub enum BrowserStep {
         #[serde(default)]
         soft: bool,
     },
+    ExpectPoll {
+        expression: String,
+        expected: serde_json::Value,
+        matcher: BrowserPollMatcher,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        soft: Option<bool>,
+    },
 
     Click {
         locator: BrowserLocator,
@@ -1383,6 +1414,15 @@ pub enum BrowserStep {
         paths: Vec<String>,
     },
 
+    WaitForFunction {
+        expression: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locator: Option<BrowserLocator>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        polling_ms: Option<u64>,
+    },
     WaitForSelector {
         locator: BrowserLocator,
         #[serde(default)]
@@ -1686,6 +1726,7 @@ impl BrowserStep {
         "clear_permissions",
         "set_http_credentials",
         "expect",
+        "expect_poll",
         "click",
         "click_if_exists",
         "hover",
@@ -1708,6 +1749,7 @@ impl BrowserStep {
         "uncheck",
         "set_input_files",
         "expect_file_chooser",
+        "wait_for_function",
         "wait_for_selector",
         "wait_for_navigation",
         "wait_for_url",
@@ -2423,6 +2465,13 @@ mod tests {
                 timeout_ms: Some(1_000),
                 soft: false,
             },
+            BrowserStep::ExpectPoll {
+                expression: "window.__count".to_string(),
+                expected: serde_json::json!(3),
+                matcher: BrowserPollMatcher::Gt,
+                timeout_ms: Some(1_000),
+                soft: Some(true),
+            },
             BrowserStep::Click { locator: locator() },
             BrowserStep::ClickIfExists { locator: locator() },
             BrowserStep::Hover { locator: locator() },
@@ -2493,6 +2542,12 @@ mod tests {
             },
             BrowserStep::ExpectFileChooser {
                 paths: vec!["/tmp/file".to_string()],
+            },
+            BrowserStep::WaitForFunction {
+                expression: "() => window.__ready".to_string(),
+                locator: Some(locator()),
+                timeout_ms: Some(1_000),
+                polling_ms: Some(50),
             },
             BrowserStep::WaitForSelector {
                 locator: locator(),
@@ -3163,6 +3218,93 @@ mod tests {
         match step {
             BrowserStep::ExtractTable { limit, .. } => assert_eq!(limit, None),
             _ => panic!("Expected ExtractTable"),
+        }
+    }
+
+    #[test]
+    fn wait_for_function_defaults_to_a_page_predicate_without_a_fixed_interval() {
+        let step: BrowserStep =
+            serde_json::from_str(r#"{"action": "wait_for_function", "expression": "() => ready"}"#)
+                .unwrap();
+
+        let BrowserStep::WaitForFunction {
+            expression,
+            locator,
+            timeout_ms,
+            polling_ms,
+        } = step
+        else {
+            panic!("expected WaitForFunction");
+        };
+        assert_eq!(expression, "() => ready");
+        assert!(locator.is_none());
+        assert!(timeout_ms.is_none());
+        assert!(polling_ms.is_none());
+    }
+
+    #[test]
+    fn wait_for_function_accepts_a_locator_and_a_fixed_interval() {
+        let step: BrowserStep = serde_json::from_str(
+            r##"{"action": "wait_for_function", "expression": "el => el.dataset.state === 'ready'", "locator": {"by": "css", "value": "#row"}, "timeout_ms": 2000, "polling_ms": 40}"##,
+        )
+        .unwrap();
+
+        let BrowserStep::WaitForFunction {
+            locator,
+            timeout_ms,
+            polling_ms,
+            ..
+        } = step
+        else {
+            panic!("expected WaitForFunction");
+        };
+        assert!(locator.is_some());
+        assert_eq!(timeout_ms, Some(2_000));
+        assert_eq!(polling_ms, Some(40));
+    }
+
+    #[test]
+    fn expect_poll_round_trips_every_matcher_name() {
+        for (name, expected) in [
+            ("equals", BrowserPollMatcher::Equals),
+            ("contains", BrowserPollMatcher::Contains),
+            ("gt", BrowserPollMatcher::Gt),
+            ("lt", BrowserPollMatcher::Lt),
+            ("matches_regex", BrowserPollMatcher::MatchesRegex),
+        ] {
+            let step: BrowserStep = serde_json::from_value(serde_json::json!({
+                "action": "expect_poll",
+                "expression": "window.__count",
+                "expected": 3,
+                "matcher": name,
+            }))
+            .unwrap();
+
+            let BrowserStep::ExpectPoll { matcher, soft, .. } = step else {
+                panic!("expected ExpectPoll");
+            };
+            assert_eq!(matcher, expected);
+            assert_eq!(matcher.name(), name);
+            assert!(soft.is_none());
+            assert_eq!(
+                serde_json::to_value(matcher).unwrap(),
+                serde_json::json!(name)
+            );
+        }
+    }
+
+    #[test]
+    fn expect_poll_requires_an_expression_expected_value_and_matcher() {
+        for missing in [
+            serde_json::json!({"action": "expect_poll", "expected": 1, "matcher": "equals"}),
+            serde_json::json!({"action": "expect_poll", "expression": "x", "matcher": "equals"}),
+            serde_json::json!({"action": "expect_poll", "expression": "x", "expected": 1}),
+            serde_json::json!({"action": "expect_poll", "expression": "x", "expected": 1, "matcher": "starts_with"}),
+        ] {
+            assert!(
+                serde_json::from_value::<BrowserStep>(missing.clone()).is_err(),
+                "expected rejection: {missing}"
+            );
         }
     }
 

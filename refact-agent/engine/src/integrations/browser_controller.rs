@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -22,7 +23,8 @@ use refact_browser::{
     LocatorHandlerRegistry, ExpectPollResult, LocatorOutcome, Mouse, MouseButton, NetworkLoadState,
     NetworkMonitorHandle, MainFrameCssPoint, MouseState, Ref, ScrollStrategy, SnapshotMode,
     SnapshotOptions, SystemClock, UrlMatcher, WebSocketRegistry, WorldManager,
-    DEFAULT_DISMISS_OVERLAYS_HANDLER, apply_network_report_mode, required_states,
+    DEFAULT_DISMISS_OVERLAYS_HANDLER, FUNCTION_POLL_BACKOFF_MS, apply_network_report_mode,
+    required_states,
 };
 use refact_browser::artifacts::{pdf_payload, screenshot_capture, ScreenshotMetrics};
 use refact_browser::http_client;
@@ -737,10 +739,7 @@ fn execute_steps_with_world(
             &mut locator_handlers,
             &mut mouse_state,
         );
-        let is_non_fatal = matches!(
-            step,
-            BrowserStep::ClickIfExists { .. } | BrowserStep::Expect { soft: true, .. }
-        );
+        let is_non_fatal = is_non_fatal_step(step);
         if !result.ok && !is_non_fatal {
             all_ok = false;
             results.push(result);
@@ -1989,10 +1988,7 @@ pub async fn execute_request_with_runtime(
             rt.push_agent_action(action_type, &result.summary);
         }
 
-        let is_non_fatal = matches!(
-            step,
-            BrowserStep::ClickIfExists { .. } | BrowserStep::Expect { soft: true, .. }
-        );
+        let is_non_fatal = is_non_fatal_step(step);
         if !result.ok && !is_non_fatal {
             all_ok = false;
             results.push(result);
@@ -2536,10 +2532,7 @@ pub fn execute_steps_with_runtime(
             },
         };
 
-        let is_non_fatal = matches!(
-            step,
-            BrowserStep::ClickIfExists { .. } | BrowserStep::Expect { soft: true, .. }
-        );
+        let is_non_fatal = is_non_fatal_step(step);
         if !result.ok && !is_non_fatal {
             all_ok = false;
             results.push(result);
@@ -2607,6 +2600,18 @@ pub fn execute_steps_with_runtime(
         context: Some(context_summary(runtime)),
         screenshot: None,
     }
+}
+
+fn is_non_fatal_step(step: &BrowserStep) -> bool {
+    matches!(
+        step,
+        BrowserStep::ClickIfExists { .. }
+            | BrowserStep::Expect { soft: true, .. }
+            | BrowserStep::ExpectPoll {
+                soft: Some(true),
+                ..
+            }
+    )
 }
 
 fn is_navigation_step(step: &BrowserStep) -> bool {
@@ -3169,6 +3174,22 @@ fn execute_single_step(
             *soft,
         ),
 
+        BrowserStep::ExpectPoll {
+            expression,
+            expected,
+            matcher,
+            timeout_ms,
+            soft,
+        } => step_expect_poll(
+            tab,
+            idx,
+            expression,
+            expected,
+            *matcher,
+            clamp_timeout_ms(*timeout_ms),
+            soft.unwrap_or(false),
+        ),
+
         BrowserStep::Click { locator } => step_locator_action(
             tab,
             world,
@@ -3347,6 +3368,20 @@ fn execute_single_step(
             "File chooser flow requires a browser runtime",
         ),
 
+        BrowserStep::WaitForFunction {
+            expression,
+            locator,
+            timeout_ms,
+            polling_ms,
+        } => step_wait_for_function(
+            tab,
+            world,
+            idx,
+            expression,
+            locator.as_ref(),
+            clamp_timeout_ms(*timeout_ms),
+            *polling_ms,
+        ),
         BrowserStep::WaitForSelector {
             locator,
             timeout_ms,
@@ -3564,6 +3599,329 @@ fn step_expect(
 
 fn expect_retries(attempts: u32) -> u32 {
     attempts.saturating_sub(1)
+}
+
+fn elapsed_ms(elapsed: Duration) -> u64 {
+    elapsed.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+const POLL_VALUE_BINDING: &str = "__refact_poll_value";
+
+fn page_poll_js(expression: &str) -> String {
+    format!(
+        "(() => {{ const {POLL_VALUE_BINDING} = ({expression}); return typeof {POLL_VALUE_BINDING} === 'function' ? {POLL_VALUE_BINDING}() : {POLL_VALUE_BINDING}; }})()"
+    )
+}
+
+fn element_poll_js(expression: &str) -> String {
+    format!(
+        "function() {{ const {POLL_VALUE_BINDING} = ({expression}); return typeof {POLL_VALUE_BINDING} === 'function' ? {POLL_VALUE_BINDING}(this) : {POLL_VALUE_BINDING}; }}"
+    )
+}
+
+fn js_exception_message(exception: &Runtime::ExceptionDetails) -> String {
+    exception
+        .exception
+        .as_ref()
+        .and_then(|value| value.description.as_deref())
+        .unwrap_or(&exception.text)
+        .to_string()
+}
+
+fn evaluate_page_poll(tab: &Tab, expression: &str) -> Result<Value, String> {
+    let evaluated = tab
+        .call_method(Runtime::Evaluate {
+            expression: page_poll_js(expression),
+            object_group: None,
+            include_command_line_api: None,
+            silent: None,
+            context_id: None,
+            return_by_value: Some(true),
+            generate_preview: None,
+            user_gesture: None,
+            await_promise: Some(true),
+            throw_on_side_effect: None,
+            timeout: None,
+            disable_breaks: None,
+            repl_mode: None,
+            allow_unsafe_eval_blocked_by_csp: None,
+            unique_context_id: None,
+            serialization_options: None,
+        })
+        .map_err(|error| format!("JS evaluation failed: {error}"))?;
+    if let Some(exception) = evaluated.exception_details {
+        return Err(js_exception_message(&exception));
+    }
+    Ok(evaluated.result.value.unwrap_or(Value::Null))
+}
+
+fn sample_poll_expression(
+    tab: &Tab,
+    world: &WorldManager,
+    expression: &str,
+    locator: Option<&BrowserLocator>,
+) -> Result<Value, String> {
+    let Some(locator) = locator else {
+        return evaluate_page_poll(tab, expression);
+    };
+    let handles = match resolve_locator_handles(tab, world, locator) {
+        Ok(handles) => handles,
+        Err(error) if matches!(locator.strategy, LocatorStrategy::Ref { .. }) => return Err(error),
+        Err(_) => Vec::new(),
+    };
+    let Some(handle) = strict_locator_handle(tab, world, locator, handles)? else {
+        return Ok(Value::Null);
+    };
+    let value = world.call_function_on(tab, &handle, &element_poll_js(expression), Vec::new());
+    let _ = world.release_handle(tab, &handle);
+    match value {
+        Ok(value) => Ok(value),
+        Err(refact_browser::HandleError::Invalidated { .. }) => Ok(Value::Null),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(number) => number.as_f64().is_some_and(|number| number != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
+fn poll_backoff_schedule(polling_ms: Option<u64>) -> Vec<u64> {
+    match polling_ms {
+        Some(interval) => vec![0, interval],
+        None => FUNCTION_POLL_BACKOFF_MS.to_vec(),
+    }
+}
+
+fn json_equals(left: &Value, right: &Value) -> bool {
+    match (left.as_f64(), right.as_f64()) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn compare_poll_numbers(received: &Value, expected: &Value) -> Option<Ordering> {
+    received.as_f64()?.partial_cmp(&expected.as_f64()?)
+}
+
+fn poll_expectation_regex(expected: &Value) -> Result<LocatorRegex, String> {
+    match expected {
+        Value::String(source) => Ok(LocatorRegex {
+            source: source.clone(),
+            flags: String::new(),
+        }),
+        Value::Object(_) => serde_json::from_value(expected.clone())
+            .map_err(|error| format!("Invalid matches_regex expectation: {error}")),
+        _ => Err("matches_regex expects a regex string or a {source, flags} object".to_string()),
+    }
+}
+
+fn poll_matcher_matches(
+    matcher: BrowserPollMatcher,
+    received: &Value,
+    expected: &Value,
+) -> Result<bool, String> {
+    match matcher {
+        BrowserPollMatcher::Equals => Ok(json_equals(received, expected)),
+        BrowserPollMatcher::Contains => Ok(match (received, expected) {
+            (Value::String(received), Value::String(expected)) => received.contains(expected),
+            (Value::Array(received), expected) => {
+                received.iter().any(|item| json_equals(item, expected))
+            }
+            _ => false,
+        }),
+        BrowserPollMatcher::Gt => {
+            Ok(compare_poll_numbers(received, expected).is_some_and(Ordering::is_gt))
+        }
+        BrowserPollMatcher::Lt => {
+            Ok(compare_poll_numbers(received, expected).is_some_and(Ordering::is_lt))
+        }
+        BrowserPollMatcher::MatchesRegex => {
+            let regex = poll_expectation_regex(expected)?;
+            match received.as_str() {
+                Some(received) => refact_browser::assertions::matches_text(
+                    received,
+                    &BrowserExpectedText::Regex(regex),
+                    refact_browser::assertions::TextMatchKind::Exact,
+                    false,
+                ),
+                None => Ok(false),
+            }
+        }
+    }
+}
+
+fn redact_poll_value(value: Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(refact_core::string_utils::redact_sensitive(&text)),
+        Value::Array(values) => Value::Array(values.into_iter().map(redact_poll_value).collect()),
+        Value::Object(entries) => Value::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key, redact_poll_value(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn step_wait_for_function(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    expression: &str,
+    locator: Option<&BrowserLocator>,
+    timeout_ms: u64,
+    polling_ms: Option<u64>,
+) -> StepResult {
+    let engine = ActionabilityEngine::new(SystemClock::default(), ActionabilityTimeouts::default());
+    let schedule = poll_backoff_schedule(polling_ms);
+    let outcome =
+        engine.poll_expect_with_backoff(Duration::from_millis(timeout_ms), &schedule, || {
+            sample_poll_expression(tab, world, expression, locator)
+                .map(|value| (is_truthy(&value), value))
+        });
+    let target = locator
+        .map(|locator| format!(" ({})", describe_locator(locator)))
+        .unwrap_or_default();
+    let (received, attempts, elapsed, error) = match outcome {
+        ExpectPollResult::Matched {
+            received,
+            attempts,
+            elapsed,
+        } => {
+            let mut step = StepResult::success(idx, format!("Predicate satisfied{target}"))
+                .with_data(serde_json::json!({
+                    "value": redact_poll_value(received),
+                    "attempts": attempts,
+                    "elapsed_ms": elapsed_ms(elapsed),
+                }));
+            step.retries = expect_retries(attempts);
+            return step;
+        }
+        ExpectPollResult::TimedOut {
+            received,
+            attempts,
+            elapsed,
+        } => (
+            received.unwrap_or(Value::Null),
+            attempts,
+            elapsed,
+            format!("Timeout {timeout_ms}ms exceeded"),
+        ),
+        ExpectPollResult::Failed {
+            error,
+            received,
+            attempts,
+            elapsed,
+        } => (received.unwrap_or(Value::Null), attempts, elapsed, error),
+    };
+    let received = redact_poll_value(received);
+    let mut step = StepResult::failure(
+        idx,
+        format!("Wait for function{target}"),
+        format!("{error}; last value was {}", json_for_message(&received)),
+    );
+    step.retries = expect_retries(attempts);
+    step.data = Some(serde_json::json!({
+        "value": received,
+        "attempts": attempts,
+        "elapsed_ms": elapsed_ms(elapsed),
+    }));
+    step
+}
+
+fn step_expect_poll(
+    tab: &Tab,
+    idx: usize,
+    expression: &str,
+    expected: &Value,
+    matcher: BrowserPollMatcher,
+    timeout_ms: u64,
+    soft: bool,
+) -> StepResult {
+    let engine = ActionabilityEngine::new(SystemClock::default(), ActionabilityTimeouts::default());
+    let outcome = engine.poll_expect_with_backoff(
+        Duration::from_millis(timeout_ms),
+        FUNCTION_POLL_BACKOFF_MS,
+        || {
+            let received = evaluate_page_poll(tab, expression)?;
+            let matched = poll_matcher_matches(matcher, &received, expected)?;
+            Ok((matched, received))
+        },
+    );
+    let (passed, received, attempts, elapsed, error) = match outcome {
+        ExpectPollResult::Matched {
+            received,
+            attempts,
+            elapsed,
+        } => (true, received, attempts, elapsed, None),
+        ExpectPollResult::TimedOut {
+            received,
+            attempts,
+            elapsed,
+        } => (
+            false,
+            received.unwrap_or(Value::Null),
+            attempts,
+            elapsed,
+            Some(format!("Timeout {timeout_ms}ms exceeded")),
+        ),
+        ExpectPollResult::Failed {
+            error,
+            received,
+            attempts,
+            elapsed,
+        } => (
+            false,
+            received.unwrap_or(Value::Null),
+            attempts,
+            elapsed,
+            Some(error),
+        ),
+    };
+    let received = redact_poll_value(received);
+    let assertion = BrowserAssertionResult {
+        matcher: matcher.name().to_string(),
+        passed,
+        soft,
+        expected: expected.clone(),
+        received: received.clone(),
+        diff: None,
+        attempts,
+        elapsed_ms: elapsed_ms(elapsed),
+    };
+    let mut step = if passed {
+        StepResult::success(idx, format!("Poll assertion passed: {}", matcher.name()))
+    } else {
+        let summary = if soft {
+            format!("Soft poll assertion failed: {}", matcher.name())
+        } else {
+            format!("Poll assertion failed: {}", matcher.name())
+        };
+        StepResult::failure(
+            idx,
+            summary,
+            format!(
+                "Expected {} {} but received {}{}",
+                matcher.name(),
+                json_for_message(expected),
+                json_for_message(&received),
+                error
+                    .as_deref()
+                    .map(|error| format!(" ({error})"))
+                    .unwrap_or_default()
+            ),
+        )
+    };
+    step.retries = expect_retries(attempts);
+    step.assertion = Some(assertion);
+    step
 }
 
 fn expectation_expected_value(matcher: &BrowserExpectation) -> Value {
@@ -5855,12 +6213,7 @@ fn invoke_eval_function(tab: &Tab, object_id: String) -> Result<Runtime::RemoteO
         })
         .map_err(|error| error.to_string())?;
     if let Some(exception) = invoked.exception_details {
-        return Err(exception
-            .exception
-            .as_ref()
-            .and_then(|value| value.description.as_deref())
-            .unwrap_or(&exception.text)
-            .to_string());
+        return Err(js_exception_message(&exception));
     }
     Ok(invoked.result)
 }
@@ -7208,6 +7561,193 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn predicate_truthiness_follows_javascript_rules() {
+        for truthy in [
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!(-0.5),
+            serde_json::json!("ready"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            assert!(is_truthy(&truthy), "expected truthy: {truthy}");
+        }
+        for falsy in [
+            serde_json::json!(null),
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!(0.0),
+            serde_json::json!(""),
+        ] {
+            assert!(!is_truthy(&falsy), "expected falsy: {falsy}");
+        }
+    }
+
+    #[test]
+    fn equals_compares_numbers_across_integer_and_float_encodings() {
+        assert!(poll_matcher_matches(
+            BrowserPollMatcher::Equals,
+            &serde_json::json!(3),
+            &serde_json::json!(3.0)
+        )
+        .unwrap());
+        assert!(poll_matcher_matches(
+            BrowserPollMatcher::Equals,
+            &serde_json::json!({"a": [1, "x"]}),
+            &serde_json::json!({"a": [1, "x"]})
+        )
+        .unwrap());
+        assert!(!poll_matcher_matches(
+            BrowserPollMatcher::Equals,
+            &serde_json::json!(true),
+            &serde_json::json!(1)
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn contains_matches_substrings_and_array_membership() {
+        assert!(poll_matcher_matches(
+            BrowserPollMatcher::Contains,
+            &serde_json::json!("loading done"),
+            &serde_json::json!("done")
+        )
+        .unwrap());
+        assert!(poll_matcher_matches(
+            BrowserPollMatcher::Contains,
+            &serde_json::json!(["a", "b"]),
+            &serde_json::json!("b")
+        )
+        .unwrap());
+        assert!(!poll_matcher_matches(
+            BrowserPollMatcher::Contains,
+            &serde_json::json!(7),
+            &serde_json::json!("7")
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn numeric_comparisons_ignore_non_numeric_values_instead_of_failing() {
+        assert!(poll_matcher_matches(
+            BrowserPollMatcher::Gt,
+            &serde_json::json!(5),
+            &serde_json::json!(4.5)
+        )
+        .unwrap());
+        assert!(!poll_matcher_matches(
+            BrowserPollMatcher::Gt,
+            &serde_json::json!(4),
+            &serde_json::json!(4)
+        )
+        .unwrap());
+        assert!(poll_matcher_matches(
+            BrowserPollMatcher::Lt,
+            &serde_json::json!(1),
+            &serde_json::json!(2)
+        )
+        .unwrap());
+        assert!(!poll_matcher_matches(
+            BrowserPollMatcher::Lt,
+            &serde_json::json!("1"),
+            &serde_json::json!(2)
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn matches_regex_accepts_a_bare_source_or_flagged_object_and_rejects_bad_patterns() {
+        assert!(poll_matcher_matches(
+            BrowserPollMatcher::MatchesRegex,
+            &serde_json::json!("order-42-done"),
+            &serde_json::json!("^order-\\d+-done$")
+        )
+        .unwrap());
+        assert!(poll_matcher_matches(
+            BrowserPollMatcher::MatchesRegex,
+            &serde_json::json!("READY"),
+            &serde_json::json!({"source": "ready", "flags": "i"})
+        )
+        .unwrap());
+        assert!(!poll_matcher_matches(
+            BrowserPollMatcher::MatchesRegex,
+            &serde_json::json!(7),
+            &serde_json::json!("7")
+        )
+        .unwrap());
+        assert!(poll_matcher_matches(
+            BrowserPollMatcher::MatchesRegex,
+            &serde_json::json!("x"),
+            &serde_json::json!("([")
+        )
+        .is_err());
+        assert!(poll_matcher_matches(
+            BrowserPollMatcher::MatchesRegex,
+            &serde_json::json!("x"),
+            &serde_json::json!(7)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_fixed_poll_interval_replaces_the_default_ladder() {
+        assert_eq!(poll_backoff_schedule(None), FUNCTION_POLL_BACKOFF_MS);
+        assert_eq!(poll_backoff_schedule(Some(40)), vec![0, 40]);
+    }
+
+    #[test]
+    fn poll_expressions_auto_invoke_functions_and_bind_the_element_argument() {
+        let page = page_poll_js("() => window.ready");
+        assert!(page.contains("() => window.ready"));
+        assert!(page.contains("=== 'function'"));
+        assert!(page.ends_with("})()"));
+        assert!(!page.contains("(this)"));
+
+        let element = element_poll_js("el => el.dataset.state === 'ready'");
+        assert!(element.starts_with("function() {"));
+        assert!(element.contains("(this)"));
+    }
+
+    #[test]
+    fn reported_poll_values_are_redacted_without_reshaping_them() {
+        let redacted = redact_poll_value(serde_json::json!({
+            "headers": ["authorization: Bearer abcdef123456"],
+            "token": "sk-abcdef123456789",
+            "count": 3,
+            "ready": true,
+        }));
+
+        let serialized = serde_json::to_string(&redacted).unwrap();
+        assert!(!serialized.contains("abcdef123456"), "{serialized}");
+        assert!(!serialized.contains("sk-abcdef"), "{serialized}");
+        assert!(serialized.contains("[REDACTED]"), "{serialized}");
+        assert_eq!(redacted["count"], serde_json::json!(3));
+        assert_eq!(redacted["ready"], serde_json::json!(true));
+        assert_eq!(redacted["headers"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_soft_poll_assertions_join_the_non_fatal_step_set() {
+        let poll = |soft| BrowserStep::ExpectPoll {
+            expression: "window.__count".to_string(),
+            expected: serde_json::json!(1),
+            matcher: BrowserPollMatcher::Equals,
+            timeout_ms: None,
+            soft,
+        };
+
+        assert!(is_non_fatal_step(&poll(Some(true))));
+        assert!(!is_non_fatal_step(&poll(Some(false))));
+        assert!(!is_non_fatal_step(&poll(None)));
+        assert!(!is_non_fatal_step(&BrowserStep::WaitForFunction {
+            expression: "() => true".to_string(),
+            locator: None,
+            timeout_ms: None,
+            polling_ms: None,
+        }));
     }
 
     #[test]
