@@ -41,6 +41,8 @@ const NAVIGATION_LIFECYCLE_EVENT: &str = "load";
 const MAX_DOM_SNAPSHOT_CHARS: usize = 100_000;
 const MAX_EXTRACT_LINKS: usize = 500;
 const MAX_EXTRACT_TABLE_ROWS: usize = 100;
+const DEFAULT_ALL_TEXTS: usize = 50;
+const MAX_ALL_TEXTS: usize = 500;
 const DEFAULT_ARIA_SNAPSHOT_CHARS: usize = 20_000;
 const MAX_ARIA_SNAPSHOT_CHARS: usize = 100_000;
 
@@ -2781,6 +2783,9 @@ fn needs_locator_handler_checkpoint(step: &BrowserStep) -> bool {
             | BrowserStep::GetText { .. }
             | BrowserStep::GetHtml { .. }
             | BrowserStep::GetAttribute { .. }
+            | BrowserStep::BoundingBox { .. }
+            | BrowserStep::InputValue { .. }
+            | BrowserStep::ElementState { .. }
             | BrowserStep::ScreenshotElement { .. }
             | BrowserStep::Styles { .. }
             | BrowserStep::HighlightElement { .. }
@@ -3474,6 +3479,15 @@ fn execute_single_step(
         BrowserStep::GetAttribute { locator, attribute } => {
             step_get_attribute(tab, world, idx, locator, attribute)
         }
+        BrowserStep::BoundingBox { locator } => step_bounding_box(tab, world, idx, locator),
+        BrowserStep::Count { locator } => step_count(tab, world, idx, locator),
+        BrowserStep::InputValue { locator } => step_input_value(tab, world, idx, locator),
+        BrowserStep::AllTexts {
+            locator,
+            mode,
+            limit,
+        } => step_all_texts(tab, world, idx, locator, *mode, *limit),
+        BrowserStep::ElementState { locator } => step_element_state(tab, world, idx, locator),
         BrowserStep::ExtractLinks { locator, limit } => {
             step_extract_links(tab, world, idx, locator.as_ref(), *limit)
         }
@@ -5873,6 +5887,135 @@ fn step_get_attribute(
     }
 }
 
+fn element_bounding_box(info: &ElementInfo) -> Value {
+    match (&info.bbox, info.visible) {
+        (Some(bbox), true) => serde_json::json!({
+            "x": bbox.x,
+            "y": bbox.y,
+            "width": bbox.width,
+            "height": bbox.height,
+        }),
+        _ => Value::Null,
+    }
+}
+
+fn step_bounding_box(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+) -> StepResult {
+    let resolved = match resolve_element(tab, world, locator) {
+        Ok(resolved) => resolved,
+        Err(error) => return StepResult::failure(idx, "Bounding box: resolution failed", error),
+    };
+    let bounding_box = element_bounding_box(&resolved.info);
+    let _ = world.release_handle(tab, &resolved.handle);
+    let summary = if bounding_box.is_null() {
+        format!("<{}> is not visible and has no bounding box", resolved.tag)
+    } else {
+        format!("Got bounding box of <{}>", resolved.tag)
+    };
+    StepResult::success(idx, summary).with_data(serde_json::json!({"bounding_box": bounding_box}))
+}
+
+fn step_count(tab: &Tab, world: &WorldManager, idx: usize, locator: &BrowserLocator) -> StepResult {
+    match resolve_locator_handles(tab, world, locator) {
+        Ok(handles) => {
+            let count = handles.len();
+            release_locator_handles(tab, world, &handles);
+            StepResult::success(
+                idx,
+                format!("Matched {count} element(s) ({})", describe_locator(locator)),
+            )
+            .with_data(serde_json::json!({"count": count}))
+        }
+        Err(error) => StepResult::failure(idx, "Count failed", error),
+    }
+}
+
+fn step_input_value(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+) -> StepResult {
+    let resolved = match resolve_element(tab, world, locator) {
+        Ok(resolved) => resolved,
+        Err(error) => return StepResult::failure(idx, "Input value: resolution failed", error),
+    };
+    let read = call_handle_json(
+        tab,
+        world,
+        &resolved.handle,
+        browser_locators::js_input_value(),
+    );
+    let _ = world.release_handle(tab, &resolved.handle);
+    match read {
+        Ok(result) => {
+            let value = result.get("value").cloned().unwrap_or(Value::Null);
+            StepResult::success(idx, format!("Got input value of <{}>", resolved.tag))
+                .with_data(serde_json::json!({"value": value}))
+        }
+        Err(error) => StepResult::failure(idx, "Input value failed", error),
+    }
+}
+
+fn all_texts_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(DEFAULT_ALL_TEXTS).min(MAX_ALL_TEXTS)
+}
+
+fn step_all_texts(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    mode: BrowserTextMode,
+    limit: Option<usize>,
+) -> StepResult {
+    let handles = match resolve_locator_handles(tab, world, locator) {
+        Ok(handles) => handles,
+        Err(error) => return StepResult::failure(idx, "All texts: resolution failed", error),
+    };
+    let total = handles.len();
+    let mut texts = Vec::new();
+    let mut failure = None;
+    for handle in handles.iter().take(all_texts_limit(limit)) {
+        match call_handle_json(tab, world, handle, browser_locators::js_element_text(mode)) {
+            Ok(result) => texts.push(result.get("text").cloned().unwrap_or(Value::Null)),
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    release_locator_handles(tab, world, &handles);
+    match failure {
+        Some(error) => StepResult::failure(idx, "All texts failed", error),
+        None => StepResult::success(idx, format!("Read {} of {total} text(s)", texts.len()))
+            .with_data(serde_json::json!({"texts": texts, "total": total})),
+    }
+}
+
+fn step_element_state(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+) -> StepResult {
+    let resolved = match resolve_element(tab, world, locator) {
+        Ok(resolved) => resolved,
+        Err(error) => return StepResult::failure(idx, "Element state: resolution failed", error),
+    };
+    let state = world.element_states(tab, &resolved.handle);
+    let _ = world.release_handle(tab, &resolved.handle);
+    match state {
+        Ok(state) => StepResult::success(idx, format!("Read element state of <{}>", resolved.tag))
+            .with_data(serde_json::json!({"state": state})),
+        Err(error) => StepResult::failure(idx, "Element state failed", error.to_string()),
+    }
+}
+
 fn step_extract_links(
     tab: &Tab,
     world: &WorldManager,
@@ -6957,6 +7100,107 @@ mod tests {
     fn timed_out_expect_attempts_exclude_the_first_attempt_from_retries() {
         assert_eq!(expect_retries(2), 1);
         assert_eq!(expect_retries(0), 0);
+    }
+
+    fn element_info(visible: bool, bbox: Option<ElementBBox>) -> ElementInfo {
+        ElementInfo {
+            tag: "input".to_string(),
+            input_type: Some("text".to_string()),
+            id: None,
+            name: None,
+            placeholder: None,
+            aria_label: None,
+            role: None,
+            visible,
+            enabled: true,
+            readonly: false,
+            content_editable: false,
+            value: None,
+            inner_text: None,
+            bbox,
+            field_kind: FieldKind::TextInput,
+        }
+    }
+
+    #[test]
+    fn bounding_box_reports_viewport_css_pixels_for_a_visible_element() {
+        let info = element_info(
+            true,
+            Some(ElementBBox {
+                x: 12.5,
+                y: 34.0,
+                width: 200.0,
+                height: 40.0,
+            }),
+        );
+
+        assert_eq!(
+            element_bounding_box(&info),
+            serde_json::json!({"x": 12.5, "y": 34.0, "width": 200.0, "height": 40.0})
+        );
+    }
+
+    #[test]
+    fn bounding_box_is_null_when_the_element_is_hidden_or_has_no_box() {
+        let hidden = element_info(
+            false,
+            Some(ElementBBox {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            }),
+        );
+
+        assert_eq!(element_bounding_box(&hidden), Value::Null);
+        assert_eq!(element_bounding_box(&element_info(true, None)), Value::Null);
+    }
+
+    #[test]
+    fn all_texts_limit_defaults_and_clamps_to_the_extraction_cap() {
+        assert_eq!(all_texts_limit(None), DEFAULT_ALL_TEXTS);
+        assert_eq!(all_texts_limit(Some(3)), 3);
+        assert_eq!(all_texts_limit(Some(0)), 0);
+        assert_eq!(all_texts_limit(Some(10_000)), MAX_ALL_TEXTS);
+    }
+
+    #[test]
+    fn input_value_reads_the_live_property_and_rejects_other_elements() {
+        let script = browser_locators::js_input_value();
+
+        assert!(script.contains("String(el.value)"));
+        assert!(!script.contains("getAttribute"));
+        assert!(script.contains("tag !== 'input' && tag !== 'textarea' && tag !== 'select'"));
+    }
+
+    #[test]
+    fn all_texts_mode_selects_inner_text_or_text_content() {
+        assert!(
+            browser_locators::js_element_text(BrowserTextMode::InnerText).contains("innerText")
+        );
+        assert!(
+            browser_locators::js_element_text(BrowserTextMode::TextContent).contains("textContent")
+        );
+        assert!(
+            !browser_locators::js_element_text(BrowserTextMode::TextContent).contains("innerText")
+        );
+    }
+
+    #[test]
+    fn element_state_is_surfaced_read_only_with_every_tracked_flag() {
+        let mut state = actionable_state();
+        state.checked = Some(refact_browser::CheckedState::Mixed);
+
+        assert_eq!(
+            serde_json::json!({"state": state}),
+            serde_json::json!({"state": {
+                "visible": true,
+                "enabled": true,
+                "editable": true,
+                "checked": "mixed",
+                "stable": true,
+            }})
+        );
     }
 
     #[test]

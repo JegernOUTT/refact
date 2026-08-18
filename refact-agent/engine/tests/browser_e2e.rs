@@ -23,11 +23,12 @@ use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
     AccessibilitySnapshotOptions, BrowserActionRequest, BrowserCookie, BrowserCookieSameSite,
-    BrowserExpectedText, BrowserExpectation, BrowserHttpRequest, BrowserLoadState, BrowserLocator,
-    BrowserPdfOptions, BrowserPollMatcher, BrowserScreenshotAnimations, BrowserScreenshotClip,
-    BrowserScreenshotOptions, BrowserStep, BrowserStorageItem, BrowserStorageKind, FillStrategy,
-    LocatorHandlerAction, LocatorRegex, NetworkReportMode, RouteHandler, SessionPolicy, TabTarget,
-    UrlPattern, WebSocketEventKind, WebSocketRouteMode,
+    BrowserExpectation, BrowserExpectedText, BrowserHttpRequest, BrowserLoadState,
+    BrowserLocator, BrowserPdfOptions, BrowserPollMatcher, BrowserScreenshotAnimations,
+    BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep, BrowserStorageItem,
+    BrowserStorageKind, BrowserTextMode, FillStrategy, LocatorHandlerAction, LocatorRegex,
+    NetworkReportMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
+    WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -72,6 +73,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "contenteditable.html",
     "hover-menu.html",
     "strict-multi.html",
+    "readouts.html",
     "compose.html",
     "hostile-globals.html",
     "hit-target.html",
@@ -2054,6 +2056,217 @@ async fn strict_multi_click_errors() {
     assert!(error.contains("css=.duplicate"), "{error}");
     assert!(error.contains("resolved to 3 elements"), "{error}");
     assert!(error.contains("<button class=\"duplicate\""), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn input_value_reads_the_typed_property_not_the_stale_attribute() {
+    let Some(case) = BrowserCase::start("readouts.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::Fill {
+                locator: BrowserLocator::css("#stale"),
+                text: "typed-value".to_string(),
+                clear_first: true,
+                verify: true,
+            },
+            BrowserStep::InputValue {
+                locator: BrowserLocator::css("#stale"),
+            },
+            BrowserStep::GetAttribute {
+                locator: BrowserLocator::css("#stale"),
+                attribute: "value".to_string(),
+            },
+            BrowserStep::InputValue {
+                locator: BrowserLocator::css("#notes"),
+            },
+            BrowserStep::InputValue {
+                locator: BrowserLocator::css("#pick"),
+            },
+        ],
+    );
+
+    assert!(report.ok, "input_value batch failed: {report:?}");
+    assert_eq!(
+        report.steps[1].data.as_ref().unwrap()["value"],
+        json!("typed-value")
+    );
+    assert_eq!(
+        report.steps[2].data.as_ref().unwrap()["value"],
+        json!("attribute-value")
+    );
+    assert_eq!(
+        report.steps[3].data.as_ref().unwrap()["value"],
+        json!("textarea-value")
+    );
+    assert_eq!(
+        report.steps[4].data.as_ref().unwrap()["value"],
+        json!("beta")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn input_value_rejects_non_field_elements() {
+    let Some(case) = BrowserCase::start("readouts.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::InputValue {
+            locator: BrowserLocator::css("#not-a-field"),
+        }],
+    );
+
+    assert!(
+        !report.ok,
+        "input_value must reject a plain div: {report:?}"
+    );
+    let error = report.steps[0].error.as_deref().unwrap_or_default();
+    assert!(error.contains("<input>"), "{error}");
+    assert!(error.contains("<select>"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn count_reports_every_match_without_strictness() {
+    let Some(case) = BrowserCase::start("readouts.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::Count {
+                locator: BrowserLocator::css(".row"),
+            },
+            BrowserStep::Count {
+                locator: BrowserLocator::css("#never-rendered"),
+            },
+        ],
+    );
+
+    assert!(report.ok, "count must not be strict: {report:?}");
+    assert_eq!(report.steps[0].data.as_ref().unwrap()["count"], json!(4));
+    assert_eq!(report.steps[1].data.as_ref().unwrap()["count"], json!(0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn all_texts_honours_the_limit_and_reports_the_true_total() {
+    let Some(case) = BrowserCase::start("readouts.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::AllTexts {
+                locator: BrowserLocator::css(".row"),
+                mode: BrowserTextMode::InnerText,
+                limit: Some(2),
+            },
+            BrowserStep::AllTexts {
+                locator: BrowserLocator::css(".row"),
+                mode: BrowserTextMode::TextContent,
+                limit: None,
+            },
+        ],
+    );
+
+    assert!(report.ok, "all_texts batch failed: {report:?}");
+    let limited = report.steps[0].data.as_ref().unwrap();
+    assert_eq!(limited["texts"], json!(["First", "Second"]));
+    assert_eq!(limited["total"], json!(4));
+
+    let full = report.steps[1].data.as_ref().unwrap();
+    assert_eq!(
+        full["texts"],
+        json!(["First clipped", "Second", "Third", "Fourth"])
+    );
+    assert_eq!(full["total"], json!(4));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn bounding_box_measures_visible_elements_and_is_null_when_hidden() {
+    let Some(case) = BrowserCase::start("readouts.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::BoundingBox {
+                locator: BrowserLocator::css("#measured"),
+            },
+            BrowserStep::BoundingBox {
+                locator: BrowserLocator::css("#display-none"),
+            },
+        ],
+    );
+
+    assert!(report.ok, "bounding_box batch failed: {report:?}");
+    let measured = &report.steps[0].data.as_ref().unwrap()["bounding_box"];
+    assert_eq!(measured["x"], json!(40.0));
+    assert_eq!(measured["y"], json!(60.0));
+    assert_eq!(measured["width"], json!(220.0));
+    assert_eq!(measured["height"], json!(30.0));
+    assert_eq!(
+        report.steps[1].data.as_ref().unwrap()["bounding_box"],
+        json!(null)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn element_state_reports_every_flag_in_one_read() {
+    let Some(case) = BrowserCase::start("readouts.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::ElementState {
+                locator: BrowserLocator::css("#ticked"),
+            },
+            BrowserStep::ElementState {
+                locator: BrowserLocator::css("#display-none"),
+            },
+        ],
+    );
+
+    assert!(report.ok, "element_state batch failed: {report:?}");
+    let ticked = &report.steps[0].data.as_ref().unwrap()["state"];
+    assert_eq!(ticked["visible"], json!(true));
+    assert_eq!(ticked["enabled"], json!(true));
+    assert_eq!(ticked["checked"], json!("checked"));
+    assert_eq!(ticked["stable"], json!(true));
+    assert_eq!(
+        report.steps[1].data.as_ref().unwrap()["state"]["visible"],
+        json!(false)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn readouts_stay_strict_for_single_element_steps() {
+    let Some(case) = BrowserCase::start("readouts.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::BoundingBox {
+            locator: BrowserLocator::css(".row"),
+        }],
+    );
+
+    assert!(
+        !report.ok,
+        "bounding_box must reject multiple matches: {report:?}"
+    );
+    let error = report.steps[0].error.as_deref().unwrap_or_default();
+    assert!(error.contains("resolved to 4 elements"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

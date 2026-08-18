@@ -1,4 +1,4 @@
-use crate::browser_models::{ElementInfo, FieldKind};
+use crate::browser_models::{BrowserTextMode, ElementInfo, FieldKind};
 
 pub const INSPECT_ELEMENT_JS: &str = r#"
 if (!window.__refact_inspect_element) {
@@ -173,6 +173,37 @@ pub fn js_get_attribute(attribute: &str) -> String {
 }}"#,
         js_string_literal(attribute),
     )
+}
+
+pub fn js_input_value() -> &'static str {
+    r#"function() {
+  var el = this;
+  if (!el) return JSON.stringify({error: 'No resolved element'});
+  var tag = el.tagName.toLowerCase();
+  if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') {
+    return JSON.stringify({error: 'Node is not an <input>, <textarea> or <select> element'});
+  }
+  return JSON.stringify({ok: true, value: String(el.value)});
+}"#
+}
+
+pub fn js_element_text(mode: BrowserTextMode) -> &'static str {
+    match mode {
+        BrowserTextMode::InnerText => {
+            r#"function() {
+  var el = this;
+  if (!el) return JSON.stringify({error: 'No resolved element'});
+  return JSON.stringify({ok: true, text: el.innerText || ''});
+}"#
+        }
+        BrowserTextMode::TextContent => {
+            r#"function() {
+  var el = this;
+  if (!el) return JSON.stringify({error: 'No resolved element'});
+  return JSON.stringify({ok: true, text: el.textContent || ''});
+}"#
+        }
+    }
 }
 
 pub fn js_extract_links(limit: usize) -> String {
@@ -575,6 +606,9 @@ mod tests {
             js_get_text().to_string(),
             js_get_html().to_string(),
             js_get_attribute("href"),
+            js_input_value().to_string(),
+            js_element_text(BrowserTextMode::InnerText).to_string(),
+            js_element_text(BrowserTextMode::TextContent).to_string(),
             js_extract_table().to_string(),
             js_highlight_element().to_string(),
         ] {

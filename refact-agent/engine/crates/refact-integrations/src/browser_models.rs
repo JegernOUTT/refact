@@ -1513,6 +1513,25 @@ pub enum BrowserStep {
         locator: BrowserLocator,
         attribute: String,
     },
+    BoundingBox {
+        locator: BrowserLocator,
+    },
+    Count {
+        locator: BrowserLocator,
+    },
+    InputValue {
+        locator: BrowserLocator,
+    },
+    AllTexts {
+        locator: BrowserLocator,
+        #[serde(default)]
+        mode: BrowserTextMode,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    ElementState {
+        locator: BrowserLocator,
+    },
     ExtractLinks {
         #[serde(default)]
         locator: Option<BrowserLocator>,
@@ -1666,6 +1685,14 @@ pub enum BrowserLoadState {
     Networkidle,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserTextMode {
+    #[default]
+    InnerText,
+    TextContent,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum UrlPattern {
@@ -1787,6 +1814,11 @@ impl BrowserStep {
         "get_text",
         "get_html",
         "get_attribute",
+        "bounding_box",
+        "count",
+        "input_value",
+        "all_texts",
+        "element_state",
         "extract_links",
         "extract_table",
         "dom_snapshot",
@@ -2637,6 +2669,15 @@ mod tests {
                 locator: locator(),
                 attribute: "href".to_string(),
             },
+            BrowserStep::BoundingBox { locator: locator() },
+            BrowserStep::Count { locator: locator() },
+            BrowserStep::InputValue { locator: locator() },
+            BrowserStep::AllTexts {
+                locator: locator(),
+                mode: BrowserTextMode::TextContent,
+                limit: Some(10),
+            },
+            BrowserStep::ElementState { locator: locator() },
             BrowserStep::ExtractLinks {
                 locator: Some(locator()),
                 limit: Some(10),
@@ -3222,6 +3263,72 @@ mod tests {
                 save_as: Some(name)
             } if name == "saved.txt"
         ));
+    }
+
+    #[test]
+    fn readout_steps_address_a_single_locator() {
+        for (json, expected) in [
+            (
+                r#"{"action":"bounding_box","locator":{"by":"ref","value":"e1"}}"#,
+                "bounding_box",
+            ),
+            (
+                r#"{"action":"count","locator":{"by":"css","value":".row"}}"#,
+                "count",
+            ),
+            (
+                r#"{"action":"input_value","locator":{"by":"ref","value":"e1"}}"#,
+                "input_value",
+            ),
+            (
+                r#"{"action":"element_state","locator":{"by":"ref","value":"e1"}}"#,
+                "element_state",
+            ),
+        ] {
+            let step: BrowserStep = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_value(&step).unwrap()["action"], expected);
+        }
+    }
+
+    #[test]
+    fn all_texts_mode_defaults_to_inner_text_and_limit_is_optional() {
+        let step: BrowserStep =
+            serde_json::from_str(r#"{"action":"all_texts","locator":{"by":"css","value":"li"}}"#)
+                .unwrap();
+
+        assert!(matches!(
+            step,
+            BrowserStep::AllTexts {
+                mode: BrowserTextMode::InnerText,
+                limit: None,
+                ..
+            }
+        ));
+
+        let explicit: BrowserStep = serde_json::from_str(
+            r#"{"action":"all_texts","locator":{"by":"css","value":"li"},"mode":"text_content","limit":5}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            explicit,
+            BrowserStep::AllTexts {
+                mode: BrowserTextMode::TextContent,
+                limit: Some(5),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn readout_steps_reject_unknown_fields() {
+        let error = serde_json::from_str::<BrowserStep>(
+            r#"{"action":"all_texts","locator":{"by":"css","value":"li"},"limits":5}"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("limits"), "{error}");
     }
 
     #[test]

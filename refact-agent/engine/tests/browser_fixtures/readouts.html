@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Locator readouts</title>
+  <style>
+    #measured { position: absolute; left: 40px; top: 60px; width: 220px; height: 30px; }
+    #display-none { display: none; }
+    #clipped { display: none; }
+  </style>
+</head>
+<body>
+  <label for="stale">Stale attribute</label>
+  <input id="stale" value="attribute-value">
+  <label for="notes">Notes</label>
+  <textarea id="notes">textarea-value</textarea>
+  <select id="pick">
+    <option value="alpha">Alpha</option>
+    <option value="beta" selected>Beta</option>
+  </select>
+  <div id="not-a-field">Plain div</div>
+  <div id="measured">Measured</div>
+  <div id="display-none">Hidden</div>
+  <ul>
+    <li class="row">First<span id="clipped"> clipped</span></li>
+    <li class="row">Second</li>
+    <li class="row">Third</li>
+    <li class="row">Fourth</li>
+  </ul>
+  <input id="ticked" type="checkbox" checked>
+</body>
+</html>
