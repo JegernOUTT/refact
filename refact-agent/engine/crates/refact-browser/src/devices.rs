@@ -8,9 +8,15 @@ use crate::context_state::ViewportState;
 const DEVICE_DESCRIPTORS: &str = include_str!("device_descriptors.json");
 
 const DEVICE_ALIASES: &[(&str, &str)] = &[
-    ("mobile", "Pixel 7"),
-    ("tablet", "Galaxy Tab S4"),
-    ("desktop", "Desktop Chrome"),
+    ("mobile", "Refact Mobile"),
+    ("tablet", "Refact Tablet"),
+    ("desktop", "Refact Desktop"),
+];
+
+const LEGACY_PRESETS: &[(&str, &str, u32, u32, f64, bool, bool)] = &[
+    ("Refact Desktop", "Desktop Chrome", 1440, 900, 2.0, false, false),
+    ("Refact Mobile", "Pixel 7", 390, 844, 3.0, true, true),
+    ("Refact Tablet", "Galaxy Tab S4", 834, 1112, 2.0, true, true),
 ];
 
 const MAX_DEVICE_SUGGESTIONS: usize = 5;
@@ -83,7 +89,30 @@ fn parse_registry(source: &str) -> Result<Vec<DeviceDescriptor>, String> {
 pub fn registry() -> &'static [DeviceDescriptor] {
     static REGISTRY: OnceLock<Vec<DeviceDescriptor>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        parse_registry(DEVICE_DESCRIPTORS).expect("vendored device_descriptors.json must parse")
+        let mut devices =
+            parse_registry(DEVICE_DESCRIPTORS).expect("vendored device_descriptors.json must parse");
+        for (name, ua_source, width, height, device_scale_factor, is_mobile, has_touch) in
+            LEGACY_PRESETS
+        {
+            let user_agent = devices
+                .iter()
+                .find(|device| device.name == *ua_source)
+                .map(|device| device.user_agent.clone())
+                .unwrap_or_else(|| "Mozilla/5.0".to_string());
+            devices.push(DeviceDescriptor {
+                name: (*name).to_string(),
+                user_agent,
+                viewport: ViewportState {
+                    width: *width,
+                    height: *height,
+                    device_scale_factor: *device_scale_factor,
+                    is_mobile: *is_mobile,
+                    has_touch: *has_touch,
+                },
+            });
+        }
+        devices.sort_by(|left, right| left.name.cmp(&right.name));
+        devices
     })
 }
 
@@ -181,7 +210,7 @@ mod tests {
             "expected 100+ devices, got {}",
             devices.len()
         );
-        assert_eq!(devices.len(), registry().len());
+        assert_eq!(devices.len() + LEGACY_PRESETS.len(), registry().len());
         assert!(devices.iter().all(|device| !device.user_agent.is_empty()));
         assert!(devices
             .iter()
@@ -204,16 +233,31 @@ mod tests {
 
     #[test]
     fn legacy_aliases_still_resolve_to_representative_registry_entries() {
-        assert_eq!(resolve_alias("mobile"), Some("Pixel 7"));
-        assert_eq!(resolve_alias("tablet"), Some("Galaxy Tab S4"));
-        assert_eq!(resolve_alias("desktop"), Some("Desktop Chrome"));
-        assert_eq!(resolve_alias("DESKTOP"), Some("Desktop Chrome"));
+        assert_eq!(resolve_alias("mobile"), Some("Refact Mobile"));
+        assert_eq!(resolve_alias("tablet"), Some("Refact Tablet"));
+        assert_eq!(resolve_alias("desktop"), Some("Refact Desktop"));
+        assert_eq!(resolve_alias("DESKTOP"), Some("Refact Desktop"));
         assert_eq!(resolve_alias("iPhone 13"), None);
 
-        assert!(lookup("mobile").unwrap().viewport.is_mobile);
-        assert!(lookup("tablet").unwrap().viewport.has_touch);
+        let mobile = lookup("mobile").unwrap();
+        assert!(mobile.viewport.is_mobile);
+        assert_eq!(mobile.viewport.width, 390);
+        assert_eq!(mobile.viewport.height, 844);
+        assert_eq!(mobile.viewport.device_scale_factor, 3.0);
+
+        let tablet = lookup("tablet").unwrap();
+        assert!(tablet.viewport.has_touch);
+        assert_eq!(tablet.viewport.width, 834);
+        assert_eq!(tablet.viewport.height, 1112);
+
         let desktop = lookup("desktop").unwrap();
         assert!(!desktop.viewport.is_mobile && !desktop.viewport.has_touch);
+        assert_eq!(desktop.viewport.width, 1440);
+        assert_eq!(desktop.viewport.height, 900);
+        assert_eq!(desktop.viewport.device_scale_factor, 2.0);
+
+        assert!(lookup("Pixel 7").is_ok());
+        assert!(lookup("Desktop Chrome").is_ok());
     }
 
     #[test]

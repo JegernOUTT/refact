@@ -475,7 +475,7 @@ async fn differentiator_02_click_if_exists_skips_missing_and_continues_batch() {
     assert!(report.ok, "optional click aborted the batch: {report:?}");
     assert_eq!(report.steps.len(), 2);
     assert!(report.steps[0].ok);
-    assert!(report.steps[0].summary.contains("skipped"));
+    assert!(report.steps[0].summary.to_lowercase().contains("skipped"));
     assert_eq!(
         eval_value(&case.tab, "document.body.dataset.continued"),
         "yes"
