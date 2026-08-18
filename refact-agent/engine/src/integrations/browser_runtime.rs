@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::Mutex as AMutex;
@@ -62,6 +63,21 @@ pub const RELAUNCH_SETTLE: Duration = Duration::from_millis(800);
 pub const RELAUNCH_WARNING: &str =
     "browser session was dead; relaunched and retried (open tabs lost, cookies/localStorage kept)";
 
+pub fn relaunch_resume_warning(resume_index: usize) -> String {
+    format!(
+        "browser session was dead; relaunched and resumed from step {resume_index} — open tabs were lost, cookies/storage persist via profile"
+    )
+}
+
+static RELAUNCH_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<AMutex<()>>>>> = OnceLock::new();
+
+fn relaunch_lock_for_chat(chat_id: &str) -> Arc<AMutex<()>> {
+    let locks = RELAUNCH_LOCKS.get_or_init(Default::default);
+    let mut locks = locks.lock().unwrap_or_else(|error| error.into_inner());
+    locks.retain(|key, lock| key == chat_id || Arc::strong_count(lock) > 1);
+    locks.entry(chat_id.to_string()).or_default().clone()
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeRecoveryPlan {
     pub runtime_id: String,
@@ -115,9 +131,24 @@ pub async fn relaunch_runtime_for_chat(
         ..launch_options
     };
 
+    let relaunch_lock = relaunch_lock_for_chat(chat_id);
+    let _relaunch_guard = relaunch_lock.lock().await;
+
     let previous_emitter_active = match find_runtime_by_chat_id(app.clone(), chat_id).await {
         Some((runtime_id, runtime_arc)) => {
-            let emitter_active = runtime_arc.lock().await.frame_emitter_active;
+            let (emitter_active, usable) = {
+                let mut rt = runtime_arc.lock().await;
+                let same_mode = rt.launch_options.headless == options.headless;
+                let usable = same_mode && tokio::task::block_in_place(|| rt.check_connection());
+                (rt.frame_emitter_active, usable)
+            };
+            if usable {
+                info!(
+                    "BrowserRuntime {} is already live for chat {}, reusing it instead of relaunching",
+                    runtime_id, chat_id
+                );
+                return Ok(runtime_id);
+            }
             drop(runtime_arc);
             let removed = remove_browser_runtime(app.clone(), &runtime_id).await;
             drop(removed);
@@ -192,6 +223,16 @@ pub async fn browser_snapshot_for_chat(
     })
 }
 
+struct RuntimeHealth {
+    chat_id: Option<String>,
+    was_connected: bool,
+    still_connected: bool,
+    idle_expired: bool,
+    idle_timeout: Duration,
+    profile_dir: PathBuf,
+    launch_options: BrowserLaunchOptions,
+}
+
 pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
     loop {
         let shutdown_flag = app.runtime.shutdown_flag.clone();
@@ -224,36 +265,55 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                 }
             };
 
-            let mut rt = runtime_arc.lock().await;
-
-            refact_browser::adopt_new_tabs(&mut rt, None);
-
-            let was_connected = rt.is_connected;
-            let still_connected = rt.check_connection();
+            let RuntimeHealth {
+                chat_id,
+                was_connected,
+                still_connected,
+                idle_expired,
+                idle_timeout,
+                profile_dir,
+                launch_options,
+            } = {
+                let mut rt = runtime_arc.lock().await;
+                tokio::task::block_in_place(|| {
+                    refact_browser::adopt_new_tabs(&mut rt, None);
+                    let was_connected = rt.is_connected;
+                    let still_connected = rt.check_connection();
+                    RuntimeHealth {
+                        chat_id: rt.attached_chat_id.clone(),
+                        was_connected,
+                        still_connected,
+                        idle_expired: rt.is_idle_expired(),
+                        idle_timeout: rt.idle_timeout,
+                        profile_dir: rt.profile_dir.clone(),
+                        launch_options: rt.launch_options.clone(),
+                    }
+                })
+            };
 
             if was_connected && !still_connected {
                 info!(
                     "BrowserRuntime {} (chat {:?}) lost connection",
-                    rt.runtime_id, rt.attached_chat_id
+                    rid, chat_id
                 );
             }
 
-            if rt.attached_chat_id.is_some() && rt.is_idle_expired() {
+            if chat_id.is_some() && idle_expired {
                 warn!(
                     "BrowserRuntime {} idle timeout ({:?}) for chat {:?}",
-                    rt.runtime_id, rt.idle_timeout, rt.attached_chat_id
+                    rid, idle_timeout, chat_id
                 );
                 to_remove.push(rid.clone());
                 continue;
             }
 
             if !still_connected {
-                match rt.attached_chat_id.clone() {
+                match chat_id {
                     Some(chat_id) => to_relaunch.push(RuntimeRecoveryPlan {
                         runtime_id: rid.clone(),
                         chat_id,
-                        profile_dir: rt.profile_dir.clone(),
-                        launch_options: rt.launch_options.clone(),
+                        profile_dir,
+                        launch_options,
                     }),
                     None => to_remove.push(rid.clone()),
                 }
@@ -322,6 +382,63 @@ mod tests {
         assert!(monitor.contains("Some(chat_id) => to_relaunch.push(RuntimeRecoveryPlan {"));
         assert!(monitor.contains("None => to_remove.push(rid.clone()),"));
         assert!(monitor.contains("relaunch_runtime_for_chat("));
+        assert!(
+            monitor.contains("tokio::task::block_in_place(|| {"),
+            "sync CDP calls still run on a worker thread while holding the runtime mutex"
+        );
+    }
+
+    #[test]
+    fn concurrent_relaunches_for_one_chat_share_a_single_guard() {
+        let first = relaunch_lock_for_chat("chat-relaunch-guard");
+        let second = relaunch_lock_for_chat("chat-relaunch-guard");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(
+            &first,
+            &relaunch_lock_for_chat("other-chat-relaunch-guard")
+        ));
+
+        let guard = first.try_lock().expect("first relaunch takes the guard");
+        assert!(
+            second.try_lock().is_err(),
+            "a second relaunch for the same chat must wait instead of launching another browser"
+        );
+        drop(guard);
+        assert!(second.try_lock().is_ok());
+    }
+
+    #[test]
+    fn relaunch_reuses_a_live_runtime_in_the_requested_mode() {
+        let helper = include_str!("browser_runtime.rs")
+            .split_once("pub async fn relaunch_runtime_for_chat(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+
+        for step in [
+            "let relaunch_lock = relaunch_lock_for_chat(chat_id);",
+            "let _relaunch_guard = relaunch_lock.lock().await;",
+            "let same_mode = rt.launch_options.headless == options.headless;",
+            "tokio::task::block_in_place(|| rt.check_connection())",
+            "return Ok(runtime_id);",
+        ] {
+            assert!(helper.contains(step), "relaunch guard lost step: {step}");
+        }
+        assert!(
+            helper.find("let _relaunch_guard").unwrap()
+                < helper.find("remove_browser_runtime(").unwrap(),
+            "the per-chat guard must be held across remove, launch and register"
+        );
+    }
+
+    #[test]
+    fn resume_warning_names_the_step_the_retry_starts_from() {
+        let warning = relaunch_resume_warning(2);
+        assert!(warning.contains("relaunched and resumed from step 2"));
+        assert!(warning.contains("open tabs were lost"));
+        assert!(warning.contains("cookies/storage persist via profile"));
     }
 
     #[test]

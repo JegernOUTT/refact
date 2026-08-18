@@ -1670,6 +1670,10 @@ pub async fn browser_frame_emission_task(
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
+        if gcx.shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+
         let runtime_arc = {
             let browser_runtimes = gcx.browser_runtimes.clone();
             let browser_runtimes = browser_runtimes.lock().await;

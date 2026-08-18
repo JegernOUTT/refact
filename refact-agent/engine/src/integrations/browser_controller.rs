@@ -2472,38 +2472,83 @@ pub async fn execute_request_with_runtime_validated(
     };
 
     let app = crate::app_state::AppState::from_gcx(gcx).await;
+    let total_steps = request.steps.len();
     let transport_alive = {
         let mut rt = runtime_arc.lock().await;
         tokio::task::block_in_place(|| rt.check_connection())
     };
 
+    let mut resume = None;
     if transport_alive {
         let outcome =
             execute_request_with_runtime(runtime_arc, request.clone(), image_policy).await;
         if !report_hit_dead_transport(&outcome) {
             return outcome;
         }
+        if let Ok(attempt) = &outcome {
+            resume = Some(plan_resume(attempt, total_steps));
+        }
     }
 
     let runtime_arc = relaunch_and_resolve(app, &chat_id, profile_dir, launch_options).await?;
-    let mut report = execute_request_with_runtime(runtime_arc, request, image_policy).await?;
-    report
-        .warnings
-        .push(crate::integrations::browser_runtime::RELAUNCH_WARNING.to_string());
-    Ok(report)
+    let Some(resume) = resume else {
+        let mut report = execute_request_with_runtime(runtime_arc, request, image_policy).await?;
+        report
+            .warnings
+            .push(crate::integrations::browser_runtime::RELAUNCH_WARNING.to_string());
+        return Ok(report);
+    };
+    let mut retry_request = request;
+    retry_request.steps = retry_request.steps.split_off(resume.resume_index);
+    let retry = execute_request_with_runtime(runtime_arc, retry_request, image_policy).await?;
+    Ok(merge_resumed_report(resume, retry))
+}
+
+struct ResumePlan {
+    resume_index: usize,
+    completed_steps: Vec<StepResult>,
+    warnings: Vec<String>,
+}
+
+fn plan_resume(attempt: &ExecutionReport, total_steps: usize) -> ResumePlan {
+    let step_at = |index: usize| attempt.steps.iter().find(|step| step.step_index == index);
+    let resume_index = (0..total_steps)
+        .find(|index| step_at(*index).is_none_or(step_hit_dead_transport))
+        .unwrap_or(total_steps);
+    ResumePlan {
+        resume_index,
+        completed_steps: (0..resume_index).filter_map(step_at).cloned().collect(),
+        warnings: attempt.warnings.clone(),
+    }
+}
+
+fn merge_resumed_report(resume: ResumePlan, mut retry: ExecutionReport) -> ExecutionReport {
+    let mut steps = resume.completed_steps;
+    let mut retried = std::mem::take(&mut retry.steps);
+    for step in &mut retried {
+        step.step_index += resume.resume_index;
+    }
+    steps.append(&mut retried);
+    retry.steps = steps;
+
+    let mut warnings = resume.warnings;
+    warnings
+        .push(crate::integrations::browser_runtime::relaunch_resume_warning(resume.resume_index));
+    warnings.append(&mut retry.warnings);
+    retry.warnings = warnings;
+    retry
+}
+
+fn step_hit_dead_transport(step: &StepResult) -> bool {
+    step.error
+        .as_deref()
+        .is_some_and(refact_browser::is_transport_dead_error)
 }
 
 fn report_hit_dead_transport(outcome: &Result<ExecutionReport, String>) -> bool {
     match outcome {
         Err(error) => refact_browser::is_transport_dead_error(error),
-        Ok(report) => {
-            !report.ok
-                && report.steps.iter().any(|step| {
-                    step.error
-                        .as_deref()
-                        .is_some_and(refact_browser::is_transport_dead_error)
-                })
-        }
+        Ok(report) => !report.ok && report.steps.iter().any(step_hit_dead_transport),
     }
 }
 
@@ -9026,14 +9071,21 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    const DEAD_TRANSPORT: &str =
+        "Unable to make method calls because underlying connection is closed";
+
     fn report_with_step_error(error: Option<&str>) -> ExecutionReport {
         let step = match error {
             Some(error) => StepResult::failure(0, "OpenTab", error.to_string()),
             None => StepResult::success(0, "OpenTab"),
         };
+        report_with_steps(vec![step])
+    }
+
+    fn report_with_steps(steps: Vec<StepResult>) -> ExecutionReport {
         ExecutionReport {
-            ok: error.is_none(),
-            steps: vec![step],
+            ok: steps.iter().all(|step| step.ok),
+            steps,
             warnings: Vec::new(),
             url: None,
             title: None,
@@ -9059,7 +9111,7 @@ mod tests {
     #[test]
     fn dead_transport_is_detected_from_step_errors_and_dispatch_errors() {
         assert!(report_hit_dead_transport(&Ok(report_with_step_error(
-            Some("Unable to make method calls because underlying connection is closed")
+            Some(DEAD_TRANSPORT)
         ))));
         assert!(report_hit_dead_transport(&Err(
             "MethodCallError(ConnectionClosed)".to_string()
@@ -9077,22 +9129,127 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_boundary_relaunches_and_retries_once_with_a_visible_warning() {
-        let dispatch = include_str!("browser_controller.rs")
-            .split_once("pub async fn execute_request_with_runtime_validated(")
-            .unwrap()
-            .1
-            .split_once("\nfn report_hit_dead_transport(")
-            .unwrap()
-            .0;
+    fn plan_resume_starts_at_the_first_unfinished_or_dead_step() {
+        let all_ok = report_with_steps(vec![
+            StepResult::success(0, "Navigate"),
+            StepResult::success(1, "Click"),
+        ]);
+        assert_eq!(plan_resume(&all_ok, 2).resume_index, 2);
+        assert_eq!(plan_resume(&all_ok, 2).completed_steps.len(), 2);
 
-        assert!(dispatch.contains("tokio::task::block_in_place(|| rt.check_connection())"));
-        assert!(dispatch.contains("if !report_hit_dead_transport(&outcome)"));
-        assert!(
-            dispatch.contains("relaunch_and_resolve(app, &chat_id, profile_dir, launch_options)")
+        let dead_first = report_with_steps(vec![StepResult::failure(0, "Click", DEAD_TRANSPORT)]);
+        assert_eq!(plan_resume(&dead_first, 3).resume_index, 0);
+        assert!(plan_resume(&dead_first, 3).completed_steps.is_empty());
+
+        let dead_midway = report_with_steps(vec![
+            StepResult::success(0, "Navigate"),
+            StepResult::success(1, "Fill"),
+            StepResult::failure(2, "Click", DEAD_TRANSPORT),
+        ]);
+        let resume = plan_resume(&dead_midway, 4);
+        assert_eq!(resume.resume_index, 2);
+        assert_eq!(
+            resume
+                .completed_steps
+                .iter()
+                .map(|step| step.step_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
         );
-        assert!(dispatch.contains("crate::integrations::browser_runtime::RELAUNCH_WARNING"));
-        assert_eq!(dispatch.matches("execute_request_with_runtime(").count(), 3);
+
+        let soft_failure = report_with_steps(vec![
+            StepResult::success(0, "Navigate"),
+            StepResult::failure(1, "Expect", "Timeout 5000ms exceeded"),
+            StepResult::failure(2, "Click", DEAD_TRANSPORT),
+        ]);
+        let resume = plan_resume(&soft_failure, 3);
+        assert_eq!(resume.resume_index, 2);
+        assert_eq!(resume.completed_steps.len(), 2);
+        assert!(!resume.completed_steps[1].ok);
+
+        let nothing_ran = report_with_steps(Vec::new());
+        assert_eq!(plan_resume(&nothing_ran, 3).resume_index, 0);
+        assert!(plan_resume(&nothing_ran, 3).completed_steps.is_empty());
+    }
+
+    #[test]
+    fn merged_report_keeps_original_indices_and_both_attempt_warnings() {
+        let mut attempt = report_with_steps(vec![
+            StepResult::success(0, "Navigate"),
+            StepResult::success(1, "Fill"),
+            StepResult::failure(2, "Click", DEAD_TRANSPORT),
+        ]);
+        attempt.warnings.push("attempt one warning".to_string());
+        let resume = plan_resume(&attempt, 4);
+
+        let mut retry = report_with_steps(vec![
+            StepResult::success(0, "Click"),
+            StepResult::success(1, "Screenshot"),
+        ]);
+        retry.warnings.push("attempt two warning".to_string());
+
+        let merged = merge_resumed_report(resume, retry);
+        assert_eq!(
+            merged
+                .steps
+                .iter()
+                .map(|step| step.step_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(
+            merged
+                .steps
+                .iter()
+                .map(|step| step.summary.clone())
+                .collect::<Vec<_>>(),
+            vec!["Navigate", "Fill", "Click", "Screenshot"]
+        );
+        assert_eq!(
+            merged.warnings,
+            vec![
+                "attempt one warning".to_string(),
+                crate::integrations::browser_runtime::relaunch_resume_warning(2),
+                "attempt two warning".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_boundary_relaunches_and_retries_once_with_a_visible_warning() {
+        let attempt = report_with_steps(vec![
+            StepResult::success(0, "Navigate"),
+            StepResult::success(1, "Fill"),
+            StepResult::failure(2, "Click", DEAD_TRANSPORT),
+        ]);
+        assert!(report_hit_dead_transport(&Ok(attempt.clone())));
+
+        let resume = plan_resume(&attempt, 4);
+        let replayed = resume.resume_index;
+        assert_eq!(replayed, 2);
+        assert!(resume.completed_steps.iter().all(|step| step.ok));
+
+        let warning = crate::integrations::browser_runtime::relaunch_resume_warning(replayed);
+        assert!(warning.contains("relaunched and resumed from step 2"));
+        assert!(warning.contains("cookies/storage persist via profile"));
+
+        let retry = report_with_steps(vec![
+            StepResult::success(0, "Click"),
+            StepResult::success(1, "Screenshot"),
+        ]);
+        let merged = merge_resumed_report(resume, retry);
+        assert!(merged.warnings.contains(&warning));
+        assert_eq!(merged.steps.len(), 4);
+        assert_eq!(
+            merged
+                .steps
+                .iter()
+                .filter(|step| step.summary == "Click")
+                .count(),
+            1
+        );
+        assert!(crate::integrations::browser_runtime::RELAUNCH_WARNING
+            .contains("relaunched and retried"));
     }
 
     fn actionable_state() -> refact_browser::ElementState {
