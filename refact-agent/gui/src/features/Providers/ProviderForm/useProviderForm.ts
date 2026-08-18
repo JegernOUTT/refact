@@ -24,6 +24,7 @@ type ParsedSchema = {
   fields: SchemaFieldDef[];
   oauth?: {
     supported: boolean;
+    warning?: string;
     methods?: { id: string; label: string; description?: string }[];
   };
   description?: string;

@@ -88,6 +88,8 @@ pub(crate) async fn refresh_expiring_oauth_tokens(gcx: &Arc<GlobalContext>) {
     refresh_expiring_claude_code_tokens(gcx).await;
     let (http_client, config_dir) = { (gcx.http_client.clone(), gcx.config_dir.clone()) };
     try_refresh_openai_codex_instances(gcx, &http_client, &config_dir).await;
+    try_refresh_xai_oauth_instances(gcx, &http_client, &config_dir).await;
+    try_refresh_google_antigravity_instances(gcx, &http_client, &config_dir).await;
 }
 
 pub(crate) async fn refresh_expiring_claude_code_tokens(gcx: &Arc<GlobalContext>) {
@@ -741,6 +743,638 @@ async fn try_refresh_openai_codex(
             }
         }
     }
+}
+
+async fn try_refresh_xai_oauth_instances(
+    gcx: &Arc<GlobalContext>,
+    http_client: &reqwest::Client,
+    config_dir: &std::path::Path,
+) {
+    let candidates = {
+        let registry = gcx.providers.read().await;
+        registry
+            .iter()
+            .filter(|(_, provider)| provider.base_provider_name() == "xai_oauth")
+            .filter_map(|(_, provider)| {
+                let oauth_tokens = provider
+                    .as_any()
+                    .downcast_ref::<crate::providers::xai_oauth::XAIOAuthProvider>()?
+                    .oauth_tokens
+                    .clone();
+                Some(OAuthRefreshCandidate {
+                    instance_id: provider.name().to_string(),
+                    display_name: provider.display_name().to_string(),
+                    oauth_tokens,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for candidate in candidates {
+        try_refresh_xai_oauth(gcx, http_client, config_dir, candidate).await;
+    }
+}
+
+async fn try_refresh_xai_oauth(
+    gcx: &Arc<GlobalContext>,
+    http_client: &reqwest::Client,
+    config_dir: &std::path::Path,
+    candidate: OAuthRefreshCandidate<crate::providers::xai_oauth_flow::OAuthTokens>,
+) {
+    let instance_id = candidate.instance_id;
+    let display_name = candidate.display_name;
+    let candidate_tokens = candidate.oauth_tokens;
+
+    if candidate_tokens.is_empty() || candidate_tokens.refresh_token.is_empty() {
+        return;
+    }
+
+    if !needs_refresh(candidate_tokens.expires_at) {
+        return;
+    }
+
+    if is_invalid_refresh_token(&instance_id, &candidate_tokens.refresh_token) {
+        return;
+    }
+
+    let _guard = match crate::providers::xai_oauth::XAIOAuthProvider::lock_refresh_guard().await {
+        Ok(guard) => guard,
+        Err(error) => {
+            tracing::warn!(
+                "{}: failed to acquire OAuth refresh guard: {}",
+                display_name,
+                error
+            );
+            return;
+        }
+    };
+    let Some(oauth_tokens) = ({
+        let registry = gcx.providers.read().await;
+        registry
+            .get(&instance_id)
+            .and_then(|provider| {
+                provider
+                    .as_any()
+                    .downcast_ref::<crate::providers::xai_oauth::XAIOAuthProvider>()
+            })
+            .map(|provider| provider.oauth_tokens.clone())
+    }) else {
+        return;
+    };
+    if oauth_tokens.is_empty()
+        || oauth_tokens.refresh_token.is_empty()
+        || !needs_refresh(oauth_tokens.expires_at)
+        || is_invalid_refresh_token(&instance_id, &oauth_tokens.refresh_token)
+    {
+        return;
+    }
+
+    tracing::info!(
+        "{}: refreshing OAuth token (expires_at={})",
+        display_name,
+        oauth_tokens.expires_at
+    );
+
+    match crate::providers::xai_oauth_flow::refresh_access_token(
+        http_client,
+        &oauth_tokens.refresh_token,
+    )
+    .await
+    {
+        Ok(new_tokens) => {
+            tracing::info!("{}: OAuth token refreshed successfully", display_name);
+            let saved = match save_xai_refreshed_tokens(
+                gcx,
+                config_dir,
+                &instance_id,
+                &oauth_tokens,
+                &new_tokens.access_token,
+                &new_tokens.refresh_token,
+                new_tokens.expires_at,
+            )
+            .await
+            {
+                Ok(saved) => saved,
+                Err(e) => {
+                    tracing::warn!("{}: failed to save refreshed tokens: {}", display_name, e);
+                    false
+                }
+            };
+            if saved && clear_oauth_failure(&instance_id) {
+                let ev = crate::buddy::actor::make_runtime_event(
+                    "connection_restored",
+                    &format!("{}: OAuth token refreshed", display_name),
+                    "provider",
+                    &format!("oauth_{}", instance_id),
+                    "completed",
+                    None,
+                );
+                crate::buddy::actor::buddy_enqueue_event(
+                    crate::app_state::AppState::from_gcx((*gcx).clone()).await,
+                    ev,
+                )
+                .await;
+            }
+        }
+        Err(e) => {
+            let first_failure = mark_oauth_failure(&instance_id);
+            if is_permanent_refresh_error(&e) {
+                mark_invalid_refresh_token(&instance_id, &oauth_tokens.refresh_token);
+                if first_failure {
+                    tracing::warn!(
+                        "{}: OAuth refresh token is invalid; clearing saved refresh token. Please log in again if Grok stops working: {}",
+                        display_name,
+                        e
+                    );
+                } else {
+                    tracing::debug!(
+                        "{}: OAuth refresh token is still invalid: {}",
+                        display_name,
+                        e
+                    );
+                }
+                let cleared = match save_xai_refreshed_tokens(
+                    gcx,
+                    config_dir,
+                    &instance_id,
+                    &oauth_tokens,
+                    "",
+                    "",
+                    0,
+                )
+                .await
+                {
+                    Ok(cleared) => cleared,
+                    Err(save_err) => {
+                        tracing::warn!(
+                            "{}: failed to clear invalid OAuth refresh token: {}",
+                            display_name,
+                            save_err
+                        );
+                        false
+                    }
+                };
+                if first_failure && cleared {
+                    let ev = crate::buddy::actor::make_runtime_event(
+                        "connection_lost",
+                        &format!(
+                            "{} OAuth expired — please log in again if needed",
+                            display_name
+                        ),
+                        "provider",
+                        &format!("oauth_{}", instance_id),
+                        "failed",
+                        Some("high"),
+                    );
+                    crate::buddy::actor::buddy_enqueue_event(
+                        crate::app_state::AppState::from_gcx((*gcx).clone()).await,
+                        ev,
+                    )
+                    .await;
+                }
+                return;
+            }
+            if first_failure {
+                tracing::warn!("{}: OAuth token refresh failed: {}", display_name, e);
+                let ev = crate::buddy::actor::make_runtime_event(
+                    "connection_lost",
+                    &format!("{}: OAuth refresh failed", display_name),
+                    "provider",
+                    &format!("oauth_{}", instance_id),
+                    "failed",
+                    Some("high"),
+                );
+                crate::buddy::actor::buddy_enqueue_event(
+                    crate::app_state::AppState::from_gcx((*gcx).clone()).await,
+                    ev,
+                )
+                .await;
+            } else {
+                tracing::debug!("{}: OAuth token refresh still failing: {}", display_name, e);
+            }
+        }
+    }
+}
+
+async fn try_refresh_google_antigravity_instances(
+    gcx: &Arc<GlobalContext>,
+    http_client: &reqwest::Client,
+    config_dir: &std::path::Path,
+) {
+    let candidates = {
+        let registry = gcx.providers.read().await;
+        registry
+            .iter()
+            .filter(|(_, provider)| provider.base_provider_name() == "google_antigravity")
+            .filter_map(|(_, provider)| {
+                let oauth_tokens = provider
+                    .as_any()
+                    .downcast_ref::<
+                        crate::providers::google_antigravity::GoogleAntigravityProvider,
+                    >()?
+                    .oauth_tokens
+                    .clone();
+                Some(OAuthRefreshCandidate {
+                    instance_id: provider.name().to_string(),
+                    display_name: provider.display_name().to_string(),
+                    oauth_tokens,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for candidate in candidates {
+        try_refresh_google_antigravity(gcx, http_client, config_dir, candidate).await;
+    }
+}
+
+async fn try_refresh_google_antigravity(
+    gcx: &Arc<GlobalContext>,
+    http_client: &reqwest::Client,
+    config_dir: &std::path::Path,
+    candidate: OAuthRefreshCandidate<crate::providers::google_antigravity_oauth::OAuthTokens>,
+) {
+    use crate::providers::google_antigravity::GoogleAntigravityProvider;
+
+    let instance_id = candidate.instance_id;
+    let display_name = candidate.display_name;
+    let candidate_tokens = candidate.oauth_tokens;
+
+    if candidate_tokens.is_empty() || candidate_tokens.refresh_token.is_empty() {
+        return;
+    }
+
+    if !needs_refresh(candidate_tokens.expires_at) {
+        return;
+    }
+
+    if is_invalid_refresh_token(&instance_id, &candidate_tokens.refresh_token) {
+        return;
+    }
+
+    let _guard = match GoogleAntigravityProvider::lock_refresh_guard().await {
+        Ok(guard) => guard,
+        Err(error) => {
+            tracing::warn!(
+                "{}: failed to acquire OAuth refresh guard: {}",
+                display_name,
+                error
+            );
+            return;
+        }
+    };
+    let Some(oauth_tokens) = ({
+        let registry = gcx.providers.read().await;
+        registry
+            .get(&instance_id)
+            .and_then(|provider| {
+                provider.as_any().downcast_ref::<
+                    crate::providers::google_antigravity::GoogleAntigravityProvider,
+                >()
+            })
+            .map(|provider| provider.oauth_tokens.clone())
+    }) else {
+        return;
+    };
+    if oauth_tokens.is_empty()
+        || oauth_tokens.refresh_token.is_empty()
+        || !needs_refresh(oauth_tokens.expires_at)
+        || is_invalid_refresh_token(&instance_id, &oauth_tokens.refresh_token)
+    {
+        return;
+    }
+
+    tracing::info!(
+        "{}: refreshing OAuth token (expires_at={})",
+        display_name,
+        oauth_tokens.expires_at
+    );
+
+    match crate::providers::google_antigravity_oauth::refresh_access_token(
+        http_client,
+        &oauth_tokens.refresh_token,
+    )
+    .await
+    {
+        Ok(new_tokens) => {
+            tracing::info!("{}: OAuth token refreshed successfully", display_name);
+            let project_id = if new_tokens.project_id.is_empty() {
+                &oauth_tokens.project_id
+            } else {
+                &new_tokens.project_id
+            };
+            let saved = match save_google_antigravity_refreshed_tokens(
+                gcx,
+                config_dir,
+                &instance_id,
+                &oauth_tokens,
+                &new_tokens.access_token,
+                &new_tokens.refresh_token,
+                new_tokens.expires_at,
+                project_id,
+            )
+            .await
+            {
+                Ok(saved) => saved,
+                Err(e) => {
+                    tracing::warn!("{}: failed to save refreshed tokens: {}", display_name, e);
+                    false
+                }
+            };
+            if saved && clear_oauth_failure(&instance_id) {
+                let ev = crate::buddy::actor::make_runtime_event(
+                    "connection_restored",
+                    &format!("{}: OAuth token refreshed", display_name),
+                    "provider",
+                    &format!("oauth_{}", instance_id),
+                    "completed",
+                    None,
+                );
+                crate::buddy::actor::buddy_enqueue_event(
+                    crate::app_state::AppState::from_gcx((*gcx).clone()).await,
+                    ev,
+                )
+                .await;
+            }
+        }
+        Err(e) => {
+            let first_failure = mark_oauth_failure(&instance_id);
+            if is_permanent_refresh_error(&e) {
+                mark_invalid_refresh_token(&instance_id, &oauth_tokens.refresh_token);
+                if first_failure {
+                    tracing::warn!(
+                        concat!(
+                            "{}: OAuth refresh token is invalid; clearing saved refresh token. ",
+                            "Please log in again if Google Antigravity stops working: {}"
+                        ),
+                        display_name,
+                        e
+                    );
+                } else {
+                    tracing::debug!(
+                        "{}: OAuth refresh token is still invalid: {}",
+                        display_name,
+                        e
+                    );
+                }
+                let cleared = match save_google_antigravity_refreshed_tokens(
+                    gcx,
+                    config_dir,
+                    &instance_id,
+                    &oauth_tokens,
+                    "",
+                    "",
+                    0,
+                    &oauth_tokens.project_id,
+                )
+                .await
+                {
+                    Ok(cleared) => cleared,
+                    Err(save_err) => {
+                        tracing::warn!(
+                            "{}: failed to clear invalid OAuth refresh token: {}",
+                            display_name,
+                            save_err
+                        );
+                        false
+                    }
+                };
+                if first_failure && cleared {
+                    let ev = crate::buddy::actor::make_runtime_event(
+                        "connection_lost",
+                        &format!(
+                            "{} OAuth expired — please log in again if needed",
+                            display_name
+                        ),
+                        "provider",
+                        &format!("oauth_{}", instance_id),
+                        "failed",
+                        Some("high"),
+                    );
+                    crate::buddy::actor::buddy_enqueue_event(
+                        crate::app_state::AppState::from_gcx((*gcx).clone()).await,
+                        ev,
+                    )
+                    .await;
+                }
+                return;
+            }
+            if first_failure {
+                tracing::warn!("{}: OAuth token refresh failed: {}", display_name, e);
+                let ev = crate::buddy::actor::make_runtime_event(
+                    "connection_lost",
+                    &format!("{}: OAuth refresh failed", display_name),
+                    "provider",
+                    &format!("oauth_{}", instance_id),
+                    "failed",
+                    Some("high"),
+                );
+                crate::buddy::actor::buddy_enqueue_event(
+                    crate::app_state::AppState::from_gcx((*gcx).clone()).await,
+                    ev,
+                )
+                .await;
+            } else {
+                tracing::debug!("{}: OAuth token refresh still failing: {}", display_name, e);
+            }
+        }
+    }
+}
+
+async fn save_google_antigravity_refreshed_tokens(
+    gcx: &Arc<GlobalContext>,
+    config_dir: &std::path::Path,
+    provider_name: &str,
+    expected_tokens: &crate::providers::google_antigravity_oauth::OAuthTokens,
+    access_token: &str,
+    refresh_token: &str,
+    expires_at: i64,
+    project_id: &str,
+) -> Result<bool, String> {
+    let registry_matches = {
+        let registry = gcx.providers.read().await;
+        registry
+            .get(provider_name)
+            .and_then(|provider| {
+                provider.as_any().downcast_ref::<
+                    crate::providers::google_antigravity::GoogleAntigravityProvider,
+                >()
+            })
+            .is_some_and(|provider| &provider.oauth_tokens == expected_tokens)
+    };
+    if !registry_matches {
+        return Ok(false);
+    }
+
+    let updated = config_store::update_provider_config_if(config_dir, provider_name, |existing| {
+        let Some(value) = existing else {
+            return Ok(None);
+        };
+        let mut yaml_map = value.as_mapping().cloned().ok_or_else(|| {
+            "Config file root is not a YAML mapping. Cannot safely patch.".to_string()
+        })?;
+
+        let mut tokens_map = yaml_map
+            .get(&serde_yaml::Value::String("oauth_tokens".to_string()))
+            .and_then(|v| v.as_mapping())
+            .cloned()
+            .unwrap_or_default();
+        let current_tokens: crate::providers::google_antigravity_oauth::OAuthTokens =
+            serde_yaml::from_value(serde_yaml::Value::Mapping(tokens_map.clone()))
+                .map_err(|error| format!("Failed to parse existing OAuth tokens: {}", error))?;
+        if &current_tokens != expected_tokens {
+            return Ok(None);
+        }
+
+        tokens_map.insert(
+            serde_yaml::Value::String("access_token".to_string()),
+            serde_yaml::Value::String(access_token.to_string()),
+        );
+        tokens_map.insert(
+            serde_yaml::Value::String("refresh_token".to_string()),
+            serde_yaml::Value::String(refresh_token.to_string()),
+        );
+        tokens_map.insert(
+            serde_yaml::Value::String("expires_at".to_string()),
+            serde_yaml::Value::Number(serde_yaml::Number::from(expires_at)),
+        );
+        tokens_map.insert(
+            serde_yaml::Value::String("project_id".to_string()),
+            serde_yaml::Value::String(project_id.to_string()),
+        );
+
+        yaml_map.insert(
+            serde_yaml::Value::String("oauth_tokens".to_string()),
+            serde_yaml::Value::Mapping(tokens_map),
+        );
+
+        Ok(Some(serde_yaml::Value::Mapping(yaml_map)))
+    })
+    .await?;
+    if updated.is_none() {
+        return Ok(false);
+    }
+
+    let changed = {
+        let mut registry = gcx.providers.write().await;
+        registry
+            .get_mut(provider_name)
+            .and_then(|provider| {
+                provider.as_any_mut().downcast_mut::<
+                    crate::providers::google_antigravity::GoogleAntigravityProvider,
+                >()
+            })
+            .filter(|provider| &provider.oauth_tokens == expected_tokens)
+            .map(|provider| {
+                provider.apply_oauth_refresh_tokens(access_token, refresh_token, expires_at);
+                provider.oauth_tokens.project_id = project_id.to_string();
+            })
+            .is_some()
+    };
+
+    if changed {
+        let caps_state = gcx.caps_state.clone();
+        let mut caps_state = caps_state.write().await;
+        caps_state.caps = None;
+        caps_state.last_attempted_ts = 0;
+    }
+
+    Ok(changed)
+}
+
+async fn save_xai_refreshed_tokens(
+    gcx: &Arc<GlobalContext>,
+    config_dir: &std::path::Path,
+    provider_name: &str,
+    expected_tokens: &crate::providers::xai_oauth_flow::OAuthTokens,
+    access_token: &str,
+    refresh_token: &str,
+    expires_at: i64,
+) -> Result<bool, String> {
+    let registry_matches = {
+        let registry = gcx.providers.read().await;
+        registry
+            .get(provider_name)
+            .and_then(|provider| {
+                provider
+                    .as_any()
+                    .downcast_ref::<crate::providers::xai_oauth::XAIOAuthProvider>()
+            })
+            .is_some_and(|provider| &provider.oauth_tokens == expected_tokens)
+    };
+    if !registry_matches {
+        return Ok(false);
+    }
+
+    let updated = config_store::update_provider_config_if(config_dir, provider_name, |existing| {
+        let Some(value) = existing else {
+            return Ok(None);
+        };
+        let mut yaml_map = value.as_mapping().cloned().ok_or_else(|| {
+            "Config file root is not a YAML mapping. Cannot safely patch.".to_string()
+        })?;
+
+        let mut tokens_map = yaml_map
+            .get(&serde_yaml::Value::String("oauth_tokens".to_string()))
+            .and_then(|v| v.as_mapping())
+            .cloned()
+            .unwrap_or_default();
+        let current_tokens: crate::providers::xai_oauth_flow::OAuthTokens =
+            serde_yaml::from_value(serde_yaml::Value::Mapping(tokens_map.clone()))
+                .map_err(|error| format!("Failed to parse existing OAuth tokens: {}", error))?;
+        if &current_tokens != expected_tokens {
+            return Ok(None);
+        }
+
+        tokens_map.insert(
+            serde_yaml::Value::String("access_token".to_string()),
+            serde_yaml::Value::String(access_token.to_string()),
+        );
+        tokens_map.insert(
+            serde_yaml::Value::String("refresh_token".to_string()),
+            serde_yaml::Value::String(refresh_token.to_string()),
+        );
+        tokens_map.insert(
+            serde_yaml::Value::String("expires_at".to_string()),
+            serde_yaml::Value::Number(serde_yaml::Number::from(expires_at)),
+        );
+
+        yaml_map.insert(
+            serde_yaml::Value::String("oauth_tokens".to_string()),
+            serde_yaml::Value::Mapping(tokens_map),
+        );
+
+        Ok(Some(serde_yaml::Value::Mapping(yaml_map)))
+    })
+    .await?;
+    if updated.is_none() {
+        return Ok(false);
+    }
+
+    let changed = {
+        let mut registry = gcx.providers.write().await;
+        registry
+            .get_mut(provider_name)
+            .and_then(|provider| {
+                provider
+                    .as_any_mut()
+                    .downcast_mut::<crate::providers::xai_oauth::XAIOAuthProvider>()
+            })
+            .filter(|provider| &provider.oauth_tokens == expected_tokens)
+            .map(|provider| {
+                provider.apply_oauth_refresh_tokens(access_token, refresh_token, expires_at);
+            })
+            .is_some()
+    };
+
+    if changed {
+        let caps_state = gcx.caps_state.clone();
+        let mut caps_state = caps_state.write().await;
+        caps_state.caps = None;
+        caps_state.last_attempted_ts = 0;
+    }
+
+    Ok(changed)
 }
 
 fn needs_refresh(expires_at: i64) -> bool {

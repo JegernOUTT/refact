@@ -132,7 +132,11 @@ fn provider_display_name(base_provider: &str) -> Result<String, ScratchError> {
 fn oauth_supported_for_base(base_provider: &str) -> bool {
     matches!(
         base_provider,
-        "claude_code" | "openai_codex" | "github_copilot"
+        "claude_code"
+            | "openai_codex"
+            | "github_copilot"
+            | "xai_oauth"
+            | "google_antigravity"
     )
 }
 
@@ -2405,6 +2409,97 @@ pub async fn handle_v1_provider_oauth_start(
                 }),
             )
         }
+        "xai_oauth" => {
+            let (session_id, authorize_url, listener) =
+                crate::providers::xai_oauth_flow::start_oauth_session(params.name.clone())
+                    .await
+                    .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
+
+            let listener_handle = crate::providers::xai_oauth_flow::start_callback_listener(
+                listener,
+                gcx.http_client.clone(),
+            );
+            let gcx_clone = gcx.clone();
+            tokio::spawn(async move {
+                if let Some((tokens, provider_instance_id)) = listener_handle.await.ok().flatten() {
+                    let config_dir = gcx_clone.config_dir.clone();
+                    if let Ok(tokens_value) = serde_yaml::to_value(&tokens) {
+                        if let Err(e) = save_provider_oauth_tokens(
+                            &gcx_clone,
+                            &config_dir,
+                            &provider_instance_id,
+                            "xai_oauth",
+                            &tokens_value,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                "xAI Grok: failed to save OAuth tokens from callback listener: {:?}",
+                                e
+                            );
+                        } else {
+                            tracing::info!(
+                                "xAI Grok: OAuth tokens saved successfully from callback listener"
+                            );
+                        }
+                    }
+                }
+            });
+
+            json_response(
+                StatusCode::OK,
+                &json!({
+                    "session_id": session_id,
+                    "authorize_url": authorize_url,
+                }),
+            )
+        }
+        "google_antigravity" => {
+            let (session_id, authorize_url, listener) =
+                crate::providers::google_antigravity_oauth::start_oauth_session(params.name.clone())
+                    .await
+                    .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
+
+            let listener_handle =
+                crate::providers::google_antigravity_oauth::start_callback_listener(
+                    listener,
+                    gcx.http_client.clone(),
+                );
+            let gcx_clone = gcx.clone();
+            tokio::spawn(async move {
+                if let Some((tokens, provider_instance_id)) = listener_handle.await.ok().flatten() {
+                    let config_dir = gcx_clone.config_dir.clone();
+                    if let Ok(tokens_value) = serde_yaml::to_value(&tokens) {
+                        if let Err(e) = save_provider_oauth_tokens(
+                            &gcx_clone,
+                            &config_dir,
+                            &provider_instance_id,
+                            "google_antigravity",
+                            &tokens_value,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                "Google Antigravity: failed to save OAuth tokens from callback listener: {:?}",
+                                e
+                            );
+                        } else {
+                            tracing::info!(
+                                "Google Antigravity: OAuth tokens saved successfully from callback listener"
+                            );
+                        }
+                    }
+                }
+            });
+
+            json_response(
+                StatusCode::OK,
+                &json!({
+                    "session_id": session_id,
+                    "authorize_url": authorize_url,
+                }),
+            )
+        }
         "github_copilot" => {
             let request = if body_bytes.is_empty() {
                 GitHubCopilotOAuthStartRequest::default()
@@ -2543,6 +2638,72 @@ pub async fn handle_v1_provider_oauth_exchange(
             )
             .await?;
         }
+        "xai_oauth" => {
+            let (tokens, session_provider_name) =
+                crate::providers::xai_oauth_flow::exchange_code_for_session(
+                    &http_client,
+                    &request.session_id,
+                    &request.code,
+                )
+                .await
+                .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+            if session_provider_name != params.name {
+                return Err(ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "OAuth session belongs to provider '{}'",
+                        session_provider_name
+                    ),
+                ));
+            }
+
+            save_provider_oauth_tokens(
+                &gcx,
+                &config_dir,
+                &session_provider_name,
+                "xai_oauth",
+                &serde_yaml::to_value(&tokens).map_err(|e| {
+                    ScratchError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to serialize tokens: {}", e),
+                    )
+                })?,
+            )
+            .await?;
+        }
+        "google_antigravity" => {
+            let (tokens, session_provider_name) =
+                crate::providers::google_antigravity_oauth::exchange_code_for_session(
+                    &http_client,
+                    &request.session_id,
+                    &request.code,
+                )
+                .await
+                .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+            if session_provider_name != params.name {
+                return Err(ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "OAuth session belongs to provider '{}'",
+                        session_provider_name
+                    ),
+                ));
+            }
+
+            save_provider_oauth_tokens(
+                &gcx,
+                &config_dir,
+                &session_provider_name,
+                "google_antigravity",
+                &serde_yaml::to_value(&tokens).map_err(|e| {
+                    ScratchError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to serialize tokens: {}", e),
+                    )
+                })?,
+            )
+            .await?;
+        }
         "github_copilot" => {
             let outcome = crate::providers::github_copilot_oauth::poll_oauth_session(
                 &http_client,
@@ -2651,6 +2812,37 @@ pub async fn handle_v1_provider_oauth_logout(
                     })?;
             save_provider_oauth_tokens(&gcx, &config_dir, &params.name, "openai_codex", &empty)
                 .await?;
+        }
+        "xai_oauth" => {
+            let empty =
+                serde_yaml::to_value(&crate::providers::xai_oauth_flow::OAuthTokens::default())
+                    .map_err(|e| {
+                        ScratchError::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to serialize: {}", e),
+                        )
+                    })?;
+            save_provider_oauth_tokens(&gcx, &config_dir, &params.name, "xai_oauth", &empty)
+                .await?;
+        }
+        "google_antigravity" => {
+            let empty = serde_yaml::to_value(
+                &crate::providers::google_antigravity_oauth::OAuthTokens::default(),
+            )
+            .map_err(|e| {
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to serialize: {}", e),
+                )
+            })?;
+            save_provider_oauth_tokens(
+                &gcx,
+                &config_dir,
+                &params.name,
+                "google_antigravity",
+                &empty,
+            )
+            .await?;
         }
         "github_copilot" => {
             let empty = serde_yaml::to_value(
@@ -3460,6 +3652,16 @@ async fn save_provider_oauth_tokens(
             .map(|tokens| tokens.refresh_token),
             "openai_codex" => serde_yaml::from_value::<
                 crate::providers::openai_codex_oauth::OAuthTokens,
+            >(tokens_value.clone())
+            .ok()
+            .map(|tokens| tokens.refresh_token),
+            "xai_oauth" => serde_yaml::from_value::<
+                crate::providers::xai_oauth_flow::OAuthTokens,
+            >(tokens_value.clone())
+            .ok()
+            .map(|tokens| tokens.refresh_token),
+            "google_antigravity" => serde_yaml::from_value::<
+                crate::providers::google_antigravity_oauth::OAuthTokens,
             >(tokens_value.clone())
             .ok()
             .map(|tokens| tokens.refresh_token),

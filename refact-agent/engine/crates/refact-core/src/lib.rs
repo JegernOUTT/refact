@@ -1,3 +1,4 @@
+pub mod antigravity_client;
 pub mod ast_types;
 pub mod at_commands_preview_cache;
 pub mod buddy_meta;

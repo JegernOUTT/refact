@@ -18,6 +18,8 @@ pub use refact_providers::deepseek;
 pub use refact_providers::doubao;
 pub use refact_providers::github_copilot;
 pub use refact_providers::github_copilot_oauth;
+pub use refact_providers::google_antigravity;
+pub use refact_providers::google_antigravity_oauth;
 pub use refact_providers::google_gemini;
 pub use refact_providers::groq;
 pub use refact_providers::kimi;
@@ -33,6 +35,8 @@ pub use refact_providers::openrouter;
 pub use refact_providers::qwen;
 pub use refact_providers::vllm;
 pub use refact_providers::xai;
+pub use refact_providers::xai_oauth;
+pub use refact_providers::xai_oauth_flow;
 pub use refact_providers::xai_responses;
 pub use refact_providers::zhipu;
 

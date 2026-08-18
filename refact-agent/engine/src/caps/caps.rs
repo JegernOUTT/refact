@@ -29,6 +29,7 @@ fn resolve_image_token_mode(configured: ImageTokenMode, wire_format: WireFormat)
         WireFormat::AnthropicMessages => ImageTokenMode::Detail,
         WireFormat::OpenaiChatCompletions | WireFormat::OpenaiResponses => ImageTokenMode::Tile,
         WireFormat::OllamaNative => ImageTokenMode::Provider,
+        WireFormat::GoogleCloudCode => ImageTokenMode::Provider,
     }
 }
 

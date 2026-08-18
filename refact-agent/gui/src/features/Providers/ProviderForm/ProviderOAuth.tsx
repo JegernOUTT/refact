@@ -17,12 +17,19 @@ import { Button, FieldText, Surface } from "../../../components/ui";
 
 import styles from "./ProviderOAuth.module.css";
 
-const PROVIDERS_WITH_AUTO_CALLBACK = ["claude_code", "openai_codex"];
+const PROVIDERS_WITH_AUTO_CALLBACK = [
+  "claude_code",
+  "openai_codex",
+  "xai_oauth",
+  "google_antigravity",
+];
 
 const PROVIDER_LOGIN_LABELS: Partial<Record<string, string>> = {
   claude_code: "Login with Anthropic",
   openai_codex: "Login with OpenAI",
   github_copilot: "Login with GitHub Copilot",
+  xai_oauth: "Login with xAI",
+  google_antigravity: "Login with Google",
 };
 
 type ProviderOAuthProps = {

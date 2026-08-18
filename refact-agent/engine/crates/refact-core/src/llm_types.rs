@@ -10,6 +10,7 @@ pub enum WireFormat {
     OpenaiResponses,
     AnthropicMessages,
     OllamaNative,
+    GoogleCloudCode,
 }
 
 impl Default for WireFormat {
@@ -25,6 +26,7 @@ impl std::fmt::Display for WireFormat {
             Self::OpenaiResponses => write!(f, "openai_responses"),
             Self::AnthropicMessages => write!(f, "anthropic_messages"),
             Self::OllamaNative => write!(f, "ollama_native"),
+            Self::GoogleCloudCode => write!(f, "google_cloudcode"),
         }
     }
 }

@@ -207,6 +207,7 @@ pub fn derive_models_dev_endpoint(api: &str, wire_format: WireFormat) -> String 
         WireFormat::OpenaiResponses => "responses",
         WireFormat::AnthropicMessages => "messages",
         WireFormat::OllamaNative => "api/chat",
+        WireFormat::GoogleCloudCode => "v1internal:streamGenerateContent",
     };
     format!("{trimmed}/{suffix}")
 }

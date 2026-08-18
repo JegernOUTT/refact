@@ -529,6 +529,14 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
         <div className={styles.formSection}>
           {hasOAuth ? (
             <>
+              {parsedSchema.oauth?.warning ? (
+                <div className={styles.oauthWarning} role="alert">
+                  <span className={styles.oauthWarningIcon} aria-hidden="true">
+                    ⚠️
+                  </span>
+                  <span>{parsedSchema.oauth.warning}</span>
+                </div>
+              ) : null}
               <ProviderOAuth
                 providerName={currentProvider.name}
                 baseProvider={baseProvider}

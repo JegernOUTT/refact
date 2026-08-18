@@ -20,6 +20,25 @@
   overflow-wrap: anywhere;
 }
 
+.oauthWarning {
+  display: flex;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  align-items: flex-start;
+  box-sizing: border-box;
+  padding: var(--rf-space-3);
+  border: 1px solid var(--rf-color-danger);
+  border-radius: var(--rf-radius-2);
+  color: var(--rf-color-danger);
+  font-size: var(--rf-text-2);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.oauthWarningIcon {
+  flex: 0 0 auto;
+}
+
 .usagePanel {
   display: flex;
   min-width: 0;

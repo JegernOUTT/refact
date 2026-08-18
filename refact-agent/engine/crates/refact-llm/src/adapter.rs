@@ -56,6 +56,9 @@ static OPENAI_RESPONSES_ADAPTER: OnceLock<
 > = OnceLock::new();
 static ANTHROPIC_ADAPTER: OnceLock<crate::adapters::anthropic::AnthropicAdapter> = OnceLock::new();
 static OLLAMA_ADAPTER: OnceLock<crate::adapters::ollama::OllamaAdapter> = OnceLock::new();
+static GOOGLE_CLOUDCODE_ADAPTER: OnceLock<
+    crate::adapters::google_cloudcode::GoogleCloudCodeAdapter,
+> = OnceLock::new();
 
 pub fn get_adapter(format: WireFormat) -> &'static dyn LlmWireAdapter {
     match format {
@@ -70,6 +73,8 @@ pub fn get_adapter(format: WireFormat) -> &'static dyn LlmWireAdapter {
         WireFormat::OllamaNative => {
             OLLAMA_ADAPTER.get_or_init(|| crate::adapters::ollama::OllamaAdapter)
         }
+        WireFormat::GoogleCloudCode => GOOGLE_CLOUDCODE_ADAPTER
+            .get_or_init(|| crate::adapters::google_cloudcode::GoogleCloudCodeAdapter),
     }
 }
 

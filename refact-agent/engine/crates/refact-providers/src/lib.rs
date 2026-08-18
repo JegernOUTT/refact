@@ -16,6 +16,8 @@ pub mod deepseek;
 pub mod doubao;
 pub mod github_copilot;
 pub mod github_copilot_oauth;
+pub mod google_antigravity;
+pub mod google_antigravity_oauth;
 pub mod google_gemini;
 pub mod groq;
 pub mod kimi;
@@ -31,6 +33,8 @@ pub mod openrouter;
 pub mod qwen;
 pub mod vllm;
 pub mod xai;
+pub mod xai_oauth;
+pub mod xai_oauth_flow;
 pub mod xai_responses;
 pub mod zhipu;
 
