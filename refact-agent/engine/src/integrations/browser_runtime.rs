@@ -12,10 +12,21 @@ pub fn get_browser_profile_dir(gcx_cache_dir: &PathBuf, thread_id: &str) -> Path
     gcx_cache_dir.join("browser_profiles").join(thread_id)
 }
 
+fn workspace_roots(app: &crate::app_state::AppState) -> Vec<PathBuf> {
+    app.gcx
+        .documents_state
+        .workspace_folders
+        .lock()
+        .map(|folders| folders.clone())
+        .unwrap_or_default()
+}
+
 pub async fn register_browser_runtime(
     app: crate::app_state::AppState,
     runtime: BrowserRuntime,
 ) -> String {
+    let mut runtime = runtime;
+    runtime.set_allowed_roots(workspace_roots(&app));
     let runtime_id = runtime.runtime_id.clone();
     let arc = Arc::new(AMutex::new(runtime));
     app.integrations

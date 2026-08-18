@@ -959,11 +959,33 @@ pub fn contrast_audit_verdict(
     }
 }
 
-fn token_colors_from_files(root: &Path, token_files: &[String]) -> TokenColorScan {
+fn contained_token_path(root: &Path, requested: &str) -> Result<PathBuf, String> {
+    let candidate = Path::new(requested);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    let Ok(canonical) = resolved.canonicalize() else {
+        return Ok(resolved);
+    };
+    let contained = root
+        .canonicalize()
+        .map(|root| canonical.starts_with(&root))
+        .unwrap_or(false);
+    if !contained {
+        return Err(format!(
+            "Design token file escapes the workspace: {requested}"
+        ));
+    }
+    Ok(canonical)
+}
+
+fn token_colors_from_files(root: &Path, token_files: &[String]) -> Result<TokenColorScan, String> {
     let mut colors = Vec::new();
     let mut resolved_files = Vec::new();
     for relative in token_files {
-        let path = root.join(relative);
+        let path = contained_token_path(root, relative)?;
         let Ok(content) = std::fs::read_to_string(path) else {
             continue;
         };
@@ -988,10 +1010,10 @@ fn token_colors_from_files(root: &Path, token_files: &[String]) -> TokenColorSca
     }
     colors.sort();
     colors.dedup();
-    TokenColorScan {
+    Ok(TokenColorScan {
         colors,
         resolved_files,
-    }
+    })
 }
 
 fn project_root(
@@ -1332,7 +1354,7 @@ impl Tool for ToolContrastAudit {
         } else {
             args.token_files
         };
-        let token_scan = token_colors_from_files(&root, &token_files);
+        let token_scan = token_colors_from_files(&root, &token_files)?;
         let runtime = attached_runtime(app, &chat_id).await?;
         let mut runtime = runtime.lock().await;
         let tab = browser_controller::session_tab(&mut runtime)?;
@@ -1798,13 +1820,42 @@ mod tests {
                 "src/styles/tokens.css".to_string(),
                 "src/styles/missing.css".to_string(),
             ],
-        );
+        )
+        .unwrap();
         assert_eq!(scan.resolved_files, vec!["src/styles/tokens.css"]);
         assert_eq!(scan.colors, vec!["#e7150d", "#fff"]);
 
-        let empty = token_colors_from_files(root.path(), &["nope.css".to_string()]);
+        let empty = token_colors_from_files(root.path(), &["nope.css".to_string()]).unwrap();
         assert!(empty.resolved_files.is_empty());
         assert!(empty.colors.is_empty());
+    }
+
+    #[test]
+    fn token_files_outside_the_workspace_are_refused_instead_of_read() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.css");
+        std::fs::write(&secret, ":root{--leak:#ABCDEF;}").unwrap();
+        std::fs::create_dir_all(root.path().join("src/styles")).unwrap();
+        std::fs::write(root.path().join("src/styles/tokens.css"), "#fff").unwrap();
+
+        for escape in [
+            secret.to_string_lossy().into_owned(),
+            format!(
+                "../{}/secret.css",
+                outside.path().file_name().unwrap().to_string_lossy()
+            ),
+        ] {
+            let error = token_colors_from_files(root.path(), &[escape.clone()]).unwrap_err();
+            assert!(
+                error.contains("escapes the workspace"),
+                "{escape} -> {error}"
+            );
+        }
+
+        let inside =
+            token_colors_from_files(root.path(), &["src/styles/tokens.css".to_string()]).unwrap();
+        assert_eq!(inside.colors, vec!["#fff"]);
     }
 
     #[test]

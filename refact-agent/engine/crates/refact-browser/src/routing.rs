@@ -510,6 +510,7 @@ fn fetch_upstream(
 pub fn normalize_route_handler(
     handler: RouteHandler,
     artifacts_dir: &Path,
+    allowed_roots: &[PathBuf],
 ) -> Result<RouteHandler, String> {
     let RouteHandler::Fulfill {
         status,
@@ -528,7 +529,8 @@ pub fn normalize_route_handler(
     }
     let (body, content_type, body_base64) = match (path, json) {
         (Some(path), _) => {
-            let resolved = resolve_fulfill_path(&path, artifacts_dir)?;
+            let resolved =
+                resolve_contained_path(&path, "Route fulfill", artifacts_dir, allowed_roots)?;
             let bytes = std::fs::read(&resolved)
                 .map_err(|error| format!("Failed to read route fulfill path: {error}"))?;
             let content_type =
@@ -563,7 +565,12 @@ pub fn normalize_route_handler(
     })
 }
 
-fn resolve_fulfill_path(path: &str, artifacts_dir: &Path) -> Result<PathBuf, String> {
+pub fn resolve_contained_path(
+    path: &str,
+    label: &str,
+    artifacts_dir: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<PathBuf, String> {
     let candidate = Path::new(path);
     let resolved = if candidate.is_absolute() {
         candidate.to_path_buf()
@@ -572,19 +579,18 @@ fn resolve_fulfill_path(path: &str, artifacts_dir: &Path) -> Result<PathBuf, Str
     };
     let canonical = resolved
         .canonicalize()
-        .map_err(|_| format!("Route fulfill path does not exist: {path}"))?;
-    if !candidate.is_absolute() {
-        let root = artifacts_dir
-            .canonicalize()
-            .map_err(|error| format!("Failed to resolve artifact directory: {error}"))?;
-        if !canonical.starts_with(&root) {
-            return Err(format!(
-                "Route fulfill path escapes the artifact directory: {path}"
-            ));
-        }
+        .map_err(|_| format!("{label} path does not exist: {path}"))?;
+    let contained = std::iter::once(artifacts_dir)
+        .chain(allowed_roots.iter().map(PathBuf::as_path))
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| canonical.starts_with(&root));
+    if !contained {
+        return Err(format!(
+            "{label} path escapes the allowed directories: {path}"
+        ));
     }
     if !canonical.is_file() {
-        return Err(format!("Route fulfill path is not a file: {path}"));
+        return Err(format!("{label} path is not a file: {path}"));
     }
     Ok(canonical)
 }
@@ -1366,6 +1372,7 @@ mod tests {
                 body_base64: false,
             },
             dir.path(),
+            &[],
         )
         .unwrap();
 
@@ -1401,6 +1408,7 @@ mod tests {
                 body_base64: false,
             },
             dir.path(),
+            &[],
         )
         .unwrap();
 
@@ -1442,6 +1450,7 @@ mod tests {
                 body_base64: false,
             },
             &artifacts,
+            &[],
         )
         .unwrap_err();
         assert!(traversal.contains("escapes"), "unexpected: {traversal}");
@@ -1457,11 +1466,112 @@ mod tests {
                 body_base64: false,
             },
             &artifacts,
+            &[],
         )
         .unwrap_err();
         assert!(missing.contains("does not exist"), "unexpected: {missing}");
 
         std::fs::remove_file(&outside).unwrap();
+    }
+
+    fn fulfill_from_path(
+        path: &Path,
+        artifacts: &Path,
+        allowed_roots: &[PathBuf],
+    ) -> Result<RouteHandler, String> {
+        normalize_route_handler(
+            RouteHandler::Fulfill {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: None,
+                path: Some(path.to_string_lossy().into_owned()),
+                json: None,
+                content_type: None,
+                body_base64: false,
+            },
+            artifacts,
+            allowed_roots,
+        )
+    }
+
+    #[test]
+    fn absolute_fulfill_paths_are_contained_by_artifacts_and_allowed_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = dir.path().join("artifacts");
+        let workspace = dir.path().join("workspace");
+        let secrets = dir.path().join("secrets");
+        for directory in [&artifacts, &workspace, &secrets] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let inside = artifacts.join("mock.json");
+        let in_workspace = workspace.join("fixture.json");
+        let outside = secrets.join("id_rsa");
+        for (path, body) in [
+            (&inside, r#"{"ok":true}"#),
+            (&in_workspace, r#"{"ws":true}"#),
+            (&outside, "PRIVATE KEY"),
+        ] {
+            std::fs::write(path, body).unwrap();
+        }
+
+        assert!(fulfill_from_path(&inside, &artifacts, &[]).is_ok());
+
+        let escaped = fulfill_from_path(&outside, &artifacts, &[]).unwrap_err();
+        assert!(
+            escaped.contains("escapes the allowed directories"),
+            "unexpected: {escaped}"
+        );
+
+        let denied = fulfill_from_path(&in_workspace, &artifacts, &[]).unwrap_err();
+        assert!(
+            denied.contains("escapes the allowed directories"),
+            "unexpected: {denied}"
+        );
+
+        let allowed = fulfill_from_path(&in_workspace, &artifacts, &[workspace.clone()]).unwrap();
+        let RouteHandler::Fulfill { body, .. } = allowed else {
+            panic!("expected a fulfill handler");
+        };
+        assert_eq!(body.as_deref(), Some(r#"{"ws":true}"#));
+
+        let still_denied = fulfill_from_path(&outside, &artifacts, &[workspace]).unwrap_err();
+        assert!(
+            still_denied.contains("escapes the allowed directories"),
+            "unexpected: {still_denied}"
+        );
+    }
+
+    #[test]
+    fn relative_traversal_out_of_an_allowed_root_is_still_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = dir.path().join("artifacts");
+        let secrets = dir.path().join("secrets");
+        for directory in [&artifacts, &secrets] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        std::fs::write(secrets.join("id_rsa"), "PRIVATE KEY").unwrap();
+
+        let error = resolve_contained_path(
+            "../secrets/id_rsa",
+            "Route fulfill",
+            &artifacts,
+            &[artifacts.clone()],
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("escapes the allowed directories"),
+            "unexpected: {error}"
+        );
+    }
+
+    #[test]
+    fn contained_paths_must_resolve_to_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = dir.path().join("artifacts");
+        std::fs::create_dir_all(artifacts.join("nested")).unwrap();
+
+        let error = resolve_contained_path("nested", "HAR replay", &artifacts, &[]).unwrap_err();
+        assert!(error.contains("is not a file"), "unexpected: {error}");
     }
 
     #[test]
@@ -1478,6 +1588,7 @@ mod tests {
                 body_base64: false,
             },
             dir.path(),
+            &[],
         )
         .unwrap();
 
@@ -1509,6 +1620,7 @@ mod tests {
                 body_base64: false,
             },
             dir.path(),
+            &[],
         )
         .unwrap_err();
 
@@ -1530,7 +1642,7 @@ mod tests {
         };
 
         assert_eq!(
-            normalize_route_handler(handler.clone(), dir.path()).unwrap(),
+            normalize_route_handler(handler.clone(), dir.path(), &[]).unwrap(),
             handler
         );
     }

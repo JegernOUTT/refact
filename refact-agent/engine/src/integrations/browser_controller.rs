@@ -1482,12 +1482,12 @@ fn execute_route_management_step(
             url_filter,
             not_found,
         } => Some(
-            match refact_browser::har::HarReplay::load(
-                Path::new(path),
-                url_filter.as_ref(),
-                *not_found,
-            )
-            .and_then(|replay| runtime.set_har_replay(replay))
+            match runtime
+                .contained_path(path, "HAR replay")
+                .and_then(|resolved| {
+                    refact_browser::har::HarReplay::load(&resolved, url_filter.as_ref(), *not_found)
+                })
+                .and_then(|replay| runtime.set_har_replay(replay))
             {
                 Ok(()) => StepResult::success(idx, "Added HAR replay route")
                     .with_data(serde_json::json!({"routes": runtime.route_registry.list()})),
@@ -2246,6 +2246,7 @@ fn http_request_result(
                 "count": response.set_cookies.len(),
                 "names": response.set_cookies.iter().map(|cookie| cookie.name.clone()).collect::<Vec<_>>(),
             },
+            "rejected_cookies": response.rejected_cookies,
         }
     });
     let entry = &mut data["http_request"];
@@ -10686,6 +10687,7 @@ mod tests {
                 same_site: None,
                 url: None,
             }],
+            rejected_cookies: Vec::new(),
             body,
         }
     }

@@ -16,6 +16,7 @@ pub const DEFAULT_HTTP_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_HTTP_MAX_REDIRECTS: u32 = 20;
 
 const SUMMARY_RESPONSE_HEADERS: [&str; 2] = ["content-type", "content-length"];
+const CROSS_ORIGIN_STRIPPED_HEADERS: [&str; 2] = ["authorization", "cookie"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpRequestBody {
@@ -42,7 +43,14 @@ pub struct HttpResponse {
     pub redirects: u32,
     pub headers: BTreeMap<String, String>,
     pub set_cookies: Vec<BrowserCookie>,
+    pub rejected_cookies: Vec<String>,
     pub body: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SetCookieScan {
+    pub accepted: Vec<BrowserCookie>,
+    pub rejected: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,13 +133,43 @@ pub fn cookie_header(cookies: &[BrowserCookie], url: &Url) -> Option<String> {
     (!pairs.is_empty()).then(|| pairs.join("; "))
 }
 
-pub fn parse_set_cookies(url: &Url, headers: &[String]) -> Vec<BrowserCookie> {
+pub fn parse_set_cookies(url: &Url, headers: &[String]) -> SetCookieScan {
     let Some(host) = url.host_str() else {
-        return Vec::new();
+        return SetCookieScan::default();
     };
+    let mut scan = SetCookieScan::default();
+    for header in headers {
+        match parse_set_cookie(url, host, header) {
+            Some(Ok(cookie)) => scan.accepted.push(cookie),
+            Some(Err(reason)) => scan.rejected.push(reason),
+            None => {}
+        }
+    }
+    scan
+}
+
+pub fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+pub fn headers_for_hop(
+    headers: &BTreeMap<String, String>,
+    origin: &Url,
+    target: &Url,
+) -> BTreeMap<String, String> {
+    if same_origin(origin, target) {
+        return headers.clone();
+    }
     headers
         .iter()
-        .filter_map(|header| parse_set_cookie(url, host, header))
+        .filter(|(name, _)| {
+            !CROSS_ORIGIN_STRIPPED_HEADERS
+                .iter()
+                .any(|stripped| name.eq_ignore_ascii_case(stripped))
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
 }
 
@@ -219,9 +257,10 @@ pub async fn send_http_request(
     let mut method = spec.method.clone();
     let mut body = spec.body.clone();
     let mut set_cookies: Vec<BrowserCookie> = Vec::new();
+    let mut rejected_cookies: Vec<String> = Vec::new();
     let mut redirects = 0u32;
     loop {
-        let mut headers = header_map(&spec.headers)?;
+        let mut headers = header_map(&headers_for_hop(&spec.headers, &spec.url, &url))?;
         if let Some(content_type) = body.as_ref().and_then(|body| body.content_type.as_deref()) {
             if !headers.contains_key(CONTENT_TYPE) {
                 headers.insert(
@@ -252,10 +291,9 @@ pub async fn send_http_request(
             .map_err(|error| format!("HTTP request failed: {}", mask_text(&error.to_string())))?;
         let status = response.status();
         let headers = header_btree(response.headers());
-        set_cookies.extend(parse_set_cookies(
-            &url,
-            &raw_set_cookies(response.headers()),
-        ));
+        let scan = parse_set_cookies(&url, &raw_set_cookies(response.headers()));
+        set_cookies.extend(scan.accepted);
+        rejected_cookies.extend(scan.rejected);
         if let Some(location) = redirect_location(status, response.headers(), &url) {
             if redirects >= spec.max_redirects {
                 return Err(format!(
@@ -288,6 +326,7 @@ pub async fn send_http_request(
             redirects,
             headers,
             set_cookies,
+            rejected_cookies,
             body: bytes,
         });
     }
@@ -393,7 +432,34 @@ fn default_cookie_path(url: &Url) -> String {
     )
 }
 
-fn parse_set_cookie(url: &Url, host: &str, header: &str) -> Option<BrowserCookie> {
+fn is_public_suffix(domain: &str) -> bool {
+    domain
+        .trim_start_matches('.')
+        .split('.')
+        .filter(|label| !label.is_empty())
+        .count()
+        < 2
+}
+
+fn set_cookie_domain_rejection(host: &str, name: &str, domain: &str) -> Option<String> {
+    let host = host.to_ascii_lowercase();
+    if domain.trim_start_matches('.') == host {
+        return None;
+    }
+    if is_public_suffix(domain) {
+        return Some(mask_text(&format!(
+            "{name}: Domain={domain} is a public suffix"
+        )));
+    }
+    if !domain_matches(&host, domain) {
+        return Some(mask_text(&format!(
+            "{name}: Domain={domain} does not domain-match {host}"
+        )));
+    }
+    None
+}
+
+fn parse_set_cookie(url: &Url, host: &str, header: &str) -> Option<Result<BrowserCookie, String>> {
     let mut attributes = header.split(';').filter(|part| !part.trim().is_empty());
     let pair = attributes.next()?;
     if !pair.contains('=') {
@@ -455,13 +521,13 @@ fn parse_set_cookie(url: &Url, host: &str, header: &str) -> Option<BrowserCookie
     }
     if cookie.domain.is_empty() {
         cookie.domain = host.to_ascii_lowercase();
-    } else if !domain_matches(host, &cookie.domain) {
-        return None;
+    } else if let Some(reason) = set_cookie_domain_rejection(host, &cookie.name, &cookie.domain) {
+        return Some(Err(reason));
     }
     if !cookie.path.starts_with('/') {
         cookie.path = default_cookie_path(url);
     }
-    Some(cookie)
+    Some(Ok(cookie))
 }
 
 fn split_cookie_pair(part: &str) -> (String, String) {
@@ -564,7 +630,11 @@ mod tests {
             ],
         );
 
+        let rejected = parsed.rejected;
+        let parsed = parsed.accepted;
         assert_eq!(parsed.len(), 3);
+        assert_eq!(rejected.len(), 1);
+        assert!(rejected[0].contains("evil"), "{rejected:?}");
         assert_eq!(parsed[0].name, "sid");
         assert_eq!(parsed[0].value, "xyz");
         assert_eq!(parsed[0].domain, "api.example.test");
@@ -587,6 +657,7 @@ mod tests {
             ],
         );
 
+        let parsed = parsed.accepted;
         assert_eq!(parsed[0].expires, Some(0.0));
         assert!(parsed[1].expires.unwrap() > Utc::now().timestamp() as f64);
         assert_eq!(parsed[2].expires, Some(1_445_412_480.0));
@@ -598,10 +669,128 @@ mod tests {
         let header = cookie_header(&jar(), &url).unwrap();
         assert!(header.contains("session=abc123"));
 
-        let refreshed = parse_set_cookies(&url, &["session=rotated; Path=/".to_string()]);
+        let refreshed = parse_set_cookies(&url, &["session=rotated; Path=/".to_string()]).accepted;
         let merged = [refreshed.clone(), jar()].concat();
         let next = cookie_header(&merged, &url).unwrap();
         assert!(next.starts_with("session=rotated"));
+    }
+
+    #[test]
+    fn set_cookie_domain_must_domain_match_and_may_not_be_a_public_suffix() {
+        let url = Url::parse("https://api.example.test/v1").unwrap();
+        let scan = parse_set_cookies(
+            &url,
+            &[
+                "host_only=1".to_string(),
+                "parent=1; Domain=.example.test".to_string(),
+                "exact=1; Domain=api.example.test".to_string(),
+                "sibling=1; Domain=other.example.test".to_string(),
+                "foreign=1; Domain=evil.test".to_string(),
+                "tld=1; Domain=.test".to_string(),
+            ],
+        );
+
+        let accepted = scan
+            .accepted
+            .iter()
+            .map(|cookie| (cookie.name.as_str(), cookie.domain.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            accepted,
+            vec![
+                ("host_only", "api.example.test"),
+                ("parent", ".example.test"),
+                ("exact", ".api.example.test"),
+            ]
+        );
+
+        assert_eq!(scan.rejected.len(), 3);
+        assert!(scan.rejected[0].contains("sibling"), "{:?}", scan.rejected);
+        assert!(scan.rejected[1].contains("foreign"), "{:?}", scan.rejected);
+        assert!(
+            scan.rejected[2].contains("public suffix"),
+            "{:?}",
+            scan.rejected
+        );
+    }
+
+    #[test]
+    fn a_public_suffix_domain_identical_to_the_request_host_stays_host_only() {
+        let scan = parse_set_cookies(
+            &Url::parse("http://localhost:8080/app").unwrap(),
+            &["dev=1; Domain=localhost".to_string()],
+        );
+
+        assert_eq!(scan.rejected, Vec::<String>::new());
+        assert_eq!(scan.accepted[0].domain, "localhost");
+    }
+
+    #[test]
+    fn cross_origin_redirects_drop_authorization_and_cookie_headers() {
+        let headers = BTreeMap::from([
+            ("Authorization".to_string(), "Bearer secret".to_string()),
+            ("Cookie".to_string(), "session=secret".to_string()),
+            ("Accept".to_string(), "application/json".to_string()),
+        ]);
+        let origin = Url::parse("https://api.example.test/v1").unwrap();
+
+        let same = headers_for_hop(
+            &headers,
+            &origin,
+            &Url::parse("https://api.example.test/v2").unwrap(),
+        );
+        assert_eq!(same, headers);
+
+        for target in [
+            "https://evil.test/v1",
+            "http://api.example.test/v1",
+            "https://api.example.test:8443/v1",
+            "https://other.example.test/v1",
+        ] {
+            let stripped = headers_for_hop(&headers, &origin, &Url::parse(target).unwrap());
+            assert_eq!(
+                stripped,
+                BTreeMap::from([("Accept".to_string(), "application/json".to_string())]),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn header_stripping_is_case_insensitive_and_default_ports_stay_same_origin() {
+        let headers = BTreeMap::from([
+            ("authorization".to_string(), "Bearer secret".to_string()),
+            ("cOOkie".to_string(), "session=secret".to_string()),
+        ]);
+        let origin = Url::parse("https://api.example.test/v1").unwrap();
+
+        assert!(headers_for_hop(
+            &headers,
+            &origin,
+            &Url::parse("https://evil.test/").unwrap()
+        )
+        .is_empty());
+        assert_eq!(
+            headers_for_hop(
+                &headers,
+                &origin,
+                &Url::parse("https://api.example.test:443/other").unwrap()
+            ),
+            headers
+        );
+    }
+
+    #[test]
+    fn jar_cookies_are_rescoped_to_the_redirect_target() {
+        let target = Url::parse("https://evil.test/").unwrap();
+        assert_eq!(cookie_header(&jar(), &target), None);
+
+        let mut hijacked = jar();
+        hijacked.push(cookie("planted", "yes", "evil.test", "/", false));
+        assert_eq!(
+            cookie_header(&hijacked, &target).as_deref(),
+            Some("planted=yes")
+        );
     }
 
     #[test]

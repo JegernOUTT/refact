@@ -96,7 +96,7 @@ pub use network::{
 };
 pub use websocket::{WebSocketRegistry, install_websocket_router};
 pub use refs::{ElementHandleInfo, Ref, RefError, RefParseError, RefRegistry, SnapshotGeneration};
-pub use routing::RouteRegistry;
+pub use routing::{RouteRegistry, resolve_contained_path};
 pub use snapshot::{AriaSnapshot, SnapshotBox, SnapshotMode, SnapshotNode, SnapshotOptions};
 pub use us_keyboard_layout::{
     KEYPAD_LOCATION, KeyDefinition, KeyDescription, ShiftedKeyDefinition, US_KEYBOARD_LAYOUT,
@@ -490,6 +490,7 @@ pub struct BrowserRuntime {
     pub profile_dir: PathBuf,
     pub downloads_dir: PathBuf,
     pub artifacts_dir: PathBuf,
+    pub allowed_roots: Vec<PathBuf>,
     pub launch_options: BrowserLaunchOptions,
     pub buffers: BrowserBuffers,
     pub network_monitor: Arc<NetworkMonitorHandle>,
@@ -586,6 +587,7 @@ impl BrowserRuntime {
             profile_dir,
             downloads_dir,
             artifacts_dir,
+            allowed_roots: Vec::new(),
             launch_options: options,
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
@@ -646,6 +648,7 @@ impl BrowserRuntime {
             profile_dir: PathBuf::new(),
             downloads_dir,
             artifacts_dir,
+            allowed_roots: Vec::new(),
             launch_options: options,
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
@@ -684,6 +687,14 @@ impl BrowserRuntime {
         self.launch_options.headless
     }
 
+    pub fn set_allowed_roots(&mut self, roots: Vec<PathBuf>) {
+        self.allowed_roots = roots;
+    }
+
+    pub fn contained_path(&self, path: &str, label: &str) -> Result<PathBuf, String> {
+        resolve_contained_path(path, label, &self.artifacts_dir, &self.allowed_roots)
+    }
+
     pub fn window_bounds(&self) -> Option<&WindowBounds> {
         self.launch_options.window_bounds.as_ref()
     }
@@ -698,7 +709,8 @@ impl BrowserRuntime {
         handler: refact_integrations::browser_models::RouteHandler,
         times: Option<u32>,
     ) -> Result<(), String> {
-        let handler = routing::normalize_route_handler(handler, &self.artifacts_dir)?;
+        let handler =
+            routing::normalize_route_handler(handler, &self.artifacts_dir, &self.allowed_roots)?;
         let enable = self.route_registry.is_empty();
         self.route_registry.add(pattern.clone(), handler, times)?;
         if enable {
