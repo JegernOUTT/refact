@@ -108,6 +108,33 @@ fn bounded_error_text(message: &str) -> String {
 mod tests {
     use super::*;
 
+    fn parse_step(step: Value) -> BrowserStep {
+        parse_browser_action_request(serde_json::json!({"steps": [step]}))
+            .unwrap()
+            .steps
+            .remove(0)
+    }
+
+    fn round_trip(step: Value) -> Value {
+        let serialized = serde_json::to_value(parse_step(step)).unwrap();
+        let reparsed = serde_json::to_value(parse_step(serialized.clone())).unwrap();
+        assert_eq!(serialized, reparsed, "round-trip drifted");
+        serialized
+    }
+
+    fn assert_step_rejection(step: Value, expected: &str) {
+        let error =
+            parse_browser_action_request(serde_json::json!({"steps": [step.clone()]})).unwrap_err();
+        assert!(
+            error.starts_with("step[0] ("),
+            "expected an action-qualified error for {step}: {error}"
+        );
+        assert!(
+            error.contains(expected),
+            "unexpected error for {step}: {error}"
+        );
+    }
+
     fn valid_request() -> Value {
         serde_json::json!({
             "attach_screenshot": true,
@@ -545,7 +572,10 @@ mod tests {
             panic!("expected an http_request step");
         };
         assert_eq!(options.method.as_deref(), Some("post"));
-        assert_eq!(options.body_json, Some(serde_json::json!({"name": "widget"})));
+        assert_eq!(
+            options.body_json,
+            Some(serde_json::json!({"name": "widget"}))
+        );
         assert_eq!(options.max_redirects, Some(0));
         assert_eq!(options.fail_on_status, Some(true));
         assert_eq!(options.full_headers, Some(true));
@@ -886,6 +916,632 @@ mod tests {
                 .unwrap_err();
             assert!(error.starts_with("step[0] ("), "unexpected error: {error}");
             assert!(error.contains(expected), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn page_manipulation_steps_parse_with_their_optional_fields() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "set_content", "html": "<p>hi</p>"},
+                {"action": "set_content", "html": "<p>hi</p>", "wait_until": "networkidle"},
+                {"action": "page_content"},
+                {"action": "add_script_tag", "url": "https://example.com/a.js"},
+                {"action": "add_script_tag", "content": "window.x = 1", "script_type": "module"},
+                {"action": "add_style_tag", "url": "https://example.com/a.css"},
+                {"action": "add_style_tag", "content": "body { color: red }"},
+                {"action": "add_init_script", "content": "window.seeded = true"},
+                {"action": "remove_init_script", "id": "init-1"},
+                {"action": "dispatch_event", "locator": {"by": "css", "value": "#go"}, "event_type": "click"},
+                {"action": "dispatch_event", "locator": {"by": "css", "value": "#go"}, "event_type": "click", "event_init": {"bubbles": true}}
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request.steps.as_slice(),
+            [
+                BrowserStep::SetContent {
+                    wait_until: None,
+                    ..
+                },
+                BrowserStep::SetContent {
+                    wait_until: Some(BrowserLoadState::Networkidle),
+                    ..
+                },
+                BrowserStep::PageContent,
+                BrowserStep::AddScriptTag {
+                    url: Some(_),
+                    content: None,
+                    script_type: None,
+                },
+                BrowserStep::AddScriptTag {
+                    url: None,
+                    content: Some(_),
+                    script_type: Some(_),
+                },
+                BrowserStep::AddStyleTag {
+                    url: Some(_),
+                    content: None,
+                },
+                BrowserStep::AddStyleTag {
+                    url: None,
+                    content: Some(_),
+                },
+                BrowserStep::AddInitScript { .. },
+                BrowserStep::RemoveInitScript { .. },
+                BrowserStep::DispatchEvent {
+                    event_init: None,
+                    ..
+                },
+                BrowserStep::DispatchEvent {
+                    event_init: Some(_),
+                    ..
+                },
+            ]
+        ));
+
+        assert_eq!(
+            round_trip(serde_json::json!({"action": "set_content", "html": "<p>hi</p>"})),
+            serde_json::json!({"action": "set_content", "html": "<p>hi</p>"})
+        );
+        assert_eq!(
+            round_trip(serde_json::json!({"action": "page_content"})),
+            serde_json::json!({"action": "page_content"})
+        );
+        assert_eq!(
+            round_trip(
+                serde_json::json!({"action": "add_script_tag", "url": "https://example.com/a.js"})
+            ),
+            serde_json::json!({"action": "add_script_tag", "url": "https://example.com/a.js"})
+        );
+        assert_eq!(
+            round_trip(serde_json::json!({"action": "add_style_tag"})),
+            serde_json::json!({"action": "add_style_tag"})
+        );
+        assert_eq!(
+            round_trip(serde_json::json!({
+                "action": "dispatch_event",
+                "locator": {"by": "css", "value": "#go"},
+                "event_type": "click"
+            })),
+            serde_json::json!({
+                "action": "dispatch_event",
+                "locator": {"by": "css", "value": "#go"},
+                "event_type": "click"
+            })
+        );
+    }
+
+    #[test]
+    fn page_manipulation_steps_reject_unknown_and_missing_fields() {
+        for (step, expected) in [
+            (serde_json::json!({"action": "set_content"}), "html"),
+            (
+                serde_json::json!({"action": "set_content", "html": "<p/>", "waitUntil": "load"}),
+                "waitUntil",
+            ),
+            (
+                serde_json::json!({"action": "set_content", "html": "<p/>", "wait_until": "idle"}),
+                "idle",
+            ),
+            (
+                serde_json::json!({"action": "add_script_tag", "type": "module"}),
+                "type",
+            ),
+            (
+                serde_json::json!({"action": "add_style_tag", "css": "body {}"}),
+                "css",
+            ),
+            (serde_json::json!({"action": "add_init_script"}), "content"),
+            (serde_json::json!({"action": "remove_init_script"}), "id"),
+            (
+                serde_json::json!({"action": "dispatch_event", "locator": {"by": "css", "value": "#go"}}),
+                "event_type",
+            ),
+            (
+                serde_json::json!({"action": "dispatch_event", "locator": {"by": "css", "value": "#go"}, "event_type": "click", "init": {}}),
+                "init",
+            ),
+        ] {
+            assert_step_rejection(step, expected);
+        }
+    }
+
+    #[test]
+    fn wait_step_filters_are_optional_and_round_trip() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "wait_for_request", "pattern": "/api"},
+                {"action": "wait_for_request", "pattern": "/api", "method": "POST"},
+                {"action": "wait_for_response", "pattern": "/api"},
+                {"action": "wait_for_response", "pattern": "/api", "method": "GET", "status": 204},
+                {"action": "wait_for_selector", "locator": {"by": "css", "value": "#q"}},
+                {"action": "wait_for_selector", "locator": {"by": "css", "value": "#q"}, "state": "hidden"},
+                {"action": "wait_for_console_message"},
+                {"action": "wait_for_console_message", "contains": "ready", "level": "warning", "timeout_ms": 500}
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request.steps.as_slice(),
+            [
+                BrowserStep::WaitForRequest { method: None, .. },
+                BrowserStep::WaitForRequest {
+                    method: Some(_),
+                    ..
+                },
+                BrowserStep::WaitForResponse {
+                    method: None,
+                    status: None,
+                    ..
+                },
+                BrowserStep::WaitForResponse {
+                    method: Some(_),
+                    status: Some(204),
+                    ..
+                },
+                BrowserStep::WaitForSelector { state: None, .. },
+                BrowserStep::WaitForSelector {
+                    state: Some(BrowserWaitState::Hidden),
+                    ..
+                },
+                BrowserStep::WaitForConsoleMessage {
+                    contains: None,
+                    level: None,
+                    timeout_ms: None,
+                },
+                BrowserStep::WaitForConsoleMessage {
+                    contains: Some(_),
+                    level: Some(BrowserConsoleLevel::Warning),
+                    timeout_ms: Some(500),
+                },
+            ]
+        ));
+
+        for state in ["attached", "detached", "visible", "hidden"] {
+            let serialized = round_trip(serde_json::json!({
+                "action": "wait_for_selector",
+                "locator": {"by": "css", "value": "#q"},
+                "state": state
+            }));
+            assert_eq!(serialized["state"], serde_json::json!(state));
+        }
+        for step in [
+            serde_json::json!({"action": "wait_for_request", "pattern": "/api", "method": "POST"}),
+            serde_json::json!({"action": "wait_for_response", "pattern": "/api", "status": 500}),
+            serde_json::json!({"action": "wait_for_console_message", "level": "error"}),
+        ] {
+            round_trip(step);
+        }
+    }
+
+    #[test]
+    fn wait_step_filters_reject_unknown_fields_and_wrong_state_families() {
+        for (step, expected) in [
+            (
+                serde_json::json!({"action": "wait_for_selector", "locator": {"by": "css", "value": "#q"}, "state": "networkidle"}),
+                "networkidle",
+            ),
+            (
+                serde_json::json!({"action": "wait_for_selector", "locator": {"by": "css", "value": "#q"}, "state": "load"}),
+                "load",
+            ),
+            (
+                serde_json::json!({"action": "wait_for_selector", "locator": {"by": "css", "value": "#q"}, "states": "visible"}),
+                "states",
+            ),
+            (
+                serde_json::json!({"action": "wait_for_request", "pattern": "/api", "status": 200}),
+                "status",
+            ),
+            (
+                serde_json::json!({"action": "wait_for_response", "pattern": "/api", "statusCode": 200}),
+                "statusCode",
+            ),
+            (
+                serde_json::json!({"action": "wait_for_console_message", "level": "debug"}),
+                "debug",
+            ),
+            (
+                serde_json::json!({"action": "wait_for_console_message", "text": "ready"}),
+                "text",
+            ),
+        ] {
+            assert_step_rejection(step, expected);
+        }
+    }
+
+    #[test]
+    fn web_socket_steps_default_to_mocked_forwarding() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "route_web_socket", "pattern": "wss://example.com/**"},
+                {"action": "route_web_socket", "pattern": "wss://example.com/**", "mode": "intercept", "on_page_message": "drop", "on_server_message": "capture"},
+                {"action": "close_web_socket", "pattern": "wss://example.com/**"},
+                {"action": "close_web_socket", "pattern": "wss://example.com/**", "code": 1000, "reason": "bye"}
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request.steps.as_slice(),
+            [
+                BrowserStep::RouteWebSocket {
+                    mode: WebSocketRouteMode::Mock,
+                    on_page_message: WebSocketMessageAction::Forward,
+                    on_server_message: WebSocketMessageAction::Forward,
+                    ..
+                },
+                BrowserStep::RouteWebSocket {
+                    mode: WebSocketRouteMode::Intercept,
+                    on_page_message: WebSocketMessageAction::Drop,
+                    on_server_message: WebSocketMessageAction::Capture,
+                    ..
+                },
+                BrowserStep::CloseWebSocket {
+                    code: None,
+                    reason: None,
+                    ..
+                },
+                BrowserStep::CloseWebSocket {
+                    code: Some(1000),
+                    reason: Some(_),
+                    ..
+                },
+            ]
+        ));
+
+        assert_eq!(
+            round_trip(
+                serde_json::json!({"action": "route_web_socket", "pattern": "wss://example.com/**"})
+            ),
+            serde_json::json!({
+                "action": "route_web_socket",
+                "pattern": "wss://example.com/**",
+                "mode": "mock",
+                "on_page_message": "forward",
+                "on_server_message": "forward"
+            })
+        );
+        assert_eq!(
+            round_trip(
+                serde_json::json!({"action": "close_web_socket", "pattern": "wss://example.com/**"})
+            ),
+            serde_json::json!({"action": "close_web_socket", "pattern": "wss://example.com/**"})
+        );
+    }
+
+    #[test]
+    fn web_socket_steps_reject_unknown_fields_and_bad_modes() {
+        for (step, expected) in [
+            (serde_json::json!({"action": "route_web_socket"}), "pattern"),
+            (
+                serde_json::json!({"action": "route_web_socket", "pattern": "wss://x/**", "mode": "record"}),
+                "record",
+            ),
+            (
+                serde_json::json!({"action": "route_web_socket", "pattern": "wss://x/**", "on_page_message": "ignore"}),
+                "ignore",
+            ),
+            (
+                serde_json::json!({"action": "route_web_socket", "pattern": "wss://x/**", "on_message": "drop"}),
+                "on_message",
+            ),
+            (serde_json::json!({"action": "close_web_socket"}), "pattern"),
+            (
+                serde_json::json!({"action": "close_web_socket", "pattern": "wss://x/**", "close_code": 1000}),
+                "close_code",
+            ),
+        ] {
+            assert_step_rejection(step, expected);
+        }
+    }
+
+    #[test]
+    fn expect_polish_options_are_optional_and_round_trip() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "expect", "locator": {"by": "css", "value": "#a"}, "matcher": {"type": "to_be_visible"}},
+                {"action": "expect", "locator": {"by": "css", "value": "#a"}, "matcher": {"type": "to_be_visible"}, "not": true},
+                {"action": "expect", "locator": {"by": "css", "value": "#a"}, "matcher": {"type": "to_be_checked"}},
+                {"action": "expect", "locator": {"by": "css", "value": "#a"}, "matcher": {"type": "to_be_checked", "indeterminate": true}},
+                {"action": "expect", "locator": {"by": "css", "value": "#a"}, "matcher": {"type": "to_have_css", "name": "color", "expected": "rgb(0, 0, 0)"}},
+                {"action": "expect", "locator": {"by": "css", "value": "#a"}, "matcher": {"type": "to_have_css", "name": "content", "expected": "x", "pseudo": "before"}},
+                {"action": "expect", "locator": {"by": "css", "value": "#a"}, "matcher": {"type": "to_have_attribute", "name": "disabled"}},
+                {"action": "expect", "locator": {"by": "css", "value": "#a"}, "matcher": {"type": "to_have_attribute", "name": "href", "expected": "/docs"}},
+                {"action": "expect", "locator": {"by": "css", "value": "#a"}, "matcher": {"type": "to_be_in_viewport"}},
+                {"action": "expect", "locator": {"by": "css", "value": "#a"}, "matcher": {"type": "to_be_in_viewport", "ratio": 0.5}}
+            ]
+        }))
+        .unwrap();
+
+        let observed = request
+            .steps
+            .iter()
+            .map(|step| match step {
+                BrowserStep::Expect { matcher, not, .. } => (matcher.clone(), *not),
+                other => panic!("unexpected step: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(observed[0].1, None);
+        assert_eq!(observed[1].1, Some(true));
+        assert_eq!(
+            observed[2].0,
+            BrowserExpectation::ToBeChecked {
+                checked: None,
+                indeterminate: None
+            }
+        );
+        assert_eq!(
+            observed[3].0,
+            BrowserExpectation::ToBeChecked {
+                checked: None,
+                indeterminate: Some(true)
+            }
+        );
+        assert_eq!(
+            observed[4].0,
+            BrowserExpectation::ToHaveCss {
+                name: "color".to_string(),
+                expected: BrowserExpectedText::Text("rgb(0, 0, 0)".to_string()),
+                ignore_case: false,
+                pseudo: None
+            }
+        );
+        assert_eq!(
+            observed[5].0,
+            BrowserExpectation::ToHaveCss {
+                name: "content".to_string(),
+                expected: BrowserExpectedText::Text("x".to_string()),
+                ignore_case: false,
+                pseudo: Some(BrowserPseudoElement::Before)
+            }
+        );
+        assert_eq!(
+            observed[6].0,
+            BrowserExpectation::ToHaveAttribute {
+                name: "disabled".to_string(),
+                expected: None,
+                ignore_case: false
+            }
+        );
+        assert_eq!(
+            observed[7].0,
+            BrowserExpectation::ToHaveAttribute {
+                name: "href".to_string(),
+                expected: Some(BrowserExpectedText::Text("/docs".to_string())),
+                ignore_case: false
+            }
+        );
+        assert_eq!(
+            observed[8].0,
+            BrowserExpectation::ToBeInViewport { ratio: None }
+        );
+        assert_eq!(
+            observed[9].0,
+            BrowserExpectation::ToBeInViewport { ratio: Some(0.5) }
+        );
+
+        let serialized = round_trip(serde_json::json!({
+            "action": "expect",
+            "locator": {"by": "css", "value": "#a"},
+            "matcher": {"type": "to_have_attribute", "name": "disabled"},
+            "not": true
+        }));
+        assert_eq!(serialized["not"], serde_json::json!(true));
+        assert_eq!(
+            serialized["matcher"],
+            serde_json::json!({"type": "to_have_attribute", "name": "disabled", "ignore_case": false})
+        );
+
+        let without_not = round_trip(serde_json::json!({
+            "action": "expect",
+            "matcher": {"type": "to_be_in_viewport", "ratio": 0.25}
+        }));
+        assert_eq!(without_not.get("not"), None);
+    }
+
+    #[test]
+    fn expect_polish_rejects_unknown_step_fields_and_bad_matchers() {
+        for (step, expected) in [
+            (
+                serde_json::json!({"action": "expect", "matcher": {"type": "to_be_visible"}, "nott": true}),
+                "nott",
+            ),
+            (
+                serde_json::json!({"action": "expect", "matcher": {"type": "to_be_visible"}, "not": "yes"}),
+                "expected a boolean",
+            ),
+            (
+                serde_json::json!({"action": "expect", "matcher": {"type": "to_have_css", "name": "content", "expected": "x", "pseudo": "first_line"}}),
+                "first_line",
+            ),
+            (
+                serde_json::json!({"action": "expect", "matcher": {"type": "to_have_attribute"}}),
+                "name",
+            ),
+            (
+                serde_json::json!({"action": "expect", "matcher": {"type": "to_be_checkd"}}),
+                "to_be_checkd",
+            ),
+            (serde_json::json!({"action": "expect"}), "matcher"),
+        ] {
+            assert_step_rejection(step, expected);
+        }
+    }
+
+    #[test]
+    fn lifecycle_steps_parse_with_their_defaults() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "block_service_workers": true,
+            "steps": [
+                {"action": "cancel_download"},
+                {"action": "cancel_download", "id": "dl-1"},
+                {"action": "grant_permissions", "permissions": ["geolocation"]},
+                {"action": "grant_permissions", "permissions": ["camera"], "origin": "https://example.com", "state": "denied"},
+                {"action": "grant_permissions", "permissions": ["clipboard-read"], "state": "prompt"},
+                {"action": "start_har_recording", "mode": "minimal", "content": "omit"},
+                {"action": "start_har_recording", "mode": "full", "content": "embed", "update": "merge"},
+                {"action": "storage_state"},
+                {"action": "storage_state", "save_as": "state.json", "indexed_db": true},
+                {"action": "set_storage_state", "state": {}},
+                {"action": "set_storage_state", "state": {"cookies": [], "origins": []}, "indexed_db": false}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(request.block_service_workers, Some(true));
+        assert!(matches!(
+            request.steps.as_slice(),
+            [
+                BrowserStep::CancelDownload { id: None },
+                BrowserStep::CancelDownload { id: Some(_) },
+                BrowserStep::GrantPermissions {
+                    origin: None,
+                    state: BrowserPermissionState::Granted,
+                    ..
+                },
+                BrowserStep::GrantPermissions {
+                    origin: Some(_),
+                    state: BrowserPermissionState::Denied,
+                    ..
+                },
+                BrowserStep::GrantPermissions {
+                    state: BrowserPermissionState::Prompt,
+                    ..
+                },
+                BrowserStep::StartHarRecording {
+                    mode: HarMode::Minimal,
+                    content: HarContentPolicy::Omit,
+                    update: None,
+                    ..
+                },
+                BrowserStep::StartHarRecording {
+                    mode: HarMode::Full,
+                    content: HarContentPolicy::Embed,
+                    update: Some(_),
+                    ..
+                },
+                BrowserStep::StorageState {
+                    save_as: None,
+                    indexed_db: None,
+                },
+                BrowserStep::StorageState {
+                    save_as: Some(_),
+                    indexed_db: Some(true),
+                },
+                BrowserStep::SetStorageState {
+                    indexed_db: None,
+                    ..
+                },
+                BrowserStep::SetStorageState {
+                    indexed_db: Some(false),
+                    ..
+                },
+            ]
+        ));
+
+        assert_eq!(
+            round_trip(serde_json::json!({"action": "cancel_download"})),
+            serde_json::json!({"action": "cancel_download"})
+        );
+        assert_eq!(
+            round_trip(
+                serde_json::json!({"action": "grant_permissions", "permissions": ["geolocation"]})
+            ),
+            serde_json::json!({"action": "grant_permissions", "permissions": ["geolocation"]})
+        );
+        assert_eq!(
+            round_trip(
+                serde_json::json!({"action": "grant_permissions", "permissions": ["camera"], "state": "prompt"})
+            ),
+            serde_json::json!({"action": "grant_permissions", "permissions": ["camera"], "state": "prompt"})
+        );
+        assert_eq!(
+            round_trip(serde_json::json!({"action": "storage_state"})),
+            serde_json::json!({"action": "storage_state"})
+        );
+        round_trip(serde_json::json!({
+            "action": "start_har_recording",
+            "mode": "full",
+            "content": "attach",
+            "update": "merge"
+        }));
+        round_trip(
+            serde_json::json!({"action": "set_storage_state", "state": {}, "indexed_db": true}),
+        );
+    }
+
+    #[test]
+    fn lifecycle_steps_reject_unknown_and_missing_fields() {
+        for (step, expected) in [
+            (
+                serde_json::json!({"action": "cancel_download", "download_id": "dl-1"}),
+                "download_id",
+            ),
+            (
+                serde_json::json!({"action": "grant_permissions", "permissions": ["camera"], "state": "ask"}),
+                "ask",
+            ),
+            (
+                serde_json::json!({"action": "grant_permissions", "origin": "https://x.test"}),
+                "permissions",
+            ),
+            (
+                serde_json::json!({"action": "start_har_recording", "mode": "minimal"}),
+                "content",
+            ),
+            (
+                serde_json::json!({"action": "start_har_recording", "mode": "minimal", "content": "omit", "updat": "merge"}),
+                "updat",
+            ),
+            (
+                serde_json::json!({"action": "storage_state", "indexedDb": true}),
+                "indexedDb",
+            ),
+            (
+                serde_json::json!({"action": "set_storage_state", "indexed_db": true}),
+                "state",
+            ),
+        ] {
+            assert_step_rejection(step, expected);
+        }
+    }
+
+    #[test]
+    fn block_service_workers_is_an_optional_batch_level_flag() {
+        let omitted = parse_browser_action_request(serde_json::json!({"steps": []})).unwrap();
+        assert_eq!(omitted.block_service_workers, None);
+        assert_eq!(
+            serde_json::to_value(&omitted)
+                .unwrap()
+                .get("block_service_workers"),
+            None
+        );
+
+        for flag in [true, false] {
+            let parsed = parse_browser_action_request(
+                serde_json::json!({"block_service_workers": flag, "steps": []}),
+            )
+            .unwrap();
+            assert_eq!(parsed.block_service_workers, Some(flag));
+            assert_eq!(
+                serde_json::to_value(&parsed).unwrap()["block_service_workers"],
+                serde_json::json!(flag)
+            );
+        }
+
+        for rejected in [
+            serde_json::json!({"block_service_workers": "yes", "steps": []}),
+            serde_json::json!({"blockServiceWorkers": true, "steps": []}),
+        ] {
+            assert!(
+                parse_browser_action_request(rejected.clone()).is_err(),
+                "expected rejection: {rejected}"
+            );
         }
     }
 }
