@@ -8,7 +8,7 @@ use refact_integrations::browser_models::{
     BrowserStorageKind, BrowserStorageOrigin, BrowserStorageState,
 };
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewportState {
     pub width: u32,
     pub height: u32,
@@ -26,6 +26,116 @@ pub struct MediaState {
     pub media: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NetworkConditions {
+    pub latency_ms: f64,
+    pub download_kbps: f64,
+    pub upload_kbps: f64,
+}
+
+impl NetworkConditions {
+    pub const PRESET_NAMES: &'static [&'static str] = &["slow-3g", "fast-3g", "slow-4g"];
+
+    pub const UNLIMITED: Self = Self {
+        latency_ms: 0.0,
+        download_kbps: -1.0,
+        upload_kbps: -1.0,
+    };
+
+    pub fn resolve(
+        preset: Option<&str>,
+        latency_ms: Option<f64>,
+        download_kbps: Option<f64>,
+        upload_kbps: Option<f64>,
+    ) -> Result<Option<Self>, String> {
+        if preset.is_none()
+            && latency_ms.is_none()
+            && download_kbps.is_none()
+            && upload_kbps.is_none()
+        {
+            return Ok(None);
+        }
+        let base = preset
+            .map(Self::preset)
+            .transpose()?
+            .unwrap_or(Self::UNLIMITED);
+        let resolved = Self {
+            latency_ms: latency_ms.unwrap_or(base.latency_ms),
+            download_kbps: download_kbps.unwrap_or(base.download_kbps),
+            upload_kbps: upload_kbps.unwrap_or(base.upload_kbps),
+        };
+        if resolved.latency_ms < 0.0 {
+            return Err(format!(
+                "latency_ms must not be negative, got {}",
+                resolved.latency_ms
+            ));
+        }
+        for (label, value) in [
+            ("download_kbps", download_kbps),
+            ("upload_kbps", upload_kbps),
+        ] {
+            if value.is_some_and(|value| value <= 0.0) {
+                return Err(format!(
+                    "{label} must be positive; omit it for unlimited bandwidth or use offline"
+                ));
+            }
+        }
+        Ok(Some(resolved))
+    }
+
+    pub fn preset(name: &str) -> Result<Self, String> {
+        match name {
+            "slow-3g" => Ok(Self {
+                latency_ms: 2000.0,
+                download_kbps: 400.0,
+                upload_kbps: 400.0,
+            }),
+            "fast-3g" | "slow-4g" => Ok(Self {
+                latency_ms: 562.5,
+                download_kbps: 1440.0,
+                upload_kbps: 675.0,
+            }),
+            other => Err(format!(
+                "Unknown network preset '{other}'. Use one of {}",
+                Self::PRESET_NAMES.join(", ")
+            )),
+        }
+    }
+
+    pub fn download_bytes_per_second(&self) -> f64 {
+        kbps_to_bytes_per_second(self.download_kbps)
+    }
+
+    pub fn upload_bytes_per_second(&self) -> f64 {
+        kbps_to_bytes_per_second(self.upload_kbps)
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "{}ms latency, {} down, {} up",
+            self.latency_ms,
+            bandwidth_label(self.download_kbps),
+            bandwidth_label(self.upload_kbps)
+        )
+    }
+}
+
+fn bandwidth_label(kbps: f64) -> String {
+    if kbps < 0.0 {
+        "unlimited".to_string()
+    } else {
+        format!("{kbps}kbps")
+    }
+}
+
+fn kbps_to_bytes_per_second(kbps: f64) -> f64 {
+    if kbps < 0.0 {
+        -1.0
+    } else {
+        kbps * 1000.0 / 8.0
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ContextState {
     pub viewport: Option<ViewportState>,
@@ -35,6 +145,8 @@ pub struct ContextState {
     pub user_agent: Option<(String, Option<String>)>,
     pub geolocation: Option<(f64, f64, f64)>,
     pub offline: bool,
+    pub network_conditions: Option<NetworkConditions>,
+    pub cpu_throttling_rate: Option<f64>,
     pub extra_http_headers: BTreeMap<String, String>,
     pub permissions: Vec<String>,
     pub http_credentials: Option<(String, String)>,
@@ -86,7 +198,8 @@ impl ContextState {
             })
             .map_err(|error| format!("Failed to set geolocation: {error}"))?;
         }
-        apply_offline(tab, self.offline)?;
+        apply_network_conditions(tab, self.offline, self.network_conditions.as_ref())?;
+        apply_cpu_throttling(tab, self.cpu_throttling_rate)?;
         apply_extra_http_headers(tab, &self.extra_http_headers)?;
         if let Some((username, password)) = &self.http_credentials {
             tab.authenticate(Some(username.clone()), Some(password.clone()))
@@ -103,6 +216,8 @@ impl ContextState {
         self.user_agent = None;
         self.geolocation = None;
         self.offline = false;
+        self.network_conditions = None;
+        self.cpu_throttling_rate = None;
         self.permissions.clear();
         for tab in tabs {
             tab.call_method(Emulation::ClearDeviceMetricsOverride(None))
@@ -128,7 +243,8 @@ impl ContextState {
             .map_err(|error| format!("Failed to clear user agent: {error}"))?;
             tab.call_method(Emulation::ClearGeolocationOverride(None))
                 .map_err(|error| format!("Failed to clear geolocation: {error}"))?;
-            apply_offline(tab, self.offline)?;
+            apply_network_conditions(tab, self.offline, self.network_conditions.as_ref())?;
+            apply_cpu_throttling(tab, self.cpu_throttling_rate)?;
             clear_permissions(tab)?;
         }
         Ok(())
@@ -213,19 +329,31 @@ pub fn apply_media(tab: &Tab, media: &MediaState) -> Result<(), String> {
     .map_err(|error| format!("Failed to emulate media: {error}"))
 }
 
-pub fn apply_offline(tab: &Tab, offline: bool) -> Result<(), String> {
+pub fn apply_network_conditions(
+    tab: &Tab,
+    offline: bool,
+    conditions: Option<&NetworkConditions>,
+) -> Result<(), String> {
     tab.call_method(Network::EmulateNetworkConditions {
         offline,
-        latency: 0.0,
-        download_throughput: -1.0,
-        upload_throughput: -1.0,
+        latency: conditions.map_or(0.0, |conditions| conditions.latency_ms),
+        download_throughput: conditions.map_or(-1.0, NetworkConditions::download_bytes_per_second),
+        upload_throughput: conditions.map_or(-1.0, NetworkConditions::upload_bytes_per_second),
         connection_Type: None,
         packet_loss: None,
         packet_queue_length: None,
         packet_reordering: None,
     })
     .map(|_| ())
-    .map_err(|error| format!("Failed to set offline mode: {error}"))
+    .map_err(|error| format!("Failed to set network conditions: {error}"))
+}
+
+pub fn apply_cpu_throttling(tab: &Tab, rate: Option<f64>) -> Result<(), String> {
+    tab.call_method(Emulation::SetCPUThrottlingRate {
+        rate: rate.unwrap_or(1.0),
+    })
+    .map(|_| ())
+    .map_err(|error| format!("Failed to set CPU throttling: {error}"))
 }
 
 pub fn apply_extra_http_headers(
@@ -583,6 +711,101 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(media.color_scheme.as_deref(), Some("dark"));
+    }
+
+    #[test]
+    fn network_presets_match_chrome_devtools_canonical_values() {
+        let slow_3g = NetworkConditions::preset("slow-3g").unwrap();
+        assert_eq!(slow_3g.latency_ms, 2000.0);
+        assert_eq!(slow_3g.download_kbps, 400.0);
+        assert_eq!(slow_3g.upload_kbps, 400.0);
+        assert_eq!(slow_3g.download_bytes_per_second(), 50_000.0);
+
+        let fast_3g = NetworkConditions::preset("fast-3g").unwrap();
+        assert_eq!(fast_3g.latency_ms, 562.5);
+        assert_eq!(fast_3g.download_kbps, 1440.0);
+        assert_eq!(fast_3g.upload_kbps, 675.0);
+        assert_eq!(fast_3g.download_bytes_per_second(), 180_000.0);
+        assert_eq!(fast_3g.upload_bytes_per_second(), 84_375.0);
+
+        assert_eq!(NetworkConditions::preset("slow-4g").unwrap(), fast_3g);
+    }
+
+    #[test]
+    fn unknown_network_preset_lists_the_supported_names() {
+        let error = NetworkConditions::preset("3g").unwrap_err();
+        assert!(error.starts_with("Unknown network preset '3g'."), "{error}");
+        for name in NetworkConditions::PRESET_NAMES {
+            assert!(error.contains(name), "{error}");
+        }
+    }
+
+    #[test]
+    fn absent_conditions_keep_the_unthrottled_cdp_sentinels() {
+        let unthrottled = ContextState::default();
+        assert!(unthrottled.network_conditions.is_none());
+        assert!(unthrottled.cpu_throttling_rate.is_none());
+
+        let throttled = NetworkConditions {
+            latency_ms: 100.0,
+            download_kbps: 8.0,
+            upload_kbps: 4.0,
+        };
+        assert_eq!(throttled.download_bytes_per_second(), 1000.0);
+        assert_eq!(throttled.upload_bytes_per_second(), 500.0);
+        assert_eq!(throttled.summary(), "100ms latency, 8kbps down, 4kbps up");
+
+        assert_eq!(
+            NetworkConditions::UNLIMITED.download_bytes_per_second(),
+            -1.0
+        );
+        assert_eq!(NetworkConditions::UNLIMITED.upload_bytes_per_second(), -1.0);
+        assert_eq!(
+            NetworkConditions::UNLIMITED.summary(),
+            "0ms latency, unlimited down, unlimited up"
+        );
+    }
+
+    #[test]
+    fn explicit_parameters_override_the_preset_they_are_combined_with() {
+        assert_eq!(
+            NetworkConditions::resolve(None, None, None, None).unwrap(),
+            None
+        );
+
+        let preset_only = NetworkConditions::resolve(Some("slow-3g"), None, None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(preset_only, NetworkConditions::preset("slow-3g").unwrap());
+
+        let overridden = NetworkConditions::resolve(Some("slow-3g"), Some(10.0), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(overridden.latency_ms, 10.0);
+        assert_eq!(overridden.download_kbps, 400.0);
+
+        let latency_only = NetworkConditions::resolve(None, Some(250.0), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latency_only.latency_ms, 250.0);
+        assert_eq!(latency_only.download_kbps, -1.0);
+        assert_eq!(latency_only.download_bytes_per_second(), -1.0);
+    }
+
+    #[test]
+    fn invalid_throttling_parameters_are_hard_errors() {
+        assert!(NetworkConditions::resolve(Some("gprs"), None, None, None)
+            .unwrap_err()
+            .starts_with("Unknown network preset 'gprs'."));
+        assert!(NetworkConditions::resolve(None, Some(-1.0), None, None)
+            .unwrap_err()
+            .contains("latency_ms must not be negative"));
+        assert!(NetworkConditions::resolve(None, None, Some(0.0), None)
+            .unwrap_err()
+            .contains("download_kbps must be positive"));
+        assert!(NetworkConditions::resolve(None, None, None, Some(-5.0))
+            .unwrap_err()
+            .contains("upload_kbps must be positive"));
     }
 
     #[test]

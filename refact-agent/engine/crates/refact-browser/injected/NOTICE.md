@@ -37,11 +37,12 @@ This directory contains source adapted from [Microsoft Playwright](https://githu
 
 ## Vendored files outside this directory
 
-These files are vendored from the same Playwright commit but live next to the Rust sources because they run in the page's main world rather than in the injected utility-world bundle.
+These files are vendored from the same Playwright commit but live next to the Rust sources because they run in the page's main world rather than in the injected utility-world bundle, or because they are data rather than executable source.
 
 | Local file | Upstream file | Commit | Local modifications |
 |---|---|---|---|
 | `../src/clock_source.js` | `packages/injected/src/clock.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | TypeScript annotations are erased (the `TimerType` enum becomes a frozen-shape object literal) and the module is wrapped in an idempotent installer publishing `globalThis.__refactClock`; timer semantics, the replay log, and the faked API surface are unchanged. |
+| `../src/device_descriptors.json` | `packages/isomorphic/deviceDescriptorsSource.json` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | None; copied verbatim and read at runtime by `../src/devices.rs`, which uses `userAgent`, `viewport`, `deviceScaleFactor`, `isMobile`, and `hasTouch` and ignores `screen` and `defaultBrowserType`. |
 
 `clock.ts` additionally carries an upstream third-party notice: it derives from [Sinon.JS](https://github.com/sinonjs/fake-timers) fake timers, Copyright (c) 2010-2014 Christian Johansen, licensed under BSD-3-Clause. That notice is preserved verbatim at the top of `../src/clock_source.js`.
 

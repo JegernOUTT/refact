@@ -4,6 +4,7 @@ pub mod assertions;
 pub mod clock;
 pub mod context_state;
 pub mod coverage;
+pub mod devices;
 pub mod dialogs;
 pub mod drag;
 pub mod files;
@@ -46,7 +47,8 @@ pub use clock::{
     CLOCK_SOURCE, ClockManager, ClockOp, ClockState, current_wall_ms, parse_clock_ticks,
     parse_clock_time,
 };
-pub use context_state::{ContextState, MediaState, ViewportState};
+pub use context_state::{ContextState, MediaState, NetworkConditions, ViewportState};
+pub use devices::DeviceDescriptor;
 pub use handles::{
     CheckedState, ElementHandle, ElementState, ElementStateName, HandleError, HandleRegistry,
 };
@@ -2497,16 +2499,26 @@ mod tests {
         let source = include_str!("../../../src/integrations/browser_controller.rs");
         let context = include_str!("context_state.rs");
 
-        for preset in [
-            "Some(\"mobile\") => (390, 844, 3.0, true)",
-            "Some(\"tablet\") => (834, 1112, 2.0, true)",
-            "_ => (1440, 900, 2.0, false)",
-        ] {
-            assert!(source.contains(preset), "controller lacks {preset}");
+        for alias in ["mobile", "tablet", "desktop"] {
+            let device = crate::devices::lookup(alias)
+                .unwrap_or_else(|error| panic!("alias {alias} lost its device: {error}"));
+            assert!(device.viewport.width > 0 && device.viewport.height > 0);
+            assert!(device.viewport.device_scale_factor > 0.0);
+            assert!(!device.user_agent.is_empty());
         }
-        assert!(source.contains("runtime.context_state.viewport = Some"));
-        assert!(source.contains("device_scale_factor: dpr"));
-        assert!(source.contains("is_mobile: mobile"));
+        assert!(crate::devices::lookup("mobile").unwrap().viewport.is_mobile);
+        assert!(crate::devices::lookup("tablet").unwrap().viewport.has_touch);
+        assert!(
+            !crate::devices::lookup("desktop")
+                .unwrap()
+                .viewport
+                .is_mobile
+        );
+
+        assert!(
+            source.contains("runtime.context_state.viewport = Some(descriptor.viewport.clone())")
+        );
+        assert!(source.contains("refact_browser::devices::lookup"));
         assert!(context.contains("SetDeviceMetricsOverride"));
     }
 

@@ -30,6 +30,7 @@ use refact_lsp::integrations::browser_models::{
     FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode, RouteHandler,
     SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind, WebSocketRouteMode,
 };
+use refact_lsp::refact_browser::devices;
 use refact_lsp::refact_browser::{
     BrowserLaunchOptions, BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState,
     HandleError, Keyboard, HitTargetController, HitTargetResult, Mouse, MouseButton,
@@ -1664,6 +1665,101 @@ async fn tap_requires_touch_emulation_then_fires_touch_events() {
         .value
         .unwrap();
     assert_eq!(recorded, json!("touchstart,touchend,click"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn emulate_device_changes_reported_viewport_and_user_agent() {
+    let Some(mut case) = BrowserCase::start("input-events.html").await else {
+        return;
+    };
+
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::EmulateDevice {
+            name: "Pixel 7".to_string(),
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(report.ok, "emulate_device failed: {report:?}");
+    assert!(report.steps[0].summary.contains("Pixel 7"));
+
+    let width = case
+        .tab
+        .evaluate("window.innerWidth", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(width, json!(412));
+    let user_agent = case
+        .tab
+        .evaluate("navigator.userAgent", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(
+        user_agent,
+        json!(devices::lookup("Pixel 7").unwrap().user_agent)
+    );
+    let touch_points = case
+        .tab
+        .evaluate("navigator.maxTouchPoints > 0", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(touch_points, json!(true));
+
+    let unknown = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::EmulateDevice {
+            name: "Pixel 777".to_string(),
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(!unknown.ok, "unknown device must fail: {unknown:?}");
+    let error = unknown.steps[0].error.clone().unwrap();
+    assert!(error.contains("Unknown device 'Pixel 777'"), "{error}");
+    assert!(error.contains("Pixel 7"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn network_and_cpu_throttling_apply_and_reset_clears_them() {
+    let Some(mut case) = BrowserCase::start("input-events.html").await else {
+        return;
+    };
+
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::SetNetworkConditions {
+                offline: None,
+                latency_ms: None,
+                download_kbps: None,
+                upload_kbps: None,
+                preset: Some("slow-3g".to_string()),
+            },
+            BrowserStep::SetCpuThrottling { rate: 4.0 },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(report.ok, "throttling failed: {report:?}");
+    assert!(report.steps[0].summary.contains("2000ms latency"));
+    assert!(report.steps[1].summary.contains("4"));
+    assert_eq!(
+        case.runtime.context_state.network_conditions,
+        Some(refact_lsp::refact_browser::NetworkConditions::preset("slow-3g").unwrap())
+    );
+    assert_eq!(case.runtime.context_state.cpu_throttling_rate, Some(4.0));
+
+    let reset = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::Reset],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(reset.ok, "reset failed: {reset:?}");
+    assert!(case.runtime.context_state.network_conditions.is_none());
+    assert!(case.runtime.context_state.cpu_throttling_rate.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

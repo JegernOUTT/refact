@@ -1331,6 +1331,28 @@ pub enum BrowserStep {
     SetOffline {
         offline: bool,
     },
+    SetNetworkConditions {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offline: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        latency_ms: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        download_kbps: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upload_kbps: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preset: Option<String>,
+    },
+    SetCpuThrottling {
+        rate: f64,
+    },
+    EmulateDevice {
+        name: String,
+    },
+    ListDevices {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<String>,
+    },
     SetExtraHttpHeaders {
         headers: BTreeMap<String, String>,
     },
@@ -1887,6 +1909,10 @@ impl BrowserStep {
         "set_user_agent",
         "set_geolocation",
         "set_offline",
+        "set_network_conditions",
+        "set_cpu_throttling",
+        "emulate_device",
+        "list_devices",
         "set_extra_http_headers",
         "get_cookies",
         "set_cookies",
@@ -2645,6 +2671,20 @@ mod tests {
                 accuracy: None,
             },
             BrowserStep::SetOffline { offline: false },
+            BrowserStep::SetNetworkConditions {
+                offline: Some(false),
+                latency_ms: Some(150.0),
+                download_kbps: Some(1600.0),
+                upload_kbps: Some(750.0),
+                preset: Some("slow-3g".to_string()),
+            },
+            BrowserStep::SetCpuThrottling { rate: 4.0 },
+            BrowserStep::EmulateDevice {
+                name: "iPhone 13".to_string(),
+            },
+            BrowserStep::ListDevices {
+                filter: Some("pixel".to_string()),
+            },
             BrowserStep::SetExtraHttpHeaders {
                 headers: BTreeMap::new(),
             },

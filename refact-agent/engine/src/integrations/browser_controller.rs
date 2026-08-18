@@ -814,6 +814,10 @@ fn is_context_management_step(step: &BrowserStep) -> bool {
             | BrowserStep::SetUserAgent { .. }
             | BrowserStep::SetGeolocation { .. }
             | BrowserStep::SetOffline { .. }
+            | BrowserStep::SetNetworkConditions { .. }
+            | BrowserStep::SetCpuThrottling { .. }
+            | BrowserStep::EmulateDevice { .. }
+            | BrowserStep::ListDevices { .. }
             | BrowserStep::SetExtraHttpHeaders { .. }
             | BrowserStep::GetCookies { .. }
             | BrowserStep::SetCookies { .. }
@@ -826,6 +830,32 @@ fn is_context_management_step(step: &BrowserStep) -> bool {
             | BrowserStep::GrantPermissions { .. }
             | BrowserStep::ClearPermissions
             | BrowserStep::SetHttpCredentials { .. }
+    )
+}
+
+fn open_tab_for_device(
+    runtime: &BrowserRuntime,
+    device: &Option<String>,
+) -> Result<(&'static refact_browser::DeviceDescriptor, Arc<Tab>), String> {
+    let descriptor = refact_browser::devices::lookup(device.as_deref().unwrap_or("desktop"))?;
+    let tab = runtime
+        .browser
+        .new_tab()
+        .map_err(|error| format!("Failed: {error}"))?;
+    Ok((descriptor, tab))
+}
+
+fn network_conditions_summary(
+    offline: bool,
+    conditions: Option<&refact_browser::NetworkConditions>,
+) -> String {
+    let throttling = conditions.map_or_else(
+        || "no throttling".to_string(),
+        refact_browser::NetworkConditions::summary,
+    );
+    format!(
+        "Network conditions: {}, {throttling}",
+        if offline { "offline" } else { "online" }
     )
 }
 
@@ -944,6 +974,82 @@ fn execute_context_management_step(
                     "Went online"
                 },
             ))
+        }
+        BrowserStep::SetNetworkConditions {
+            offline,
+            latency_ms,
+            download_kbps,
+            upload_kbps,
+            preset,
+        } => {
+            let conditions = refact_browser::NetworkConditions::resolve(
+                preset.as_deref(),
+                *latency_ms,
+                *download_kbps,
+                *upload_kbps,
+            )?;
+            if let Some(offline) = offline {
+                runtime.context_state.offline = *offline;
+            }
+            runtime.context_state.network_conditions = conditions;
+            apply_context_to_tabs(runtime)?;
+            Ok(StepResult::success(
+                idx,
+                network_conditions_summary(runtime.context_state.offline, conditions.as_ref()),
+            )
+            .with_data(serde_json::json!({
+                "network_conditions": conditions.map(|conditions| serde_json::json!({
+                    "latency_ms": conditions.latency_ms,
+                    "download_kbps": conditions.download_kbps,
+                    "upload_kbps": conditions.upload_kbps,
+                })),
+                "offline": runtime.context_state.offline,
+            })))
+        }
+        BrowserStep::SetCpuThrottling { rate } => {
+            if *rate < 1.0 {
+                return Err(format!(
+                    "rate must be at least 1 (1 disables CPU throttling), got {rate}"
+                ));
+            }
+            runtime.context_state.cpu_throttling_rate = (*rate > 1.0).then_some(*rate);
+            apply_context_to_tabs(runtime)?;
+            Ok(StepResult::success(
+                idx,
+                if *rate > 1.0 {
+                    format!("Throttling CPU {rate}x slower")
+                } else {
+                    "CPU throttling off".to_string()
+                },
+            )
+            .with_data(serde_json::json!({"cpu_throttling_rate": rate})))
+        }
+        BrowserStep::EmulateDevice { name } => {
+            let device = refact_browser::devices::lookup(name)?;
+            runtime.context_state.viewport = Some(device.viewport.clone());
+            runtime.context_state.user_agent = Some((device.user_agent.clone(), None));
+            apply_context_to_tabs(runtime)?;
+            Ok(
+                StepResult::success(idx, format!("Emulating {}", device.summary())).with_data(
+                    serde_json::json!({"device": {
+                        "name": device.name,
+                        "width": device.viewport.width,
+                        "height": device.viewport.height,
+                        "device_scale_factor": device.viewport.device_scale_factor,
+                        "is_mobile": device.viewport.is_mobile,
+                        "has_touch": device.viewport.has_touch,
+                        "user_agent": device.user_agent,
+                    }}),
+                ),
+            )
+        }
+        BrowserStep::ListDevices { filter } => {
+            let names = refact_browser::devices::list(filter.as_deref());
+            Ok(
+                StepResult::success(idx, format!("{} matching device(s)", names.len())).with_data(
+                    serde_json::json!({"devices": names, "aliases": ["mobile", "tablet", "desktop"]}),
+                ),
+            )
         }
         BrowserStep::SetExtraHttpHeaders { headers } => {
             runtime.context_state.extra_http_headers = headers.clone();
@@ -1274,7 +1380,7 @@ struct BrowserResetCounts {
 impl BrowserResetCounts {
     fn summary(&self) -> String {
         format!(
-            "Reset: {}, {}, {}, {}, {}, offline off, emulation cleared, {}",
+            "Reset: {}, {}, {}, {}, {}, offline off, throttling off, emulation and device cleared, {}",
             counted(self.routes, "route"),
             counted(self.har_replays, "har replay"),
             counted(self.websocket_routes, "ws route"),
@@ -1297,6 +1403,7 @@ impl BrowserResetCounts {
                 "locator_handlers": self.locator_handlers,
                 "authenticators": self.authenticators,
                 "offline": false,
+                "throttling_cleared": true,
                 "emulation_cleared": true,
                 "clock_cleared": self.clock,
             }
@@ -2652,22 +2759,12 @@ pub fn execute_steps_with_runtime(
     for (idx, step) in steps.iter().enumerate() {
         let step_tab_ids = runtime.known_tab_ids();
         let result = match step {
-            BrowserStep::OpenTab { device, url } => match runtime.browser.new_tab() {
-                Ok(new_tab) => {
-                    let device_label = device.as_deref().unwrap_or("desktop");
+            BrowserStep::OpenTab { device, url } => match open_tab_for_device(runtime, device) {
+                Ok((descriptor, new_tab)) => {
+                    let device_label = descriptor.name.clone();
                     let target_id = new_tab.get_target_id().to_string();
-                    let (w, h, dpr, mobile) = match device.as_deref() {
-                        Some("mobile") => (390, 844, 3.0, true),
-                        Some("tablet") => (834, 1112, 2.0, true),
-                        _ => (1440, 900, 2.0, false),
-                    };
-                    runtime.context_state.viewport = Some(refact_browser::ViewportState {
-                        width: w,
-                        height: h,
-                        device_scale_factor: dpr,
-                        is_mobile: mobile,
-                        has_touch: mobile,
-                    });
+                    runtime.context_state.viewport = Some(descriptor.viewport.clone());
+                    runtime.context_state.user_agent = Some((descriptor.user_agent.clone(), None));
                     if let Err(error) =
                         crate::integrations::browser_runtime::setup_recording_for_tab(
                             runtime,
@@ -2719,7 +2816,7 @@ pub fn execute_steps_with_runtime(
                         .with_data(serde_json::json!({"tab_id": target_id})),
                     }
                 }
-                Err(e) => StepResult::failure(idx, "OpenTab", &format!("Failed: {}", e)),
+                Err(error) => StepResult::failure(idx, "OpenTab", error),
             },
             BrowserStep::CloseTab { tab: target } => {
                 let tab = match target {
@@ -3598,6 +3695,10 @@ fn execute_single_step(
         | BrowserStep::SetUserAgent { .. }
         | BrowserStep::SetGeolocation { .. }
         | BrowserStep::SetOffline { .. }
+        | BrowserStep::SetNetworkConditions { .. }
+        | BrowserStep::SetCpuThrottling { .. }
+        | BrowserStep::EmulateDevice { .. }
+        | BrowserStep::ListDevices { .. }
         | BrowserStep::SetExtraHttpHeaders { .. }
         | BrowserStep::GetCookies { .. }
         | BrowserStep::SetCookies { .. }
@@ -8841,7 +8942,7 @@ mod tests {
         );
         assert_eq!(
             counts.summary(),
-            "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, offline off, emulation cleared, clock cleared"
+            "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, offline off, throttling off, emulation and device cleared, clock cleared"
         );
         assert!(route_registry.is_empty());
         assert_eq!(websocket_registry.route_count(), 0);
@@ -8858,6 +8959,28 @@ mod tests {
     }
 
     #[test]
+    fn network_conditions_summary_reports_offline_and_throttling_independently() {
+        assert_eq!(
+            network_conditions_summary(false, None),
+            "Network conditions: online, no throttling"
+        );
+        assert_eq!(
+            network_conditions_summary(true, None),
+            "Network conditions: offline, no throttling"
+        );
+
+        let slow_3g = refact_browser::NetworkConditions::preset("slow-3g").unwrap();
+        assert_eq!(
+            network_conditions_summary(false, Some(&slow_3g)),
+            "Network conditions: online, 2000ms latency, 400kbps down, 400kbps up"
+        );
+        assert_eq!(
+            network_conditions_summary(true, Some(&slow_3g)),
+            "Network conditions: offline, 2000ms latency, 400kbps down, 400kbps up"
+        );
+    }
+
+    #[test]
     fn reset_on_clean_state_succeeds_with_zero_counts() {
         let websocket_registry = WebSocketRegistry::default();
         let locator_handlers = populated_locator_handlers();
@@ -8869,7 +8992,7 @@ mod tests {
         assert_eq!(repeated, BrowserResetCounts::default());
         assert_eq!(
             repeated.summary(),
-            "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, offline off, emulation cleared, clock off"
+            "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, offline off, throttling off, emulation and device cleared, clock off"
         );
         assert_eq!(websocket_registry.route_count(), 0);
         assert_eq!(locator_handlers.lock().unwrap().handlers().len(), 1);
@@ -8967,6 +9090,7 @@ mod tests {
                     "locator_handlers": 3,
                     "authenticators": 1,
                     "offline": false,
+                    "throttling_cleared": true,
                     "emulation_cleared": true,
                     "clock_cleared": true,
                 }

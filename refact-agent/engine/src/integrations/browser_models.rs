@@ -679,6 +679,69 @@ mod tests {
     }
 
     #[test]
+    fn throttling_and_device_steps_parse_their_parameters() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "set_network_conditions", "preset": "slow-3g", "latency_ms": 120.0, "offline": false},
+                {"action": "set_cpu_throttling", "rate": 4.0},
+                {"action": "emulate_device", "name": "iPhone 13"},
+                {"action": "list_devices"},
+            ]
+        }))
+        .unwrap();
+
+        match &request.steps[0] {
+            BrowserStep::SetNetworkConditions {
+                offline,
+                latency_ms,
+                download_kbps,
+                upload_kbps,
+                preset,
+            } => {
+                assert_eq!(*offline, Some(false));
+                assert_eq!(*latency_ms, Some(120.0));
+                assert_eq!(*download_kbps, None);
+                assert_eq!(*upload_kbps, None);
+                assert_eq!(preset.as_deref(), Some("slow-3g"));
+            }
+            other => panic!("unexpected step: {other:?}"),
+        }
+        assert!(matches!(
+            request.steps[1],
+            BrowserStep::SetCpuThrottling { rate } if rate == 4.0
+        ));
+        assert!(matches!(
+            &request.steps[2],
+            BrowserStep::EmulateDevice { name } if name == "iPhone 13"
+        ));
+        assert!(matches!(
+            &request.steps[3],
+            BrowserStep::ListDevices { filter: None }
+        ));
+    }
+
+    #[test]
+    fn throttling_and_device_steps_reject_unknown_and_missing_fields() {
+        for (step, expected) in [
+            (
+                serde_json::json!({"action": "set_network_conditions", "latencyMs": 100}),
+                "latencyMs",
+            ),
+            (serde_json::json!({"action": "set_cpu_throttling"}), "rate"),
+            (serde_json::json!({"action": "emulate_device"}), "name"),
+            (
+                serde_json::json!({"action": "list_devices", "contains": "pixel"}),
+                "contains",
+            ),
+        ] {
+            let error = parse_browser_action_request(serde_json::json!({"steps": [step.clone()]}))
+                .unwrap_err();
+            assert!(error.starts_with("step[0] ("), "unexpected error: {error}");
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
     fn gallery_and_state_steps_reject_unknown_fields_and_bad_enum_values() {
         for (step, expected) in [
             (
