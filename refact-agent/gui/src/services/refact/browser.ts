@@ -536,9 +536,17 @@ export type BrowserRouteHandler =
       post_data?: string;
     };
 
+export type BrowserHarRouteInfo = {
+  entry_count: number;
+  not_found?: string;
+};
+
 export type BrowserRouteInfo = {
   pattern: BrowserUrlPattern;
   handler: BrowserRouteHandler;
+  har?: BrowserHarRouteInfo | null;
+  times_remaining?: number | null;
+  order?: number;
 };
 
 export type BrowserRouteInterception = {
@@ -567,9 +575,65 @@ export type BrowserContextSummary = {
   http_credentials: boolean;
 };
 
+export type BrowserHttpRequestResult = {
+  method: string;
+  url: string;
+  status: number;
+  status_text?: string | null;
+  redirects?: number | null;
+  headers?: Record<string, string> | null;
+  body_bytes?: number | null;
+  set_cookies?: { count: number; names: string[] } | null;
+  body?: string | null;
+  artifact?: { path: string; bytes: number } | null;
+};
+
+export type BrowserCdpResult = {
+  method: string;
+  target: string;
+  warnings: string[];
+  bytes: number;
+  result?: unknown;
+  artifact?: BrowserSnapshotArtifact | null;
+};
+
+export type BrowserClockState = {
+  installed: boolean;
+  paused: boolean;
+};
+
+export type BrowserResetSummary = {
+  routes: number;
+  har_replays: number;
+  websocket_routes: number;
+  locator_handlers: number;
+  authenticators: number;
+  init_scripts: number;
+  offline: boolean;
+  throttling_cleared: boolean;
+  emulation_cleared: boolean;
+  clock_cleared: boolean;
+  service_worker_block_cleared: boolean;
+};
+
+export type BrowserNetworkConditions = {
+  latency_ms: number;
+  download_kbps: number;
+  upload_kbps: number;
+};
+
+export type BrowserElementState = {
+  visible?: boolean;
+  enabled?: boolean;
+  editable?: boolean;
+  stable?: boolean;
+  checked?: boolean | string | null;
+};
+
 export type BrowserActionResponse = {
   ok: boolean;
   steps: BrowserExecutionStep[];
+  network_summary?: string[];
   url?: string | null;
   title?: string | null;
   stabilized?: boolean;

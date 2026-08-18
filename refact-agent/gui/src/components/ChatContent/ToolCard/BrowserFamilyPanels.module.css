@@ -1,0 +1,134 @@
+.section {
+  composes: section from "./ToolCardBody.module.css";
+  gap: var(--rf-space-2);
+}
+
+.sectionLabel {
+  composes: sectionLabel from "./ToolCardBody.module.css";
+}
+
+.rowList {
+  composes: resultList from "./ToolCardBody.module.css";
+  gap: var(--rf-space-1);
+}
+
+.networkRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  min-width: 0;
+  align-items: baseline;
+  gap: var(--rf-space-1) var(--rf-space-2);
+  padding-block: var(--rf-space-1);
+  border-block-end: var(--rf-hairline) solid var(--rf-border);
+}
+
+.networkRow:last-child {
+  border-block-end: 0;
+}
+
+.networkRow[data-error="true"] {
+  padding-inline-start: var(--rf-space-2);
+  border-inline-start: calc(var(--rf-hairline) * 2) solid var(--rf-color-danger);
+}
+
+@container (max-width: 360px) {
+  .networkRow {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+}
+
+.url {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mono {
+  font-family: var(--rf-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.rowMeta {
+  min-width: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  overflow-wrap: anywhere;
+}
+
+.failure {
+  grid-column: 1 / -1;
+  min-width: 0;
+  color: var(--rf-color-danger);
+  font-size: var(--rf-text-1);
+  overflow-wrap: anywhere;
+}
+
+.warning {
+  min-width: 0;
+  color: var(--rf-color-warning);
+  font-size: var(--rf-text-1);
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.chain {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.routeRow {
+  min-width: 0;
+  padding-inline-start: var(--rf-space-2);
+  border-inline-start: var(--rf-hairline) solid var(--rf-border);
+}
+
+.httpRow,
+.cdpRow,
+.readoutRow {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  justify-items: start;
+}
+
+.readoutSummary {
+  min-width: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  overflow-wrap: anywhere;
+}
+
+.websocketRow {
+  min-width: 0;
+}
+
+.websocketRow[data-status="error"] {
+  padding-inline-start: var(--rf-space-2);
+  border-inline-start: var(--rf-hairline) solid var(--rf-color-danger);
+}
+
+.codeBlock {
+  composes: resultPanel from "./ToolCardBody.module.css";
+  composes: resultPanelCompact from "./ToolCardBody.module.css";
+}
+
+.filterInput {
+  min-width: 0;
+  max-width: var(--rf-input-max, 100%);
+}
+
+.deviceCloud {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  min-width: 0;
+  max-height: calc(var(--rf-control-h-lg) * 5);
+  overflow-y: auto;
+}

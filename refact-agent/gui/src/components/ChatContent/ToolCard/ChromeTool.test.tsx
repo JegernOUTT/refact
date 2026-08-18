@@ -301,9 +301,12 @@ describe("ChromeTool", () => {
     expect(screen.getByText(/Start HAR recording/i)).toBeInTheDocument();
     await user.click(screen.getByText(/Browser action/i));
     expect(screen.getByText("WebSockets")).toBeInTheDocument();
-    expect(
-      screen.getByText((text) => text.includes("frame_received routed")),
-    ).toBeInTheDocument();
+    expect(screen.getByTestId("websocket-route")).toBeInTheDocument();
+    expect(screen.getByText("mock")).toBeInTheDocument();
+    expect(screen.getByText("wss://example.test/**")).toBeInTheDocument();
+    expect(screen.getByText("received")).toBeInTheDocument();
+    expect(screen.getByText("routed")).toBeInTheDocument();
+    expect(screen.getByText("masked frame")).toBeInTheDocument();
   });
 
   test("renders typed browser request and execution report", async () => {
@@ -992,6 +995,9 @@ describe("ChromeTool", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "Filmstrip" })).toBeInTheDocument();
     expect(view.container.querySelectorAll("img")).toHaveLength(1);
+    expect(screen.getByTestId("capture-artifact")).toHaveTextContent(
+      "/artifacts/burst-filmstrip.jpg",
+    );
   });
 
   test("labels element galleries and state strips that carry no inline image", async () => {
@@ -1173,5 +1179,146 @@ describe("ChromeTool", () => {
     expect(
       screen.getByText((text) => text.includes('+ navigation "Secondary"')),
     ).toBeInTheDocument();
+  });
+
+  test("renders wave-3 step families inside the card", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-families",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: {
+            steps: [
+              { action: "fast_forward", ticks_ms: 3_600_000 },
+              { action: "list_routes" },
+              { action: "http_request", url: "https://api.example.test/ping" },
+              { action: "cdp_send", method: "Page.enable" },
+              { action: "list_devices" },
+              { action: "reset" },
+              { action: "count" },
+            ],
+          },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-families",
+      content: JSON.stringify({
+        ok: true,
+        network_summary: ["GET https://example.test/app.js 200 2048b 40ms"],
+        steps: [
+          {
+            step_index: 0,
+            ok: true,
+            summary: "Fast-forwarded clock",
+            retries: 0,
+            data: { clock: { installed: true, paused: false } },
+          },
+          {
+            step_index: 1,
+            ok: true,
+            summary: "Listed 1 network route(s)",
+            retries: 0,
+            data: {
+              routes: [
+                {
+                  order: 0,
+                  pattern: "**/api/**",
+                  handler: { type: "abort", reason: "blockedbyclient" },
+                },
+              ],
+            },
+          },
+          {
+            step_index: 2,
+            ok: true,
+            summary: "GET https://api.example.test/ping -> 204",
+            retries: 0,
+            data: {
+              http_request: {
+                method: "GET",
+                url: "https://api.example.test/ping",
+                status: 204,
+                body_bytes: 0,
+              },
+            },
+          },
+          {
+            step_index: 3,
+            ok: true,
+            summary: "Page.enable on page returned 12 bytes",
+            retries: 0,
+            data: {
+              cdp_send: {
+                method: "Page.enable",
+                target: "page",
+                warnings: [],
+                bytes: 12,
+                result: {},
+              },
+            },
+          },
+          {
+            step_index: 4,
+            ok: true,
+            summary: "2 matching device(s)",
+            retries: 0,
+            data: { devices: ["Pixel 7", "iPad Pro 11"], aliases: ["mobile"] },
+          },
+          {
+            step_index: 5,
+            ok: true,
+            summary: "Reset browser state",
+            retries: 0,
+            data: {
+              reset: {
+                routes: 1,
+                har_replays: 0,
+                websocket_routes: 0,
+                locator_handlers: 0,
+                authenticators: 0,
+                init_scripts: 0,
+                offline: false,
+                throttling_cleared: true,
+                emulation_cleared: true,
+                clock_cleared: true,
+                service_worker_block_cleared: false,
+              },
+            },
+          },
+          {
+            step_index: 6,
+            ok: true,
+            summary: "Matched 3 element(s)",
+            retries: 0,
+            data: { count: 3 },
+          },
+        ],
+      }),
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+
+    expect(screen.getByTestId("network-summary")).toBeInTheDocument();
+    expect(screen.getByTestId("route-chain")).toBeInTheDocument();
+    expect(screen.getByTestId("http-requests")).toBeInTheDocument();
+    expect(screen.getByTestId("clock-timeline")).toBeInTheDocument();
+    expect(screen.getByTestId("readouts")).toBeInTheDocument();
+    expect(screen.getByTestId("devices")).toBeInTheDocument();
+    expect(screen.getByTestId("cdp")).toBeInTheDocument();
+    expect(screen.getByTestId("reset")).toBeInTheDocument();
+    expect(screen.getByText("fast_forward +01:00")).toBeInTheDocument();
+    expect(screen.getByText("3 matched")).toBeInTheDocument();
+    expect(screen.getByText("1 routes")).toBeInTheDocument();
   });
 });

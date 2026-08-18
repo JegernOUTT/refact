@@ -23,12 +23,25 @@ import type {
 } from "../../../services/refact/browser";
 import { ShikiCodeBlock } from "../../Markdown";
 import { DialogImage } from "../../DialogImage";
+import { Chip } from "../../ui";
 import { AriaSnapshotView } from "./AriaSnapshotView";
 import { ActionabilityLog } from "./ActionabilityLog";
 import { ArtifactsPanel } from "./ArtifactsPanel";
 import { NetworkPanel } from "./NetworkPanel";
 import { PageHeader } from "./PageHeader";
 import { PageSnapshot } from "./PageSnapshot";
+import { collectBrowserFamilies } from "./browserFamilies";
+import {
+  CdpPanel,
+  ClockTimeline,
+  DevicePanel,
+  HttpRequestPanel,
+  NetworkSummaryPanel,
+  ReadoutPanel,
+  ResetPanel,
+  RouteChainPanel,
+  WebSocketPanel,
+} from "./BrowserFamilyPanels";
 import styles from "./ChromeTool.module.css";
 
 interface ChromeArgs {
@@ -242,7 +255,16 @@ function stringList(value: unknown): string[] {
   return value.filter((entry): entry is string => typeof entry === "string");
 }
 
-function parseFrameRecords(value: unknown): BrowserFrameRecord[] {
+interface CaptureFrame extends BrowserFrameRecord {
+  artifactPath: string | null;
+}
+
+function artifactPath(value: unknown): string | null {
+  if (!isRecord(value) || !isRecord(value.artifact)) return null;
+  return typeof value.artifact.path === "string" ? value.artifact.path : null;
+}
+
+function parseFrameRecords(value: unknown): CaptureFrame[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry) => {
     if (!isRecord(entry)) return [];
@@ -254,6 +276,7 @@ function parseFrameRecords(value: unknown): BrowserFrameRecord[] {
         index,
         offset_ms: offset,
         changed_percent: optionalNumber(entry.changed_percent) ?? null,
+        artifactPath: artifactPath(entry),
       },
     ];
   });
@@ -301,8 +324,9 @@ interface StepCaptureEntry {
   kind: BrowserCaptureKind;
   label: string;
   detail: string | null;
-  frames: BrowserFrameRecord[];
+  frames: CaptureFrame[];
   warnings: string[];
+  artifactPath: string | null;
   src?: string;
 }
 
@@ -661,6 +685,11 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     [typedResult],
   );
 
+  const families = useMemo(
+    () => collectBrowserFamilies(typedResult, typedArgs?.steps ?? null),
+    [typedResult, typedArgs],
+  );
+
   const { captures, usedImageIndexes } = useMemo(() => {
     const entries: StepCaptureEntry[] = [];
     const used = new Set<number>();
@@ -684,6 +713,7 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         detail: captureDetail(kind, data),
         frames: kind === "filmstrip" ? parseFrameRecords(data.frames) : [],
         warnings: stringList(data.warnings),
+        artifactPath: artifactPath(data),
         src,
       });
     }
@@ -835,19 +865,6 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       .join("\n");
   }, [typedResult]);
 
-  const typedWebSocketsBlock = useMemo(() => {
-    if (!typedResult?.websockets?.length) return null;
-    return typedResult.websockets
-      .map((event) => {
-        const detail = event.data ?? event.error ?? event.status ?? "";
-        const route = event.routed ? " routed" : "";
-        return `${event.kind}${route}: ${event.url}${
-          detail ? ` · ${detail}` : ""
-        }`;
-      })
-      .join("\n");
-  }, [typedResult]);
-
   const typedContextBlock = useMemo(() => {
     const context = typedResult?.context;
     if (!context) return null;
@@ -957,11 +974,20 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
                 {capture.frames.length > 0 && (
                   <Flex gap="1" wrap="wrap">
                     {capture.frames.map((frame) => (
-                      <Box className={styles.frameChip} key={frame.index}>
+                      <Box
+                        className={styles.frameChip}
+                        key={frame.index}
+                        title={frame.artifactPath ?? undefined}
+                      >
                         {formatFrameChip(frame)}
                       </Box>
                     ))}
                   </Flex>
+                )}
+                {capture.artifactPath && (
+                  <Chip data-testid="capture-artifact" radius="chip">
+                    {capture.artifactPath}
+                  </Chip>
                 )}
                 {capture.warnings.map((warning, index) => (
                   <Box className={styles.captureWarning} key={index}>
@@ -1017,6 +1043,12 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         )
       )}
 
+      <ReadoutPanel entries={families.readouts} />
+
+      <HttpRequestPanel entries={families.httpRequests} />
+
+      <CdpPanel entries={families.cdp} />
+
       {pageContext?.snapshot && (
         <PageSnapshot snapshot={pageContext.snapshot} />
       )}
@@ -1056,16 +1088,13 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
 
       <NetworkPanel entries={typedResult?.network} />
 
-      {typedWebSocketsBlock && (
-        <Box className={styles.section}>
-          <Box className={styles.sectionLabel}>WebSockets</Box>
-          <Box className={styles.logContent}>
-            <ShikiCodeBlock showLineNumbers={false}>
-              {typedWebSocketsBlock}
-            </ShikiCodeBlock>
-          </Box>
-        </Box>
-      )}
+      <NetworkSummaryPanel rows={families.networkSummary} />
+
+      <WebSocketPanel
+        closes={families.webSocketCloses}
+        events={families.webSocketEvents}
+        routes={families.webSocketRoutes}
+      />
 
       {typedContextBlock && (
         <Box className={styles.section}>
@@ -1078,6 +1107,12 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         </Box>
       )}
 
+      <ClockTimeline entries={families.clock} />
+
+      <DevicePanel catalogs={families.devices} emulation={families.emulation} />
+
+      <ResetPanel entries={families.resets} />
+
       {typedRoutesBlock && (
         <Box className={styles.section}>
           <Box className={styles.sectionLabel}>Active Routes</Box>
@@ -1088,6 +1123,8 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
           </Box>
         </Box>
       )}
+
+      <RouteChainPanel chains={families.routeChains} />
 
       {typedInterceptionsBlock && (
         <Box className={styles.section}>
