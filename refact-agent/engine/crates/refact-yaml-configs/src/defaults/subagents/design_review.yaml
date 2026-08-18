@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: design_review
 title: Design Review
 description: Read-only UI audit grounded in design-system and live-browser measurements
@@ -42,9 +42,11 @@ messages:
 
     Canonical calls:
 
-    - `chrome({"steps":[{"type":"accessibility_snapshot","locator":{"css":"[data-testid=toolbar]"},"boxes":true}]})`
-    - `chrome({"steps":[{"type":"capture_element_states","locator":{"ref":"e14"},"states":["default","hover","focus","active"]}]})`
-    - `chrome({"steps":[{"type":"click","locator":{"css":"#open-drawer"}},{"type":"capture_frames","duration_ms":1200,"frame_count":8,"locator":{"css":".drawer"}}]})`
+    Every step names its `action`, and every locator is `{"by": <strategy>, "value": <string>}`.
+
+    - `chrome({"steps":[{"action":"accessibility_snapshot","locator":{"by":"css","value":"[data-testid=toolbar]"},"boxes":true}]})`
+    - `chrome({"steps":[{"action":"capture_element_states","locator":{"by":"ref","value":"e14"},"states":["default","hover","focus","active"]}]})`
+    - `chrome({"steps":[{"action":"click","locator":{"by":"css","value":"#open-drawer"}},{"action":"capture_frames","duration_ms":1200,"frame_count":8,"locator":{"by":"css","value":".drawer"}}]})`
 
     Return exactly one fenced `html` block and nothing after it. The block must be a complete interactive report with a summary, filterable or collapsible findings, and an evidence section. Every finding must contain:
     - severity;

@@ -1430,6 +1430,117 @@ mod tests {
             assert!(design_prompt.contains(required), "missing `{required}`");
         }
     }
+
+    fn extract_chrome_examples(prompt: &str) -> Vec<String> {
+        let mut examples = Vec::new();
+        let mut rest = prompt;
+        while let Some(start) = rest.find("chrome({") {
+            let payload = &rest[start + "chrome(".len()..];
+            let mut depth = 0usize;
+            let mut end = None;
+            for (index, character) in payload.char_indices() {
+                match character {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(index + character.len_utf8());
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else {
+                panic!(
+                    "unbalanced chrome example near: {}",
+                    &payload[..40.min(payload.len())]
+                );
+            };
+            examples.push(payload[..end].to_string());
+            rest = &payload[end..];
+        }
+        examples
+    }
+
+    #[tokio::test]
+    async fn design_prompt_chrome_examples_parse_through_the_real_browser_dialect() {
+        let gcx = task_prompt_contract_gcx().await;
+        let registry =
+            crate::yaml_configs::customization_registry::load_registry_from_dir(&gcx.config_dir)
+                .await;
+        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+
+        let design = registry
+            .modes
+            .get("design")
+            .expect("design mode should load");
+        let prompts = [
+            ("design", design.prompt.clone()),
+            (
+                "design_review",
+                registry
+                    .subagents
+                    .get("design_review")
+                    .and_then(|subagent| subagent.messages.system_prompt.clone())
+                    .expect("design_review system prompt"),
+            ),
+            (
+                "visual_qa",
+                registry
+                    .subagents
+                    .get("visual_qa")
+                    .and_then(|subagent| subagent.messages.system_prompt.clone())
+                    .expect("visual_qa system prompt"),
+            ),
+        ];
+
+        let mut parsed = 0usize;
+        for (id, prompt) in &prompts {
+            for example in extract_chrome_examples(prompt) {
+                let value: serde_json::Value =
+                    serde_json::from_str(&example).unwrap_or_else(|error| {
+                        panic!("{id} example is not JSON: {example} ({error})")
+                    });
+                crate::integrations::browser_models::parse_browser_action_request(value)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{id} example does not match the chrome dialect: {example} ({error})"
+                        )
+                    });
+                assert!(
+                    !example.contains("\"type\":"),
+                    "{id} example uses the non-existent `type` step key: {example}"
+                );
+                parsed += 1;
+            }
+        }
+        assert_eq!(
+            parsed, 6,
+            "expected every documented chrome example to be round-tripped, parsed {parsed}"
+        );
+    }
+
+    #[test]
+    fn browser_locators_only_parse_in_by_value_form() {
+        let by_value = serde_json::json!({
+            "steps":[{"action":"click","locator":{"by":"css","value":"#save"}}]
+        });
+        assert!(
+            crate::integrations::browser_models::parse_browser_action_request(by_value).is_ok()
+        );
+        for wrong in [
+            serde_json::json!({"steps":[{"type":"click","locator":{"by":"css","value":"#save"}}]}),
+            serde_json::json!({"steps":[{"action":"click","locator":{"css":"#save"}}]}),
+            serde_json::json!({"steps":[{"action":"click","locator":{"ref":"e14"}}]}),
+        ] {
+            assert!(
+                crate::integrations::browser_models::parse_browser_action_request(wrong.clone())
+                    .is_err(),
+                "{wrong} must not parse; documenting it would teach an unusable dialect"
+            );
+        }
+    }
 }
 
 pub async fn get_available_tool_groups(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {

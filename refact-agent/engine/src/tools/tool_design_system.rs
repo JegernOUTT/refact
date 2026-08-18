@@ -17,8 +17,10 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 
 const DEFAULT_MAX_FINDINGS: usize = 100;
 const MAX_FINDINGS: usize = 500;
-const MAX_COMPONENTS: usize = 200;
-const MAX_TOKEN_OUTPUT: usize = 2_000;
+const MAX_COMPONENTS: usize = 100;
+const MAX_TOKEN_OUTPUT: usize = 300;
+const MAX_OUTPUT_CHARS: usize = 60_000;
+const MAX_OUTPUT_TOKENS: usize = 16_000;
 const MAX_SCAN_FILES: usize = 20_000;
 const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -65,7 +67,10 @@ struct ComponentRecord {
     exported: bool,
     props: Vec<String>,
     variants: BTreeMap<String, Vec<String>>,
+    approx_usage_count: usize,
     usage_count: usize,
+    method: &'static str,
+    heuristic: bool,
     source: String,
 }
 
@@ -77,6 +82,8 @@ struct DriftFinding {
     line: usize,
     nearest_token: Option<String>,
     nearest_value: Option<String>,
+    heuristic: bool,
+    method: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -96,9 +103,11 @@ struct DesignSystemResponse {
     tokens: Value,
     component_inventory_source: String,
     component_count: usize,
+    component_output_count: usize,
     components_truncated: bool,
     components: Vec<ComponentRecord>,
     drift_count: usize,
+    drift_output_count: usize,
     findings_truncated: bool,
     drift: Vec<DriftFinding>,
 }
@@ -181,7 +190,7 @@ impl Tool for ToolDesignSystem {
             content: ChatContent::SimpleText(text),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
-            output_filter: Some(OutputFilter::no_limits()),
+            output_filter: Some(design_system_output_filter()),
             ..Default::default()
         })];
         let records = crate::privacy::records::declared_file_records(&gcx, record_paths)?;
@@ -201,7 +210,7 @@ impl Tool for ToolDesignSystem {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Extract repository design tokens as DTCG JSON, inventory UI components with usage counts, and find hardcoded visual values with nearest-token suggestions.".to_string(),
+            description: "Extract repository design tokens as DTCG JSON, inventory UI components, and find hardcoded visual values with nearest-token suggestions. Usage counts and drift findings are approximations, not verified references: without CodeGraph, usage is an identifier grep (`approx_usage_count`, `method: identifier-grep`) and every drift row is a regex scan carrying `heuristic: true`. Output is bounded; check `tokens_truncated`, `components_truncated`, and `findings_truncated` with their counts before treating a list as complete.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -455,11 +464,22 @@ fn analyze_design_system(
         tokens: dtcg,
         component_inventory_source,
         component_count,
+        component_output_count: components.len(),
         components_truncated,
         components,
         drift_count,
+        drift_output_count: drift.len(),
         findings_truncated,
         drift,
+    }
+}
+
+fn design_system_output_filter() -> OutputFilter {
+    OutputFilter {
+        limit_lines: usize::MAX,
+        limit_chars: MAX_OUTPUT_CHARS,
+        limit_tokens: Some(MAX_OUTPUT_TOKENS),
+        ..Default::default()
     }
 }
 
@@ -982,6 +1002,7 @@ fn inventory_components(
                 continue;
             };
             let (props, variants) = component_contract(name, &file.text);
+            let usage = graph.incoming.get(id).copied().unwrap_or_default();
             components.insert(
                 (name.clone(), relative.clone()),
                 ComponentRecord {
@@ -990,7 +1011,10 @@ fn inventory_components(
                     exported: is_exported(name, &file.text),
                     props,
                     variants,
-                    usage_count: graph.incoming.get(id).copied().unwrap_or_default(),
+                    approx_usage_count: usage,
+                    usage_count: usage,
+                    method: "codegraph-incoming-edges",
+                    heuristic: false,
                     source: format!("codegraph-generation-{}", graph.generation),
                 },
             );
@@ -1002,12 +1026,16 @@ fn inventory_components(
             let key = (name.clone(), file.relative.clone());
             components.entry(key).or_insert_with(|| {
                 let (props, variants) = component_contract(&name, &file.text);
+                let usage = identifiers
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(1)
+                    .saturating_sub(1);
                 ComponentRecord {
-                    usage_count: identifiers
-                        .get(&name)
-                        .copied()
-                        .unwrap_or(1)
-                        .saturating_sub(1),
+                    approx_usage_count: usage,
+                    usage_count: usage,
+                    method: "identifier-grep",
+                    heuristic: true,
                     exported: is_exported(&name, &file.text),
                     props,
                     variants,
@@ -1020,7 +1048,15 @@ fn inventory_components(
     }
     let total = components.len();
     let truncated = total > MAX_COMPONENTS;
-    let components = components.into_values().take(MAX_COMPONENTS).collect();
+    let mut components = components.into_values().collect::<Vec<_>>();
+    components.sort_by(|left, right| {
+        right
+            .approx_usage_count
+            .cmp(&left.approx_usage_count)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    components.truncate(MAX_COMPONENTS);
     (
         if graph_used {
             "codegraph+filesystem".to_string()
@@ -1223,6 +1259,8 @@ fn detect_drift(
                         line: line_index + 1,
                         nearest_token,
                         nearest_value,
+                        heuristic: true,
+                        method: "regex-scan-nearest-token",
                     });
                 }
             }
@@ -1238,6 +1276,8 @@ fn detect_drift(
                         line: line_index + 1,
                         nearest_token,
                         nearest_value,
+                        heuristic: true,
+                        method: "regex-scan-nearest-token",
                     });
                 }
             }
@@ -1252,6 +1292,8 @@ fn detect_drift(
                         line: line_index + 1,
                         nearest_token,
                         nearest_value,
+                        heuristic: true,
+                        method: "regex-scan-nearest-token",
                     });
                 }
             }
@@ -1524,7 +1566,63 @@ mod tests {
             .unwrap();
         assert_eq!(button.props, vec!["disabled", "variant"]);
         assert_eq!(button.variants["variant"], vec!["ghost", "primary"]);
-        assert_eq!(button.usage_count, 1);
+        assert_eq!(button.approx_usage_count, 1);
+        assert_eq!(button.usage_count, button.approx_usage_count);
+        assert_eq!(button.method, "identifier-grep");
+        assert!(button.heuristic);
+    }
+
+    #[test]
+    fn drift_findings_declare_themselves_as_heuristics() {
+        let root = Path::new("/tmp/design-system-heuristic");
+        let files = vec![
+            source(root, "styles/tokens.css", ":root { --brand: #112233; }"),
+            source(root, "Card.module.css", ".bad { color: #102234; }"),
+        ];
+        let tokens = extract_tokens(&files);
+        let (_, _, findings) = detect_drift(&files, &tokens, 10);
+        assert!(!findings.is_empty());
+        for finding in &findings {
+            assert!(finding.heuristic, "{finding:?}");
+            assert_eq!(finding.method, "regex-scan-nearest-token");
+        }
+    }
+
+    #[test]
+    fn component_inventory_is_bounded_and_ranked_by_usage() {
+        let root = Path::new("/tmp/design-system-bounded");
+        let mut files = Vec::new();
+        for index in 0..(MAX_COMPONENTS + 5) {
+            files.push(source(
+                root,
+                Box::leak(format!("Comp{index}.tsx").into_boxed_str()),
+                Box::leak(
+                    format!("export function Comp{index}() {{ return null }}").into_boxed_str(),
+                ),
+            ));
+        }
+        files.push(source(
+            root,
+            "Page.tsx",
+            "export const Page = () => <Comp0 />;",
+        ));
+        let (_, total, truncated, components) = inventory_components(root, root, &files, None);
+        assert!(truncated, "{total} components should exceed the cap");
+        assert_eq!(components.len(), MAX_COMPONENTS);
+        assert_eq!(components.first().unwrap().name, "Comp0");
+        assert_eq!(components.first().unwrap().approx_usage_count, 1);
+        assert!(components
+            .windows(2)
+            .all(|pair| pair[0].approx_usage_count >= pair[1].approx_usage_count));
+    }
+
+    #[test]
+    fn design_system_output_is_bounded_instead_of_unlimited() {
+        let filter = design_system_output_filter();
+        assert!(!filter.skip);
+        assert_eq!(filter.limit_chars, MAX_OUTPUT_CHARS);
+        assert_eq!(filter.limit_tokens, Some(MAX_OUTPUT_TOKENS));
+        assert!(filter.limit_chars < usize::MAX);
     }
 
     #[test]
@@ -1591,7 +1689,9 @@ mod tests {
             .find(|component| component.name == "Button")
             .unwrap();
         assert_eq!(inventory_source, "codegraph+filesystem");
-        assert_eq!(button.usage_count, 1);
+        assert_eq!(button.approx_usage_count, 1);
+        assert_eq!(button.method, "codegraph-incoming-edges");
+        assert!(!button.heuristic);
         assert!(button.source.starts_with("codegraph-generation-"));
     }
 }

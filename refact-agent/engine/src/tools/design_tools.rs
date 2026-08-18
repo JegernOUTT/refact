@@ -40,8 +40,15 @@ const INSTRUMENTATION_ERROR_MARKERS: &[&str] = &[
     "RefactInjected is not installed",
     "__refact_injected__ is not defined",
 ];
-const ZERO_SCAN_WARNING: &str = "Contrast audit scanned 0 elements — page not instrumented or selector matched nothing; results are NOT a pass";
+const ZERO_SCAN_FAILURE: &str = "contrast audit scanned 0 elements — measurement failed, not a pass; the page is not instrumented or the selector matched nothing";
 const NO_TOKEN_FILES_WARNING: &str = "Contrast audit resolved 0 design-token files — non-token color findings are incomplete; results are NOT a pass";
+const PROBE_ZERO_MEASUREMENT_FAILURE: &str = "ui_probe measured 0 elements — measurement failed, not a pass; the page is not instrumented or the targets matched nothing";
+const AA_NORMAL_RATIO: f64 = 4.5;
+const AA_LARGE_RATIO: f64 = 3.0;
+const AAA_NORMAL_RATIO: f64 = 7.0;
+const AAA_LARGE_RATIO: f64 = 4.5;
+const NON_TEXT_RATIO: f64 = 3.0;
+const MAX_INLINE_ARTIFACT_CHARS: usize = 32 * 1024;
 const PROBE_FUNCTION: &str = r#"function(properties) {
   const el = this;
   const rect = el.getBoundingClientRect();
@@ -379,7 +386,25 @@ pub fn contrast_ratio(foreground: Rgb, background: Rgb) -> f64 {
     (first.max(second) + 0.05) / (first.min(second) + 0.05)
 }
 
-fn text_threshold(font_size: f64, font_weight: &str) -> f64 {
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+pub enum WcagLevel {
+    #[default]
+    #[serde(rename = "AA", alias = "aa")]
+    Aa,
+    #[serde(rename = "AAA", alias = "aaa")]
+    Aaa,
+}
+
+impl WcagLevel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Aa => "AA",
+            Self::Aaa => "AAA",
+        }
+    }
+}
+
+pub fn is_large_text(font_size: f64, font_weight: &str) -> bool {
     let weight = font_weight.parse::<u16>().unwrap_or_else(|_| {
         if font_weight.eq_ignore_ascii_case("bold") {
             700
@@ -387,10 +412,56 @@ fn text_threshold(font_size: f64, font_weight: &str) -> f64 {
             400
         }
     });
-    if (font_size >= 18.66 && weight >= 700) || font_size >= 24.0 {
-        3.0
+    (font_size >= 18.66 && weight >= 700) || font_size >= 24.0
+}
+
+pub fn required_contrast_ratio(level: WcagLevel, large_text: bool) -> f64 {
+    match (level, large_text) {
+        (WcagLevel::Aa, false) => AA_NORMAL_RATIO,
+        (WcagLevel::Aa, true) => AA_LARGE_RATIO,
+        (WcagLevel::Aaa, false) => AAA_NORMAL_RATIO,
+        (WcagLevel::Aaa, true) => AAA_LARGE_RATIO,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContrastEvaluation {
+    pub ratio: f64,
+    pub required_ratio: f64,
+    pub large_text: bool,
+    pub passes_aa: bool,
+    pub passes_aaa: bool,
+    pub emitted: bool,
+}
+
+pub fn evaluate_contrast(
+    ratio: f64,
+    level: WcagLevel,
+    non_text: bool,
+    font_size: f64,
+    font_weight: &str,
+) -> ContrastEvaluation {
+    let large_text = !non_text && is_large_text(font_size, font_weight);
+    let (required_ratio, passes_aa, passes_aaa) = if non_text {
+        (
+            NON_TEXT_RATIO,
+            ratio >= NON_TEXT_RATIO,
+            ratio >= NON_TEXT_RATIO,
+        )
     } else {
-        4.5
+        (
+            required_contrast_ratio(level, large_text),
+            ratio >= required_contrast_ratio(WcagLevel::Aa, large_text),
+            ratio >= required_contrast_ratio(WcagLevel::Aaa, large_text),
+        )
+    };
+    ContrastEvaluation {
+        ratio,
+        required_ratio,
+        large_text,
+        passes_aa,
+        passes_aaa,
+        emitted: ratio < required_ratio,
     }
 }
 
@@ -624,6 +695,8 @@ fn changed_regions(changed: &[bool], width: u32, height: u32) -> Vec<ChangedRegi
 pub struct ContrastAuditArgs {
     #[serde(default)]
     pub token_files: Vec<String>,
+    #[serde(default)]
+    pub level: WcagLevel,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -645,6 +718,11 @@ struct ContrastFinding {
     foreground: String,
     background: String,
     ratio: f64,
+    required_ratio: f64,
+    level: &'static str,
+    large_text: bool,
+    passes_aa: bool,
+    passes_aaa: bool,
     threshold: f64,
     aa: bool,
     aaa: bool,
@@ -656,6 +734,99 @@ struct RawColorFinding {
     color: String,
     selector: String,
     severity: &'static str,
+}
+
+pub fn cell_is_measured(cell: &Value) -> bool {
+    let Some(measured) = cell.get("box") else {
+        return false;
+    };
+    ["width", "height"]
+        .iter()
+        .all(|key| measured.get(key).and_then(Value::as_f64).is_some())
+}
+
+pub fn artifact_is_oversized(artifact: &ImageArtifact) -> bool {
+    artifact.data.len() > MAX_INLINE_ARTIFACT_CHARS
+}
+
+fn artifact_json(artifact: &ImageArtifact, path: Option<&Path>) -> Value {
+    let mut value = json!({
+        "kind": artifact.kind,
+        "mime": artifact.mime,
+        "width": artifact.width,
+        "height": artifact.height,
+        "bytes": artifact.bytes,
+        "attached_as": "multimodal_image"
+    });
+    match path {
+        Some(path) => {
+            value["path"] = json!(path.to_string_lossy());
+            value["inlined"] = json!(false);
+        }
+        None => {
+            value["data"] = json!(artifact.data);
+            value["inlined"] = json!(true);
+        }
+    }
+    value
+}
+
+pub fn spill_artifact(
+    artifact: &ImageArtifact,
+    artifacts_dir: &Path,
+    stem: &str,
+) -> Result<Value, String> {
+    if !artifact_is_oversized(artifact) {
+        return Ok(artifact_json(artifact, None));
+    }
+    let bytes = base64::prelude::BASE64_STANDARD
+        .decode(&artifact.data)
+        .map_err(|error| format!("failed to decode artifact for spilling: {error}"))?;
+    std::fs::create_dir_all(artifacts_dir).map_err(|error| {
+        format!(
+            "failed to create design artifacts directory {}: {error}",
+            artifacts_dir.display()
+        )
+    })?;
+    let extension = artifact
+        .mime
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("png");
+    let path = artifacts_dir.join(format!(
+        "{stem}-{}.{extension}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_millis())
+            .unwrap_or_default()
+    ));
+    std::fs::write(&path, &bytes)
+        .map_err(|error| format!("failed to write artifact {}: {error}", path.display()))?;
+    Ok(artifact_json(artifact, Some(&path)))
+}
+
+fn tool_image_message(
+    tool_call_id: &str,
+    text: String,
+    artifact: &ImageArtifact,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    let content = vec![
+        crate::scratchpads::multimodality::MultimodalElement::new("text".to_string(), text)?,
+        crate::scratchpads::multimodality::MultimodalElement::new(
+            artifact.mime.clone(),
+            artifact.data.clone(),
+        )?,
+    ];
+    Ok((
+        false,
+        vec![ContextEnum::ChatMessage(ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::Multimodal(content),
+            tool_call_id: tool_call_id.to_string(),
+            ..Default::default()
+        })],
+    ))
 }
 
 fn tool_message(tool_call_id: &str, text: String) -> Result<(bool, Vec<ContextEnum>), String> {
@@ -931,31 +1102,24 @@ pub struct ContrastAuditVerdict {
 
 pub fn contrast_audit_verdict(
     elements_scanned: usize,
-    failed: usize,
-    aaa_warnings: usize,
+    level: WcagLevel,
+    failures: usize,
     raw_colors: usize,
     resolved_token_files: usize,
 ) -> ContrastAuditVerdict {
-    let mut warnings = Vec::new();
-    if elements_scanned == 0 {
-        warnings.push(ZERO_SCAN_WARNING);
-    }
-    if resolved_token_files == 0 {
-        warnings.push(NO_TOKEN_FILES_WARNING);
-    }
     let measured = format!(
-        "Contrast audit scanned {elements_scanned} elements: {failed} AA failures, {aaa_warnings} AAA warnings, and {raw_colors} non-token colors"
+        "Contrast audit scanned {elements_scanned} elements at {}: {failures} contrast failures and {raw_colors} non-token colors",
+        level.label()
     );
-    if warnings.is_empty() {
+    if resolved_token_files > 0 {
         return ContrastAuditVerdict {
             summary: measured,
             warning: None,
         };
     }
-    let warning = warnings.join(" | ");
     ContrastAuditVerdict {
-        summary: format!("{warning}. {measured}"),
-        warning: Some(warning),
+        summary: format!("{NO_TOKEN_FILES_WARNING}. {measured}"),
+        warning: Some(NO_TOKEN_FILES_WARNING.to_string()),
     }
 }
 
@@ -1014,6 +1178,10 @@ fn token_colors_from_files(root: &Path, token_files: &[String]) -> Result<TokenC
         colors,
         resolved_files,
     })
+}
+
+fn design_artifacts_dir(gcx: &crate::global_context::GlobalContext) -> PathBuf {
+    gcx.cache_dir.join("design_artifacts")
 }
 
 fn project_root(
@@ -1187,8 +1355,12 @@ impl Tool for ToolUiProbe {
         }
         let _ = refact_browser::context_state::apply_media(&tab, &original_media);
         runtime.touch();
+        let cells_measured = table.iter().filter(|cell| cell_is_measured(cell)).count();
+        if cells_measured == 0 {
+            return Err(PROBE_ZERO_MEASUREMENT_FAILURE.to_string());
+        }
         let summary = format!(
-            "Probed {} target-state combinations without screenshots",
+            "Probed {} target-state combinations ({cells_measured} measured) without screenshots",
             table.len()
         );
         tool_message(
@@ -1198,6 +1370,7 @@ impl Tool for ToolUiProbe {
                 summary,
                 json!({
                     "matrix": table,
+                    "cells_measured": cells_measured,
                     "target_count":args.targets.len(),
                     "viewport_count":args.viewports.len(),
                     "theme_count":args.themes.len(),
@@ -1213,7 +1386,7 @@ impl Tool for ToolUiProbe {
             &self.config_path,
             "ui_probe",
             "UI Probe",
-            "Measure live DOM targets across a viewport × theme × state matrix. Returns computed styles, rectangles, and overflow flags without screenshots. Requires a page instrumented by the local dev-server flow; third-party pages return a page-not-instrumented error.",
+            "Measure live DOM targets across a viewport × theme × state matrix. Returns computed styles, rectangles, and overflow flags without screenshots. Requires a page instrumented by the local dev-server flow; third-party pages return a page-not-instrumented error. Fails closed: measuring 0 cells is a tool error rather than an empty pass.",
             json!({
                 "type":"object",
                 "properties":{
@@ -1302,16 +1475,18 @@ impl Tool for ToolMarkElements {
         let _ = runtime
             .world_manager
             .eval_in_utility(&tab, "window.__refactHideMarks?.(); true");
+        let spilled = spill_artifact(&artifact, &runtime.artifacts_dir, "mark-elements")?;
         runtime.touch();
         let summary = format!("Marked {} DOM-exact ARIA elements", marks.len());
-        tool_message(
+        tool_image_message(
             tool_call_id,
             ToolJson::new(
                 "mark_elements",
                 summary,
-                json!({"marks":marks,"artifact":artifact}),
+                json!({"marks":marks,"artifact":spilled}),
             )
             .to_text(),
+            &artifact,
         )
     }
 
@@ -1367,28 +1542,42 @@ impl Tool for ToolContrastAudit {
         let samples: Vec<RawContrastSample> = serde_json::from_value(raw)
             .map_err(|error| format!("failed to parse contrast samples: {error}"))?;
         let elements_scanned = samples.len();
+        if elements_scanned == 0 {
+            return Err(ZERO_SCAN_FAILURE.to_string());
+        }
         let mut findings = Vec::new();
         for sample in samples {
             let ratio = contrast_ratio(
                 parse_css_color(&sample.foreground)?,
                 parse_css_color(&sample.background)?,
             );
-            let threshold = if sample.kind == "non_text" {
-                3.0
-            } else {
-                text_threshold(sample.font_size, &sample.font_weight)
-            };
-            if ratio < 7.0 {
+            let evaluation = evaluate_contrast(
+                ratio,
+                args.level,
+                sample.kind == "non_text",
+                sample.font_size,
+                &sample.font_weight,
+            );
+            if evaluation.emitted {
                 findings.push(ContrastFinding {
                     selector: sample.selector,
                     text: sample.text,
                     foreground: sample.foreground,
                     background: sample.background,
                     ratio: (ratio * 100.0).round() / 100.0,
-                    threshold,
-                    aa: ratio >= threshold,
-                    aaa: ratio >= 7.0,
-                    severity: if ratio < threshold { "High" } else { "Medium" },
+                    required_ratio: evaluation.required_ratio,
+                    level: args.level.label(),
+                    large_text: evaluation.large_text,
+                    passes_aa: evaluation.passes_aa,
+                    passes_aaa: evaluation.passes_aaa,
+                    threshold: evaluation.required_ratio,
+                    aa: evaluation.passes_aa,
+                    aaa: evaluation.passes_aaa,
+                    severity: if evaluation.passes_aa {
+                        "Medium"
+                    } else {
+                        "High"
+                    },
                 });
             }
             if findings.len() >= MAX_AUDIT_FINDINGS {
@@ -1397,11 +1586,10 @@ impl Tool for ToolContrastAudit {
         }
         let raw_colors = find_raw_colors(&tab, &runtime.world_manager, &token_scan.colors)?;
         runtime.touch();
-        let failed = findings.iter().filter(|finding| !finding.aa).count();
         let verdict = contrast_audit_verdict(
             elements_scanned,
-            failed,
-            findings.len().saturating_sub(failed),
+            args.level,
+            findings.len(),
             raw_colors.len(),
             token_scan.resolved_files.len(),
         );
@@ -1413,7 +1601,14 @@ impl Tool for ToolContrastAudit {
                 json!({
                     "findings":findings,
                     "raw_colors":raw_colors,
-                    "thresholds":{"aaa":7.0,"aa":4.5,"large_text":3.0,"non_text":3.0},
+                    "level":args.level.label(),
+                    "thresholds":{
+                        "aa_normal":AA_NORMAL_RATIO,
+                        "aa_large":AA_LARGE_RATIO,
+                        "aaa_normal":AAA_NORMAL_RATIO,
+                        "aaa_large":AAA_LARGE_RATIO,
+                        "non_text":NON_TEXT_RATIO
+                    },
                     "token_files":token_files,
                     "token_files_resolved":token_scan.resolved_files,
                     "token_color_count":token_scan.colors.len(),
@@ -1430,8 +1625,11 @@ impl Tool for ToolContrastAudit {
             &self.config_path,
             "contrast_audit",
             "Contrast Audit",
-            "Audit live DOM text contrast against WCAG AAA 7.0, AA 4.5, large-text 3.0, and non-text 3.0 thresholds; also report raw stylesheet colors absent from discovered token files. Fails closed: reports elements_scanned and, when zero elements were measured or no token file resolved, leads the summary with a warning instead of a pass.",
-            json!({"type":"object","properties":{"token_files":{"type":"array","items":{"type":"string"},"description":"Repository-relative design-token CSS files"}}}),
+            "Audit live DOM contrast against the requested WCAG level: AA requires 4.5 for normal text and 3.0 for large text, AAA requires 7.0 for normal text and 4.5 for large text, and non-text UI contrast requires 3.0. A finding is emitted only when the measured ratio is below the requirement for the audited level and text size class. Also reports raw stylesheet colors absent from discovered token files. Fails closed: scanning 0 elements is a tool error rather than a pass, and resolving 0 token files leads the summary with a warning.",
+            json!({"type":"object","properties":{
+                "token_files":{"type":"array","items":{"type":"string"},"description":"Repository-relative design-token CSS files"},
+                "level":{"type":"string","enum":["AA","AAA"],"default":"AA","description":"WCAG conformance level to audit against"}
+            }}),
             false,
         )
     }
@@ -1482,20 +1680,22 @@ impl Tool for ToolImageRegion {
         )?;
         let cropped = image.crop_imm(rect.x, rect.y, rect.width, rect.height);
         let artifact = artifact_from_bytes(encode_png(&cropped)?, "image/png", &policy)?;
+        let spilled = spill_artifact(&artifact, &design_artifacts_dir(&app.gcx), "image-region")?;
         let summary = format!(
             "Cropped {}x{} region from `{}`",
             rect.width,
             rect.height,
             path.display()
         );
-        tool_message(
+        tool_image_message(
             tool_call_id,
             ToolJson::new(
                 "image_region",
                 summary,
-                json!({"source":path,"region":rect,"artifact":artifact}),
+                json!({"source":path,"region":rect,"artifact":spilled}),
             )
             .to_text(),
+            &artifact,
         )
     }
 
@@ -1557,15 +1757,17 @@ impl Tool for ToolVisualDiff {
             tokio::fs::write(&baseline, &current_bytes)
                 .await
                 .map_err(|error| format!("failed to write baseline: {error}"))?;
+            let spilled = spill_artifact(&current, &runtime.artifacts_dir, "visual-diff-baseline")?;
             runtime.touch();
-            return tool_message(
+            return tool_image_message(
                 tool_call_id,
                 ToolJson::new(
                     "visual_diff",
                     format!("Visual baseline updated at `{}`", baseline.display()),
-                    json!({"baseline":baseline,"baseline_updated":true,"changed_pixels":0,"changed_percent":0.0,"regions":[],"artifact":current}),
+                    json!({"baseline":baseline,"baseline_updated":true,"changed_pixels":0,"changed_percent":0.0,"regions":[],"artifact":spilled}),
                 )
                 .to_text(),
+                &current,
             );
         }
         let baseline_bytes = tokio::fs::read(&baseline)
@@ -1577,12 +1779,13 @@ impl Tool for ToolVisualDiff {
             .map_err(|error| format!("failed to decode current screenshot: {error}"))?;
         let diff = compare_images(&baseline_image, &current_image, args.threshold, &args.masks)?;
         let artifact = artifact_from_bytes(encode_png(&diff.image)?, "image/png", &policy)?;
+        let spilled = spill_artifact(&artifact, &runtime.artifacts_dir, "visual-diff")?;
         let summary = format!(
             "Visual diff changed {} of {} pixels ({:.3}%)",
             diff.changed_pixels, diff.total_pixels, diff.changed_percent
         );
         runtime.touch();
-        tool_message(
+        tool_image_message(
             tool_call_id,
             ToolJson::new(
                 "visual_diff",
@@ -1596,10 +1799,11 @@ impl Tool for ToolVisualDiff {
                     "changed_percent":diff.changed_percent,
                     "regions":diff.regions,
                     "masks":args.masks,
-                    "artifact":artifact
+                    "artifact":spilled
                 }),
             )
             .to_text(),
+            &artifact,
         )
     }
 
@@ -1679,32 +1883,118 @@ mod tests {
                 .abs()
                 < 0.01
         );
-        assert_eq!(text_threshold(16.0, "400"), 4.5);
-        assert_eq!(text_threshold(18.66, "700"), 3.0);
+        assert!(!is_large_text(16.0, "400"));
+        assert!(is_large_text(18.66, "700"));
+        assert!(is_large_text(24.0, "400"));
+        assert!(!is_large_text(18.66, "400"));
         assert!(parse_css_color("transparent").is_err());
     }
 
     #[test]
-    fn contrast_audit_never_passes_without_measured_elements_or_tokens() {
-        let nothing_scanned = contrast_audit_verdict(0, 0, 0, 0, 1);
-        assert_eq!(nothing_scanned.warning.as_deref(), Some(ZERO_SCAN_WARNING));
-        assert!(nothing_scanned.summary.starts_with(ZERO_SCAN_WARNING));
+    fn wcag_requirements_follow_the_audited_level_and_text_size_class() {
+        assert_eq!(required_contrast_ratio(WcagLevel::Aa, false), 4.5);
+        assert_eq!(required_contrast_ratio(WcagLevel::Aa, true), 3.0);
+        assert_eq!(required_contrast_ratio(WcagLevel::Aaa, false), 7.0);
+        assert_eq!(required_contrast_ratio(WcagLevel::Aaa, true), 4.5);
 
-        let no_tokens = contrast_audit_verdict(12, 0, 0, 0, 0);
+        for (ratio, level, large, required, emitted) in [
+            (4.6, WcagLevel::Aa, false, 4.5, false),
+            (4.4, WcagLevel::Aa, false, 4.5, true),
+            (3.1, WcagLevel::Aa, true, 3.0, false),
+            (2.9, WcagLevel::Aa, true, 3.0, true),
+            (7.1, WcagLevel::Aaa, false, 7.0, false),
+            (6.9, WcagLevel::Aaa, false, 7.0, true),
+            (4.6, WcagLevel::Aaa, true, 4.5, false),
+            (4.4, WcagLevel::Aaa, true, 4.5, true),
+        ] {
+            let (font_size, font_weight) = if large { (24.0, "400") } else { (16.0, "400") };
+            let evaluation = evaluate_contrast(ratio, level, false, font_size, font_weight);
+            assert_eq!(evaluation.large_text, large, "{ratio} {level:?} {large}");
+            assert_eq!(
+                evaluation.required_ratio, required,
+                "{ratio} {level:?} {large}"
+            );
+            assert_eq!(evaluation.emitted, emitted, "{ratio} {level:?} {large}");
+        }
+
+        let aa_large_pass = evaluate_contrast(5.0, WcagLevel::Aa, false, 24.0, "400");
+        assert!(!aa_large_pass.emitted);
+        assert!(aa_large_pass.passes_aa);
+        assert!(aa_large_pass.passes_aaa);
+
+        let aaa_large_gap = evaluate_contrast(4.0, WcagLevel::Aaa, false, 24.0, "400");
+        assert!(aaa_large_gap.emitted);
+        assert!(aaa_large_gap.passes_aa);
+        assert!(!aaa_large_gap.passes_aaa);
+
+        let non_text = evaluate_contrast(2.5, WcagLevel::Aaa, true, 0.0, "400");
+        assert_eq!(non_text.required_ratio, 3.0);
+        assert!(!non_text.large_text);
+        assert!(non_text.emitted);
+    }
+
+    #[test]
+    fn contrast_audit_never_passes_without_resolved_token_files() {
+        let no_tokens = contrast_audit_verdict(12, WcagLevel::Aa, 0, 0, 0);
         assert_eq!(no_tokens.warning.as_deref(), Some(NO_TOKEN_FILES_WARNING));
         assert!(no_tokens.summary.starts_with(NO_TOKEN_FILES_WARNING));
 
-        let blind = contrast_audit_verdict(0, 0, 0, 0, 0);
-        let blind_warning = blind.warning.unwrap();
-        assert!(blind_warning.contains(ZERO_SCAN_WARNING));
-        assert!(blind_warning.contains(NO_TOKEN_FILES_WARNING));
-        assert!(blind.summary.starts_with(ZERO_SCAN_WARNING));
-
-        let clean = contrast_audit_verdict(12, 0, 3, 0, 2);
+        let clean = contrast_audit_verdict(12, WcagLevel::Aaa, 3, 0, 2);
         assert_eq!(clean.warning, None);
         assert_eq!(
             clean.summary,
-            "Contrast audit scanned 12 elements: 0 AA failures, 3 AAA warnings, and 0 non-token colors"
+            "Contrast audit scanned 12 elements at AAA: 3 contrast failures and 0 non-token colors"
+        );
+    }
+
+    #[test]
+    fn zero_measurement_is_a_failure_message_not_a_pass() {
+        for message in [ZERO_SCAN_FAILURE, PROBE_ZERO_MEASUREMENT_FAILURE] {
+            assert!(
+                message.contains("measurement failed, not a pass"),
+                "{message}"
+            );
+        }
+        assert!(!cell_is_measured(&json!({"box": Value::Null})));
+        assert!(!cell_is_measured(&json!({"styles": {}})));
+        assert!(!cell_is_measured(&json!({"box": {"x": 1.0, "y": 2.0}})));
+        assert!(cell_is_measured(
+            &json!({"box": {"x": 1.0, "y": 2.0, "width": 30.0, "height": 40.0}})
+        ));
+    }
+
+    #[test]
+    fn oversized_artifacts_spill_to_disk_instead_of_inline_base64() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = ImageArtifact {
+            kind: "image".to_string(),
+            mime: "image/png".to_string(),
+            data: "a".repeat(16),
+            width: 2,
+            height: 2,
+            bytes: 12,
+        };
+        assert!(!artifact_is_oversized(&small));
+        let inline = spill_artifact(&small, dir.path(), "small").unwrap();
+        assert_eq!(inline["inlined"], json!(true));
+        assert_eq!(inline["data"], json!("a".repeat(16)));
+        assert!(inline.get("path").is_none());
+
+        let payload = base64::prelude::BASE64_STANDARD.encode(vec![7u8; MAX_INLINE_ARTIFACT_CHARS]);
+        let large = ImageArtifact {
+            data: payload,
+            ..small.clone()
+        };
+        assert!(artifact_is_oversized(&large));
+        let spilled = spill_artifact(&large, dir.path(), "large").unwrap();
+        assert_eq!(spilled["inlined"], json!(false));
+        assert!(spilled.get("data").is_none());
+        assert_eq!(spilled["attached_as"], json!("multimodal_image"));
+        let written = PathBuf::from(spilled["path"].as_str().unwrap());
+        assert!(written.starts_with(dir.path()));
+        assert_eq!(
+            std::fs::read(&written).unwrap(),
+            vec![7u8; MAX_INLINE_ARTIFACT_CHARS]
         );
     }
 

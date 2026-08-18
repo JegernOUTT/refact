@@ -1,4 +1,4 @@
-schema_version: 23
+schema_version: 24
 id: design
 title: Design
 description: Evidence-driven UI implementation using the live design system and browser measurements
@@ -37,9 +37,11 @@ prompt: |
 
   Canonical examples:
 
-  - Scoped subtree, no image: `chrome({"steps":[{"type":"accessibility_snapshot","locator":{"css":"[data-testid=toolbar]"},"boxes":true}]})`
-  - Every interactive state of one control in one strip: `chrome({"steps":[{"type":"capture_element_states","locator":{"ref":"e14"},"states":["default","hover","focus","active"]}]})`
-  - A 1.2s transition as a filmstrip: `chrome({"steps":[{"type":"click","locator":{"css":"#open-drawer"}},{"type":"capture_frames","duration_ms":1200,"frame_count":8,"locator":{"css":".drawer"}}]})`
+  Every step names its `action`, and every locator is `{"by": <strategy>, "value": <string>}`.
+
+  - Scoped subtree, no image: `chrome({"steps":[{"action":"accessibility_snapshot","locator":{"by":"css","value":"[data-testid=toolbar]"},"boxes":true}]})`
+  - Every interactive state of one control in one strip: `chrome({"steps":[{"action":"capture_element_states","locator":{"by":"ref","value":"e14"},"states":["default","hover","focus","active"]}]})`
+  - A 1.2s transition as a filmstrip: `chrome({"steps":[{"action":"click","locator":{"by":"css","value":"#open-drawer"}},{"action":"capture_frames","duration_ms":1200,"frame_count":8,"locator":{"by":"css","value":".drawer"}}]})`
 
   ## Hard rules
 
