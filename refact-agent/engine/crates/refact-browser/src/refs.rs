@@ -381,6 +381,52 @@ mod tests {
     }
 
     #[test]
+    fn scoped_snapshot_reuses_the_generation_store_of_the_page_snapshot() {
+        let registry = RefRegistry::default();
+        let outside: Ref = "e1".parse().unwrap();
+        let inside: Ref = "e2".parse().unwrap();
+        let minted_while_scoped: Ref = "e3".parse().unwrap();
+        let page = registry.replace_snapshot(
+            "tab",
+            HashMap::from([
+                (outside.clone(), info("Outside")),
+                (inside.clone(), info("Inside")),
+            ]),
+        );
+        let scoped = registry.replace_snapshot(
+            "tab",
+            HashMap::from([
+                (inside.clone(), info("Inside")),
+                (minted_while_scoped.clone(), info("Nested")),
+            ]),
+        );
+
+        assert_eq!(
+            (scoped.document_generation, scoped.frame_generation),
+            (page.document_generation, page.frame_generation),
+            "scoping must not bump generations the way navigation does"
+        );
+        assert_eq!(
+            registry.resolve_current("tab", &inside).unwrap(),
+            info("Inside"),
+            "a ref re-listed by the scoped subtree stays resolvable"
+        );
+        assert_eq!(
+            registry
+                .resolve_current("tab", &minted_while_scoped)
+                .unwrap(),
+            info("Nested")
+        );
+        assert!(
+            matches!(
+                registry.resolve_current("tab", &outside),
+                Err(RefError::Stale { .. })
+            ),
+            "refs outside the scoped subtree go stale, not generation-mismatched"
+        );
+    }
+
+    #[test]
     fn unknown_and_stale_refs_are_distinct() {
         let registry = RefRegistry::default();
         let known: Ref = "e1".parse().unwrap();

@@ -508,7 +508,9 @@ export function renderAriaTreeAsJSON(ariaSnapshot: AriaSnapshot, publicOptions: 
     const isAtDepthLimit = !!publicOptions.depth && depth === publicOptions.depth;
     if (singleTextChild !== undefined) {
       node.text = singleTextChild;
-    } else if (!isAtDepthLimit && ariaNode.children.length) {
+    } else if (isAtDepthLimit && ariaNode.children.length) {
+      node.truncatedChildren = ariaNode.children.length;
+    } else if (ariaNode.children.length) {
       const inCursorPointer = !!ariaNode.ref && renderCursorPointer && aria.hasPointerCursor(ariaNode);
       node.children = ariaNode.children.map(child => {
         if (typeof child === 'string')

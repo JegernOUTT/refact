@@ -1047,7 +1047,8 @@ async fn design_tools_measure_marks_contrast_and_visual_changes() {
                     mode: Default::default(),
                     refs: Some(true),
                     boxes: true,
-                    root: None,
+                    locator: None,
+                    depth: None,
                     max_chars: None,
                 },
             },
@@ -3978,6 +3979,123 @@ async fn production_snapshot_and_ref_actions_share_one_batch() {
             .value
             .unwrap(),
         json!("ref batch")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn scoped_accessibility_snapshot_returns_only_the_target_subtree() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    case.tab
+        .evaluate(
+            "document.querySelector('nav button').addEventListener('click', () => document.body.dataset.saved = 'yes')",
+            false,
+        )
+        .unwrap();
+
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::AccessibilitySnapshot {
+            options: AccessibilitySnapshotOptions {
+                locator: Some(BrowserLocator::css("nav")),
+                boxes: true,
+                ..Default::default()
+            },
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(report.ok, "scoped snapshot failed: {report:?}");
+    let data = report.steps[0].data.as_ref().unwrap();
+    let yaml = data["yaml"].as_str().unwrap();
+    assert!(yaml.contains("Save"), "subtree content missing: {yaml}");
+    assert!(yaml.contains("Guide"), "subtree content missing: {yaml}");
+    assert!(
+        !yaml.contains("Snapshot page"),
+        "scoped snapshot leaked content outside the subtree: {yaml}"
+    );
+    assert!(
+        !yaml.contains("Search"),
+        "scoped snapshot leaked content outside the subtree: {yaml}"
+    );
+    assert!(
+        yaml.contains("[box="),
+        "boxes must compose with scoping: {yaml}"
+    );
+
+    let save_ref = data["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"].as_str() == Some("Save"))
+        .and_then(|node| node["ref"].as_str())
+        .unwrap()
+        .to_string();
+    let click = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::Click {
+            locator: BrowserLocator::reference(&save_ref),
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(
+        click.ok,
+        "a ref minted by a scoped snapshot must stay actionable: {click:?}"
+    );
+    assert_eq!(
+        case.tab
+            .evaluate("document.body.dataset.saved", false)
+            .unwrap()
+            .value
+            .unwrap(),
+        json!("yes")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn depth_limited_accessibility_snapshot_marks_truncated_children() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::AccessibilitySnapshot {
+                options: AccessibilitySnapshotOptions::default(),
+            },
+            BrowserStep::AccessibilitySnapshot {
+                options: AccessibilitySnapshotOptions {
+                    depth: Some(1),
+                    ..Default::default()
+                },
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(report.ok, "snapshots failed: {report:?}");
+    let full = report.steps[0].data.as_ref().unwrap()["yaml"]
+        .as_str()
+        .unwrap();
+    let limited = report.steps[1].data.as_ref().unwrap()["yaml"]
+        .as_str()
+        .unwrap();
+
+    assert!(
+        !full.contains("truncated"),
+        "an unlimited snapshot must not gain markers: {full}"
+    );
+    assert!(
+        limited.contains("… (") && limited.contains("truncated)"),
+        "depth limit must emit a counted marker: {limited}"
+    );
+    assert!(
+        limited.lines().count() < full.lines().count(),
+        "depth limit must shrink the snapshot"
     );
 }
 

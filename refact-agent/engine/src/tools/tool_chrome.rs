@@ -225,7 +225,6 @@ fn browser_step_schema_with_actions(
     });
     properties.insert("source_position".to_string(), position_schema.clone());
     properties.insert("target_position".to_string(), position_schema);
-    properties.insert("root".to_string(), browser_locator_schema());
     properties.insert("text".to_string(), serde_json::json!({"type": "string"}));
     properties.insert("key".to_string(), serde_json::json!({"type": "string"}));
     properties.insert(
@@ -388,6 +387,10 @@ fn browser_step_schema_with_actions(
     properties.insert(
         "boxes".to_string(),
         serde_json::json!({"type": "boolean", "description": "Include element boxes in accessibility_snapshot"}),
+    );
+    properties.insert(
+        "depth".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 1, "description": "Limit accessibility_snapshot nesting; deeper children collapse into a truncated-count marker"}),
     );
     properties.insert(
         "paths".to_string(),
@@ -1107,6 +1110,7 @@ mod tests {
             "delay",
             "delta_x",
             "delta_y",
+            "depth",
             "device",
             "end_x",
             "end_y",
@@ -1146,7 +1150,6 @@ mod tests {
             "quality",
             "refs",
             "reset_on_navigation",
-            "root",
             "save_as",
             "scale",
             "seconds",

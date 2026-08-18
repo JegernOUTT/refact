@@ -751,8 +751,10 @@ pub struct AccessibilitySnapshotOptions {
     pub refs: Option<bool>,
     #[serde(default)]
     pub boxes: bool,
+    #[serde(default, alias = "root", skip_serializing_if = "Option::is_none")]
+    pub locator: Option<BrowserLocator>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root: Option<BrowserLocator>,
+    pub depth: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_chars: Option<usize>,
 }
@@ -3205,7 +3207,8 @@ mod tests {
                 assert_eq!(options.mode, AccessibilitySnapshotMode::Ai);
                 assert!(options.refs_enabled());
                 assert!(!options.boxes);
-                assert!(options.root.is_none());
+                assert!(options.locator.is_none());
+                assert!(options.depth.is_none());
                 assert!(options.max_chars.is_none());
             }
             _ => panic!("Expected AccessibilitySnapshot"),
@@ -3216,11 +3219,62 @@ mod tests {
             "mode": "default",
             "refs": true,
             "boxes": true,
-            "root": {"by": "css", "value": "main"},
+            "locator": {"by": "css", "value": "main"},
+            "depth": 3,
             "max_chars": 4096
         });
         let step: BrowserStep = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(step).unwrap(), value);
+    }
+
+    #[test]
+    fn accessibility_snapshot_accepts_the_legacy_root_alias() {
+        let step: BrowserStep = serde_json::from_value(serde_json::json!({
+            "action": "accessibility_snapshot",
+            "root": {"by": "css", "value": "main"}
+        }))
+        .unwrap();
+        let BrowserStep::AccessibilitySnapshot { options } = step else {
+            panic!("Expected AccessibilitySnapshot");
+        };
+        assert_eq!(
+            options.locator,
+            Some(BrowserLocator::css("main")),
+            "legacy root spelling must still deserialize"
+        );
+        assert_eq!(
+            serde_json::to_value(BrowserStep::AccessibilitySnapshot { options }).unwrap()
+                ["locator"],
+            serde_json::json!({"by": "css", "value": "main"}),
+            "only the canonical locator name is emitted"
+        );
+    }
+
+    #[test]
+    fn accessibility_snapshot_scoping_options_compose() {
+        let step: BrowserStep = serde_json::from_value(serde_json::json!({
+            "action": "accessibility_snapshot",
+            "locator": {"by": "css", "value": "#menu"},
+            "depth": 2,
+            "boxes": true
+        }))
+        .unwrap();
+        let BrowserStep::AccessibilitySnapshot { options } = step else {
+            panic!("Expected AccessibilitySnapshot");
+        };
+        assert_eq!(options.locator, Some(BrowserLocator::css("#menu")));
+        assert_eq!(options.depth, Some(2));
+        assert!(options.boxes);
+        assert!(options.refs_enabled());
+    }
+
+    #[test]
+    fn accessibility_snapshot_omitting_scoping_options_stays_byte_stable() {
+        let options = AccessibilitySnapshotOptions::default();
+        assert_eq!(
+            serde_json::to_string(&BrowserStep::AccessibilitySnapshot { options }).unwrap(),
+            r#"{"action":"accessibility_snapshot","mode":"ai","boxes":false}"#
+        );
     }
 
     #[test]

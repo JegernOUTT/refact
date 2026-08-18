@@ -281,6 +281,26 @@ mod tests {
     }
 
     #[test]
+    fn injected_bundle_collapses_depth_limited_children_into_a_counted_marker() {
+        assert!(INJECTED_BUNDLE.contains("isAtDepthLimit"));
+        assert!(INJECTED_BUNDLE.contains("node.truncatedChildren = ariaNode.children.length"));
+        assert!(INJECTED_BUNDLE
+            .contains(r#"`… (${count} ${count === 1 ? "child" : "children"} truncated)`"#));
+        assert!(INJECTED_BUNDLE.contains(
+            r#"lines.push(indent(depth + 1) + "- " + truncationMarker(node.truncatedChildren));"#
+        ));
+    }
+
+    #[test]
+    fn injected_bundle_renders_boxes_and_blind_navigation_markers() {
+        assert!(INJECTED_BUNDLE
+            .contains("` [box=${node.box.x},${node.box.y},${node.box.width},${node.box.height}]`"));
+        for marker in [" [cursor=pointer]", " [active]", " [level=${node.level}]"] {
+            assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
+        }
+    }
+
+    #[test]
     fn injected_bundle_contains_latest_snapshot_ref_resolution() {
         assert!(INJECTED_BUNDLE.contains("resolveAriaRef"));
         assert!(INJECTED_BUNDLE.contains("REF_DETACHED"));

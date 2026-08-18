@@ -6,7 +6,7 @@ This directory contains source adapted from [Microsoft Playwright](https://githu
 
 | Local file | Upstream file | Commit | Local modifications |
 |---|---|---|---|
-| `src/vendor/injected/ariaSnapshot.ts` | `packages/injected/src/ariaSnapshot.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports; interactable refs require the explicit `refs` option so they remain disabled by default. |
+| `src/vendor/injected/ariaSnapshot.ts` | `packages/injected/src/ariaSnapshot.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports; interactable refs require the explicit `refs` option so they remain disabled by default; children dropped at the `depth` limit record a `truncatedChildren` count instead of disappearing silently. |
 | `src/vendor/injected/ariaSnapshotDistiller.ts` | `packages/injected/src/ariaSnapshotDistiller.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports. |
 | `src/vendor/injected/domUtils.ts` | `packages/injected/src/domUtils.ts`, `packages/injected/src/roleUtils.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Includes the DOM, visibility, box, and element-state helpers used by the Refact injected runtime. |
 | `src/vendor/injected/hitTarget.ts` | `packages/injected/src/injectedScript.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Extracts the composed-root hit test, DOM preview, and capture-phase event interceptor into a standalone module backed by the Refact builtins snapshot. |
@@ -23,8 +23,8 @@ This directory contains source adapted from [Microsoft Playwright](https://githu
 | `src/vendor/injected/selectorUtils.ts` | `packages/injected/src/selectorUtils.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports; the role-dependent label helper is omitted until the role implementation is vendored. |
 | `src/vendor/injected/utilityScript.ts` | `packages/injected/src/utilityScript.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports. |
 | `src/vendor/injected/bindingsController.ts` | `packages/injected/src/bindingsController.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Package aliases are replaced with relative imports. |
-| `src/vendor/isomorphic/ariaSnapshot.ts` | `packages/isomorphic/ariaSnapshot.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | None. |
-| `src/vendor/isomorphic/ariaSnapshotRenderer.ts` | `packages/isomorphic/ariaSnapshotRenderer.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | None. |
+| `src/vendor/isomorphic/ariaSnapshot.ts` | `packages/isomorphic/ariaSnapshot.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | `AriaNodeJSON` carries an optional `truncatedChildren` count for nodes collapsed at the `depth` limit. |
+| `src/vendor/isomorphic/ariaSnapshotRenderer.ts` | `packages/isomorphic/ariaSnapshotRenderer.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | Nodes carrying `truncatedChildren` render a `… (N children truncated)` marker line instead of appearing as childless leaves. |
 | `src/vendor/isomorphic/cssParser.ts` | `packages/isomorphic/cssParser.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | None. |
 | `src/vendor/isomorphic/selectorParser.ts` | `packages/isomorphic/selectorParser.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | None. |
 | `src/vendor/isomorphic/stringUtils.ts` | `packages/isomorphic/stringUtils.ts` | `d5a185a894ab3ab17ff77a44e116a1339c6bdaed` | None. |

@@ -5381,7 +5381,7 @@ fn step_accessibility_snapshot(
     idx: usize,
     options: &AccessibilitySnapshotOptions,
 ) -> StepResult {
-    let root = match options.root.as_ref() {
+    let root = match options.locator.as_ref() {
         Some(locator) => match resolve_element(tab, world, locator) {
             Ok(resolved) => Some(resolved.handle),
             Err(error) => {
@@ -5401,6 +5401,7 @@ fn step_accessibility_snapshot(
         },
         refs: options.refs_enabled(),
         boxes: options.boxes,
+        depth: options.depth,
         ..Default::default()
     };
     let snapshot = world.aria_snapshot(tab, root.clone(), snapshot_options);

@@ -73,6 +73,7 @@ export type AriaNodeJSON = {
   placeholder?: string;
   text?: string;
   children?: (AriaNodeJSON | string)[];
+  truncatedChildren?: number;
 };
 
 export type AriaSnapshotJSON = AriaNodeJSON[];

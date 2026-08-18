@@ -218,6 +218,10 @@ mod tests {
                 serde_json::json!({"action": "wait_for_response", "pattern": {"source": "/api", "flags": "i"}}),
                 serde_json::json!({"action": "wait_for_response", "url_or_pattern": {"source": "/api", "flags": "i"}}),
             ),
+            (
+                serde_json::json!({"action": "accessibility_snapshot", "locator": {"by": "css", "value": "main"}}),
+                serde_json::json!({"action": "accessibility_snapshot", "root": {"by": "css", "value": "main"}}),
+            ),
         ] {
             let from_canonical =
                 parse_browser_action_request(serde_json::json!({"steps": [canonical.clone()]}))
@@ -233,7 +237,13 @@ mod tests {
             );
 
             let serialized = serde_json::to_string(&canonical_value).unwrap();
-            for legacy_name in ["url_pattern", "url_or_pattern", "contains", "\"data\""] {
+            for legacy_name in [
+                "url_pattern",
+                "url_or_pattern",
+                "contains",
+                "\"data\"",
+                "\"root\"",
+            ] {
                 assert!(
                     !serialized.contains(legacy_name),
                     "serialization must emit canonical names only, got {serialized}"
@@ -251,6 +261,47 @@ mod tests {
 
         assert!(
             error.starts_with("step[0] (wait_for_request): "),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("duplicate field"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn accessibility_snapshot_scoping_options_compose_in_a_batch() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [{
+                "action": "accessibility_snapshot",
+                "locator": {"by": "css", "value": "#dropdown"},
+                "depth": 2,
+                "boxes": true
+            }]
+        }))
+        .unwrap();
+
+        let BrowserStep::AccessibilitySnapshot { options } = &request.steps[0] else {
+            panic!("Expected AccessibilitySnapshot");
+        };
+        assert_eq!(options.locator, Some(BrowserLocator::css("#dropdown")));
+        assert_eq!(options.depth, Some(2));
+        assert!(options.boxes);
+    }
+
+    #[test]
+    fn accessibility_snapshot_rejects_root_and_locator_together() {
+        let error = parse_browser_action_request(serde_json::json!({
+            "steps": [{
+                "action": "accessibility_snapshot",
+                "locator": {"by": "css", "value": "main"},
+                "root": {"by": "css", "value": "main"}
+            }]
+        }))
+        .unwrap_err();
+
+        assert!(
+            error.starts_with("step[0] (accessibility_snapshot): "),
             "unexpected error: {error}"
         );
         assert!(

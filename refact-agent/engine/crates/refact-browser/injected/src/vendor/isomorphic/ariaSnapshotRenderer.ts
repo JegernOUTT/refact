@@ -91,7 +91,7 @@ export function renderAriaSnapshotAsYaml(snapshot: AriaSnapshotJSON, options: Ar
     if (node.placeholder !== undefined)
       props.push(['placeholder', node.placeholder]);
 
-    if (node.text === undefined && !props.length && !node.children?.length) {
+    if (node.text === undefined && !props.length && !node.children?.length && !node.truncatedChildren) {
       // Leaf node without children.
       lines.push(escapedKey);
     } else if (node.text !== undefined && !props.length) {
@@ -115,6 +115,8 @@ export function renderAriaSnapshotAsYaml(snapshot: AriaSnapshotJSON, options: Ar
             visit(child, depth + 1);
         }
       }
+      if (node.truncatedChildren)
+        lines.push(indent(depth + 1) + '- ' + truncationMarker(node.truncatedChildren));
     }
   };
 
@@ -125,6 +127,10 @@ export function renderAriaSnapshotAsYaml(snapshot: AriaSnapshotJSON, options: Ar
 
 function indent(depth: number): string {
   return '  '.repeat(depth);
+}
+
+function truncationMarker(count: number): string {
+  return `… (${count} ${count === 1 ? 'child' : 'children'} truncated)`;
 }
 
 function convertToBestGuessRegex(text: string): string {

@@ -1,4 +1,4 @@
-// @refact-injected-hash ddb03f43852544c888cb0e62705eae32b164e6824908e49b3375dd42b64c9774
+// @refact-injected-hash e5845517af25eced17389920255171c81b23757095b32cb8c513d407dee795ae
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -2652,7 +2652,7 @@ function renderAriaSnapshotAsYaml(snapshot, options = {}) {
       props.push(["url", node.url]);
     if (node.placeholder !== void 0)
       props.push(["placeholder", node.placeholder]);
-    if (node.text === void 0 && !props.length && !((_b = node.children) == null ? void 0 : _b.length)) {
+    if (node.text === void 0 && !props.length && !((_b = node.children) == null ? void 0 : _b.length) && !node.truncatedChildren) {
       lines.push(escapedKey);
     } else if (node.text !== void 0 && !props.length) {
       if (includeText(node, node.text))
@@ -2673,6 +2673,8 @@ function renderAriaSnapshotAsYaml(snapshot, options = {}) {
             visit(child, depth + 1);
         }
       }
+      if (node.truncatedChildren)
+        lines.push(indent(depth + 1) + "- " + truncationMarker(node.truncatedChildren));
     }
   };
   for (const node of snapshot)
@@ -2681,6 +2683,9 @@ function renderAriaSnapshotAsYaml(snapshot, options = {}) {
 }
 function indent(depth) {
   return "  ".repeat(depth);
+}
+function truncationMarker(count) {
+  return `… (${count} ${count === 1 ? "child" : "children"} truncated)`;
 }
 function convertToBestGuessRegex(text) {
   const dynamicContent = [
@@ -3150,7 +3155,9 @@ function renderAriaTreeAsJSON(ariaSnapshot, publicOptions) {
     const isAtDepthLimit = !!publicOptions.depth && depth === publicOptions.depth;
     if (singleTextChild !== void 0) {
       node.text = singleTextChild;
-    } else if (!isAtDepthLimit && ariaNode.children.length) {
+    } else if (isAtDepthLimit && ariaNode.children.length) {
+      node.truncatedChildren = ariaNode.children.length;
+    } else if (ariaNode.children.length) {
       const inCursorPointer = !!ariaNode.ref && renderCursorPointer && hasPointerCursor(ariaNode);
       node.children = ariaNode.children.map((child) => {
         if (typeof child === "string")

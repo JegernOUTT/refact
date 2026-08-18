@@ -158,4 +158,49 @@ mod tests {
         assert_eq!(value["doNotRenderActive"], false);
         assert!(ARIA_SNAPSHOT_FUNCTION.contains("ariaSnapshot(this, options)"));
     }
+
+    #[test]
+    fn omitted_depth_stays_null_so_the_injected_truncation_guard_is_disabled() {
+        let value = serde_json::to_value(SnapshotOptions::default()).unwrap();
+        assert!(
+            value["depth"].is_null(),
+            "a null depth keeps the injected `!!options.depth` guard false"
+        );
+        assert_eq!(value["boxes"], false);
+    }
+
+    #[test]
+    fn scoping_controls_serialize_together_for_the_injected_bridge() {
+        let value = serde_json::to_value(SnapshotOptions {
+            mode: SnapshotMode::Ai,
+            refs: true,
+            boxes: true,
+            depth: Some(2),
+            do_not_render_active: false,
+        })
+        .unwrap();
+        assert_eq!(value["mode"], "ai");
+        assert_eq!(value["refs"], true);
+        assert_eq!(value["boxes"], true);
+        assert_eq!(value["depth"], 2);
+    }
+
+    #[test]
+    fn aria_snapshot_round_trips_depth_truncation_marker_lines() {
+        let snapshot = AriaSnapshot {
+            yaml: "- list [ref=e7]:\n  - … (3 children truncated)".to_string(),
+            nodes: vec![SnapshotNode {
+                role: "list".to_string(),
+                name: None,
+                reference: Some("e7".to_string()),
+                geometry: None,
+            }],
+            generation: None,
+        };
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(
+            serde_json::from_value::<AriaSnapshot>(value).unwrap(),
+            snapshot
+        );
+    }
 }
