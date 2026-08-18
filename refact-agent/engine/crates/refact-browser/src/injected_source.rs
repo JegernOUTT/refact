@@ -70,12 +70,68 @@ mod tests {
     #[test]
     fn injected_bundle_contains_element_state_predicates() {
         for marker in [
-            "elementState(element, state)",
-            "elementStates(element)",
+            "elementState(element, state, budgetMs = stabilityBudgetMs)",
+            "elementStates(element, budgetMs = stabilityBudgetMs)",
             "isElementVisible",
             "getAriaDisabled",
             "getReadonly",
             "getCheckedState",
+        ] {
+            assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
+        }
+    }
+
+    #[test]
+    fn injected_bundle_drops_exports_without_rust_callers() {
+        for marker in [
+            "resolveSimple",
+            "dispatchBinding",
+            "__refact_binding",
+            "builtins() {",
+            "version() {",
+        ] {
+            assert!(!INJECTED_BUNDLE.contains(marker), "leftover {marker}");
+        }
+    }
+
+    #[test]
+    fn injected_bundle_derives_expectation_states_from_aria() {
+        for marker in [
+            "const checked = getCheckedState(element);",
+            "editable: this.editableState(element) === true",
+            r#"checked: checked === "checked""#,
+            "return readonly === \"error\" ? null : !getAriaDisabled(element) && !readonly;",
+        ] {
+            assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
+        }
+    }
+
+    #[test]
+    fn injected_bundle_scopes_locator_strategies_like_playwright() {
+        assert!(INJECTED_BUNDLE.contains("XPathEngine.queryAll(scope"));
+        assert!(INJECTED_BUNDLE
+            .contains(r#"selector.startsWith("/") && root.nodeType !== Node.DOCUMENT_NODE"#));
+        assert!(
+            INJECTED_BUNDLE.contains(r#"elements = queryCssPiercingShadow(scope, `#${CSS.escape("#)
+        );
+        assert!(INJECTED_BUNDLE.contains(r#""data-testid", (_e = locator.value) != null ? _e : "", (_f = locator.exact) != null ? _f : true"#));
+    }
+
+    #[test]
+    fn injected_bundle_extracts_links_through_shadow_roots() {
+        assert!(INJECTED_BUNDLE.contains(
+            r#"root.matches("a[href]") ? [root] : queryCssPiercingShadow(root, "a[href]")"#
+        ));
+    }
+
+    #[test]
+    fn injected_bundle_bounds_the_stability_check_with_a_deadline() {
+        for marker in [
+            "checkElementIsStable(element, budgetMs)",
+            "this.builtinSnapshot.setTimeout",
+            "this.builtinSnapshot.clearTimeout",
+            r#"resolve({ stable: false, unstable: "deadline" })"#,
+            "clearTimeout(deadline);",
         ] {
             assert!(INJECTED_BUNDLE.contains(marker), "missing {marker}");
         }
@@ -248,7 +304,6 @@ mod tests {
         assert!(source.contains("const module = { exports: {} };"));
         assert!(source.contains("module.exports.bootstrapRefactInjected()"));
         assert!(source.contains("__refact_injected__"));
-        assert!(source.contains("__refact_binding"));
         assert!(source.ends_with("})()"));
     }
 
@@ -274,7 +329,7 @@ mod tests {
 
     #[test]
     fn injected_bundle_reports_indeterminate_and_viewport_ratio_expectation_values() {
-        assert!(INJECTED_BUNDLE.contains(r#"indeterminate: getCheckedState(element) === "mixed""#));
+        assert!(INJECTED_BUNDLE.contains(r#"indeterminate: checked === "mixed""#));
         assert!(INJECTED_BUNDLE.contains("viewportRatio: viewportIntersectionRatio(rect"));
         assert!(INJECTED_BUNDLE.contains("function viewportIntersectionRatio(rect"));
     }
@@ -284,12 +339,15 @@ mod tests {
         assert!(INJECTED_BUNDLE.contains("generateAriaTree"));
         assert!(INJECTED_BUNDLE.contains("distillAriaSnapshot"));
         assert!(INJECTED_BUNDLE.contains("renderAriaSnapshotAsYaml"));
-        assert!(INJECTED_BUNDLE.contains("ariaSnapshot(element"));
+        assert!(INJECTED_BUNDLE.contains("ariaSnapshot\", {"));
+        assert_eq!(INJECTED_BUNDLE.matches("ariaSnapshot(element").count(), 0);
     }
 
     #[test]
     fn injected_bundle_collapses_depth_limited_children_into_a_counted_marker() {
-        assert!(INJECTED_BUNDLE.contains("isAtDepthLimit"));
+        assert!(INJECTED_BUNDLE.contains(
+            r#"const isAtDepthLimit = typeof publicOptions.depth === "number" && depth === publicOptions.depth;"#
+        ));
         assert!(INJECTED_BUNDLE.contains("node.truncatedChildren = ariaNode.children.length"));
         assert!(INJECTED_BUNDLE
             .contains(r#"`… (${count} ${count === 1 ? "child" : "children"} truncated)`"#));

@@ -505,7 +505,7 @@ export function renderAriaTreeAsJSON(ariaSnapshot: AriaSnapshot, publicOptions: 
       node.placeholder = ariaNode.props.placeholder;
 
     const singleTextChild = ariaNode.children.length === 1 && typeof ariaNode.children[0] === 'string' ? ariaNode.children[0] : undefined;
-    const isAtDepthLimit = !!publicOptions.depth && depth === publicOptions.depth;
+    const isAtDepthLimit = typeof publicOptions.depth === 'number' && depth === publicOptions.depth;
     if (singleTextChild !== undefined) {
       node.text = singleTextChild;
     } else if (isAtDepthLimit && ariaNode.children.length) {

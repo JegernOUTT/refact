@@ -164,9 +164,20 @@ mod tests {
         let value = serde_json::to_value(SnapshotOptions::default()).unwrap();
         assert!(
             value["depth"].is_null(),
-            "a null depth keeps the injected `!!options.depth` guard false"
+            "a null depth keeps the injected numeric depth guard false"
         );
         assert_eq!(value["boxes"], false);
+    }
+
+    #[test]
+    fn zero_depth_serializes_as_a_number_so_the_injected_guard_truncates_at_the_root() {
+        let value = serde_json::to_value(SnapshotOptions {
+            depth: Some(0),
+            ..SnapshotOptions::default()
+        })
+        .unwrap();
+        assert_eq!(value["depth"], 0);
+        assert!(value["depth"].is_number());
     }
 
     #[test]

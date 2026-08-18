@@ -92,6 +92,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "clock.html",
     "visual-states.html",
     "poll-state.html",
+    "aria-shadow.html",
 ];
 
 fn execute_steps(
@@ -3259,6 +3260,68 @@ async fn element_states_match_playwright_predicates() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn expectation_values_follow_aria_checked_and_aria_disabled() {
+    let Some(mut case) = BrowserCase::start("aria-shadow.html").await else {
+        return;
+    };
+    case.setup_world();
+    let mut values = Vec::new();
+    for selector in ["#aria-checked", "#aria-switch", "#aria-disabled-input"] {
+        let handle = case
+            .runtime
+            .world_manager
+            .call_injected_handles(
+                &case.tab,
+                "resolveAll",
+                json!([{"by":"css","value":selector}]),
+            )
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        values.push(
+            case.runtime
+                .world_manager
+                .expectation_values(&case.tab, &handle)
+                .unwrap(),
+        );
+    }
+
+    assert_eq!(values[0]["checked"], json!(true));
+    assert_eq!(values[0]["indeterminate"], json!(false));
+    assert_eq!(values[1]["checked"], json!(false));
+    assert_eq!(values[2]["enabled"], json!(false));
+    assert_eq!(values[2]["editable"], json!(false));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn extract_links_pierces_open_shadow_roots() {
+    let Some(case) = BrowserCase::start("aria-shadow.html").await else {
+        return;
+    };
+    let report = execute_steps(
+        &case.tab,
+        &[BrowserStep::ExtractLinks {
+            locator: Some(BrowserLocator::css("body")),
+            limit: None,
+        }],
+    );
+    assert!(report.ok, "shadow extract_links failed: {report:?}");
+    let data = report.steps[0].data.as_ref().unwrap();
+    assert_eq!(data["total"], json!(3));
+    let urls = data["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|link| link["url"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(urls.contains(&"https://example.com/shadow".to_string()));
+    assert!(urls.contains(&"https://example.com/nested".to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn computed_roles_match_playwright_html_aam() {
     let Some(mut case) = BrowserCase::start("roles.html").await else {
         return;
@@ -5854,6 +5917,11 @@ async fn get_by_locators_match_playwright_semantics() {
     );
     assert_eq!(
         resolve(json!({"by":"test_id","value":"save-card"})).len(),
+        1
+    );
+    assert!(resolve(json!({"by":"test_id","value":"save"})).is_empty());
+    assert_eq!(
+        resolve(json!({"by":"test_id","value":"save","exact":false})).len(),
         1
     );
 

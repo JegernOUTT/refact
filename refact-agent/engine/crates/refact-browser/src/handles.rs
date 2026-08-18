@@ -11,6 +11,10 @@ use crate::world::WorldManager;
 
 const GET_ACCESSIBLE_NAME_FUNCTION: &str = "function(includeHidden) { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.getAccessibleName(this, includeHidden); }";
 const GET_ACCESSIBLE_DESCRIPTION_FUNCTION: &str = "function() { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.getAccessibleDescription(this); }";
+const ELEMENT_STATE_FUNCTION: &str = "function(state, budgetMs) { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.elementState(this, state, budgetMs); }";
+const ELEMENT_STATES_FUNCTION: &str = "function(budgetMs) { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.elementStates(this, budgetMs); }";
+
+pub const STABILITY_BUDGET_MS: u64 = 5_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,8 +88,8 @@ impl WorldManager {
         self.call_function_on(
             tab,
             handle,
-            "function(state) { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.elementState(this, state); }",
-            vec![state],
+            ELEMENT_STATE_FUNCTION,
+            vec![state, Value::from(STABILITY_BUDGET_MS)],
         )
     }
 
@@ -97,8 +101,8 @@ impl WorldManager {
         let value = self.call_function_on(
             tab,
             handle,
-            "function() { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.elementStates(this); }",
-            Vec::new(),
+            ELEMENT_STATES_FUNCTION,
+            vec![Value::from(STABILITY_BUDGET_MS)],
         )?;
         serde_json::from_value(value).map_err(|error| {
             HandleError::Protocol(format!("Failed to parse browser element states: {error}"))
@@ -381,5 +385,13 @@ mod tests {
         ));
         assert!(GET_ACCESSIBLE_NAME_FUNCTION.contains("getAccessibleName(this, includeHidden)"));
         assert!(GET_ACCESSIBLE_DESCRIPTION_FUNCTION.contains("getAccessibleDescription(this)"));
+    }
+
+    #[test]
+    fn element_state_wrappers_pass_a_bounded_stability_budget() {
+        assert!(ELEMENT_STATE_FUNCTION.contains("elementState(this, state, budgetMs)"));
+        assert!(ELEMENT_STATES_FUNCTION.contains("elementStates(this, budgetMs)"));
+        assert!(STABILITY_BUDGET_MS > 0);
+        assert_eq!(Value::from(STABILITY_BUDGET_MS), serde_json::json!(5_000));
     }
 }

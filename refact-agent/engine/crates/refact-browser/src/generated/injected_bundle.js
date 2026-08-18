@@ -1,4 +1,4 @@
-// @refact-injected-hash 69df7d23883bb95ae113c1baad8c527fc3bbdbbc560abfabde1a2f419f7b6d20
+// @refact-injected-hash 87cf71ebb37c88bf3a63f3c1d28812bdde89ae5af904f7a5c12d7f655ded671a
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -3152,7 +3152,7 @@ function renderAriaTreeAsJSON(ariaSnapshot, publicOptions) {
     if (ariaNode.props.placeholder !== void 0)
       node.placeholder = ariaNode.props.placeholder;
     const singleTextChild = ariaNode.children.length === 1 && typeof ariaNode.children[0] === "string" ? ariaNode.children[0] : void 0;
-    const isAtDepthLimit = !!publicOptions.depth && depth === publicOptions.depth;
+    const isAtDepthLimit = typeof publicOptions.depth === "number" && depth === publicOptions.depth;
     if (singleTextChild !== void 0) {
       node.text = singleTextChild;
     } else if (isAtDepthLimit && ariaNode.children.length) {
@@ -4944,7 +4944,7 @@ function cssEscapeCharacter(s, i) {
 
 // src/refactInjected.ts
 var injectedInstanceName = "__refact_injected__";
-var bindingName = "__refact_binding";
+var stabilityBudgetMs = 5e3;
 function createLocatorRegExp(value) {
   var _a;
   return new RegExp(value.source, (_a = value.flags) != null ? _a : "");
@@ -5067,17 +5067,8 @@ var RefactInjected = class {
     this.builtinSnapshot = builtins;
     this.hitTargetController = new HitTargetController(global, builtins);
   }
-  version() {
-    return "playwright-1.63.0-next-refact-1";
-  }
-  builtins() {
-    return this.builtinSnapshot;
-  }
-  resolveSimple(cssSelector) {
-    return this.global.document.querySelector(cssSelector);
-  }
   resolveAll(locator, scopeOverride) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m;
     const document = this.global.document;
     const scope = scopeOverride != null ? scopeOverride : locator.within ? queryCssPiercingShadow(document, locator.within)[0] : document;
     if (!scope)
@@ -5089,32 +5080,30 @@ var RefactInjected = class {
       case "css":
         elements = queryCssPiercingShadow(scope, (_a = locator.value) != null ? _a : "");
         break;
-      case "id": {
-        const element = queryCssPiercingShadow(scope, `#${CSS.escape((_b = locator.value) != null ? _b : "")}`)[0];
-        elements = element ? [element] : [];
+      case "id":
+        elements = queryCssPiercingShadow(scope, `#${CSS.escape((_b = locator.value) != null ? _b : "")}`);
         break;
-      }
       case "name":
         elements = queryCssPiercingShadow(scope, `[name=${JSON.stringify((_c = locator.value) != null ? _c : "")}]`);
         break;
       case "test_id":
-        elements = queryByAttribute(scope, (_d = locator.attribute) != null ? _d : "data-testid", (_e = locator.value) != null ? _e : "", locator.exact, locator.regex);
+        elements = queryByAttribute(scope, (_d = locator.attribute) != null ? _d : "data-testid", (_e = locator.value) != null ? _e : "", (_f = locator.exact) != null ? _f : true, locator.regex);
         break;
       case "placeholder":
-        elements = queryByAttribute(scope, "placeholder", (_f = locator.value) != null ? _f : "", locator.exact, locator.regex);
+        elements = queryByAttribute(scope, "placeholder", (_g = locator.value) != null ? _g : "", locator.exact, locator.regex);
         break;
       case "alt_text":
-        elements = queryByAttribute(scope, "alt", (_g = locator.value) != null ? _g : "", locator.exact, locator.regex);
+        elements = queryByAttribute(scope, "alt", (_h = locator.value) != null ? _h : "", locator.exact, locator.regex);
         break;
       case "title":
-        elements = queryByAttribute(scope, "title", (_h = locator.value) != null ? _h : "", locator.exact, locator.regex);
+        elements = queryByAttribute(scope, "title", (_i = locator.value) != null ? _i : "", locator.exact, locator.regex);
         break;
       case "autocomplete":
-        elements = queryCssPiercingShadow(scope, `[autocomplete=${JSON.stringify((_i = locator.value) != null ? _i : "")}]`);
+        elements = queryCssPiercingShadow(scope, `[autocomplete=${JSON.stringify((_j = locator.value) != null ? _j : "")}]`);
         break;
       case "text": {
         const cache = /* @__PURE__ */ new Map();
-        const { matcher, kind } = createLocatorTextMatcher((_j = locator.value) != null ? _j : "", locator.exact, locator.regex);
+        const { matcher, kind } = createLocatorTextMatcher((_k = locator.value) != null ? _k : "", locator.exact, locator.regex);
         elements = [];
         let lastDidNotMatchSelf = null;
         for (const element of queryAllPiercingShadow(scope)) {
@@ -5130,7 +5119,7 @@ var RefactInjected = class {
       }
       case "label": {
         const cache = /* @__PURE__ */ new Map();
-        const { matcher } = createLocatorTextMatcher((_k = locator.value) != null ? _k : "", locator.exact, locator.regex);
+        const { matcher } = createLocatorTextMatcher((_l = locator.value) != null ? _l : "", locator.exact, locator.regex);
         elements = queryDescendantsPiercingShadow(scope).filter(
           (element) => getElementLabels(cache, element).some((label) => matcher(label))
         );
@@ -5141,22 +5130,9 @@ var RefactInjected = class {
         elements = createRoleEngine(true).queryAll(scope, selector);
         break;
       }
-      case "xpath": {
-        const result = document.evaluate(
-          (_l = locator.value) != null ? _l : "",
-          scope,
-          null,
-          XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-          null
-        );
-        elements = [];
-        for (let index = 0; index < result.snapshotLength; index++) {
-          const element = result.snapshotItem(index);
-          if (element instanceof Element)
-            elements.push(element);
-        }
+      case "xpath":
+        elements = XPathEngine.queryAll(scope, (_m = locator.value) != null ? _m : "");
         break;
-      }
       default:
         throw new Error(`Unknown locator strategy: ${locator.by}`);
     }
@@ -5197,7 +5173,7 @@ var RefactInjected = class {
     const links = [];
     let total = 0;
     for (const root of roots) {
-      const anchors = root.matches("a[href]") ? [root] : Array.from(root.querySelectorAll("a[href]"));
+      const anchors = root.matches("a[href]") ? [root] : queryCssPiercingShadow(root, "a[href]");
       total += anchors.length;
       for (const anchor of anchors) {
         if (links.length < limit)
@@ -5206,7 +5182,7 @@ var RefactInjected = class {
     }
     return { ok: true, links, total };
   }
-  async elementState(element, state) {
+  async elementState(element, state, budgetMs = stabilityBudgetMs) {
     this.ensureConnected(element);
     if (state === "visible") {
       const visible = isElementVisible(element);
@@ -5232,18 +5208,18 @@ var RefactInjected = class {
       };
     }
     if (state === "stable") {
-      const stable = await this.checkElementIsStable(element);
-      return { stable, matches: stable };
+      const result = await this.checkElementIsStable(element, budgetMs);
+      return { ...result, matches: result.stable };
     }
     throw new Error(`Unexpected element state "${state}"`);
   }
-  async elementStates(element) {
+  async elementStates(element, budgetMs = stabilityBudgetMs) {
     return {
       visible: this.bestEffort(() => element.isConnected && isElementVisible(element), false),
       enabled: this.bestEffort(() => element.isConnected && !getAriaDisabled(element), false),
       editable: this.bestEffort(() => element.isConnected ? this.editableState(element) : null, null),
       checked: this.bestEffort(() => element.isConnected ? getCheckedState(element) : null, null),
-      stable: await this.bestEffortStable(element)
+      stable: await this.bestEffortStable(element, budgetMs)
     };
   }
   expectHitTarget(element, point) {
@@ -5262,9 +5238,9 @@ var RefactInjected = class {
       return fallback;
     }
   }
-  async bestEffortStable(element) {
+  async bestEffortStable(element, budgetMs) {
     try {
-      return element.isConnected && await this.checkElementIsStable(element);
+      return element.isConnected && (await this.checkElementIsStable(element, budgetMs)).stable;
     } catch {
       return false;
     }
@@ -5277,13 +5253,27 @@ var RefactInjected = class {
     if (!element || !element.isConnected)
       throw new Error("Element is not attached to the DOM");
   }
-  async checkElementIsStable(element) {
+  async checkElementIsStable(element, budgetMs) {
     const requestAnimationFrame = this.builtinSnapshot.requestAnimationFrame;
     const performanceNow = this.builtinSnapshot.performanceNow;
+    const setTimeout = this.builtinSnapshot.setTimeout;
+    const clearTimeout = this.builtinSnapshot.clearTimeout;
     let lastRect;
     let lastTime = 0;
     return await new Promise((resolve, reject) => {
+      let settled = false;
+      let deadline = 0;
+      const settle = (callback) => {
+        if (settled)
+          return;
+        settled = true;
+        clearTimeout(deadline);
+        callback();
+      };
+      deadline = setTimeout(() => settle(() => resolve({ stable: false, unstable: "deadline" })), budgetMs);
       const check = () => {
+        if (settled)
+          return;
         try {
           this.ensureConnected(element);
           const time = performanceNow();
@@ -5295,31 +5285,22 @@ var RefactInjected = class {
           const clientRect = element.getBoundingClientRect();
           const rect = { x: clientRect.x, y: clientRect.y, width: clientRect.width, height: clientRect.height };
           if (lastRect) {
-            resolve(
-              rect.x === lastRect.x && rect.y === lastRect.y && rect.width === lastRect.width && rect.height === lastRect.height
-            );
+            const stable = rect.x === lastRect.x && rect.y === lastRect.y && rect.width === lastRect.width && rect.height === lastRect.height;
+            settle(() => resolve({ stable }));
             return;
           }
           lastRect = rect;
           requestAnimationFrame(check);
         } catch (error) {
-          reject(error);
+          settle(() => reject(error));
         }
       };
       try {
         requestAnimationFrame(check);
       } catch (error) {
-        reject(error);
+        settle(() => reject(error));
       }
     });
-  }
-  dispatchBinding(name, payload) {
-    const global = this.global;
-    const binding = global[bindingName];
-    const stringify = this.builtinSnapshot.jsonStringify;
-    if (!binding)
-      throw new Error(`${bindingName} is not installed`);
-    binding(stringify({ name, payload }));
   }
   getImplicitRole(element) {
     var _a;
@@ -5347,13 +5328,14 @@ var RefactInjected = class {
     const select = element;
     const rect = element.getBoundingClientRect();
     const view = this.global;
+    const checked = getCheckedState(element);
     return {
       attached: element.isConnected,
       visible: isElementVisible(element),
       enabled: !getAriaDisabled(element),
-      editable: !getReadonly(element) && (element.matches("input, textarea, select") || htmlElement.isContentEditable),
-      checked: input.checked === true,
-      indeterminate: getCheckedState(element) === "mixed",
+      editable: this.editableState(element) === true,
+      checked: checked === "checked",
+      indeterminate: checked === "mixed",
       focused: element === this.global.document.activeElement,
       empty: element.children.length === 0 && !normalizeWhiteSpace((_a = element.textContent) != null ? _a : "").length && !("value" in input && input.value),
       inViewport: rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < view.innerHeight && rect.left < view.innerWidth,
@@ -5367,28 +5349,6 @@ var RefactInjected = class {
       accessibleName: getElementAccessibleName(element, false).text,
       accessibleDescription: getElementAccessibleDescription(element, false).text
     };
-  }
-  ariaSnapshot(element, options) {
-    var _a;
-    const root = (_a = element != null ? element : this.global.document.body) != null ? _a : this.global.document.documentElement;
-    this.ensureConnected(root);
-    const tree = generateAriaTree(root, options);
-    const { json } = renderAriaTreeAsJSON(tree, options);
-    const nodes = [];
-    if (options.boxes) {
-      const visit = (node) => {
-        var _a2;
-        if (typeof node === "string")
-          return;
-        if (node.box)
-          nodes.push({ role: node.role, name: node.name, ref: node.ref, box: node.box });
-        for (const child of (_a2 = node.children) != null ? _a2 : [])
-          visit(child);
-      };
-      for (const node of json)
-        visit(node);
-    }
-    return { yaml: renderAriaSnapshotAsYaml(json), nodes };
   }
 };
 function bootstrapRefactInjected(global, builtins) {

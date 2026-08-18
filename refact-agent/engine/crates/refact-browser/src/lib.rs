@@ -137,10 +137,6 @@ const OVERLAYS_SCRIPT: &str = include_str!("browser_overlays.js");
 
 pub const PICKER_PAGE_TIMEOUT_MS: u64 = 35_000;
 
-pub fn overlays_script() -> &'static str {
-    OVERLAYS_SCRIPT
-}
-
 const STEALTH_SCRIPT: &str = r#"(function() {
     if (window.__refact_stealth_installed) return;
     window.__refact_stealth_installed = true;

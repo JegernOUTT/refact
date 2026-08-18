@@ -99,11 +99,12 @@ type RefactLocator = Readonly<{
 }>;
 
 const injectedInstanceName = '__refact_injected__';
-const bindingName = '__refact_binding';
+const stabilityBudgetMs = 5000;
+
+type StabilityResult = Readonly<{ stable: boolean; unstable?: 'deadline' }>;
 
 type RefactGlobal = typeof globalThis & {
   [injectedInstanceName]?: RefactInjected;
-  [bindingName]?: (payload: string) => void;
 };
 
 function createLocatorRegExp(value: LocatorRegex): RegExp {
@@ -243,18 +244,6 @@ export class RefactInjected {
     this.hitTargetController = new HitTargetController(global, builtins);
   }
 
-  version(): string {
-    return 'playwright-1.63.0-next-refact-1';
-  }
-
-  builtins(): RefactBuiltins {
-    return this.builtinSnapshot;
-  }
-
-  resolveSimple(cssSelector: string): Element | null {
-    return this.global.document.querySelector(cssSelector);
-  }
-
   resolveAll(locator: RefactLocator, scopeOverride?: Document | Element): Element[] {
     const document = this.global.document;
     const scope = scopeOverride ?? (locator.within ? queryCssPiercingShadow(document, locator.within)[0] : document);
@@ -267,16 +256,14 @@ export class RefactInjected {
       case 'css':
         elements = queryCssPiercingShadow(scope, locator.value ?? '');
         break;
-      case 'id': {
-        const element = queryCssPiercingShadow(scope, `#${CSS.escape(locator.value ?? '')}`)[0];
-        elements = element ? [element] : [];
+      case 'id':
+        elements = queryCssPiercingShadow(scope, `#${CSS.escape(locator.value ?? '')}`);
         break;
-      }
       case 'name':
         elements = queryCssPiercingShadow(scope, `[name=${JSON.stringify(locator.value ?? '')}]`);
         break;
       case 'test_id':
-        elements = queryByAttribute(scope, locator.attribute ?? 'data-testid', locator.value ?? '', locator.exact, locator.regex);
+        elements = queryByAttribute(scope, locator.attribute ?? 'data-testid', locator.value ?? '', locator.exact ?? true, locator.regex);
         break;
       case 'placeholder':
         elements = queryByAttribute(scope, 'placeholder', locator.value ?? '', locator.exact, locator.regex);
@@ -319,22 +306,9 @@ export class RefactInjected {
         elements = createRoleEngine(true).queryAll(scope, selector);
         break;
       }
-      case 'xpath': {
-        const result = document.evaluate(
-          locator.value ?? '',
-          scope,
-          null,
-          XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-          null,
-        );
-        elements = [];
-        for (let index = 0; index < result.snapshotLength; index++) {
-          const element = result.snapshotItem(index);
-          if (element instanceof Element)
-            elements.push(element);
-        }
+      case 'xpath':
+        elements = XPathEngine.queryAll(scope, locator.value ?? '');
         break;
-      }
       default:
         throw new Error(`Unknown locator strategy: ${locator.by}`);
     }
@@ -378,7 +352,7 @@ export class RefactInjected {
     for (const root of roots) {
       const anchors = root.matches('a[href]')
         ? [root as HTMLAnchorElement]
-        : Array.from(root.querySelectorAll<HTMLAnchorElement>('a[href]'));
+        : queryCssPiercingShadow(root, 'a[href]') as HTMLAnchorElement[];
       total += anchors.length;
       for (const anchor of anchors) {
         if (links.length < limit)
@@ -388,7 +362,7 @@ export class RefactInjected {
     return { ok: true, links, total };
   }
 
-  async elementState(element: Element, state: ElementStateName): Promise<Record<string, unknown>> {
+  async elementState(element: Element, state: ElementStateName, budgetMs = stabilityBudgetMs): Promise<Record<string, unknown>> {
     this.ensureConnected(element);
     if (state === 'visible') {
       const visible = isElementVisible(element);
@@ -414,19 +388,19 @@ export class RefactInjected {
       };
     }
     if (state === 'stable') {
-      const stable = await this.checkElementIsStable(element);
-      return { stable, matches: stable };
+      const result = await this.checkElementIsStable(element, budgetMs);
+      return { ...result, matches: result.stable };
     }
     throw new Error(`Unexpected element state "${state}"`);
   }
 
-  async elementStates(element: Element): Promise<ElementStates> {
+  async elementStates(element: Element, budgetMs = stabilityBudgetMs): Promise<ElementStates> {
     return {
       visible: this.bestEffort(() => element.isConnected && isElementVisible(element), false),
       enabled: this.bestEffort(() => element.isConnected && !getAriaDisabled(element), false),
       editable: this.bestEffort(() => element.isConnected ? this.editableState(element) : null, null),
       checked: this.bestEffort(() => element.isConnected ? getCheckedState(element) : null, null),
-      stable: await this.bestEffortStable(element),
+      stable: await this.bestEffortStable(element, budgetMs),
     };
   }
 
@@ -455,9 +429,9 @@ export class RefactInjected {
     }
   }
 
-  private async bestEffortStable(element: Element): Promise<boolean> {
+  private async bestEffortStable(element: Element, budgetMs: number): Promise<boolean> {
     try {
-      return element.isConnected && await this.checkElementIsStable(element);
+      return element.isConnected && (await this.checkElementIsStable(element, budgetMs)).stable;
     } catch {
       return false;
     }
@@ -473,13 +447,27 @@ export class RefactInjected {
       throw new Error('Element is not attached to the DOM');
   }
 
-  private async checkElementIsStable(element: Element): Promise<boolean> {
+  private async checkElementIsStable(element: Element, budgetMs: number): Promise<StabilityResult> {
     const requestAnimationFrame = this.builtinSnapshot.requestAnimationFrame;
     const performanceNow = this.builtinSnapshot.performanceNow;
+    const setTimeout = this.builtinSnapshot.setTimeout;
+    const clearTimeout = this.builtinSnapshot.clearTimeout;
     let lastRect: { x: number; y: number; width: number; height: number } | undefined;
     let lastTime = 0;
-    return await new Promise<boolean>((resolve, reject) => {
+    return await new Promise<StabilityResult>((resolve, reject) => {
+      let settled = false;
+      let deadline = 0;
+      const settle = (callback: () => void) => {
+        if (settled)
+          return;
+        settled = true;
+        clearTimeout(deadline);
+        callback();
+      };
+      deadline = setTimeout(() => settle(() => resolve({ stable: false, unstable: 'deadline' })), budgetMs);
       const check = () => {
+        if (settled)
+          return;
         try {
           this.ensureConnected(element);
           const time = performanceNow();
@@ -491,35 +479,26 @@ export class RefactInjected {
           const clientRect = element.getBoundingClientRect();
           const rect = { x: clientRect.x, y: clientRect.y, width: clientRect.width, height: clientRect.height };
           if (lastRect) {
-            resolve(
+            const stable =
               rect.x === lastRect.x &&
               rect.y === lastRect.y &&
               rect.width === lastRect.width &&
-              rect.height === lastRect.height,
-            );
+              rect.height === lastRect.height;
+            settle(() => resolve({ stable }));
             return;
           }
           lastRect = rect;
           requestAnimationFrame(check);
         } catch (error) {
-          reject(error);
+          settle(() => reject(error));
         }
       };
       try {
         requestAnimationFrame(check);
       } catch (error) {
-        reject(error);
+        settle(() => reject(error));
       }
     });
-  }
-
-  dispatchBinding(name: string, payload: unknown): void {
-    const global = this.global as RefactGlobal;
-    const binding = global[bindingName];
-    const stringify = this.builtinSnapshot.jsonStringify;
-    if (!binding)
-      throw new Error(`${bindingName} is not installed`);
-    binding(stringify({ name, payload }));
   }
 
   getImplicitRole(element: Element): string {
@@ -549,13 +528,14 @@ export class RefactInjected {
     const select = element as HTMLSelectElement;
     const rect = element.getBoundingClientRect();
     const view = this.global;
+    const checked = getCheckedState(element);
     return {
       attached: element.isConnected,
       visible: isElementVisible(element),
       enabled: !getAriaDisabled(element),
-      editable: !getReadonly(element) && (element.matches('input, textarea, select') || htmlElement.isContentEditable),
-      checked: input.checked === true,
-      indeterminate: getCheckedState(element) === 'mixed',
+      editable: this.editableState(element) === true,
+      checked: checked === 'checked',
+      indeterminate: checked === 'mixed',
       focused: element === this.global.document.activeElement,
       empty: element.children.length === 0 && !normalizeWhiteSpace((element.textContent ?? '')).length && !('value' in input && input.value),
       inViewport: rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < view.innerHeight && rect.left < view.innerWidth,
@@ -569,27 +549,6 @@ export class RefactInjected {
       accessibleName: getElementAccessibleName(element, false).text,
       accessibleDescription: getElementAccessibleDescription(element, false).text,
     };
-  }
-
-  ariaSnapshot(element: Element | null, options: AriaTreeOptions): Record<string, unknown> {
-    const root = element ?? this.global.document.body ?? this.global.document.documentElement;
-    this.ensureConnected(root);
-    const tree = generateAriaTree(root, options);
-    const { json } = renderAriaTreeAsJSON(tree, options);
-    const nodes: Record<string, unknown>[] = [];
-    if (options.boxes) {
-      const visit = (node: (typeof json)[number] | string) => {
-        if (typeof node === 'string')
-          return;
-        if (node.box)
-          nodes.push({ role: node.role, name: node.name, ref: node.ref, box: node.box });
-        for (const child of node.children ?? [])
-          visit(child);
-      };
-      for (const node of json)
-        visit(node);
-    }
-    return { yaml: renderAriaSnapshotAsYaml(json), nodes };
   }
 }
 

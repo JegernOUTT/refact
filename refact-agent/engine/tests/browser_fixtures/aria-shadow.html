@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ARIA states and shadow links</title>
+</head>
+<body>
+  <div id="aria-checked" role="checkbox" aria-checked="true" tabindex="0">Subscribe</div>
+  <div id="aria-switch" role="switch" aria-checked="false" tabindex="0">Notifications</div>
+  <input id="aria-disabled-input" aria-disabled="true">
+  <a id="light-link" href="https://example.com/light">Light link</a>
+  <div id="link-host"></div>
+  <script>
+    const host = document.querySelector('#link-host').attachShadow({ mode: 'open' });
+    host.innerHTML = '<a id="shadow-link" href="https://example.com/shadow">Shadow link</a><div id="nested-host"></div>';
+    const nested = host.querySelector('#nested-host').attachShadow({ mode: 'open' });
+    nested.innerHTML = '<a id="nested-link" href="https://example.com/nested">Nested link</a>';
+  </script>
+</body>
+</html>
