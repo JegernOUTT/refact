@@ -18,7 +18,7 @@ use crate::network::{UrlMatcher, mask_headers, mask_text};
 const INTERCEPTION_REPORT_CAP: usize = 1_000;
 const HAR_ROUTE_PATTERN: &str = "har-replay";
 const FETCH_MAX_REDIRECTS: usize = 20;
-const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const FORBIDDEN_REQUEST_HEADERS: [&str; 3] = ["cookie", "host", "content-length"];
 const HOP_BY_HOP_RESPONSE_HEADERS: [&str; 4] = [
     "content-length",
@@ -278,7 +278,7 @@ struct HandlerOutcome {
 
 struct UpstreamResponse {
     status: u16,
-    headers: BTreeMap<String, String>,
+    headers: Vec<(String, String)>,
     body: Option<String>,
     body_base64: bool,
 }
@@ -303,7 +303,7 @@ fn execute_handler(
             request_id,
             "fulfill",
             *status,
-            headers.clone(),
+            header_pairs(headers),
             body.clone(),
             content_type.clone(),
             *body_base64,
@@ -368,7 +368,7 @@ fn execute_handler(
                 .or_else(|| post_data.map(str::to_string));
             match fetch_upstream(&target_url, &target_method, &headers, request_body) {
                 Ok(response) => {
-                    let headers = merge_headers(&response.headers, response_headers);
+                    let headers = merge_response_headers(response.headers, response_headers);
                     let (body, encoded) = match body_override {
                         Some(body) => (Some(body.clone()), *body_base64),
                         None => (response.body, response.body_base64),
@@ -402,17 +402,17 @@ fn fulfill_outcome(
     request_id: String,
     action: &str,
     status: u16,
-    mut headers: BTreeMap<String, String>,
+    mut headers: Vec<(String, String)>,
     body: Option<String>,
     content_type: Option<String>,
     body_base64: bool,
 ) -> HandlerOutcome {
     if let Some(content_type) = content_type {
         if !headers
-            .keys()
-            .any(|name| name.eq_ignore_ascii_case("content-type"))
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
         {
-            headers.insert("Content-Type".to_string(), content_type);
+            headers.push(("Content-Type".to_string(), content_type));
         }
     }
     let body_wire = body.as_ref().map(|body| {
@@ -433,7 +433,7 @@ fn fulfill_outcome(
         decision: RequestPausedDecision::Fulfill(Fetch::FulfillRequest {
             request_id,
             response_code: status as u32,
-            response_headers: Some(headers_to_cdp(&headers)),
+            response_headers: Some(header_entries(&headers)),
             binary_response_headers: None,
             body: body_wire,
             response_phrase: None,
@@ -488,7 +488,7 @@ fn fetch_upstream(
                 .ok()
                 .map(|value| (name.to_string(), value.to_string()))
         })
-        .collect();
+        .collect::<Vec<_>>();
     let bytes = response
         .bytes()
         .map_err(|error| format!("Route fetch response failed: {error}"))?;
@@ -743,6 +743,39 @@ fn headers_to_cdp(headers: &BTreeMap<String, String>) -> Vec<Fetch::HeaderEntry>
         .collect()
 }
 
+fn header_entries(headers: &[(String, String)]) -> Vec<Fetch::HeaderEntry> {
+    headers
+        .iter()
+        .map(|(name, value)| Fetch::HeaderEntry {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
+fn header_pairs(headers: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+fn merge_response_headers(
+    upstream: Vec<(String, String)>,
+    overrides: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut merged = upstream
+        .into_iter()
+        .filter(|(name, _)| {
+            !overrides
+                .keys()
+                .any(|override_name| override_name.eq_ignore_ascii_case(name))
+        })
+        .collect::<Vec<_>>();
+    merged.extend(header_pairs(overrides));
+    merged
+}
+
 fn merge_headers(
     existing: &BTreeMap<String, String>,
     overrides: &BTreeMap<String, String>,
@@ -879,6 +912,119 @@ mod tests {
 
     fn route(pattern: &str, handler: RouteHandler) -> (UrlPattern, RouteHandler) {
         (UrlPattern::Text(pattern.to_string()), handler)
+    }
+    fn fetch_and_fulfill(response_headers: BTreeMap<String, String>) -> RouteHandler {
+        RouteHandler::FetchAndFulfill {
+            url: None,
+            method: None,
+            headers: None,
+            post_data: None,
+            status: None,
+            response_headers,
+            body: None,
+            body_base64: false,
+        }
+    }
+
+    fn fulfilled_headers(outcome: &HandlerOutcome) -> Vec<(String, String)> {
+        match &outcome.decision {
+            RequestPausedDecision::Fulfill(request) => request
+                .response_headers
+                .as_ref()
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .map(|entry| (entry.name.to_ascii_lowercase(), entry.value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            other => panic!("expected a fulfill decision, got {other:?}"),
+        }
+    }
+
+    fn upstream_serving(response: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/resource", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = stream.read(&mut [0u8; 1024]);
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn duplicate_response_headers_survive_fetch_and_fulfill() {
+        let (url, server) = upstream_serving(
+            "HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Path=/\r\nSet-Cookie: b=2; Path=/\r\nContent-Length: 2\r\n\r\nok",
+        );
+        let outcome = execute_handler(
+            "request-1".to_string(),
+            &fetch_and_fulfill(BTreeMap::new()),
+            &url,
+            "GET",
+            &BTreeMap::new(),
+            None,
+        );
+        server.join().unwrap();
+        let cookies = fulfilled_headers(&outcome)
+            .into_iter()
+            .filter(|(name, _)| name == "set-cookie")
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cookies,
+            vec!["a=1; Path=/".to_string(), "b=2; Path=/".to_string()],
+            "every Set-Cookie must reach fulfillRequest, not just the last one"
+        );
+    }
+
+    #[test]
+    fn response_header_overrides_replace_every_upstream_copy_case_insensitively() {
+        let upstream = vec![
+            ("Set-Cookie".to_string(), "a=1".to_string()),
+            ("set-cookie".to_string(), "b=2".to_string()),
+            ("X-Keep".to_string(), "yes".to_string()),
+        ];
+        let overrides = BTreeMap::from([("SET-COOKIE".to_string(), "override=1".to_string())]);
+        assert_eq!(
+            merge_response_headers(upstream, &overrides),
+            vec![
+                ("X-Keep".to_string(), "yes".to_string()),
+                ("SET-COOKIE".to_string(), "override=1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn route_fetch_decides_inline_and_stays_bounded() {
+        assert!(
+            FETCH_TIMEOUT <= Duration::from_secs(10),
+            "the interceptor callback blocks all CDP traffic while fetching"
+        );
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/gone", dead.local_addr().unwrap());
+        drop(dead);
+        let started = std::time::Instant::now();
+        let outcome = execute_handler(
+            "request-1".to_string(),
+            &fetch_and_fulfill(BTreeMap::new()),
+            &url,
+            "GET",
+            &BTreeMap::new(),
+            None,
+        );
+        assert!(
+            matches!(outcome.decision, RequestPausedDecision::Fail(_)),
+            "a failed upstream fetch must resolve the interception inline"
+        );
+        assert_eq!(outcome.action, "abort");
+        assert!(outcome.reason.is_some());
+        assert!(started.elapsed() < FETCH_TIMEOUT);
     }
 
     fn fulfill(status: u16, body: &str) -> RouteHandler {

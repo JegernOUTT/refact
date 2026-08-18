@@ -1507,12 +1507,12 @@ pub fn setup_network_capture(
                     normalize_timestamp_ms(event.params.timestamp),
                     Some(event.params.encoded_data_length.max(0.0) as u64),
                 ) {
-                    if har_recorder.begin_body_capture() {
-                        let recorder = har_recorder.clone();
-                        let request_id = event.params.request_id.clone();
-                        let body_tab = event_tab.clone();
-                        std::thread::spawn(move || {
-                            let body = body_tab
+                    let request_id = event.params.request_id.clone();
+                    let body_tab = event_tab.clone();
+                    har_recorder.capture_body(
+                        &entry,
+                        Box::new(move || {
+                            body_tab
                                 .call_method(Network::GetResponseBody { request_id })
                                 .ok()
                                 .map(|response| {
@@ -1521,12 +1521,9 @@ pub fn setup_network_capture(
                                         response.base_64_encoded,
                                         None,
                                     )
-                                });
-                            recorder.finish_body_capture(&entry, body);
-                        });
-                    } else {
-                        har_recorder.record(&entry, None);
-                    }
+                                })
+                        }),
+                    );
                 }
             }
             Event::NetworkLoadingFailed(event) => {

@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +12,9 @@ use refact_integrations::browser_models::{
 use refact_integrations::browser_types::NetworkEntry;
 
 use crate::network::{UrlMatcher, mask_headers, mask_text};
+
+const HAR_BODY_QUEUE_CAP: usize = 64;
+const HAR_BODY_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub struct HarResponseBody {
@@ -114,6 +118,7 @@ struct HarRecording {
     matcher: Option<UrlMatcher>,
     entries: Vec<HarEntry>,
     base: Option<(PathBuf, Vec<HarEntry>)>,
+    bodies_skipped: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -135,18 +140,42 @@ pub struct HarRecordingSummary {
     pub replaced_entries: usize,
     #[serde(default)]
     pub appended_entries: usize,
+    #[serde(default)]
+    pub bodies_skipped: usize,
 }
 
 #[derive(Debug, Default)]
 struct HarRecorderState {
     recording: Option<HarRecording>,
-    pending_bodies: usize,
 }
 
 #[derive(Debug, Default)]
-pub struct HarRecorder {
+struct HarShared {
     state: Mutex<HarRecorderState>,
+    finished: Mutex<bool>,
     changed: Condvar,
+}
+
+pub type HarBodyFetcher = Box<dyn FnOnce() -> Option<HarResponseBody> + Send>;
+
+struct BodyWorker {
+    sender: SyncSender<(NetworkEntry, HarBodyFetcher)>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+#[derive(Default)]
+pub struct HarRecorder {
+    shared: Arc<HarShared>,
+    worker: Mutex<Option<BodyWorker>>,
+}
+
+impl std::fmt::Debug for HarRecorder {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HarRecorder")
+            .field("shared", &self.shared)
+            .finish()
+    }
 }
 
 impl HarRecorder {
@@ -179,7 +208,7 @@ impl HarRecorder {
         if path.extension().and_then(|value| value.to_str()) != Some("har") {
             return Err("HAR path must end in .har".to_string());
         }
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.shared.state.lock().unwrap();
         if state.recording.is_some() {
             return Err("HAR recording is already active".to_string());
         }
@@ -190,55 +219,98 @@ impl HarRecorder {
             matcher,
             entries: Vec::new(),
             base,
+            bodies_skipped: 0,
         });
+        drop(state);
+        self.start_worker();
         Ok(path)
     }
 
+    fn start_worker(&self) {
+        let mut worker = self.worker.lock().unwrap();
+        if worker.is_some() {
+            return;
+        }
+        let (sender, receiver) = sync_channel::<(NetworkEntry, HarBodyFetcher)>(HAR_BODY_QUEUE_CAP);
+        let shared = self.shared.clone();
+        *shared.finished.lock().unwrap() = false;
+        let handle = std::thread::spawn(move || {
+            for (entry, fetch) in receiver {
+                let body = fetch();
+                record_into(&shared, &entry, body);
+            }
+            *shared.finished.lock().unwrap() = true;
+            shared.changed.notify_all();
+        });
+        *worker = Some(BodyWorker { sender, handle });
+    }
+
     pub fn is_active(&self) -> bool {
-        self.state.lock().unwrap().recording.is_some()
+        self.shared.state.lock().unwrap().recording.is_some()
     }
 
     pub fn record(&self, entry: &NetworkEntry, body: Option<HarResponseBody>) {
-        let mut state = self.state.lock().unwrap();
-        let Some(recording) = state.recording.as_mut() else {
+        record_into(&self.shared, entry, body);
+    }
+
+    pub fn capture_body(&self, entry: &NetworkEntry, fetch: HarBodyFetcher) {
+        if !self.is_active() {
+            return;
+        }
+        let queued = self
+            .worker
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|worker| worker.sender.try_send((entry.clone(), fetch)));
+        match queued {
+            Some(Ok(())) => {}
+            Some(Err(TrySendError::Full((entry, _)))) => {
+                record_into(&self.shared, &entry, None);
+                self.count_skipped_body();
+            }
+            Some(Err(TrySendError::Disconnected((entry, _)))) => {
+                record_into(&self.shared, &entry, None)
+            }
+            None => record_into(&self.shared, entry, None),
+        }
+    }
+
+    fn count_skipped_body(&self) {
+        if let Some(recording) = self.shared.state.lock().unwrap().recording.as_mut() {
+            recording.bodies_skipped += 1;
+        }
+    }
+
+    fn join_worker(&self, timeout: Duration) {
+        let Some(worker) = self.worker.lock().unwrap().take() else {
             return;
         };
-        if recording
-            .matcher
-            .as_ref()
-            .is_some_and(|matcher| !matcher.is_match(&entry.url))
-        {
-            return;
+        drop(worker.sender);
+        let mut finished = self.shared.finished.lock().unwrap();
+        let deadline = std::time::Instant::now() + timeout;
+        while !*finished {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            let (next, wait) = self
+                .shared
+                .changed
+                .wait_timeout(finished, remaining)
+                .unwrap();
+            finished = next;
+            if wait.timed_out() && !*finished {
+                return;
+            }
         }
-        recording.entries.push(entry_from_monitor(
-            entry,
-            body,
-            recording.mode,
-            recording.content,
-        ));
-    }
-
-    pub fn begin_body_capture(&self) -> bool {
-        let mut state = self.state.lock().unwrap();
-        if state.recording.is_none() {
-            return false;
-        }
-        state.pending_bodies += 1;
-        true
-    }
-
-    pub fn finish_body_capture(&self, entry: &NetworkEntry, body: Option<HarResponseBody>) {
-        self.record(entry, body);
-        let mut state = self.state.lock().unwrap();
-        state.pending_bodies = state.pending_bodies.saturating_sub(1);
-        self.changed.notify_all();
+        drop(finished);
+        let _ = worker.handle.join();
     }
 
     pub fn stop(&self) -> Result<HarRecordingSummary, String> {
-        let mut state = self.state.lock().unwrap();
-        while state.pending_bodies > 0 {
-            state = self.changed.wait(state).unwrap();
-        }
+        self.join_worker(HAR_BODY_JOIN_TIMEOUT);
+        let mut state = self.shared.state.lock().unwrap();
         let recording = state
             .recording
             .take()
@@ -278,8 +350,29 @@ impl HarRecorder {
             updated_from,
             replaced_entries: merge.replaced,
             appended_entries: merge.appended,
+            bodies_skipped: recording.bodies_skipped,
         })
     }
+}
+
+fn record_into(shared: &HarShared, entry: &NetworkEntry, body: Option<HarResponseBody>) {
+    let mut state = shared.state.lock().unwrap();
+    let Some(recording) = state.recording.as_mut() else {
+        return;
+    };
+    if recording
+        .matcher
+        .as_ref()
+        .is_some_and(|matcher| !matcher.is_match(&entry.url))
+    {
+        return;
+    }
+    recording.entries.push(entry_from_monitor(
+        entry,
+        body,
+        recording.mode,
+        recording.content,
+    ));
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -597,6 +690,133 @@ mod tests {
             encoded_data_length: Some(20),
             ..Default::default()
         }
+    }
+
+    fn distinct_entry(index: usize) -> NetworkEntry {
+        NetworkEntry {
+            url: format!("https://example.test/resource-{index}"),
+            ..network_entry()
+        }
+    }
+
+    fn started_recorder(dir: &Path) -> HarRecorder {
+        let recorder = HarRecorder::default();
+        recorder
+            .start(
+                dir,
+                Some("bodies.har"),
+                HarMode::Full,
+                HarContentPolicy::Embed,
+                None,
+                None,
+            )
+            .unwrap();
+        recorder
+    }
+
+    #[test]
+    fn the_body_worker_drains_every_queued_capture_before_stop_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = started_recorder(dir.path());
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        for index in 0..8 {
+            let captured = captured.clone();
+            recorder.capture_body(
+                &distinct_entry(index),
+                Box::new(move || {
+                    captured.lock().unwrap().push(index);
+                    Some(HarResponseBody {
+                        body: format!("body-{index}"),
+                        base64: false,
+                        mime_type: None,
+                    })
+                }),
+            );
+        }
+        let summary = recorder.stop().unwrap();
+        assert_eq!(*captured.lock().unwrap(), (0..8).collect::<Vec<_>>());
+        assert_eq!(summary.entry_count, 8);
+        assert_eq!(summary.bodies_skipped, 0);
+    }
+
+    #[test]
+    fn captures_past_the_queue_cap_are_recorded_without_a_body_and_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = started_recorder(dir.path());
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let blocker = release.clone();
+        recorder.capture_body(
+            &distinct_entry(0),
+            Box::new(move || {
+                let (lock, changed) = &*blocker;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+                None
+            }),
+        );
+        for index in 1..HAR_BODY_QUEUE_CAP + 5 {
+            recorder.capture_body(&distinct_entry(index), Box::new(|| None));
+        }
+        {
+            let (lock, changed) = &*release;
+            *lock.lock().unwrap() = true;
+            changed.notify_all();
+        }
+        let summary = recorder.stop().unwrap();
+        assert!(
+            summary.bodies_skipped >= 3,
+            "over-cap captures must be counted, got {}",
+            summary.bodies_skipped
+        );
+        assert_eq!(summary.entry_count, HAR_BODY_QUEUE_CAP + 5);
+    }
+
+    #[test]
+    fn stop_gives_up_on_a_wedged_capture_instead_of_hanging() {
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = started_recorder(dir.path());
+        let wedged = Arc::new((Mutex::new(false), Condvar::new()));
+        let blocker = wedged.clone();
+        recorder.capture_body(
+            &network_entry(),
+            Box::new(move || {
+                let (lock, changed) = &*blocker;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+                None
+            }),
+        );
+        let started = std::time::Instant::now();
+        recorder.join_worker(Duration::from_millis(200));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "join must be bounded, took {:?}",
+            started.elapsed()
+        );
+        assert!(recorder.stop().is_ok());
+        let (lock, changed) = &*wedged;
+        *lock.lock().unwrap() = true;
+        changed.notify_all();
+    }
+
+    #[test]
+    fn captures_are_dropped_when_no_recording_is_active() {
+        let recorder = HarRecorder::default();
+        let called = Arc::new(Mutex::new(false));
+        let flag = called.clone();
+        recorder.capture_body(
+            &network_entry(),
+            Box::new(move || {
+                *flag.lock().unwrap() = true;
+                None
+            }),
+        );
+        assert!(!*called.lock().unwrap());
+        assert!(recorder.stop().is_err());
     }
 
     #[test]

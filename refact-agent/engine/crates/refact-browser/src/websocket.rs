@@ -17,6 +17,7 @@ use crate::network::{UrlMatcher, mask_text};
 const WEBSOCKET_EVENT_CAP: usize = 1_000;
 const WEBSOCKET_BINDING: &str = "__refact_websocket_event";
 const WEBSOCKET_DISPATCH: &str = "__refactWebSocketDispatch";
+const FLUSH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug)]
 struct RegisteredWebSocketRoute {
@@ -422,7 +423,7 @@ impl WebSocketRegistry {
         pattern: &UrlPattern,
         code: Option<u16>,
         reason: Option<&str>,
-    ) -> Result<usize, String> {
+    ) -> Result<Vec<String>, String> {
         let matcher = matcher_for_pattern(pattern)?;
         let sockets = self.matching_sockets(&matcher);
         for socket in &sockets {
@@ -437,11 +438,14 @@ impl WebSocketRegistry {
                     .close(code, reason.map(mask_text)),
             );
         }
+        Ok(sockets.into_iter().map(|socket| socket.route_id).collect())
+    }
+
+    pub fn forget_sockets(&self, route_ids: &[String]) {
         let mut state = self.state.lock().unwrap();
-        for socket in &sockets {
-            state.routed_sockets.remove(&socket.route_id);
+        for route_id in route_ids {
+            state.routed_sockets.remove(route_id);
         }
-        Ok(sockets.len())
     }
 
     pub fn flush_commands(&self, tabs: &[std::sync::Arc<Tab>]) -> Result<(), String> {
@@ -452,16 +456,74 @@ impl WebSocketRegistry {
     }
 
     pub fn flush_tab_commands(&self, tab: &Tab) -> Result<(), String> {
-        for command in self.take_commands_for(tab.get_target_id()) {
-            let command = serde_json::to_string(&command)
-                .map_err(|error| format!("Failed to serialize WebSocket command: {error}"))?;
+        self.dispatch_commands(tab.get_target_id(), |payload| {
             tab.evaluate(
-                &format!("globalThis[{WEBSOCKET_DISPATCH:?}]?.({command})"),
+                &format!("globalThis[{WEBSOCKET_DISPATCH:?}]?.({payload})"),
                 false,
             )
-            .map_err(|error| format!("Failed to dispatch WebSocket command: {error}"))?;
+            .map(|_| ())
+            .map_err(|error| format!("Failed to dispatch WebSocket command: {error}"))
+        })
+    }
+
+    fn dispatch_commands(
+        &self,
+        tab_target_id: &str,
+        mut dispatch: impl FnMut(&str) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let commands = self.take_commands_for(tab_target_id);
+        for (index, command) in commands.iter().enumerate() {
+            let payload = match serde_json::to_string(command) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    self.requeue_commands(tab_target_id, &commands[index + 1..]);
+                    return Err(format!("Failed to serialize WebSocket command: {error}"));
+                }
+            };
+            if let Err(error) = dispatch(&payload) {
+                self.requeue_commands(tab_target_id, &commands[index..]);
+                return Err(error);
+            }
         }
         Ok(())
+    }
+
+    fn requeue_commands(&self, tab_target_id: &str, commands: &[Value]) {
+        if commands.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock().unwrap();
+        let mut pending = commands
+            .iter()
+            .map(|command| (tab_target_id.to_string(), command.clone()))
+            .collect::<Vec<_>>();
+        pending.append(&mut state.commands);
+        state.commands = pending;
+    }
+
+    pub fn has_pending_commands(&self, tab_target_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .commands
+            .iter()
+            .any(|(target_id, _)| target_id == tab_target_id)
+    }
+
+    pub fn wait_for_pending_commands(&self, tab_target_id: &str, timeout: Duration) -> bool {
+        let state = self.state.lock().unwrap();
+        if state
+            .commands
+            .iter()
+            .any(|(target_id, _)| target_id == tab_target_id)
+        {
+            return true;
+        }
+        let (state, _) = self.changed.wait_timeout(state, timeout).unwrap();
+        state
+            .commands
+            .iter()
+            .any(|(target_id, _)| target_id == tab_target_id)
     }
 
     fn take_commands_for(&self, tab_target_id: &str) -> Vec<Value> {
@@ -504,6 +566,7 @@ impl WebSocketRegistry {
             .unwrap()
             .commands
             .push((socket.tab_target_id.clone(), command));
+        self.changed.notify_all();
     }
 
     #[cfg(test)]
@@ -591,12 +654,28 @@ fn websocket_event_from_binding_payload(payload: &Value) -> Option<Value> {
     Some(value)
 }
 
+fn spawn_command_flusher(tab: &std::sync::Arc<Tab>, registry: std::sync::Arc<WebSocketRegistry>) {
+    let target_id = tab.get_target_id().to_string();
+    let flusher_tab = std::sync::Arc::downgrade(tab);
+    std::thread::spawn(move || loop {
+        let pending = registry.wait_for_pending_commands(&target_id, FLUSH_POLL_INTERVAL);
+        let Some(tab) = flusher_tab.upgrade() else {
+            return;
+        };
+        if pending {
+            if let Err(error) = registry.flush_tab_commands(&tab) {
+                tracing::warn!("WebSocket command dispatch failed: {error}");
+            }
+        }
+    });
+}
+
 pub fn install_websocket_router(
     tab: &std::sync::Arc<Tab>,
     registry: std::sync::Arc<WebSocketRegistry>,
 ) -> Result<(), String> {
     let target_id = tab.get_target_id().to_string();
-    let dispatch_tab = std::sync::Arc::downgrade(tab);
+    spawn_command_flusher(tab, registry.clone());
     tab.expose_function(
         WEBSOCKET_BINDING,
         std::sync::Arc::new(move |payload: Value| {
@@ -604,11 +683,6 @@ pub fn install_websocket_router(
                 return;
             };
             registry.handle_page_event(&target_id, &event);
-            if let Some(tab) = dispatch_tab.upgrade() {
-                if let Err(error) = registry.flush_tab_commands(&tab) {
-                    tracing::warn!("WebSocket command dispatch failed: {error}");
-                }
-            }
         }),
     )
     .map_err(|error| format!("Failed to expose WebSocket route binding: {error}"))?;
@@ -817,6 +891,118 @@ mod tests {
             &json!({"type": "created", "id": "route-1", "url": url, "protocols": protocols}),
         );
         registry.take_commands();
+    }
+
+    #[test]
+    fn commands_that_fail_to_dispatch_are_requeued_in_order() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        );
+        created(&registry, "ws://127.0.0.1:9/ws-echo", json!([]));
+
+        registry.send_to_page(&pattern, "first").unwrap();
+        registry.send_to_page(&pattern, "second").unwrap();
+        registry.send_to_page(&pattern, "third").unwrap();
+
+        let mut seen = Vec::new();
+        let error = registry
+            .dispatch_commands("tab-1", |payload| {
+                if seen.len() == 1 {
+                    return Err("tab is gone".to_string());
+                }
+                seen.push(payload.to_string());
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(error, "tab is gone");
+        assert_eq!(seen.len(), 1);
+
+        let remaining = registry.take_commands_for("tab-1");
+        assert_eq!(remaining.len(), 2, "undispatched commands must not be lost");
+        assert_eq!(remaining[0]["data"], json!("second"));
+        assert_eq!(remaining[1]["data"], json!("third"));
+    }
+
+    #[test]
+    fn requeued_commands_stay_ahead_of_newly_queued_ones() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        );
+        created(&registry, "ws://127.0.0.1:9/ws-echo", json!([]));
+
+        registry.send_to_page(&pattern, "first").unwrap();
+        assert!(registry
+            .dispatch_commands("tab-1", |_| Err("offline".to_string()))
+            .is_err());
+        registry.send_to_page(&pattern, "second").unwrap();
+
+        let remaining = registry.take_commands_for("tab-1");
+        assert_eq!(remaining[0]["data"], json!("first"));
+        assert_eq!(remaining[1]["data"], json!("second"));
+    }
+
+    #[test]
+    fn close_keeps_the_socket_registered_until_dispatch_succeeds() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        );
+        created(&registry, "ws://127.0.0.1:9/ws-echo", json!([]));
+
+        let closing = registry.close_sockets(&pattern, Some(1001), None).unwrap();
+        assert_eq!(closing, vec!["route-1".to_string()]);
+        assert!(registry
+            .dispatch_commands("tab-1", |_| Err("tab is gone".to_string()))
+            .is_err());
+        assert_eq!(
+            registry.send_to_page(&pattern, "still-here").unwrap(),
+            1,
+            "a socket whose close never reached the page stays addressable"
+        );
+
+        registry.forget_sockets(&closing);
+        assert_eq!(registry.send_to_page(&pattern, "after-close").unwrap(), 0);
+    }
+
+    #[test]
+    fn queued_commands_wake_the_flusher_instead_of_the_binding_callback() {
+        let registry = std::sync::Arc::new(routed_registry(
+            &UrlPattern::Text("ws://**/ws-echo".to_string()),
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        ));
+        let waiter = registry.clone();
+        let observer = std::thread::spawn(move || {
+            waiter.wait_for_pending_commands("tab-1", Duration::from_secs(2))
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "created", "id": "route-1", "url": "ws://127.0.0.1:9/ws-echo"}),
+        );
+        assert!(observer.join().unwrap());
+        assert!(registry.has_pending_commands("tab-1"));
+        assert!(!registry.has_pending_commands("tab-2"));
+    }
+
+    #[test]
+    fn waiting_for_commands_gives_up_when_nothing_is_queued() {
+        let registry = WebSocketRegistry::default();
+        let started = Instant::now();
+        assert!(!registry.wait_for_pending_commands("tab-1", Duration::from_millis(50)));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
@@ -1087,12 +1273,11 @@ mod tests {
         );
         created(&registry, "ws://127.0.0.1:9/ws-echo", json!([]));
 
-        assert_eq!(
-            registry
-                .close_sockets(&pattern, Some(4002), Some("server restarting"))
-                .unwrap(),
-            1
-        );
+        let closed = registry
+            .close_sockets(&pattern, Some(4002), Some("server restarting"))
+            .unwrap();
+        assert_eq!(closed.len(), 1);
+        registry.forget_sockets(&closed);
 
         let command = registry.take_commands().remove(0);
         assert_eq!(command["type"], json!("close"));

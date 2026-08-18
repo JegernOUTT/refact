@@ -14,6 +14,8 @@ use tungstenite::{Message, WebSocket, connect};
 use crate::{ElementHandle, WorldManager};
 
 const CANCELED_REASON: &str = "canceled";
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const DOWNLOAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InputMetadata {
@@ -395,6 +397,7 @@ pub struct DownloadMonitor {
     tracker: DownloadTracker,
     directory: PathBuf,
     next_command_id: Mutex<u64>,
+    command_timeout: Duration,
 }
 
 impl DownloadMonitor {
@@ -408,6 +411,7 @@ impl DownloadMonitor {
             tracker: DownloadTracker::default(),
             directory,
             next_command_id: Mutex::new(1),
+            command_timeout: COMMAND_TIMEOUT,
         })
     }
 
@@ -442,6 +446,20 @@ impl DownloadMonitor {
             id
         };
         let mut socket = self.socket.lock().unwrap();
+        restoring_read_timeout(&mut socket, |socket| {
+            self.exchange(socket, id, method, params)
+        })
+    }
+
+    fn exchange(
+        &self,
+        socket: &mut BrowserSocket,
+        id: u64,
+        method: &str,
+        params: Value,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + self.command_timeout;
+        set_read_timeout(socket, Some(self.command_timeout))?;
         socket
             .send(Message::Text(
                 json!({"id": id, "method": method, "params": params})
@@ -450,9 +468,19 @@ impl DownloadMonitor {
             ))
             .map_err(|error| format!("Failed to send download CDP command: {error}"))?;
         loop {
-            let message = socket
-                .read()
-                .map_err(|error| format!("Failed to read download CDP response: {error}"))?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "Timed out after {}ms waiting for download CDP response to {method}",
+                    self.command_timeout.as_millis()
+                ));
+            }
+            set_read_timeout(socket, Some(remaining))?;
+            let message = match socket.read() {
+                Ok(message) => message,
+                Err(error) if is_read_timeout(&error) => continue,
+                Err(error) => return Err(format!("Failed to read download CDP response: {error}")),
+            };
             let Some(value) = message_json(message)? else {
                 continue;
             };
@@ -506,20 +534,19 @@ impl DownloadMonitor {
                 ));
             }
             let mut socket = self.socket.lock().unwrap();
-            set_read_timeout(&mut socket, Some(remaining.min(Duration::from_millis(250))))?;
-            match socket.read() {
-                Ok(message) => {
-                    if let Some(value) = message_json(message)? {
-                        self.handle_event(&value);
+            restoring_read_timeout(&mut socket, |socket| {
+                set_read_timeout(socket, Some(remaining.min(DOWNLOAD_POLL_INTERVAL)))?;
+                match socket.read() {
+                    Ok(message) => {
+                        if let Some(value) = message_json(message)? {
+                            self.handle_event(&value);
+                        }
+                        Ok(())
                     }
+                    Err(error) if is_read_timeout(&error) => Ok(()),
+                    Err(error) => Err(format!("Failed while waiting for download: {error}")),
                 }
-                Err(tungstenite::Error::Io(error))
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) => {}
-                Err(error) => return Err(format!("Failed while waiting for download: {error}")),
-            }
+            })?;
         }
     }
 
@@ -607,6 +634,36 @@ fn set_read_timeout(socket: &mut BrowserSocket, timeout: Option<Duration>) -> Re
     .map_err(|error| format!("Failed to configure download wait timeout: {error}"))
 }
 
+fn read_timeout(socket: &mut BrowserSocket) -> Result<Option<Duration>, String> {
+    match socket.get_mut() {
+        MaybeTlsStream::Plain(stream) => stream.read_timeout(),
+        MaybeTlsStream::Rustls(stream) => stream.sock.read_timeout(),
+        _ => return Err("Unsupported download CDP transport".to_string()),
+    }
+    .map_err(|error| format!("Failed to read download wait timeout: {error}"))
+}
+
+fn restoring_read_timeout<T>(
+    socket: &mut BrowserSocket,
+    body: impl FnOnce(&mut BrowserSocket) -> Result<T, String>,
+) -> Result<T, String> {
+    let previous = read_timeout(socket)?;
+    let result = body(socket);
+    let restored = set_read_timeout(socket, previous);
+    result.and_then(|value| restored.map(|()| value))
+}
+
+fn is_read_timeout(error: &tungstenite::Error) -> bool {
+    matches!(
+        error,
+        tungstenite::Error::Io(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+    )
+}
+
 fn string_field(value: &Value, name: &str) -> String {
     value
         .get(name)
@@ -630,7 +687,98 @@ fn mask_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
     use tempfile::tempdir;
+
+    struct SilentServer {
+        url: String,
+        _handle: std::thread::JoinHandle<()>,
+    }
+
+    fn silent_cdp_server() -> SilentServer {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/devtools", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let Ok(socket) = tungstenite::accept(stream) else {
+                    return;
+                };
+                std::thread::sleep(Duration::from_secs(30));
+                drop(socket);
+            }
+        });
+        SilentServer {
+            url,
+            _handle: handle,
+        }
+    }
+
+    fn silent_monitor(
+        server: &SilentServer,
+        command_timeout: Duration,
+    ) -> (DownloadMonitor, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let mut monitor =
+            DownloadMonitor::connect(&server.url, dir.path().join("downloads")).unwrap();
+        monitor.command_timeout = command_timeout;
+        (monitor, dir)
+    }
+
+    #[test]
+    fn send_command_times_out_on_an_unresponsive_socket() {
+        let server = silent_cdp_server();
+        let (monitor, _dir) = silent_monitor(&server, Duration::from_millis(200));
+        let started = Instant::now();
+        let error = monitor
+            .send_command("Browser.setDownloadBehavior", json!({}))
+            .unwrap_err();
+        assert!(
+            error.contains("Timed out after 200ms waiting for download CDP response"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the command exchange must be bounded, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn send_command_restores_the_previous_read_timeout() {
+        let server = silent_cdp_server();
+        let (monitor, _dir) = silent_monitor(&server, Duration::from_millis(200));
+        {
+            let mut socket = monitor.socket.lock().unwrap();
+            set_read_timeout(&mut socket, Some(Duration::from_secs(7))).unwrap();
+        }
+        assert!(monitor
+            .send_command("Browser.setDownloadBehavior", json!({}))
+            .is_err());
+        let mut socket = monitor.socket.lock().unwrap();
+        assert_eq!(
+            read_timeout(&mut socket).unwrap(),
+            Some(Duration::from_secs(7))
+        );
+    }
+
+    #[test]
+    fn wait_for_download_restores_the_read_timeout_it_borrowed() {
+        let server = silent_cdp_server();
+        let (monitor, _dir) = silent_monitor(&server, COMMAND_TIMEOUT);
+        {
+            let mut socket = monitor.socket.lock().unwrap();
+            assert_eq!(read_timeout(&mut socket).unwrap(), None);
+        }
+        assert!(monitor
+            .wait_for_download(0, Duration::from_millis(300), None)
+            .is_err());
+        let mut socket = monitor.socket.lock().unwrap();
+        assert_eq!(
+            read_timeout(&mut socket).unwrap(),
+            None,
+            "a stale poll timeout must not leak into later commands"
+        );
+    }
 
     fn metadata(multiple: bool) -> InputMetadata {
         InputMetadata {

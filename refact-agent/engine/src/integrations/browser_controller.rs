@@ -1448,10 +1448,13 @@ fn execute_route_management_step(
                     .websocket_registry
                     .close_sockets(pattern, *code, reason.as_deref());
             Some(match flush_websocket_commands(runtime, result) {
-                Ok(closed) => StepResult::success(idx, format!("Closed {closed} WebSocket(s)"))
-                    .with_data(
+                Ok(route_ids) => {
+                    runtime.websocket_registry.forget_sockets(&route_ids);
+                    let closed = route_ids.len();
+                    StepResult::success(idx, format!("Closed {closed} WebSocket(s)")).with_data(
                         serde_json::json!({"closed": closed, "code": code, "reason": reason}),
-                    ),
+                    )
+                }
                 Err(error) => StepResult::failure(idx, "Close WebSocket", error),
             })
         }
@@ -1620,10 +1623,10 @@ fn counted(count: usize, singular: &str) -> String {
     }
 }
 
-fn flush_websocket_commands(
+fn flush_websocket_commands<T>(
     runtime: &BrowserRuntime,
-    result: Result<usize, String>,
-) -> Result<usize, String> {
+    result: Result<T, String>,
+) -> Result<T, String> {
     let tabs = runtime
         .browser
         .get_tabs()
@@ -2192,11 +2195,17 @@ fn execute_clock_step(runtime: &mut BrowserRuntime, step: &BrowserStep, idx: usi
     }
 }
 
-async fn execute_http_request_step(
+struct PreparedHttpRequest {
+    spec: http_client::HttpRequestSpec,
+    tab: Arc<Tab>,
+    jar: Vec<refact_integrations::browser_models::BrowserCookie>,
+    artifacts_dir: PathBuf,
+}
+
+fn prepare_http_request(
     runtime: &mut BrowserRuntime,
     options: &BrowserHttpRequest,
-    idx: usize,
-) -> StepResult {
+) -> Result<PreparedHttpRequest, String> {
     let artifacts_dir = runtime.artifacts_dir.clone();
     let prepared = (|| -> Result<(http_client::HttpRequestSpec, Arc<Tab>), String> {
         let spec = http_client::HttpRequestSpec {
@@ -2224,26 +2233,45 @@ async fn execute_http_request_step(
             .ok_or_else(|| "No active tab in browser runtime".to_string())?;
         Ok((spec, tab))
     })();
-    let (spec, tab) = match prepared {
+    let (spec, tab) = prepared?;
+    let jar = refact_browser::context_state::get_cookies(&tab, None)?;
+    Ok(PreparedHttpRequest {
+        spec,
+        tab,
+        jar,
+        artifacts_dir,
+    })
+}
+
+fn apply_http_response(
+    runtime: &mut BrowserRuntime,
+    tab: &Tab,
+    response: &http_client::HttpResponse,
+) -> Result<(), String> {
+    if !response.set_cookies.is_empty() {
+        refact_browser::context_state::set_cookies(tab, &response.set_cookies)?;
+    }
+    runtime.touch();
+    Ok(())
+}
+
+async fn execute_http_request_step(
+    runtime: &mut BrowserRuntime,
+    options: &BrowserHttpRequest,
+    idx: usize,
+) -> StepResult {
+    let prepared = match prepare_http_request(runtime, options) {
         Ok(prepared) => prepared,
         Err(error) => return StepResult::failure(idx, "HTTP request", error),
     };
-    let jar = match refact_browser::context_state::get_cookies(&tab, None) {
-        Ok(jar) => jar,
-        Err(error) => return StepResult::failure(idx, "HTTP request", error),
-    };
-    let response = match http_client::send_http_request(&spec, &jar).await {
+    let response = match http_client::send_http_request(&prepared.spec, &prepared.jar).await {
         Ok(response) => response,
         Err(error) => return StepResult::failure(idx, "HTTP request", error),
     };
-    if !response.set_cookies.is_empty() {
-        if let Err(error) = refact_browser::context_state::set_cookies(&tab, &response.set_cookies)
-        {
-            return StepResult::failure(idx, "HTTP request", error);
-        }
+    if let Err(error) = apply_http_response(runtime, &prepared.tab, &response) {
+        return StepResult::failure(idx, "HTTP request", error);
     }
-    runtime.touch();
-    http_request_result(&response, options, idx, &artifacts_dir)
+    http_request_result(&response, options, idx, &prepared.artifacts_dir)
 }
 
 fn http_request_result(
@@ -2865,7 +2893,8 @@ pub async fn execute_request_with_runtime(
                 | BrowserStep::RouteFromHar { .. }
         ) {
             let mut rt = runtime_arc.lock().await;
-            execute_route_management_step(&mut rt, step, idx).unwrap()
+            tokio::task::block_in_place(|| execute_route_management_step(&mut rt, step, idx))
+                .unwrap()
         } else if let BrowserStep::WaitForWebSocketFrame {
             pattern,
             timeout_ms,
@@ -2879,12 +2908,14 @@ pub async fn execute_request_with_runtime(
                 })
                 .transpose();
             let cursor = armed_network_waits.get(&idx).copied().unwrap_or_default();
-            match matcher.and_then(|matcher| {
-                websocket_registry.wait_for_frame(
-                    matcher.as_ref(),
-                    cursor,
-                    Duration::from_millis(clamp_timeout_ms(*timeout_ms)),
-                )
+            match tokio::task::block_in_place(|| {
+                matcher.and_then(|matcher| {
+                    websocket_registry.wait_for_frame(
+                        matcher.as_ref(),
+                        cursor,
+                        Duration::from_millis(clamp_timeout_ms(*timeout_ms)),
+                    )
+                })
             }) {
                 Ok(frame) => StepResult::success(idx, "Observed WebSocket frame")
                     .with_data(serde_json::json!({"frame": frame})),
@@ -2892,7 +2923,7 @@ pub async fn execute_request_with_runtime(
             }
         } else if matches!(step, BrowserStep::Reset) {
             let mut rt = runtime_arc.lock().await;
-            execute_reset_step(&mut rt, idx)
+            tokio::task::block_in_place(|| execute_reset_step(&mut rt, idx))
         } else if let BrowserStep::CdpSend {
             method,
             params,
@@ -2921,16 +2952,43 @@ pub async fn execute_request_with_runtime(
             })
         } else if is_clock_step(step) {
             let mut rt = runtime_arc.lock().await;
-            execute_clock_step(&mut rt, step, idx)
+            tokio::task::block_in_place(|| execute_clock_step(&mut rt, step, idx))
         } else if let BrowserStep::HttpRequest { options } = step {
-            let mut rt = runtime_arc.lock().await;
-            execute_http_request_step(&mut rt, options, idx).await
+            let prepared = {
+                let mut rt = runtime_arc.lock().await;
+                tokio::task::block_in_place(|| prepare_http_request(&mut rt, options))
+            };
+            match prepared {
+                Ok(prepared) => {
+                    match http_client::send_http_request(&prepared.spec, &prepared.jar).await {
+                        Ok(response) => {
+                            let applied = {
+                                let mut rt = runtime_arc.lock().await;
+                                tokio::task::block_in_place(|| {
+                                    apply_http_response(&mut rt, &prepared.tab, &response)
+                                })
+                            };
+                            match applied {
+                                Ok(()) => http_request_result(
+                                    &response,
+                                    options,
+                                    idx,
+                                    &prepared.artifacts_dir,
+                                ),
+                                Err(error) => StepResult::failure(idx, "HTTP request", error),
+                            }
+                        }
+                        Err(error) => StepResult::failure(idx, "HTTP request", error),
+                    }
+                }
+                Err(error) => StepResult::failure(idx, "HTTP request", error),
+            }
         } else if is_instrumentation_step(step) {
             let mut rt = runtime_arc.lock().await;
-            execute_instrumentation_step(&mut rt, step, idx)
+            tokio::task::block_in_place(|| execute_instrumentation_step(&mut rt, step, idx))
         } else if is_context_management_step(step) {
             let mut rt = runtime_arc.lock().await;
-            execute_context_management_step(&mut rt, step, idx)
+            tokio::task::block_in_place(|| execute_context_management_step(&mut rt, step, idx))
         } else if is_tab_management_step(step) {
             let step_report = tokio::task::block_in_place(|| {
                 let mut rt = runtime_arc.blocking_lock();
