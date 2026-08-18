@@ -31,6 +31,11 @@ use refact_browser::artifacts::{
     ComposeLayout, ElementStateAction, ScreenshotMetrics, compose_sheet, element_state_sequence,
     pdf_payload, screenshot_capture,
 };
+use refact_browser::screencast::{
+    build_filmstrip, capture_screencast_burst, capture_timed_frames, select_evenly_spaced,
+    CapturedFrame, FilmstripResult, FrameBurstPlan, ScreencastSessionOptions,
+    DEFAULT_SCREENCAST_QUALITY, MAX_FRAME_COUNT, MAX_SESSION_DURATION_MS, MAX_SESSION_FRAMES,
+};
 use refact_browser::http_client;
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 
@@ -1356,6 +1361,228 @@ fn execute_reset_step(runtime: &mut BrowserRuntime, idx: usize) -> StepResult {
     }
 }
 
+fn is_screencast_step(step: &BrowserStep) -> bool {
+    matches!(
+        step,
+        BrowserStep::CaptureFrames { .. }
+            | BrowserStep::ScreencastStart { .. }
+            | BrowserStep::ScreencastStop { .. }
+    )
+}
+
+fn screencast_quality(quality: Option<u32>) -> Result<u32, String> {
+    match quality {
+        Some(quality) if quality > 100 => Err(format!(
+            "Screencast quality {quality} must be between 0 and 100"
+        )),
+        Some(quality) => Ok(quality),
+        None => Ok(DEFAULT_SCREENCAST_QUALITY),
+    }
+}
+
+fn burst_screenshot_options(policy: &ImagePolicy, full_page: bool) -> BrowserScreenshotOptions {
+    BrowserScreenshotOptions {
+        full_page,
+        image_type: Some(BrowserScreenshotType::Jpeg),
+        quality: policy.quality,
+        ..Default::default()
+    }
+}
+
+fn capture_scoped_frame(
+    tab: &Tab,
+    world: &WorldManager,
+    locator: Option<&BrowserLocator>,
+    options: &BrowserScreenshotOptions,
+    policy: &ImagePolicy,
+) -> Result<Vec<u8>, String> {
+    let element = match locator {
+        Some(locator) => {
+            let resolved = resolve_element(tab, world, locator)?;
+            let clip = resolved
+                .bbox
+                .as_ref()
+                .filter(|bbox| bbox.width > 0.0 && bbox.height > 0.0)
+                .ok_or_else(|| "Element has no visible bounds".to_string())
+                .and_then(|bbox| {
+                    screenshot_metrics(tab).map(|metrics| BrowserScreenshotClip {
+                        x: metrics.page_x + bbox.x,
+                        y: metrics.page_y + bbox.y,
+                        width: bbox.width,
+                        height: bbox.height,
+                    })
+                });
+            let _ = world.release_handle(tab, &resolved.handle);
+            Some(clip?)
+        }
+        None => None,
+    };
+    let capture = capture_screenshot(tab, world, options, element, policy)?;
+    base64::prelude::BASE64_STANDARD
+        .decode(capture.data)
+        .map_err(|error| format!("Screencast frame decode failed: {error}"))
+}
+
+fn capture_frame_burst(
+    tab: &Tab,
+    world: &WorldManager,
+    plan: &FrameBurstPlan,
+    locator: Option<&BrowserLocator>,
+    full_page: bool,
+    policy: &ImagePolicy,
+) -> Result<(Vec<CapturedFrame>, Vec<String>), String> {
+    let scoped = locator.is_some() || full_page;
+    if !scoped {
+        let quality = policy
+            .quality
+            .map(u32::from)
+            .unwrap_or(DEFAULT_SCREENCAST_QUALITY)
+            .min(100);
+        let frames = capture_screencast_burst(tab, plan, quality)?;
+        if frames.len() >= 2 {
+            return Ok((frames, Vec::new()));
+        }
+    }
+    let options = burst_screenshot_options(policy, full_page && locator.is_none());
+    let reason = if locator.is_some() {
+        "element-scoped frames use timed screenshots"
+    } else if full_page {
+        "full-page frames use timed screenshots"
+    } else {
+        "the screencast produced too few frames, captured with timed screenshots instead"
+    };
+    let frames = capture_timed_frames(
+        plan,
+        || capture_scoped_frame(tab, world, locator, &options, policy),
+        |remaining| std::thread::sleep(remaining),
+    )?;
+    Ok((frames, vec![reason.to_string()]))
+}
+
+fn filmstrip_step_data(result: &FilmstripResult) -> Value {
+    serde_json::json!({
+        "mime": result.filmstrip.mime,
+        "data": result.filmstrip_data,
+        "width": result.filmstrip.width,
+        "height": result.filmstrip.height,
+        "bytes": result.filmstrip.bytes,
+        "artifact": result.filmstrip,
+        "frames": result.frames,
+        "frame_count": result.frames.len(),
+        "columns": result.columns,
+        "rows": result.rows,
+        "duration_ms": result.duration_ms,
+        "warnings": result.warnings,
+    })
+}
+
+fn execute_screencast_step(
+    runtime: &mut BrowserRuntime,
+    step: &BrowserStep,
+    idx: usize,
+    image_policy: &ImagePolicy,
+) -> StepResult {
+    let result: Result<StepResult, String> = (|| {
+        let tab = runtime
+            .get_active_tab()
+            .ok_or_else(|| "No active tab in browser runtime".to_string())?;
+        match step {
+            BrowserStep::CaptureFrames {
+                duration_ms,
+                frame_count,
+                interval_ms,
+                locator,
+                full_page,
+            } => {
+                let plan = FrameBurstPlan::resolve(*duration_ms, *frame_count, *interval_ms)?;
+                let (frames, warnings) = capture_frame_burst(
+                    &tab,
+                    &runtime.world_manager,
+                    &plan,
+                    locator.as_ref(),
+                    full_page.unwrap_or(false),
+                    image_policy,
+                )?;
+                let captured = frames.len();
+                let filmstrip = build_filmstrip(
+                    &frames,
+                    &runtime.artifacts_dir,
+                    "burst",
+                    image_policy,
+                    warnings,
+                )?;
+                Ok(StepResult::success(
+                    idx,
+                    format!("Captured {captured} frame(s) over {}ms", plan.duration_ms),
+                )
+                .with_data(filmstrip_step_data(&filmstrip)))
+            }
+            BrowserStep::ScreencastStart {
+                quality,
+                max_width,
+                max_height,
+            } => {
+                runtime.screencast_manager.start(
+                    &tab,
+                    ScreencastSessionOptions {
+                        quality: screencast_quality(*quality)?,
+                        max_width: *max_width,
+                        max_height: *max_height,
+                    },
+                )?;
+                Ok(StepResult::success(
+                    idx,
+                    format!(
+                        "Started screencast, auto-stops after {MAX_SESSION_DURATION_MS}ms or {MAX_SESSION_FRAMES} frames"
+                    ),
+                ))
+            }
+            BrowserStep::ScreencastStop { compose } => {
+                let stopped = runtime.screencast_manager.stop(&tab)?;
+                let mut warnings = Vec::new();
+                if stopped.auto_stopped {
+                    warnings.push(format!(
+                        "The screencast auto-stopped at the {MAX_SESSION_DURATION_MS}ms / {MAX_SESSION_FRAMES} frame cap"
+                    ));
+                }
+                let captured = stopped.frames.len();
+                if !compose.unwrap_or(true) {
+                    return Ok(StepResult::success(
+                        idx,
+                        format!("Stopped screencast after {captured} frame(s)"),
+                    )
+                    .with_data(serde_json::json!({
+                        "frame_count": captured,
+                        "duration_ms": stopped.duration_ms,
+                        "warnings": warnings,
+                    })));
+                }
+                let selected = select_evenly_spaced(stopped.frames, MAX_FRAME_COUNT);
+                if selected.len() > 1 {
+                    warnings.push(format!(
+                        "Composed {} of {captured} captured frame(s)",
+                        selected.len()
+                    ));
+                }
+                let filmstrip = build_filmstrip(
+                    &selected,
+                    &runtime.artifacts_dir,
+                    "session",
+                    image_policy,
+                    warnings,
+                )?;
+                Ok(StepResult::success(
+                    idx,
+                    format!("Stopped screencast after {captured} frame(s)"),
+                )
+                .with_data(filmstrip_step_data(&filmstrip)))
+            }
+            _ => unreachable!(),
+        }
+    })();
+    result.unwrap_or_else(|error| StepResult::failure(idx, "Screencast", error))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct WindowBoundsRequest {
     left: Option<u32>,
@@ -1563,7 +1790,8 @@ async fn execute_http_request_step(
         Err(error) => return StepResult::failure(idx, "HTTP request", error),
     };
     if !response.set_cookies.is_empty() {
-        if let Err(error) = refact_browser::context_state::set_cookies(&tab, &response.set_cookies) {
+        if let Err(error) = refact_browser::context_state::set_cookies(&tab, &response.set_cookies)
+        {
             return StepResult::failure(idx, "HTTP request", error);
         }
     }
@@ -1988,6 +2216,11 @@ pub async fn execute_request_with_runtime(
         } else if matches!(step, BrowserStep::Reset) {
             let mut rt = runtime_arc.lock().await;
             execute_reset_step(&mut rt, idx)
+        } else if is_screencast_step(step) {
+            tokio::task::block_in_place(|| {
+                let mut rt = runtime_arc.blocking_lock();
+                execute_screencast_step(&mut rt, step, idx, image_policy)
+            })
         } else if let BrowserStep::SetWindowBounds {
             x,
             y,
@@ -2576,6 +2809,9 @@ pub fn execute_steps_with_runtime(
                 execute_route_management_step(runtime, step, idx).unwrap()
             }
             BrowserStep::Reset => execute_reset_step(runtime, idx),
+            step if is_screencast_step(step) => {
+                execute_screencast_step(runtime, step, idx, image_policy)
+            }
             BrowserStep::SetWindowBounds {
                 x,
                 y,
@@ -3342,6 +3578,9 @@ fn execute_single_step(
         | BrowserStep::StopHarRecording
         | BrowserStep::RouteFromHar { .. }
         | BrowserStep::Reset
+        | BrowserStep::CaptureFrames { .. }
+        | BrowserStep::ScreencastStart { .. }
+        | BrowserStep::ScreencastStop { .. }
         | BrowserStep::HttpRequest { .. }
         | BrowserStep::StartCoverage { .. }
         | BrowserStep::StopCoverage
@@ -8468,7 +8707,10 @@ mod tests {
         let failed = http_request_result(&response, &strict, 0, dir.path());
         assert!(!failed.ok);
         assert_eq!(failed.error.as_deref(), Some("HTTP 404 OK"));
-        assert_eq!(failed.data.as_ref().unwrap()["http_request"]["body"], "missing");
+        assert_eq!(
+            failed.data.as_ref().unwrap()["http_request"]["body"],
+            "missing"
+        );
 
         let created = http_response(201, Vec::new(), "text/plain");
         let accepted = http_request_result(&created, &strict, 0, dir.path());
@@ -8730,6 +8972,121 @@ mod tests {
                 }
             })
         );
+    }
+
+    fn filmstrip_artifact(
+        kind: &'static str,
+        name: &str,
+    ) -> refact_browser::screencast::FrameArtifact {
+        refact_browser::screencast::FrameArtifact {
+            kind,
+            mime: "image/jpeg".to_string(),
+            path: PathBuf::from(format!("/artifacts/{name}")),
+            bytes: 2_048,
+            width: 320,
+            height: 200,
+        }
+    }
+
+    fn filmstrip_result() -> FilmstripResult {
+        FilmstripResult {
+            frames: vec![
+                refact_browser::screencast::FrameRecord {
+                    index: 0,
+                    offset_ms: 0,
+                    changed_percent: None,
+                    artifact: filmstrip_artifact("frame", "frame-00.jpg"),
+                },
+                refact_browser::screencast::FrameRecord {
+                    index: 1,
+                    offset_ms: 500,
+                    changed_percent: Some(42.5),
+                    artifact: filmstrip_artifact("frame", "frame-01.jpg"),
+                },
+            ],
+            filmstrip: filmstrip_artifact("filmstrip", "filmstrip.jpg"),
+            filmstrip_data: "ZmlsbXN0cmlw".to_string(),
+            columns: 2,
+            rows: 1,
+            duration_ms: 500,
+            warnings: vec!["element-scoped frames use timed screenshots".to_string()],
+        }
+    }
+
+    #[test]
+    fn screencast_quality_defaults_and_rejects_out_of_range_values() {
+        assert_eq!(
+            screencast_quality(None).unwrap(),
+            DEFAULT_SCREENCAST_QUALITY
+        );
+        assert_eq!(screencast_quality(Some(0)).unwrap(), 0);
+        assert_eq!(screencast_quality(Some(100)).unwrap(), 100);
+        assert_eq!(
+            screencast_quality(Some(101)).unwrap_err(),
+            "Screencast quality 101 must be between 0 and 100"
+        );
+    }
+
+    #[test]
+    fn burst_screenshots_are_jpeg_and_carry_the_full_page_request() {
+        let policy = ImagePolicy::browser_capture();
+
+        let viewport = burst_screenshot_options(&policy, false);
+        assert_eq!(viewport.image_type, Some(BrowserScreenshotType::Jpeg));
+        assert_eq!(viewport.quality, policy.quality);
+        assert!(!viewport.full_page);
+        assert!(burst_screenshot_options(&policy, true).full_page);
+    }
+
+    #[test]
+    fn filmstrip_step_data_exposes_the_composite_as_the_step_image() {
+        let data = filmstrip_step_data(&filmstrip_result());
+
+        assert_eq!(data["mime"], serde_json::json!("image/jpeg"));
+        assert_eq!(data["data"], serde_json::json!("ZmlsbXN0cmlw"));
+        assert_eq!(data["artifact"]["kind"], serde_json::json!("filmstrip"));
+        assert_eq!(data["frame_count"], serde_json::json!(2));
+        assert_eq!(data["columns"], serde_json::json!(2));
+        assert_eq!(data["duration_ms"], serde_json::json!(500));
+        assert_eq!(data["frames"][0]["offset_ms"], serde_json::json!(0));
+        assert!(data["frames"][0].get("changed_percent").is_none());
+        assert_eq!(
+            data["frames"][1]["changed_percent"],
+            serde_json::json!(42.5)
+        );
+        assert_eq!(
+            data["frames"][1]["artifact"]["kind"],
+            serde_json::json!("frame")
+        );
+        assert_eq!(
+            data["warnings"],
+            serde_json::json!(["element-scoped frames use timed screenshots"])
+        );
+    }
+
+    #[test]
+    fn screencast_steps_are_routed_to_the_runtime_dispatch() {
+        for step in [
+            BrowserStep::CaptureFrames {
+                duration_ms: None,
+                frame_count: None,
+                interval_ms: None,
+                locator: None,
+                full_page: None,
+            },
+            BrowserStep::ScreencastStart {
+                quality: None,
+                max_width: None,
+                max_height: None,
+            },
+            BrowserStep::ScreencastStop { compose: None },
+        ] {
+            assert!(is_screencast_step(&step));
+            assert!(!is_instrumentation_step(&step));
+            assert!(!is_context_management_step(&step));
+            assert!(!is_tab_management_step(&step));
+        }
+        assert!(!is_screencast_step(&BrowserStep::StopCoverage));
     }
 
     #[test]

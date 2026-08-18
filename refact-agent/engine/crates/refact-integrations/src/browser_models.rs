@@ -1218,6 +1218,31 @@ pub enum BrowserStep {
     },
     StopCoverage,
 
+    CaptureFrames {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_count: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interval_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locator: Option<BrowserLocator>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_page: Option<bool>,
+    },
+    ScreencastStart {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_height: Option<u32>,
+    },
+    ScreencastStop {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compose: Option<bool>,
+    },
+
     AddVirtualAuthenticator {
         #[serde(
             default,
@@ -1845,6 +1870,9 @@ impl BrowserStep {
         "http_request",
         "start_coverage",
         "stop_coverage",
+        "capture_frames",
+        "screencast_start",
+        "screencast_stop",
         "add_virtual_authenticator",
         "remove_virtual_authenticator",
         "list_credentials",
@@ -2529,6 +2557,21 @@ mod tests {
                 reset_on_navigation: Some(true),
             },
             BrowserStep::StopCoverage,
+            BrowserStep::CaptureFrames {
+                duration_ms: Some(1_000),
+                frame_count: Some(8),
+                interval_ms: None,
+                locator: Some(locator()),
+                full_page: Some(false),
+            },
+            BrowserStep::ScreencastStart {
+                quality: Some(80),
+                max_width: Some(1_280),
+                max_height: Some(800),
+            },
+            BrowserStep::ScreencastStop {
+                compose: Some(true),
+            },
             BrowserStep::AddVirtualAuthenticator {
                 id: (),
                 protocol: Some(BrowserAuthenticatorProtocol::Ctap2),

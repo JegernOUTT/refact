@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Animation</title>
+  <style>
+    body { margin: 0; background: #101014; }
+    #stage { width: 480px; height: 240px; position: relative; overflow: hidden; }
+    #swatch {
+      position: absolute;
+      top: 40px;
+      left: 0;
+      width: 160px;
+      height: 160px;
+      background: #1020c0;
+      animation: travel 1s linear infinite alternate;
+    }
+    #swatch.paused { animation-play-state: paused; }
+    @keyframes travel {
+      from { left: 0; background: #1020c0; }
+      to { left: 320px; background: #f0d020; }
+    }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <div id="swatch"></div>
+  </div>
+  <button id="play">Play</button>
+  <script>
+    const swatch = document.querySelector('#swatch');
+    const play = () => {
+      swatch.classList.remove('paused');
+      swatch.getAnimations().forEach((animation) => {
+        animation.currentTime = 0;
+        animation.play();
+      });
+    };
+    document.querySelector('#play').addEventListener('click', play);
+    globalThis.playAnimation = play;
+    globalThis.pauseAnimation = () => swatch.classList.add('paused');
+  </script>
+</body>
+</html>

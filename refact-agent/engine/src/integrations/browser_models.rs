@@ -568,6 +568,60 @@ mod tests {
     }
 
     #[test]
+    fn screencast_steps_parse_with_defaults_and_reject_unknown_fields() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "capture_frames"},
+                {"action": "capture_frames", "duration_ms": 2000, "interval_ms": 500, "full_page": true},
+                {"action": "screencast_start"},
+                {"action": "screencast_stop", "compose": false}
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request.steps.as_slice(),
+            [
+                BrowserStep::CaptureFrames {
+                    duration_ms: None,
+                    frame_count: None,
+                    interval_ms: None,
+                    locator: None,
+                    full_page: None,
+                },
+                BrowserStep::CaptureFrames {
+                    duration_ms: Some(2000),
+                    interval_ms: Some(500),
+                    full_page: Some(true),
+                    ..
+                },
+                BrowserStep::ScreencastStart {
+                    quality: None,
+                    max_width: None,
+                    max_height: None,
+                },
+                BrowserStep::ScreencastStop {
+                    compose: Some(false)
+                },
+            ]
+        ));
+        assert_eq!(
+            serde_json::to_value(&request.steps[0]).unwrap(),
+            serde_json::json!({"action": "capture_frames"})
+        );
+
+        let error = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "capture_frames", "frames": 4}]
+        }))
+        .unwrap_err();
+
+        assert!(
+            error.starts_with("step[0] (capture_frames): unknown field `frames`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn unknown_batch_envelope_fields_are_rejected() {
         let error = parse_browser_action_request(serde_json::json!({
             "steps": [],

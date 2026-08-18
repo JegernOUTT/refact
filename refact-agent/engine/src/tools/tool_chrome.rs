@@ -37,6 +37,7 @@ use headless_chrome::protocol::cdp::types::Event;
 use serde::{Deserialize, Serialize};
 
 use base64::Engine;
+use refact_browser::screencast::{MAX_BURST_DURATION_MS, MAX_FRAME_COUNT, MIN_FRAME_COUNT};
 use refact_core::image_policy::{resize_to_policy, ImagePolicy};
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
@@ -139,6 +140,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "reset is the escape hatch for sticky plumbing: one call drops every network route, HAR replay, WebSocket route, locator handler, and virtual authenticator, turns offline off, and clears media, viewport, device, geolocation, and permission overrides, reporting what it cleared with counts. It leaves cookies, storage, open tabs, and the current page untouched. ",
     "http_request sends an HTTP call that shares the page's cookie jar in both directions: matching cookies for the target domain and path are attached, and response Set-Cookie headers are written back into the browser, so a logged-in page and the API call see the same session. Send url plus optional method, headers, and exactly one of body, body_json (auto application/json), or form (auto urlencoded); http and https only. Results carry status, final URL after redirects, content-type/content-length (set full_headers=true for every header), and the body inline when it stays under 8KB, otherwise an artifact path. Cookie values are never inlined, only the count and names. Set fail_on_status=true to fail the step on a non-2xx status.\n",
     "Instrumentation: start_coverage and stop_coverage opt into precise JavaScript and CSS usage tracking and return bounded per-URL summaries plus a full JSON artifact. add_virtual_authenticator enables passkey testing and mints the authenticator id it returns, so never send it an id; remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified address that returned id. Credential ids, private keys, user handles, blobs, and user names are redacted from reports.\n",
+    "Motion: capture_frames records a burst and returns ONE composed filmstrip image (up to a 4x6 grid, each cell labelled +NNNms) plus per-frame artifact paths and the percentage of pixels that changed against the previous frame, so animations and transient UI are readable even without looking at pixels. It takes duration_ms (defaults to 1000, capped at 10000) with either frame_count (2-24, defaults to 8) or interval_ms, and scopes to an element with locator or to the whole document with full_page. Out-of-range values are hard errors. screencast_start and screencast_stop bracket a manual session that auto-stops at 30000ms or 60 frames and reports that cap as a warning; screencast_stop composes a filmstrip unless compose=false. The filmstrip is always attached, even when attach_screenshot is false.\n",
     "Touch and low-level keyboard: tap takes either a locator (full actionability and hit-target checks, like click) or x/y coordinates, and requires touch emulation from an earlier set_viewport step with has_touch true. insert_text types into the focused element with one input event and no key events, which suits IME-style entry but skips keyboard shortcuts; it focuses an optional locator first. press_sequentially focuses its locator and then sends real per-character key events with an optional delay_ms (default 0) for inputs driven by keystroke handlers such as autocomplete; prefer fill for ordinary form entry.\n",
     "Forms: fill, clear, select_option, check, uncheck.\n",
     "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch. ",
@@ -419,6 +421,30 @@ fn browser_step_schema_with_actions(
     properties.insert(
         "reset_on_navigation".to_string(),
         serde_json::json!({"type": "boolean", "description": "Reset coverage on navigation; defaults to true"}),
+    );
+    properties.insert(
+        "duration_ms".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 1, "maximum": MAX_BURST_DURATION_MS, "description": "capture_frames burst length; defaults to 1000ms"}),
+    );
+    properties.insert(
+        "frame_count".to_string(),
+        serde_json::json!({"type": "integer", "minimum": MIN_FRAME_COUNT, "maximum": MAX_FRAME_COUNT, "description": "capture_frames frame count; defaults to 8, mutually exclusive with interval_ms"}),
+    );
+    properties.insert(
+        "interval_ms".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 1, "description": "capture_frames spacing; mutually exclusive with frame_count"}),
+    );
+    properties.insert(
+        "compose".to_string(),
+        serde_json::json!({"type": "boolean", "description": "screencast_stop composes a filmstrip; defaults to true"}),
+    );
+    properties.insert(
+        "max_width".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 1, "description": "screencast_start frame width cap"}),
+    );
+    properties.insert(
+        "max_height".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 1, "description": "screencast_start frame height cap"}),
     );
     properties.insert(
         "protocol".to_string(),
@@ -1541,6 +1567,99 @@ mod tests {
         let content = execution_report_to_multimodal(&report, &ImagePolicy::default()).unwrap();
         assert!(content.iter().any(|element| element.is_image()));
     }
+
+    fn report_with_screenshot(step_data: Value) -> ExecutionReport {
+        const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let step = crate::integrations::browser_models::StepResult::success(0, "Captured frames")
+            .with_data(step_data);
+        serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "steps": [step],
+            "dialogs": [],
+            "new_tabs": [],
+            "screenshot": {"mime": "image/png", "data": TINY_PNG_BASE64},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn filmstrips_attach_even_when_a_report_screenshot_is_present() {
+        const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let filmstrip = report_with_screenshot(serde_json::json!({
+            "mime": "image/png",
+            "data": TINY_PNG_BASE64,
+            "artifact": {"kind": "filmstrip"},
+        }));
+        let plain = report_with_screenshot(serde_json::json!({
+            "mime": "image/png",
+            "data": TINY_PNG_BASE64,
+        }));
+
+        assert!(step_image_is_attachable(
+            &filmstrip,
+            filmstrip.steps[0].data.as_ref().unwrap()
+        ));
+        assert!(!step_image_is_attachable(
+            &plain,
+            plain.steps[0].data.as_ref().unwrap()
+        ));
+        assert_eq!(
+            execution_report_to_multimodal(&filmstrip, &ImagePolicy::default())
+                .unwrap()
+                .iter()
+                .filter(|element| element.is_image())
+                .count(),
+            2
+        );
+        assert_eq!(
+            execution_report_to_multimodal(&plain, &ImagePolicy::default())
+                .unwrap()
+                .iter()
+                .filter(|element| element.is_image())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn chrome_schema_documents_the_motion_capture_steps() {
+        use refact_browser::screencast::{MAX_SESSION_DURATION_MS, MAX_SESSION_FRAMES};
+
+        let schema = chrome_input_schema();
+        let properties = schema
+            .pointer("/properties/request/properties/steps/items/properties")
+            .and_then(Value::as_object)
+            .unwrap();
+        for field in [
+            "duration_ms",
+            "frame_count",
+            "interval_ms",
+            "compose",
+            "max_width",
+            "max_height",
+        ] {
+            assert!(
+                properties.contains_key(field),
+                "missing schema field {field}"
+            );
+        }
+        assert_eq!(
+            properties["duration_ms"]["maximum"],
+            serde_json::json!(MAX_BURST_DURATION_MS)
+        );
+        assert_eq!(
+            properties["frame_count"]["minimum"],
+            serde_json::json!(MIN_FRAME_COUNT)
+        );
+        assert_eq!(
+            properties["frame_count"]["maximum"],
+            serde_json::json!(MAX_FRAME_COUNT)
+        );
+        let description = ToolChrome::default().tool_description().description;
+        assert!(description.contains("capture_frames records a burst"));
+        assert!(description.contains(&MAX_SESSION_DURATION_MS.to_string()));
+        assert!(description.contains(&MAX_SESSION_FRAMES.to_string()));
+    }
 }
 
 async fn setup_chrome_session(
@@ -1959,6 +2078,10 @@ async fn execute_via_controller(
     Ok(format_controller_report(&report, &tab_state, image_policy))
 }
 
+fn step_image_is_attachable(report: &ExecutionReport, data: &Value) -> bool {
+    report.screenshot.is_none() || data["artifact"]["kind"] == "filmstrip"
+}
+
 fn format_controller_report(
     report: &ExecutionReport,
     tab_state: &str,
@@ -1978,8 +2101,8 @@ fn format_controller_report(
             log.push(msg);
         }
 
-        if report.screenshot.is_none() {
-            if let Some(ref data) = result.data {
+        if let Some(ref data) = result.data {
+            if step_image_is_attachable(report, data) {
                 if let (Some(mime), Some(b64_data)) = (
                     data.get("mime").and_then(|v| v.as_str()),
                     data.get("data").and_then(|v| v.as_str()),
@@ -1994,19 +2117,6 @@ fn format_controller_report(
                             Err(e) => log.push(format!("Screenshot processing: {}", e)),
                         }
                     }
-                }
-            }
-        }
-
-        if let Some(ref data) = result.data {
-            for (mime, encoded) in step_gallery_images(data) {
-                match resize_screenshot_b64(&encoded, &mime, image_policy) {
-                    Ok((resized, resized_mime)) => {
-                        if let Ok(element) = MultimodalElement::new(resized_mime, resized) {
-                            multimodal.push(element);
-                        }
-                    }
-                    Err(error) => log.push(format!("Screenshot processing: {error}")),
                 }
             }
         }
@@ -2074,10 +2184,10 @@ fn execution_report_to_multimodal(
     content.push(MultimodalElement::new("text".to_string(), text_pretty)?);
 
     for result in &report.steps {
-        let Some(ref data) = result.data else {
-            continue;
-        };
-        if report.screenshot.is_none() {
+        if let Some(ref data) = result.data {
+            if !step_image_is_attachable(report, data) {
+                continue;
+            }
             if let (Some(mime), Some(b64_data)) = (
                 data.get("mime").and_then(|v| v.as_str()),
                 data.get("data").and_then(|v| v.as_str()),
@@ -2091,22 +2201,7 @@ fn execution_report_to_multimodal(
                 }
             }
         }
-        for (mime, encoded) in step_gallery_images(data) {
-            let (resized, resized_mime) = resize_screenshot_b64(&encoded, &mime, image_policy)?;
-            if let Ok(element) = MultimodalElement::new(resized_mime, resized) {
-                content.push(element);
-            }
-        }
     }
-
-    if let Some(screenshot) = &report.screenshot {
-        let (resized, resized_mime) =
-            resize_screenshot_b64(&screenshot.data, &screenshot.mime, image_policy)?;
-        if let Ok(element) = MultimodalElement::new(resized_mime, resized) {
-            content.push(element);
-        }
-    }
-
     Ok(content)
 }
 

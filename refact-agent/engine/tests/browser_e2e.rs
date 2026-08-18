@@ -51,6 +51,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "delayed-button.html",
     "overlay.html",
     "moving-target.html",
+    "animation.html",
     "states.html",
     "roles.html",
     "accname.html",
@@ -5018,6 +5019,143 @@ async fn composed_locators_match_playwright_semantics() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn capture_frames_records_an_animation_as_a_labelled_filmstrip() {
+    let Some(mut case) = BrowserCase::start("animation.html").await else {
+        return;
+    };
+    let policy = ImagePolicy::browser_capture();
+
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::Eval {
+                expression: "playAnimation()".to_string(),
+            },
+            BrowserStep::CaptureFrames {
+                duration_ms: Some(900),
+                frame_count: Some(6),
+                interval_ms: None,
+                locator: None,
+                full_page: None,
+            },
+        ],
+        &policy,
+    );
+
+    assert!(report.ok, "capture_frames failed: {report:?}");
+    let data = report.steps[1].data.as_ref().unwrap();
+    assert_eq!(data["frame_count"], json!(6));
+    assert_eq!(data["artifact"]["kind"], json!("filmstrip"));
+    assert!(data["data"].as_str().is_some_and(|data| !data.is_empty()));
+    assert_eq!(data["columns"], json!(4));
+    assert_eq!(data["rows"], json!(2));
+
+    let frames = data["frames"].as_array().unwrap();
+    assert_eq!(frames.len(), 6);
+    assert!(frames[0].get("changed_percent").is_none());
+    for frame in frames {
+        let path = FsPath::new(frame["artifact"]["path"].as_str().unwrap());
+        assert!(path.exists(), "missing frame artifact {path:?}");
+        assert_eq!(frame["artifact"]["kind"], json!("frame"));
+    }
+    let moved = frames
+        .iter()
+        .skip(1)
+        .filter_map(|frame| frame["changed_percent"].as_f64())
+        .any(|changed| changed > 0.0);
+    assert!(moved, "animation produced no measurable motion: {frames:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn capture_frames_scopes_to_an_element_and_to_the_full_page() {
+    let Some(mut case) = BrowserCase::start("animation.html").await else {
+        return;
+    };
+    let policy = ImagePolicy::browser_capture();
+
+    let scoped = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::Eval {
+                expression: "playAnimation()".to_string(),
+            },
+            BrowserStep::CaptureFrames {
+                duration_ms: Some(600),
+                frame_count: Some(3),
+                interval_ms: None,
+                locator: Some(BrowserLocator::css("#stage")),
+                full_page: None,
+            },
+        ],
+        &policy,
+    );
+    assert!(scoped.ok, "element-scoped capture failed: {scoped:?}");
+    let scoped_data = scoped.steps[1].data.as_ref().unwrap();
+    let scoped_frame = &scoped_data["frames"][0]["artifact"];
+    assert_eq!(scoped_frame["width"], json!(480));
+    assert_eq!(scoped_frame["height"], json!(240));
+    assert_eq!(
+        scoped_data["warnings"],
+        json!(["element-scoped frames use timed screenshots"])
+    );
+
+    let full = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::CaptureFrames {
+            duration_ms: Some(400),
+            frame_count: Some(2),
+            interval_ms: None,
+            locator: None,
+            full_page: Some(true),
+        }],
+        &policy,
+    );
+    assert!(full.ok, "full-page capture failed: {full:?}");
+    assert_eq!(
+        full.steps[0].data.as_ref().unwrap()["warnings"],
+        json!(["full-page frames use timed screenshots"])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn capture_frames_rejects_requests_beyond_the_hard_caps() {
+    let Some(mut case) = BrowserCase::start("animation.html").await else {
+        return;
+    };
+    let policy = ImagePolicy::browser_capture();
+
+    for (step, expected) in [
+        (
+            BrowserStep::CaptureFrames {
+                duration_ms: Some(10_001),
+                frame_count: None,
+                interval_ms: None,
+                locator: None,
+                full_page: None,
+            },
+            "duration_ms 10001 exceeds the 10000ms capture cap",
+        ),
+        (
+            BrowserStep::CaptureFrames {
+                duration_ms: Some(1_000),
+                frame_count: Some(25),
+                interval_ms: None,
+                locator: None,
+                full_page: None,
+            },
+            "frame_count 25, outside the supported 2..=24 range",
+        ),
+    ] {
+        let report = execute_steps_with_runtime(&mut case.runtime, &[step], &policy);
+        assert!(!report.ok, "cap was not enforced: {report:?}");
+        assert_eq!(report.steps[0].error.as_deref(), Some(expected));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn set_window_bounds_moves_and_resizes_the_real_headed_window() {
     if !e2e_enabled() {
         print_skip();
@@ -5221,6 +5359,48 @@ fn channel_leader(color: (u8, u8, u8)) -> &'static str {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn screencast_sessions_compose_a_filmstrip_on_stop() {
+    let Some(mut case) = BrowserCase::start("animation.html").await else {
+        return;
+    };
+    let policy = ImagePolicy::browser_capture();
+
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::ScreencastStart {
+                quality: Some(70),
+                max_width: Some(640),
+                max_height: Some(480),
+            },
+            BrowserStep::Eval {
+                expression: "playAnimation()".to_string(),
+            },
+            BrowserStep::WaitSeconds { seconds: 1.5 },
+            BrowserStep::ScreencastStop {
+                compose: Some(true),
+            },
+        ],
+        &policy,
+    );
+
+    assert!(report.ok, "screencast session failed: {report:?}");
+    assert!(report.steps[0].summary.starts_with("Started screencast"));
+    let data = report.steps[3].data.as_ref().unwrap();
+    assert_eq!(data["artifact"]["kind"], json!("filmstrip"));
+    assert!(data["frame_count"].as_u64().is_some_and(|count| count >= 2));
+
+    let already_stopped = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::ScreencastStop { compose: None }],
+        &policy,
+    );
+    assert!(!already_stopped.ok);
+    assert_eq!(
+        already_stopped.steps[0].error.as_deref(),
+        Some("No screencast session is running")
+    );
+}
 async fn clock_fast_forward_fires_each_due_timer_at_most_once() {
     let Some(case) = ClockCase::start().await else {
         return;

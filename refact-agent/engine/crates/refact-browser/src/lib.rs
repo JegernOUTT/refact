@@ -23,6 +23,7 @@ mod mouse;
 mod network;
 mod refs;
 mod routing;
+pub mod screencast;
 mod snapshot;
 mod us_keyboard_layout;
 pub mod webauthn;
@@ -486,6 +487,7 @@ pub struct BrowserRuntime {
     pub websocket_registry: Arc<WebSocketRegistry>,
     pub har_recorder: Arc<har::HarRecorder>,
     pub coverage_manager: coverage::CoverageManager,
+    pub screencast_manager: screencast::ScreencastManager,
     pub webauthn_manager: webauthn::WebAuthnManager,
     pub context_state: ContextState,
     pub clock: ClockManager,
@@ -579,6 +581,7 @@ impl BrowserRuntime {
             websocket_registry: Arc::new(WebSocketRegistry::default()),
             har_recorder: Arc::new(har::HarRecorder::default()),
             coverage_manager: coverage::CoverageManager::default(),
+            screencast_manager: screencast::ScreencastManager::default(),
             webauthn_manager: webauthn::WebAuthnManager::default(),
             context_state: ContextState::default(),
             clock: ClockManager::default(),
@@ -635,6 +638,7 @@ impl BrowserRuntime {
             websocket_registry: Arc::new(WebSocketRegistry::default()),
             har_recorder: Arc::new(har::HarRecorder::default()),
             coverage_manager: coverage::CoverageManager::default(),
+            screencast_manager: screencast::ScreencastManager::default(),
             webauthn_manager: webauthn::WebAuthnManager::default(),
             context_state: ContextState::default(),
             clock: ClockManager::default(),
@@ -975,6 +979,7 @@ impl Drop for BrowserRuntime {
             .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         self.coverage_manager.cleanup(&tabs);
+        self.screencast_manager.cleanup(&tabs);
         let _ = self.webauthn_manager.cleanup(&tabs);
         if !self.route_registry.is_empty() || self.context_state.http_credentials.is_some() {
             for tab in &tabs {
