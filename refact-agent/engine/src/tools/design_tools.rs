@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::Engine;
-use headless_chrome::protocol::cdp::{Emulation, Input};
+use headless_chrome::protocol::cdp::Emulation;
 use headless_chrome::Tab;
 use image::{DynamicImage, GenericImageView, ImageFormat, Rgba, RgbaImage};
 use refact_browser::{
@@ -13,8 +13,8 @@ use refact_browser::{
 };
 use refact_core::image_policy::{resize_to_policy, ImagePolicy};
 use refact_integrations::browser_models::{
-    BrowserLocator, BrowserScreenshotAnimations, BrowserScreenshotCaret, BrowserScreenshotOptions,
-    BrowserScreenshotType, BrowserStep,
+    BrowserElementState, BrowserLocator, BrowserScreenshotAnimations, BrowserScreenshotCaret,
+    BrowserScreenshotOptions, BrowserScreenshotType, BrowserStep,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -133,12 +133,14 @@ pub enum TargetInput {
     },
 }
 
+pub fn is_browser_ref(value: &str) -> bool {
+    value.parse::<refact_browser::Ref>().is_ok()
+}
+
 impl TargetInput {
     fn locator(&self) -> Result<BrowserLocator, String> {
         match self {
-            Self::Text(value) if value.starts_with('e') || value.starts_with('f') => {
-                Ok(BrowserLocator::reference(value))
-            }
+            Self::Text(value) if is_browser_ref(value) => Ok(BrowserLocator::reference(value)),
             Self::Text(value) if !value.trim().is_empty() => Ok(BrowserLocator::css(value)),
             Self::Text(_) => Err("target must not be empty".to_string()),
             Self::Structured {
@@ -741,10 +743,6 @@ fn tool_desc(
     }
 }
 
-fn locator_value(locator: &BrowserLocator) -> Result<Value, String> {
-    serde_json::to_value(locator).map_err(|error| format!("failed to serialize locator: {error}"))
-}
-
 pub fn map_design_runtime_error(error: &str) -> String {
     if INSTRUMENTATION_ERROR_MARKERS
         .iter()
@@ -760,142 +758,21 @@ fn resolve_target_handle(
     world: &WorldManager,
     target: &TargetInput,
 ) -> Result<refact_browser::ElementHandle, String> {
-    let locator = target.locator()?;
-    let handles = world
-        .call_injected_handles(tab, "resolveLocator", json!([locator_value(&locator)?]))
-        .map_err(|error| {
-            map_design_runtime_error(&format!("failed to resolve {}: {error}", target.key()))
-        })?;
-    match handles.as_slice() {
-        [handle] => Ok(handle.clone()),
-        [] => Err(format!("target `{}` matched no elements", target.key())),
-        handles => Err(format!(
-            "target `{}` matched {} elements; use a unique selector or ref",
-            target.key(),
-            handles.len()
-        )),
-    }
+    browser_controller::resolve_locator_element(tab, world, &target.locator()?).map_err(|error| {
+        map_design_runtime_error(&format!("failed to resolve {}: {error}", target.key()))
+    })
 }
 
-fn apply_probe_state(
-    tab: &Tab,
-    world: &WorldManager,
-    handle: &refact_browser::ElementHandle,
-    state: &str,
-) -> Result<(), String> {
+pub fn parse_element_state(state: &str) -> Result<BrowserElementState, String> {
     match state {
-        "default" => Ok(()),
-        "hover" => {
-            let rect: Rect = serde_json::from_value(
-                world
-                    .call_function_on(tab, handle, "function(){const r=this.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};}", vec![])
-                    .map_err(|error| format!("failed to read hover target: {error}"))?,
-            )
-            .map_err(|error| format!("failed to parse hover target: {error}"))?;
-            tab.call_method(Input::DispatchMouseEvent {
-                Type: Input::DispatchMouseEventTypeOption::MouseMoved,
-                x: rect.x + rect.width / 2.0,
-                y: rect.y + rect.height / 2.0,
-                modifiers: Some(0),
-                timestamp: None,
-                button: None,
-                buttons: Some(0),
-                click_count: None,
-                force: None,
-                tangential_pressure: None,
-                tilt_x: None,
-                tilt_y: None,
-                twist: None,
-                delta_x: None,
-                delta_y: None,
-                pointer_Type: None,
-            })
-            .map(|_| ())
-            .map_err(|error| format!("failed to hover target: {error}"))
-        }
-        "focus" => world
-            .call_function_on(tab, handle, "function(){this.focus();return true;}", vec![])
-            .map(|_| ())
-            .map_err(|error| format!("failed to focus target: {error}")),
-        "active" => {
-            let rect: Rect = serde_json::from_value(
-                world
-                    .call_function_on(tab, handle, "function(){const r=this.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};}", vec![])
-                    .map_err(|error| format!("failed to read active target: {error}"))?,
-            )
-            .map_err(|error| format!("failed to parse active target: {error}"))?;
-            let x = rect.x + rect.width / 2.0;
-            let y = rect.y + rect.height / 2.0;
-            for event_type in [
-                Input::DispatchMouseEventTypeOption::MouseMoved,
-                Input::DispatchMouseEventTypeOption::MousePressed,
-            ] {
-                tab.call_method(Input::DispatchMouseEvent {
-                    Type: event_type,
-                    x,
-                    y,
-                    modifiers: Some(0),
-                    timestamp: None,
-                    button: Some(Input::MouseButton::Left),
-                    buttons: Some(1),
-                    click_count: Some(1),
-                    force: Some(0.5),
-                    tangential_pressure: None,
-                    tilt_x: None,
-                    tilt_y: None,
-                    twist: None,
-                    delta_x: None,
-                    delta_y: None,
-                    pointer_Type: None,
-                })
-                .map_err(|error| format!("failed to activate target: {error}"))?;
-            }
-            Ok(())
-        }
+        "default" => Ok(BrowserElementState::Default),
+        "hover" => Ok(BrowserElementState::Hover),
+        "focus" => Ok(BrowserElementState::Focus),
+        "active" => Ok(BrowserElementState::Active),
         other => Err(format!(
             "unsupported state `{other}`; expected default, hover, focus, or active"
         )),
     }
-}
-
-fn cleanup_probe_state(tab: &Tab, world: &WorldManager) {
-    let _ = world.eval_in_utility(tab, "document.activeElement?.blur?.();true");
-    let _ = tab.call_method(Input::DispatchMouseEvent {
-        Type: Input::DispatchMouseEventTypeOption::MouseReleased,
-        x: -10.0,
-        y: -10.0,
-        modifiers: Some(0),
-        timestamp: None,
-        button: Some(Input::MouseButton::Left),
-        buttons: Some(0),
-        click_count: Some(1),
-        force: None,
-        tangential_pressure: None,
-        tilt_x: None,
-        tilt_y: None,
-        twist: None,
-        delta_x: None,
-        delta_y: None,
-        pointer_Type: None,
-    });
-    let _ = tab.call_method(Input::DispatchMouseEvent {
-        Type: Input::DispatchMouseEventTypeOption::MouseMoved,
-        x: -10.0,
-        y: -10.0,
-        modifiers: Some(0),
-        timestamp: None,
-        button: None,
-        buttons: Some(0),
-        click_count: None,
-        force: None,
-        tangential_pressure: None,
-        tilt_x: None,
-        tilt_y: None,
-        twist: None,
-        delta_x: None,
-        delta_y: None,
-        pointer_Type: None,
-    });
 }
 
 fn encode_png(image: &DynamicImage) -> Result<Vec<u8>, String> {
@@ -999,7 +876,11 @@ fn install_mark_overlay(
         .map_err(|error| format!("failed to install mark overlay: {error}"))
 }
 
-fn find_raw_colors(tab: &Tab, token_colors: &[String]) -> Result<Vec<RawColorFinding>, String> {
+fn find_raw_colors(
+    tab: &Tab,
+    world: &WorldManager,
+    token_colors: &[String],
+) -> Result<Vec<RawColorFinding>, String> {
     let token_colors = serde_json::to_string(token_colors).map_err(|error| error.to_string())?;
     let expression = format!(
         r#"(() => {{
@@ -1019,11 +900,9 @@ fn find_raw_colors(tab: &Tab, token_colors: &[String]) -> Result<Vec<RawColorFin
   return findings;
 }})()"#
     );
-    let value = tab
-        .evaluate(&expression, true)
-        .map_err(|error| format!("failed to inspect stylesheet colors: {error}"))?
-        .value
-        .unwrap_or(Value::Array(Vec::new()));
+    let value = world.eval_in_utility(tab, &expression).map_err(|error| {
+        map_design_runtime_error(&format!("failed to inspect stylesheet colors: {error}"))
+    })?;
     let values: Vec<Value> = serde_json::from_value(value)
         .map_err(|error| format!("failed to parse stylesheet colors: {error}"))?;
     Ok(values
@@ -1199,12 +1078,15 @@ impl Tool for ToolUiProbe {
                 ));
             }
         }
+        let states = args
+            .states
+            .iter()
+            .map(|state| parse_element_state(state))
+            .collect::<Result<Vec<_>, _>>()?;
         let (app, chat_id, _, _) = tool_context(&ccx).await;
         let runtime = attached_runtime(app, &chat_id).await?;
         let mut runtime = runtime.lock().await;
-        let tab = runtime
-            .get_active_tab()
-            .ok_or_else(|| "The attached browser has no active tab".to_string())?;
+        let tab = browser_controller::session_tab(&mut runtime)?;
         let original_viewport = runtime.context_state.viewport.clone();
         let original_media = runtime.context_state.media.clone();
         let properties = if args.properties.is_empty() {
@@ -1215,11 +1097,13 @@ impl Tool for ToolUiProbe {
         } else {
             args.properties.clone()
         };
+        let properties_argument =
+            serde_json::to_value(&properties).map_err(|error| error.to_string())?;
         let mut table = Vec::with_capacity(cells.len());
         for cell in cells {
             let viewport = &args.viewports[cell.viewport];
             let theme = &args.themes[cell.theme];
-            let state = &args.states[cell.state];
+            let state = states[cell.state];
             let viewport_state = ViewportState {
                 width: viewport.width,
                 height: viewport.height,
@@ -1235,31 +1119,45 @@ impl Tool for ToolUiProbe {
                     ..Default::default()
                 },
             )?;
-            cleanup_probe_state(&tab, &runtime.world_manager);
             let target = &args.targets[cell.target];
             let handle = resolve_target_handle(&tab, &runtime.world_manager, target)?;
-            apply_probe_state(&tab, &runtime.world_manager, &handle, state)?;
-            let data = runtime
-                .world_manager
-                .call_function_on(
-                    &tab,
-                    &handle,
-                    PROBE_FUNCTION,
-                    vec![serde_json::to_value(&properties).map_err(|error| error.to_string())?],
-                )
-                .map_err(|error| format!("failed to probe {}: {error}", target.key()))?;
+            let probed = browser_controller::run_element_state_sequence(
+                &tab,
+                &runtime.world_manager,
+                &handle,
+                &[state],
+                |_| {
+                    runtime
+                        .world_manager
+                        .call_function_on(
+                            &tab,
+                            &handle,
+                            PROBE_FUNCTION,
+                            vec![properties_argument.clone()],
+                        )
+                        .map_err(|error| {
+                            map_design_runtime_error(&format!(
+                                "failed to probe {}: {error}",
+                                target.key()
+                            ))
+                        })
+                },
+            );
+            let _ = runtime.world_manager.release_handle(&tab, &handle);
+            let data = probed?
+                .pop()
+                .map(|(_, data)| data)
+                .ok_or_else(|| format!("probe of {} produced no measurement", target.key()))?;
             table.push(json!({
                 "target": target.key(),
                 "viewport": {"width":viewport.width,"height":viewport.height},
                 "theme": theme,
-                "state": state,
+                "state": state.label(),
                 "box": data.get("box").cloned().unwrap_or(Value::Null),
                 "styles": data.get("styles").cloned().unwrap_or(Value::Null),
                 "overflow": data.get("overflow").cloned().unwrap_or(Value::Null)
             }));
-            let _ = runtime.world_manager.release_handle(&tab, &handle);
         }
-        cleanup_probe_state(&tab, &runtime.world_manager);
         if let Some(viewport) = original_viewport.as_ref() {
             let _ = refact_browser::context_state::apply_viewport(&tab, viewport);
         } else {
@@ -1331,9 +1229,7 @@ impl Tool for ToolMarkElements {
         let policy = image_policy_for_model(app.gcx.clone(), &model_id).await;
         let runtime = attached_runtime(app, &chat_id).await?;
         let mut runtime = runtime.lock().await;
-        let tab = runtime
-            .get_active_tab()
-            .ok_or_else(|| "The attached browser has no active tab".to_string())?;
+        let tab = browser_controller::session_tab(&mut runtime)?;
         let root_handle = selector
             .map(|selector| {
                 runtime.world_manager.resolve_expression_handle(
@@ -1352,6 +1248,7 @@ impl Tool for ToolMarkElements {
                 &tab,
                 root_handle.clone(),
                 SnapshotOptions {
+                    mode: refact_browser::SnapshotMode::Ai,
                     refs: true,
                     boxes: true,
                     ..Default::default()
@@ -1438,14 +1335,13 @@ impl Tool for ToolContrastAudit {
         let token_scan = token_colors_from_files(&root, &token_files);
         let runtime = attached_runtime(app, &chat_id).await?;
         let mut runtime = runtime.lock().await;
-        let tab = runtime
-            .get_active_tab()
-            .ok_or_else(|| "The attached browser has no active tab".to_string())?;
-        let raw = tab
-            .evaluate(CONTRAST_AUDIT_EXPRESSION, true)
-            .map_err(|error| format!("failed to audit contrast: {error}"))?
-            .value
-            .unwrap_or(Value::Array(Vec::new()));
+        let tab = browser_controller::session_tab(&mut runtime)?;
+        let raw = runtime
+            .world_manager
+            .eval_in_utility(&tab, CONTRAST_AUDIT_EXPRESSION)
+            .map_err(|error| {
+                map_design_runtime_error(&format!("failed to audit contrast: {error}"))
+            })?;
         let samples: Vec<RawContrastSample> = serde_json::from_value(raw)
             .map_err(|error| format!("failed to parse contrast samples: {error}"))?;
         let elements_scanned = samples.len();
@@ -1477,7 +1373,7 @@ impl Tool for ToolContrastAudit {
                 break;
             }
         }
-        let raw_colors = find_raw_colors(&tab, &token_scan.colors)?;
+        let raw_colors = find_raw_colors(&tab, &runtime.world_manager, &token_scan.colors)?;
         runtime.touch();
         let failed = findings.iter().filter(|finding| !finding.aa).count();
         let verdict = contrast_audit_verdict(
@@ -1787,6 +1683,85 @@ mod tests {
         assert_eq!(
             clean.summary,
             "Contrast audit scanned 12 elements: 0 AA failures, 3 AAA warnings, and 0 non-token colors"
+        );
+    }
+
+    #[test]
+    fn picked_css_selectors_never_masquerade_as_browser_refs() {
+        for picked in [
+            "[data-refact-src=\"src/App.tsx:12:4\"]",
+            "form > div:nth-of-type(2)",
+            "footer",
+            "figure > img",
+            "em",
+            "#save",
+            "fieldset input",
+        ] {
+            assert!(!is_browser_ref(picked), "`{picked}` is not a ref");
+            assert_eq!(
+                TargetInput::Text(picked.to_string()).locator().unwrap(),
+                BrowserLocator::css(picked),
+                "`{picked}` must stay a css locator"
+            );
+        }
+        for reference in ["e1", "e42", "f2e7"] {
+            assert!(is_browser_ref(reference), "`{reference}` is a ref");
+            assert_eq!(
+                TargetInput::Text(reference.to_string()).locator().unwrap(),
+                BrowserLocator::reference(reference)
+            );
+        }
+        assert_eq!(
+            TargetInput::Structured {
+                reference: None,
+                selector: Some("form > div".to_string()),
+            }
+            .locator()
+            .unwrap(),
+            BrowserLocator::css("form > div")
+        );
+    }
+
+    #[test]
+    fn probe_states_reuse_the_shared_element_state_sequencer() {
+        assert_eq!(
+            ["default", "hover", "focus", "active"]
+                .map(|state| parse_element_state(state).unwrap()),
+            refact_browser::artifacts::DEFAULT_ELEMENT_STATES
+        );
+        assert!(parse_element_state("pressed").is_err());
+
+        use refact_browser::artifacts::{element_state_sequence, ElementStateAction};
+        assert_eq!(
+            element_state_sequence(&[BrowserElementState::Default]),
+            vec![ElementStateAction::Capture(BrowserElementState::Default)]
+        );
+        assert_eq!(
+            element_state_sequence(&[BrowserElementState::Hover]),
+            vec![
+                ElementStateAction::Hover,
+                ElementStateAction::Capture(BrowserElementState::Hover),
+                ElementStateAction::MoveMouseAway
+            ]
+        );
+        assert_eq!(
+            element_state_sequence(&[BrowserElementState::Focus]),
+            vec![
+                ElementStateAction::Focus,
+                ElementStateAction::Capture(BrowserElementState::Focus),
+                ElementStateAction::Blur
+            ]
+        );
+        assert_eq!(
+            element_state_sequence(&[BrowserElementState::Active]),
+            vec![
+                ElementStateAction::Hover,
+                ElementStateAction::PressAndHold,
+                ElementStateAction::Capture(BrowserElementState::Active),
+                ElementStateAction::ReleaseMouse,
+                ElementStateAction::MoveMouseAway,
+                ElementStateAction::Blur
+            ]
         );
     }
 

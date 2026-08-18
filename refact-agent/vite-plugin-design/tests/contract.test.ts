@@ -57,6 +57,28 @@ describe("surface contract", () => {
     ).toBe(true);
   });
 
+  it("emits picked selectors that compose as css locators and never as browser refs", () => {
+    const isBrowserRef = (value: string): boolean =>
+      /^(f[1-9]\d*)?e[1-9]\d*$/.test(value);
+
+    for (const selector of [
+      '[data-refact-src="src/App.tsx:12:4"]',
+      "form > div:nth-of-type(2)",
+      "footer",
+      "figure > img",
+      "em",
+      "#save",
+      "fieldset input",
+    ]) {
+      expect(isBrowserRef(selector)).toBe(false);
+    }
+    for (const reference of ["e1", "e42", "f2e7"]) {
+      expect(isBrowserRef(reference)).toBe(true);
+    }
+    expect(isBrowserRef("e0")).toBe(false);
+    expect(isBrowserRef("em")).toBe(false);
+  });
+
   it("accepts the runtime Apply envelope and rejects malformed or reversed traffic", () => {
     expect(
       parseDesignSurfaceMessage({

@@ -106,6 +106,11 @@ pub fn resolve_tab(runtime: &BrowserRuntime, target: &TabTarget) -> Result<Arc<T
     }
 }
 
+pub fn session_tab(runtime: &mut BrowserRuntime) -> Result<Arc<Tab>, String> {
+    refact_browser::adopt_new_tabs(runtime, None);
+    resolve_tab(runtime, &TabTarget::Active)
+}
+
 fn eval_js_value(tab: &Tab, js: &str) -> Result<serde_json::Value, String> {
     let remote = tab
         .evaluate(js, false)
@@ -543,6 +548,14 @@ fn resolve_element_typed(
         }
     };
     inspect_resolved_element(tab, world, handle).map_err(ResolveElementError::Other)
+}
+
+pub fn resolve_locator_element(
+    tab: &Tab,
+    world: &WorldManager,
+    locator: &BrowserLocator,
+) -> Result<ElementHandle, String> {
+    resolve_element(tab, world, locator).map(|resolved| resolved.handle)
 }
 
 fn resolve_locator_handles(
@@ -8099,26 +8112,37 @@ fn step_capture_element_states(
     }
 }
 
-fn drive_element_states(
+pub fn run_element_state_sequence<T, F>(
     tab: &Tab,
     world: &WorldManager,
     handle: &ElementHandle,
     states: &[BrowserElementState],
-    options: &BrowserScreenshotOptions,
-    policy: &ImagePolicy,
-) -> Result<Vec<(String, PolicyScreenshot)>, String> {
-    let dispatcher = CdpMouseDispatcher::new(tab);
-    let point = dispatcher
-        .clickable_point(handle)
-        .map_err(|error| error.to_string())?;
+    mut observe: F,
+) -> Result<Vec<(BrowserElementState, T)>, String>
+where
+    F: FnMut(BrowserElementState) -> Result<T, String>,
+{
     let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
-    let mut mouse = Mouse::new(dispatcher, &keyboard);
-    let mut captures = Vec::new();
+    let mut mouse = Mouse::new(CdpMouseDispatcher::new(tab), &keyboard);
+    let mut point: Option<MainFrameCssPoint> = None;
+    let mut observations = Vec::new();
     for action in element_state_sequence(states) {
         match action {
-            ElementStateAction::Hover => mouse
-                .hover(point.x, point.y)
-                .map_err(|error| error.to_string())?,
+            ElementStateAction::Hover => {
+                let target = match point {
+                    Some(target) => target,
+                    None => {
+                        let resolved = CdpMouseDispatcher::new(tab)
+                            .clickable_point(handle)
+                            .map_err(|error| error.to_string())?;
+                        point = Some(resolved);
+                        resolved
+                    }
+                };
+                mouse
+                    .hover(target.x, target.y)
+                    .map_err(|error| error.to_string())?
+            }
             ElementStateAction::MoveMouseAway => mouse
                 .move_to(0.0, 0.0, 1)
                 .map_err(|error| error.to_string())?,
@@ -8136,13 +8160,27 @@ fn drive_element_states(
                 call_handle_json(tab, world, handle, &browser_locators::js_blur_element())
                     .map(|_| ())?
             }
-            ElementStateAction::Capture(state) => {
-                let capture = capture_element(tab, world, handle, options, policy)?;
-                captures.push((state.label().to_string(), capture));
-            }
+            ElementStateAction::Capture(state) => observations.push((state, observe(state)?)),
         }
     }
-    Ok(captures)
+    Ok(observations)
+}
+
+fn drive_element_states(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: &ElementHandle,
+    states: &[BrowserElementState],
+    options: &BrowserScreenshotOptions,
+    policy: &ImagePolicy,
+) -> Result<Vec<(String, PolicyScreenshot)>, String> {
+    let captures = run_element_state_sequence(tab, world, handle, states, |_| {
+        capture_element(tab, world, handle, options, policy)
+    })?;
+    Ok(captures
+        .into_iter()
+        .map(|(state, capture)| (state.label().to_string(), capture))
+        .collect())
 }
 
 const PDF_INLINE_LIMIT_BYTES: usize = 256 * 1024;

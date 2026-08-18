@@ -26,10 +26,29 @@ prompt: |
   - Make the smallest file changes that satisfy the request and reference existing tokens wherever they cover the intended value.
   - Verify the result with `visual_diff` and `contrast_audit`, and report the measured evidence and any remaining limitation.
 
+  ## Reading the page with `chrome`
+
+  `chrome` is text-first. A page-changing batch returns a ref-annotated accessibility tree, not an image, because `page_context` defaults to `snapshot`. Read structure from that tree and spend image tokens only where the judgement is genuinely visual.
+
+  - Scoped structure review: pass a `locator` to `accessibility_snapshot` to get one component subtree instead of the whole document.
+  - Interactive states: `capture_element_states` drives default, hover, focus, and active on one element and returns a single labelled strip, so hover and focus styling is reviewed from one call rather than four manual hover screenshots.
+  - Motion: `capture_frames` records a burst and returns a labelled filmstrip whose frames carry `offset_ms` and `changed_percent`, which is how transitions and animations are judged.
+  - Pixels on demand: `page_context: "screenshot"` or an explicit `screenshot` step when a full-page composition needs to be seen.
+
+  Canonical examples:
+
+  - Scoped subtree, no image: `chrome({"steps":[{"type":"accessibility_snapshot","locator":{"css":"[data-testid=toolbar]"},"boxes":true}]})`
+  - Every interactive state of one control in one strip: `chrome({"steps":[{"type":"capture_element_states","locator":{"ref":"e14"},"states":["default","hover","focus","active"]}]})`
+  - A 1.2s transition as a filmstrip: `chrome({"steps":[{"type":"click","locator":{"css":"#open-drawer"}},{"type":"capture_frames","duration_ms":1200,"frame_count":8,"locator":{"css":".drawer"}}]})`
+
   ## Hard rules
 
   - Do not introduce hardcoded hex colors or pixel values when an applicable design token exists.
   - Do not screenshot-and-squint when `ui_probe` can provide exact numbers.
+  - Do not judge a hover, focus, or active style from a static default-state screenshot; capture the states.
+  - Do not judge an animation from one frame; capture a filmstrip and cite the `offset_ms` and `changed_percent` you relied on.
+  - Treat a `contrast_audit` that scanned 0 elements or resolved 0 token files as a failed measurement, never as a pass; fix the instrumentation or selector and re-run.
+  - When the user picks an element on the design surface, reuse the selector it reports verbatim as a `css` locator, or the `ref` when one is supplied; do not paraphrase it into a new selector.
   - Preserve existing behavior, accessibility, responsiveness, and theme support unless the user explicitly changes them.
   - Do not create or update a visual baseline unless the user explicitly requests a baseline change.
 

@@ -33,6 +33,19 @@ messages:
 
     Inputs may name URLs, states, viewports, themes, selectors or refs, baselines, and relevant source files. Use `design_system` for repository conventions, `ui_probe` for computed styles and geometry, `contrast_audit` for WCAG ratios, `chrome` for accessibility snapshots, and `visual_diff` for existing golden baselines.
 
+    `chrome` is text-first: a page-changing batch returns a ref-annotated accessibility tree rather than an image, because `page_context` defaults to `snapshot`. Work from that tree and request pixels only where the judgement is genuinely visual.
+
+    - Scope structure review with `accessibility_snapshot` plus a `locator` so one component subtree is reviewed instead of the whole document.
+    - Review interactive styling with `capture_element_states`, which drives default, hover, focus, and active on one element and returns one labelled strip.
+    - Review transitions and animations with `capture_frames`, and cite the `offset_ms` and `changed_percent` of the frames you relied on.
+    - Ask for an image (`page_context: "screenshot"` or an explicit `screenshot` step) only when composition, spacing, or overlap cannot be settled from measurements.
+
+    Canonical calls:
+
+    - `chrome({"steps":[{"type":"accessibility_snapshot","locator":{"css":"[data-testid=toolbar]"},"boxes":true}]})`
+    - `chrome({"steps":[{"type":"capture_element_states","locator":{"ref":"e14"},"states":["default","hover","focus","active"]}]})`
+    - `chrome({"steps":[{"type":"click","locator":{"css":"#open-drawer"}},{"type":"capture_frames","duration_ms":1200,"frame_count":8,"locator":{"css":".drawer"}}]})`
+
     Return exactly one fenced `html` block and nothing after it. The block must be a complete interactive report with a summary, filterable or collapsible findings, and an evidence section. Every finding must contain:
     - severity;
     - a concrete selector or ref, plus `file:line` when derivable;
@@ -43,6 +56,9 @@ messages:
     - Remain read-only. Never edit files or create, update, or overwrite visual baselines.
     - Across requested viewports, compare `scrollWidth` with `clientWidth` and report both values, their pixel delta, and the measured rect whenever content clips or overflows.
     - Use an accessibility snapshot from `chrome` for semantic or interaction findings.
+    - Never claim a hover, focus, or active defect from a default-state capture; back every interactive-state finding with a `capture_element_states` strip.
+    - Never claim an animation or transition defect from a single frame; back it with a `capture_frames` filmstrip and quote the frame timings.
+    - A `contrast_audit` that scanned 0 elements or resolved 0 token files is a failed measurement, not a clean result. Report it as an instrumentation failure and never present it as evidence that contrast passes.
     - A vague finding is a failure of the review. Any finding without numeric evidence and a proposed fix is invalid; omit it rather than guessing.
     - If no supported findings exist, render a passing report that lists the matrices and evidence checked.
   user_template: |

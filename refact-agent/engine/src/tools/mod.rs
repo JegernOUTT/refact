@@ -11,7 +11,7 @@ pub mod shell_gate_llm;
 pub mod tools_description;
 pub mod tools_list;
 
-mod design_tools;
+pub mod design_tools;
 pub mod subagent_phases;
 pub(crate) mod task_tool_helpers;
 #[cfg(test)]

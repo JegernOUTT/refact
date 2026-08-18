@@ -1384,6 +1384,11 @@ mod tests {
             "scrollWidth",
             "clientWidth",
             "fenced `html` block",
+            "capture_element_states",
+            "capture_frames",
+            "accessibility_snapshot",
+            "page_context",
+            "scanned 0 elements",
         ] {
             assert!(review_prompt.contains(required), "missing `{required}`");
         }
@@ -1400,8 +1405,29 @@ mod tests {
             "console error",
             "page error",
             "layout shift",
+            "capture_element_states",
+            "capture_frames",
+            "accessibility_snapshot",
+            "page_context",
+            "elements_scanned",
         ] {
             assert!(visual_qa_prompt.contains(required), "missing `{required}`");
+        }
+        assert!(
+            visual_qa.tools.iter().any(|tool| tool == "contrast_audit"),
+            "the visual_qa gate needs contrast_audit to enforce fail-closed contrast evidence"
+        );
+
+        let design_prompt = &design.prompt;
+        for required in [
+            "capture_element_states",
+            "capture_frames",
+            "accessibility_snapshot",
+            "page_context",
+            "scanned 0 elements",
+            "verbatim",
+        ] {
+            assert!(design_prompt.contains(required), "missing `{required}`");
         }
     }
 }

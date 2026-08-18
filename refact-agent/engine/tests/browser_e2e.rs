@@ -7053,3 +7053,205 @@ async fn dispatch_event_fires_listeners_with_the_inferred_class_and_detail() {
         "the browser must survive every refused call: {alive:?}"
     );
 }
+
+struct DesignToolCase {
+    ccx: Arc<tokio::sync::Mutex<refact_lsp::at_commands::at_commands::AtCommandsContext>>,
+    _profile: TempDir,
+    _cache_dir: TempDir,
+    _config_dir: TempDir,
+    _server: FixtureServer,
+    _tab: Arc<Tab>,
+}
+
+async fn design_tool_context(case: BrowserCase, chat_id: &str) -> DesignToolCase {
+    let mut case = case;
+    let cache_dir = tempdir().unwrap();
+    let config_dir = tempdir().unwrap();
+    let command_line = refact_lsp::global_context::CommandLine::from_iter_safe([
+        "browser-e2e",
+        "--http-port",
+        "0",
+        "--lsp-port",
+        "0",
+        "--no-scheduler",
+    ])
+    .unwrap();
+    let (gcx, _) = refact_lsp::global_context::create_global_context(
+        cache_dir.path().to_path_buf(),
+        config_dir.path().to_path_buf(),
+        command_line,
+    )
+    .await;
+    let app = refact_lsp::app_state::AppState::from_gcx(gcx).await;
+    case.runtime.reattach(chat_id);
+    refact_lsp::integrations::browser_runtime::register_browser_runtime(app.clone(), case.runtime)
+        .await;
+    DesignToolCase {
+        ccx: Arc::new(tokio::sync::Mutex::new(
+            refact_lsp::at_commands::at_commands::AtCommandsContext::new_from_app(
+                app,
+                4096,
+                10,
+                false,
+                Vec::new(),
+                chat_id.to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        )),
+        _profile: case._profile,
+        _cache_dir: cache_dir,
+        _config_dir: config_dir,
+        _server: case.server,
+        _tab: case.tab,
+    }
+}
+
+fn design_tool_payload(
+    messages: Vec<refact_lsp::call_validation::ContextEnum>,
+) -> serde_json::Value {
+    let refact_lsp::call_validation::ContextEnum::ChatMessage(message) = messages
+        .into_iter()
+        .next()
+        .expect("design tool must return a message")
+    else {
+        panic!("expected a chat message");
+    };
+    let ChatContent::SimpleText(text) = message.content else {
+        panic!("expected simple text");
+    };
+    serde_json::from_str(&text).expect("design tools must return ToolJson")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn design_tools_drive_element_states_through_the_shared_browser_session() {
+    let Some(mut case) = BrowserCase::start("visual-states.html").await else {
+        return;
+    };
+    case.setup_world();
+    let case = design_tool_context(case, "design-states-e2e").await;
+    let ccx = case.ccx.clone();
+
+    let mut probe = refact_lsp::tools::design_tools::ToolUiProbe {
+        config_path: "builtin".to_string(),
+    };
+    let (_, messages) = refact_lsp::tools::tools_description::Tool::tool_execute(
+        &mut probe,
+        ccx,
+        &"design-probe".to_string(),
+        &std::collections::HashMap::from([
+            ("targets".to_string(), json!(["#swatch"])),
+            (
+                "viewports".to_string(),
+                json!([{"width": 800, "height": 600}]),
+            ),
+            ("themes".to_string(), json!(["light"])),
+            (
+                "states".to_string(),
+                json!(["default", "hover", "focus", "active"]),
+            ),
+            ("properties".to_string(), json!(["background-color"])),
+        ]),
+    )
+    .await
+    .expect("ui_probe must succeed on the instrumented fixture");
+
+    let payload = design_tool_payload(messages);
+    let matrix = payload["matrix"].as_array().expect("matrix array");
+    assert_eq!(matrix.len(), 4, "one cell per requested state: {matrix:?}");
+    let measured = matrix
+        .iter()
+        .map(|cell| {
+            (
+                cell["state"].as_str().unwrap().to_string(),
+                cell["styles"]["background-color"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        measured,
+        vec![
+            ("default".to_string(), "rgb(0, 0, 255)".to_string()),
+            ("hover".to_string(), "rgb(0, 255, 0)".to_string()),
+            ("focus".to_string(), "rgb(255, 255, 0)".to_string()),
+            ("active".to_string(), "rgb(255, 0, 0)".to_string()),
+        ],
+        "each state must be driven through the shared element-state sequencer"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn design_tools_scope_the_aria_snapshot_and_compose_with_refs() {
+    let Some(mut case) = BrowserCase::start("snapshot.html").await else {
+        return;
+    };
+    case.setup_world();
+    let case = design_tool_context(case, "design-snapshot-e2e").await;
+    let ccx = case.ccx.clone();
+
+    let mut mark = refact_lsp::tools::design_tools::ToolMarkElements {
+        config_path: "builtin".to_string(),
+    };
+    let (_, messages) = refact_lsp::tools::tools_description::Tool::tool_execute(
+        &mut mark,
+        ccx.clone(),
+        &"design-mark-all".to_string(),
+        &std::collections::HashMap::new(),
+    )
+    .await
+    .expect("mark_elements must succeed on the instrumented fixture");
+    let whole_page = design_tool_payload(messages);
+    let whole_page_marks = whole_page["marks"].as_array().expect("marks array").len();
+    assert!(whole_page_marks > 0, "the page must expose marked elements");
+
+    let (_, messages) = refact_lsp::tools::tools_description::Tool::tool_execute(
+        &mut mark,
+        ccx.clone(),
+        &"design-mark-scoped".to_string(),
+        &std::collections::HashMap::from([("selector".to_string(), json!("main"))]),
+    )
+    .await
+    .expect("scoped mark_elements must succeed");
+    let scoped = design_tool_payload(messages);
+    let scoped_marks = scoped["marks"].as_array().expect("marks array");
+    assert!(
+        scoped_marks.len() <= whole_page_marks,
+        "a scoped snapshot must not exceed the whole-page snapshot"
+    );
+
+    let reference = scoped_marks
+        .first()
+        .expect("a scoped subtree must expose at least one ref")["ref"]
+        .as_str()
+        .expect("ref string")
+        .to_string();
+    let mut probe = refact_lsp::tools::design_tools::ToolUiProbe {
+        config_path: "builtin".to_string(),
+    };
+    let (_, messages) = refact_lsp::tools::tools_description::Tool::tool_execute(
+        &mut probe,
+        ccx,
+        &"design-probe-ref".to_string(),
+        &std::collections::HashMap::from([
+            ("targets".to_string(), json!([reference])),
+            (
+                "viewports".to_string(),
+                json!([{"width": 800, "height": 600}]),
+            ),
+            ("themes".to_string(), json!(["light"])),
+            ("states".to_string(), json!(["default"])),
+        ]),
+    )
+    .await
+    .expect("a ref emitted by mark_elements must compose as a ui_probe target");
+    let payload = design_tool_payload(messages);
+    assert_eq!(payload["matrix"].as_array().unwrap().len(), 1);
+}
