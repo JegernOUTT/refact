@@ -6507,6 +6507,9 @@ async fn screenshot_style_pierces_shadow_dom() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn set_content_replaces_the_document_and_is_visible_in_the_next_snapshot() {
+}
+
 async fn cdp_send_round_trips_raw_protocol_calls_on_page_and_browser_targets() {
     let Some(mut case) = BrowserCase::start("snapshot.html").await else {
         return;
@@ -6515,6 +6518,7 @@ async fn cdp_send_round_trips_raw_protocol_calls_on_page_and_browser_targets() {
     let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
 
     let report = execute_request_with_runtime(
+        runtime,
         runtime.clone(),
         BrowserActionRequest {
             session: SessionPolicy::SharedDefault,
@@ -6522,6 +6526,16 @@ async fn cdp_send_round_trips_raw_protocol_calls_on_page_and_browser_targets() {
             attach_screenshot: Some(false),
             network: NetworkReportMode::default(),
             steps: vec![
+                BrowserStep::SetContent {
+                    html: "<!doctype html><html><body><h1>Fixture-less heading</h1><button>Press me</button></body></html>"
+                        .to_string(),
+                    wait_until: None,
+                },
+                BrowserStep::AccessibilitySnapshot {
+                    options: AccessibilitySnapshotOptions::default(),
+                },
+                BrowserStep::PageContent,
+            ],
                 BrowserStep::CdpSend {
                     method: "Runtime.evaluate".to_string(),
                     params: Some(json!({"expression": "40 + 2", "returnByValue": true})),
@@ -6553,6 +6567,20 @@ async fn cdp_send_round_trips_raw_protocol_calls_on_page_and_browser_targets() {
     .await
     .unwrap();
 
+    assert!(report.ok, "set_content batch failed: {report:?}");
+    let snapshot = serde_json::to_string(&report.steps[1].data).unwrap();
+    assert!(
+        snapshot.contains("Fixture-less heading") && snapshot.contains("Press me"),
+        "snapshot did not observe the new document: {snapshot}"
+    );
+    let content = report.steps[2]
+        .data
+        .as_ref()
+        .and_then(|data| data.get("html"))
+        .and_then(|html| html.as_str())
+        .unwrap_or_default();
+    assert!(content.starts_with("<!DOCTYPE html>"), "{content}");
+    assert!(content.contains("Fixture-less heading"), "{content}");
     assert!(report.ok, "cdp_send batch failed: {report:?}");
 
     let evaluated = report.steps[0].data.as_ref().unwrap();
@@ -6590,11 +6618,196 @@ async fn cdp_send_round_trips_raw_protocol_calls_on_page_and_browser_targets() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
+}
+
 async fn cdp_send_guardrails_refuse_session_breaking_methods_and_surface_cdp_errors() {
     let Some(mut case) = BrowserCase::start("snapshot.html").await else {
         return;
     };
     case.setup_world();
+    let server_url = case.server.url("readouts.html");
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+
+    let added = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: Some(false),
+            page_context: None,
+            network: NetworkReportMode::default(),
+            steps: vec![
+                BrowserStep::AddInitScript {
+                    content: "window.__refact_init_flag = 'installed';".to_string(),
+                },
+                BrowserStep::Navigate {
+                    url: server_url.clone(),
+                },
+                BrowserStep::Eval {
+                    expression: "window.__refact_init_flag || 'missing'".to_string(),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+
+    assert!(added.ok, "init script batch failed: {added:?}");
+    let id = added.steps[0]
+        .data
+        .as_ref()
+        .and_then(|data| data.get("id"))
+        .and_then(|id| id.as_str())
+        .expect("add_init_script must mint an id")
+        .to_string();
+    assert_eq!(returned_eval_string(&added), "installed");
+
+    let removed = execute_request_with_runtime(
+        runtime.clone(),
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: Some(false),
+            page_context: None,
+            network: NetworkReportMode::default(),
+            steps: vec![
+                BrowserStep::RemoveInitScript { id },
+                BrowserStep::Navigate {
+                    url: server_url.clone(),
+                },
+                BrowserStep::Eval {
+                    expression: "window.__refact_init_flag || 'missing'".to_string(),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(removed.ok, "remove_init_script batch failed: {removed:?}");
+    assert_eq!(returned_eval_string(&removed), "missing");
+
+    let reset = execute_request_with_runtime(
+        runtime,
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: Some(false),
+            page_context: None,
+            network: NetworkReportMode::default(),
+            steps: vec![
+                BrowserStep::AddInitScript {
+                    content: "window.__refact_init_flag = 'reinstalled';".to_string(),
+                },
+                BrowserStep::Reset,
+                BrowserStep::Navigate { url: server_url },
+                BrowserStep::Eval {
+                    expression: "window.__refact_init_flag || 'missing'".to_string(),
+                },
+            ],
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(reset.ok, "reset batch failed: {reset:?}");
+    assert_eq!(
+        reset.steps[1]
+            .data
+            .as_ref()
+            .and_then(|data| data.pointer("/reset/init_scripts"))
+            .and_then(|value| value.as_u64()),
+        Some(1)
+    );
+    assert_eq!(returned_eval_string(&reset), "missing");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn add_style_tag_changes_computed_style_and_add_script_tag_runs() {
+    let Some(case) = BrowserCase::start("dispatch-event.html").await else {
+        return;
+    };
+
+    let report = execute_steps(
+        &case.tab,
+        &[
+            BrowserStep::AddStyleTag {
+                url: None,
+                content: Some("#target { color: rgb(1, 2, 3); }".to_string()),
+            },
+            BrowserStep::AddScriptTag {
+                url: None,
+                content: Some("window.__refact_script_tag = 'ran';".to_string()),
+                script_type: None,
+            },
+            BrowserStep::Eval {
+                expression:
+                    "getComputedStyle(document.getElementById('target')).color + '|' + window.__refact_script_tag"
+                        .to_string(),
+            },
+        ],
+    );
+
+    assert!(report.ok, "tag injection failed: {report:?}");
+    assert_eq!(returned_eval_string(&report), "rgb(1, 2, 3)|ran");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn dispatch_event_fires_listeners_with_the_inferred_class_and_detail() {
+    let Some(case) = BrowserCase::start("dispatch-event.html").await else {
+        return;
+    };
+
+    let report = execute_steps(
+        &case.tab,
+        &[
+            BrowserStep::DispatchEvent {
+                locator: BrowserLocator::css("#target"),
+                event_type: "click".to_string(),
+                event_init: None,
+            },
+            BrowserStep::DispatchEvent {
+                locator: BrowserLocator::css("#target"),
+                event_type: "keydown".to_string(),
+                event_init: Some(json!({"key": "Enter"})),
+            },
+            BrowserStep::DispatchEvent {
+                locator: BrowserLocator::css("#target"),
+                event_type: "app:custom".to_string(),
+                event_init: Some(json!({"detail": {"id": 7}})),
+            },
+            BrowserStep::Eval {
+                expression: "JSON.stringify(window.__events)".to_string(),
+            },
+        ],
+    );
+
+    assert!(report.ok, "dispatch_event batch failed: {report:?}");
+    let events: serde_json::Value =
+        serde_json::from_str(returned_eval_string(&report)).expect("listener log must be JSON");
+
+    assert_eq!(events[0]["constructor"], json!("MouseEvent"));
+    assert_eq!(events[0]["bubbles"], json!(true));
+    assert_eq!(events[0]["cancelable"], json!(true));
+    assert_eq!(events[0]["composed"], json!(true));
+
+    assert_eq!(events[1]["constructor"], json!("KeyboardEvent"));
+    assert_eq!(events[1]["key"], json!("Enter"));
+
+    assert_eq!(events[2]["constructor"], json!("CustomEvent"));
+    assert_eq!(events[2]["detail"], json!({"id": 7}));
+
+    let bubbled = case
+        .tab
+        .evaluate("window.__bubbledToBody === true", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(bubbled, json!(true));
     let own_target_id = case.tab.get_target_id().to_string();
     let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
 

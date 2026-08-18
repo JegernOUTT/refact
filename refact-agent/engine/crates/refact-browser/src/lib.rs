@@ -15,6 +15,7 @@ mod handles;
 pub mod har;
 mod hit_target;
 pub mod http_client;
+mod init_scripts;
 mod injected_source;
 mod keyboard;
 pub mod launch;
@@ -52,6 +53,8 @@ pub use clock::{
     CLOCK_SOURCE, ClockManager, ClockOp, ClockState, current_wall_ms, parse_clock_ticks,
     parse_clock_time,
 };
+pub use context_state::{ContextState, MediaState, ViewportState};
+pub use init_scripts::{InitScript, InitScriptManager, page_init_script};
 pub use context_state::{ContextState, MediaState, NetworkConditions, ViewportState};
 pub use devices::DeviceDescriptor;
 pub use handles::{
@@ -499,6 +502,7 @@ pub struct BrowserRuntime {
     pub webauthn_manager: webauthn::WebAuthnManager,
     pub context_state: ContextState,
     pub clock: ClockManager,
+    pub init_scripts: InitScriptManager,
     pub mouse_states: HashMap<String, MouseState>,
     pub idle_timeout: Duration,
     pub is_connected: bool,
@@ -594,6 +598,7 @@ impl BrowserRuntime {
             webauthn_manager: webauthn::WebAuthnManager::default(),
             context_state: ContextState::default(),
             clock: ClockManager::default(),
+            init_scripts: InitScriptManager::default(),
             mouse_states: HashMap::new(),
             idle_timeout,
             is_connected: true,
@@ -652,6 +657,7 @@ impl BrowserRuntime {
             webauthn_manager: webauthn::WebAuthnManager::default(),
             context_state: ContextState::default(),
             clock: ClockManager::default(),
+            init_scripts: InitScriptManager::default(),
             mouse_states: HashMap::new(),
             idle_timeout,
             is_connected: true,
@@ -1626,6 +1632,7 @@ pub fn setup_recording_for_tab(
     install_websocket_router(&tab, runtime.websocket_registry.clone())?;
     runtime.context_state.apply_to_tab(&tab)?;
     runtime.clock.apply_to_tab(&tab)?;
+    runtime.init_scripts.apply_to_tab(&tab)?;
     if !runtime.route_registry.is_empty() || runtime.context_state.http_credentials.is_some() {
         runtime
             .route_registry

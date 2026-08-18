@@ -79,10 +79,12 @@ impl LocatorHandler {
                         | BrowserStep::ClockSetFixedTime { .. }
                         | BrowserStep::ClockSetSystemTime { .. }
                         | BrowserStep::HttpRequest { .. }
+                        | BrowserStep::AddInitScript { .. }
+                        | BrowserStep::RemoveInitScript { .. }
                 )
             }) {
                 return Err(
-                    "Locator handler steps cannot manage handlers, browser tabs, network routes, the clock, or send HTTP requests"
+                    "Locator handler steps cannot manage handlers, browser tabs, network routes, init scripts, the clock, or send HTTP requests"
                         .to_string(),
                 );
             }

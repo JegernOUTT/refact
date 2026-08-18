@@ -379,6 +379,17 @@ mod tests {
     }
 
     #[test]
+    fn page_manipulation_steps_parse_with_their_optional_fields() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "set_content", "html": "<p>hi</p>"},
+                {"action": "set_content", "html": "<p>hi</p>", "wait_until": "domcontentloaded"},
+                {"action": "page_content"},
+                {"action": "add_script_tag", "content": "window.ok = 1", "script_type": "module"},
+                {"action": "add_style_tag", "url": "https://example.com/app.css"},
+                {"action": "add_init_script", "content": "window.__flag = 1"},
+                {"action": "remove_init_script", "id": "init1"},
+                {"action": "dispatch_event", "locator": {"by": "ref", "value": "e5"}, "event_type": "click"}
     fn cancel_download_takes_an_optional_id_and_rejects_unknown_fields() {
         let request = parse_browser_action_request(serde_json::json!({
             "steps": [{"action": "cancel_download"}, {"action": "cancel_download", "id": "guid-1"}]
@@ -427,6 +438,62 @@ mod tests {
         assert!(matches!(
             request.steps.as_slice(),
             [
+                BrowserStep::SetContent {
+                    wait_until: None,
+                    ..
+                },
+                BrowserStep::SetContent {
+                    wait_until: Some(BrowserLoadState::Domcontentloaded),
+                    ..
+                },
+                BrowserStep::PageContent,
+                BrowserStep::AddScriptTag {
+                    url: None,
+                    script_type: Some(_),
+                    ..
+                },
+                BrowserStep::AddStyleTag {
+                    url: Some(_),
+                    content: None,
+                },
+                BrowserStep::AddInitScript { .. },
+                BrowserStep::RemoveInitScript { .. },
+                BrowserStep::DispatchEvent {
+                    event_init: None,
+                    ..
+                },
+            ]
+        ));
+        assert_eq!(
+            serde_json::to_value(&request.steps[2]).unwrap(),
+            serde_json::json!({"action": "page_content"})
+        );
+    }
+
+    #[test]
+    fn dispatch_event_carries_an_arbitrary_event_init_object() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [{
+                "action": "dispatch_event",
+                "locator": {"by": "css", "value": "#drop"},
+                "event_type": "dragstart",
+                "event_init": {"detail": {"id": 7}, "bubbles": false}
+            }]
+        }))
+        .unwrap();
+
+        let BrowserStep::DispatchEvent {
+            event_type,
+            event_init,
+            ..
+        } = &request.steps[0]
+        else {
+            panic!("expected a dispatch_event step");
+        };
+        assert_eq!(event_type, "dragstart");
+        assert_eq!(
+            event_init.as_ref().unwrap(),
+            &serde_json::json!({"detail": {"id": 7}, "bubbles": false})
                 BrowserStep::GrantPermissions {
                     state: BrowserPermissionState::Granted,
                     ..
@@ -540,6 +607,26 @@ mod tests {
     }
 
     #[test]
+    fn page_manipulation_steps_reject_unknown_and_missing_fields() {
+        for (step, expected) in [
+            (serde_json::json!({"action": "set_content"}), "html"),
+            (
+                serde_json::json!({"action": "set_content", "html": "<p/>", "wait_until": "idle"}),
+                "idle",
+            ),
+            (
+                serde_json::json!({"action": "add_script_tag", "contentt": "x"}),
+                "contentt",
+            ),
+            (
+                serde_json::json!({"action": "add_script_tag", "content": "x", "type": "module"}),
+                "type",
+            ),
+            (serde_json::json!({"action": "add_init_script"}), "content"),
+            (serde_json::json!({"action": "remove_init_script"}), "id"),
+            (
+                serde_json::json!({"action": "dispatch_event", "locator": {"by": "ref", "value": "e1"}}),
+                "event_type",
     fn block_service_workers_is_a_batch_level_option() {
         let request = parse_browser_action_request(serde_json::json!({
             "block_service_workers": true,
@@ -583,6 +670,11 @@ mod tests {
         ] {
             let error = parse_browser_action_request(serde_json::json!({"steps": [step.clone()]}))
                 .unwrap_err();
+            assert!(error.starts_with("step[0] ("), "unexpected error: {error}");
+            assert!(
+                error.contains(expected),
+                "expected {expected} in error for {step}, got {error}"
+            );
             assert!(
                 error.starts_with("step[0] (cdp_send): "),
                 "unexpected error for {step}: {error}"

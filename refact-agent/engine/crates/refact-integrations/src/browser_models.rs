@@ -1816,6 +1816,39 @@ pub enum BrowserStep {
         property_filter: Option<String>,
     },
 
+    SetContent {
+        html: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_until: Option<BrowserLoadState>,
+    },
+    PageContent,
+    AddScriptTag {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        script_type: Option<String>,
+    },
+    AddStyleTag {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+    },
+    AddInitScript {
+        content: String,
+    },
+    RemoveInitScript {
+        id: String,
+    },
+    DispatchEvent {
+        locator: BrowserLocator,
+        event_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_init: Option<serde_json::Value>,
+    },
+
     TabLog,
 
     AddLocatorHandler {
@@ -2120,6 +2153,13 @@ impl BrowserStep {
         "pdf",
         "eval",
         "styles",
+        "set_content",
+        "page_content",
+        "add_script_tag",
+        "add_style_tag",
+        "add_init_script",
+        "remove_init_script",
+        "dispatch_event",
         "tab_log",
         "add_locator_handler",
         "remove_locator_handler",
@@ -3225,6 +3265,31 @@ mod tests {
             BrowserStep::Styles {
                 locator: locator(),
                 property_filter: Some("color".to_string()),
+            },
+            BrowserStep::SetContent {
+                html: "<p>hi</p>".to_string(),
+                wait_until: Some(BrowserLoadState::Load),
+            },
+            BrowserStep::PageContent,
+            BrowserStep::AddScriptTag {
+                url: None,
+                content: Some("window.ok = 1".to_string()),
+                script_type: Some("module".to_string()),
+            },
+            BrowserStep::AddStyleTag {
+                url: Some("https://example.com/app.css".to_string()),
+                content: None,
+            },
+            BrowserStep::AddInitScript {
+                content: "window.__flag = 1".to_string(),
+            },
+            BrowserStep::RemoveInitScript {
+                id: "init1".to_string(),
+            },
+            BrowserStep::DispatchEvent {
+                locator: locator(),
+                event_type: "click".to_string(),
+                event_init: Some(serde_json::json!({"detail": 2})),
             },
             BrowserStep::TabLog,
             BrowserStep::AddLocatorHandler {

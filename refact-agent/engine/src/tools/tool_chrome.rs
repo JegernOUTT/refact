@@ -150,6 +150,8 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Motion: capture_frames records a burst and returns ONE composed filmstrip image (up to a 4x6 grid, each cell labelled +NNNms) plus per-frame artifact paths and the percentage of pixels that changed against the previous frame, so animations and transient UI are readable even without looking at pixels. It takes duration_ms (defaults to 1000, capped at 10000) with either frame_count (2-24, defaults to 8) or interval_ms, and scopes to an element with locator or to the whole document with full_page. Out-of-range values are hard errors. screencast_start and screencast_stop bracket a manual session that auto-stops at 30000ms or 60 frames and reports that cap as a warning; screencast_stop composes a filmstrip unless compose=false. The filmstrip is always attached, even when attach_screenshot is false.\n",
     "Touch and low-level keyboard: tap takes either a locator (full actionability and hit-target checks, like click) or x/y coordinates, and requires touch emulation from an earlier set_viewport step with has_touch true. insert_text types into the focused element with one input event and no key events, which suits IME-style entry but skips keyboard shortcuts; it focuses an optional locator first. press_sequentially focuses its locator and then sends real per-character key events with an optional delay_ms (default 0) for inputs driven by keystroke handlers such as autocomplete; prefer fill for ordinary form entry.\n",
     "Forms: fill, clear, select_option, check, uncheck.\n",
+    "Page manipulation: set_content replaces the whole document with raw html, so fixtures need no server or file; it waits for wait_until (domcontentloaded, load, or networkidle; load by default) and re-bootstraps refs like a navigation, so take a fresh accessibility_snapshot afterwards. page_content returns the full serialized document including its doctype, inline under 8KB and otherwise as an artifact path. add_script_tag and add_style_tag inject into the current document and take exactly one of url or content, plus an optional script_type such as module; both wait for a url to finish loading and fail the step if it errors. add_init_script evaluates content before any page script on every later navigation in this session and mints the id it returns, so never send it an id; remove_init_script takes that id, and reset drops every init script. dispatch_event sends a synthetic DOM event to a locator regardless of visibility, inferring the event class from event_type (click gives MouseEvent, keydown KeyboardEvent, dragstart DragEvent, and so on); event_init supplies the initialisation properties, with bubbles, cancelable, and composed defaulting to true.\n",
+    "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch. ",
     "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch. Set not=true to invert any matcher: the step retries until the matcher stops matching and a timeout reports the still-matching value. to_have_text and to_contain_text also accept an array of expectations across every match, exact and same-length for to_have_text, an ordered subset for to_contain_text. to_have_attribute without `expected` asserts presence only, to_have_css takes an optional pseudo of before or after, to_be_checked takes checked or indeterminate (never both), and to_be_in_viewport takes an optional ratio between 0 and 1. ",
     "expect_poll evaluates `expression` and retries until the value satisfies `matcher` (equals, contains, gt, lt, matches_regex) against `expected`, reporting attempts and elapsed like expect; it also honours soft.\n",
     "Waiting: wait_for_function is the way to wait on arbitrary app state: it evaluates `expression` until the result is truthy, defaults to 100/250/500/1000ms poll intervals unless `polling_ms` fixes one, and with a `locator` re-resolves the element each retry and passes it as the first argument, so a re-rendered node is tolerated. A thrown expression fails immediately instead of retrying. ",
@@ -497,7 +499,7 @@ fn browser_step_schema_with_actions(
         "id".to_string(),
         serde_json::json!({
             "type": "string",
-            "description": "Virtual authenticator id minted by add_virtual_authenticator and returned in its result. Required by remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified; sending it to add_virtual_authenticator is an error."
+            "description": "Server-minted id returned by a previous step. Virtual authenticator id from add_virtual_authenticator, required by remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified; init script id from add_init_script, required by remove_init_script. Sending it to the minting action is an error."
         }),
     );
     properties.insert(
@@ -551,6 +553,30 @@ fn browser_step_schema_with_actions(
     properties.insert(
         "state".to_string(),
         serde_json::json!({"type": "string", "enum": ["domcontentloaded", "load", "networkidle"]}),
+    );
+    properties.insert(
+        "wait_until".to_string(),
+        serde_json::json!({"type": "string", "enum": ["domcontentloaded", "load", "networkidle"], "description": "Load state set_content waits for; defaults to load"}),
+    );
+    properties.insert(
+        "html".to_string(),
+        serde_json::json!({"type": "string", "description": "Raw document HTML for set_content"}),
+    );
+    properties.insert(
+        "content".to_string(),
+        serde_json::json!({"type": "string", "description": "Inline source for add_script_tag, add_style_tag, and add_init_script; mutually exclusive with url on the tag actions"}),
+    );
+    properties.insert(
+        "script_type".to_string(),
+        serde_json::json!({"type": "string", "description": "Optional type attribute for add_script_tag, for example module"}),
+    );
+    properties.insert(
+        "event_type".to_string(),
+        serde_json::json!({"type": "string", "description": "DOM event name for dispatch_event; the event class is inferred from it"}),
+    );
+    properties.insert(
+        "event_init".to_string(),
+        serde_json::json!({"type": "object", "description": "dispatch_event init properties; bubbles, cancelable, and composed default to true"}),
     );
     properties.insert("pattern".to_string(), url_pattern_schema());
     properties.insert("save_as".to_string(), serde_json::json!({"type": "string"}));
@@ -886,6 +912,13 @@ fn locator_handler_schema() -> serde_json::Value {
         .filter(|action| {
             !matches!(
                 *action,
+                "route"
+                    | "unroute"
+                    | "list_routes"
+                    | "reset"
+                    | "http_request"
+                    | "add_init_script"
+                    | "remove_init_script"
                 "route" | "unroute" | "list_routes" | "reset" | "http_request" | "cdp_send"
             ) && !action.starts_with("clock_")
         })

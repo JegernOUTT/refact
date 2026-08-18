@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Dispatch event</title>
+  </head>
+  <body>
+    <button id="target">Target</button>
+    <div id="log"></div>
+    <script>
+      window.__events = [];
+      var target = document.getElementById('target');
+      ['click', 'app:custom', 'keydown', 'dragstart'].forEach(function (name) {
+        target.addEventListener(name, function (event) {
+          window.__events.push({
+            type: event.type,
+            constructor: event.constructor.name,
+            bubbles: event.bubbles,
+            cancelable: event.cancelable,
+            composed: event.composed,
+            detail: event.detail === undefined ? null : event.detail,
+            key: event.key === undefined ? null : event.key
+          });
+          document.getElementById('log').textContent = JSON.stringify(window.__events);
+        });
+      });
+      document.body.addEventListener('app:custom', function () {
+        window.__bubbledToBody = true;
+      });
+    </script>
+  </body>
+</html>

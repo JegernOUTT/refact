@@ -1480,6 +1480,39 @@ fn execute_route_management_step(
     }
 }
 
+fn execute_init_script_step(
+    runtime: &mut BrowserRuntime,
+    step: &BrowserStep,
+    idx: usize,
+) -> StepResult {
+    let tabs = runtime
+        .browser
+        .get_tabs()
+        .lock()
+        .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    match step {
+        BrowserStep::AddInitScript { content } => {
+            for tab in &tabs {
+                if let Err(error) = runtime.world_manager.ensure_utility_world(tab) {
+                    return StepResult::failure(idx, "Add init script", error);
+                }
+            }
+            match runtime.init_scripts.add(&tabs, content.clone()) {
+                Ok(id) => StepResult::success(idx, format!("Added init script {id}"))
+                    .with_data(serde_json::json!({"id": id})),
+                Err(error) => StepResult::failure(idx, "Add init script", error),
+            }
+        }
+        BrowserStep::RemoveInitScript { id } => match runtime.init_scripts.remove(&tabs, id) {
+            Ok(()) => StepResult::success(idx, format!("Removed init script {id}"))
+                .with_data(serde_json::json!({"id": id})),
+            Err(error) => StepResult::failure(idx, "Remove init script", error),
+        },
+        _ => StepResult::failure(idx, "Init script", "Unsupported init script step"),
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct BrowserResetCounts {
     routes: usize,
@@ -1487,6 +1520,7 @@ struct BrowserResetCounts {
     websocket_routes: usize,
     locator_handlers: usize,
     authenticators: usize,
+    init_scripts: usize,
     clock: bool,
     service_worker_block: bool,
 }
@@ -1494,6 +1528,7 @@ struct BrowserResetCounts {
 impl BrowserResetCounts {
     fn summary(&self) -> String {
         format!(
+            "Reset: {}, {}, {}, {}, {}, {}, offline off, emulation cleared, {}",
             "Reset: {}, {}, {}, {}, {}, offline off, emulation cleared, {}, {}",
             "Reset: {}, {}, {}, {}, {}, offline off, throttling off, emulation and device cleared, {}",
             counted(self.routes, "route"),
@@ -1501,6 +1536,7 @@ impl BrowserResetCounts {
             counted(self.websocket_routes, "ws route"),
             counted(self.locator_handlers, "locator handler"),
             counted(self.authenticators, "authenticator"),
+            counted(self.init_scripts, "init script"),
             if self.clock {
                 "clock cleared"
             } else {
@@ -1522,6 +1558,7 @@ impl BrowserResetCounts {
                 "websocket_routes": self.websocket_routes,
                 "locator_handlers": self.locator_handlers,
                 "authenticators": self.authenticators,
+                "init_scripts": self.init_scripts,
                 "offline": false,
                 "throttling_cleared": true,
                 "emulation_cleared": true,
@@ -1560,6 +1597,7 @@ fn reset_sticky_registries(
     websocket_registry: &WebSocketRegistry,
     locator_handlers: &Mutex<LocatorHandlerRegistry>,
     authenticators: usize,
+    init_scripts: usize,
     clock: bool,
     service_worker_block: bool,
 ) -> Result<BrowserResetCounts, String> {
@@ -1573,6 +1611,7 @@ fn reset_sticky_registries(
             .map_err(|error| format!("Failed to lock locator handlers: {error}"))?
             .reset(),
         authenticators,
+        init_scripts,
         clock,
         service_worker_block,
     })
@@ -1590,12 +1629,14 @@ fn execute_reset_step(runtime: &mut BrowserRuntime, idx: usize) -> StepResult {
         runtime.remove_routes(None)?;
         let authenticators = runtime.webauthn_manager.cleanup(&tabs);
         let clock = runtime.clock.reset(&tabs)?;
+        let init_scripts = runtime.init_scripts.reset(&tabs)?;
         let service_worker_block = runtime.context_state.block_service_workers;
         let counts = reset_sticky_registries(
             &routes,
             &runtime.websocket_registry,
             &runtime.locator_handlers,
             authenticators,
+            init_scripts,
             clock,
             service_worker_block,
         )?;
@@ -2543,6 +2584,25 @@ pub async fn execute_request_with_runtime(
             };
             rt.touch();
             result
+        } else if matches!(step, BrowserStep::PageContent) {
+            let mut rt = runtime_arc.lock().await;
+            let result = match rt.get_active_tab() {
+                Some(tab) => {
+                    tokio::task::block_in_place(|| step_page_content(&tab, idx, &rt.artifacts_dir))
+                }
+                None => StepResult::failure(idx, "Page content", "No active tab"),
+            };
+            rt.touch();
+            result
+        } else if matches!(
+            step,
+            BrowserStep::AddInitScript { .. } | BrowserStep::RemoveInitScript { .. }
+        ) {
+            let mut rt = runtime_arc.lock().await;
+            let result =
+                tokio::task::block_in_place(|| execute_init_script_step(&mut rt, step, idx));
+            rt.touch();
+            result
         } else if matches!(
             step,
             BrowserStep::Route { .. }
@@ -2849,7 +2909,8 @@ pub async fn execute_request_with_runtime(
             )
         });
         let url = tab.get_url();
-        let page_changed = initial_url.as_deref() != Some(url.as_str());
+        let page_changed = initial_url.as_deref() != Some(url.as_str())
+            || request.steps.iter().any(replaces_document_in_place);
         let capture_requested = report_screenshot_requested(
             request.attach_screenshot,
             page_context_mode,
@@ -3303,6 +3364,13 @@ pub fn execute_steps_with_runtime(
                 Some(tab) => step_pdf(tab, idx, options, &runtime.artifacts_dir),
                 None => StepResult::failure(idx, "PDF", "No active tab"),
             },
+            BrowserStep::PageContent => match &current_tab {
+                Some(tab) => step_page_content(tab, idx, &runtime.artifacts_dir),
+                None => StepResult::failure(idx, "Page content", "No active tab"),
+            },
+            BrowserStep::AddInitScript { .. } | BrowserStep::RemoveInitScript { .. } => {
+                execute_init_script_step(runtime, step, idx)
+            }
             other => match &current_tab {
                 Some(tab) => {
                     let chooser_was_armed = runtime.file_chooser_manager.is_armed();
@@ -3450,6 +3518,10 @@ fn is_non_fatal_step(step: &BrowserStep) -> bool {
     )
 }
 
+fn replaces_document_in_place(step: &BrowserStep) -> bool {
+    matches!(step, BrowserStep::SetContent { .. })
+}
+
 fn is_navigation_step(step: &BrowserStep) -> bool {
     matches!(
         step,
@@ -3457,6 +3529,7 @@ fn is_navigation_step(step: &BrowserStep) -> bool {
             | BrowserStep::Reload
             | BrowserStep::GoBack
             | BrowserStep::GoForward
+            | BrowserStep::SetContent { .. }
     )
 }
 
@@ -3473,6 +3546,9 @@ fn execute_runtime_network_step(
     mouse_state: &mut MouseState,
 ) -> StepResult {
     match step {
+        BrowserStep::SetContent { html, wait_until } => {
+            step_set_content(tab, world, network_monitor, idx, html, *wait_until)
+        }
         BrowserStep::WaitForNetworkIdle { timeout_ms } => wait_for_load_state(
             network_monitor,
             idx,
@@ -4393,6 +4469,39 @@ fn execute_single_step(
             locator,
             property_filter,
         } => step_styles(tab, world, idx, locator, property_filter.as_deref()),
+
+        BrowserStep::SetContent { .. } => StepResult::failure(
+            idx,
+            "Set content",
+            "Setting page content requires a browser runtime",
+        ),
+        BrowserStep::PageContent => StepResult::failure(
+            idx,
+            "Page content",
+            "Reading page content requires a browser runtime",
+        ),
+        BrowserStep::AddScriptTag {
+            url,
+            content,
+            script_type,
+        } => step_add_script_tag(
+            tab,
+            idx,
+            url.as_deref(),
+            content.as_deref(),
+            script_type.as_deref(),
+        ),
+        BrowserStep::AddStyleTag { url, content } => {
+            step_add_style_tag(tab, idx, url.as_deref(), content.as_deref())
+        }
+        BrowserStep::AddInitScript { .. } | BrowserStep::RemoveInitScript { .. } => {
+            StepResult::failure(idx, "Init script", "Init scripts require a browser runtime")
+        }
+        BrowserStep::DispatchEvent {
+            locator,
+            event_type,
+            event_init,
+        } => step_dispatch_event(tab, world, idx, locator, event_type, event_init.as_ref()),
 
         BrowserStep::TabLog => step_tab_log(tab, idx),
 
@@ -8037,6 +8146,311 @@ fn step_eval(tab: &Tab, idx: usize, expression: &str) -> StepResult {
         .with_data(serde_json::json!({"value": value, "description": desc}))
 }
 
+fn eval_js_awaited(tab: &Tab, expression: &str) -> Result<serde_json::Value, String> {
+    let result = tab
+        .call_method(Runtime::Evaluate {
+            expression: expression.to_string(),
+            return_by_value: Some(true),
+            generate_preview: None,
+            silent: Some(false),
+            await_promise: Some(true),
+            include_command_line_api: Some(false),
+            user_gesture: Some(true),
+            object_group: None,
+            context_id: None,
+            throw_on_side_effect: None,
+            timeout: None,
+            disable_breaks: None,
+            repl_mode: None,
+            allow_unsafe_eval_blocked_by_csp: None,
+            unique_context_id: None,
+            serialization_options: None,
+        })
+        .map_err(|error| format!("JS evaluation failed: {error}"))?;
+    if let Some(exception) = result.exception_details {
+        return Err(exception
+            .exception
+            .as_ref()
+            .and_then(|value| value.description.clone())
+            .unwrap_or(exception.text));
+    }
+    Ok(result.result.value.unwrap_or(serde_json::Value::Null))
+}
+
+const PAGE_CONTENT_JS: &str = r#"(function() {
+  var out = '';
+  if (document.doctype) out = new XMLSerializer().serializeToString(document.doctype);
+  if (document.documentElement) out += document.documentElement.outerHTML;
+  return out;
+})()"#;
+
+fn step_set_content(
+    tab: &Tab,
+    world: &WorldManager,
+    network_monitor: &NetworkMonitorHandle,
+    idx: usize,
+    html: &str,
+    wait_until: Option<BrowserLoadState>,
+) -> StepResult {
+    let frame_id = match tab.call_method(Page::GetFrameTree(None)) {
+        Ok(response) => response.frame_tree.frame.id,
+        Err(error) => {
+            return StepResult::failure(
+                idx,
+                "Set content",
+                format!("Failed to read browser frame tree: {error}"),
+            );
+        }
+    };
+    if let Err(error) = tab.call_method(Page::SetDocumentContent {
+        frame_id,
+        html: html.to_string(),
+    }) {
+        return StepResult::failure(
+            idx,
+            "Set content",
+            format!("Failed to set document content: {error}"),
+        );
+    }
+    let _ = world.release_all(tab);
+    let state = wait_until.unwrap_or(BrowserLoadState::Load);
+    let wait = wait_for_load_state(network_monitor, idx, state, DEFAULT_WAIT_TIMEOUT_MS);
+    let summary = format!("Set page content ({} bytes)", html.len());
+    if wait.ok {
+        StepResult::success(idx, summary)
+    } else {
+        StepResult::success(idx, format!("{summary} ({})", wait.summary))
+    }
+}
+
+fn step_page_content(tab: &Tab, idx: usize, artifacts_dir: &Path) -> StepResult {
+    let html = match eval_js_value(tab, PAGE_CONTENT_JS) {
+        Ok(value) => value.as_str().unwrap_or_default().to_string(),
+        Err(error) => return StepResult::failure(idx, "Page content", error),
+    };
+    let bytes = html.len();
+    if bytes <= http_client::HTTP_INLINE_BODY_LIMIT_BYTES {
+        return StepResult::success(idx, format!("Read page content ({bytes} bytes)"))
+            .with_data(serde_json::json!({"html": html, "bytes": bytes}));
+    }
+    match save_page_content_artifact(artifacts_dir, idx, &html) {
+        Ok(path) => StepResult::success(
+            idx,
+            format!(
+                "Read page content ({bytes} bytes) saved to {}",
+                path.display()
+            ),
+        )
+        .with_data(serde_json::json!({
+            "bytes": bytes,
+            "artifact": {
+                "kind": "page_content",
+                "mime": "text/html",
+                "path": path,
+                "bytes": bytes,
+            }
+        })),
+        Err(error) => StepResult::failure(idx, "Page content", error),
+    }
+}
+
+fn save_page_content_artifact(
+    artifacts_dir: &Path,
+    idx: usize,
+    html: &str,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(artifacts_dir).map_err(|error| {
+        format!(
+            "Failed to create browser artifacts directory {}: {error}",
+            artifacts_dir.display()
+        )
+    })?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = artifacts_dir.join(format!("content-{nonce}-{idx}.html"));
+    std::fs::write(&path, html).map_err(|error| {
+        format!(
+            "Failed to save page content artifact {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
+
+fn tag_source(url: Option<&str>, content: Option<&str>, action: &str) -> Result<(), String> {
+    match (url, content) {
+        (Some(_), Some(_)) => Err(format!("{action} accepts either url or content, not both")),
+        (None, None) => Err(format!("{action} requires either url or content")),
+        _ => Ok(()),
+    }
+}
+
+fn add_script_tag_js(
+    url: Option<&str>,
+    content: Option<&str>,
+    script_type: Option<&str>,
+) -> String {
+    let type_js = match script_type {
+        Some(value) => format!("element.type = {};", js_string_literal(value)),
+        None => String::new(),
+    };
+    let body = match url {
+        Some(url) => format!(
+            r#"element.src = {url};
+    element.addEventListener('load', function() {{ resolve(true); }});
+    element.addEventListener('error', function() {{ reject(new Error('Failed to load script ' + {url})); }});
+    (document.head || document.documentElement).appendChild(element);"#,
+            url = js_string_literal(url),
+        ),
+        None => format!(
+            r#"element.text = {content};
+    (document.head || document.documentElement).appendChild(element);
+    resolve(true);"#,
+            content = js_string_literal(content.unwrap_or_default()),
+        ),
+    };
+    format!(
+        r#"(function() {{
+  return new Promise(function(resolve, reject) {{
+    var element = document.createElement('script');
+    {type_js}
+    {body}
+  }});
+}})()"#
+    )
+}
+
+fn add_style_tag_js(url: Option<&str>, content: Option<&str>) -> String {
+    let body = match url {
+        Some(url) => format!(
+            r#"var element = document.createElement('link');
+    element.rel = 'stylesheet';
+    element.href = {url};
+    element.addEventListener('load', function() {{ resolve(true); }});
+    element.addEventListener('error', function() {{ reject(new Error('Failed to load stylesheet ' + {url})); }});
+    (document.head || document.documentElement).appendChild(element);"#,
+            url = js_string_literal(url),
+        ),
+        None => format!(
+            r#"var element = document.createElement('style');
+    element.textContent = {content};
+    (document.head || document.documentElement).appendChild(element);
+    resolve(true);"#,
+            content = js_string_literal(content.unwrap_or_default()),
+        ),
+    };
+    format!(
+        r#"(function() {{
+  return new Promise(function(resolve, reject) {{
+    {body}
+  }});
+}})()"#
+    )
+}
+
+fn step_add_script_tag(
+    tab: &Tab,
+    idx: usize,
+    url: Option<&str>,
+    content: Option<&str>,
+    script_type: Option<&str>,
+) -> StepResult {
+    if let Err(error) = tag_source(url, content, "add_script_tag") {
+        return StepResult::failure(idx, "Add script tag", error);
+    }
+    match eval_js_awaited(tab, &add_script_tag_js(url, content, script_type)) {
+        Ok(_) => StepResult::success(
+            idx,
+            match url {
+                Some(url) => format!("Added script tag {url}"),
+                None => "Added inline script tag".to_string(),
+            },
+        ),
+        Err(error) => StepResult::failure(idx, "Add script tag", error),
+    }
+}
+
+fn step_add_style_tag(
+    tab: &Tab,
+    idx: usize,
+    url: Option<&str>,
+    content: Option<&str>,
+) -> StepResult {
+    if let Err(error) = tag_source(url, content, "add_style_tag") {
+        return StepResult::failure(idx, "Add style tag", error);
+    }
+    match eval_js_awaited(tab, &add_style_tag_js(url, content)) {
+        Ok(_) => StepResult::success(
+            idx,
+            match url {
+                Some(url) => format!("Added style tag {url}"),
+                None => "Added inline style tag".to_string(),
+            },
+        ),
+        Err(error) => StepResult::failure(idx, "Add style tag", error),
+    }
+}
+
+fn event_constructor(event_type: &str, event_init: Option<&Value>) -> &'static str {
+    match event_type {
+        "auxclick" | "click" | "dblclick" | "mousedown" | "mouseenter" | "mouseleave"
+        | "mousemove" | "mouseout" | "mouseover" | "mouseup" | "mousewheel" => "MouseEvent",
+        "keydown" | "keyup" | "keypress" | "textInput" => "KeyboardEvent",
+        "touchstart" | "touchmove" | "touchend" | "touchcancel" => "TouchEvent",
+        "pointerover" | "pointerout" | "pointerenter" | "pointerleave" | "pointerdown"
+        | "pointerup" | "pointermove" | "pointercancel" | "gotpointercapture"
+        | "lostpointercapture" => "PointerEvent",
+        "focus" | "blur" => "FocusEvent",
+        "drag" | "dragstart" | "dragend" | "dragover" | "dragenter" | "dragleave" | "dragexit"
+        | "drop" => "DragEvent",
+        "wheel" => "WheelEvent",
+        "deviceorientation" | "deviceorientationabsolute" => "DeviceOrientationEvent",
+        "devicemotion" => "DeviceMotionEvent",
+        _ => match event_init.and_then(|init| init.get("detail")) {
+            Some(_) => "CustomEvent",
+            None => "Event",
+        },
+    }
+}
+
+fn dispatch_event_js(event_type: &str, event_init: Option<&Value>) -> String {
+    let constructor = event_constructor(event_type, event_init);
+    let init = event_init.cloned().unwrap_or_else(|| serde_json::json!({}));
+    format!(
+        r#"function() {{
+  var init = Object.assign({{bubbles: true, cancelable: true, composed: true}}, {init});
+  this.dispatchEvent(new {constructor}({event_type}, init));
+  return JSON.stringify({{dispatched: true}});
+}}"#,
+        event_type = js_string_literal(event_type),
+    )
+}
+
+fn step_dispatch_event(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    event_type: &str,
+    event_init: Option<&Value>,
+) -> StepResult {
+    let info = match resolve_element(tab, world, locator) {
+        Ok(info) => info,
+        Err(error) => return StepResult::failure(idx, "Dispatch event: resolution failed", error),
+    };
+    let js = dispatch_event_js(event_type, event_init);
+    match call_handle_json(tab, world, &info.handle, &js) {
+        Ok(_) => StepResult::success(idx, format!("Dispatched {event_type} on <{}>", info.tag))
+            .with_data(serde_json::json!({
+                "event_type": event_type,
+                "constructor": event_constructor(event_type, event_init),
+            })),
+        Err(error) => StepResult::failure(idx, format!("Dispatch event '{event_type}'"), error),
+    }
+}
+
 fn step_styles(
     tab: &Tab,
     world: &WorldManager,
@@ -9949,6 +10363,9 @@ mod tests {
             .unwrap();
         let locator_handlers = populated_locator_handlers();
 
+        let counts =
+            reset_sticky_registries(&routes, &websocket_registry, &locator_handlers, 1, 2, true)
+                .unwrap();
         let counts = reset_sticky_registries(
             &routes,
             &websocket_registry,
@@ -9968,12 +10385,14 @@ mod tests {
                 websocket_routes: 1,
                 locator_handlers: 3,
                 authenticators: 1,
+                init_scripts: 2,
                 clock: true,
                 service_worker_block: true,
             }
         );
         assert_eq!(
             counts.summary(),
+            "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, 2 init scripts, offline off, emulation cleared, clock cleared"
             "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, offline off, emulation cleared, clock cleared, service worker block cleared"
             "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, offline off, throttling off, emulation and device cleared, clock cleared"
         );
@@ -10018,6 +10437,9 @@ mod tests {
         let websocket_registry = WebSocketRegistry::default();
         let locator_handlers = populated_locator_handlers();
 
+        reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, 0, false).unwrap();
+        let repeated =
+            reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, 0, false)
         reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, false, false)
             .unwrap();
         let repeated =
@@ -10027,6 +10449,7 @@ mod tests {
         assert_eq!(repeated, BrowserResetCounts::default());
         assert_eq!(
             repeated.summary(),
+            "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, 0 init scripts, offline off, emulation cleared, clock off"
             "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, offline off, emulation cleared, clock off, service worker block off"
             "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, offline off, throttling off, emulation and device cleared, clock off"
         );
@@ -10106,6 +10529,154 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_event_infers_the_playwright_event_class() {
+        for (event_type, expected) in [
+            ("click", "MouseEvent"),
+            ("dblclick", "MouseEvent"),
+            ("mouseenter", "MouseEvent"),
+            ("keydown", "KeyboardEvent"),
+            ("textInput", "KeyboardEvent"),
+            ("touchstart", "TouchEvent"),
+            ("pointerdown", "PointerEvent"),
+            ("gotpointercapture", "PointerEvent"),
+            ("focus", "FocusEvent"),
+            ("blur", "FocusEvent"),
+            ("dragstart", "DragEvent"),
+            ("drop", "DragEvent"),
+            ("wheel", "WheelEvent"),
+            ("deviceorientation", "DeviceOrientationEvent"),
+            ("devicemotion", "DeviceMotionEvent"),
+            ("input", "Event"),
+            ("change", "Event"),
+            ("app:custom", "Event"),
+        ] {
+            assert_eq!(
+                event_constructor(event_type, None),
+                expected,
+                "unexpected class for {event_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_event_upgrades_to_custom_event_only_for_unmapped_types_carrying_detail() {
+        let detail = serde_json::json!({"detail": {"id": 7}});
+        assert_eq!(
+            event_constructor("app:custom", Some(&detail)),
+            "CustomEvent"
+        );
+        assert_eq!(event_constructor("change", Some(&detail)), "CustomEvent");
+        assert_eq!(event_constructor("click", Some(&detail)), "MouseEvent");
+
+        let without_detail = serde_json::json!({"bubbles": false});
+        assert_eq!(
+            event_constructor("app:custom", Some(&without_detail)),
+            "Event"
+        );
+    }
+
+    #[test]
+    fn dispatch_event_js_defaults_bubbles_cancelable_and_composed_but_lets_the_caller_win() {
+        let js = dispatch_event_js("click", None);
+        assert!(
+            js.contains("Object.assign({bubbles: true, cancelable: true, composed: true}, {})"),
+            "{js}"
+        );
+        assert!(js.contains("new MouseEvent('click', init)"), "{js}");
+
+        let overridden = dispatch_event_js("click", Some(&serde_json::json!({"bubbles": false})));
+        assert!(
+            overridden.contains(
+                "Object.assign({bubbles: true, cancelable: true, composed: true}, {\"bubbles\":false})"
+            ),
+            "{overridden}"
+        );
+    }
+
+    #[test]
+    fn tag_steps_require_exactly_one_source() {
+        assert!(tag_source(Some("https://x.test/a.js"), None, "add_script_tag").is_ok());
+        assert!(tag_source(None, Some("window.x = 1"), "add_script_tag").is_ok());
+
+        let both =
+            tag_source(Some("https://x.test/a.js"), Some("x"), "add_script_tag").unwrap_err();
+        assert!(both.contains("not both"), "{both}");
+
+        let neither = tag_source(None, None, "add_style_tag").unwrap_err();
+        assert!(
+            neither.contains("requires either url or content"),
+            "{neither}"
+        );
+    }
+
+    #[test]
+    fn tag_js_awaits_remote_sources_and_appends_inline_ones_immediately() {
+        let remote = add_script_tag_js(Some("https://x.test/a.js"), None, Some("module"));
+        assert!(remote.contains("element.type = 'module'"), "{remote}");
+        assert!(
+            remote.contains("element.src = 'https://x.test/a.js'"),
+            "{remote}"
+        );
+        assert!(remote.contains("addEventListener('load'"), "{remote}");
+        assert!(remote.contains("addEventListener('error'"), "{remote}");
+
+        let inline = add_script_tag_js(None, Some("window.x = 1"), None);
+        assert!(inline.contains("element.text = 'window.x = 1'"), "{inline}");
+        assert!(!inline.contains("addEventListener"), "{inline}");
+
+        let remote_style = add_style_tag_js(Some("https://x.test/a.css"), None);
+        assert!(
+            remote_style.contains("element.rel = 'stylesheet'"),
+            "{remote_style}"
+        );
+        assert!(
+            remote_style.contains("addEventListener('error'"),
+            "{remote_style}"
+        );
+
+        let inline_style = add_style_tag_js(None, Some("body { color: red }"));
+        assert!(
+            inline_style.contains("createElement('style')"),
+            "{inline_style}"
+        );
+        assert!(
+            inline_style.contains("element.textContent = 'body { color: red }'"),
+            "{inline_style}"
+        );
+    }
+
+    #[test]
+    fn set_content_rebootstraps_refs_and_counts_as_a_page_change() {
+        let step = BrowserStep::SetContent {
+            html: "<p>hi</p>".to_string(),
+            wait_until: None,
+        };
+        assert!(is_navigation_step(&step));
+        assert!(replaces_document_in_place(&step));
+
+        assert!(!replaces_document_in_place(&BrowserStep::PageContent));
+        assert!(!replaces_document_in_place(&BrowserStep::Reload));
+    }
+
+    #[test]
+    fn set_content_forces_a_report_screenshot_even_though_the_url_never_changes() {
+        assert!(report_screenshot_requested(None, true, false));
+        assert!(!report_screenshot_requested(None, false, false));
+        assert!(!report_screenshot_requested(Some(false), true, false));
+    }
+
+    #[test]
+    fn page_content_serializes_the_doctype_before_the_document_element() {
+        assert!(PAGE_CONTENT_JS.contains("document.doctype"));
+        assert!(PAGE_CONTENT_JS.contains("XMLSerializer"));
+        assert!(PAGE_CONTENT_JS.contains("documentElement.outerHTML"));
+        assert!(
+            PAGE_CONTENT_JS.find("doctype").unwrap()
+                < PAGE_CONTENT_JS.find("documentElement.outerHTML").unwrap()
+        );
+    }
+
+    #[test]
     fn reset_reports_the_cleared_subsystems_as_structured_data() {
         let counts = BrowserResetCounts {
             routes: 2,
@@ -10113,6 +10684,7 @@ mod tests {
             websocket_routes: 1,
             locator_handlers: 3,
             authenticators: 1,
+            init_scripts: 2,
             clock: true,
             service_worker_block: true,
         };
@@ -10126,6 +10698,7 @@ mod tests {
                     "websocket_routes": 1,
                     "locator_handlers": 3,
                     "authenticators": 1,
+                    "init_scripts": 2,
                     "offline": false,
                     "throttling_cleared": true,
                     "emulation_cleared": true,
