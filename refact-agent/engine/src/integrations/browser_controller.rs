@@ -160,6 +160,16 @@ impl ResolveElementError {
     }
 }
 
+fn locator_outcome_for_resolve_error(strategy: &LocatorStrategy, error: String) -> LocatorOutcome {
+    if matches!(strategy, LocatorStrategy::Ref { .. })
+        || refact_browser::is_transport_dead_error(&error)
+    {
+        LocatorOutcome::Error { description: error }
+    } else {
+        LocatorOutcome::NotFound
+    }
+}
+
 impl std::ops::Deref for ResolvedElement {
     type Target = ElementInfo;
 
@@ -218,11 +228,7 @@ impl ActionabilityDriver for DragActionabilityDriver<'_> {
                 LocatorOutcome::MultipleMatches { count, previews }
             }
             Err(ResolveElementError::Other(error)) => {
-                if matches!(self.locator.strategy, LocatorStrategy::Ref { .. }) {
-                    LocatorOutcome::Error { description: error }
-                } else {
-                    LocatorOutcome::NotFound
-                }
+                locator_outcome_for_resolve_error(&self.locator.strategy, error)
             }
         }
     }
@@ -355,11 +361,7 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
                 LocatorOutcome::MultipleMatches { count, previews }
             }
             Err(ResolveElementError::Other(error)) => {
-                if matches!(self.locator.strategy, LocatorStrategy::Ref { .. }) {
-                    LocatorOutcome::Error { description: error }
-                } else {
-                    LocatorOutcome::NotFound
-                }
+                locator_outcome_for_resolve_error(&self.locator.strategy, error)
             }
         }
     }
@@ -3047,6 +3049,7 @@ pub async fn execute_request_with_runtime(
     };
     let page_context_mode = request.page_context_mode();
     let artifacts_dir = runtime_arc.lock().await.artifacts_dir.clone();
+    let mut warnings: Vec<String> = Vec::new();
     let (url, title, stabilized, screenshot, snapshot) = if let Some(tab) = active_tab {
         let stabilized = tokio::task::block_in_place(|| {
             wait_for_report_stability(
@@ -3068,12 +3071,26 @@ pub async fn execute_request_with_runtime(
                 .any(|step| matches!(step, BrowserStep::Screenshot { .. })),
         );
         let screenshot = if capture_requested {
-            tokio::task::block_in_place(|| capture_report_screenshot(&tab, image_policy).ok())
+            match tokio::task::block_in_place(|| capture_report_screenshot(&tab, image_policy)) {
+                Ok(screenshot) => Some(screenshot),
+                Err(error) => {
+                    warnings.push(format!("screenshot capture failed: {error}"));
+                    None
+                }
+            }
         } else {
             None
         };
         let snapshot = if report_snapshot_requested(page_context_mode, page_changed) {
-            tokio::task::block_in_place(|| capture_page_snapshot(&tab, &world, &artifacts_dir).ok())
+            match tokio::task::block_in_place(|| {
+                capture_page_snapshot(&tab, &world, &artifacts_dir)
+            }) {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => {
+                    warnings.push(format!("page snapshot capture failed: {error}"));
+                    None
+                }
+            }
         } else {
             None
         };
@@ -3139,7 +3156,7 @@ pub async fn execute_request_with_runtime(
     let mut report = ExecutionReport {
         ok: all_ok,
         steps: results,
-        warnings: Vec::new(),
+        warnings,
         url,
         title,
         page: (page != BrowserPageContext::default()).then_some(page),
@@ -3886,16 +3903,25 @@ fn perform_action_prechecks(
 }
 
 fn wait_for_pending_navigation(tab: &Tab, deadline: Instant) -> Result<(), String> {
+    let mut last_error: Option<String>;
     loop {
-        let loading = eval_js_value(tab, "document.readyState === 'loading'")
-            .ok()
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        if !loading {
-            return Ok(());
+        match eval_js_value(tab, "document.readyState === 'loading'") {
+            Ok(value) => {
+                if !value.as_bool().unwrap_or(false) {
+                    return Ok(());
+                }
+                last_error = None;
+            }
+            Err(error) if refact_browser::is_transport_dead_error(&error) => {
+                return Err(format!("Polling failed: {error}"));
+            }
+            Err(error) => last_error = Some(error),
         }
         if Instant::now() >= deadline {
-            return Err("Timed out waiting for navigation before action".to_string());
+            return Err(poll_deadline_error(
+                last_error,
+                "Timed out waiting for navigation before action".to_string(),
+            ));
         }
         std::thread::sleep(
             Duration::from_millis(DEFAULT_POLL_INTERVAL_MS)
@@ -6376,6 +6402,38 @@ fn probe_click_if_exists(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ClickIfExistsProbe {
+    Proceed,
+    Skip(String),
+    Fatal(String),
+}
+
+fn classify_click_if_exists_probe(probe: Result<(), String>) -> ClickIfExistsProbe {
+    match probe {
+        Ok(()) => ClickIfExistsProbe::Proceed,
+        Err(error) if refact_browser::is_transport_dead_error(&error) => {
+            ClickIfExistsProbe::Fatal(error)
+        }
+        Err(error) => ClickIfExistsProbe::Skip(error),
+    }
+}
+
+fn click_if_exists_action_result(result: StepResult) -> StepResult {
+    let error = result
+        .error
+        .clone()
+        .unwrap_or_else(|| result.summary.clone());
+    if result.ok || refact_browser::is_transport_dead_error(&error) {
+        return result;
+    }
+    StepResult {
+        ok: true,
+        summary: format!("Click failed (non-fatal): {error}"),
+        ..result
+    }
+}
+
 fn step_click_if_exists(
     tab: &Tab,
     world: &WorldManager,
@@ -6385,16 +6443,26 @@ fn step_click_if_exists(
     locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
     image_policy: &ImagePolicy,
 ) -> StepResult {
-    if let Err(reason) = probe_click_if_exists(tab, world, locator) {
-        return StepResult::success(
-            idx,
-            format!(
-                "Skipped click_if_exists ({}): {reason}",
-                describe_locator(locator)
-            ),
-        );
+    match classify_click_if_exists_probe(probe_click_if_exists(tab, world, locator)) {
+        ClickIfExistsProbe::Proceed => {}
+        ClickIfExistsProbe::Skip(reason) => {
+            return StepResult::success(
+                idx,
+                format!(
+                    "Skipped click_if_exists ({}): {reason}",
+                    describe_locator(locator)
+                ),
+            );
+        }
+        ClickIfExistsProbe::Fatal(error) => {
+            return StepResult::failure(
+                idx,
+                format!("click_if_exists failed ({})", describe_locator(locator)),
+                error,
+            );
+        }
     }
-    let result = step_actionable_action(
+    click_if_exists_action_result(step_actionable_action(
         tab,
         world,
         idx,
@@ -6404,19 +6472,7 @@ fn step_click_if_exists(
         handlers,
         locator_handler_firings,
         image_policy,
-    );
-    if result.ok {
-        result
-    } else {
-        StepResult {
-            ok: true,
-            summary: format!(
-                "Click failed (non-fatal): {}",
-                result.error.as_deref().unwrap_or(&result.summary)
-            ),
-            ..result
-        }
-    }
+    ))
 }
 
 fn step_press_key(tab: &Tab, idx: usize, key: &str, modifiers: &[String]) -> StepResult {
@@ -6763,6 +6819,13 @@ fn step_check_uncheck(
     }
 }
 
+fn poll_deadline_error(last_error: Option<String>, timeout_message: String) -> String {
+    match last_error {
+        Some(error) => format!("Polling failed: {error}"),
+        None => timeout_message,
+    }
+}
+
 fn poll_condition(
     tab: &Tab,
     js_condition: &str,
@@ -6770,13 +6833,21 @@ fn poll_condition(
     interval_ms: u64,
 ) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last_error: Option<String>;
     loop {
         match eval_js_value(tab, js_condition) {
             Ok(val) if val.as_bool() == Some(true) => return Ok(()),
-            _ => {}
+            Ok(_) => last_error = None,
+            Err(error) if refact_browser::is_transport_dead_error(&error) => {
+                return Err(format!("Polling failed: {error}"));
+            }
+            Err(error) => last_error = Some(error),
         }
         if Instant::now() >= deadline {
-            return Err(format!("Timed out after {}ms", timeout_ms));
+            return Err(poll_deadline_error(
+                last_error,
+                format!("Timed out after {}ms", timeout_ms),
+            ));
         }
         std::thread::sleep(Duration::from_millis(interval_ms));
     }
@@ -6979,6 +7050,19 @@ fn step_wait_for_selector(
     }
 }
 
+fn navigation_load_state_step(idx: usize, summary: String, wait: Result<(), String>) -> StepResult {
+    match wait {
+        Ok(()) => StepResult::success(idx, summary),
+        Err(error) if refact_browser::is_transport_dead_error(&error) => {
+            StepResult::failure(idx, summary, error)
+        }
+        Err(error) => {
+            StepResult::success(idx, format!("{summary} (load state not reached: {error})"))
+                .with_data(serde_json::json!({"load_state_reached": false}))
+        }
+    }
+}
+
 fn step_wait_for_navigation(
     tab: &Tab,
     idx: usize,
@@ -6987,13 +7071,13 @@ fn step_wait_for_navigation(
 ) -> StepResult {
     let current_url = tab.get_url();
     let reference_url = pre_step_url.unwrap_or(&current_url);
+    let complete_js = r#"(function() { return document.readyState === 'complete'; })()"#;
 
     if current_url != reference_url {
-        let complete_js = r#"(function() { return document.readyState === 'complete'; })()"#;
-        let _ = poll_condition(tab, complete_js, timeout_ms, DEFAULT_POLL_INTERVAL_MS);
-        return StepResult::success(
+        return navigation_load_state_step(
             idx,
             format!("Navigation detected: {} -> {}", reference_url, current_url),
+            poll_condition(tab, complete_js, timeout_ms, DEFAULT_POLL_INTERVAL_MS),
         );
     }
 
@@ -7001,24 +7085,20 @@ fn step_wait_for_navigation(
         r#"(function() {{ return window.location.href !== {}; }})()"#,
         js_string_literal(reference_url),
     );
-    let complete_js = r#"(function() { return document.readyState === 'complete'; })()"#;
 
     match poll_condition(tab, &url_changed_js, timeout_ms, DEFAULT_POLL_INTERVAL_MS) {
         Ok(()) => {
             let end_url = tab.get_url();
-            let _ = poll_condition(tab, complete_js, timeout_ms, DEFAULT_POLL_INTERVAL_MS);
-            StepResult::success(
+            navigation_load_state_step(
                 idx,
                 format!("Navigation detected: {} -> {}", reference_url, end_url),
+                poll_condition(tab, complete_js, timeout_ms, DEFAULT_POLL_INTERVAL_MS),
             )
         }
-        Err(_) => StepResult::failure(
+        Err(error) => StepResult::failure(
             idx,
             "Wait for navigation",
-            format!(
-                "Timed out after {}ms; URL unchanged ({})",
-                timeout_ms, current_url
-            ),
+            format!("{error}; URL unchanged ({current_url})"),
         ),
     }
 }
@@ -8519,7 +8599,15 @@ fn step_set_content(
     if wait.ok {
         StepResult::success(idx, summary)
     } else {
-        StepResult::success(idx, format!("{summary} ({})", wait.summary))
+        StepResult::failure(
+            idx,
+            summary,
+            format!(
+                "Content was set but {} failed: {}",
+                wait.summary,
+                wait.error.as_deref().unwrap_or(&wait.summary)
+            ),
+        )
     }
 }
 
@@ -11780,5 +11868,131 @@ mod tests {
             "set_window_bounds must not be routed as page-emulation context state"
         );
         assert!(is_context_management_step(&request.steps[1]));
+    }
+
+    fn css_strategy() -> LocatorStrategy {
+        LocatorStrategy::Css {
+            value: "#submit".to_string(),
+        }
+    }
+
+    #[test]
+    fn poll_deadline_reports_the_last_eval_error_instead_of_a_bare_timeout() {
+        assert_eq!(
+            poll_deadline_error(
+                Some("JS evaluation failed: boom".to_string()),
+                "Timed out after 5000ms".to_string()
+            ),
+            "Polling failed: JS evaluation failed: boom"
+        );
+        assert_eq!(
+            poll_deadline_error(None, "Timed out after 5000ms".to_string()),
+            "Timed out after 5000ms"
+        );
+    }
+
+    #[test]
+    fn click_if_exists_skips_only_genuine_non_actionable_probes() {
+        assert_eq!(
+            classify_click_if_exists_probe(Ok(())),
+            ClickIfExistsProbe::Proceed
+        );
+        assert_eq!(
+            classify_click_if_exists_probe(Err("Element not found".to_string())),
+            ClickIfExistsProbe::Skip("Element not found".to_string())
+        );
+        assert_eq!(
+            classify_click_if_exists_probe(Err(
+                "not actionable, element is not visible".to_string()
+            )),
+            ClickIfExistsProbe::Skip("not actionable, element is not visible".to_string())
+        );
+        assert_eq!(
+            classify_click_if_exists_probe(Err(DEAD_TRANSPORT.to_string())),
+            ClickIfExistsProbe::Fatal(DEAD_TRANSPORT.to_string())
+        );
+    }
+
+    #[test]
+    fn click_if_exists_keeps_transport_dead_action_failures_fatal() {
+        let succeeded = click_if_exists_action_result(StepResult::success(3, "click on <button>"));
+        assert!(succeeded.ok);
+        assert_eq!(succeeded.summary, "click on <button>");
+
+        let non_fatal = click_if_exists_action_result(StepResult::failure(
+            3,
+            "click failed",
+            "Element is not visible".to_string(),
+        ));
+        assert!(non_fatal.ok);
+        assert_eq!(
+            non_fatal.summary,
+            "Click failed (non-fatal): Element is not visible"
+        );
+
+        let fatal = click_if_exists_action_result(StepResult::failure(
+            3,
+            "click failed",
+            DEAD_TRANSPORT.to_string(),
+        ));
+        assert!(!fatal.ok);
+        assert_eq!(fatal.error.as_deref(), Some(DEAD_TRANSPORT));
+    }
+
+    #[test]
+    fn transport_dead_resolve_errors_surface_for_every_locator_strategy() {
+        assert_eq!(
+            locator_outcome_for_resolve_error(&css_strategy(), "Element not found".to_string()),
+            LocatorOutcome::NotFound
+        );
+        assert_eq!(
+            locator_outcome_for_resolve_error(&css_strategy(), DEAD_TRANSPORT.to_string()),
+            LocatorOutcome::Error {
+                description: DEAD_TRANSPORT.to_string()
+            }
+        );
+        assert_eq!(
+            locator_outcome_for_resolve_error(
+                &LocatorStrategy::Ref {
+                    value: "e1".to_string()
+                },
+                "Invalid browser ref e1".to_string()
+            ),
+            LocatorOutcome::Error {
+                description: "Invalid browser ref e1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn navigation_load_state_failures_are_reported_on_the_step() {
+        let reached = navigation_load_state_step(1, "Navigation detected".to_string(), Ok(()));
+        assert!(reached.ok);
+        assert_eq!(reached.summary, "Navigation detected");
+        assert!(reached.data.is_none());
+
+        let not_reached = navigation_load_state_step(
+            1,
+            "Navigation detected".to_string(),
+            Err("Timed out after 5000ms".to_string()),
+        );
+        assert!(not_reached.ok);
+        assert!(
+            not_reached.summary.contains("load state not reached"),
+            "unexpected summary: {}",
+            not_reached.summary
+        );
+        assert_eq!(
+            not_reached.data,
+            Some(serde_json::json!({"load_state_reached": false}))
+        );
+
+        let dead = navigation_load_state_step(
+            1,
+            "Navigation detected".to_string(),
+            Err(DEAD_TRANSPORT.to_string()),
+        );
+        assert!(!dead.ok);
+        assert_eq!(dead.error.as_deref(), Some(DEAD_TRANSPORT));
     }
 }

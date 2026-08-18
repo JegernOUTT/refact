@@ -1257,6 +1257,7 @@ impl Tool for ToolChrome {
                         Some(&chat_id),
                     )
                     .await;
+                    return Err(err_msg);
                 }
             }
         } else {
