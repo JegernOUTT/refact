@@ -8,7 +8,8 @@ use headless_chrome::protocol::cdp::Page;
 use serde_json::{Value, json};
 
 use refact_integrations::browser_models::{
-    UrlPattern, WebSocketEvent, WebSocketEventKind, WebSocketRouteMode,
+    UrlPattern, WebSocketEvent, WebSocketEventKind, WebSocketFrameDisposition,
+    WebSocketMessageAction, WebSocketRouteMode,
 };
 
 use crate::network::{UrlMatcher, mask_text};
@@ -22,6 +23,8 @@ struct RegisteredWebSocketRoute {
     pattern: UrlPattern,
     matcher: UrlMatcher,
     mode: WebSocketRouteMode,
+    on_page_message: WebSocketMessageAction,
+    on_server_message: WebSocketMessageAction,
 }
 
 #[derive(Clone, Debug)]
@@ -29,6 +32,60 @@ struct RoutedSocket {
     tab_target_id: String,
     route_id: String,
     url: String,
+    protocols: Vec<String>,
+    routed: bool,
+    on_page_message: WebSocketMessageAction,
+    on_server_message: WebSocketMessageAction,
+}
+
+struct EventDraft {
+    kind: WebSocketEventKind,
+    data: Option<String>,
+    opcode: Option<u8>,
+    status: Option<u16>,
+    error: Option<String>,
+    routed: bool,
+    disposition: Option<WebSocketFrameDisposition>,
+    close_code: Option<u16>,
+    close_reason: Option<String>,
+}
+
+impl EventDraft {
+    fn new(kind: WebSocketEventKind) -> Self {
+        Self {
+            kind,
+            data: None,
+            opcode: None,
+            status: None,
+            error: None,
+            routed: false,
+            disposition: None,
+            close_code: None,
+            close_reason: None,
+        }
+    }
+
+    fn routed(mut self) -> Self {
+        self.routed = true;
+        self
+    }
+
+    fn frame(mut self, data: String, opcode: u8) -> Self {
+        self.data = Some(data);
+        self.opcode = Some(opcode);
+        self
+    }
+
+    fn disposition(mut self, disposition: WebSocketFrameDisposition) -> Self {
+        self.disposition = Some(disposition);
+        self
+    }
+
+    fn close(mut self, code: Option<u16>, reason: Option<String>) -> Self {
+        self.close_code = code;
+        self.close_reason = reason;
+        self
+    }
 }
 
 #[derive(Debug, Default)]
@@ -49,7 +106,13 @@ pub struct WebSocketRegistry {
 }
 
 impl WebSocketRegistry {
-    pub fn add_route(&self, pattern: UrlPattern, mode: WebSocketRouteMode) -> Result<(), String> {
+    pub fn add_route(
+        &self,
+        pattern: UrlPattern,
+        mode: WebSocketRouteMode,
+        on_page_message: WebSocketMessageAction,
+        on_server_message: WebSocketMessageAction,
+    ) -> Result<(), String> {
         let matcher = matcher_for_pattern(&pattern)?;
         self.state
             .lock()
@@ -59,6 +122,8 @@ impl WebSocketRegistry {
                 pattern,
                 matcher,
                 mode,
+                on_page_message,
+                on_server_message,
             });
         Ok(())
     }
@@ -95,72 +160,39 @@ impl WebSocketRegistry {
             &mut state,
             socket_id,
             url,
-            WebSocketEventKind::Created,
-            None,
-            None,
-            None,
-            None,
-            false,
+            Vec::new(),
+            EventDraft::new(WebSocketEventKind::Created),
         );
         self.changed.notify_all();
     }
 
     pub fn record_handshake(&self, socket_id: &str, status: u16) {
-        self.record(
-            socket_id,
-            WebSocketEventKind::HandshakeResponse,
-            None,
-            None,
-            Some(status),
-            None,
-            false,
-        );
+        let mut draft = EventDraft::new(WebSocketEventKind::HandshakeResponse);
+        draft.status = Some(status);
+        self.record(socket_id, draft);
     }
 
     pub fn record_frame(&self, socket_id: &str, sent: bool, data: String, opcode: u8) {
-        let data = if opcode == 1 {
-            mask_text(&data)
+        let kind = if sent {
+            WebSocketEventKind::FrameSent
         } else {
-            format!("[binary frame: {} bytes]", decoded_len(&data))
+            WebSocketEventKind::FrameReceived
         };
         self.record(
             socket_id,
-            if sent {
-                WebSocketEventKind::FrameSent
-            } else {
-                WebSocketEventKind::FrameReceived
-            },
-            Some(data),
-            Some(opcode),
-            None,
-            None,
-            false,
+            EventDraft::new(kind).frame(frame_text(&data, opcode), opcode),
         );
     }
 
     pub fn record_closed(&self, socket_id: &str) {
-        self.record(
-            socket_id,
-            WebSocketEventKind::Closed,
-            None,
-            None,
-            None,
-            None,
-            false,
-        );
+        self.record(socket_id, EventDraft::new(WebSocketEventKind::Closed));
         self.state.lock().unwrap().urls.remove(socket_id);
     }
 
     pub fn record_error(&self, socket_id: &str, error: String) {
-        self.record(
-            socket_id,
-            WebSocketEventKind::Error,
-            None,
-            None,
-            None,
-            Some(mask_text(&error)),
-            false,
-        );
+        let mut draft = EventDraft::new(WebSocketEventKind::Error);
+        draft.error = Some(mask_text(&error));
+        self.record(socket_id, draft);
     }
 
     pub fn handle_page_event(&self, tab_target_id: &str, payload: &Value) {
@@ -171,130 +203,140 @@ impl WebSocketRegistry {
             return;
         };
         match event_type {
-            "created" => {
-                let Some(url) = payload.get("url").and_then(Value::as_str) else {
-                    return;
-                };
-                let mut state = self.state.lock().unwrap();
-                let Some(route) = state
-                    .routes
-                    .iter()
-                    .find(|route| route.matcher.is_match(url))
-                    .cloned()
-                else {
-                    state.routed_sockets.insert(
-                        route_id.to_string(),
-                        RoutedSocket {
-                            tab_target_id: tab_target_id.to_string(),
-                            route_id: route_id.to_string(),
-                            url: url.to_string(),
-                        },
-                    );
-                    drop(state);
-                    let _ = self.queue_command(route_id, json!({"type": "connect"}));
-                    return;
-                };
-                let routed = !matches!(route.mode, WebSocketRouteMode::ObserveAndModify);
-                state.routed_sockets.insert(
-                    route_id.to_string(),
-                    RoutedSocket {
-                        tab_target_id: tab_target_id.to_string(),
-                        route_id: route_id.to_string(),
-                        url: url.to_string(),
-                    },
-                );
-                push_event(
-                    &mut state,
-                    route_id.to_string(),
-                    url.to_string(),
-                    WebSocketEventKind::Created,
-                    None,
-                    None,
-                    None,
-                    None,
-                    routed,
-                );
-                let mode = route.mode;
-                drop(state);
-                let _ = self.queue_command(
-                    route_id,
-                    match mode {
-                        WebSocketRouteMode::Mock => json!({"type": "open"}),
-                        WebSocketRouteMode::ObserveAndModify => json!({"type": "connect"}),
-                    },
-                );
-            }
+            "created" => self.handle_created(tab_target_id, route_id, payload),
             "page_message" | "server_message" => {
-                let Some(data) = payload.get("data").and_then(Value::as_str) else {
-                    return;
-                };
-                let binary = payload
-                    .get("is_base64")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let routed = self
-                    .state
-                    .lock()
-                    .unwrap()
-                    .routed_sockets
-                    .get(route_id)
-                    .cloned();
-                let Some(socket) = routed else {
-                    return;
-                };
-                self.record(
-                    route_id,
-                    if event_type == "page_message" {
-                        WebSocketEventKind::FrameSent
-                    } else {
-                        WebSocketEventKind::FrameReceived
-                    },
-                    Some(if binary {
-                        format!("[binary frame: {} bytes]", decoded_len(data))
-                    } else {
-                        mask_text(data)
-                    }),
-                    Some(if binary { 2 } else { 1 }),
-                    None,
-                    None,
-                    true,
-                );
-                let _ = self.queue_command(
-                    &socket.route_id,
-                    json!({
-                        "type": if event_type == "page_message" { "send_to_server" } else { "send_to_page" },
-                        "data": data,
-                        "is_base64": binary,
-                    }),
-                );
+                self.handle_message(route_id, event_type == "page_message", payload)
             }
             "closed" => {
                 self.record(
                     route_id,
-                    WebSocketEventKind::Closed,
-                    None,
-                    None,
-                    None,
-                    None,
-                    true,
+                    EventDraft::new(WebSocketEventKind::Closed).routed().close(
+                        payload
+                            .get("code")
+                            .and_then(Value::as_u64)
+                            .map(|code| code as u16),
+                        payload
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .filter(|reason| !reason.is_empty())
+                            .map(mask_text),
+                    ),
                 );
                 self.state.lock().unwrap().routed_sockets.remove(route_id);
             }
-            "error" => self.record(
-                route_id,
-                WebSocketEventKind::Error,
-                None,
-                None,
-                None,
-                payload
+            "error" => {
+                let mut draft = EventDraft::new(WebSocketEventKind::Error).routed();
+                draft.error = payload
                     .get("message")
                     .and_then(Value::as_str)
-                    .map(mask_text),
-                true,
-            ),
+                    .map(mask_text);
+                self.record(route_id, draft);
+            }
             _ => {}
         }
         self.changed.notify_all();
+    }
+
+    fn handle_created(&self, tab_target_id: &str, route_id: &str, payload: &Value) {
+        let Some(url) = payload.get("url").and_then(Value::as_str) else {
+            return;
+        };
+        let protocols = payload
+            .get("protocols")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(mask_text)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut state = self.state.lock().unwrap();
+        let route = state
+            .routes
+            .iter()
+            .find(|route| route.matcher.is_match(url))
+            .cloned();
+        let socket = RoutedSocket {
+            tab_target_id: tab_target_id.to_string(),
+            route_id: route_id.to_string(),
+            url: url.to_string(),
+            protocols: protocols.clone(),
+            routed: route.is_some(),
+            on_page_message: route
+                .as_ref()
+                .map(|route| route.on_page_message)
+                .unwrap_or_default(),
+            on_server_message: route
+                .as_ref()
+                .map(|route| route.on_server_message)
+                .unwrap_or_default(),
+        };
+        state
+            .routed_sockets
+            .insert(route_id.to_string(), socket.clone());
+        let command = match route.as_ref().map(|route| route.mode) {
+            Some(WebSocketRouteMode::Mock) => json!({"type": "open"}),
+            Some(WebSocketRouteMode::Intercept) | None => json!({"type": "connect"}),
+        };
+        if route.is_some() {
+            push_event(
+                &mut state,
+                route_id.to_string(),
+                url.to_string(),
+                protocols,
+                EventDraft::new(WebSocketEventKind::Created).routed(),
+            );
+        }
+        drop(state);
+        self.queue_command(&socket, command);
+    }
+
+    fn handle_message(&self, route_id: &str, from_page: bool, payload: &Value) {
+        let Some(data) = payload.get("data").and_then(Value::as_str) else {
+            return;
+        };
+        let binary = payload
+            .get("is_base64")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let socket = self
+            .state
+            .lock()
+            .unwrap()
+            .routed_sockets
+            .get(route_id)
+            .cloned();
+        let Some(socket) = socket else {
+            return;
+        };
+        let action = if from_page {
+            socket.on_page_message
+        } else {
+            socket.on_server_message
+        };
+        let kind = if from_page {
+            WebSocketEventKind::FrameSent
+        } else {
+            WebSocketEventKind::FrameReceived
+        };
+        let opcode = if binary { 2 } else { 1 };
+        let mut draft = EventDraft::new(kind)
+            .frame(frame_text(data, opcode), opcode)
+            .disposition(disposition_for(action));
+        draft.routed = socket.routed;
+        self.record(route_id, draft);
+        if matches!(action, WebSocketMessageAction::Forward) {
+            self.queue_command(
+                &socket,
+                json!({
+                    "type": if from_page { "send_to_server" } else { "send_to_page" },
+                    "data": data,
+                    "is_base64": binary,
+                }),
+            );
+        }
     }
 
     pub fn drain_report(&self) -> Vec<WebSocketEvent> {
@@ -325,6 +367,7 @@ impl WebSocketRegistry {
                         event.kind,
                         WebSocketEventKind::FrameSent | WebSocketEventKind::FrameReceived
                     )
+                    && !matches!(event.disposition, Some(WebSocketFrameDisposition::Dropped))
                     && matcher.is_none_or(|matcher| matcher.is_match(&event.url))
             }) {
                 return Ok(event.clone());
@@ -343,49 +386,56 @@ impl WebSocketRegistry {
 
     pub fn send_to_page(&self, pattern: &UrlPattern, data: &str) -> Result<usize, String> {
         let matcher = matcher_for_pattern(pattern)?;
-        let sockets = self
-            .state
-            .lock()
-            .unwrap()
-            .routed_sockets
-            .values()
-            .filter(|socket| matcher.is_match(&socket.url))
-            .cloned()
-            .collect::<Vec<_>>();
+        let sockets = self.matching_sockets(&matcher);
         for socket in &sockets {
             self.queue_command(
-                &socket.route_id,
+                socket,
                 json!({"type": "send_to_page", "data": data, "is_base64": false}),
-            )?;
+            );
             self.record(
                 &socket.route_id,
-                WebSocketEventKind::FrameReceived,
-                Some(mask_text(data)),
-                Some(1),
-                None,
-                None,
-                true,
+                EventDraft::new(WebSocketEventKind::FrameReceived)
+                    .routed()
+                    .frame(mask_text(data), 1)
+                    .disposition(WebSocketFrameDisposition::Forwarded),
             );
+        }
+        Ok(sockets.len())
+    }
+
+    pub fn close_sockets(
+        &self,
+        pattern: &UrlPattern,
+        code: Option<u16>,
+        reason: Option<&str>,
+    ) -> Result<usize, String> {
+        let matcher = matcher_for_pattern(pattern)?;
+        let sockets = self.matching_sockets(&matcher);
+        for socket in &sockets {
+            self.queue_command(
+                socket,
+                json!({"type": "close", "code": code, "reason": reason}),
+            );
+            self.record(
+                &socket.route_id,
+                EventDraft::new(WebSocketEventKind::Closed)
+                    .routed()
+                    .close(code, reason.map(mask_text)),
+            );
+        }
+        let mut state = self.state.lock().unwrap();
+        for socket in &sockets {
+            state.routed_sockets.remove(&socket.route_id);
         }
         Ok(sockets.len())
     }
 
     pub fn flush_commands(&self, tabs: &[std::sync::Arc<Tab>]) -> Result<(), String> {
         let commands = std::mem::take(&mut self.state.lock().unwrap().commands);
-        for (route_id, command) in commands {
-            let socket = self
-                .state
-                .lock()
-                .unwrap()
-                .routed_sockets
-                .get(&route_id)
-                .cloned();
-            let Some(socket) = socket else {
-                continue;
-            };
+        for (tab_target_id, command) in commands {
             let Some(tab) = tabs
                 .iter()
-                .find(|tab| tab.get_target_id() == &socket.tab_target_id)
+                .find(|tab| tab.get_target_id() == &tab_target_id)
             else {
                 continue;
             };
@@ -400,45 +450,61 @@ impl WebSocketRegistry {
         Ok(())
     }
 
-    fn record(
-        &self,
-        socket_id: &str,
-        kind: WebSocketEventKind,
-        data: Option<String>,
-        opcode: Option<u8>,
-        status: Option<u16>,
-        error: Option<String>,
-        routed: bool,
-    ) {
-        let mut state = self.state.lock().unwrap();
-        let url = state
+    fn matching_sockets(&self, matcher: &UrlMatcher) -> Vec<RoutedSocket> {
+        self.state
+            .lock()
+            .unwrap()
             .routed_sockets
-            .get(socket_id)
-            .map(|socket| socket.url.clone())
-            .or_else(|| state.urls.get(socket_id).cloned())
-            .unwrap_or_default();
-        push_event(
-            &mut state,
-            socket_id.to_string(),
-            url,
-            kind,
-            data,
-            opcode,
-            status,
-            error,
-            routed,
-        );
+            .values()
+            .filter(|socket| matcher.is_match(&socket.url))
+            .cloned()
+            .collect()
+    }
+
+    fn record(&self, socket_id: &str, draft: EventDraft) {
+        let mut state = self.state.lock().unwrap();
+        let (url, protocols) = match state.routed_sockets.get(socket_id) {
+            Some(socket) => (socket.url.clone(), socket.protocols.clone()),
+            None => (
+                state.urls.get(socket_id).cloned().unwrap_or_default(),
+                Vec::new(),
+            ),
+        };
+        push_event(&mut state, socket_id.to_string(), url, protocols, draft);
         self.changed.notify_all();
     }
 
-    fn queue_command(&self, route_id: &str, mut command: Value) -> Result<(), String> {
-        command["id"] = Value::String(route_id.to_string());
+    fn queue_command(&self, socket: &RoutedSocket, mut command: Value) {
+        command["id"] = Value::String(socket.route_id.clone());
         self.state
             .lock()
             .unwrap()
             .commands
-            .push((route_id.to_string(), command));
-        Ok(())
+            .push((socket.tab_target_id.clone(), command));
+    }
+
+    #[cfg(test)]
+    fn take_commands(&self) -> Vec<Value> {
+        std::mem::take(&mut self.state.lock().unwrap().commands)
+            .into_iter()
+            .map(|(_, command)| command)
+            .collect()
+    }
+}
+
+fn disposition_for(action: WebSocketMessageAction) -> WebSocketFrameDisposition {
+    match action {
+        WebSocketMessageAction::Forward => WebSocketFrameDisposition::Forwarded,
+        WebSocketMessageAction::Capture => WebSocketFrameDisposition::Captured,
+        WebSocketMessageAction::Drop => WebSocketFrameDisposition::Dropped,
+    }
+}
+
+fn frame_text(data: &str, opcode: u8) -> String {
+    if opcode == 1 {
+        mask_text(data)
+    } else {
+        format!("[binary frame: {} bytes]", decoded_len(data))
     }
 }
 
@@ -446,24 +512,24 @@ fn push_event(
     state: &mut WebSocketState,
     socket_id: String,
     url: String,
-    kind: WebSocketEventKind,
-    data: Option<String>,
-    opcode: Option<u8>,
-    status: Option<u16>,
-    error: Option<String>,
-    routed: bool,
+    protocols: Vec<String>,
+    draft: EventDraft,
 ) {
     state.sequence += 1;
     state.events.push_back(WebSocketEvent {
         sequence: state.sequence,
         socket_id,
         url: mask_text(&url),
-        kind,
-        data,
-        opcode,
-        status,
-        error,
-        routed,
+        kind: draft.kind,
+        data: draft.data,
+        opcode: draft.opcode,
+        status: draft.status,
+        error: draft.error,
+        routed: draft.routed,
+        protocols,
+        disposition: draft.disposition,
+        close_code: draft.close_code,
+        close_reason: draft.close_reason,
     });
     while state.events.len() > WEBSOCKET_EVENT_CAP {
         state.events.pop_front();
@@ -560,7 +626,7 @@ fn websocket_mock_script() -> String {
     constructor(url, protocols) {{
       super();
       this.url = new URL(url, document.baseURI).href.replace(/^http/, 'ws');
-      this.protocols = protocols;
+      this.protocols = protocols === undefined ? [] : (Array.isArray(protocols) ? protocols : [protocols]);
       this.readyState = 0;
       this.binaryType = 'blob';
       this.bufferedAmount = 0;
@@ -569,7 +635,7 @@ fn websocket_mock_script() -> String {
       this.onopen = null; this.onmessage = null; this.onerror = null; this.onclose = null;
       this.id = `refact-ws-${{++nextId}}`;
       sockets.set(this.id, this);
-      emit({{ type: 'created', id: this.id, url: this.url }});
+      emit({{ type: 'created', id: this.id, url: this.url, protocols: this.protocols }});
     }}
     send(data) {{
       if (this.readyState !== 1) throw new DOMException('WebSocket is not open');
@@ -579,7 +645,17 @@ fn websocket_mock_script() -> String {
       this.readyState = 3;
       this.server?.close(code, reason);
       this.dispatchEvent(new CloseEvent('close', {{ code, reason, wasClean: true }}));
-      emit({{ type: 'closed', id: this.id }});
+      emit({{ type: 'closed', id: this.id, code, reason }});
+      sockets.delete(this.id);
+    }}
+    serverClose(code, reason) {{
+      const closeCode = code ?? 1000;
+      const closeReason = reason ?? '';
+      this.readyState = 3;
+      try {{ this.server?.close(); }} catch (error) {{ void error; }}
+      this.server = undefined;
+      const close = new CloseEvent('close', {{ code: closeCode, reason: closeReason, wasClean: closeCode === 1000 }});
+      this.dispatchEvent(close); this.onclose?.(close);
       sockets.delete(this.id);
     }}
     open() {{
@@ -588,16 +664,16 @@ fn websocket_mock_script() -> String {
       const event = new Event('open'); this.dispatchEvent(event); this.onopen?.(event);
     }}
     connect() {{
-      this.server = new NativeWebSocket(this.url, this.protocols);
+      this.server = this.protocols.length ? new NativeWebSocket(this.url, this.protocols) : new NativeWebSocket(this.url);
       this.server.binaryType = this.binaryType;
-      this.server.onopen = () => this.open();
+      this.server.onopen = () => {{ this.protocol = this.server.protocol; this.open(); }};
       this.server.onmessage = event => toWire(event.data).then(wire => emit({{ type: 'server_message', id: this.id, ...wire }}));
       this.server.onerror = () => emit({{ type: 'error', id: this.id, message: 'WebSocket server error' }});
       this.server.onclose = event => {{
         this.readyState = 3;
         const close = new CloseEvent('close', {{ code: event.code, reason: event.reason, wasClean: event.wasClean }});
         this.dispatchEvent(close); this.onclose?.(close);
-        emit({{ type: 'closed', id: this.id }});
+        emit({{ type: 'closed', id: this.id, code: event.code, reason: event.reason }});
         sockets.delete(this.id);
       }};
     }}
@@ -615,6 +691,7 @@ fn websocket_mock_script() -> String {
     if (request.type === 'connect') socket.connect();
     if (request.type === 'send_to_page') socket.sendToPage(request);
     if (request.type === 'send_to_server') socket.sendToServer(request);
+    if (request.type === 'close') socket.serverClose(request.code, request.reason);
   }};
   globalThis.WebSocket = RoutedWebSocket;
 }})();"#,
@@ -682,11 +759,34 @@ mod tests {
             json!("closed")
         );
 
-        assert!(websocket_event_from_binding_payload(&Value::String("not json".to_string())).is_none());
         assert!(
-            websocket_event_from_binding_payload(&Value::String(json!({"seq": 1}).to_string()))
-                .is_none()
+            websocket_event_from_binding_payload(&Value::String("not json".to_string())).is_none()
         );
+        assert!(websocket_event_from_binding_payload(&Value::String(
+            json!({"seq": 1}).to_string()
+        ))
+        .is_none());
+    }
+
+    fn routed_registry(
+        pattern: &UrlPattern,
+        mode: WebSocketRouteMode,
+        on_page_message: WebSocketMessageAction,
+        on_server_message: WebSocketMessageAction,
+    ) -> WebSocketRegistry {
+        let registry = WebSocketRegistry::default();
+        registry
+            .add_route(pattern.clone(), mode, on_page_message, on_server_message)
+            .unwrap();
+        registry
+    }
+
+    fn created(registry: &WebSocketRegistry, url: &str, protocols: Value) {
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "created", "id": "route-1", "url": url, "protocols": protocols}),
+        );
+        registry.take_commands();
     }
 
     #[test]
@@ -694,7 +794,12 @@ mod tests {
         let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
         let registry = WebSocketRegistry::default();
         registry
-            .add_route(pattern.clone(), WebSocketRouteMode::Mock)
+            .add_route(
+                pattern.clone(),
+                WebSocketRouteMode::Mock,
+                WebSocketMessageAction::Forward,
+                WebSocketMessageAction::Forward,
+            )
             .unwrap();
         let payload = Value::String(
             json!({"type": "created", "id": "refact-ws-1", "url": "ws://127.0.0.1:8123/ws-echo"})
@@ -704,9 +809,9 @@ mod tests {
         registry.handle_page_event("tab-1", &event);
         assert_eq!(registry.send_to_page(&pattern, "mocked-frame").unwrap(), 1);
         let events = registry.drain_report();
-        assert!(events.iter().any(|event| {
-            matches!(event.kind, WebSocketEventKind::Created) && event.routed
-        }));
+        assert!(events
+            .iter()
+            .any(|event| { matches!(event.kind, WebSocketEventKind::Created) && event.routed }));
         assert!(events.iter().any(|event| {
             matches!(event.kind, WebSocketEventKind::FrameReceived)
                 && event.data.as_deref() == Some("mocked-frame")
@@ -715,13 +820,12 @@ mod tests {
 
     #[test]
     fn routed_websocket_events_forward_by_default_and_agent_messages_are_masked() {
-        let registry = WebSocketRegistry::default();
-        registry
-            .add_route(
-                UrlPattern::Text("wss://example.test/**".to_string()),
-                WebSocketRouteMode::ObserveAndModify,
-            )
-            .unwrap();
+        let registry = routed_registry(
+            &UrlPattern::Text("wss://example.test/**".to_string()),
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        );
         registry.handle_page_event(
             "tab-1",
             &json!({"type": "created", "id": "route-1", "url": "wss://example.test/ws"}),
@@ -733,5 +837,255 @@ mod tests {
         let events = registry.drain_report();
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].data.as_deref(), Some("token=[REDACTED]"));
+    }
+
+    #[test]
+    fn intercept_mode_connects_to_the_real_server_and_forwards_both_directions() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        );
+
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "created", "id": "route-1", "url": "ws://127.0.0.1:9/ws-echo"}),
+        );
+        assert_eq!(registry.take_commands()[0]["type"], json!("connect"));
+
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "page_message", "id": "route-1", "data": "up", "is_base64": false}),
+        );
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "server_message", "id": "route-1", "data": "down", "is_base64": false}),
+        );
+
+        let commands = registry.take_commands();
+        assert_eq!(commands[0]["type"], json!("send_to_server"));
+        assert_eq!(commands[0]["data"], json!("up"));
+        assert_eq!(commands[1]["type"], json!("send_to_page"));
+        assert_eq!(commands[1]["data"], json!("down"));
+
+        let events = registry.drain_report();
+        assert!(events.iter().all(|event| event.routed));
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| event.disposition)
+                .collect::<Vec<_>>(),
+            vec![
+                WebSocketFrameDisposition::Forwarded,
+                WebSocketFrameDisposition::Forwarded
+            ]
+        );
+    }
+
+    #[test]
+    fn mock_mode_opens_the_socket_without_connecting_to_the_real_server() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Mock,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        );
+
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "created", "id": "route-1", "url": "ws://127.0.0.1:9/ws-echo"}),
+        );
+
+        assert_eq!(registry.take_commands()[0]["type"], json!("open"));
+    }
+
+    #[test]
+    fn unmatched_sockets_pass_through_to_the_real_server_and_are_not_reported_as_routed() {
+        let registry = routed_registry(
+            &UrlPattern::Text("ws://**/routed".to_string()),
+            WebSocketRouteMode::Mock,
+            WebSocketMessageAction::Drop,
+            WebSocketMessageAction::Drop,
+        );
+
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "created", "id": "route-1", "url": "ws://127.0.0.1:9/other"}),
+        );
+        assert_eq!(registry.take_commands()[0]["type"], json!("connect"));
+
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "page_message", "id": "route-1", "data": "up", "is_base64": false}),
+        );
+
+        assert_eq!(registry.take_commands()[0]["type"], json!("send_to_server"));
+        let events = registry.drain_report();
+        assert!(events.iter().all(|event| !event.routed));
+    }
+
+    #[test]
+    fn drop_blocks_the_frame_and_hides_it_from_wait_for_frame() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Drop,
+            WebSocketMessageAction::Forward,
+        );
+        created(&registry, "ws://127.0.0.1:9/ws-echo", json!([]));
+
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "page_message", "id": "route-1", "data": "blocked", "is_base64": false}),
+        );
+
+        assert!(registry.take_commands().is_empty());
+        let events = registry.drain_report();
+        let frame = events
+            .iter()
+            .find(|event| matches!(event.kind, WebSocketEventKind::FrameSent))
+            .unwrap();
+        assert_eq!(
+            frame.disposition,
+            Some(WebSocketFrameDisposition::Dropped),
+            "dropped frames stay visible in the report"
+        );
+        assert!(
+            registry
+                .wait_for_frame(None, 0, Duration::from_millis(50))
+                .is_err(),
+            "a dropped frame must not satisfy wait_for_web_socket_frame"
+        );
+    }
+
+    #[test]
+    fn capture_surfaces_the_frame_without_forwarding_and_still_redacts_it() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Capture,
+        );
+        created(&registry, "ws://127.0.0.1:9/ws-echo", json!([]));
+
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "server_message", "id": "route-1", "data": "token=secret", "is_base64": false}),
+        );
+
+        assert!(
+            registry.take_commands().is_empty(),
+            "captured frames are not forwarded"
+        );
+        let frame = registry
+            .wait_for_frame(None, 0, Duration::from_millis(50))
+            .unwrap();
+        assert_eq!(frame.disposition, Some(WebSocketFrameDisposition::Captured));
+        assert_eq!(frame.data.as_deref(), Some("token=[REDACTED]"));
+    }
+
+    #[test]
+    fn close_web_socket_simulates_a_server_close_with_code_and_reason() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        );
+        created(&registry, "ws://127.0.0.1:9/ws-echo", json!([]));
+
+        assert_eq!(
+            registry
+                .close_sockets(&pattern, Some(4002), Some("server restarting"))
+                .unwrap(),
+            1
+        );
+
+        let command = registry.take_commands().remove(0);
+        assert_eq!(command["type"], json!("close"));
+        assert_eq!(command["code"], json!(4002));
+        assert_eq!(command["reason"], json!("server restarting"));
+        assert_eq!(command["id"], json!("route-1"));
+
+        let closed = registry
+            .drain_report()
+            .into_iter()
+            .find(|event| matches!(event.kind, WebSocketEventKind::Closed))
+            .unwrap();
+        assert_eq!(closed.close_code, Some(4002));
+        assert_eq!(closed.close_reason.as_deref(), Some("server restarting"));
+
+        assert_eq!(
+            registry.send_to_page(&pattern, "after-close").unwrap(),
+            0,
+            "a closed socket is no longer addressable"
+        );
+    }
+
+    #[test]
+    fn page_requested_subprotocols_are_reported_on_every_event_for_the_socket() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        );
+        created(
+            &registry,
+            "ws://127.0.0.1:9/ws-echo",
+            json!(["graphql-ws", "soap"]),
+        );
+
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "server_message", "id": "route-1", "data": "frame", "is_base64": false}),
+        );
+
+        let events = registry.drain_report();
+        assert!(!events.is_empty());
+        assert!(
+            events
+                .iter()
+                .all(|event| event.protocols == vec!["graphql-ws".to_string(), "soap".to_string()]),
+            "every event for the socket carries the requested subprotocols: {events:?}"
+        );
+    }
+
+    #[test]
+    fn binary_frames_are_summarized_by_length_in_both_directions() {
+        let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Capture,
+            WebSocketMessageAction::Capture,
+        );
+        created(&registry, "ws://127.0.0.1:9/ws-echo", json!([]));
+
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "page_message", "id": "route-1", "data": "AAECAw==", "is_base64": true}),
+        );
+
+        let frame = registry
+            .wait_for_frame(None, 0, Duration::from_millis(50))
+            .unwrap();
+        assert_eq!(frame.opcode, Some(2));
+        assert_eq!(frame.data.as_deref(), Some("[binary frame: 4 bytes]"));
+    }
+
+    #[test]
+    fn shim_reports_protocols_and_handles_a_simulated_server_close() {
+        let script = websocket_mock_script();
+        assert!(script.contains("protocols: this.protocols"));
+        assert!(script.contains("serverClose(code, reason)"));
+        assert!(script.contains("if (request.type === 'close') socket.serverClose"));
     }
 }

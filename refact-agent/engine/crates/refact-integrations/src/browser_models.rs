@@ -4,11 +4,29 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::browser_types::{ConsoleEntry, NetworkEntry};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSocketRouteMode {
+    #[default]
     Mock,
-    ObserveAndModify,
+    Intercept,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSocketMessageAction {
+    #[default]
+    Forward,
+    Drop,
+    Capture,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSocketFrameDisposition {
+    Forwarded,
+    Captured,
+    Dropped,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,6 +56,14 @@ pub struct WebSocketEvent {
     pub error: Option<String>,
     #[serde(default)]
     pub routed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocols: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<WebSocketFrameDisposition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1147,7 +1173,12 @@ pub enum BrowserStep {
 
     RouteWebSocket {
         pattern: UrlPattern,
+        #[serde(default)]
         mode: WebSocketRouteMode,
+        #[serde(default)]
+        on_page_message: WebSocketMessageAction,
+        #[serde(default)]
+        on_server_message: WebSocketMessageAction,
     },
     UnrouteWebSocket {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1158,6 +1189,14 @@ pub enum BrowserStep {
         pattern: UrlPattern,
         #[serde(alias = "data")]
         text: String,
+    },
+    CloseWebSocket {
+        #[serde(alias = "url_pattern")]
+        pattern: UrlPattern,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     WaitForWebSocketFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1901,6 +1940,7 @@ impl BrowserStep {
         "route_web_socket",
         "unroute_web_socket",
         "send_web_socket_message",
+        "close_web_socket",
         "wait_for_web_socket_frame",
         "start_har_recording",
         "stop_har_recording",
@@ -2636,8 +2676,15 @@ mod tests {
             BrowserStep::RouteWebSocket {
                 pattern: UrlPattern::Text("wss://example.com/**".to_string()),
                 mode: WebSocketRouteMode::Mock,
+                on_page_message: WebSocketMessageAction::Forward,
+                on_server_message: WebSocketMessageAction::Forward,
             },
             BrowserStep::UnrouteWebSocket { pattern: None },
+            BrowserStep::CloseWebSocket {
+                pattern: UrlPattern::Text("wss://example.com/**".to_string()),
+                code: Some(1001),
+                reason: Some("going away".to_string()),
+            },
             BrowserStep::SendWebSocketMessage {
                 pattern: UrlPattern::Text("wss://example.com/**".to_string()),
                 text: "hello".to_string(),
@@ -3117,6 +3164,78 @@ mod tests {
         assert!(matches!(
             step,
             BrowserStep::RemoveVirtualAuthenticator { ref id } if id == "minted-uuid"
+        ));
+    }
+
+    #[test]
+    fn route_web_socket_defaults_to_mock_with_both_directions_forwarding() {
+        let step: BrowserStep = serde_json::from_value(
+            serde_json::json!({"action": "route_web_socket", "pattern": "wss://example.com/**"}),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            step,
+            BrowserStep::RouteWebSocket {
+                mode: WebSocketRouteMode::Mock,
+                on_page_message: WebSocketMessageAction::Forward,
+                on_server_message: WebSocketMessageAction::Forward,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn route_web_socket_accepts_intercept_mode_with_per_direction_overrides() {
+        let step: BrowserStep = serde_json::from_value(serde_json::json!({
+            "action": "route_web_socket",
+            "pattern": "wss://example.com/**",
+            "mode": "intercept",
+            "on_page_message": "drop",
+            "on_server_message": "capture",
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            step,
+            BrowserStep::RouteWebSocket {
+                mode: WebSocketRouteMode::Intercept,
+                on_page_message: WebSocketMessageAction::Drop,
+                on_server_message: WebSocketMessageAction::Capture,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn close_web_socket_takes_an_optional_code_and_reason() {
+        let bare: BrowserStep = serde_json::from_value(
+            serde_json::json!({"action": "close_web_socket", "pattern": "wss://example.com/**"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            bare,
+            BrowserStep::CloseWebSocket {
+                code: None,
+                reason: None,
+                ..
+            }
+        ));
+
+        let detailed: BrowserStep = serde_json::from_value(serde_json::json!({
+            "action": "close_web_socket",
+            "pattern": "wss://example.com/**",
+            "code": 1001,
+            "reason": "going away",
+        }))
+        .unwrap();
+        assert!(matches!(
+            detailed,
+            BrowserStep::CloseWebSocket {
+                code: Some(1001),
+                ref reason,
+                ..
+            } if reason.as_deref() == Some("going away")
         ));
     }
 
@@ -4160,8 +4279,7 @@ mod tests {
 
     #[test]
     fn test_request_attach_screenshot_is_tri_state() {
-        let omitted: BrowserActionRequest =
-            serde_json::from_str(r#"{"steps": []}"#).unwrap();
+        let omitted: BrowserActionRequest = serde_json::from_str(r#"{"steps": []}"#).unwrap();
         assert_eq!(omitted.attach_screenshot, None);
 
         let enabled: BrowserActionRequest =

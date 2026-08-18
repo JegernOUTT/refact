@@ -27,8 +27,9 @@ use refact_lsp::integrations::browser_models::{
     BrowserHttpRequest, BrowserLoadState, BrowserLocator, BrowserPdfOptions, BrowserPollMatcher,
     BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
     BrowserStorageItem, BrowserStorageKind, BrowserTextMode, CdpTarget, ClockTicks, ClockTime,
-    FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode, PageContextMode,
-    RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind, WebSocketRouteMode,
+    ExecutionReport, FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode,
+    PageContextMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
+    WebSocketFrameDisposition, WebSocketMessageAction, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::devices;
 use refact_lsp::refact_browser::{
@@ -85,6 +86,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "interstitial.html",
     "generator.html",
     "ws-echo.html",
+    "ws-intercept.html",
     "har-target.html",
     "clock.html",
     "visual-states.html",
@@ -309,6 +311,55 @@ impl FixtureServer {
 
     fn url(&self, path: &str) -> String {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+    }
+}
+
+struct WsEchoServer {
+    address: std::net::SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl WsEchoServer {
+    async fn start() -> Result<Self, String> {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|error| error.to_string())?;
+        let address = listener.local_addr().map_err(|error| error.to_string())?;
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    while let Some(Ok(message)) = socket.next().await {
+                        let Message::Text(text) = message else {
+                            continue;
+                        };
+                        if socket
+                            .send(Message::Text(format!("echo:{text}")))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Ok(Self { address, task })
+    }
+
+    fn url(&self) -> String {
+        format!("ws://{}/ws-echo", self.address)
+    }
+}
+
+impl Drop for WsEchoServer {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 
@@ -3679,6 +3730,8 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
                 BrowserStep::RouteWebSocket {
                     pattern: pattern.clone(),
                     mode: WebSocketRouteMode::Mock,
+                    on_page_message: WebSocketMessageAction::Forward,
+                    on_server_message: WebSocketMessageAction::Forward,
                 },
                 BrowserStep::Navigate { url: page },
                 BrowserStep::SendWebSocketMessage {
@@ -3720,6 +3773,184 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
                 && event.data.as_deref() == Some("hello")
         }),
         "page frame not observed: {:?}",
+        report.websockets
+    );
+}
+
+async fn intercept_case(
+    on_page_message: WebSocketMessageAction,
+    on_server_message: WebSocketMessageAction,
+    extra: Vec<BrowserStep>,
+) -> Option<(ExecutionReport, WsEchoServer)> {
+    let mut case = BrowserCase::start("states.html").await?;
+    case.setup_world();
+    let echo = WsEchoServer::start().await.unwrap();
+    let pattern = UrlPattern::Text("ws://**/ws-echo".to_string());
+    let page = format!("{}?ws={}", case.server.url("ws-intercept.html"), echo.url());
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+
+    let mut steps = vec![
+        BrowserStep::RouteWebSocket {
+            pattern,
+            mode: WebSocketRouteMode::Intercept,
+            on_page_message,
+            on_server_message,
+        },
+        BrowserStep::Navigate { url: page },
+    ];
+    steps.extend(extra);
+
+    let report = execute_request_with_runtime(
+        runtime,
+        BrowserActionRequest {
+            session: SessionPolicy::SharedDefault,
+            target: TabTarget::Active,
+            attach_screenshot: None,
+            page_context: None,
+            network: NetworkReportMode::default(),
+            steps,
+        },
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    Some((report, echo))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn websocket_intercept_mode_round_trips_through_the_real_server() {
+    let Some((report, _echo)) = intercept_case(
+        WebSocketMessageAction::Forward,
+        WebSocketMessageAction::Forward,
+        vec![BrowserStep::WaitForText {
+            text: "echo:hello".to_string(),
+            timeout_ms: Some(5_000),
+        }],
+    )
+    .await
+    else {
+        return;
+    };
+
+    assert!(report.ok, "intercept round-trip failed: {report:?}");
+    assert!(
+        report.page_errors.is_empty(),
+        "page errors during intercept: {:?}",
+        report.page_errors
+    );
+    assert!(
+        report.websockets.iter().any(|event| {
+            matches!(event.kind, WebSocketEventKind::FrameSent)
+                && event.data.as_deref() == Some("hello")
+                && event.disposition == Some(WebSocketFrameDisposition::Forwarded)
+        }),
+        "page frame was not forwarded to the server: {:?}",
+        report.websockets
+    );
+    assert!(
+        report.websockets.iter().any(|event| {
+            matches!(event.kind, WebSocketEventKind::FrameReceived)
+                && event.data.as_deref() == Some("echo:hello")
+                && event.disposition == Some(WebSocketFrameDisposition::Forwarded)
+        }),
+        "server frame was not forwarded to the page: {:?}",
+        report.websockets
+    );
+    assert!(
+        report
+            .websockets
+            .iter()
+            .any(|event| { event.protocols == vec!["chat-v1".to_string(), "chat-v2".to_string()] }),
+        "page-requested subprotocols missing from the report: {:?}",
+        report.websockets
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn websocket_drop_blocks_the_page_frame_from_reaching_the_server() {
+    let Some((report, _echo)) = intercept_case(
+        WebSocketMessageAction::Drop,
+        WebSocketMessageAction::Forward,
+        vec![
+            BrowserStep::WaitForWebSocketFrame {
+                pattern: None,
+                timeout_ms: Some(1_500),
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("#received")),
+                matcher: BrowserExpectation::ToHaveText {
+                    expected: BrowserExpectedText::Text("waiting".to_string()),
+                    ignore_case: false,
+                },
+                timeout_ms: Some(1_000),
+                soft: true,
+            },
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+
+    assert!(
+        !report.steps[2].ok,
+        "a dropped frame must not satisfy wait_for_web_socket_frame: {:?}",
+        report.steps[2]
+    );
+    assert!(
+        report.steps[3].ok,
+        "the server never echoed, so #received must still read 'waiting': {:?}",
+        report.steps[3]
+    );
+    assert!(
+        report.websockets.iter().any(|event| {
+            matches!(event.kind, WebSocketEventKind::FrameSent)
+                && event.data.as_deref() == Some("hello")
+                && event.disposition == Some(WebSocketFrameDisposition::Dropped)
+        }),
+        "the dropped frame should still be reported as dropped: {:?}",
+        report.websockets
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn websocket_close_delivers_code_and_reason_to_the_page() {
+    let Some((report, _echo)) = intercept_case(
+        WebSocketMessageAction::Forward,
+        WebSocketMessageAction::Forward,
+        vec![
+            BrowserStep::WaitForText {
+                text: "echo:hello".to_string(),
+                timeout_ms: Some(5_000),
+            },
+            BrowserStep::CloseWebSocket {
+                pattern: UrlPattern::Text("ws://**/ws-echo".to_string()),
+                code: Some(4002),
+                reason: Some("server restarting".to_string()),
+            },
+            BrowserStep::WaitForText {
+                text: "closed:4002:server restarting".to_string(),
+                timeout_ms: Some(5_000),
+            },
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+
+    assert!(report.ok, "close simulation failed: {report:?}");
+    assert_eq!(report.steps[3].summary, "Closed 1 WebSocket(s)");
+    assert!(
+        report.websockets.iter().any(|event| {
+            matches!(event.kind, WebSocketEventKind::Closed)
+                && event.close_code == Some(4002)
+                && event.close_reason.as_deref() == Some("server restarting")
+        }),
+        "close code and reason missing from the report: {:?}",
         report.websockets
     );
 }

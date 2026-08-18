@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+  <body>
+    <output id="received">waiting</output>
+    <output id="closed">open</output>
+    <output id="protocol">none</output>
+    <script>
+      const target = new URLSearchParams(location.search).get("ws");
+      if (target) {
+        const socket = new WebSocket(target, ["chat-v1", "chat-v2"]);
+        socket.addEventListener("open", () => {
+          document.querySelector("#protocol").textContent = socket.protocol || "none";
+          socket.send("hello");
+        });
+        socket.addEventListener("message", (event) => {
+          document.querySelector("#received").textContent = event.data;
+        });
+        socket.addEventListener("close", (event) => {
+          document.querySelector("#closed").textContent =
+            `closed:${event.code}:${event.reason}`;
+        });
+      }
+    </script>
+  </body>
+</html>

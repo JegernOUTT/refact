@@ -1293,8 +1293,18 @@ fn execute_route_management_step(
                     .with_data(serde_json::json!({"routes": routes})),
             )
         }
-        BrowserStep::RouteWebSocket { pattern, mode } => Some(
-            match runtime.websocket_registry.add_route(pattern.clone(), *mode) {
+        BrowserStep::RouteWebSocket {
+            pattern,
+            mode,
+            on_page_message,
+            on_server_message,
+        } => Some(
+            match runtime.websocket_registry.add_route(
+                pattern.clone(),
+                *mode,
+                *on_page_message,
+                *on_server_message,
+            ) {
                 Ok(()) => StepResult::success(idx, "Added WebSocket route").with_data(
                     serde_json::json!({"route_count": runtime.websocket_registry.route_count()}),
                 ),
@@ -1314,24 +1324,29 @@ fn execute_route_management_step(
         }
         BrowserStep::SendWebSocketMessage { pattern, text } => {
             let result = runtime.websocket_registry.send_to_page(pattern, text);
-            let tabs = runtime
-                .browser
-                .get_tabs()
-                .lock()
-                .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            Some(
-                match result.and_then(|sent| {
-                    runtime.websocket_registry.flush_commands(&tabs)?;
-                    Ok(sent)
-                }) {
-                    Ok(sent) => StepResult::success(
-                        idx,
-                        format!("Sent WebSocket message to {sent} socket(s)"),
+            Some(match flush_websocket_commands(runtime, result) {
+                Ok(sent) => {
+                    StepResult::success(idx, format!("Sent WebSocket message to {sent} socket(s)"))
+                }
+                Err(error) => StepResult::failure(idx, "Send WebSocket message", error),
+            })
+        }
+        BrowserStep::CloseWebSocket {
+            pattern,
+            code,
+            reason,
+        } => {
+            let result =
+                runtime
+                    .websocket_registry
+                    .close_sockets(pattern, *code, reason.as_deref());
+            Some(match flush_websocket_commands(runtime, result) {
+                Ok(closed) => StepResult::success(idx, format!("Closed {closed} WebSocket(s)"))
+                    .with_data(
+                        serde_json::json!({"closed": closed, "code": code, "reason": reason}),
                     ),
-                    Err(error) => StepResult::failure(idx, "Send WebSocket message", error),
-                },
-            )
+                Err(error) => StepResult::failure(idx, "Close WebSocket", error),
+            })
         }
         BrowserStep::StartHarRecording {
             path,
@@ -1439,6 +1454,21 @@ fn counted(count: usize, singular: &str) -> String {
     } else {
         format!("{count} {singular}s")
     }
+}
+
+fn flush_websocket_commands(
+    runtime: &BrowserRuntime,
+    result: Result<usize, String>,
+) -> Result<usize, String> {
+    let tabs = runtime
+        .browser
+        .get_tabs()
+        .lock()
+        .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let count = result?;
+    runtime.websocket_registry.flush_commands(&tabs)?;
+    Ok(count)
 }
 
 fn reset_sticky_registries(
@@ -2428,6 +2458,7 @@ pub async fn execute_request_with_runtime(
                 | BrowserStep::RouteWebSocket { .. }
                 | BrowserStep::UnrouteWebSocket { .. }
                 | BrowserStep::SendWebSocketMessage { .. }
+                | BrowserStep::CloseWebSocket { .. }
                 | BrowserStep::StartHarRecording { .. }
                 | BrowserStep::StopHarRecording
                 | BrowserStep::RouteFromHar { .. }
@@ -3068,6 +3099,7 @@ pub fn execute_steps_with_runtime(
             | BrowserStep::RouteWebSocket { .. }
             | BrowserStep::UnrouteWebSocket { .. }
             | BrowserStep::SendWebSocketMessage { .. }
+            | BrowserStep::CloseWebSocket { .. }
             | BrowserStep::StartHarRecording { .. }
             | BrowserStep::StopHarRecording
             | BrowserStep::RouteFromHar { .. }) => {
@@ -3844,6 +3876,7 @@ fn execute_single_step(
         | BrowserStep::RouteWebSocket { .. }
         | BrowserStep::UnrouteWebSocket { .. }
         | BrowserStep::SendWebSocketMessage { .. }
+        | BrowserStep::CloseWebSocket { .. }
         | BrowserStep::WaitForWebSocketFrame { .. }
         | BrowserStep::StartHarRecording { .. }
         | BrowserStep::StopHarRecording
@@ -9494,6 +9527,8 @@ mod tests {
             .add_route(
                 UrlPattern::Text("wss://example.com/**".to_string()),
                 WebSocketRouteMode::Mock,
+                WebSocketMessageAction::Forward,
+                WebSocketMessageAction::Forward,
             )
             .unwrap();
         let locator_handlers = populated_locator_handlers();

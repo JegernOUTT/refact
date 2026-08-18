@@ -20,7 +20,7 @@ use refact_lsp::integrations::browser_models::{
     AccessibilitySnapshotOptions, BrowserActionRequest, BrowserAuthenticatorProtocol,
     BrowserAuthenticatorTransport, BrowserLocator, BrowserStep, ElementInfo, FieldKind,
     FillStrategy, HarContentPolicy, HarMode, HarNotFound, NetworkReportMode, SessionPolicy,
-    TabTarget, UrlPattern, WebSocketEventKind, WebSocketRouteMode,
+    TabTarget, UrlPattern, WebSocketEventKind, WebSocketMessageAction, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::{
     setup_recording_for_tab, BrowserLaunchOptions, BrowserRuntime, UTILITY_WORLD_NAME,
@@ -165,6 +165,8 @@ fn websocket_inspection_and_har_replay_contracts_are_additive_and_masked() {
         .add_route(
             UrlPattern::Text("wss://example.test/**".to_string()),
             WebSocketRouteMode::Mock,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
         )
         .unwrap();
     registry.record_created(
