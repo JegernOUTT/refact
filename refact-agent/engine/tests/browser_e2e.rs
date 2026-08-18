@@ -31,8 +31,9 @@ use refact_lsp::integrations::browser_models::{
     SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::{
-    BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
-    HitTargetController, HitTargetResult, Mouse, MouseButton, UTILITY_WORLD_NAME,
+    BrowserLaunchOptions, BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState,
+    HandleError, Keyboard, HitTargetController, HitTargetResult, Mouse, MouseButton,
+    UTILITY_WORLD_NAME,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -318,11 +319,12 @@ impl Drop for FixtureServer {
 fn launch_browser(profile: &TempDir) -> BrowserRuntime {
     BrowserRuntime::launch(
         profile.path().to_path_buf(),
-        None,
-        discover_chrome(),
-        Some(Duration::from_secs(120)),
-        true,
-        true,
+        BrowserLaunchOptions {
+            headless: true,
+            chrome_path: discover_chrome(),
+            idle_timeout: Some(Duration::from_secs(120)),
+            ..BrowserLaunchOptions::default()
+        },
     )
     .expect("browser launch must succeed after e2e_enabled")
 }
@@ -5014,6 +5016,77 @@ async fn composed_locators_match_playwright_semantics() {
     assert_eq!(multi.steps[0].data.as_ref().unwrap()["total"], json!(2));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn set_window_bounds_moves_and_resizes_the_real_headed_window() {
+    if !e2e_enabled() {
+        print_skip();
+        return;
+    }
+    let profile = tempdir().unwrap();
+    let mut runtime = BrowserRuntime::launch(
+        profile.path().to_path_buf(),
+        BrowserLaunchOptions {
+            headless: false,
+            chrome_path: discover_chrome(),
+            idle_timeout: Some(Duration::from_secs(120)),
+            window_bounds: Some(refact_lsp::refact_chat_api::WindowBounds {
+                x: 30,
+                y: 40,
+                width: 900,
+                height: 700,
+            }),
+            ..BrowserLaunchOptions::default()
+        },
+    )
+    .expect("headed browser launch must succeed");
+    let tab = runtime.browser.new_tab().unwrap();
+    runtime.set_active_tab_target_id(tab.get_target_id().to_string());
+
+    let report = execute_steps_with_runtime(
+        &mut runtime,
+        &[BrowserStep::SetWindowBounds {
+            x: Some(60),
+            y: Some(80),
+            width: Some(1024),
+            height: Some(768),
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(report.ok, "set_window_bounds failed: {report:?}");
+    let data = report.steps[0].data.as_ref().unwrap();
+    assert_eq!(data["applied"], json!(true));
+    assert_eq!(data["headless"], json!(false));
+
+    let read_back = tab.get_bounds().unwrap();
+    assert_eq!(read_back.width as u32, 1024);
+    assert_eq!(read_back.height as u32, 768);
+    assert_eq!(read_back.left, 60);
+    assert_eq!(read_back.top, 80);
+    assert_eq!(
+        runtime.window_bounds().map(|bounds| bounds.width),
+        Some(1024)
+    );
+
+    let partial = execute_steps_with_runtime(
+        &mut runtime,
+        &[BrowserStep::SetWindowBounds {
+            x: None,
+            y: None,
+            width: Some(800),
+            height: None,
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(partial.ok, "partial set_window_bounds failed: {partial:?}");
+    let after_partial = tab.get_bounds().unwrap();
+    assert_eq!(after_partial.width as u32, 800);
+    assert_eq!(after_partial.height as u32, 768);
+    assert_eq!(after_partial.left, 60);
+}
+
 struct ClockCase {
     _profile: TempDir,
     _server: FixtureServer,
@@ -5227,6 +5300,39 @@ async fn screenshot_mask_hides_a_fixture_element_and_restores_the_dom() {
         .value
         .unwrap();
     assert_eq!(leftovers, json!(0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn set_window_bounds_on_headless_succeeds_without_applying() {
+    if !e2e_enabled() {
+        print_skip();
+        return;
+    }
+    let profile = tempdir().unwrap();
+    let mut runtime = launch_browser(&profile);
+    let tab = runtime.browser.new_tab().unwrap();
+    runtime.set_active_tab_target_id(tab.get_target_id().to_string());
+
+    let report = execute_steps_with_runtime(
+        &mut runtime,
+        &[BrowserStep::SetWindowBounds {
+            x: None,
+            y: None,
+            width: Some(1024),
+            height: Some(768),
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(report.ok, "headless set_window_bounds must not fail");
+    let step = &report.steps[0];
+    assert!(step.summary.contains("headless"));
+    assert!(step.summary.contains("set_viewport"));
+    let data = step.data.as_ref().unwrap();
+    assert_eq!(data["applied"], json!(false));
+    assert_eq!(data["headless"], json!(true));
+    assert!(runtime.window_bounds().is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

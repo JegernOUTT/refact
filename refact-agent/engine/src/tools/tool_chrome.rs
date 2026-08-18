@@ -21,8 +21,9 @@ use crate::integrations::browser_actions::{self, BrowserAction, DeviceType};
 use crate::integrations::browser_controller;
 use crate::integrations::browser_models::{ExecutionReport, parse_browser_action_request};
 use crate::integrations::browser_runtime::{
-    BrowserRuntime, find_runtime_by_chat_id, register_browser_runtime, get_browser_profile_dir,
-    setup_recording_for_runtime, setup_recording_for_tab,
+    BrowserLaunchOptions, BrowserProxyOptions, BrowserRuntime, find_runtime_by_chat_id,
+    register_browser_runtime, get_browser_profile_dir, setup_recording_for_runtime,
+    setup_recording_for_tab,
 };
 
 use chrono::DateTime;
@@ -66,6 +67,50 @@ pub struct SettingsChrome {
     pub tablet_window_height: String,
     #[serde(default)]
     pub tablet_scale_factor: String,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    #[serde(default)]
+    pub chromium_sandbox: String,
+    #[serde(default)]
+    pub proxy_server: String,
+    #[serde(default)]
+    pub proxy_bypass: String,
+    #[serde(default)]
+    pub downloads_dir: String,
+    #[serde(default)]
+    pub ignore_https_errors: String,
+}
+
+impl SettingsChrome {
+    pub fn launch_options(&self) -> BrowserLaunchOptions {
+        let defaults = BrowserLaunchOptions::default();
+        BrowserLaunchOptions {
+            headless: self.headless.parse().unwrap_or(defaults.headless),
+            chrome_path: (!self.chrome_path.is_empty())
+                .then(|| PathBuf::from(self.chrome_path.clone())),
+            idle_timeout: self
+                .idle_browser_timeout
+                .parse::<u64>()
+                .ok()
+                .map(Duration::from_secs),
+            extra_args: self.extra_args.clone(),
+            chromium_sandbox: self
+                .chromium_sandbox
+                .parse()
+                .unwrap_or(defaults.chromium_sandbox),
+            proxy: (!self.proxy_server.is_empty()).then(|| BrowserProxyOptions {
+                server: self.proxy_server.clone(),
+                bypass: (!self.proxy_bypass.is_empty()).then(|| self.proxy_bypass.clone()),
+            }),
+            downloads_dir: (!self.downloads_dir.is_empty())
+                .then(|| PathBuf::from(self.downloads_dir.clone())),
+            ignore_https_errors: self
+                .ignore_https_errors
+                .parse()
+                .unwrap_or(defaults.ignore_https_errors),
+            ..defaults
+        }
+    }
 }
 
 #[derive(Default)]
@@ -104,6 +149,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot, accessibility_snapshot, screenshot, screenshot_element, screenshot_elements, capture_element_states, pdf, styles, tab_log. Screenshots support full_page, clip, type, quality, scale, omit_background, animations, caret, mask, mask_color, and style; screenshot_element uses locator or ref. screenshot_elements takes locators plus compose (grid composes one labeled contact sheet, separate returns one image per locator). capture_element_states captures one locator across states (default, hover, focus, active) as a labeled strip. PDF supports Chromium print options and returns an artifact path.\n",
     "Readouts (never fake these with eval or expect): bounding_box returns viewport CSS-pixel x/y/width/height or null when the element is not visible; count returns the match count without strictness; input_value returns the live value property of an input, textarea, or select and fails on any other element; all_texts returns the text of every match with `mode` inner_text or text_content plus an optional `limit`, reporting the true total; element_state returns visible, enabled, editable, checked, and stable in one read.\n",
     "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, or continue modifications; unroute removes one pattern or all routes; list_routes returns active routes. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. Page-level routes may not observe requests served by a service worker.\n",
+    "Window vs viewport: set_viewport is device-metrics emulation (it changes what the page measures, not the window on screen); set_window_bounds moves and resizes the actual OS window with x/y/width/height, any subset. set_window_bounds needs a headed browser: in headless there is no OS window, so it succeeds without applying and tells you to use set_viewport. reset does not touch window bounds.\n",
     "Network: wait_for_request and wait_for_response accept a URL string or `{source,flags}` regex; completed requests also appear in the report. route registers a persistent `{pattern,handler}` with fulfill, abort, continue, fallback, or fetch_and_fulfill; unroute removes one pattern or all routes; list_routes returns active routes in evaluation order with `order` and `times_remaining`. Several routes may share a pattern: the newest matching route runs first, a fallback handler hands the request to the next older matching route, then to the HAR replay, then to the network. Optional `times` on a route expires it after that many matches, including matches consumed by a traversed fallback. fulfill takes `body`, or `path` to serve a file (relative paths stay inside the runtime artifact directory, content type inferred from the extension), or `json` for a JSON body; status defaults to 200. fetch_and_fulfill performs the real request from the engine (up to 20 redirects, forwarding the page's own request headers) and fulfills with the real response, optionally overriding status, response_headers, and body. Cookie, Host, and Content-Length request headers keep their original values on continue and fetch_and_fulfill. Text route bodies are UTF-8 and encoded to base64 on the CDP wire; set body_base64=true when body already contains base64 binary data. URL patterns are globs (`*`, `**`, `{a,b}`) or `{source,flags}` regexes; `?` is literal and JavaScript route predicates are not supported. Page-level routes may not observe requests served by a service worker.\n",
     "Context: set_viewport, emulate_media, set_locale, set_timezone, set_user_agent, set_geolocation, set_offline, and set_extra_http_headers persist across adopted tabs and popups. Cookie state uses get_cookies, set_cookies, clear_cookies. Web storage uses get_storage, set_storage, clear_storage with kind local or session. storage_state and set_storage_state use Playwright's {cookies,origins:[{origin,local_storage}]} login-reuse shape. grant_permissions and clear_permissions control origin permissions. set_http_credentials shares the lazy Fetch path with routing. Cookie, storage, and credential values are redacted in reports.\n",
     "Files: set_input_files, expect_file_chooser, wait_for_download.\n",
@@ -1576,15 +1622,12 @@ async fn setup_chrome_session(
         return Ok(setup_log);
     }
 
-    let idle_browser_timeout = args
-        .idle_browser_timeout
-        .parse::<u64>()
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(600));
+    let launch_options = args.launch_options();
+    let idle_browser_timeout = launch_options.idle_timeout_or_default();
 
     let runtime = if args.chrome_path.starts_with("ws://") {
         setup_log.push("Connect to existing web socket.".to_string());
-        BrowserRuntime::connect(args.chrome_path.clone(), Some(idle_browser_timeout), true)?
+        BrowserRuntime::connect(args.chrome_path.clone(), launch_options)?
     } else if let Some(container_address) = args.chrome_path.strip_prefix("container://") {
         setup_log.push("Connect to chrome from container.".to_string());
         let response = reqwest::get(&format!("http://{container_address}/json"))
@@ -1608,26 +1651,16 @@ async fn setup_chrome_session(
             ws_url_parts[2] = container_address;
         }
         let ws_url = ws_url_parts.join("/");
-        BrowserRuntime::connect(ws_url, Some(idle_browser_timeout), true)?
+        BrowserRuntime::connect(ws_url, launch_options)?
     } else {
-        let chrome_path = if args.chrome_path.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(args.chrome_path.clone()))
-        };
         let cache_dir = gcx.cache_dir.clone();
         let profile_dir = get_browser_profile_dir(&cache_dir, chat_id);
-        let headless = args.headless.parse::<bool>().unwrap_or(false);
 
-        setup_log.push("Started new chrome process.".to_string());
-        BrowserRuntime::launch(
-            profile_dir,
-            None,
-            chrome_path,
-            Some(idle_browser_timeout),
-            true,
-            headless,
-        )?
+        setup_log.push(format!(
+            "Started new chrome process ({}).",
+            launch_options.mode_label()
+        ));
+        BrowserRuntime::launch(profile_dir, launch_options)?
     };
 
     let runtime_id = {

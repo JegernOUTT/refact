@@ -78,7 +78,7 @@ pub struct TimelineEntry {
     pub details: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowBounds {
     pub x: i32,
     pub y: i32,

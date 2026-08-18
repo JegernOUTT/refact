@@ -22,10 +22,21 @@ use refact_lsp::integrations::browser_models::{
     FillStrategy, HarContentPolicy, HarMode, HarNotFound, NetworkReportMode, SessionPolicy,
     TabTarget, UrlPattern, WebSocketEventKind, WebSocketRouteMode,
 };
-use refact_lsp::refact_browser::{setup_recording_for_tab, BrowserRuntime, UTILITY_WORLD_NAME};
+use refact_lsp::refact_browser::{
+    setup_recording_for_tab, BrowserLaunchOptions, BrowserRuntime, UTILITY_WORLD_NAME,
+};
 use refact_lsp::refact_integrations::browser_types::RecorderEvent;
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+fn e2e_launch_options(chrome_path: Option<PathBuf>) -> BrowserLaunchOptions {
+    BrowserLaunchOptions {
+        headless: true,
+        chrome_path,
+        idle_timeout: Some(Duration::from_secs(120)),
+        ..BrowserLaunchOptions::default()
+    }
+}
 use tempfile::{tempdir, TempDir};
 
 fn find_executable(name: &FsPath, path: Option<&OsString>) -> Option<PathBuf> {
@@ -220,11 +231,7 @@ impl BrowserCase {
         let profile = tempdir().unwrap();
         let mut runtime = BrowserRuntime::launch(
             profile.path().to_path_buf(),
-            None,
-            discover_chrome(),
-            Some(Duration::from_secs(120)),
-            true,
-            true,
+            e2e_launch_options(discover_chrome()),
         )
         .unwrap();
         let tab = runtime.browser.new_tab().unwrap();
@@ -247,11 +254,7 @@ impl BrowserCase {
         let profile = tempdir().unwrap();
         let mut runtime = BrowserRuntime::launch(
             profile.path().to_path_buf(),
-            None,
-            Some(chrome),
-            Some(Duration::from_secs(120)),
-            true,
-            true,
+            e2e_launch_options(Some(chrome)),
         )
         .unwrap();
         let tab = runtime.browser.new_tab().unwrap();

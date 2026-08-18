@@ -1264,6 +1264,16 @@ pub enum BrowserStep {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         has_touch: Option<bool>,
     },
+    SetWindowBounds {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+    },
     EmulateMedia {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         color_scheme: Option<String>,
@@ -1842,6 +1852,7 @@ impl BrowserStep {
         "clear_credentials",
         "set_user_verified",
         "set_viewport",
+        "set_window_bounds",
         "emulate_media",
         "set_locale",
         "set_timezone",
@@ -2561,6 +2572,12 @@ mod tests {
                 device_scale_factor: Some(3.0),
                 is_mobile: Some(true),
                 has_touch: Some(true),
+            },
+            BrowserStep::SetWindowBounds {
+                x: Some(40),
+                y: Some(60),
+                width: Some(1280),
+                height: Some(800),
             },
             BrowserStep::EmulateMedia {
                 color_scheme: Some("dark".to_string()),

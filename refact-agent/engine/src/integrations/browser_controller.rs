@@ -1356,6 +1356,104 @@ fn execute_reset_step(runtime: &mut BrowserRuntime, idx: usize) -> StepResult {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct WindowBoundsRequest {
+    left: Option<u32>,
+    top: Option<u32>,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+fn validate_window_bounds_request(
+    x: Option<i32>,
+    y: Option<i32>,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<WindowBoundsRequest, String> {
+    if x.is_none() && y.is_none() && width.is_none() && height.is_none() {
+        return Err("set_window_bounds needs at least one of x, y, width, height".to_string());
+    }
+    for (name, value) in [("x", x), ("y", y)] {
+        if let Some(value) = value {
+            if value < 0 {
+                return Err(format!(
+                    "set_window_bounds {name}={value} is negative; the CDP client only accepts non-negative window positions"
+                ));
+            }
+        }
+    }
+    for (name, value) in [("width", width), ("height", height)] {
+        if value == Some(0) {
+            return Err(format!(
+                "set_window_bounds {name} must be greater than zero"
+            ));
+        }
+    }
+    Ok(WindowBoundsRequest {
+        left: x.map(|value| value as u32),
+        top: y.map(|value| value as u32),
+        width,
+        height,
+    })
+}
+
+fn execute_set_window_bounds_step(
+    runtime: &mut BrowserRuntime,
+    x: Option<i32>,
+    y: Option<i32>,
+    width: Option<u32>,
+    height: Option<u32>,
+    idx: usize,
+) -> StepResult {
+    let request = match validate_window_bounds_request(x, y, width, height) {
+        Ok(request) => request,
+        Err(error) => return StepResult::failure(idx, "Set window bounds", error),
+    };
+    if runtime.headless() {
+        return StepResult::success(
+            idx,
+            "Set window bounds skipped: headless has no OS window, use set_viewport for emulation",
+        )
+        .with_data(serde_json::json!({"applied": false, "headless": true}));
+    }
+    let result: Result<StepResult, String> = (|| {
+        let tab = runtime
+            .get_active_tab()
+            .ok_or_else(|| "No active tab in browser runtime".to_string())?;
+        tab.set_bounds(headless_chrome::types::Bounds::Normal {
+            left: request.left,
+            top: request.top,
+            width: request.width.map(f64::from),
+            height: request.height.map(f64::from),
+        })
+        .map_err(|error| format!("Failed to set window bounds: {error}"))?;
+        let bounds = tab
+            .get_bounds()
+            .map_err(|error| format!("Failed to read back window bounds: {error}"))?;
+        let applied = refact_chat_api::WindowBounds {
+            x: bounds.left as i32,
+            y: bounds.top as i32,
+            width: bounds.width as u32,
+            height: bounds.height as u32,
+        };
+        let summary = format!(
+            "Set window to {}x{} at ({}, {})",
+            applied.width, applied.height, applied.x, applied.y
+        );
+        let data = serde_json::json!({
+            "applied": true,
+            "headless": false,
+            "bounds": applied.clone(),
+        });
+        runtime.set_window_bounds(applied);
+        Ok(StepResult::success(idx, summary).with_data(data))
+    })();
+    match result {
+        Ok(step) => step,
+        Err(error) => StepResult::failure(idx, "Set window bounds", error),
+    }
+}
+
 fn is_clock_step(step: &BrowserStep) -> bool {
     matches!(
         step,
@@ -1890,6 +1988,17 @@ pub async fn execute_request_with_runtime(
         } else if matches!(step, BrowserStep::Reset) {
             let mut rt = runtime_arc.lock().await;
             execute_reset_step(&mut rt, idx)
+        } else if let BrowserStep::SetWindowBounds {
+            x,
+            y,
+            width,
+            height,
+        } = step
+        {
+            let mut rt = runtime_arc.lock().await;
+            tokio::task::block_in_place(|| {
+                execute_set_window_bounds_step(&mut rt, *x, *y, *width, *height, idx)
+            })
         } else if is_clock_step(step) {
             let mut rt = runtime_arc.lock().await;
             execute_clock_step(&mut rt, step, idx)
@@ -2467,6 +2576,12 @@ pub fn execute_steps_with_runtime(
                 execute_route_management_step(runtime, step, idx).unwrap()
             }
             BrowserStep::Reset => execute_reset_step(runtime, idx),
+            BrowserStep::SetWindowBounds {
+                x,
+                y,
+                width,
+                height,
+            } => execute_set_window_bounds_step(runtime, *x, *y, *width, *height, idx),
             BrowserStep::HttpRequest { options } => tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current()
                     .block_on(execute_http_request_step(runtime, options, idx))
@@ -3237,6 +3352,7 @@ fn execute_single_step(
         | BrowserStep::ClearCredentials { .. }
         | BrowserStep::SetUserVerified { .. }
         | BrowserStep::SetViewport { .. }
+        | BrowserStep::SetWindowBounds { .. }
         | BrowserStep::EmulateMedia { .. }
         | BrowserStep::SetLocale { .. }
         | BrowserStep::SetTimezone { .. }
@@ -8814,5 +8930,82 @@ mod tests {
             result.data.unwrap()["authenticator_id"],
             serde_json::json!("minted-uuid")
         );
+    }
+
+    #[test]
+    fn window_bounds_accept_any_single_dimension_and_keep_the_rest_unchanged() {
+        assert_eq!(
+            validate_window_bounds_request(None, None, Some(1024), None).unwrap(),
+            WindowBoundsRequest {
+                left: None,
+                top: None,
+                width: Some(1024),
+                height: None,
+            }
+        );
+        assert_eq!(
+            validate_window_bounds_request(Some(12), Some(34), Some(800), Some(600)).unwrap(),
+            WindowBoundsRequest {
+                left: Some(12),
+                top: Some(34),
+                width: Some(800),
+                height: Some(600),
+            }
+        );
+    }
+
+    #[test]
+    fn window_bounds_reject_an_empty_request() {
+        let error = validate_window_bounds_request(None, None, None, None).unwrap_err();
+
+        assert!(
+            error.contains("at least one of x, y, width, height"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn window_bounds_reject_zero_sizes_and_negative_positions() {
+        for (x, y, width, height, needle) in [
+            (None, None, Some(0), None, "width must be greater than zero"),
+            (
+                None,
+                None,
+                None,
+                Some(0),
+                "height must be greater than zero",
+            ),
+            (Some(-1), None, None, None, "x=-1 is negative"),
+            (None, Some(-5), None, None, "y=-5 is negative"),
+        ] {
+            let error = validate_window_bounds_request(x, y, width, height).unwrap_err();
+            assert!(error.contains(needle), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn set_window_bounds_is_a_runtime_step_batchable_with_viewport_emulation() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "set_window_bounds", "width": 1280, "height": 800},
+                {"action": "set_viewport", "width": 390, "height": 844},
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request.steps[0],
+            BrowserStep::SetWindowBounds {
+                x: None,
+                y: None,
+                width: Some(1280),
+                height: Some(800)
+            }
+        ));
+        assert!(
+            !is_context_management_step(&request.steps[0]),
+            "set_window_bounds must not be routed as page-emulation context state"
+        );
+        assert!(is_context_management_step(&request.steps[1]));
     }
 }

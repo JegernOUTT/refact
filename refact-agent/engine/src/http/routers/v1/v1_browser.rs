@@ -1,9 +1,11 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use axum::http::{Response, StatusCode};
 use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use base64::Engine;
+use refact_chat_api::WindowBounds;
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 
 use crate::app_state::AppState;
@@ -11,9 +13,10 @@ use crate::global_context::GlobalContext;
 use crate::chat::types::{BrowserTabInfo, ChatEvent, TimelineEntry};
 use crate::custom_error::ScratchError;
 use crate::integrations::browser_runtime::{
-    BrowserRuntime, PICKER_PAGE_TIMEOUT_MS, compute_frame_hash, ensure_injection_into_all_tabs,
-    get_browser_profile_dir, register_browser_runtime, remove_browser_runtime,
-    find_runtime_by_chat_id, setup_recording_for_runtime,
+    BrowserLaunchOptions, BrowserProxyOptions, BrowserRuntime, PICKER_PAGE_TIMEOUT_MS,
+    compute_frame_hash, ensure_injection_into_all_tabs, get_browser_profile_dir,
+    register_browser_runtime, remove_browser_runtime, find_runtime_by_chat_id,
+    setup_recording_for_runtime,
 };
 use crate::integrations::browser_types::{RecorderEvent, ConsoleEntry, NetworkEntry};
 use crate::integrations::browser_models::BrowserActionRequest;
@@ -119,6 +122,40 @@ pub struct ChatIdBody {
     pub chat_id: String,
 }
 
+#[derive(Deserialize, Default)]
+pub struct BrowserStartBody {
+    pub chat_id: String,
+    #[serde(default)]
+    pub headless: Option<bool>,
+    #[serde(default)]
+    pub window_bounds: Option<WindowBounds>,
+    #[serde(default)]
+    pub extra_args: Option<Vec<String>>,
+    #[serde(default)]
+    pub chromium_sandbox: Option<bool>,
+    #[serde(default)]
+    pub proxy: Option<BrowserProxyOptions>,
+    #[serde(default)]
+    pub downloads_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub ignore_https_errors: Option<bool>,
+}
+
+impl BrowserStartBody {
+    fn launch_options(&self, base: BrowserLaunchOptions) -> BrowserLaunchOptions {
+        BrowserLaunchOptions {
+            headless: self.headless.unwrap_or(base.headless),
+            window_bounds: self.window_bounds.clone().or(base.window_bounds),
+            extra_args: self.extra_args.clone().unwrap_or(base.extra_args),
+            chromium_sandbox: self.chromium_sandbox.unwrap_or(base.chromium_sandbox),
+            proxy: self.proxy.clone().or(base.proxy),
+            downloads_dir: self.downloads_dir.clone().or(base.downloads_dir),
+            ignore_https_errors: self.ignore_https_errors.unwrap_or(base.ignore_https_errors),
+            ..base
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct ScreenshotBody {
     pub chat_id: String,
@@ -193,7 +230,7 @@ pub async fn handle_browser_start(
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
-    let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
+    let post: BrowserStartBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("JSON problem: {}", e),
@@ -201,37 +238,28 @@ pub async fn handle_browser_start(
     })?;
 
     if let Some((rid, runtime_arc)) = find_runtime_by_chat_id(app.clone(), &post.chat_id).await {
-        let (is_headless, profile_dir, chrome_path, window_bounds, idle_timeout, mask_passwords) = {
+        let (profile_dir, current_options) = {
             let rt = runtime_arc.lock().await;
-            (
-                rt.headless,
-                rt.profile_dir.clone(),
-                rt.chrome_path.clone(),
-                rt.window_bounds.clone(),
-                rt.idle_timeout,
-                rt.mask_passwords(),
-            )
+            (rt.profile_dir.clone(), rt.launch_options.clone())
         };
-        if is_headless {
+        let requested_options = post.launch_options(BrowserLaunchOptions {
+            headless: BrowserLaunchOptions::default().headless,
+            ..current_options.clone()
+        });
+        if requested_options.headless != current_options.headless {
             drop(runtime_arc);
             let removed = remove_browser_runtime(app.clone(), &rid).await;
             drop(removed);
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
 
-            let runtime = BrowserRuntime::launch(
-                profile_dir,
-                window_bounds,
-                chrome_path,
-                Some(idle_timeout),
-                mask_passwords,
-                false,
-            )
-            .map_err(|e| {
-                ScratchError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to relaunch browser in visible mode: {}", e),
-                )
-            })?;
+            let mode = requested_options.mode_label();
+            let runtime =
+                BrowserRuntime::launch(profile_dir, requested_options.clone()).map_err(|e| {
+                    ScratchError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to relaunch browser in {} mode: {}", mode, e),
+                    )
+                })?;
 
             let mut rt = runtime;
             rt.reattach(&post.chat_id);
@@ -245,7 +273,11 @@ pub async fn handle_browser_start(
             if let Some(runtime_arc) = runtime_arc {
                 let mut rt = runtime_arc.lock().await;
                 if let Err(e) = setup_recording_for_runtime(&mut rt) {
-                    tracing::warn!("Browser recording setup failed after headless→headful relaunch (non-fatal): {}", e);
+                    tracing::warn!(
+                        "Browser recording setup failed after {} relaunch (non-fatal): {}",
+                        mode,
+                        e
+                    );
                 }
                 rt.frame_emitter_active = true;
             }
@@ -260,7 +292,10 @@ pub async fn handle_browser_start(
                 StatusCode::OK,
                 serde_json::json!({
                     "runtime_id": runtime_id,
-                    "status": "started"
+                    "status": "started",
+                    "headless": requested_options.headless,
+                    "previous_headless": current_options.headless,
+                    "detail": format!("browser restarted {}: open tabs lost, cookies/localStorage persisted (same profile)", mode)
                 }),
             ));
         }
@@ -293,21 +328,23 @@ pub async fn handle_browser_start(
             StatusCode::OK,
             serde_json::json!({
                 "runtime_id": rid,
-                "status": "already_running"
+                "status": "already_running",
+                "headless": current_options.headless
             }),
         ));
     }
 
     let cache_dir = gcx.cache_dir.clone();
     let profile_dir = get_browser_profile_dir(&cache_dir, &post.chat_id);
+    let launch_options = post.launch_options(BrowserLaunchOptions::default());
+    let headless = launch_options.headless;
 
-    let runtime =
-        BrowserRuntime::launch(profile_dir, None, None, None, true, false).map_err(|e| {
-            ScratchError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to launch browser: {}", e),
-            )
-        })?;
+    let runtime = BrowserRuntime::launch(profile_dir, launch_options).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to launch browser: {}", e),
+        )
+    })?;
 
     let mut rt = runtime;
     rt.reattach(&post.chat_id);
@@ -336,7 +373,8 @@ pub async fn handle_browser_start(
         StatusCode::OK,
         serde_json::json!({
             "runtime_id": runtime_id,
-            "status": "started"
+            "status": "started",
+            "headless": headless
         }),
     ))
 }
@@ -1410,7 +1448,7 @@ pub async fn handle_browser_handoff(
             .lock()
             .map(|tabs| tabs.iter().map(|t| t.get_url()).collect())
             .unwrap_or_default();
-        let window_bounds = rt.window_bounds.clone();
+        let window_bounds = rt.window_bounds().cloned();
         let mask_passwords = rt.mask_passwords();
         let attach_screenshot = false;
 
@@ -1469,6 +1507,8 @@ pub async fn handle_browser_status(
                 serde_json::json!({
                     "runtime_id": rid,
                     "connected": rt.is_connected,
+                    "headless": rt.headless(),
+                    "window_bounds": rt.window_bounds(),
                     "active_tab": rt.active_tab_target_id().map(|s| s.to_string()),
                     "url": url,
                     "title": title,

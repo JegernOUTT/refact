@@ -15,6 +15,7 @@ mod hit_target;
 pub mod http_client;
 mod injected_source;
 mod keyboard;
+pub mod launch;
 mod locator_gen;
 mod locator_handlers;
 mod locators;
@@ -63,6 +64,10 @@ pub use injected_source::{INJECTED_BUNDLE, wrapped_bootstrap};
 pub use keyboard::{
     CdpKeyboardDispatcher, KeyEventPayload, KeyEventType, Keyboard, KeyboardDispatch,
     KeyboardDispatcher, KeyboardModifier, modifier_bitmask,
+};
+pub use launch::{
+    BrowserLaunchOptions, BrowserProxyOptions, DEFAULT_IDLE_TIMEOUT, IGNORED_CHROME_DEFAULT_ARGS,
+    MANDATORY_CHROME_ARGS,
 };
 pub use locator_handlers::{
     DEFAULT_DISMISS_OVERLAYS_HANDLER, LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation,
@@ -474,7 +479,7 @@ pub struct BrowserRuntime {
     pub profile_dir: PathBuf,
     pub downloads_dir: PathBuf,
     pub artifacts_dir: PathBuf,
-    pub window_bounds: Option<WindowBounds>,
+    pub launch_options: BrowserLaunchOptions,
     pub buffers: BrowserBuffers,
     pub network_monitor: Arc<NetworkMonitorHandle>,
     pub route_registry: Arc<RouteRegistry>,
@@ -489,8 +494,6 @@ pub struct BrowserRuntime {
     pub is_connected: bool,
     pub last_activity: Instant,
     pub frame_emitter_active: bool,
-    pub headless: bool,
-    pub chrome_path: Option<PathBuf>,
     pub locator_handlers: Arc<std::sync::Mutex<LocatorHandlerRegistry>>,
 }
 
@@ -508,40 +511,38 @@ impl std::ops::DerefMut for BrowserRuntime {
 }
 
 impl BrowserRuntime {
-    pub fn launch(
-        profile_dir: PathBuf,
-        window_bounds: Option<WindowBounds>,
-        chrome_path: Option<PathBuf>,
-        idle_timeout: Option<Duration>,
-        mask_passwords: bool,
-        headless: bool,
-    ) -> Result<Self, String> {
+    pub fn launch(profile_dir: PathBuf, options: BrowserLaunchOptions) -> Result<Self, String> {
         std::fs::create_dir_all(&profile_dir)
             .map_err(|e| format!("Failed to create profile dir {:?}: {}", profile_dir, e))?;
 
-        let window_size = window_bounds.as_ref().map(|wb| (wb.width, wb.height));
-        let idle_timeout = idle_timeout.unwrap_or(Duration::from_secs(600));
+        let idle_timeout = options.idle_timeout_or_default();
+        let args = options.chrome_args();
+        let ignored_default_args = options.ignored_default_args();
+        let mask_passwords = options.mask_passwords;
 
-        let mut launch_options = headless_chrome::LaunchOptions {
-            headless,
-            window_size,
+        let launch_options = headless_chrome::LaunchOptions {
+            headless: options.headless,
+            sandbox: options.chromium_sandbox,
+            ignore_certificate_errors: options.ignore_https_errors,
+            window_size: options.window_size(),
             idle_browser_timeout: idle_timeout,
             user_data_dir: Some(profile_dir.clone()),
-            args: vec![
-                std::ffi::OsStr::new("--no-restore-last-session"),
-                std::ffi::OsStr::new("--no-first-run"),
-                std::ffi::OsStr::new("--no-startup-window"),
-                std::ffi::OsStr::new("--disable-blink-features=AutomationControlled"),
-            ],
+            path: options.chrome_path.clone(),
+            proxy_server: options.proxy.as_ref().map(|proxy| proxy.server.as_str()),
+            args: args.iter().map(std::ffi::OsString::as_os_str).collect(),
+            ignore_default_args: ignored_default_args
+                .iter()
+                .map(std::ffi::OsString::as_os_str)
+                .collect(),
             ..Default::default()
         };
-        if let Some(ref path) = chrome_path {
-            launch_options.path = Some(path.clone());
-        }
 
         let browser = Browser::new(launch_options).map_err(|e| e.to_string())?;
         let runtime_id = Uuid::new_v4().to_string();
-        let downloads_dir = profile_dir.join("downloads").join(&runtime_id);
+        let downloads_dir = options
+            .downloads_dir
+            .clone()
+            .unwrap_or_else(|| profile_dir.join("downloads").join(&runtime_id));
         let artifacts_dir = profile_dir.join("artifacts").join(&runtime_id);
         let download_monitor = Arc::new(DownloadMonitor::connect(
             &browser.get_ws_url(),
@@ -549,8 +550,10 @@ impl BrowserRuntime {
         )?);
 
         info!(
-            "BrowserRuntime {} launched with profile {:?}",
-            runtime_id, profile_dir
+            "BrowserRuntime {} launched {} with profile {:?}",
+            runtime_id,
+            options.mode_label(),
+            profile_dir
         );
 
         Ok(Self {
@@ -569,7 +572,7 @@ impl BrowserRuntime {
             profile_dir,
             downloads_dir,
             artifacts_dir,
-            window_bounds,
+            launch_options: options,
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
             route_registry: Arc::new(RouteRegistry::default()),
@@ -584,24 +587,21 @@ impl BrowserRuntime {
             is_connected: true,
             last_activity: Instant::now(),
             frame_emitter_active: false,
-            headless,
-            chrome_path,
             locator_handlers: Arc::new(std::sync::Mutex::new(LocatorHandlerRegistry::default())),
         })
     }
 
-    pub fn connect(
-        ws_url: String,
-        idle_timeout: Option<Duration>,
-        mask_passwords: bool,
-    ) -> Result<Self, String> {
-        let idle_timeout = idle_timeout.unwrap_or(Duration::from_secs(600));
+    pub fn connect(ws_url: String, options: BrowserLaunchOptions) -> Result<Self, String> {
+        let idle_timeout = options.idle_timeout_or_default();
+        let mask_passwords = options.mask_passwords;
         let browser = Browser::connect_with_timeout(ws_url.clone(), idle_timeout)
             .map_err(|e| format!("Failed to connect to browser at {}: {}", ws_url, e))?;
         let runtime_id = Uuid::new_v4().to_string();
-        let downloads_dir = std::env::temp_dir()
-            .join("refact-browser-downloads")
-            .join(&runtime_id);
+        let downloads_dir = options.downloads_dir.clone().unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("refact-browser-downloads")
+                .join(&runtime_id)
+        });
         let artifacts_dir = std::env::temp_dir()
             .join("refact-browser-artifacts")
             .join(&runtime_id);
@@ -628,7 +628,7 @@ impl BrowserRuntime {
             profile_dir: PathBuf::new(),
             downloads_dir,
             artifacts_dir,
-            window_bounds: None,
+            launch_options: options,
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
             route_registry: Arc::new(RouteRegistry::default()),
@@ -643,14 +643,24 @@ impl BrowserRuntime {
             is_connected: true,
             last_activity: Instant::now(),
             frame_emitter_active: false,
-            headless: false,
-            chrome_path: None,
             locator_handlers: Arc::new(std::sync::Mutex::new(LocatorHandlerRegistry::default())),
         })
     }
 
     pub fn mask_passwords(&self) -> bool {
         self.buffers.mask_passwords
+    }
+
+    pub fn headless(&self) -> bool {
+        self.launch_options.headless
+    }
+
+    pub fn window_bounds(&self) -> Option<&WindowBounds> {
+        self.launch_options.window_bounds.as_ref()
+    }
+
+    pub fn set_window_bounds(&mut self, bounds: WindowBounds) {
+        self.launch_options.window_bounds = Some(bounds);
     }
 
     pub fn add_route(
@@ -972,7 +982,9 @@ impl Drop for BrowserRuntime {
             }
             self.route_registry.remove(None);
         }
-        let _ = std::fs::remove_dir_all(&self.downloads_dir);
+        if self.launch_options.downloads_dir.is_none() {
+            let _ = std::fs::remove_dir_all(&self.downloads_dir);
+        }
         let _ = std::fs::remove_dir_all(&self.artifacts_dir);
     }
 }
