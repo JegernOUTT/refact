@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 base64 = "0.22.1"
-chrono = "0.4.31"
+chrono = { version = "0.4.31", features = ["serde"] }
 refact-chat-api = { path = "../refact-chat-api" }
 refact-core = { path = "../refact-core" }
 refact-integrations = { path = "../refact-integrations" }

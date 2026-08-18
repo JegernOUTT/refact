@@ -1187,6 +1187,27 @@ pub enum BrowserStep {
         options: BrowserHttpRequest,
     },
 
+    ClockInstall {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        time: Option<ClockTime>,
+    },
+    ClockFastForward {
+        ticks: ClockTicks,
+    },
+    ClockPauseAt {
+        time: ClockTime,
+    },
+    ClockResume,
+    ClockRunFor {
+        ticks: ClockTicks,
+    },
+    ClockSetFixedTime {
+        time: ClockTime,
+    },
+    ClockSetSystemTime {
+        time: ClockTime,
+    },
+
     StartCoverage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         js: Option<bool>,
@@ -1751,6 +1772,20 @@ pub enum UrlPattern {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ClockTicks {
+    Millis(i64),
+    Human(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ClockTime {
+    UnixMillis(i64),
+    Text(String),
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1790,6 +1825,13 @@ impl BrowserStep {
         "stop_har_recording",
         "route_from_har",
         "reset",
+        "clock_install",
+        "clock_fast_forward",
+        "clock_pause_at",
+        "clock_resume",
+        "clock_run_for",
+        "clock_set_fixed_time",
+        "clock_set_system_time",
         "http_request",
         "start_coverage",
         "stop_coverage",
@@ -2445,6 +2487,25 @@ mod tests {
                 not_found: HarNotFound::Abort,
             },
             BrowserStep::Reset,
+            BrowserStep::ClockInstall {
+                time: Some(ClockTime::Text("2020-02-02T00:00:00Z".to_string())),
+            },
+            BrowserStep::ClockFastForward {
+                ticks: ClockTicks::Human("01:00".to_string()),
+            },
+            BrowserStep::ClockPauseAt {
+                time: ClockTime::UnixMillis(1_580_601_600_000),
+            },
+            BrowserStep::ClockResume,
+            BrowserStep::ClockRunFor {
+                ticks: ClockTicks::Millis(1000),
+            },
+            BrowserStep::ClockSetFixedTime {
+                time: ClockTime::Text("2020-02-02".to_string()),
+            },
+            BrowserStep::ClockSetSystemTime {
+                time: ClockTime::UnixMillis(1_580_601_600_000),
+            },
             BrowserStep::HttpRequest {
                 options: BrowserHttpRequest {
                     url: "https://example.com/api/session".to_string(),
@@ -2864,6 +2925,82 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
 
         assert_eq!(declared, serialized);
+    }
+
+    #[test]
+    fn clock_ticks_accept_milliseconds_and_human_strings() {
+        let millis: BrowserStep =
+            serde_json::from_value(serde_json::json!({"action": "clock_run_for", "ticks": 1000}))
+                .unwrap();
+        assert!(matches!(
+            millis,
+            BrowserStep::ClockRunFor {
+                ticks: ClockTicks::Millis(1000)
+            }
+        ));
+        let human: BrowserStep = serde_json::from_value(
+            serde_json::json!({"action": "clock_fast_forward", "ticks": "01:00"}),
+        )
+        .unwrap();
+        let BrowserStep::ClockFastForward { ticks } = &human else {
+            panic!("expected clock_fast_forward, got {human:?}");
+        };
+        assert_eq!(*ticks, ClockTicks::Human("01:00".to_string()));
+        assert_eq!(
+            serde_json::to_value(&human).unwrap(),
+            serde_json::json!({"action": "clock_fast_forward", "ticks": "01:00"})
+        );
+    }
+
+    #[test]
+    fn clock_time_accepts_unix_millis_and_iso_strings() {
+        let numeric: BrowserStep = serde_json::from_value(
+            serde_json::json!({"action": "clock_pause_at", "time": 1_580_601_600_000i64}),
+        )
+        .unwrap();
+        let BrowserStep::ClockPauseAt { time } = &numeric else {
+            panic!("expected clock_pause_at, got {numeric:?}");
+        };
+        assert_eq!(*time, ClockTime::UnixMillis(1_580_601_600_000));
+        let iso: BrowserStep = serde_json::from_value(
+            serde_json::json!({"action": "clock_set_fixed_time", "time": "2020-02-02"}),
+        )
+        .unwrap();
+        let BrowserStep::ClockSetFixedTime { time } = &iso else {
+            panic!("expected clock_set_fixed_time, got {iso:?}");
+        };
+        assert_eq!(*time, ClockTime::Text("2020-02-02".to_string()));
+    }
+
+    #[test]
+    fn clock_install_time_is_optional_and_resume_takes_no_parameters() {
+        let install: BrowserStep =
+            serde_json::from_value(serde_json::json!({"action": "clock_install"})).unwrap();
+        assert!(matches!(install, BrowserStep::ClockInstall { time: None }));
+        assert_eq!(
+            serde_json::to_value(&install).unwrap(),
+            serde_json::json!({"action": "clock_install"})
+        );
+        let resume: BrowserStep =
+            serde_json::from_value(serde_json::json!({"action": "clock_resume"})).unwrap();
+        assert!(matches!(resume, BrowserStep::ClockResume));
+    }
+
+    #[test]
+    fn clock_steps_reject_missing_required_parameters() {
+        for action in [
+            "clock_fast_forward",
+            "clock_run_for",
+            "clock_pause_at",
+            "clock_set_fixed_time",
+            "clock_set_system_time",
+        ] {
+            assert!(
+                serde_json::from_value::<BrowserStep>(serde_json::json!({"action": action}))
+                    .is_err(),
+                "{action} accepted a missing parameter"
+            );
+        }
     }
 
     #[test]

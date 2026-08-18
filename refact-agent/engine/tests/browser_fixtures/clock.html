@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Clock fixture</title>
+  </head>
+  <body>
+    <h1>Clock fixture</h1>
+    <p>Now: <span id="now"></span></p>
+    <p>Interval ticks: <span id="interval-count">0</span></p>
+    <p>Chain steps: <span id="chain-count">0</span></p>
+    <p>Timeouts fired: <span id="timeouts"></span></p>
+    <script>
+      window.__intervalCount = 0;
+      window.__chain = [];
+      window.__timeouts = [];
+      window.__dateSamples = [];
+      window.__installedAt = Date.now();
+
+      const nowLabel = document.getElementById("now");
+      const intervalLabel = document.getElementById("interval-count");
+      const chainLabel = document.getElementById("chain-count");
+      const timeoutsLabel = document.getElementById("timeouts");
+
+      function render() {
+        nowLabel.textContent = new Date(Date.now()).toISOString();
+        intervalLabel.textContent = String(window.__intervalCount);
+        chainLabel.textContent = String(window.__chain.length);
+        timeoutsLabel.textContent = window.__timeouts.join(",");
+      }
+
+      function armTimeouts() {
+        for (const delay of [1000, 2000, 3000]) {
+          setTimeout(function () {
+            window.__timeouts.push(delay);
+            render();
+          }, delay);
+        }
+      }
+
+      function chainStep() {
+        setTimeout(function () {
+          window.__chain.push(Date.now());
+          render();
+          chainStep();
+        }, 1000);
+      }
+
+      setInterval(function () {
+        window.__intervalCount += 1;
+        window.__dateSamples.push(Date.now());
+        render();
+      }, 1000);
+
+      armTimeouts();
+      chainStep();
+
+      window.__reset = function () {
+        window.__intervalCount = 0;
+        window.__chain = [];
+        window.__timeouts = [];
+        window.__dateSamples = [];
+        armTimeouts();
+        render();
+        return true;
+      };
+
+      window.__state = function () {
+        return JSON.stringify({
+          interval: window.__intervalCount,
+          chain: window.__chain.length,
+          timeouts: window.__timeouts.slice(),
+          dates: window.__dateSamples.slice(),
+          now: Date.now(),
+          performance: Math.round(performance.now()),
+          isFake: Boolean(Date.isFake),
+        });
+      };
+
+      render();
+    </script>
+  </body>
+</html>

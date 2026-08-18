@@ -71,11 +71,18 @@ impl LocatorHandler {
                         | BrowserStep::Unroute { .. }
                         | BrowserStep::ListRoutes
                         | BrowserStep::Reset
+                        | BrowserStep::ClockInstall { .. }
+                        | BrowserStep::ClockFastForward { .. }
+                        | BrowserStep::ClockPauseAt { .. }
+                        | BrowserStep::ClockResume
+                        | BrowserStep::ClockRunFor { .. }
+                        | BrowserStep::ClockSetFixedTime { .. }
+                        | BrowserStep::ClockSetSystemTime { .. }
                         | BrowserStep::HttpRequest { .. }
                 )
             }) {
                 return Err(
-                    "Locator handler steps cannot manage handlers, browser tabs, network routes, or send HTTP requests"
+                    "Locator handler steps cannot manage handlers, browser tabs, network routes, the clock, or send HTTP requests"
                         .to_string(),
                 );
             }
@@ -317,6 +324,28 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("network routes"), "{error}");
+    }
+
+    #[test]
+    fn handler_steps_cannot_drive_the_session_clock() {
+        for step in [
+            BrowserStep::ClockInstall { time: None },
+            BrowserStep::ClockResume,
+            BrowserStep::ClockRunFor {
+                ticks: refact_integrations::browser_models::ClockTicks::Millis(1000),
+            },
+        ] {
+            let error = LocatorHandler::registered(
+                "banner".to_string(),
+                BrowserLocator::css("#banner"),
+                LocatorHandlerAction::Steps { steps: vec![step] },
+                None,
+                false,
+            )
+            .unwrap_err();
+
+            assert!(error.contains("clock"), "{error}");
+        }
     }
 
     #[test]

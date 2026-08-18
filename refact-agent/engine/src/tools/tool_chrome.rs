@@ -89,6 +89,8 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Coordinate mouse escape hatch: mouse_move, mouse_down, mouse_up, mouse_click_xy, mouse_drag_xy, and mouse_wheel use main-frame viewport CSS pixels and bypass locator resolution. Use these only for canvas, map, and vision-driven UIs with no addressable element; locator/ref actions remain the default. ",
     "Locator handlers and overlay auto-dismiss do NOT guard `mouse_*` coordinate actions: an overlay that would be dismissed before a locator action will still swallow a coordinate click.\n",
     "Network: route/unroute/list_routes control HTTP interception. route_web_socket and unroute_web_socket install page-level WebSocket routing; send_web_socket_message supplies mock page messages and wait_for_web_socket_frame waits for observed traffic. start_har_recording and stop_har_recording write a runtime-owned HAR artifact; route_from_har replays it with abort or fallback for misses. HAR output is returned as a path and summary, never inlined. ",
+    "reset is the escape hatch for sticky plumbing: one call drops every network route, HAR replay, WebSocket route, locator handler, virtual authenticator, and the fake clock, turns offline off, and clears media, viewport, device, geolocation, and permission overrides, reporting what it cleared with counts. It leaves cookies, storage, open tabs, and the current page untouched.\n",
+    "Clock: clock_install pins fake time (optional `time` as unix ms or ISO string, current time by default) and must run before the page caches Date; clock_fast_forward jumps ahead firing each due timer AT MOST ONCE while clock_run_for advances firing ALL callbacks along the way, so a 60s interval fires once under fast_forward and 60 times under run_for. clock_pause_at stops time at an instant, clock_resume restarts it, clock_set_fixed_time freezes Date.now while leaving timers running, and clock_set_system_time shifts time silently without firing timers. `ticks` takes milliseconds or \"MM:SS\"/\"HH:MM:SS\"; the clock is session-scoped across tabs and navigations until reset clears it.\n",
     "reset is the escape hatch for sticky plumbing: one call drops every network route, HAR replay, WebSocket route, locator handler, and virtual authenticator, turns offline off, and clears media, viewport, device, geolocation, and permission overrides, reporting what it cleared with counts. It leaves cookies, storage, open tabs, and the current page untouched. ",
     "http_request sends an HTTP call that shares the page's cookie jar in both directions: matching cookies for the target domain and path are attached, and response Set-Cookie headers are written back into the browser, so a logged-in page and the API call see the same session. Send url plus optional method, headers, and exactly one of body, body_json (auto application/json), or form (auto urlencoded); http and https only. Results carry status, final URL after redirects, content-type/content-length (set full_headers=true for every header), and the body inline when it stays under 8KB, otherwise an artifact path. Cookie values are never inlined, only the count and names. Set fail_on_status=true to fail the step on a non-2xx status.\n",
     "Instrumentation: start_coverage and stop_coverage opt into precise JavaScript and CSS usage tracking and return bounded per-URL summaries plus a full JSON artifact. add_virtual_authenticator enables passkey testing and mints the authenticator id it returns, so never send it an id; remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified address that returned id. Credential ids, private keys, user handles, blobs, and user names are redacted from reports.\n",
@@ -281,6 +283,24 @@ fn browser_step_schema_with_actions(
     properties.insert(
         "timeout_ms".to_string(),
         serde_json::json!({"type": "integer", "minimum": 0}),
+    );
+    properties.insert(
+        "ticks".to_string(),
+        serde_json::json!({
+            "oneOf": [
+                {"type": "integer", "description": "Milliseconds to advance the clock by"},
+                {"type": "string", "description": "Human-readable duration: \"08\", \"01:00\" or \"02:34:10\""}
+            ]
+        }),
+    );
+    properties.insert(
+        "time".to_string(),
+        serde_json::json!({
+            "oneOf": [
+                {"type": "integer", "description": "Unix time in milliseconds"},
+                {"type": "string", "description": "ISO date or date-time, for example \"2020-02-02\" or \"2020-02-02T10:00:00Z\""}
+            ]
+        }),
     );
     properties.insert(
         "matcher".to_string(),
@@ -764,7 +784,7 @@ fn locator_handler_schema() -> serde_json::Value {
             !matches!(
                 *action,
                 "route" | "unroute" | "list_routes" | "reset" | "http_request"
-            )
+            ) && !action.starts_with("clock_")
         })
         .collect::<Vec<_>>();
     serde_json::json!({

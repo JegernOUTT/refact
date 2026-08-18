@@ -26,9 +26,9 @@ use refact_lsp::integrations::browser_models::{
     BrowserCookieSameSite, BrowserElementState, BrowserExpectation, BrowserExpectedText,
     BrowserHttpRequest, BrowserLoadState, BrowserLocator, BrowserPdfOptions, BrowserPollMatcher,
     BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
-    BrowserStorageItem, BrowserStorageKind, BrowserTextMode, FillStrategy, LocatorHandlerAction,
-    LocatorRegex, NetworkReportMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern,
-    WebSocketEventKind, WebSocketRouteMode,
+    BrowserStorageItem, BrowserStorageKind, BrowserTextMode, ClockTicks, ClockTime,
+    FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode, RouteHandler,
+    SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::{
     BrowserRuntime, CdpKeyboardDispatcher, CdpMouseDispatcher, CheckedState, HandleError, Keyboard,
@@ -83,6 +83,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "generator.html",
     "ws-echo.html",
     "har-target.html",
+    "clock.html",
     "visual-states.html",
     "poll-state.html",
 ];
@@ -3473,9 +3474,10 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
         "Sent WebSocket message to 1 socket(s)"
     );
     assert!(
-        report.websockets.iter().any(|event| {
-            matches!(event.kind, WebSocketEventKind::Created) && event.routed
-        }),
+        report
+            .websockets
+            .iter()
+            .any(|event| { matches!(event.kind, WebSocketEventKind::Created) && event.routed }),
         "no routed socket recorded: {:?}",
         report.websockets
     );
@@ -5012,6 +5014,98 @@ async fn composed_locators_match_playwright_semantics() {
     assert_eq!(multi.steps[0].data.as_ref().unwrap()["total"], json!(2));
 }
 
+struct ClockCase {
+    _profile: TempDir,
+    _server: FixtureServer,
+    runtime: Arc<tokio::sync::Mutex<BrowserRuntime>>,
+}
+
+fn clock_request(steps: Vec<BrowserStep>) -> BrowserActionRequest {
+    BrowserActionRequest {
+        session: SessionPolicy::SharedDefault,
+        target: TabTarget::Active,
+        attach_screenshot: None,
+        network: NetworkReportMode::default(),
+        steps,
+    }
+}
+
+fn clock_time(text: &str) -> ClockTime {
+    ClockTime::Text(text.to_string())
+}
+
+fn probe_state() -> BrowserStep {
+    BrowserStep::Eval {
+        expression: "window.__state()".to_string(),
+    }
+}
+
+fn last_value(
+    report: &refact_lsp::integrations::browser_models::ExecutionReport,
+) -> serde_json::Value {
+    let raw = report
+        .steps
+        .last()
+        .and_then(|step| step.data.as_ref())
+        .and_then(|data| data.get("value"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    serde_json::from_str(raw).unwrap_or_else(|error| {
+        panic!("clock probe did not return JSON ({error}): {raw:?} in {report:?}")
+    })
+}
+
+impl ClockCase {
+    async fn start() -> Option<Self> {
+        let mut case = BrowserCase::start("clock.html").await?;
+        case.setup_world();
+        let page_url = case.server.url("clock.html");
+        let this = Self {
+            _profile: case._profile,
+            _server: case.server,
+            runtime: Arc::new(tokio::sync::Mutex::new(case.runtime)),
+        };
+        let report = this
+            .run(vec![
+                BrowserStep::ClockInstall {
+                    time: Some(clock_time("2020-02-02T00:00:00Z")),
+                },
+                BrowserStep::Navigate { url: page_url },
+                BrowserStep::ClockPauseAt {
+                    time: clock_time("2020-02-02T00:10:00Z"),
+                },
+                BrowserStep::Eval {
+                    expression: "window.__reset()".to_string(),
+                },
+                probe_state(),
+            ])
+            .await;
+        assert!(report.ok, "clock setup failed: {report:?}");
+        let state = last_value(&report);
+        assert_eq!(state["isFake"], json!(true), "clock was not installed");
+        assert_eq!(state["interval"], json!(0), "counters were not reset");
+        assert_eq!(
+            state["now"],
+            json!(1_580_602_200_000i64),
+            "pause_at did not land on the requested instant"
+        );
+        Some(this)
+    }
+
+    async fn run(
+        &self,
+        steps: Vec<BrowserStep>,
+    ) -> refact_lsp::integrations::browser_models::ExecutionReport {
+        execute_request_with_runtime(
+            self.runtime.clone(),
+            clock_request(steps),
+            &ImagePolicy::browser_capture(),
+        )
+        .await
+        .unwrap()
+    }
+}
+
 fn decode_step_image(
     report: &refact_lsp::integrations::browser_models::ExecutionReport,
 ) -> Vec<u8> {
@@ -5054,6 +5148,36 @@ fn channel_leader(color: (u8, u8, u8)) -> &'static str {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn clock_fast_forward_fires_each_due_timer_at_most_once() {
+    let Some(case) = ClockCase::start().await else {
+        return;
+    };
+
+    let report = case
+        .run(vec![
+            BrowserStep::ClockFastForward {
+                ticks: ClockTicks::Human("01:00".to_string()),
+            },
+            probe_state(),
+        ])
+        .await;
+    assert!(report.ok, "fast_forward failed: {report:?}");
+
+    let state = last_value(&report);
+    assert_eq!(state["interval"], json!(1), "interval fired more than once");
+    assert_eq!(
+        state["chain"],
+        json!(1),
+        "timeout chain advanced past one link"
+    );
+    assert_eq!(
+        state["timeouts"],
+        json!([1000, 2000, 3000]),
+        "independent timeouts did not each fire once"
+    );
+    assert_eq!(state["now"], json!(1_580_602_260_000i64));
+}
+
 async fn screenshot_mask_hides_a_fixture_element_and_restores_the_dom() {
     let Some(case) = BrowserCase::start("visual-states.html").await else {
         return;
@@ -5107,6 +5231,36 @@ async fn screenshot_mask_hides_a_fixture_element_and_restores_the_dom() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn clock_run_for_fires_every_callback_along_the_way() {
+    let Some(case) = ClockCase::start().await else {
+        return;
+    };
+
+    let report = case
+        .run(vec![
+            BrowserStep::ClockRunFor {
+                ticks: ClockTicks::Human("01:00".to_string()),
+            },
+            probe_state(),
+        ])
+        .await;
+    assert!(report.ok, "run_for failed: {report:?}");
+
+    let state = last_value(&report);
+    assert_eq!(
+        state["interval"],
+        json!(60),
+        "interval did not fire per second"
+    );
+    assert_eq!(
+        state["chain"],
+        json!(60),
+        "timeout chain did not keep chaining"
+    );
+    assert_eq!(state["timeouts"], json!([1000, 2000, 3000]));
+    assert_eq!(state["now"], json!(1_580_602_260_000i64));
+}
+
 async fn hover_state_capture_differs_from_the_default_state_capture() {
     let Some(case) = BrowserCase::start("visual-states.html").await else {
         return;
@@ -5143,6 +5297,42 @@ async fn hover_state_capture_differs_from_the_default_state_capture() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn clock_set_fixed_time_freezes_date_while_timers_keep_running() {
+    let Some(case) = ClockCase::start().await else {
+        return;
+    };
+
+    let report = case
+        .run(vec![
+            BrowserStep::ClockSetFixedTime {
+                time: clock_time("2021-03-03T00:00:00Z"),
+            },
+            BrowserStep::ClockRunFor {
+                ticks: ClockTicks::Millis(3000),
+            },
+            probe_state(),
+        ])
+        .await;
+    assert!(report.ok, "set_fixed_time failed: {report:?}");
+
+    let state = last_value(&report);
+    assert_eq!(
+        state["interval"],
+        json!(3),
+        "timers stopped under a fixed time"
+    );
+    assert_eq!(
+        state["dates"],
+        json!([
+            1_614_729_600_000i64,
+            1_614_729_600_000i64,
+            1_614_729_600_000i64
+        ]),
+        "Date.now moved while the clock was fixed"
+    );
+    assert_eq!(state["now"], json!(1_614_729_600_000i64));
+}
+
 async fn element_state_strip_captures_every_state_and_returns_the_element_to_rest() {
     let Some(case) = BrowserCase::start("visual-states.html").await else {
         return;
@@ -5183,6 +5373,115 @@ async fn element_state_strip_captures_every_state_and_returns_the_element_to_res
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn clock_set_system_time_shifts_time_without_firing_timers() {
+    let Some(case) = ClockCase::start().await else {
+        return;
+    };
+
+    let report = case
+        .run(vec![
+            BrowserStep::ClockSetSystemTime {
+                time: ClockTime::UnixMillis(1_614_729_600_000),
+            },
+            probe_state(),
+        ])
+        .await;
+    assert!(report.ok, "set_system_time failed: {report:?}");
+
+    let state = last_value(&report);
+    assert_eq!(state["now"], json!(1_614_729_600_000i64));
+    assert_eq!(state["interval"], json!(0), "set_system_time fired timers");
+    assert_eq!(
+        state["chain"],
+        json!(0),
+        "set_system_time advanced the chain"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn clock_resume_restarts_real_time_and_reset_restores_native_timers() {
+    let Some(case) = ClockCase::start().await else {
+        return;
+    };
+
+    let resumed = case
+        .run(vec![
+            BrowserStep::ClockResume,
+            BrowserStep::WaitSeconds { seconds: 1.5 },
+            probe_state(),
+        ])
+        .await;
+    assert!(resumed.ok, "resume failed: {resumed:?}");
+    let state = last_value(&resumed);
+    assert!(
+        state["interval"].as_i64().unwrap_or_default() >= 1,
+        "resumed clock did not fire the interval: {state}"
+    );
+    assert!(state["now"].as_i64().unwrap_or_default() > 1_580_602_200_000);
+
+    let after_reset = case.run(vec![BrowserStep::Reset, probe_state()]).await;
+    assert!(after_reset.ok, "reset failed: {after_reset:?}");
+    assert_eq!(
+        after_reset.steps[0].data.as_ref().unwrap()["reset"]["clock_cleared"],
+        json!(true)
+    );
+    assert_eq!(
+        last_value(&after_reset)["isFake"],
+        json!(false),
+        "reset left the fake Date installed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn clock_steps_report_clear_errors_when_used_out_of_order() {
+    let Some(mut case) = BrowserCase::start("clock.html").await else {
+        return;
+    };
+    case.setup_world();
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+
+    let early = execute_request_with_runtime(
+        runtime.clone(),
+        clock_request(vec![BrowserStep::ClockFastForward {
+            ticks: ClockTicks::Millis(1000),
+        }]),
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(!early.ok);
+    assert!(
+        early.steps[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("clock_install"),
+        "{early:?}"
+    );
+
+    let unpaused = execute_request_with_runtime(
+        runtime,
+        clock_request(vec![
+            BrowserStep::ClockInstall { time: None },
+            BrowserStep::ClockResume,
+        ]),
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(!unpaused.ok);
+    assert!(
+        unpaused.steps[1]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("clock_pause_at"),
+        "{unpaused:?}"
+    );
+}
+
 async fn element_gallery_composes_a_grid_or_returns_separate_captures() {
     let Some(case) = BrowserCase::start("visual-states.html").await else {
         return;

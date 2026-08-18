@@ -1,6 +1,7 @@
 mod actionability;
 pub mod artifacts;
 pub mod assertions;
+pub mod clock;
 pub mod context_state;
 pub mod coverage;
 pub mod dialogs;
@@ -38,6 +39,10 @@ pub use dialogs::{DialogDecision, DialogManager, DialogResponse};
 pub use drag::{
     CdpDragObserver, DragObserver, FileDropResult, FileDropTarget, drag_and_drop, drop_files,
     verify_file_drop,
+};
+pub use clock::{
+    CLOCK_SOURCE, ClockManager, ClockOp, ClockState, current_wall_ms, parse_clock_ticks,
+    parse_clock_time,
 };
 pub use context_state::{ContextState, MediaState, ViewportState};
 pub use handles::{
@@ -478,6 +483,7 @@ pub struct BrowserRuntime {
     pub coverage_manager: coverage::CoverageManager,
     pub webauthn_manager: webauthn::WebAuthnManager,
     pub context_state: ContextState,
+    pub clock: ClockManager,
     pub mouse_states: HashMap<String, MouseState>,
     pub idle_timeout: Duration,
     pub is_connected: bool,
@@ -572,6 +578,7 @@ impl BrowserRuntime {
             coverage_manager: coverage::CoverageManager::default(),
             webauthn_manager: webauthn::WebAuthnManager::default(),
             context_state: ContextState::default(),
+            clock: ClockManager::default(),
             mouse_states: HashMap::new(),
             idle_timeout,
             is_connected: true,
@@ -630,6 +637,7 @@ impl BrowserRuntime {
             coverage_manager: coverage::CoverageManager::default(),
             webauthn_manager: webauthn::WebAuthnManager::default(),
             context_state: ContextState::default(),
+            clock: ClockManager::default(),
             mouse_states: HashMap::new(),
             idle_timeout,
             is_connected: true,
@@ -1567,6 +1575,7 @@ pub fn setup_recording_for_tab(
     )?;
     install_websocket_router(&tab, runtime.websocket_registry.clone())?;
     runtime.context_state.apply_to_tab(&tab)?;
+    runtime.clock.apply_to_tab(&tab)?;
     if !runtime.route_registry.is_empty() || runtime.context_state.http_credentials.is_some() {
         runtime
             .route_registry

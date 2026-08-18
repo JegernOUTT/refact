@@ -17,13 +17,14 @@ use crate::integrations::browser_models::*;
 use crate::integrations::browser_runtime::BrowserRuntime;
 use refact_browser::{
     ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
-    ActionabilityExecutionMode, ActionabilityTimeouts, CdpKeyboardDispatcher, CdpMouseDispatcher,
-    CdpDragObserver, ElementHandle, HitTargetController, HitTargetPoint, HitTargetResult, Keyboard,
-    LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation, LocatorHandlerProbe,
-    LocatorHandlerRegistry, ExpectPollResult, LocatorOutcome, Mouse, MouseButton, NetworkLoadState,
-    NetworkMonitorHandle, MainFrameCssPoint, MouseState, Ref, ScrollStrategy, SnapshotMode,
-    SnapshotOptions, SystemClock, UrlMatcher, WebSocketRegistry, WorldManager,
-    DEFAULT_DISMISS_OVERLAYS_HANDLER, FUNCTION_POLL_BACKOFF_MS, apply_network_report_mode,
+    ActionabilityExecutionMode, ActionabilityTimeouts, CdpDragObserver, CdpKeyboardDispatcher,
+    CdpMouseDispatcher, ClockOp, DEFAULT_DISMISS_OVERLAYS_HANDLER, ElementHandle,
+    ExpectPollResult, FUNCTION_POLL_BACKOFF_MS, HitTargetController, HitTargetPoint,
+    HitTargetResult, Keyboard, LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation,
+    LocatorHandlerProbe, LocatorHandlerRegistry, LocatorOutcome, MainFrameCssPoint, Mouse,
+    MouseButton, MouseState, NetworkLoadState, NetworkMonitorHandle, Ref, ScrollStrategy,
+    SnapshotMode, SnapshotOptions, SystemClock, UrlMatcher, WebSocketRegistry, WorldManager,
+    apply_network_report_mode, current_wall_ms, parse_clock_ticks, parse_clock_time,
     required_states,
 };
 use refact_browser::artifacts::{
@@ -1262,17 +1263,23 @@ struct BrowserResetCounts {
     websocket_routes: usize,
     locator_handlers: usize,
     authenticators: usize,
+    clock: bool,
 }
 
 impl BrowserResetCounts {
     fn summary(&self) -> String {
         format!(
-            "Reset: {}, {}, {}, {}, {}, offline off, emulation cleared",
+            "Reset: {}, {}, {}, {}, {}, offline off, emulation cleared, {}",
             counted(self.routes, "route"),
             counted(self.har_replays, "har replay"),
             counted(self.websocket_routes, "ws route"),
             counted(self.locator_handlers, "locator handler"),
             counted(self.authenticators, "authenticator"),
+            if self.clock {
+                "clock cleared"
+            } else {
+                "clock off"
+            },
         )
     }
 
@@ -1286,6 +1293,7 @@ impl BrowserResetCounts {
                 "authenticators": self.authenticators,
                 "offline": false,
                 "emulation_cleared": true,
+                "clock_cleared": self.clock,
             }
         })
     }
@@ -1304,6 +1312,7 @@ fn reset_sticky_registries(
     websocket_registry: &WebSocketRegistry,
     locator_handlers: &Mutex<LocatorHandlerRegistry>,
     authenticators: usize,
+    clock: bool,
 ) -> Result<BrowserResetCounts, String> {
     let har_replays = routes.iter().filter(|route| route.har.is_some()).count();
     Ok(BrowserResetCounts {
@@ -1315,6 +1324,7 @@ fn reset_sticky_registries(
             .map_err(|error| format!("Failed to lock locator handlers: {error}"))?
             .reset(),
         authenticators,
+        clock,
     })
 }
 
@@ -1329,11 +1339,13 @@ fn execute_reset_step(runtime: &mut BrowserRuntime, idx: usize) -> StepResult {
         let routes = runtime.route_registry.list();
         runtime.remove_routes(None)?;
         let authenticators = runtime.webauthn_manager.cleanup(&tabs);
+        let clock = runtime.clock.reset(&tabs)?;
         let counts = reset_sticky_registries(
             &routes,
             &runtime.websocket_registry,
             &runtime.locator_handlers,
             authenticators,
+            clock,
         )?;
         runtime.context_state.clear_overrides(&tabs)?;
         Ok(counts)
@@ -1341,6 +1353,70 @@ fn execute_reset_step(runtime: &mut BrowserRuntime, idx: usize) -> StepResult {
     match result {
         Ok(counts) => StepResult::success(idx, counts.summary()).with_data(counts.data()),
         Err(error) => StepResult::failure(idx, "Reset", error),
+    }
+}
+
+fn is_clock_step(step: &BrowserStep) -> bool {
+    matches!(
+        step,
+        BrowserStep::ClockInstall { .. }
+            | BrowserStep::ClockFastForward { .. }
+            | BrowserStep::ClockPauseAt { .. }
+            | BrowserStep::ClockResume
+            | BrowserStep::ClockRunFor { .. }
+            | BrowserStep::ClockSetFixedTime { .. }
+            | BrowserStep::ClockSetSystemTime { .. }
+    )
+}
+
+fn clock_op_from_step(step: &BrowserStep) -> Result<ClockOp, String> {
+    match step {
+        BrowserStep::ClockInstall { time } => Ok(ClockOp::Install {
+            time_ms: match time {
+                Some(time) => parse_clock_time(time)?,
+                None => current_wall_ms(),
+            },
+        }),
+        BrowserStep::ClockFastForward { ticks } => Ok(ClockOp::FastForward {
+            ticks_ms: parse_clock_ticks(ticks)?,
+        }),
+        BrowserStep::ClockPauseAt { time } => Ok(ClockOp::PauseAt {
+            time_ms: parse_clock_time(time)?,
+        }),
+        BrowserStep::ClockResume => Ok(ClockOp::Resume),
+        BrowserStep::ClockRunFor { ticks } => Ok(ClockOp::RunFor {
+            ticks_ms: parse_clock_ticks(ticks)?,
+        }),
+        BrowserStep::ClockSetFixedTime { time } => Ok(ClockOp::SetFixedTime {
+            time_ms: parse_clock_time(time)?,
+        }),
+        BrowserStep::ClockSetSystemTime { time } => Ok(ClockOp::SetSystemTime {
+            time_ms: parse_clock_time(time)?,
+        }),
+        _ => unreachable!(),
+    }
+}
+
+fn execute_clock_step(runtime: &mut BrowserRuntime, step: &BrowserStep, idx: usize) -> StepResult {
+    let tabs = runtime
+        .browser
+        .get_tabs()
+        .lock()
+        .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let result: Result<ClockOp, String> = (|| {
+        let op = clock_op_from_step(step)?;
+        runtime.clock.run(&tabs, op, current_wall_ms())?;
+        Ok(op)
+    })();
+    match result {
+        Ok(op) => StepResult::success(idx, op.summary()).with_data(serde_json::json!({
+            "clock": {
+                "installed": runtime.clock.is_installed(),
+                "paused": runtime.clock.is_paused(),
+            }
+        })),
+        Err(error) => StepResult::failure(idx, "Browser clock", error),
     }
 }
 
@@ -1814,6 +1890,9 @@ pub async fn execute_request_with_runtime(
         } else if matches!(step, BrowserStep::Reset) {
             let mut rt = runtime_arc.lock().await;
             execute_reset_step(&mut rt, idx)
+        } else if is_clock_step(step) {
+            let mut rt = runtime_arc.lock().await;
+            execute_clock_step(&mut rt, step, idx)
         } else if let BrowserStep::HttpRequest { options } = step {
             let mut rt = runtime_arc.lock().await;
             execute_http_request_step(&mut rt, options, idx).await
@@ -3596,6 +3675,17 @@ fn execute_single_step(
         BrowserStep::Annotate { locator, text } => {
             step_highlight(tab, world, idx, locator, None, Some(text), false)
         }
+        BrowserStep::ClockInstall { .. }
+        | BrowserStep::ClockFastForward { .. }
+        | BrowserStep::ClockPauseAt { .. }
+        | BrowserStep::ClockResume
+        | BrowserStep::ClockRunFor { .. }
+        | BrowserStep::ClockSetFixedTime { .. }
+        | BrowserStep::ClockSetSystemTime { .. } => StepResult::failure(
+            idx,
+            "Browser clock",
+            "Clock steps are session-scoped and run only from a browser request batch",
+        ),
     }
 }
 
@@ -8376,7 +8466,8 @@ mod tests {
         let locator_handlers = populated_locator_handlers();
 
         let counts =
-            reset_sticky_registries(&routes, &websocket_registry, &locator_handlers, 1).unwrap();
+            reset_sticky_registries(&routes, &websocket_registry, &locator_handlers, 1, true)
+                .unwrap();
         route_registry.remove(None);
 
         assert_eq!(
@@ -8387,11 +8478,12 @@ mod tests {
                 websocket_routes: 1,
                 locator_handlers: 3,
                 authenticators: 1,
+                clock: true,
             }
         );
         assert_eq!(
             counts.summary(),
-            "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, offline off, emulation cleared"
+            "Reset: 2 routes, 1 har replay, 1 ws route, 3 locator handlers, 1 authenticator, offline off, emulation cleared, clock cleared"
         );
         assert!(route_registry.is_empty());
         assert_eq!(websocket_registry.route_count(), 0);
@@ -8412,14 +8504,14 @@ mod tests {
         let websocket_registry = WebSocketRegistry::default();
         let locator_handlers = populated_locator_handlers();
 
-        reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0).unwrap();
+        reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, false).unwrap();
         let repeated =
-            reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0).unwrap();
+            reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, false).unwrap();
 
         assert_eq!(repeated, BrowserResetCounts::default());
         assert_eq!(
             repeated.summary(),
-            "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, offline off, emulation cleared"
+            "Reset: 0 routes, 0 har replays, 0 ws routes, 0 locator handlers, 0 authenticators, offline off, emulation cleared, clock off"
         );
         assert_eq!(websocket_registry.route_count(), 0);
         assert_eq!(locator_handlers.lock().unwrap().handlers().len(), 1);
@@ -8504,6 +8596,7 @@ mod tests {
             websocket_routes: 1,
             locator_handlers: 3,
             authenticators: 1,
+            clock: true,
         };
 
         assert_eq!(
@@ -8517,6 +8610,7 @@ mod tests {
                     "authenticators": 1,
                     "offline": false,
                     "emulation_cleared": true,
+                    "clock_cleared": true,
                 }
             })
         );
