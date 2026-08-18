@@ -24,11 +24,12 @@ use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
     AccessibilitySnapshotOptions, BrowserActionRequest, BrowserComposeMode, BrowserCookie,
     BrowserCookieSameSite, BrowserElementState, BrowserExpectation, BrowserExpectedText,
-    BrowserHttpRequest, BrowserLoadState, BrowserLocator, BrowserPdfOptions, BrowserPollMatcher,
-    BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
-    BrowserStorageItem, BrowserStorageKind, BrowserTextMode, CdpTarget, ClockTicks, ClockTime,
-    ExecutionReport, FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode,
-    PageContextMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
+    BrowserExpectedTextOrList, BrowserHttpRequest, BrowserLoadState, BrowserLocator,
+    BrowserPdfOptions, BrowserPollMatcher, BrowserPseudoElement, BrowserScreenshotAnimations,
+    BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep, BrowserStorageItem,
+    BrowserStorageKind, BrowserTextMode, CdpTarget, ClockTicks, ClockTime, ExecutionReport,
+    FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode, PageContextMode,
+    RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
     WebSocketFrameDisposition, WebSocketMessageAction, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::devices;
@@ -1416,33 +1417,41 @@ async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
                 matcher: BrowserExpectation::ToBeVisible,
                 timeout_ms: Some(3_000),
                 soft: false,
+                not: None,
             },
             BrowserStep::Expect {
                 locator: Some(BrowserLocator::css("#assertion-text")),
                 matcher: BrowserExpectation::ToContainText {
-                    expected: BrowserExpectedText::Text("beta 42".to_string()),
+                    expected: BrowserExpectedTextOrList::One(BrowserExpectedText::Text(
+                        "beta 42".to_string(),
+                    )),
                     ignore_case: true,
                 },
                 timeout_ms: None,
                 soft: false,
+                not: None,
             },
             BrowserStep::Expect {
                 locator: Some(BrowserLocator::css("#assertion-text")),
                 matcher: BrowserExpectation::ToHaveText {
-                    expected: BrowserExpectedText::Regex(LocatorRegex {
-                        source: r"Alpha\s+Beta\s+\d+".to_string(),
-                        flags: String::new(),
-                    }),
+                    expected: BrowserExpectedTextOrList::One(BrowserExpectedText::Regex(
+                        LocatorRegex {
+                            source: r"Alpha\s+Beta\s+\d+".to_string(),
+                            flags: String::new(),
+                        },
+                    )),
                     ignore_case: false,
                 },
                 timeout_ms: None,
                 soft: false,
+                not: None,
             },
             BrowserStep::Expect {
                 locator: Some(BrowserLocator::css(".assertion-item")),
                 matcher: BrowserExpectation::ToHaveCount { expected: 3 },
                 timeout_ms: None,
                 soft: false,
+                not: None,
             },
             BrowserStep::Navigate {
                 url: case.server.url("snapshot.html"),
@@ -1458,6 +1467,7 @@ async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
                 },
                 timeout_ms: None,
                 soft: false,
+                not: None,
             },
             BrowserStep::Expect {
                 locator: Some(BrowserLocator::role("navigation", Some("Primary"))),
@@ -1466,15 +1476,19 @@ async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
                 },
                 timeout_ms: None,
                 soft: false,
+                not: None,
             },
             BrowserStep::Expect {
                 locator: Some(BrowserLocator::css("h1")),
                 matcher: BrowserExpectation::ToHaveText {
-                    expected: BrowserExpectedText::Text("Missing heading".to_string()),
+                    expected: BrowserExpectedTextOrList::One(BrowserExpectedText::Text(
+                        "Missing heading".to_string(),
+                    )),
                     ignore_case: false,
                 },
                 timeout_ms: Some(50),
                 soft: true,
+                not: None,
             },
             BrowserStep::Expect {
                 locator: None,
@@ -1484,6 +1498,7 @@ async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
                 },
                 timeout_ms: None,
                 soft: false,
+                not: None,
             },
         ],
         &ImagePolicy::browser_capture(),
@@ -1501,6 +1516,181 @@ async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
     assert_eq!(failed.expected, json!("Missing heading"));
     assert_eq!(failed.received, json!("Snapshot page"));
     assert!(report.steps[8].ok, "batch did not continue: {report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn expect_option_parity_covers_negation_indeterminate_pseudo_presence_and_lists() {
+    let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
+        return;
+    };
+    case.setup_world();
+    case.tab
+        .evaluate(
+            "document.head.insertAdjacentHTML('beforeend', '<style>#badge::before { content: \"done\"; }</style>'); document.body.insertAdjacentHTML('beforeend', '<p id=status>Loading</p><span id=badge data-ready></span><input id=mixed type=checkbox><div id=aria-mixed role=checkbox aria-checked=mixed></div><ul><li class=row>Alpha one</li><li class=row>Beta two</li><li class=row>Gamma three</li></ul>'); document.querySelector('#mixed').indeterminate = true; setTimeout(() => document.querySelector('#status').textContent = 'Ready', 2000)",
+            false,
+        )
+        .unwrap();
+
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("#status")),
+                matcher: BrowserExpectation::ToHaveText {
+                    expected: BrowserExpectedTextOrList::One(BrowserExpectedText::Text(
+                        "Loading".to_string(),
+                    )),
+                    ignore_case: false,
+                },
+                timeout_ms: Some(8_000),
+                soft: false,
+                not: Some(true),
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("#mixed")),
+                matcher: BrowserExpectation::ToBeChecked {
+                    checked: None,
+                    indeterminate: Some(true),
+                },
+                timeout_ms: None,
+                soft: false,
+                not: None,
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("#mixed")),
+                matcher: BrowserExpectation::ToBeChecked {
+                    checked: None,
+                    indeterminate: None,
+                },
+                timeout_ms: Some(100),
+                soft: false,
+                not: Some(true),
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("#badge")),
+                matcher: BrowserExpectation::ToHaveCss {
+                    name: "content".to_string(),
+                    expected: BrowserExpectedText::Text("\"done\"".to_string()),
+                    ignore_case: false,
+                    pseudo: Some(BrowserPseudoElement::Before),
+                },
+                timeout_ms: None,
+                soft: false,
+                not: None,
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("#badge")),
+                matcher: BrowserExpectation::ToHaveAttribute {
+                    name: "data-ready".to_string(),
+                    expected: None,
+                    ignore_case: false,
+                },
+                timeout_ms: None,
+                soft: false,
+                not: None,
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("#badge")),
+                matcher: BrowserExpectation::ToHaveAttribute {
+                    name: "data-missing".to_string(),
+                    expected: None,
+                    ignore_case: false,
+                },
+                timeout_ms: Some(100),
+                soft: false,
+                not: Some(true),
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css(".row")),
+                matcher: BrowserExpectation::ToHaveText {
+                    expected: BrowserExpectedTextOrList::Many(vec![
+                        BrowserExpectedText::Text("Alpha one".to_string()),
+                        BrowserExpectedText::Text("Beta two".to_string()),
+                        BrowserExpectedText::Text("Gamma three".to_string()),
+                    ]),
+                    ignore_case: false,
+                },
+                timeout_ms: None,
+                soft: false,
+                not: None,
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css(".row")),
+                matcher: BrowserExpectation::ToContainText {
+                    expected: BrowserExpectedTextOrList::Many(vec![
+                        BrowserExpectedText::Text("Alpha".to_string()),
+                        BrowserExpectedText::Text("Gamma".to_string()),
+                    ]),
+                    ignore_case: false,
+                },
+                timeout_ms: None,
+                soft: false,
+                not: None,
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css(".row")),
+                matcher: BrowserExpectation::ToContainText {
+                    expected: BrowserExpectedTextOrList::Many(vec![
+                        BrowserExpectedText::Text("Gamma".to_string()),
+                        BrowserExpectedText::Text("Alpha".to_string()),
+                    ]),
+                    ignore_case: false,
+                },
+                timeout_ms: Some(100),
+                soft: false,
+                not: Some(true),
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("#status")),
+                matcher: BrowserExpectation::ToBeInViewport { ratio: Some(1.0) },
+                timeout_ms: None,
+                soft: false,
+                not: None,
+            },
+            BrowserStep::Expect {
+                locator: Some(BrowserLocator::css("#aria-mixed")),
+                matcher: BrowserExpectation::ToBeChecked {
+                    checked: None,
+                    indeterminate: Some(true),
+                },
+                timeout_ms: None,
+                soft: false,
+                not: None,
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+
+    assert!(report.ok, "expect option parity batch failed: {report:?}");
+    let negated = report.steps[0].assertion.as_ref().unwrap();
+    assert_eq!(negated.matcher, "not to_have_text");
+    assert!(negated.passed);
+    assert_eq!(
+        negated.received,
+        json!("Ready"),
+        "negation must report the state that stopped matching: {report:?}"
+    );
+    assert_eq!(
+        report.steps[1].assertion.as_ref().unwrap().received,
+        json!(true)
+    );
+    assert_eq!(
+        report.steps[3].assertion.as_ref().unwrap().received,
+        json!("\"done\"")
+    );
+    assert_eq!(
+        report.steps[4].assertion.as_ref().unwrap().expected,
+        json!("<present>")
+    );
+    assert_eq!(
+        report.steps[6].assertion.as_ref().unwrap().received,
+        json!(["Alpha one", "Beta two", "Gamma three"])
+    );
+    assert!(
+        report.steps[10].ok,
+        "aria-checked=mixed must satisfy indeterminate: {report:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

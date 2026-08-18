@@ -1,4 +1,4 @@
-// @refact-injected-hash e5845517af25eced17389920255171c81b23757095b32cb8c513d407dee795ae
+// @refact-injected-hash 69df7d23883bb95ae113c1baad8c527fc3bbdbbc560abfabde1a2f419f7b6d20
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -5037,6 +5037,14 @@ function matchesLocatorText(element, matcher) {
     return text.toLowerCase().includes(normalizeWhiteSpace(matcher).toLowerCase());
   return matchesRegExp(createLocatorRegExp(matcher), text);
 }
+function viewportIntersectionRatio(rect, viewportWidth, viewportHeight) {
+  const area = rect.width * rect.height;
+  if (area <= 0)
+    return 0;
+  const width = Math.max(0, Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0));
+  const height = Math.max(0, Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0));
+  return width * height / area;
+}
 function applyLocatorIndex(elements, locator) {
   const selectors = Number(locator.nth !== void 0) + Number(locator.first === true) + Number(locator.last === true);
   if (selectors > 1)
@@ -5345,9 +5353,11 @@ var RefactInjected = class {
       enabled: !getAriaDisabled(element),
       editable: !getReadonly(element) && (element.matches("input, textarea, select") || htmlElement.isContentEditable),
       checked: input.checked === true,
+      indeterminate: getCheckedState(element) === "mixed",
       focused: element === this.global.document.activeElement,
       empty: element.children.length === 0 && !normalizeWhiteSpace((_a = element.textContent) != null ? _a : "").length && !("value" in input && input.value),
       inViewport: rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < view.innerHeight && rect.left < view.innerWidth,
+      viewportRatio: viewportIntersectionRatio(rect, view.innerWidth, view.innerHeight),
       text: (_c = (_b = htmlElement.innerText) != null ? _b : element.textContent) != null ? _c : "",
       value: "value" in input ? input.value : null,
       values: select.multiple ? Array.from(select.selectedOptions).map((option) => option.value) : null,

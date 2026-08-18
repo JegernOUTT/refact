@@ -3783,12 +3783,14 @@ fn bound_handler_step(step: &BrowserStep, deadline: Instant) -> BrowserStep {
             locator,
             matcher,
             soft,
+            not,
             ..
         } => BrowserStep::Expect {
             locator: locator.clone(),
             matcher: matcher.clone(),
             timeout_ms: Some(remaining_ms),
             soft: *soft,
+            not: *not,
         },
         BrowserStep::WaitForNetworkIdle { .. } => BrowserStep::WaitForNetworkIdle {
             timeout_ms: Some(remaining_ms),
@@ -3930,6 +3932,7 @@ fn execute_single_step(
             matcher,
             timeout_ms,
             soft,
+            not,
         } => step_expect(
             tab,
             world,
@@ -3938,6 +3941,7 @@ fn execute_single_step(
             matcher,
             timeout_ms.unwrap_or(ActionabilityTimeouts::default().expect.as_millis() as u64),
             *soft,
+            not.unwrap_or(false),
         ),
 
         BrowserStep::ExpectPoll {
@@ -4353,6 +4357,14 @@ fn execute_single_step(
     }
 }
 
+fn expectation_label(matcher: &BrowserExpectation, negate: bool) -> String {
+    if negate {
+        format!("not {}", matcher.name())
+    } else {
+        matcher.name().to_string()
+    }
+}
+
 fn step_expect(
     tab: &Tab,
     world: &WorldManager,
@@ -4361,25 +4373,50 @@ fn step_expect(
     matcher: &BrowserExpectation,
     timeout_ms: u64,
     soft: bool,
+    negate: bool,
 ) -> StepResult {
+    let label = expectation_label(matcher, negate);
     if matcher.requires_locator() && locator.is_none() {
         return StepResult::failure(
             idx,
-            format!("Expect {}", matcher.name()),
+            format!("Expect {label}"),
             "This matcher requires locator",
         );
     }
     if !matcher.requires_locator() && locator.is_some() {
         return StepResult::failure(
             idx,
-            format!("Expect {}", matcher.name()),
+            format!("Expect {label}"),
             "Page matchers do not accept locator",
         );
     }
+    if let Err(error) = matcher.validate() {
+        return StepResult::failure(idx, format!("Expect {label}"), error);
+    }
+    evaluate_expectation(
+        idx,
+        matcher,
+        Duration::from_millis(clamp_timeout_ms(Some(timeout_ms))),
+        soft,
+        negate,
+        || sample_expectation(tab, world, locator, matcher),
+    )
+}
+
+fn evaluate_expectation(
+    idx: usize,
+    matcher: &BrowserExpectation,
+    timeout: Duration,
+    soft: bool,
+    negate: bool,
+    mut sample: impl FnMut() -> Result<(bool, Value), String>,
+) -> StepResult {
+    let label = expectation_label(matcher, negate);
     let expected = expectation_expected_value(matcher);
-    let timeout = Duration::from_millis(clamp_timeout_ms(Some(timeout_ms)));
     let engine = ActionabilityEngine::new(SystemClock::default(), ActionabilityTimeouts::default());
-    let result = engine.poll_expect(timeout, || sample_expectation(tab, world, locator, matcher));
+    let result = engine.poll_expect(timeout, || {
+        sample().map(|(matched, received)| (matched != negate, received))
+    });
     let (passed, received, attempts, elapsed, terminal_error) = match result {
         ExpectPollResult::Matched {
             received,
@@ -4411,13 +4448,13 @@ fn step_expect(
         ),
     };
     let diff = match matcher {
-        BrowserExpectation::ToMatchAriaSnapshot { expected } if !passed => received
+        BrowserExpectation::ToMatchAriaSnapshot { expected } if !passed && !negate => received
             .as_str()
             .map(|actual| refact_browser::assertions::aria_snapshot_diff(expected, actual)),
         _ => None,
     };
     let assertion = BrowserAssertionResult {
-        matcher: matcher.name().to_string(),
+        matcher: label.clone(),
         passed,
         soft,
         expected: expected.clone(),
@@ -4427,10 +4464,11 @@ fn step_expect(
         elapsed_ms: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
     };
     let mut step = if passed {
-        StepResult::success(idx, format!("Assertion passed: {}", matcher.name()))
+        StepResult::success(idx, format!("Assertion passed: {label}"))
     } else {
         let message = format!(
-            "Expected {} but received {}{}",
+            "Expected {}{} but received {}{}",
+            if negate { "not " } else { "" },
             json_for_message(&expected),
             json_for_message(&received),
             terminal_error
@@ -4439,9 +4477,9 @@ fn step_expect(
                 .unwrap_or_default()
         );
         let summary = if soft {
-            format!("Soft assertion failed: {}", matcher.name())
+            format!("Soft assertion failed: {label}")
         } else {
-            format!("Assertion failed: {}", matcher.name())
+            format!("Assertion failed: {label}")
         };
         StepResult::failure(idx, summary, message)
     };
@@ -4785,20 +4823,35 @@ fn expectation_expected_value(matcher: &BrowserExpectation) -> Value {
         | BrowserExpectation::ToBeEnabled
         | BrowserExpectation::ToBeDisabled
         | BrowserExpectation::ToBeEditable
-        | BrowserExpectation::ToBeChecked
         | BrowserExpectation::ToBeFocused
-        | BrowserExpectation::ToBeEmpty
-        | BrowserExpectation::ToBeInViewport => Value::Bool(true),
+        | BrowserExpectation::ToBeEmpty => Value::Bool(true),
+        BrowserExpectation::ToBeChecked {
+            indeterminate: Some(true),
+            ..
+        } => Value::String("indeterminate".to_string()),
+        BrowserExpectation::ToBeChecked { checked, .. } => Value::Bool(checked.unwrap_or(true)),
+        BrowserExpectation::ToBeInViewport { ratio } => ratio
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
+            .unwrap_or(Value::Bool(true)),
+        BrowserExpectation::ToHaveAttribute { expected: None, .. } => {
+            Value::String("<present>".to_string())
+        }
         BrowserExpectation::ToHaveText { expected, .. }
-        | BrowserExpectation::ToContainText { expected, .. }
-        | BrowserExpectation::ToHaveValue { expected, .. }
+        | BrowserExpectation::ToContainText { expected, .. } => {
+            serde_json::to_value(expected).unwrap_or(Value::Null)
+        }
+        BrowserExpectation::ToHaveValue { expected, .. }
         | BrowserExpectation::ToHaveClass { expected, .. }
         | BrowserExpectation::ToHaveId { expected, .. }
         | BrowserExpectation::ToHaveAccessibleName { expected, .. }
         | BrowserExpectation::ToHaveAccessibleDescription { expected, .. }
         | BrowserExpectation::ToHaveUrl { expected, .. }
         | BrowserExpectation::ToHaveTitle { expected, .. }
-        | BrowserExpectation::ToHaveAttribute { expected, .. }
+        | BrowserExpectation::ToHaveAttribute {
+            expected: Some(expected),
+            ..
+        }
         | BrowserExpectation::ToHaveCss { expected, .. } => {
             serde_json::to_value(expected).unwrap_or(Value::Null)
         }
@@ -4908,12 +4961,59 @@ fn sample_expectation(
             });
         return Ok((matches, serde_json::to_value(received).unwrap_or_default()));
     }
+    if let Some((expected, ignore_case, kind)) = expectation_text_list(matcher) {
+        let mut received = Vec::new();
+        for handle in handles {
+            let values = world
+                .expectation_values(tab, &handle)
+                .map_err(|error| error.to_string())?;
+            let _ = world.release_handle(tab, &handle);
+            received.push(
+                values
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+        }
+        let matches =
+            refact_browser::assertions::matches_text_list(&received, expected, kind, ignore_case)?;
+        return Ok((matches, serde_json::to_value(received).unwrap_or_default()));
+    }
     let Some(handle) = handles.into_iter().next() else {
         return Ok((false, Value::String("detached".to_string())));
     };
     let sampled = sample_single_element(tab, world, &handle, matcher);
     let _ = world.release_handle(tab, &handle);
     sampled
+}
+
+fn expectation_text_list(
+    matcher: &BrowserExpectation,
+) -> Option<(
+    &[BrowserExpectedText],
+    bool,
+    refact_browser::assertions::TextMatchKind,
+)> {
+    match matcher {
+        BrowserExpectation::ToHaveText {
+            expected: BrowserExpectedTextOrList::Many(expected),
+            ignore_case,
+        } => Some((
+            expected,
+            *ignore_case,
+            refact_browser::assertions::TextMatchKind::Exact,
+        )),
+        BrowserExpectation::ToContainText {
+            expected: BrowserExpectedTextOrList::Many(expected),
+            ignore_case,
+        } => Some((
+            expected,
+            *ignore_case,
+            refact_browser::assertions::TextMatchKind::Contains,
+        )),
+        _ => None,
+    }
 }
 
 fn strict_expectation_error(
@@ -4943,22 +5043,33 @@ fn sample_single_element(
     | BrowserExpectation::ToHaveCss { name, .. }
     | BrowserExpectation::ToHaveJsProperty { name, .. } = matcher
     {
-        let function = match matcher {
-            BrowserExpectation::ToHaveAttribute { .. } => {
-                "function(name) { return this.getAttribute(name); }"
-            }
-            BrowserExpectation::ToHaveCss { .. } => {
-                "function(name) { return getComputedStyle(this).getPropertyValue(name); }"
-            }
-            BrowserExpectation::ToHaveJsProperty { .. } => "function(name) { return this[name]; }",
+        let (function, arguments) = match matcher {
+            BrowserExpectation::ToHaveAttribute { .. } => (
+                "function(name) { return this.getAttribute(name); }",
+                vec![Value::String(name.clone())],
+            ),
+            BrowserExpectation::ToHaveCss { pseudo, .. } => (
+                "function(name, pseudo) { return getComputedStyle(this, pseudo).getPropertyValue(name); }",
+                vec![
+                    Value::String(name.clone()),
+                    pseudo
+                        .map(|pseudo| Value::String(pseudo.selector().to_string()))
+                        .unwrap_or(Value::Null),
+                ],
+            ),
+            BrowserExpectation::ToHaveJsProperty { .. } => (
+                "function(name) { return this[name]; }",
+                vec![Value::String(name.clone())],
+            ),
             _ => unreachable!(),
         };
         let received = world
-            .call_function_on(tab, handle, function, vec![Value::String(name.clone())])
+            .call_function_on(tab, handle, function, arguments)
             .map_err(|error| error.to_string())?;
         let matches = match matcher {
+            BrowserExpectation::ToHaveAttribute { expected: None, .. } => !received.is_null(),
             BrowserExpectation::ToHaveAttribute {
-                expected,
+                expected: Some(expected),
                 ignore_case,
                 ..
             }
@@ -5009,12 +5120,25 @@ fn sample_single_element(
         BrowserExpectation::ToBeEnabled => Ok(boolean("enabled", true)),
         BrowserExpectation::ToBeDisabled => Ok(boolean("enabled", false)),
         BrowserExpectation::ToBeEditable => Ok(boolean("editable", true)),
-        BrowserExpectation::ToBeChecked => Ok(boolean("checked", true)),
+        BrowserExpectation::ToBeChecked {
+            indeterminate: Some(true),
+            ..
+        } => Ok(boolean("indeterminate", true)),
+        BrowserExpectation::ToBeChecked { checked, .. } => {
+            Ok(boolean("checked", checked.unwrap_or(true)))
+        }
         BrowserExpectation::ToBeFocused => Ok(boolean("focused", true)),
         BrowserExpectation::ToBeEmpty => Ok(boolean("empty", true)),
-        BrowserExpectation::ToBeInViewport => Ok(boolean("inViewport", true)),
+        BrowserExpectation::ToBeInViewport { ratio: None } => Ok(boolean("inViewport", true)),
+        BrowserExpectation::ToBeInViewport { ratio: Some(ratio) } => {
+            let received = field("viewportRatio");
+            Ok((
+                viewport_ratio_matches(received.as_f64().unwrap_or_default(), *ratio),
+                received,
+            ))
+        }
         BrowserExpectation::ToHaveText {
-            expected,
+            expected: BrowserExpectedTextOrList::One(expected),
             ignore_case,
         } => text(
             "text",
@@ -5023,7 +5147,7 @@ fn sample_single_element(
             *ignore_case,
         ),
         BrowserExpectation::ToContainText {
-            expected,
+            expected: BrowserExpectedTextOrList::One(expected),
             ignore_case,
         } => text(
             "text",
@@ -5093,6 +5217,16 @@ fn sample_single_element(
             *ignore_case,
         ),
         _ => Err(format!("Unsupported element matcher: {}", matcher.name())),
+    }
+}
+
+const VIEWPORT_RATIO_TOLERANCE: f64 = 1e-9;
+
+fn viewport_ratio_matches(received: f64, ratio: f64) -> bool {
+    if ratio > 0.0 {
+        received + VIEWPORT_RATIO_TOLERANCE >= ratio
+    } else {
+        received > 0.0
     }
 }
 
@@ -8535,6 +8669,193 @@ mod tests {
     fn timed_out_expect_attempts_exclude_the_first_attempt_from_retries() {
         assert_eq!(expect_retries(2), 1);
         assert_eq!(expect_retries(0), 0);
+    }
+
+    fn scripted_expectation(
+        matcher: &BrowserExpectation,
+        negate: bool,
+        timeout_ms: u64,
+        samples: Vec<Result<(bool, Value), String>>,
+    ) -> StepResult {
+        let mut samples = samples.into_iter();
+        let mut last = Ok((false, Value::Null));
+        evaluate_expectation(
+            0,
+            matcher,
+            Duration::from_millis(timeout_ms),
+            false,
+            negate,
+            move || {
+                if let Some(sample) = samples.next() {
+                    last = sample.clone();
+                }
+                last.clone()
+            },
+        )
+    }
+
+    #[test]
+    fn negated_expect_retries_until_the_matcher_stops_matching() {
+        let step = scripted_expectation(
+            &BrowserExpectation::ToBeVisible,
+            true,
+            2_000,
+            vec![
+                Ok((true, Value::Bool(true))),
+                Ok((true, Value::Bool(true))),
+                Ok((false, Value::Bool(false))),
+            ],
+        );
+
+        assert!(step.ok);
+        let assertion = step.assertion.unwrap();
+        assert_eq!(assertion.matcher, "not to_be_visible");
+        assert!(assertion.passed);
+        assert_eq!(assertion.attempts, 3);
+        assert_eq!(step.retries, 2);
+        assert_eq!(step.summary, "Assertion passed: not to_be_visible");
+    }
+
+    #[test]
+    fn negated_expect_timeout_reports_the_still_matching_state() {
+        let step = scripted_expectation(
+            &BrowserExpectation::ToHaveText {
+                expected: BrowserExpectedTextOrList::One(BrowserExpectedText::Text(
+                    "Loading".to_string(),
+                )),
+                ignore_case: false,
+            },
+            true,
+            60,
+            vec![Ok((true, Value::String("Loading".to_string())))],
+        );
+
+        assert!(!step.ok);
+        assert_eq!(step.summary, "Assertion failed: not to_have_text");
+        let error = step.error.unwrap();
+        assert!(
+            error.starts_with("Expected not \"Loading\" but received \"Loading\""),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("Timeout"), "unexpected error: {error}");
+        let assertion = step.assertion.unwrap();
+        assert_eq!(assertion.received, Value::String("Loading".to_string()));
+        assert!(!assertion.passed);
+    }
+
+    #[test]
+    fn negation_leaves_the_positive_path_untouched() {
+        let step = scripted_expectation(
+            &BrowserExpectation::ToBeVisible,
+            false,
+            2_000,
+            vec![Ok((true, Value::Bool(true)))],
+        );
+
+        assert!(step.ok);
+        let assertion = step.assertion.unwrap();
+        assert_eq!(assertion.matcher, "to_be_visible");
+        assert_eq!(assertion.expected, Value::Bool(true));
+        assert_eq!(assertion.attempts, 1);
+    }
+
+    #[test]
+    fn negated_expect_still_fails_hard_on_a_sampling_error() {
+        let step = scripted_expectation(
+            &BrowserExpectation::ToBeVisible,
+            true,
+            2_000,
+            vec![Err("strict mode violation".to_string())],
+        );
+
+        assert!(!step.ok);
+        assert!(
+            step.error.unwrap().contains("strict mode violation"),
+            "sampling errors must stay terminal under negation"
+        );
+    }
+
+    #[test]
+    fn expectation_expected_values_describe_the_new_matcher_options() {
+        assert_eq!(
+            expectation_expected_value(&BrowserExpectation::ToBeChecked {
+                checked: None,
+                indeterminate: None
+            }),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            expectation_expected_value(&BrowserExpectation::ToBeChecked {
+                checked: Some(false),
+                indeterminate: None
+            }),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            expectation_expected_value(&BrowserExpectation::ToBeChecked {
+                checked: None,
+                indeterminate: Some(true)
+            }),
+            Value::String("indeterminate".to_string())
+        );
+        assert_eq!(
+            expectation_expected_value(&BrowserExpectation::ToBeInViewport { ratio: None }),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            expectation_expected_value(&BrowserExpectation::ToBeInViewport { ratio: Some(0.5) }),
+            Value::from(0.5)
+        );
+        assert_eq!(
+            expectation_expected_value(&BrowserExpectation::ToHaveAttribute {
+                name: "data-ready".to_string(),
+                expected: None,
+                ignore_case: false
+            }),
+            Value::String("<present>".to_string())
+        );
+    }
+
+    #[test]
+    fn viewport_ratio_needs_a_real_intersection_and_tolerates_float_drift() {
+        assert!(viewport_ratio_matches(0.5, 0.5));
+        assert!(viewport_ratio_matches(1.0, 0.5));
+        assert!(!viewport_ratio_matches(0.49, 0.5));
+        assert!(viewport_ratio_matches(0.1, 0.0));
+        assert!(!viewport_ratio_matches(0.0, 0.0));
+    }
+
+    #[test]
+    fn text_list_expectations_pick_their_playwright_match_kind() {
+        let have = BrowserExpectation::ToHaveText {
+            expected: BrowserExpectedTextOrList::Many(vec![BrowserExpectedText::Text(
+                "One".to_string(),
+            )]),
+            ignore_case: true,
+        };
+        let contain = BrowserExpectation::ToContainText {
+            expected: BrowserExpectedTextOrList::Many(vec![BrowserExpectedText::Text(
+                "One".to_string(),
+            )]),
+            ignore_case: false,
+        };
+        let single = BrowserExpectation::ToHaveText {
+            expected: BrowserExpectedTextOrList::One(BrowserExpectedText::Text("One".to_string())),
+            ignore_case: false,
+        };
+
+        let (expected, ignore_case, kind) = expectation_text_list(&have).unwrap();
+        assert_eq!(expected.len(), 1);
+        assert!(ignore_case);
+        assert_eq!(kind, refact_browser::assertions::TextMatchKind::Exact);
+        assert_eq!(
+            expectation_text_list(&contain).unwrap().2,
+            refact_browser::assertions::TextMatchKind::Contains
+        );
+        assert!(expectation_text_list(&single).is_none());
+        assert!(have.is_multi_element());
+        assert!(contain.is_multi_element());
+        assert!(!single.is_multi_element());
     }
 
     fn element_info(visible: bool, bbox: Option<ElementBBox>) -> ElementInfo {

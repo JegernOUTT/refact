@@ -206,6 +206,15 @@ function matchesLocatorText(element: Element, matcher: LocatorTextMatcher): bool
   return matchesRegExp(createLocatorRegExp(matcher), text);
 }
 
+function viewportIntersectionRatio(rect: DOMRect, viewportWidth: number, viewportHeight: number): number {
+  const area = rect.width * rect.height;
+  if (area <= 0)
+    return 0;
+  const width = Math.max(0, Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0));
+  const height = Math.max(0, Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0));
+  return (width * height) / area;
+}
+
 function applyLocatorIndex(elements: Element[], locator: RefactLocator): Element[] {
   const selectors = Number(locator.nth !== undefined) + Number(locator.first === true) + Number(locator.last === true);
   if (selectors > 1)
@@ -546,9 +555,11 @@ export class RefactInjected {
       enabled: !getAriaDisabled(element),
       editable: !getReadonly(element) && (element.matches('input, textarea, select') || htmlElement.isContentEditable),
       checked: input.checked === true,
+      indeterminate: getCheckedState(element) === 'mixed',
       focused: element === this.global.document.activeElement,
       empty: element.children.length === 0 && !normalizeWhiteSpace((element.textContent ?? '')).length && !('value' in input && input.value),
       inViewport: rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < view.innerHeight && rect.left < view.innerWidth,
+      viewportRatio: viewportIntersectionRatio(rect, view.innerWidth, view.innerHeight),
       text: htmlElement.innerText ?? element.textContent ?? '',
       value: 'value' in input ? input.value : null,
       values: select.multiple ? Array.from(select.selectedOptions).map(option => option.value) : null,

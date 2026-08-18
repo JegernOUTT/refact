@@ -41,6 +41,42 @@ pub fn matches_text(
     }
 }
 
+pub fn matches_text_list(
+    received: &[String],
+    expected: &[BrowserExpectedText],
+    kind: TextMatchKind,
+    ignore_case: bool,
+) -> Result<bool, String> {
+    match kind {
+        TextMatchKind::Exact => {
+            if received.len() != expected.len() {
+                return Ok(false);
+            }
+            for (received, expected) in received.iter().zip(expected) {
+                if !matches_text(received, expected, TextMatchKind::Exact, ignore_case)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        TextMatchKind::Contains => {
+            let mut index = 0;
+            for expected in expected {
+                loop {
+                    let Some(candidate) = received.get(index) else {
+                        return Ok(false);
+                    };
+                    index += 1;
+                    if matches_text(candidate, expected, TextMatchKind::Contains, ignore_case)? {
+                        break;
+                    }
+                }
+            }
+            Ok(true)
+        }
+    }
+}
+
 fn regex_matches(
     received: &str,
     expected: &LocatorRegex,
@@ -420,6 +456,103 @@ mod tests {
                 source: r"Order \d+".to_string(),
                 flags: String::new()
             }),
+            TextMatchKind::Exact,
+            false,
+        )
+        .unwrap());
+    }
+
+    fn received(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn expected(values: &[&str]) -> Vec<BrowserExpectedText> {
+        values.iter().map(|value| text(value)).collect()
+    }
+
+    #[test]
+    fn have_text_lists_require_the_same_length_and_order() {
+        let actual = received(&["Alpha", "Beta", "Gamma"]);
+        assert!(matches_text_list(
+            &actual,
+            &expected(&["Alpha", "Beta", "Gamma"]),
+            TextMatchKind::Exact,
+            false
+        )
+        .unwrap());
+        assert!(!matches_text_list(
+            &actual,
+            &expected(&["Alpha", "Beta"]),
+            TextMatchKind::Exact,
+            false
+        )
+        .unwrap());
+        assert!(!matches_text_list(
+            &actual,
+            &expected(&["Beta", "Alpha", "Gamma"]),
+            TextMatchKind::Exact,
+            false
+        )
+        .unwrap());
+        assert!(!matches_text_list(
+            &actual,
+            &expected(&["Alph", "Beta", "Gamma"]),
+            TextMatchKind::Exact,
+            false
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn contain_text_lists_are_an_ordered_subset_of_substrings() {
+        let actual = received(&["Alpha one", "Beta two", "Gamma three"]);
+        assert!(matches_text_list(
+            &actual,
+            &expected(&["Beta"]),
+            TextMatchKind::Contains,
+            false
+        )
+        .unwrap());
+        assert!(matches_text_list(
+            &actual,
+            &expected(&["Alpha", "Gamma"]),
+            TextMatchKind::Contains,
+            false
+        )
+        .unwrap());
+        assert!(!matches_text_list(
+            &actual,
+            &expected(&["Gamma", "Alpha"]),
+            TextMatchKind::Contains,
+            false
+        )
+        .unwrap());
+        assert!(!matches_text_list(
+            &actual,
+            &expected(&["Alpha", "Delta"]),
+            TextMatchKind::Contains,
+            false
+        )
+        .unwrap());
+        assert!(
+            matches_text_list(&actual, &expected(&["BETA"]), TextMatchKind::Contains, true)
+                .unwrap()
+        );
+        assert!(matches_text_list(&actual, &[], TextMatchKind::Contains, false).unwrap());
+    }
+
+    #[test]
+    fn text_lists_accept_regex_entries_alongside_plain_strings() {
+        let actual = received(&["Order 42", "Order 7"]);
+        assert!(matches_text_list(
+            &actual,
+            &[
+                BrowserExpectedText::Regex(LocatorRegex {
+                    source: r"^Order \d+$".to_string(),
+                    flags: String::new()
+                }),
+                text("Order 7"),
+            ],
             TextMatchKind::Exact,
             false,
         )

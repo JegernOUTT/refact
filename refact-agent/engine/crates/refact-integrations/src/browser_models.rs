@@ -792,6 +792,29 @@ pub enum BrowserExpectedText {
     Regex(LocatorRegex),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum BrowserExpectedTextOrList {
+    One(BrowserExpectedText),
+    Many(Vec<BrowserExpectedText>),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserPseudoElement {
+    Before,
+    After,
+}
+
+impl BrowserPseudoElement {
+    pub fn selector(self) -> &'static str {
+        match self {
+            Self::Before => "::before",
+            Self::After => "::after",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserPollMatcher {
@@ -823,17 +846,25 @@ pub enum BrowserExpectation {
     ToBeEnabled,
     ToBeDisabled,
     ToBeEditable,
-    ToBeChecked,
+    ToBeChecked {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checked: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        indeterminate: Option<bool>,
+    },
     ToBeFocused,
     ToBeEmpty,
-    ToBeInViewport,
+    ToBeInViewport {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ratio: Option<f64>,
+    },
     ToHaveText {
-        expected: BrowserExpectedText,
+        expected: BrowserExpectedTextOrList,
         #[serde(default)]
         ignore_case: bool,
     },
     ToContainText {
-        expected: BrowserExpectedText,
+        expected: BrowserExpectedTextOrList,
         #[serde(default)]
         ignore_case: bool,
     },
@@ -849,7 +880,8 @@ pub enum BrowserExpectation {
     },
     ToHaveAttribute {
         name: String,
-        expected: BrowserExpectedText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected: Option<BrowserExpectedText>,
         #[serde(default)]
         ignore_case: bool,
     },
@@ -871,6 +903,8 @@ pub enum BrowserExpectation {
         expected: BrowserExpectedText,
         #[serde(default)]
         ignore_case: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pseudo: Option<BrowserPseudoElement>,
     },
     ToHaveId {
         expected: BrowserExpectedText,
@@ -918,10 +952,10 @@ impl BrowserExpectation {
             Self::ToBeEnabled => "to_be_enabled",
             Self::ToBeDisabled => "to_be_disabled",
             Self::ToBeEditable => "to_be_editable",
-            Self::ToBeChecked => "to_be_checked",
+            Self::ToBeChecked { .. } => "to_be_checked",
             Self::ToBeFocused => "to_be_focused",
             Self::ToBeEmpty => "to_be_empty",
-            Self::ToBeInViewport => "to_be_in_viewport",
+            Self::ToBeInViewport { .. } => "to_be_in_viewport",
             Self::ToHaveText { .. } => "to_have_text",
             Self::ToContainText { .. } => "to_contain_text",
             Self::ToHaveValue { .. } => "to_have_value",
@@ -947,7 +981,29 @@ impl BrowserExpectation {
     }
 
     pub fn is_multi_element(&self) -> bool {
-        matches!(self, Self::ToHaveCount { .. } | Self::ToHaveValues { .. })
+        match self {
+            Self::ToHaveCount { .. } | Self::ToHaveValues { .. } => true,
+            Self::ToHaveText { expected, .. } | Self::ToContainText { expected, .. } => {
+                matches!(expected, BrowserExpectedTextOrList::Many(_))
+            }
+            _ => false,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::ToBeChecked {
+                checked: Some(_),
+                indeterminate: Some(true),
+            } => Err(
+                "to_be_checked cannot combine indeterminate: true with a checked expectation"
+                    .to_string(),
+            ),
+            Self::ToBeInViewport { ratio: Some(ratio) } if !(0.0..=1.0).contains(ratio) => Err(
+                format!("to_be_in_viewport ratio must be between 0 and 1, got {ratio}"),
+            ),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -1455,6 +1511,8 @@ pub enum BrowserStep {
         timeout_ms: Option<u64>,
         #[serde(default)]
         soft: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not: Option<bool>,
     },
     ExpectPoll {
         expression: String,
@@ -2887,6 +2945,7 @@ mod tests {
                 matcher: BrowserExpectation::ToBeVisible,
                 timeout_ms: Some(1_000),
                 soft: false,
+                not: None,
             },
             BrowserStep::ExpectPoll {
                 expression: "window.__count".to_string(),

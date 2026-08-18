@@ -273,6 +273,13 @@ mod tests {
     }
 
     #[test]
+    fn injected_bundle_reports_indeterminate_and_viewport_ratio_expectation_values() {
+        assert!(INJECTED_BUNDLE.contains(r#"indeterminate: getCheckedState(element) === "mixed""#));
+        assert!(INJECTED_BUNDLE.contains("viewportRatio: viewportIntersectionRatio(rect"));
+        assert!(INJECTED_BUNDLE.contains("function viewportIntersectionRatio(rect"));
+    }
+
+    #[test]
     fn injected_bundle_contains_aria_snapshot_and_distiller() {
         assert!(INJECTED_BUNDLE.contains("generateAriaTree"));
         assert!(INJECTED_BUNDLE.contains("distillAriaSnapshot"));

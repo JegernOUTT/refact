@@ -148,7 +148,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Motion: capture_frames records a burst and returns ONE composed filmstrip image (up to a 4x6 grid, each cell labelled +NNNms) plus per-frame artifact paths and the percentage of pixels that changed against the previous frame, so animations and transient UI are readable even without looking at pixels. It takes duration_ms (defaults to 1000, capped at 10000) with either frame_count (2-24, defaults to 8) or interval_ms, and scopes to an element with locator or to the whole document with full_page. Out-of-range values are hard errors. screencast_start and screencast_stop bracket a manual session that auto-stops at 30000ms or 60 frames and reports that cap as a warning; screencast_stop composes a filmstrip unless compose=false. The filmstrip is always attached, even when attach_screenshot is false.\n",
     "Touch and low-level keyboard: tap takes either a locator (full actionability and hit-target checks, like click) or x/y coordinates, and requires touch emulation from an earlier set_viewport step with has_touch true. insert_text types into the focused element with one input event and no key events, which suits IME-style entry but skips keyboard shortcuts; it focuses an optional locator first. press_sequentially focuses its locator and then sends real per-character key events with an optional delay_ms (default 0) for inputs driven by keystroke handlers such as autocomplete; prefer fill for ordinary form entry.\n",
     "Forms: fill, clear, select_option, check, uncheck.\n",
-    "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch. ",
+    "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch. Set not=true to invert any matcher: the step retries until the matcher stops matching and a timeout reports the still-matching value. to_have_text and to_contain_text also accept an array of expectations across every match, exact and same-length for to_have_text, an ordered subset for to_contain_text. to_have_attribute without `expected` asserts presence only, to_have_css takes an optional pseudo of before or after, to_be_checked takes checked or indeterminate (never both), and to_be_in_viewport takes an optional ratio between 0 and 1. ",
     "expect_poll evaluates `expression` and retries until the value satisfies `matcher` (equals, contains, gt, lt, matches_regex) against `expected`, reporting attempts and elapsed like expect; it also honours soft.\n",
     "Waiting: wait_for_function is the way to wait on arbitrary app state: it evaluates `expression` until the result is truthy, defaults to 100/250/500/1000ms poll intervals unless `polling_ms` fixes one, and with a `locator` re-resolves the element each retry and passes it as the first argument, so a re-rendered node is tolerated. A thrown expression fails immediately instead of retrying. ",
     "wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text, wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable. Put wait_for_popup immediately before the popup-producing click in ONE batch; the returned popup becomes active for later steps. wait_for_url takes a plain substring in `pattern` and matches when the current URL contains it, unlike the glob/regex `pattern` used by route and wait_for_request. ",
@@ -372,7 +372,7 @@ fn browser_step_schema_with_actions(
             "oneOf": [
                 {
                     "type": "object",
-                    "description": "Expectation matcher. Use type plus expected/name/ignore_case as required. Text expectations accept a string or {source,flags} regex.",
+                    "description": "Expectation matcher. Use type plus expected/name/ignore_case as required. Text expectations accept a string or {source,flags} regex; to_have_text and to_contain_text also accept an array of them.",
                     "required": ["type"],
                     "properties": {
                         "type": {
@@ -390,7 +390,11 @@ fn browser_step_schema_with_actions(
                         },
                         "expected": {},
                         "name": {"type": "string"},
-                        "ignore_case": {"type": "boolean"}
+                        "ignore_case": {"type": "boolean"},
+                        "checked": {"type": "boolean", "description": "to_be_checked expected checked state; defaults to true"},
+                        "indeterminate": {"type": "boolean", "description": "to_be_checked mixed state; cannot be combined with checked"},
+                        "pseudo": {"type": "string", "enum": ["before", "after"], "description": "to_have_css pseudo-element to read the computed style from"},
+                        "ratio": {"type": "number", "minimum": 0, "maximum": 1, "description": "to_be_in_viewport minimum intersection ratio of the element area"}
                     }
                 },
                 {
@@ -418,6 +422,10 @@ fn browser_step_schema_with_actions(
     properties.insert(
         "soft".to_string(),
         serde_json::json!({"type": "boolean", "description": "Record assertion failure and continue the batch"}),
+    );
+    properties.insert(
+        "not".to_string(),
+        serde_json::json!({"type": "boolean", "description": "Invert the expect matcher and retry until it stops matching"}),
     );
     properties.insert(
         "limit".to_string(),
@@ -1299,6 +1307,7 @@ mod tests {
             "modifiers",
             "name",
             "no_wait_after",
+            "not",
             "omit_background",
             "outline",
             "page_ranges",
@@ -1412,6 +1421,18 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap()
             .contains(&Value::String("to_match_aria_snapshot".to_string())));
+        for option in ["checked", "indeterminate", "pseudo", "ratio"] {
+            assert!(
+                matcher[0]
+                    .pointer(&format!("/properties/{option}"))
+                    .is_some(),
+                "missing matcher option {option}"
+            );
+        }
+        assert_eq!(
+            matcher[0].pointer("/properties/pseudo/enum"),
+            Some(&serde_json::json!(["before", "after"]))
+        );
         assert_eq!(
             matcher[1].pointer("/type").and_then(Value::as_str),
             Some("string")

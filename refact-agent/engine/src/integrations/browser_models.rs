@@ -691,6 +691,214 @@ mod tests {
         );
     }
 
+    fn expect_matcher(step: Value) -> BrowserExpectation {
+        let request = parse_browser_action_request(serde_json::json!({"steps": [step]})).unwrap();
+        let BrowserStep::Expect { matcher, .. } = request.steps.into_iter().next().unwrap() else {
+            panic!("expected an expect step");
+        };
+        matcher
+    }
+
+    #[test]
+    fn expect_not_is_optional_and_omitted_from_serialization_when_absent() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "expect", "locator": {"by": "css", "value": "#a"}, "matcher": {"type": "to_be_visible"}},
+                {"action": "expect", "locator": {"by": "css", "value": "#a"}, "matcher": {"type": "to_be_visible"}, "not": true}
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request.steps.as_slice(),
+            [
+                BrowserStep::Expect { not: None, .. },
+                BrowserStep::Expect {
+                    not: Some(true),
+                    ..
+                }
+            ]
+        ));
+        assert_eq!(
+            serde_json::to_value(&request.steps[0]).unwrap(),
+            serde_json::json!({
+                "action": "expect",
+                "locator": {"by": "css", "value": "#a"},
+                "matcher": {"type": "to_be_visible"},
+                "soft": false
+            })
+        );
+    }
+
+    #[test]
+    fn to_be_checked_keeps_its_bare_form_and_gains_checked_and_indeterminate() {
+        assert_eq!(
+            expect_matcher(serde_json::json!({
+                "action": "expect",
+                "locator": {"by": "css", "value": "#a"},
+                "matcher": {"type": "to_be_checked"}
+            })),
+            BrowserExpectation::ToBeChecked {
+                checked: None,
+                indeterminate: None
+            }
+        );
+        assert_eq!(
+            expect_matcher(serde_json::json!({
+                "action": "expect",
+                "locator": {"by": "css", "value": "#a"},
+                "matcher": {"type": "to_be_checked", "indeterminate": true}
+            })),
+            BrowserExpectation::ToBeChecked {
+                checked: None,
+                indeterminate: Some(true)
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(BrowserExpectation::ToBeChecked {
+                checked: None,
+                indeterminate: None
+            })
+            .unwrap(),
+            serde_json::json!({"type": "to_be_checked"})
+        );
+    }
+
+    #[test]
+    fn to_be_checked_rejects_indeterminate_combined_with_a_checked_expectation() {
+        let error = BrowserExpectation::ToBeChecked {
+            checked: Some(true),
+            indeterminate: Some(true),
+        }
+        .validate()
+        .unwrap_err();
+        assert!(error.contains("indeterminate"), "unexpected error: {error}");
+
+        assert!(BrowserExpectation::ToBeChecked {
+            checked: Some(false),
+            indeterminate: Some(false),
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn to_have_css_pseudo_parses_and_maps_to_a_selector() {
+        assert_eq!(
+            expect_matcher(serde_json::json!({
+                "action": "expect",
+                "locator": {"by": "css", "value": "#a"},
+                "matcher": {"type": "to_have_css", "name": "content", "expected": "\"done\"", "pseudo": "before"}
+            })),
+            BrowserExpectation::ToHaveCss {
+                name: "content".to_string(),
+                expected: BrowserExpectedText::Text("\"done\"".to_string()),
+                ignore_case: false,
+                pseudo: Some(BrowserPseudoElement::Before)
+            }
+        );
+        assert_eq!(BrowserPseudoElement::Before.selector(), "::before");
+        assert_eq!(BrowserPseudoElement::After.selector(), "::after");
+
+        let error = parse_browser_action_request(serde_json::json!({
+            "steps": [{
+                "action": "expect",
+                "locator": {"by": "css", "value": "#a"},
+                "matcher": {"type": "to_have_css", "name": "content", "expected": "x", "pseudo": "marker"}
+            }]
+        }))
+        .unwrap_err();
+        assert!(error.contains("marker"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn to_have_attribute_expected_is_optional_for_presence_only_checks() {
+        assert_eq!(
+            expect_matcher(serde_json::json!({
+                "action": "expect",
+                "locator": {"by": "css", "value": "#a"},
+                "matcher": {"type": "to_have_attribute", "name": "disabled"}
+            })),
+            BrowserExpectation::ToHaveAttribute {
+                name: "disabled".to_string(),
+                expected: None,
+                ignore_case: false
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(BrowserExpectation::ToHaveAttribute {
+                name: "disabled".to_string(),
+                expected: None,
+                ignore_case: false
+            })
+            .unwrap(),
+            serde_json::json!({"type": "to_have_attribute", "name": "disabled", "ignore_case": false})
+        );
+    }
+
+    #[test]
+    fn to_be_in_viewport_ratio_parses_and_is_bounded() {
+        assert_eq!(
+            expect_matcher(serde_json::json!({
+                "action": "expect",
+                "locator": {"by": "css", "value": "#a"},
+                "matcher": {"type": "to_be_in_viewport", "ratio": 0.5}
+            })),
+            BrowserExpectation::ToBeInViewport { ratio: Some(0.5) }
+        );
+        assert_eq!(
+            expect_matcher(serde_json::json!({
+                "action": "expect",
+                "locator": {"by": "css", "value": "#a"},
+                "matcher": {"type": "to_be_in_viewport"}
+            })),
+            BrowserExpectation::ToBeInViewport { ratio: None }
+        );
+        assert!(BrowserExpectation::ToBeInViewport { ratio: Some(1.0) }
+            .validate()
+            .is_ok());
+        assert!(BrowserExpectation::ToBeInViewport { ratio: Some(1.5) }
+            .validate()
+            .is_err());
+        assert!(BrowserExpectation::ToBeInViewport { ratio: Some(-0.1) }
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn text_matchers_accept_a_string_a_regex_or_a_list() {
+        assert_eq!(
+            expect_matcher(serde_json::json!({
+                "action": "expect",
+                "locator": {"by": "css", "value": "li"},
+                "matcher": {"type": "to_have_text", "expected": ["One", {"source": "Tw.", "flags": "i"}]}
+            })),
+            BrowserExpectation::ToHaveText {
+                expected: BrowserExpectedTextOrList::Many(vec![
+                    BrowserExpectedText::Text("One".to_string()),
+                    BrowserExpectedText::Regex(LocatorRegex {
+                        source: "Tw.".to_string(),
+                        flags: "i".to_string()
+                    })
+                ]),
+                ignore_case: false
+            }
+        );
+        assert_eq!(
+            expect_matcher(serde_json::json!({
+                "action": "expect",
+                "locator": {"by": "css", "value": "li"},
+                "matcher": {"type": "to_contain_text", "expected": "One"}
+            })),
+            BrowserExpectation::ToContainText {
+                expected: BrowserExpectedTextOrList::One(BrowserExpectedText::Text(
+                    "One".to_string()
+                )),
+                ignore_case: false
+            }
+        );
+    }
+
     #[test]
     fn page_context_defaults_to_snapshot_and_accepts_every_mode() {
         let omitted = parse_browser_action_request(serde_json::json!({"steps": []})).unwrap();
