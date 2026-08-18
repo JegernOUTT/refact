@@ -54,6 +54,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "accname.html",
     "snapshot.html",
     "controlled-input.html",
+    "input-events.html",
     "form-actions.html",
     "iframe-form.html",
     "nested-iframe.html",
@@ -1603,6 +1604,132 @@ async fn keyboard_shortcut_selects_and_deletes_controlled_input() {
         .value
         .unwrap();
     assert_eq!(value, "");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn tap_requires_touch_emulation_then_fires_touch_events() {
+    let Some(mut case) = BrowserCase::start("input-events.html").await else {
+        return;
+    };
+
+    let without_touch = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::Tap {
+            locator: Some(BrowserLocator::css("#tap-target")),
+            x: None,
+            y: None,
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(
+        !without_touch.ok,
+        "tap must require touch: {without_touch:?}"
+    );
+    let error = without_touch.steps[0].error.clone().unwrap();
+    assert!(error.contains("set_viewport"), "unexpected error: {error}");
+    assert!(error.contains("has_touch"), "unexpected error: {error}");
+
+    let with_touch = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[
+            BrowserStep::SetViewport {
+                width: 390,
+                height: 844,
+                device_scale_factor: Some(1.0),
+                is_mobile: Some(true),
+                has_touch: Some(true),
+            },
+            BrowserStep::Tap {
+                locator: Some(BrowserLocator::css("#tap-target")),
+                x: None,
+                y: None,
+            },
+        ],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(with_touch.ok, "tap failed: {with_touch:?}");
+
+    let recorded = case
+        .tab
+        .evaluate("window.recorded.tap.join(',')", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(recorded, json!("touchstart,touchend,click"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn insert_text_produces_input_event_without_key_events() {
+    let Some(case) = BrowserCase::start("input-events.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::InsertText {
+            locator: Some(BrowserLocator::css("#ime")),
+            text: "こんにちは".to_string(),
+        }],
+    );
+    assert!(report.ok, "insert_text failed: {report:?}");
+
+    let recorded = case
+        .tab
+        .evaluate("window.recorded.ime.join(',')", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(recorded, json!("input"));
+
+    let value = case
+        .tab
+        .evaluate("document.querySelector('#ime').value", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(value, json!("こんにちは"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn press_sequentially_triggers_per_character_key_handlers() {
+    let Some(case) = BrowserCase::start("input-events.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::PressSequentially {
+            locator: BrowserLocator::css("#autocomplete"),
+            text: "abc".to_string(),
+            delay_ms: Some(5),
+        }],
+    );
+    assert!(report.ok, "press_sequentially failed: {report:?}");
+
+    let keys = case
+        .tab
+        .evaluate("window.recorded.suggestions.join(',')", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(keys, json!("a,b,c"));
+
+    let suggestions = case
+        .tab
+        .evaluate("document.querySelectorAll('#suggestions li').length", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(suggestions, json!(3));
+
+    let value = case
+        .tab
+        .evaluate("document.querySelector('#autocomplete').value", false)
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(value, json!("abc"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -92,6 +92,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "reset is the escape hatch for sticky plumbing: one call drops every network route, HAR replay, WebSocket route, locator handler, and virtual authenticator, turns offline off, and clears media, viewport, device, geolocation, and permission overrides, reporting what it cleared with counts. It leaves cookies, storage, open tabs, and the current page untouched. ",
     "http_request sends an HTTP call that shares the page's cookie jar in both directions: matching cookies for the target domain and path are attached, and response Set-Cookie headers are written back into the browser, so a logged-in page and the API call see the same session. Send url plus optional method, headers, and exactly one of body, body_json (auto application/json), or form (auto urlencoded); http and https only. Results carry status, final URL after redirects, content-type/content-length (set full_headers=true for every header), and the body inline when it stays under 8KB, otherwise an artifact path. Cookie values are never inlined, only the count and names. Set fail_on_status=true to fail the step on a non-2xx status.\n",
     "Instrumentation: start_coverage and stop_coverage opt into precise JavaScript and CSS usage tracking and return bounded per-URL summaries plus a full JSON artifact. add_virtual_authenticator enables passkey testing and mints the authenticator id it returns, so never send it an id; remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified address that returned id. Credential ids, private keys, user handles, blobs, and user names are redacted from reports.\n",
+    "Touch and low-level keyboard: tap takes either a locator (full actionability and hit-target checks, like click) or x/y coordinates, and requires touch emulation from an earlier set_viewport step with has_touch true. insert_text types into the focused element with one input event and no key events, which suits IME-style entry but skips keyboard shortcuts; it focuses an optional locator first. press_sequentially focuses its locator and then sends real per-character key events with an optional delay_ms (default 0) for inputs driven by keystroke handlers such as autocomplete; prefer fill for ordinary form entry.\n",
     "Forms: fill, clear, select_option, check, uncheck.\n",
     "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch. ",
     "expect_poll evaluates `expression` and retries until the value satisfies `matcher` (equals, contains, gt, lt, matches_regex) against `expected`, reporting attempts and elapsed like expect; it also honours soft.\n",
@@ -269,6 +270,10 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "delay".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 0}),
+    );
+    properties.insert(
+        "delay_ms".to_string(),
         serde_json::json!({"type": "integer", "minimum": 0}),
     );
     properties.insert(

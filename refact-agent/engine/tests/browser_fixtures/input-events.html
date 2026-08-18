@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Input events</title>
+</head>
+<body>
+  <button id="tap-target" style="width:160px;height:60px">Tap me</button>
+  <input id="ime" autocomplete="off">
+  <input id="autocomplete" autocomplete="off">
+  <ul id="suggestions"></ul>
+  <script>
+    window.recorded = { tap: [], ime: [], suggestions: [] };
+    const tapTarget = document.querySelector('#tap-target');
+    for (const type of ['touchstart', 'touchend', 'click']) {
+      tapTarget.addEventListener(type, () => window.recorded.tap.push(type));
+    }
+    const ime = document.querySelector('#ime');
+    for (const type of ['keydown', 'keyup', 'input']) {
+      ime.addEventListener(type, () => window.recorded.ime.push(type));
+    }
+    const suggestions = document.querySelector('#suggestions');
+    document.querySelector('#autocomplete').addEventListener('keydown', event => {
+      window.recorded.suggestions.push(event.key);
+      const item = document.createElement('li');
+      item.textContent = event.key;
+      suggestions.append(item);
+    });
+  </script>
+</body>
+</html>

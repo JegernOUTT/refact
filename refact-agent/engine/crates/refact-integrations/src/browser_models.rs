@@ -1319,6 +1319,14 @@ pub enum BrowserStep {
     ClickIfExists {
         locator: BrowserLocator,
     },
+    Tap {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locator: Option<BrowserLocator>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<f64>,
+    },
     Hover {
         locator: BrowserLocator,
     },
@@ -1335,6 +1343,17 @@ pub enum BrowserStep {
         key: String,
         #[serde(default)]
         modifiers: Vec<String>,
+    },
+    InsertText {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locator: Option<BrowserLocator>,
+        text: String,
+    },
+    PressSequentially {
+        locator: BrowserLocator,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delay_ms: Option<u64>,
     },
     DragAndDrop {
         source: BrowserLocator,
@@ -1729,11 +1748,14 @@ impl BrowserStep {
         "expect_poll",
         "click",
         "click_if_exists",
+        "tap",
         "hover",
         "focus",
         "blur",
         "scroll_to",
         "press_key",
+        "insert_text",
+        "press_sequentially",
         "drag_and_drop",
         "drop_files",
         "mouse_move",
@@ -2474,6 +2496,11 @@ mod tests {
             },
             BrowserStep::Click { locator: locator() },
             BrowserStep::ClickIfExists { locator: locator() },
+            BrowserStep::Tap {
+                locator: Some(locator()),
+                x: None,
+                y: None,
+            },
             BrowserStep::Hover { locator: locator() },
             BrowserStep::Focus { locator: locator() },
             BrowserStep::Blur { locator: locator() },
@@ -2481,6 +2508,15 @@ mod tests {
             BrowserStep::PressKey {
                 key: "Enter".to_string(),
                 modifiers: vec!["Ctrl".to_string()],
+            },
+            BrowserStep::InsertText {
+                locator: Some(locator()),
+                text: "hello".to_string(),
+            },
+            BrowserStep::PressSequentially {
+                locator: locator(),
+                text: "hello".to_string(),
+                delay_ms: Some(10),
             },
             BrowserStep::DragAndDrop {
                 source: locator(),

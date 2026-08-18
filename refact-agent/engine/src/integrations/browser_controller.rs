@@ -44,6 +44,9 @@ const MAX_EXTRACT_TABLE_ROWS: usize = 100;
 const DEFAULT_ARIA_SNAPSHOT_CHARS: usize = 20_000;
 const MAX_ARIA_SNAPSHOT_CHARS: usize = 100_000;
 
+const TAP_AMBIGUOUS_TARGET: &str = "tap requires either a locator or both x and y";
+const TAP_REQUIRES_TOUCH: &str = "The page does not support tap: enable touch emulation first with a set_viewport step that sets has_touch to true";
+
 fn clamp_timeout_ms(requested: Option<u64>) -> u64 {
     requested
         .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS)
@@ -417,6 +420,7 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
         let action_result = match self.action {
             ActionKind::Click => mouse.click(point.x, point.y, MouseButton::Left),
             ActionKind::Hover => mouse.hover(point.x, point.y),
+            ActionKind::Tap => mouse.tap(point.x, point.y),
             _ => unreachable!(),
         };
         let hit_result = hit_target.take_result(self.tab, self.world, token);
@@ -2746,10 +2750,19 @@ fn needs_locator_handler_checkpoint(step: &BrowserStep) -> bool {
         step,
         BrowserStep::Click { .. }
             | BrowserStep::ClickIfExists { .. }
+            | BrowserStep::Tap {
+                locator: Some(_),
+                ..
+            }
             | BrowserStep::Hover { .. }
             | BrowserStep::DragAndDrop { .. }
             | BrowserStep::DropFiles { .. }
             | BrowserStep::Focus { .. }
+            | BrowserStep::InsertText {
+                locator: Some(_),
+                ..
+            }
+            | BrowserStep::PressSequentially { .. }
             | BrowserStep::Blur { .. }
             | BrowserStep::ScrollTo { .. }
             | BrowserStep::Fill { .. }
@@ -3209,6 +3222,18 @@ fn execute_single_step(
             locator_handler_firings,
             image_policy,
         ),
+        BrowserStep::Tap { locator, x, y } => step_tap(
+            tab,
+            world,
+            idx,
+            locator.as_ref(),
+            *x,
+            *y,
+            handlers,
+            locator_handler_firings,
+            image_policy,
+            mouse_state,
+        ),
         BrowserStep::Hover { locator } => step_locator_action(
             tab,
             world,
@@ -3250,6 +3275,31 @@ fn execute_single_step(
             image_policy,
         ),
         BrowserStep::PressKey { key, modifiers } => step_press_key(tab, idx, key, modifiers),
+        BrowserStep::InsertText { locator, text } => step_insert_text(
+            tab,
+            world,
+            idx,
+            locator.as_ref(),
+            text,
+            handlers,
+            locator_handler_firings,
+            image_policy,
+        ),
+        BrowserStep::PressSequentially {
+            locator,
+            text,
+            delay_ms,
+        } => step_press_sequentially(
+            tab,
+            world,
+            idx,
+            locator,
+            text,
+            *delay_ms,
+            handlers,
+            locator_handler_firings,
+            image_policy,
+        ),
         BrowserStep::DragAndDrop {
             source,
             target,
@@ -4252,8 +4302,17 @@ fn uses_actionability_engine(step: &BrowserStep) -> bool {
         step,
         BrowserStep::Click { .. }
             | BrowserStep::ClickIfExists { .. }
+            | BrowserStep::Tap {
+                locator: Some(_),
+                ..
+            }
             | BrowserStep::Hover { .. }
             | BrowserStep::Focus { .. }
+            | BrowserStep::InsertText {
+                locator: Some(_),
+                ..
+            }
+            | BrowserStep::PressSequentially { .. }
             | BrowserStep::ScrollTo { .. }
             | BrowserStep::DragAndDrop { .. }
     )
@@ -4824,6 +4883,7 @@ fn step_locator_action(
     if let Some(action_kind) = match action {
         "click" => Some(ActionKind::Click),
         "hover" => Some(ActionKind::Hover),
+        "tap" => Some(ActionKind::Tap),
         "focus" => Some(ActionKind::Focus),
         "scroll_to" => Some(ActionKind::ScrollIntoViewIfNeeded),
         _ => None,
@@ -5057,6 +5117,176 @@ fn step_press_key(tab: &Tab, idx: usize, key: &str, modifiers: &[String]) -> Ste
             StepResult::success(idx, format!("Pressed {}{}", mod_str, key))
         }
         Err(e) => StepResult::failure(idx, format!("Press key {}", key), e.to_string()),
+    }
+}
+
+enum TapTarget<'a> {
+    Element(&'a BrowserLocator),
+    Point(f64, f64),
+}
+
+fn tap_target(
+    locator: Option<&BrowserLocator>,
+    x: Option<f64>,
+    y: Option<f64>,
+) -> Result<TapTarget<'_>, &'static str> {
+    match (locator, x, y) {
+        (Some(locator), None, None) => Ok(TapTarget::Element(locator)),
+        (None, Some(x), Some(y)) => Ok(TapTarget::Point(x, y)),
+        _ => Err(TAP_AMBIGUOUS_TARGET),
+    }
+}
+
+fn touch_emulation_enabled(tab: &Tab) -> bool {
+    eval_js_value(
+        tab,
+        "navigator.maxTouchPoints > 0 || 'ontouchstart' in window",
+    )
+    .ok()
+    .and_then(|value| value.as_bool())
+    .unwrap_or(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_tap(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: Option<&BrowserLocator>,
+    x: Option<f64>,
+    y: Option<f64>,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+    mouse_state: &mut MouseState,
+) -> StepResult {
+    let target = match tap_target(locator, x, y) {
+        Ok(target) => target,
+        Err(error) => return StepResult::failure(idx, "Tap failed", error),
+    };
+    if !touch_emulation_enabled(tab) {
+        return StepResult::failure(idx, "Tap failed", TAP_REQUIRES_TOUCH);
+    }
+    match target {
+        TapTarget::Element(locator) => step_actionable_action(
+            tab,
+            world,
+            idx,
+            locator,
+            "tap",
+            ActionKind::Tap,
+            handlers,
+            locator_handler_firings,
+            image_policy,
+        ),
+        TapTarget::Point(x, y) => step_mouse(
+            tab,
+            idx,
+            mouse_state,
+            |mouse| mouse.tap(x, y),
+            format!("Tapped at ({x}, {y})"),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn focus_for_keyboard(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    action: &str,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+) -> Option<StepResult> {
+    let result = step_actionable_action(
+        tab,
+        world,
+        idx,
+        locator,
+        action,
+        ActionKind::Focus,
+        handlers,
+        locator_handler_firings,
+        image_policy,
+    );
+    (!result.ok).then_some(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_insert_text(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: Option<&BrowserLocator>,
+    text: &str,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+) -> StepResult {
+    if let Some(locator) = locator {
+        if let Some(failure) = focus_for_keyboard(
+            tab,
+            world,
+            idx,
+            locator,
+            "insert_text",
+            handlers,
+            locator_handler_firings,
+            image_policy,
+        ) {
+            return failure;
+        }
+    }
+    let mut keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
+    match keyboard.insert_text(text) {
+        Ok(()) => StepResult::success(
+            idx,
+            format!("Inserted {} chars without key events", text.chars().count()),
+        ),
+        Err(error) => StepResult::failure(idx, "Insert text failed", error),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_press_sequentially(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    text: &str,
+    delay_ms: Option<u64>,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+) -> StepResult {
+    if let Some(failure) = focus_for_keyboard(
+        tab,
+        world,
+        idx,
+        locator,
+        "press_sequentially",
+        handlers,
+        locator_handler_firings,
+        image_policy,
+    ) {
+        return failure;
+    }
+    let delay = delay_ms
+        .filter(|delay_ms| *delay_ms > 0)
+        .map(Duration::from_millis);
+    let mut keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
+    match keyboard.press_sequentially(text, delay) {
+        Ok(()) => StepResult::success(
+            idx,
+            format!(
+                "Pressed {} chars sequentially into ({})",
+                text.chars().count(),
+                describe_locator(locator)
+            ),
+        ),
+        Err(error) => StepResult::failure(idx, "Press sequentially failed", error),
     }
 }
 
@@ -6614,6 +6844,78 @@ mod tests {
     #[test]
     fn click_if_exists_clicks_actionable_elements() {
         assert_eq!(click_if_exists_skip_reason(&actionable_state()), None);
+    }
+
+    #[test]
+    fn tap_accepts_a_locator_or_a_coordinate_pair_but_never_both_or_neither() {
+        let locator = BrowserLocator::css("#target");
+
+        assert!(matches!(
+            tap_target(Some(&locator), None, None),
+            Ok(TapTarget::Element(_))
+        ));
+        let Ok(TapTarget::Point(x, y)) = tap_target(None, Some(4.0), Some(9.0)) else {
+            panic!("coordinates must resolve to a coordinate tap");
+        };
+        assert_eq!((x, y), (4.0, 9.0));
+
+        for (locator, x, y) in [
+            (Some(&locator), Some(4.0), Some(9.0)),
+            (Some(&locator), Some(4.0), None),
+            (None, Some(4.0), None),
+            (None, None, Some(9.0)),
+            (None, None, None),
+        ] {
+            assert_eq!(tap_target(locator, x, y).err(), Some(TAP_AMBIGUOUS_TARGET));
+        }
+    }
+
+    #[test]
+    fn tap_touch_requirement_names_the_step_and_field_that_enable_it() {
+        assert!(TAP_REQUIRES_TOUCH.contains("set_viewport"));
+        assert!(TAP_REQUIRES_TOUCH.contains("has_touch"));
+    }
+
+    #[test]
+    fn locator_tap_and_keyboard_steps_are_guarded_by_the_actionability_engine() {
+        let locator = || BrowserLocator::css("#target");
+        for step in [
+            BrowserStep::Tap {
+                locator: Some(locator()),
+                x: None,
+                y: None,
+            },
+            BrowserStep::InsertText {
+                locator: Some(locator()),
+                text: "hi".to_string(),
+            },
+            BrowserStep::PressSequentially {
+                locator: locator(),
+                text: "hi".to_string(),
+                delay_ms: None,
+            },
+        ] {
+            assert!(needs_locator_handler_checkpoint(&step), "{step:?}");
+            assert!(uses_actionability_engine(&step), "{step:?}");
+        }
+    }
+
+    #[test]
+    fn coordinate_tap_and_bare_insert_text_skip_locator_handler_checkpoints() {
+        for step in [
+            BrowserStep::Tap {
+                locator: None,
+                x: Some(1.0),
+                y: Some(2.0),
+            },
+            BrowserStep::InsertText {
+                locator: None,
+                text: "hi".to_string(),
+            },
+        ] {
+            assert!(!needs_locator_handler_checkpoint(&step), "{step:?}");
+            assert!(!uses_actionability_engine(&step), "{step:?}");
+        }
     }
 
     #[test]

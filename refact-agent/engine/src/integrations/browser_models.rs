@@ -373,6 +373,67 @@ mod tests {
     }
 
     #[test]
+    fn tap_parses_both_the_locator_and_the_coordinate_shape() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "tap", "locator": {"by": "ref", "value": "e5"}},
+                {"action": "tap", "x": 10.0, "y": 20.0}
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request.steps.as_slice(),
+            [
+                BrowserStep::Tap {
+                    locator: Some(_),
+                    x: None,
+                    y: None
+                },
+                BrowserStep::Tap {
+                    locator: None,
+                    x: Some(_),
+                    y: Some(_)
+                }
+            ]
+        ));
+        assert_eq!(
+            serde_json::to_value(&request.steps[1]).unwrap(),
+            serde_json::json!({"action": "tap", "x": 10.0, "y": 20.0})
+        );
+    }
+
+    #[test]
+    fn insert_text_locator_is_optional_and_press_sequentially_requires_one() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [
+                {"action": "insert_text", "text": "hi"},
+                {"action": "press_sequentially", "locator": {"by": "css", "value": "#q"}, "text": "hi"}
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request.steps.as_slice(),
+            [
+                BrowserStep::InsertText { locator: None, .. },
+                BrowserStep::PressSequentially { delay_ms: None, .. }
+            ]
+        ));
+
+        let error = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "press_sequentially", "text": "hi"}]
+        }))
+        .unwrap_err();
+
+        assert!(
+            error.starts_with("step[0] (press_sequentially): "),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("locator"), "unexpected error: {error}");
+    }
+
+    #[test]
     fn http_request_defaults_to_a_bare_get_and_keeps_its_optional_fields() {
         let request = parse_browser_action_request(serde_json::json!({
             "steps": [{"action": "http_request", "url": "https://example.com/api/session"}]
