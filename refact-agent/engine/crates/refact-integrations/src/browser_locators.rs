@@ -1,4 +1,4 @@
-use crate::browser_models::{BrowserTextMode, ElementInfo, FieldKind};
+use crate::browser_models::{BrowserTextMode, ElementInfo};
 
 pub const INSPECT_ELEMENT_JS: &str = r#"
 if (!window.__refact_inspect_element) {
@@ -52,34 +52,6 @@ pub fn parse_element_info(json_str: &str) -> Result<ElementInfo, String> {
     }
 
     serde_json::from_value(value).map_err(|e| format!("Failed to parse ElementInfo: {}", e))
-}
-
-#[allow(dead_code)]
-pub fn detect_field_kind(tag: &str, input_type: Option<&str>, content_editable: bool) -> FieldKind {
-    let tag_lower = tag.to_lowercase();
-    if content_editable {
-        return FieldKind::ContentEditable;
-    }
-    match tag_lower.as_str() {
-        "textarea" => FieldKind::Textarea,
-        "select" => FieldKind::Select,
-        "input" => match input_type.unwrap_or("text") {
-            "text" => FieldKind::TextInput,
-            "password" => FieldKind::PasswordInput,
-            "email" => FieldKind::EmailInput,
-            "search" => FieldKind::SearchInput,
-            "number" => FieldKind::NumberInput,
-            "tel" => FieldKind::TelInput,
-            "url" => FieldKind::UrlInput,
-            "date" | "datetime-local" | "month" | "week" | "time" => FieldKind::DateInput,
-            "file" => FieldKind::FileInput,
-            "hidden" => FieldKind::HiddenInput,
-            "checkbox" => FieldKind::Checkbox,
-            "radio" => FieldKind::Radio,
-            _ => FieldKind::TextInput,
-        },
-        _ => FieldKind::Unknown,
-    }
 }
 
 pub fn js_click_element() -> &'static str {
@@ -340,62 +312,6 @@ pub fn js_check_text_present(text: &str) -> String {
     )
 }
 
-#[allow(dead_code)]
-pub fn js_detect_blocked_page() -> &'static str {
-    r#"(function() {
-  var body = document.body ? (document.body.innerText || '').toLowerCase() : '';
-  var title = (document.title || '').toLowerCase();
-  var status = body.substring(0, 2000);
-  var reasons = [];
-  if (/access denied|403 forbidden|error 403/i.test(status)) reasons.push('403_forbidden');
-  if (/you have been blocked|your ip has been/i.test(status)) reasons.push('ip_blocked');
-  if (/please enable javascript|javascript is required/i.test(status)) reasons.push('js_required');
-  if (/unusual traffic|automated queries/i.test(status)) reasons.push('bot_detection');
-  if (/too many requests|rate limit/i.test(status)) reasons.push('rate_limited');
-  if (title.includes('just a moment') || title.includes('attention required')) reasons.push('cloudflare_challenge');
-  if (document.querySelector('#challenge-running, #challenge-form, .cf-browser-verification')) reasons.push('cloudflare_challenge');
-  if (document.querySelector('[action*="captcha"], #captcha, .g-recaptcha, .h-captcha, [data-sitekey]')) reasons.push('captcha_present');
-  return JSON.stringify({ok: true, blocked: reasons.length > 0, reasons: reasons});
-})()"#
-}
-
-#[allow(dead_code)]
-pub fn js_detect_captcha() -> &'static str {
-    r#"(function() {
-  var types = [];
-  if (document.querySelector('.g-recaptcha, [data-sitekey], iframe[src*="recaptcha"]')) types.push('recaptcha');
-  if (document.querySelector('.h-captcha, iframe[src*="hcaptcha"]')) types.push('hcaptcha');
-  if (document.querySelector('[id*="captcha"], [class*="captcha"]')) types.push('generic_captcha');
-  if (document.querySelector('#cf-challenge-running, .cf-browser-verification')) types.push('cloudflare');
-  if (document.querySelector('[id*="arkose"], iframe[src*="arkoselabs"]')) types.push('arkose');
-  return JSON.stringify({ok: true, captcha: types.length > 0, types: types});
-})()"#
-}
-
-#[allow(dead_code)]
-pub fn js_find_search_input() -> &'static str {
-    r#"(function() {
-  var candidates = [
-    document.querySelector('input[name="q"]'),
-    document.querySelector('input[name="search"]'),
-    document.querySelector('input[name="query"]'),
-    document.querySelector('input[type="search"]'),
-    document.querySelector('textarea[name="q"]'),
-    document.querySelector('[role="searchbox"]'),
-    document.querySelector('[role="combobox"][aria-label]'),
-    document.querySelector('input[aria-label*="earch"]'),
-  ];
-  for (var i = 0; i < candidates.length; i++) {
-    var el = candidates[i];
-    if (el && el.offsetWidth > 0 && el.offsetHeight > 0) {
-      var sel = el.id ? '#' + el.id : (el.name ? '[name="' + el.name + '"]' : el.tagName.toLowerCase());
-      return JSON.stringify({ok: true, found: true, selector: sel, name: el.name || '', tag: el.tagName.toLowerCase()});
-    }
-  }
-  return JSON.stringify({ok: true, found: false});
-})()"#
-}
-
 pub fn js_string_literal(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 8);
     result.push('\'');
@@ -417,6 +333,7 @@ pub fn js_string_literal(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser_models::FieldKind;
 
     #[test]
     fn test_js_string_literal_simple() {
@@ -477,80 +394,6 @@ mod tests {
     fn test_parse_element_info_invalid_json() {
         let result = parse_element_info("not json");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_detect_field_kind_text_input() {
-        assert_eq!(
-            detect_field_kind("input", Some("text"), false),
-            FieldKind::TextInput
-        );
-    }
-
-    #[test]
-    fn test_detect_field_kind_password() {
-        assert_eq!(
-            detect_field_kind("input", Some("password"), false),
-            FieldKind::PasswordInput
-        );
-    }
-
-    #[test]
-    fn test_detect_field_kind_email() {
-        assert_eq!(
-            detect_field_kind("input", Some("email"), false),
-            FieldKind::EmailInput
-        );
-    }
-
-    #[test]
-    fn test_detect_field_kind_search() {
-        assert_eq!(
-            detect_field_kind("input", Some("search"), false),
-            FieldKind::SearchInput
-        );
-    }
-
-    #[test]
-    fn test_detect_field_kind_textarea() {
-        assert_eq!(
-            detect_field_kind("textarea", None, false),
-            FieldKind::Textarea
-        );
-    }
-
-    #[test]
-    fn test_detect_field_kind_select() {
-        assert_eq!(detect_field_kind("select", None, false), FieldKind::Select);
-    }
-
-    #[test]
-    fn test_detect_field_kind_content_editable() {
-        assert_eq!(
-            detect_field_kind("div", None, true),
-            FieldKind::ContentEditable
-        );
-    }
-
-    #[test]
-    fn test_detect_field_kind_checkbox() {
-        assert_eq!(
-            detect_field_kind("input", Some("checkbox"), false),
-            FieldKind::Checkbox
-        );
-    }
-
-    #[test]
-    fn test_detect_field_kind_input_default_type() {
-        assert_eq!(
-            detect_field_kind("input", None, false),
-            FieldKind::TextInput
-        );
-    }
-
-    #[test]
-    fn test_detect_field_kind_unknown_tag() {
-        assert_eq!(detect_field_kind("span", None, false), FieldKind::Unknown);
     }
 
     #[test]
@@ -629,34 +472,5 @@ mod tests {
         let js = js_get_attribute("href");
         assert!(js.contains("getAttribute"));
         assert!(js.contains("href"));
-    }
-
-    #[test]
-    fn test_js_detect_blocked_page_valid_js() {
-        let js = js_detect_blocked_page();
-        assert!(js.starts_with("(function()"));
-        assert!(js.contains("403"));
-        assert!(js.contains("cloudflare"));
-        assert!(js.contains("captcha"));
-        assert!(js.contains("JSON.stringify"));
-    }
-
-    #[test]
-    fn test_js_detect_captcha_valid_js() {
-        let js = js_detect_captcha();
-        assert!(js.starts_with("(function()"));
-        assert!(js.contains("recaptcha"));
-        assert!(js.contains("hcaptcha"));
-        assert!(js.contains("cloudflare"));
-        assert!(js.contains("arkose"));
-    }
-
-    #[test]
-    fn test_js_find_search_input_valid_js() {
-        let js = js_find_search_input();
-        assert!(js.starts_with("(function()"));
-        assert!(js.contains("name=\"q\""));
-        assert!(js.contains("type=\"search\""));
-        assert!(js.contains("searchbox"));
     }
 }

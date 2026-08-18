@@ -1,14 +1,7 @@
-use std::ffi::OsString;
-use std::path::{Component, Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
-use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{header, Response, StatusCode};
-use axum::response::IntoResponse;
-use axum::routing::get;
-use axum::Router;
 use headless_chrome::protocol::cdp::{Page, Runtime};
 use headless_chrome::Tab;
 use refact_core::image_policy::ImagePolicy;
@@ -22,141 +15,15 @@ use refact_lsp::integrations::browser_models::{
     FillStrategy, HarContentPolicy, HarMode, HarNotFound, NetworkReportMode, SessionPolicy,
     TabTarget, UrlPattern, WebSocketEventKind, WebSocketMessageAction, WebSocketRouteMode,
 };
-use refact_lsp::refact_browser::{
-    setup_recording_for_tab, BrowserLaunchOptions, BrowserRuntime, UTILITY_WORLD_NAME,
-};
+use refact_lsp::refact_browser::{setup_recording_for_tab, BrowserRuntime, UTILITY_WORLD_NAME};
 use refact_lsp::refact_integrations::browser_types::RecorderEvent;
-use serde::Deserialize;
 use serde_json::{json, Value};
 
-fn e2e_launch_options(chrome_path: Option<PathBuf>) -> BrowserLaunchOptions {
-    BrowserLaunchOptions {
-        headless: true,
-        chrome_path,
-        idle_timeout: Some(Duration::from_secs(120)),
-        ..BrowserLaunchOptions::default()
-    }
-}
+mod browser_common;
+
+use browser_common::{discover_chrome, e2e_enabled, e2e_launch_options, print_skip, FixtureServer};
+
 use tempfile::{tempdir, TempDir};
-
-fn find_executable(name: &FsPath, path: Option<&OsString>) -> Option<PathBuf> {
-    if name.components().count() > 1 || name.is_absolute() {
-        return name.is_file().then(|| name.to_path_buf());
-    }
-    path.and_then(|value| {
-        std::env::split_paths(value)
-            .map(|directory| directory.join(name))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-fn discover_chrome() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("CHROME")
-        .and_then(|name| find_executable(FsPath::new(&name), std::env::var_os("PATH").as_ref()))
-    {
-        return Some(path);
-    }
-    ["chrome", "chromium", "google-chrome", "chromium-browser"]
-        .iter()
-        .find_map(|name| find_executable(FsPath::new(name), std::env::var_os("PATH").as_ref()))
-}
-
-fn e2e_enabled() -> bool {
-    std::env::var("REFACT_BROWSER_E2E").as_deref() == Ok("1") && discover_chrome().is_some()
-}
-
-fn print_skip() {
-    eprintln!(
-        "skipped: set REFACT_BROWSER_E2E=1 and install Chrome, Chromium, google-chrome, or chromium-browser"
-    );
-}
-
-#[derive(Deserialize)]
-struct SlowEchoQuery {
-    ms: Option<u64>,
-}
-
-async fn slow_echo(Query(query): Query<SlowEchoQuery>) -> impl IntoResponse {
-    let delay_ms = query.ms.unwrap_or(0).min(5_000);
-    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-    axum::Json(json!({"echo": "ok", "delay_ms": delay_ms}))
-}
-
-fn fixture_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/browser_fixtures")
-}
-
-fn content_type(path: &FsPath) -> &'static str {
-    match path.extension().and_then(|extension| extension.to_str()) {
-        Some("html") => "text/html; charset=utf-8",
-        _ => "application/octet-stream",
-    }
-}
-
-async fn static_fixture(
-    State(root): State<PathBuf>,
-    AxumPath(path): AxumPath<String>,
-) -> Response<Body> {
-    let relative = FsPath::new(&path);
-    if relative
-        .components()
-        .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Body::empty())
-            .unwrap();
-    }
-    let file = root.join(relative);
-    match tokio::fs::read(&file).await {
-        Ok(bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, content_type(&file))
-            .body(Body::from(bytes))
-            .unwrap(),
-        Err(_) => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::empty())
-            .unwrap(),
-    }
-}
-
-struct FixtureServer {
-    base_url: String,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl FixtureServer {
-    async fn start() -> Self {
-        let app = Router::new()
-            .route("/slow-echo", get(slow_echo))
-            .route("/*path", get(static_fixture))
-            .with_state(fixture_root());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let listener = listener.into_std().unwrap();
-        let server = axum::Server::from_tcp(listener)
-            .unwrap()
-            .serve(app.into_make_service());
-        let task = tokio::spawn(async move {
-            let _ = server.await;
-        });
-        Self {
-            base_url: format!("http://{address}"),
-            task,
-        }
-    }
-
-    fn url(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
-    }
-}
-
-impl Drop for FixtureServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
 
 #[test]
 fn websocket_inspection_and_har_replay_contracts_are_additive_and_masked() {
@@ -230,7 +97,7 @@ impl BrowserCase {
             print_skip();
             return None;
         }
-        let server = FixtureServer::start().await;
+        let server = FixtureServer::start().await.unwrap();
         let profile = tempdir().unwrap();
         let mut runtime = BrowserRuntime::launch(
             profile.path().to_path_buf(),
@@ -253,7 +120,7 @@ impl BrowserCase {
         let chrome = discover_chrome().expect(
             "install Chrome, Chromium, google-chrome, or chromium-browser to run this test",
         );
-        let server = FixtureServer::start().await;
+        let server = FixtureServer::start().await.unwrap();
         let profile = tempdir().unwrap();
         let mut runtime = BrowserRuntime::launch(
             profile.path().to_path_buf(),

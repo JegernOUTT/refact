@@ -520,6 +520,30 @@ impl std::ops::DerefMut for BrowserRuntime {
     }
 }
 
+pub fn chrome_launch_options<'a>(
+    options: &'a BrowserLaunchOptions,
+    profile_dir: &std::path::Path,
+    args: &'a [std::ffi::OsString],
+    ignored_default_args: &'a [std::ffi::OsString],
+) -> headless_chrome::LaunchOptions<'a> {
+    headless_chrome::LaunchOptions {
+        headless: options.headless,
+        sandbox: options.chromium_sandbox,
+        ignore_certificate_errors: options.ignore_https_errors,
+        window_size: options.window_size(),
+        idle_browser_timeout: options.transport_read_timeout(),
+        user_data_dir: Some(profile_dir.to_path_buf()),
+        path: options.chrome_path.clone(),
+        proxy_server: options.proxy.as_ref().map(|proxy| proxy.server.as_str()),
+        args: args.iter().map(std::ffi::OsString::as_os_str).collect(),
+        ignore_default_args: ignored_default_args
+            .iter()
+            .map(std::ffi::OsString::as_os_str)
+            .collect(),
+        ..Default::default()
+    }
+}
+
 impl BrowserRuntime {
     pub fn launch(profile_dir: PathBuf, options: BrowserLaunchOptions) -> Result<Self, String> {
         std::fs::create_dir_all(&profile_dir)
@@ -530,22 +554,8 @@ impl BrowserRuntime {
         let ignored_default_args = options.ignored_default_args();
         let mask_passwords = options.mask_passwords;
 
-        let launch_options = headless_chrome::LaunchOptions {
-            headless: options.headless,
-            sandbox: options.chromium_sandbox,
-            ignore_certificate_errors: options.ignore_https_errors,
-            window_size: options.window_size(),
-            idle_browser_timeout: options.transport_read_timeout(),
-            user_data_dir: Some(profile_dir.clone()),
-            path: options.chrome_path.clone(),
-            proxy_server: options.proxy.as_ref().map(|proxy| proxy.server.as_str()),
-            args: args.iter().map(std::ffi::OsString::as_os_str).collect(),
-            ignore_default_args: ignored_default_args
-                .iter()
-                .map(std::ffi::OsString::as_os_str)
-                .collect(),
-            ..Default::default()
-        };
+        let launch_options =
+            chrome_launch_options(&options, &profile_dir, &args, &ignored_default_args);
 
         let browser = Browser::new(launch_options).map_err(|e| e.to_string())?;
         let runtime_id = Uuid::new_v4().to_string();
@@ -1881,36 +1891,38 @@ mod tests {
 
     #[test]
     fn transport_read_timeout_is_not_wired_to_the_idle_eviction_knob() {
-        let source = include_str!("lib.rs");
-        let launch = source
-            .split_once("pub fn launch(profile_dir: PathBuf, options: BrowserLaunchOptions)")
-            .unwrap()
-            .1
-            .split_once("pub fn connect(")
-            .unwrap()
-            .0;
-        let connect = source
-            .split_once("pub fn connect(ws_url: String, options: BrowserLaunchOptions)")
-            .unwrap()
-            .1
-            .split_once("pub fn mask_passwords(")
-            .unwrap()
-            .0;
-        let shared_knob = concat!("idle_browser_timeout: ", "idle_timeout");
+        let profile_dir = std::path::Path::new("/tmp/refact-browser-launch-options");
+        for idle_timeout in [
+            None,
+            Some(Duration::from_secs(5)),
+            Some(Duration::from_secs(7_200)),
+        ] {
+            let options = BrowserLaunchOptions {
+                headless: true,
+                idle_timeout,
+                ..BrowserLaunchOptions::default()
+            };
+            assert_ne!(
+                options.transport_read_timeout(),
+                options.idle_timeout_or_default(),
+                "transport read timeout collapsed onto the idle eviction knob for {idle_timeout:?}"
+            );
 
-        assert!(launch.contains("idle_browser_timeout: options.transport_read_timeout()"));
-        assert!(!launch.contains(shared_knob));
-        assert!(connect
-            .contains("connect_with_timeout(ws_url.clone(), options.transport_read_timeout())"));
-        assert!(!connect.contains("connect_with_timeout(ws_url.clone(), idle_timeout)"));
-        assert!(
-            launch.contains("idle_timeout,"),
-            "runtime keeps its own eviction knob"
-        );
-        assert!(
-            connect.contains("idle_timeout,"),
-            "runtime keeps its own eviction knob"
-        );
+            let args = options.chrome_args();
+            let ignored_default_args = options.ignored_default_args();
+            let launch = chrome_launch_options(&options, profile_dir, &args, &ignored_default_args);
+
+            assert_eq!(
+                launch.idle_browser_timeout,
+                options.transport_read_timeout()
+            );
+            assert_ne!(
+                launch.idle_browser_timeout,
+                options.idle_timeout_or_default()
+            );
+            assert_eq!(launch.user_data_dir.as_deref(), Some(profile_dir));
+            assert!(launch.headless);
+        }
     }
 
     #[test]

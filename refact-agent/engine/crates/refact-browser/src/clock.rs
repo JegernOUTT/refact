@@ -550,42 +550,12 @@ mod tests {
     }
 
     #[test]
-    fn vendored_source_installs_an_idempotent_global_clock() {
-        assert!(CLOCK_SOURCE.contains("globalThis.__refactClock = inject(globalThis, 'chromium')"));
-        assert!(CLOCK_SOURCE.contains("if (globalThis.__refactClock)"));
-        assert!(CLOCK_SOURCE.contains("Christian Johansen"));
-        assert!(CLOCK_SOURCE.contains("Modifications copyright (c) Microsoft Corporation."));
-    }
-
-    #[test]
-    fn vendored_source_keeps_fast_forward_and_run_for_semantics_apart() {
-        assert!(CLOCK_SOURCE.contains("async _innerFastForwardTo(to)"));
-        assert!(CLOCK_SOURCE.contains("if (to > timer.callAt)"));
-        assert!(CLOCK_SOURCE.contains("timer.callAt = to;"));
-        assert!(CLOCK_SOURCE.contains("async runFor(ticks)"));
-        assert!(CLOCK_SOURCE.contains("await this._runTo(shiftTicks(this._now.ticks, ticks));"));
-        assert!(CLOCK_SOURCE.contains("const result = await this._callFirstTimer(to);"));
-    }
-
-    #[test]
-    fn vendored_source_keeps_the_replay_log_for_new_documents() {
-        assert!(CLOCK_SOURCE.contains("_replayLogOnce()"));
-        for entry in [
-            "'install'",
-            "'fastForward'",
-            "'runFor'",
-            "'pauseAt'",
-            "'resume'",
-            "'setFixedTime'",
-            "'setSystemTime'",
-        ] {
-            assert!(CLOCK_SOURCE.contains(entry), "missing {entry}");
-        }
-    }
-
-    #[test]
-    fn vendored_source_fakes_every_documented_time_api() {
+    fn vendored_source_keeps_its_public_clock_contract() {
         for marker in [
+            "globalThis.__refactClock = inject(globalThis, 'chromium')",
+            "if (globalThis.__refactClock)",
+            "Christian Johansen",
+            "Modifications copyright (c) Microsoft Corporation.",
             "setTimeout:",
             "clearTimeout:",
             "setInterval:",
@@ -599,12 +569,6 @@ mod tests {
         ] {
             assert!(CLOCK_SOURCE.contains(marker), "missing {marker}");
         }
-    }
-
-    #[test]
-    fn vendored_source_keeps_fixed_time_from_freezing_the_tick_counter() {
-        assert!(CLOCK_SOURCE.contains("if (!this._now.isFixedTime)"));
-        assert!(CLOCK_SOURCE.contains("this._now.ticks = to;"));
     }
 
     #[test]

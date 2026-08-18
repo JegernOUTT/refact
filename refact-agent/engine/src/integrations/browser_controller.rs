@@ -86,7 +86,6 @@ const CONSOLE_POLL_INTERVAL_MS: u64 = 50;
 const VISIBLE_BOUNDING_BOX_JS: &str =
     "function() { const r = this.getBoundingClientRect(); return r.width > 0 && r.height > 0; }";
 
-#[allow(dead_code)]
 pub fn resolve_tab(runtime: &BrowserRuntime, target: &TabTarget) -> Result<Arc<Tab>, String> {
     match target {
         TabTarget::Active => runtime

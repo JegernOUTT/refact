@@ -1,7 +1,9 @@
-name: Refact Browser E2E
+name: Browser E2E
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
   pull_request:
     types: [opened, synchronize, reopened, labeled]
 
@@ -22,8 +24,30 @@ env:
   RUSTUP_MAX_RETRIES: 10
 
 jobs:
+  injected-bundle-freshness:
+    name: Injected bundle freshness
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Rebuild the injected bundle
+        run: bash tools/dev/build_injected.sh
+
+      - name: Fail when the checked-in bundle drifted from refactInjected.ts
+        run: git diff --exit-code refact-agent/engine/crates/refact-browser/src/generated/injected_bundle.js
+
   browser-e2e:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'browser-e2e')
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'browser-e2e')
     name: Browser E2E (Linux x86_64)
     runs-on: ubuntu-latest
     timeout-minutes: 45

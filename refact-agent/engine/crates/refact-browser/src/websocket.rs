@@ -1141,8 +1141,13 @@ mod tests {
             .split("this.server.onclose = event => {")
             .nth(1)
             .unwrap();
-        assert!(
-            handler.starts_with("\n        if (this.readyState === 3) return;"),
+        let first_statement = handler
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap();
+        assert_eq!(
+            first_statement, "if (this.readyState === 3) return;",
             "a simulated close must not be overwritten by the upstream close event: {handler}"
         );
     }
