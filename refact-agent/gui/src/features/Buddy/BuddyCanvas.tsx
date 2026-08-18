@@ -239,7 +239,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
       }
 
       const canvas = canvasRef.current;
-      const ctx = canvas?.getContext("2d");
+      const ctx = canvas?.getContext("2d", { willReadFrequently: true });
       if (canvas && ctx) {
         const pixelRatio = Math.min(
           2,

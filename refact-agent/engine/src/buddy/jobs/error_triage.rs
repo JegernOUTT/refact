@@ -89,6 +89,7 @@ mod tests {
                 model_id: None,
                 collected_at: chrono::Utc::now().to_rfc3339(),
                 severity: DiagnosticSeverity::High,
+                occurrences: None,
             })
             .collect()
     }

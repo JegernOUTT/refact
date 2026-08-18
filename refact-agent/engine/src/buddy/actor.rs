@@ -44,7 +44,7 @@ const OBSERVER_CONCURRENCY: usize = 4;
 const MEMORY_OPS_ARCHIVE_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
 const MEMORY_OPS_COMPACT_INTERVAL_SECS: u64 = 6 * 60 * 60;
 const MEMORY_OPS_DRAIN_INTERVAL_SECS: u64 = 600;
-const MEMORY_OPS_DRAIN_MAX_APPLIES: usize = 25;
+const MEMORY_OPS_DRAIN_MAX_APPLIES: usize = 200;
 const BUDDY_SPEECH_MAX_CHARS: usize = 280;
 const BUDDY_TITLE_MAX_CHARS: usize = 120;
 const BUDDY_DESCRIPTION_MAX_CHARS: usize = 500;
@@ -1520,7 +1520,6 @@ impl BuddyService {
             .recent_diagnostics
             .iter()
             .rev()
-            .take(20)
             .any(|existing| super::diagnostics::diagnostic_signature(existing) == signature);
         if duplicate {
             self.enqueue_diagnostic_runtime_event(&ctx);
@@ -1715,6 +1714,7 @@ impl BuddyService {
             model_id: model_id.map(|s| s.to_string()),
             collected_at: Utc::now().to_rfc3339(),
             severity,
+            occurrences: None,
         };
         self.add_diagnostic(ctx);
         let redacted = redact_sensitive(error_msg);

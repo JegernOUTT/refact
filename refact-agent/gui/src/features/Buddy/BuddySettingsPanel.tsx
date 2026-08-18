@@ -35,19 +35,8 @@ import type {
   HumorLevel,
   QuietHoursMode,
 } from "./types";
+import { formatCompactNumber, formatTimestamp } from "./buddyUtils";
 import styles from "./BuddySettingsPanel.module.css";
-
-function formatCount(value: number | undefined): string {
-  const count = value ?? 0;
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
-  return String(count);
-}
-
-function formatWhen(value: string | null | undefined): string {
-  if (!value) return "—";
-  return value.slice(0, 16).replace("T", " ");
-}
 
 function totalTokens(row: BuddyWorkflowSummary): number {
   return (row.tokens_in ?? 0) + (row.tokens_out ?? 0);
@@ -63,42 +52,42 @@ const TELEMETRY_COLUMNS: DataTableColumn<BuddyWorkflowSummary>[] = [
   {
     id: "runs",
     header: "Runs",
-    cell: (row) => formatCount(row.run_count),
+    cell: (row) => formatCompactNumber(row.run_count ?? 0),
     sortValue: (row) => row.run_count,
     align: "end",
   },
   {
     id: "llm_calls",
     header: "LLM calls",
-    cell: (row) => formatCount(row.llm_calls),
+    cell: (row) => formatCompactNumber(row.llm_calls ?? 0),
     sortValue: (row) => row.llm_calls ?? 0,
     align: "end",
   },
   {
     id: "tokens_in",
     header: "Tokens in",
-    cell: (row) => formatCount(row.tokens_in),
+    cell: (row) => formatCompactNumber(row.tokens_in ?? 0),
     sortValue: (row) => row.tokens_in ?? 0,
     align: "end",
   },
   {
     id: "tokens_out",
     header: "Tokens out",
-    cell: (row) => formatCount(row.tokens_out),
+    cell: (row) => formatCompactNumber(row.tokens_out ?? 0),
     sortValue: (row) => row.tokens_out ?? 0,
     align: "end",
   },
   {
     id: "outputs",
     header: "Outputs",
-    cell: (row) => formatCount(row.outputs),
+    cell: (row) => formatCompactNumber(row.outputs ?? 0),
     sortValue: (row) => row.outputs ?? 0,
     align: "end",
   },
   {
     id: "last_output",
     header: "Last output",
-    cell: (row) => formatWhen(row.last_output_at),
+    cell: (row) => formatTimestamp(row.last_output_at),
     sortValue: (row) => row.last_output_at ?? "",
     align: "end",
   },
@@ -748,8 +737,13 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
             </Text>
           ) : (
             <div className={styles.observersGrid}>
-              {speechDecisions.map((decision, idx) => (
-                <div key={`${decision.at}-${idx}`} className={styles.toggleRow}>
+              {speechDecisions.map((decision) => (
+                <div
+                  key={`${decision.at}-${decision.intent ?? ""}-${
+                    decision.reason
+                  }-${decision.source}-${decision.preview}`}
+                  className={styles.toggleRow}
+                >
                   <Text size="1" className={styles.toggleLabel}>
                     {decision.allowed ? "✓" : "✕"} [{decision.reason}]
                     {decision.intent ? ` ${decision.intent}:` : ""}{" "}

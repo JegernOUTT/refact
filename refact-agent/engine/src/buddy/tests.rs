@@ -1167,6 +1167,7 @@ fn make_issue_ctx(message: &str) -> DiagnosticContext {
         model_id: None,
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity: DiagnosticSeverity::High,
+        occurrences: None,
     }
 }
 
@@ -1539,6 +1540,7 @@ async fn test_diagnostic_cap() {
             model_id: None,
             collected_at: chrono::Utc::now().to_rfc3339(),
             severity: DiagnosticSeverity::Low,
+            occurrences: None,
         };
         svc.add_diagnostic(ctx);
     }
@@ -1560,6 +1562,7 @@ async fn test_diagnostic_history_persists_and_loads() {
         model_id: None,
         collected_at: "2026-04-27T10:00:00Z".to_string(),
         severity: DiagnosticSeverity::High,
+        occurrences: None,
     };
     let ctx2 = DiagnosticContext {
         error_type: "test".to_string(),
@@ -1570,6 +1573,7 @@ async fn test_diagnostic_history_persists_and_loads() {
         model_id: None,
         collected_at: "2026-04-27T10:01:00Z".to_string(),
         severity: DiagnosticSeverity::Low,
+        occurrences: None,
     };
 
     super::storage::append_diagnostic(root, &ctx1)
@@ -2009,6 +2013,7 @@ fn make_job_context(
             model_id: None,
             collected_at: chrono::Utc::now().to_rfc3339(),
             severity: DiagnosticSeverity::High,
+            occurrences: None,
         });
     }
     BuddyJobContext {
@@ -2432,6 +2437,7 @@ async fn diagnostic_metadata_is_redacted_before_storage() {
         model_id: None,
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity: DiagnosticSeverity::High,
+        occurrences: None,
     });
 
     let stored = svc.recent_diagnostics.first().unwrap();
@@ -2454,6 +2460,7 @@ async fn duplicate_diagnostic_coalesces_without_history_spam() {
         model_id: None,
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity: DiagnosticSeverity::High,
+        occurrences: None,
     };
     let mut later = ctx.clone();
     later.collected_at = (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
@@ -5031,6 +5038,7 @@ fn diagnostic_cluster_threshold() {
             model_id: None,
             collected_at: ts.clone(),
             severity: DiagnosticSeverity::High,
+            occurrences: None,
         })
         .collect();
     let facts = detect_diagnostic_cluster_facts(&diags, now);
@@ -5057,6 +5065,7 @@ fn frontend_error_burst() {
             model_id: None,
             collected_at: ts.clone(),
             severity: DiagnosticSeverity::Medium,
+            occurrences: None,
         })
         .collect();
     let facts = detect_diagnostic_cluster_facts(&diags, now);
@@ -10454,6 +10463,7 @@ async fn investigation_enrich_context_resolves_diagnostic_ids() {
         model_id: None,
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity: DiagnosticSeverity::High,
+        occurrences: None,
     };
     let id = diagnostic_id(&diag);
     let mut svc = make_service();

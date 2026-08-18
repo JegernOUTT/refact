@@ -104,8 +104,14 @@ export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
       {pet && (
         <>
           <div className={styles.divider} aria-hidden />
-          <StatItem label="Care" value={pet.evolution.care_score} />
-          <StatItem label="Neglect" value={pet.evolution.neglect_score} />
+          <StatItem
+            label="Care"
+            value={formatCompactNumber(pet.evolution.care_score)}
+          />
+          <StatItem
+            label="Neglect"
+            value={formatCompactNumber(pet.evolution.neglect_score)}
+          />
         </>
       )}
       {statsData && (

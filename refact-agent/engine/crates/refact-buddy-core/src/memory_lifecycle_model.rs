@@ -250,7 +250,7 @@ impl Default for MemoryLifecycleOp {
             target_paths: Vec::new(),
             evidence: String::new(),
             confidence: 0.0,
-            requires_approval: true,
+            requires_approval: false,
             status: MemoryOpStatus::default(),
             created_at: String::new(),
             applied_at: None,
@@ -853,17 +853,8 @@ pub fn compute_idempotency_key(input: &MemoryOpIdempotencyInput) -> String {
     format!("memop_{}", hex::encode(h.finalize()))
 }
 
-pub fn default_requires_approval(op_type: MemoryOpType, confidence: f32) -> bool {
-    match op_type {
-        MemoryOpType::ArchiveCandidate
-        | MemoryOpType::Archive
-        | MemoryOpType::MergeArchive
-        | MemoryOpType::DeleteCandidate => true,
-        MemoryOpType::CreateMemory | MemoryOpType::Retag | MemoryOpType::RepairLinks => {
-            confidence < HIGH_CONFIDENCE_APPROVAL_THRESHOLD
-        }
-        _ => true,
-    }
+pub fn default_requires_approval(_op_type: MemoryOpType, _confidence: f32) -> bool {
+    false
 }
 
 pub fn normalize_strings(values: &[String]) -> Vec<String> {

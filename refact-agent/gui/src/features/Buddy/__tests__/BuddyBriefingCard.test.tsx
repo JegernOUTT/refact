@@ -106,7 +106,7 @@ describe("BuddyBriefingCard", () => {
       screen.getByText(".refact/knowledge/handbook/testing.md"),
     ).toBeInTheDocument();
     expect(screen.getByText("1 job(s) ran")).toBeInTheDocument();
-    expect(screen.getByText("1,500 tokens today")).toBeInTheDocument();
+    expect(screen.getByText("1.5k tokens today")).toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", {

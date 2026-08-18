@@ -3901,6 +3901,7 @@ mod tests {
             model_id: Some("gpt-4".to_string()),
             collected_at: Utc::now().to_rfc3339(),
             severity: DiagnosticSeverity::Medium,
+            occurrences: None,
         }
     }
 

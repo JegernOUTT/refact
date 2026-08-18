@@ -1348,6 +1348,7 @@ export interface DiagnosticContext {
   diagnostic_id?: string;
   collected_at: string;
   severity: "low" | "medium" | "high" | "critical";
+  occurrences?: number;
 }
 
 export interface BuddyRuntimeEvent {

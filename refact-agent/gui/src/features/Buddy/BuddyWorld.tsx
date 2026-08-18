@@ -1410,7 +1410,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         world,
       } = renderStateRef.current;
       const canvas = canvasRef.current;
-      const ctx = canvas?.getContext("2d");
+      const ctx = canvas?.getContext("2d", { willReadFrequently: true });
       if (canvas && ctx) {
         let cached = canvasCssSizeRef.current;
         if (!cached) {
@@ -1474,7 +1474,9 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           );
         }
         const foregroundCanvas = foregroundCanvasRef.current;
-        const foregroundCtx = foregroundCanvas?.getContext("2d");
+        const foregroundCtx = foregroundCanvas?.getContext("2d", {
+          willReadFrequently: true,
+        });
         if (foregroundCanvas && foregroundCtx) {
           if (
             foregroundCanvas.width !== targetWidth ||

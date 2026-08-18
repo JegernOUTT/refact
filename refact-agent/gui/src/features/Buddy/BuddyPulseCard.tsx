@@ -6,15 +6,16 @@ import { selectPulse } from "./buddySlice";
 import { BuddySectionHeader } from "./BuddySectionHeader";
 import styles from "./BuddyPulseCard.module.css";
 
-const PulseRow: React.FC<{ label: string; children: React.ReactNode }> = ({
-  label,
-  children,
-}) => (
+const PulseRow: React.FC<{
+  label: string;
+  children: React.ReactNode;
+  title?: string;
+}> = ({ label, children, title }) => (
   <div className={styles.row} role="listitem">
     <Text size="1" color="gray" className={styles.rowLabel}>
       {label}
     </Text>
-    <Text size="1" className={styles.rowValue}>
+    <Text size="1" className={styles.rowValue} title={title}>
       {children}
     </Text>
   </div>
@@ -68,47 +69,63 @@ export const BuddyPulseCard: React.FC = () => {
       )}
       <div className={styles.rows} role="list">
         <PulseRow label="Tasks">
-          {pulse.tasks.total} open · {pulse.tasks.stuck} stuck ·{" "}
-          {pulse.tasks.abandoned} abandoned
+          {pulse.tasks.total ?? 0} open · {pulse.tasks.stuck ?? 0} stuck ·{" "}
+          {pulse.tasks.abandoned ?? 0} abandoned
         </PulseRow>
         <PulseRow label="Trajectories">
-          {pulse.trajectories.total} · {pulse.trajectories.untitled} untitled ·
-          oldest {pulse.trajectories.oldest_age_days}d
+          {pulse.trajectories.total ?? 0} · {pulse.trajectories.untitled ?? 0}{" "}
+          untitled · oldest {pulse.trajectories.oldest_age_days ?? 0}d
         </PulseRow>
         <PulseRow label="Memory">
-          {pulse.memory.total} docs · {pulse.memory.orphan} orphan ·{" "}
-          {pulse.memory.stale_conflicts} conflict
+          {pulse.memory.total ?? 0} docs · {pulse.memory.orphan ?? 0} orphan ·{" "}
+          {pulse.memory.stale_conflicts ?? 0} conflict
           {memoryDetails.length > 0 ? ` · ${memoryDetails.join(" · ")}` : ""}
         </PulseRow>
         <PulseRow label="Providers">
-          <StatusDot
-            className={styles.rowDot}
-            status={pulse.providers.defaults_ok ? "success" : "warning"}
-          />{" "}
-          defaults · {pulse.providers.broken_refs} broken refs
+          <span
+            role="img"
+            aria-label={
+              pulse.providers.defaults_ok ? "defaults ok" : "defaults broken"
+            }
+          >
+            <StatusDot
+              className={styles.rowDot}
+              status={pulse.providers.defaults_ok ? "success" : "warning"}
+            />
+          </span>{" "}
+          defaults · {pulse.providers.broken_refs ?? 0} broken refs
         </PulseRow>
         <PulseRow label="MCP">
-          {pulse.mcp.total} · {pulse.mcp.failing} failing ·{" "}
-          {pulse.mcp.auth_expiring} expiring
+          {pulse.mcp.total ?? 0} · {pulse.mcp.failing ?? 0} failing ·{" "}
+          {pulse.mcp.auth_expiring ?? 0} expiring
         </PulseRow>
         <PulseRow label="Customization">
-          {pulse.customization.modes}M · {pulse.customization.skills}S ·{" "}
-          {pulse.customization.commands}C · {pulse.customization.subagents}A ·{" "}
-          {pulse.customization.hooks}H
+          {pulse.customization.modes ?? 0}M · {pulse.customization.skills ?? 0}S
+          · {pulse.customization.commands ?? 0}C ·{" "}
+          {pulse.customization.subagents ?? 0}A ·{" "}
+          {pulse.customization.hooks ?? 0}H
         </PulseRow>
-        <PulseRow label="Diagnostics">
-          {pulse.diagnostics.last_hour} in last hour
+        <PulseRow
+          label="Diagnostics"
+          title={`${pulse.diagnostics.last_hour ?? 0} in last hour${
+            pulse.diagnostics.top_error_types.length > 0
+              ? ` [${pulse.diagnostics.top_error_types.join(", ")}]`
+              : ""
+          }`}
+        >
+          {pulse.diagnostics.last_hour ?? 0} in last hour
           {pulse.diagnostics.top_error_types.length > 0
             ? ` [${pulse.diagnostics.top_error_types.join(", ")}]`
             : ""}
         </PulseRow>
         <PulseRow label="Git">
-          {pulse.git.uncommitted_files} files · {pulse.git.diff_lines_4h} lines
-          / 4h
+          {pulse.git.uncommitted_files ?? 0} files ·{" "}
+          {pulse.git.diff_lines_4h ?? 0} lines / 4h
         </PulseRow>
         <PulseRow label="Worktrees">
-          {pulse.worktrees.total} total · {pulse.worktrees.abandoned_clean}{" "}
-          clean abandoned · {pulse.worktrees.dirty} dirty
+          {pulse.worktrees.total ?? 0} total ·{" "}
+          {pulse.worktrees.abandoned_clean ?? 0} clean abandoned ·{" "}
+          {pulse.worktrees.dirty ?? 0} dirty
         </PulseRow>
       </div>
     </Surface>

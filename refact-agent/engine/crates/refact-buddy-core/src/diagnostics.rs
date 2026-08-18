@@ -1,5 +1,8 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+pub const DIAGNOSTICS_FRESHNESS_SECS: i64 = 6 * 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -21,6 +24,8 @@ pub struct DiagnosticContext {
     pub model_id: Option<String>,
     pub collected_at: String,
     pub severity: DiagnosticSeverity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurrences: Option<u32>,
 }
 
 fn classify_diagnostic_severity_with_default(
@@ -69,6 +74,7 @@ pub fn collect_diagnostics_from_error(error: &str) -> DiagnosticContext {
         model_id: None,
         collected_at: Utc::now().to_rfc3339(),
         severity,
+        occurrences: None,
     }
 }
 
@@ -94,6 +100,39 @@ pub fn diagnostic_signature(ctx: &DiagnosticContext) -> String {
     )
 }
 
+pub fn unavailable_model_id(message: &str) -> Option<String> {
+    if !message.contains("not found") {
+        return None;
+    }
+    let start = message.find("Model '")? + "Model '".len();
+    let end = message[start..].find('\'')? + start;
+    Some(message[start..end].to_string())
+}
+
+pub fn collapse_diagnostics(items: Vec<DiagnosticContext>) -> Vec<DiagnosticContext> {
+    let mut signatures: HashMap<String, (usize, u32)> = HashMap::new();
+    for (index, ctx) in items.iter().enumerate() {
+        let entry = signatures
+            .entry(diagnostic_signature(ctx))
+            .or_insert((index, 0));
+        entry.0 = index;
+        entry.1 += 1;
+    }
+
+    items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, mut ctx)| {
+            let (newest_index, count) = signatures.get(&diagnostic_signature(&ctx))?;
+            if index != *newest_index {
+                return None;
+            }
+            ctx.occurrences = (*count > 1).then_some(*count);
+            Some(ctx)
+        })
+        .collect()
+}
+
 pub fn classify_error(error: &str) -> String {
     let lower = error.to_lowercase();
     if lower.contains("timeout") {
@@ -112,6 +151,57 @@ pub fn classify_error(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn diagnostic(message: &str, collected_at: &str) -> DiagnosticContext {
+        DiagnosticContext {
+            error_type: "generic".to_string(),
+            error_message: message.to_string(),
+            source_file: None,
+            tool_name: None,
+            chat_id: None,
+            model_id: None,
+            collected_at: collected_at.to_string(),
+            severity: DiagnosticSeverity::High,
+            occurrences: None,
+        }
+    }
+
+    #[test]
+    fn collapse_diagnostics_keeps_newest_and_counts_occurrences() {
+        let collapsed = collapse_diagnostics(vec![
+            diagnostic("same", "first"),
+            diagnostic("same", "second"),
+            diagnostic("same", "third"),
+        ]);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].collected_at, "third");
+        assert_eq!(collapsed[0].occurrences, Some(3));
+    }
+
+    #[test]
+    fn collapse_diagnostics_preserves_distinct_signatures() {
+        let collapsed = collapse_diagnostics(vec![
+            diagnostic("first", "one"),
+            diagnostic("second", "two"),
+        ]);
+        assert_eq!(collapsed.len(), 2);
+        assert_eq!(collapsed[0].error_message, "first");
+        assert_eq!(collapsed[1].error_message, "second");
+        assert_eq!(collapsed[0].occurrences, None);
+        assert_eq!(collapsed[1].occurrences, None);
+    }
+
+    #[test]
+    fn unavailable_model_id_extracts_only_model_not_found_errors() {
+        assert_eq!(
+            unavailable_model_id(
+                "Model 'claude_code/claude-opus-5' not found. \
+                 Server has the following models: []"
+            ),
+            Some("claude_code/claude-opus-5".to_string())
+        );
+        assert_eq!(unavailable_model_id("unrelated network error"), None);
+    }
 
     #[test]
     fn stream_corrupted_maps_to_medium_severity_and_normal_priority() {

@@ -7,6 +7,7 @@ import {
   useUndoBuddyActionMutation,
 } from "../../services/refact/buddy";
 import { BuddySectionHeader } from "./BuddySectionHeader";
+import { formatCompactNumber } from "./buddyUtils";
 import { formatOpportunityActionError } from "./hooks/useExecuteBuddyAction";
 import styles from "./BuddyBriefingCard.module.css";
 
@@ -18,7 +19,8 @@ export const BuddyBriefingCard: React.FC = () => {
   if (!briefing) return null;
 
   const activeReceipts = briefing.receipts.filter((r) => !r.undone);
-  const spendTokens = briefing.spend.tokens_in + briefing.spend.tokens_out;
+  const spendTokens =
+    (briefing.spend.tokens_in ?? 0) + (briefing.spend.tokens_out ?? 0);
 
   const handleUndo = async (receiptId: string) => {
     setUndoError(null);
@@ -73,7 +75,11 @@ export const BuddyBriefingCard: React.FC = () => {
             </Text>
             {activeReceipts.map((receipt) => (
               <div key={receipt.id} className={styles.row}>
-                <Text size="1" className={styles.rowText}>
+                <Text
+                  size="1"
+                  className={styles.rowText}
+                  title={receipt.target_path}
+                >
                   {receipt.target_path}
                 </Text>
                 <Button
@@ -97,7 +103,7 @@ export const BuddyBriefingCard: React.FC = () => {
             {briefing.pulse.diagnostics_last_hour} diagnostics/h
           </Text>
           <Text size="1" color="gray">
-            {spendTokens.toLocaleString()} tokens today
+            {formatCompactNumber(spendTokens)} tokens today
           </Text>
         </div>
         {undoError && (

@@ -5,7 +5,7 @@ use axum::response::Result;
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use crate::buddy::diagnostics::DiagnosticContext;
+use crate::buddy::diagnostics::{unavailable_model_id, DiagnosticContext};
 use crate::buddy::events::BuddyEvent;
 use crate::buddy::pulse_inject::build_buddy_pulse_payload;
 use crate::buddy::settings::{
@@ -1174,9 +1174,22 @@ pub async fn handle_v1_buddy_diagnostics_list(
     let project_root = crate::buddy::actor::latest_project_root(app.clone())
         .await
         .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
-    let diags = crate::buddy::storage::load_recent_diagnostics(&project_root, 100)
+    let mut diags = crate::buddy::storage::load_recent_diagnostics(&project_root, 100)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let available_models = app.model.caps.read().await.caps.as_ref().map(|caps| {
+        caps.chat_models
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+    });
+    if let Some(available_models) = available_models {
+        diags.retain(|ctx| {
+            unavailable_model_id(&ctx.error_message)
+                .map(|model_id| !available_models.contains(&model_id))
+                .unwrap_or(true)
+        });
+    }
     Ok(axum::Json(diags))
 }
 

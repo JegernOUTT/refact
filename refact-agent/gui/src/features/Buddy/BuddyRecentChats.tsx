@@ -23,6 +23,7 @@ import {
 } from "../../services/refact/buddy";
 import { BuddySectionHeader } from "./BuddySectionHeader";
 import { conversationIcon } from "./buddyIcons";
+import { formatRelativeTime } from "./buddyUtils";
 import type { BuddyConversationEntry } from "./types";
 import styles from "./BuddyRecentChats.module.css";
 
@@ -36,19 +37,6 @@ const FILTER_OPTIONS: { value: FilterKind; label: string }[] = [
 ];
 
 const STALE_EMPTY_PLACEHOLDER_MS = 24 * 60 * 60 * 1000;
-
-function relativeTime(ts: string): string {
-  if (!ts) return "";
-  const time = Date.parse(ts);
-  if (!Number.isFinite(time)) return "";
-  const diff = Date.now() - time;
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
-}
 
 function isStaleEmptyPlaceholder(entry: BuddyConversationEntry): boolean {
   if (entry.kind !== "chat") return false;
@@ -76,7 +64,12 @@ const EntryRow: React.FC<EntryRowProps> = ({ entry, onClick }) => {
       </span>
       <span className={styles.entryBody}>
         <span className={styles.entryTitleRow}>
-          <Text size="1" weight="medium" className={styles.entryTitle}>
+          <Text
+            size="1"
+            weight="medium"
+            className={styles.entryTitle}
+            title={entry.title || "Untitled"}
+          >
             {entry.title || "Untitled"}
           </Text>
           {entry.badge && (
@@ -89,7 +82,7 @@ const EntryRow: React.FC<EntryRowProps> = ({ entry, onClick }) => {
           {entry.message_count > 0
             ? `${entry.message_count} entries`
             : entry.status}
-          {entry.updated_at ? ` · ${relativeTime(entry.updated_at)}` : ""}
+          {entry.updated_at ? ` · ${formatRelativeTime(entry.updated_at)}` : ""}
         </Text>
       </span>
     </>

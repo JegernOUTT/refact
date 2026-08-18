@@ -202,6 +202,7 @@ mod tests {
                 chat_id: None,
                 collected_at: collected_at.clone(),
                 severity: DiagnosticSeverity::High,
+                occurrences: None,
                 model_id: None,
             })
             .collect();

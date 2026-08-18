@@ -30,6 +30,24 @@ export function formatBuddyTime(ts: string | null | undefined): string {
   });
 }
 
+export function formatRelativeTime(ts: string | null | undefined): string {
+  if (!ts) return "";
+  const time = Date.parse(ts);
+  if (!Number.isFinite(time)) return "unknown";
+  const diff = Date.now() - time;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+export function formatTimestamp(value: string | null | undefined): string {
+  if (!value) return "—";
+  return value.slice(0, 16).replace("T", " ");
+}
+
 export function formatFailureLabel(
   value: string | null | undefined,
 ): string | null {

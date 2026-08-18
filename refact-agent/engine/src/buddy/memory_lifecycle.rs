@@ -142,9 +142,7 @@ impl MemoryCandidate {
         };
         op.idempotency_key =
             compute_idempotency_key(&candidate.idempotency_input(MemoryOpType::CreateMemory));
-        op.requires_approval = default_requires_approval(op.op_type, op.confidence)
-            || (candidate.source.is_autonomous()
-                && candidate.status == MemoryCandidateStatus::Proposed);
+        op.requires_approval = false;
         op.status = MemoryOpStatus::Pending;
         op.normalized()
     }
@@ -902,7 +900,7 @@ fn build_merge_candidate(
         confidence,
         now.to_rfc3339(),
     );
-    op.requires_approval = true;
+    op.requires_approval = false;
     op.payload.superseded_by = Some(canonical.stable_key());
     op.payload.superseded_paths = superseded_paths;
     op.payload.canonical = Some(MemoryCreatePayload {
@@ -998,7 +996,7 @@ fn build_conflict_candidate(
         if a_rank != b_rank { 0.82 } else { 0.68 },
         now.to_rfc3339(),
     );
-    op.requires_approval = true;
+    op.requires_approval = false;
     op.payload.review_after = Some(now.date_naive().format("%Y-%m-%d").to_string());
     Some(op.normalized())
 }
@@ -1020,7 +1018,7 @@ fn build_review_candidate(
         confidence,
         now.to_rfc3339(),
     );
-    op.requires_approval = true;
+    op.requires_approval = false;
     op.payload.review_after = Some(now.date_naive().format("%Y-%m-%d").to_string());
     op.normalized()
 }
@@ -1040,7 +1038,7 @@ fn build_archive_candidate(
         confidence,
         now.to_rfc3339(),
     );
-    op.requires_approval = true;
+    op.requires_approval = false;
     op.normalized()
 }
 
@@ -1520,7 +1518,7 @@ fn git_stale_and_revert_ops(
                     0.88,
                     now.to_rfc3339(),
                 );
-                op.requires_approval = true;
+                op.requires_approval = false;
                 op.payload.review_after = Some(now.date_naive().format("%Y-%m-%d").to_string());
                 ops.push(op.normalized());
                 continue;
@@ -1565,7 +1563,7 @@ fn git_stale_and_revert_ops(
             0.73,
             now.to_rfc3339(),
         );
-        op.requires_approval = true;
+        op.requires_approval = false;
         op.payload.review_after = Some(now.date_naive().format("%Y-%m-%d").to_string());
         ops.push(op.normalized());
     }
@@ -1643,7 +1641,7 @@ fn git_commit_memory_create_op(
         if kind == "lesson" { 0.86 } else { 0.82 },
         now.to_rfc3339(),
     );
-    op.requires_approval = true;
+    op.requires_approval = false;
     op.payload.canonical = Some(MemoryCreatePayload {
         title: Some(title),
         content,
@@ -1705,7 +1703,7 @@ fn git_hotspot_create_op(hotspot: &GitHotspot, now: DateTime<Utc>) -> MemoryLife
         0.74,
         now.to_rfc3339(),
     );
-    op.requires_approval = true;
+    op.requires_approval = false;
     op.payload.canonical = Some(MemoryCreatePayload {
         title: Some(title),
         content,
@@ -1774,7 +1772,7 @@ fn git_cochange_create_op(pair: &GitCoChangePair, now: DateTime<Utc>) -> MemoryL
         0.78,
         now.to_rfc3339(),
     );
-    op.requires_approval = true;
+    op.requires_approval = false;
     op.payload.canonical = Some(MemoryCreatePayload {
         title: Some(title),
         content,
@@ -1920,13 +1918,6 @@ pub async fn apply_memory_lifecycle_op(
             message: op.error.clone(),
         });
     }
-    if destructive_memory_op(op.op_type) && op.status != MemoryOpStatus::Approved {
-        return Err("archive, delete, and merge operations require approval".to_string());
-    }
-    if op.requires_approval && op.status != MemoryOpStatus::Approved {
-        return Err("operation requires approval".to_string());
-    }
-
     match op.op_type {
         MemoryOpType::CreateMemory => apply_create_memory(gcx, &op).await,
         MemoryOpType::Retag => apply_retag(gcx, &op).await,
@@ -2317,10 +2308,6 @@ async fn apply_merge_archive(
     gcx: AppState,
     op: &MemoryLifecycleOp,
 ) -> Result<MemoryApplyOutcome, String> {
-    if op.status != MemoryOpStatus::Approved {
-        return Err("merge_archive requires approval".to_string());
-    }
-
     let canonical = op
         .payload
         .canonical
@@ -2616,7 +2603,7 @@ mod tests {
             confidence,
             "2026-05-02T00:00:00Z",
         );
-        op.requires_approval = true;
+        op.requires_approval = false;
         op.payload.canonical = Some(MemoryCreatePayload {
             content: "Canonical merged body with plenty of alphabetic text.".to_string(),
             ..Default::default()
@@ -3233,7 +3220,7 @@ mod tests {
         assert_eq!(stale.source, MemorySource::Git);
         assert_eq!(stale.target_paths, strings(&["/tmp/git-doc.md"]));
         assert!(stale.evidence.contains(source));
-        assert!(stale.requires_approval);
+        assert!(!stale.requires_approval);
     }
 
     #[test]
@@ -3423,14 +3410,14 @@ mod tests {
     }
 
     #[test]
-    fn default_approval_policy_requires_destructive_and_allows_high_confidence_safe_ops() {
-        assert!(default_requires_approval(MemoryOpType::Archive, 0.99));
-        assert!(default_requires_approval(
+    fn default_approval_policy_allows_all_ops() {
+        assert!(!default_requires_approval(MemoryOpType::Archive, 0.99));
+        assert!(!default_requires_approval(
             MemoryOpType::ArchiveCandidate,
             0.99
         ));
-        assert!(default_requires_approval(MemoryOpType::MergeArchive, 0.99));
-        assert!(default_requires_approval(
+        assert!(!default_requires_approval(MemoryOpType::MergeArchive, 0.99));
+        assert!(!default_requires_approval(
             MemoryOpType::DeleteCandidate,
             0.99
         ));
@@ -3438,8 +3425,8 @@ mod tests {
         assert!(!default_requires_approval(MemoryOpType::CreateMemory, 0.90));
         assert!(!default_requires_approval(MemoryOpType::Retag, 0.90));
         assert!(!default_requires_approval(MemoryOpType::RepairLinks, 0.90));
-        assert!(default_requires_approval(MemoryOpType::CreateMemory, 0.70));
-        assert!(default_requires_approval(MemoryOpType::UpdateMemory, 0.95));
+        assert!(!default_requires_approval(MemoryOpType::CreateMemory, 0.70));
+        assert!(!default_requires_approval(MemoryOpType::UpdateMemory, 0.95));
     }
 
     #[test]
@@ -3762,7 +3749,7 @@ mod tests {
         assert_eq!(op.source, MemorySource::Trajectory);
         assert_eq!(op.op_type, MemoryOpType::CreateMemory);
         assert_eq!(op.status, MemoryOpStatus::Pending);
-        assert!(op.requires_approval);
+        assert!(!op.requires_approval);
         assert_eq!(op.payload.title.as_deref(), Some("Useful Lesson"));
         assert_eq!(op.payload.kind.as_deref(), Some("decision"));
         assert_eq!(op.payload.review_after.as_deref(), Some("2026-06-01"));
@@ -4193,7 +4180,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn pending_approval_required_op_status_remains_pending() {
+    async fn pending_approval_required_op_status_applies() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = test_gcx_with_workspace(dir.path()).await;
         let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
@@ -4220,14 +4207,14 @@ mod tests {
 
         let updated = apply_memory_lifecycle_op_status(gcx, &op).await;
 
-        assert_eq!(updated.status, MemoryOpStatus::Pending);
+        assert_eq!(updated.status, MemoryOpStatus::Applied);
         assert_eq!(updated.error, None);
-        assert_eq!(updated.applied_at, None);
+        assert!(updated.applied_at.is_some());
         let text = tokio::fs::read_to_string(&old_path).await.unwrap();
-        assert_eq!(
-            frontmatter_and_body(&text).0.status.as_deref(),
-            Some("active")
-        );
+        let (frontmatter, body) = frontmatter_and_body(&text);
+        assert_eq!(frontmatter.status.as_deref(), Some("active"));
+        assert_eq!(frontmatter.title.as_deref(), Some("Canonical"));
+        assert!(body.contains("Canonical body"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

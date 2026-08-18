@@ -10,9 +10,8 @@ use tracing::warn;
 pub use refact_buddy_core::storage::*;
 
 use super::memory_lifecycle::{
-    apply_memory_lifecycle_op_status, memory_op_auto_apply_eligible,
-    memory_op_duplicate_should_replace, MemoryLifecycleOp, MemoryOpStatus, MemoryOpsRecord,
-    MemoryOpsState, MemorySource,
+    apply_memory_lifecycle_op_status, memory_op_duplicate_should_replace, MemoryLifecycleOp,
+    MemoryOpStatus, MemoryOpsRecord, MemoryOpsState, MemorySource,
 };
 use super::settings::AutonomyLevel;
 use crate::app_state::AppState;
@@ -602,18 +601,16 @@ pub async fn drain_memory_ops(
     max_applies: usize,
 ) -> Result<(MemoryOpsState, usize), String> {
     let state = snapshot_memory_ops(project_root).await;
+    if autonomy == AutonomyLevel::ReadOnly {
+        return Ok((state, 0));
+    }
     let mut candidates: Vec<(MemoryLifecycleOp, bool)> = Vec::new();
     for op in state.ops.iter() {
         if candidates.len() >= max_applies {
             break;
         }
-        let auto_apply = op.status == MemoryOpStatus::Pending
-            && op.requires_approval
-            && autonomy == AutonomyLevel::SafeAuto
-            && memory_op_auto_apply_eligible(op);
-        let eligible = op.status == MemoryOpStatus::Approved
-            || (op.status == MemoryOpStatus::Pending && !op.requires_approval)
-            || auto_apply;
+        let auto_apply = op.status == MemoryOpStatus::Pending;
+        let eligible = op.status == MemoryOpStatus::Approved || auto_apply;
         if !eligible {
             continue;
         }
@@ -1420,33 +1417,48 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn pending_approval_required_queue_apply_keeps_op_pending() {
+    async fn pending_approval_required_queue_apply_auto_applies() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let gcx = test_gcx_with_workspace(root).await;
+        let item_path = root.join(".refact").join("knowledge").join("item.md");
+        tokio::fs::create_dir_all(item_path.parent().unwrap())
+            .await
+            .unwrap();
+        let frontmatter = crate::knowledge_graph::kg_structs::KnowledgeFrontmatter {
+            id: Some("item".to_string()),
+            title: Some("item".to_string()),
+            status: Some("active".to_string()),
+            tags: vec!["memory".to_string()],
+            kind: Some("domain".to_string()),
+            ..Default::default()
+        };
+        tokio::fs::write(
+            &item_path,
+            format!("{}\n\nItem body", frontmatter.to_yaml()),
+        )
+        .await
+        .unwrap();
+
         let op = test_op("op-archive", "archive", MemoryOpStatus::Pending);
         let mut op = MemoryLifecycleOp {
             op_type: MemoryOpType::Archive,
             requires_approval: true,
+            target_paths: vec![item_path.to_string_lossy().to_string()],
             ..op
         };
         op.status = MemoryOpStatus::Pending;
 
         enqueue_memory_op(root, op.clone()).await.unwrap();
-        let (state, changed) = drain_memory_ops(
-            root,
-            AppState::from_gcx(gcx).await,
-            AutonomyLevel::Suggest,
-            100,
-        )
-        .await
-        .unwrap();
+        let (state, changed) = drain_memory_ops(root, gcx, AutonomyLevel::Suggest, 100)
+            .await
+            .unwrap();
 
         assert_eq!(state.ops.len(), 1);
-        assert_eq!(state.ops[0].status, MemoryOpStatus::Pending);
+        assert_eq!(state.ops[0].status, MemoryOpStatus::Applied);
         assert_eq!(state.ops[0].error, None);
-        assert_eq!(changed, 0);
-        assert_eq!(state.pending_count, 1);
+        assert_eq!(changed, 1);
+        assert_eq!(state.pending_count, 0);
         assert_eq!(state.failed_count, 0);
     }
 
@@ -1480,7 +1492,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn drain_safe_auto_picks_exact_duplicate_but_suggest_does_not() {
+    async fn drain_picks_exact_duplicate_for_suggest_and_safe_auto() {
         let suggest_dir = tempfile::tempdir().unwrap();
         let suggest_root = suggest_dir.path();
         let suggest_gcx = test_gcx_with_workspace(suggest_root).await;
@@ -1510,8 +1522,8 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert_eq!(suggest_changed, 0);
-        assert_eq!(suggest_state.ops[0].status, MemoryOpStatus::Pending);
+        assert_eq!(suggest_changed, 1);
+        assert_ne!(suggest_state.ops[0].status, MemoryOpStatus::Pending);
 
         let safe_dir = tempfile::tempdir().unwrap();
         let safe_root = safe_dir.path();

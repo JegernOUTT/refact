@@ -9,7 +9,7 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tracing::warn;
 
-use crate::diagnostics::DiagnosticContext;
+use crate::diagnostics::{collapse_diagnostics, DiagnosticContext, DIAGNOSTICS_FRESHNESS_SECS};
 use crate::runtime_queue::RuntimeQueue;
 use crate::settings::BuddySettings;
 use crate::state::default_buddy_state;
@@ -276,7 +276,7 @@ pub async fn append_diagnostic(project_root: &Path, ctx: &DiagnosticContext) -> 
 }
 
 pub async fn load_diagnostics(project_root: &Path) -> Result<Vec<DiagnosticContext>, String> {
-    Ok(load_diagnostics_inner(project_root, None)
+    Ok(load_diagnostics_inner(project_root, None, None)
         .await?
         .into_iter()
         .collect())
@@ -286,15 +286,18 @@ pub async fn load_recent_diagnostics(
     project_root: &Path,
     limit: usize,
 ) -> Result<Vec<DiagnosticContext>, String> {
-    Ok(load_diagnostics_inner(project_root, Some(limit))
-        .await?
-        .into_iter()
-        .collect())
+    let diagnostics =
+        load_diagnostics_inner(project_root, Some(limit), Some(DIAGNOSTICS_FRESHNESS_SECS))
+            .await?
+            .into_iter()
+            .collect();
+    Ok(collapse_diagnostics(diagnostics))
 }
 
 async fn load_diagnostics_inner(
     project_root: &Path,
     limit: Option<usize>,
+    max_age_secs: Option<i64>,
 ) -> Result<VecDeque<DiagnosticContext>, String> {
     let path = diagnostics_history_path(project_root);
     let content = match fs::read_to_string(&path).await {
@@ -317,6 +320,17 @@ async fn load_diagnostics_inner(
 
         match serde_json::from_str::<DiagnosticContext>(line) {
             Ok(ctx) => {
+                if let Some(max_age_secs) = max_age_secs {
+                    if let Ok(collected_at) =
+                        chrono::DateTime::parse_from_rfc3339(&ctx.collected_at)
+                    {
+                        if Utc::now().signed_duration_since(collected_at).num_seconds()
+                            > max_age_secs
+                        {
+                            continue;
+                        }
+                    }
+                }
                 out.push_back(ctx);
                 if let Some(limit) = limit {
                     while out.len() > limit {
@@ -367,4 +381,55 @@ pub async fn bootstrap_buddy_storage(project_root: &Path) -> Result<(), String> 
             .map_err(|e| format!("Failed to write main_prompt.md: {}", e))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics::DiagnosticSeverity;
+    use chrono::Duration;
+
+    fn diagnostic(message: &str, collected_at: String) -> DiagnosticContext {
+        DiagnosticContext {
+            error_type: "generic".to_string(),
+            error_message: message.to_string(),
+            source_file: None,
+            tool_name: None,
+            chat_id: None,
+            model_id: None,
+            collected_at,
+            severity: DiagnosticSeverity::High,
+            occurrences: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn recent_diagnostics_exclude_old_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = diagnostic(
+            "old",
+            (Utc::now() - Duration::seconds(DIAGNOSTICS_FRESHNESS_SECS + 1)).to_rfc3339(),
+        );
+        append_diagnostic(temp.path(), &old).await.unwrap();
+
+        assert!(load_recent_diagnostics(temp.path(), 100)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(load_diagnostics(temp.path()).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn recent_diagnostics_collapse_duplicates() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = diagnostic("same", (Utc::now() - Duration::seconds(1)).to_rfc3339());
+        let second = diagnostic("same", Utc::now().to_rfc3339());
+        append_diagnostic(temp.path(), &first).await.unwrap();
+        append_diagnostic(temp.path(), &second).await.unwrap();
+
+        let diagnostics = load_recent_diagnostics(temp.path(), 100).await.unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].collected_at, second.collected_at);
+        assert_eq!(diagnostics[0].occurrences, Some(2));
+    }
 }

@@ -76,10 +76,20 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
   >
     <BuddySectionHeader icon={Smile} label="Personality" />
     <div className={styles.archetype}>
-      <Text size="2" weight="bold" className={styles.archetypeName}>
+      <Text
+        size="2"
+        weight="bold"
+        className={styles.archetypeName}
+        title={personality?.archetype_label ?? name}
+      >
         {personality?.archetype_label ?? name}
       </Text>
-      <Text size="1" color="gray" className={styles.vibe}>
+      <Text
+        size="1"
+        color="gray"
+        className={styles.vibe}
+        title={personality?.vibe ?? "Playful, quirky, helpful"}
+      >
         {personality?.vibe ?? "Playful, quirky, helpful"}
       </Text>
     </div>

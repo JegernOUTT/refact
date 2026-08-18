@@ -80,7 +80,7 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
         <div className={styles.actions}>
           {opportunity.proposed_actions.map((action, idx) => (
             <Button
-              key={idx}
+              key={`${action.kind}-${JSON.stringify(action)}`}
               size="sm"
               type="button"
               variant={action.kind === "dismiss" ? "ghost" : "primary"}

@@ -70,14 +70,16 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
             No recent activity
           </Text>
         )}
-        {filteredActivities.map((a, i) => {
+        {filteredActivities.map((a) => {
           const failureLabel = formatFailureLabel(a.failure_category);
           const detail = a.failure_summary ?? a.description;
           const tooltip = detail;
           const canOpen = Boolean(a.chat_id && onOpenChat);
           return (
             <Tooltip
-              key={`${a.activity_type}-${a.timestamp}-${i}`}
+              key={`${a.activity_type}-${a.timestamp}-${a.chat_id ?? ""}-${
+                a.title
+              }-${a.description}`}
               content={tooltip}
               delayDuration={150}
             >
