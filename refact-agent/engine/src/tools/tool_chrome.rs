@@ -89,7 +89,8 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Coordinate mouse escape hatch: mouse_move, mouse_down, mouse_up, mouse_click_xy, mouse_drag_xy, and mouse_wheel use main-frame viewport CSS pixels and bypass locator resolution. Use these only for canvas, map, and vision-driven UIs with no addressable element; locator/ref actions remain the default. ",
     "Locator handlers and overlay auto-dismiss do NOT guard `mouse_*` coordinate actions: an overlay that would be dismissed before a locator action will still swallow a coordinate click.\n",
     "Network: route/unroute/list_routes control HTTP interception. route_web_socket and unroute_web_socket install page-level WebSocket routing; send_web_socket_message supplies mock page messages and wait_for_web_socket_frame waits for observed traffic. start_har_recording and stop_har_recording write a runtime-owned HAR artifact; route_from_har replays it with abort or fallback for misses. HAR output is returned as a path and summary, never inlined. ",
-    "reset is the escape hatch for sticky plumbing: one call drops every network route, HAR replay, WebSocket route, locator handler, and virtual authenticator, turns offline off, and clears media, viewport, device, geolocation, and permission overrides, reporting what it cleared with counts. It leaves cookies, storage, open tabs, and the current page untouched.\n",
+    "reset is the escape hatch for sticky plumbing: one call drops every network route, HAR replay, WebSocket route, locator handler, and virtual authenticator, turns offline off, and clears media, viewport, device, geolocation, and permission overrides, reporting what it cleared with counts. It leaves cookies, storage, open tabs, and the current page untouched. ",
+    "http_request sends an HTTP call that shares the page's cookie jar in both directions: matching cookies for the target domain and path are attached, and response Set-Cookie headers are written back into the browser, so a logged-in page and the API call see the same session. Send url plus optional method, headers, and exactly one of body, body_json (auto application/json), or form (auto urlencoded); http and https only. Results carry status, final URL after redirects, content-type/content-length (set full_headers=true for every header), and the body inline when it stays under 8KB, otherwise an artifact path. Cookie values are never inlined, only the count and names. Set fail_on_status=true to fail the step on a non-2xx status.\n",
     "Instrumentation: start_coverage and stop_coverage opt into precise JavaScript and CSS usage tracking and return bounded per-URL summaries plus a full JSON artifact. add_virtual_authenticator enables passkey testing and mints the authenticator id it returns, so never send it an id; remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified address that returned id. Credential ids, private keys, user handles, blobs, and user names are redacted from reports.\n",
     "Forms: fill, clear, select_option, check, uncheck.\n",
     "Assertions: expect retries with a 5000ms default and supports state, text/value, attribute/class/CSS/id/property, role/accessibility, count, URL/title, and ARIA snapshot matchers. Assertion failures report expected and last received values; set soft=true to record a failure and continue the batch.\n",
@@ -559,6 +560,34 @@ fn browser_step_schema_with_actions(
         serde_json::json!({"type": "object", "additionalProperties": {"type": "string"}}),
     );
     properties.insert(
+        "method".to_string(),
+        serde_json::json!({"type": "string", "description": "HTTP method for http_request, GET by default"}),
+    );
+    properties.insert(
+        "body".to_string(),
+        serde_json::json!({"type": "string", "description": "Raw http_request body; mutually exclusive with body_json and form"}),
+    );
+    properties.insert(
+        "body_json".to_string(),
+        serde_json::json!({"description": "http_request JSON body, sent as application/json"}),
+    );
+    properties.insert(
+        "form".to_string(),
+        serde_json::json!({"type": "object", "additionalProperties": {"type": "string"}, "description": "http_request form fields, sent as application/x-www-form-urlencoded"}),
+    );
+    properties.insert(
+        "max_redirects".to_string(),
+        serde_json::json!({"type": "integer", "minimum": 0, "maximum": 20}),
+    );
+    properties.insert(
+        "fail_on_status".to_string(),
+        serde_json::json!({"type": "boolean", "description": "Fail the http_request step when the status is not 2xx"}),
+    );
+    properties.insert(
+        "full_headers".to_string(),
+        serde_json::json!({"type": "boolean", "description": "Return every http_request response header instead of content-type and content-length only"}),
+    );
+    properties.insert(
         "urls".to_string(),
         serde_json::json!({"type": "array", "items": {"type": "string"}}),
     );
@@ -682,7 +711,12 @@ fn locator_handler_schema() -> serde_json::Value {
     let actions = LOCATOR_HANDLER_STEP_ACTIONS
         .iter()
         .copied()
-        .filter(|action| !matches!(*action, "route" | "unroute" | "list_routes" | "reset"))
+        .filter(|action| {
+            !matches!(
+                *action,
+                "route" | "unroute" | "list_routes" | "reset" | "http_request"
+            )
+        })
         .collect::<Vec<_>>();
     serde_json::json!({
         "oneOf": [

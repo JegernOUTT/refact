@@ -4054,6 +4054,7 @@ name = "refact-browser"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "headless_chrome",
  "refact-chat-api",
  "refact-core",
@@ -4066,6 +4067,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "tungstenite 0.28.0",
+ "url",
  "uuid",
 ]
 

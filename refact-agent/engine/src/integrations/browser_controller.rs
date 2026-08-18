@@ -25,6 +25,7 @@ use refact_browser::{
     DEFAULT_DISMISS_OVERLAYS_HANDLER, apply_network_report_mode, required_states,
 };
 use refact_browser::artifacts::{pdf_payload, screenshot_capture, ScreenshotMetrics};
+use refact_browser::http_client;
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 
 use crate::global_context::GlobalContext;
@@ -1335,6 +1336,132 @@ fn execute_reset_step(runtime: &mut BrowserRuntime, idx: usize) -> StepResult {
     }
 }
 
+async fn execute_http_request_step(
+    runtime: &mut BrowserRuntime,
+    options: &BrowserHttpRequest,
+    idx: usize,
+) -> StepResult {
+    let artifacts_dir = runtime.artifacts_dir.clone();
+    let prepared = (|| -> Result<(http_client::HttpRequestSpec, Arc<Tab>), String> {
+        let spec = http_client::HttpRequestSpec {
+            url: http_client::parse_http_url(&options.url)?,
+            method: http_client::parse_http_method(options.method.as_deref())?,
+            headers: options.headers.clone(),
+            body: http_client::build_request_body(
+                options.body.as_deref(),
+                options.body_json.as_ref(),
+                options.form.as_ref(),
+            )?,
+            timeout: Duration::from_millis(
+                options
+                    .timeout_ms
+                    .unwrap_or(http_client::DEFAULT_HTTP_TIMEOUT_MS)
+                    .min(MAX_WAIT_TIMEOUT_MS),
+            ),
+            max_redirects: options
+                .max_redirects
+                .unwrap_or(http_client::DEFAULT_HTTP_MAX_REDIRECTS)
+                .min(http_client::DEFAULT_HTTP_MAX_REDIRECTS),
+        };
+        let tab = runtime
+            .get_active_tab()
+            .ok_or_else(|| "No active tab in browser runtime".to_string())?;
+        Ok((spec, tab))
+    })();
+    let (spec, tab) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => return StepResult::failure(idx, "HTTP request", error),
+    };
+    let jar = match refact_browser::context_state::get_cookies(&tab, None) {
+        Ok(jar) => jar,
+        Err(error) => return StepResult::failure(idx, "HTTP request", error),
+    };
+    let response = match http_client::send_http_request(&spec, &jar).await {
+        Ok(response) => response,
+        Err(error) => return StepResult::failure(idx, "HTTP request", error),
+    };
+    if !response.set_cookies.is_empty() {
+        if let Err(error) = refact_browser::context_state::set_cookies(&tab, &response.set_cookies) {
+            return StepResult::failure(idx, "HTTP request", error);
+        }
+    }
+    runtime.touch();
+    http_request_result(&response, options, idx, &artifacts_dir)
+}
+
+fn http_request_result(
+    response: &http_client::HttpResponse,
+    options: &BrowserHttpRequest,
+    idx: usize,
+    artifacts_dir: &Path,
+) -> StepResult {
+    let content_type = response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| value.clone());
+    let mut data = serde_json::json!({
+        "http_request": {
+            "method": response.method,
+            "url": refact_browser::mask_text(&response.final_url),
+            "status": response.status,
+            "status_text": response.status_text,
+            "redirects": response.redirects,
+            "headers": http_client::summarize_response_headers(
+                &response.headers,
+                options.full_headers.unwrap_or(false),
+            ),
+            "body_bytes": response.body.len(),
+            "set_cookies": {
+                "count": response.set_cookies.len(),
+                "names": response.set_cookies.iter().map(|cookie| cookie.name.clone()).collect::<Vec<_>>(),
+            },
+        }
+    });
+    let entry = &mut data["http_request"];
+    match http_client::split_response_body(&response.body, content_type.as_deref()) {
+        http_client::HttpResponseBody::Empty => {}
+        http_client::HttpResponseBody::Inline(text) => entry["body"] = Value::String(text),
+        http_client::HttpResponseBody::Artifact => {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let file_name = format!(
+                "http-{nonce}-{idx}.{}",
+                http_client::response_body_extension(content_type.as_deref())
+            );
+            match http_client::save_response_body(&response.body, artifacts_dir, &file_name) {
+                Ok(path) => {
+                    entry["artifact"] = serde_json::json!({
+                        "path": path,
+                        "bytes": response.body.len(),
+                    })
+                }
+                Err(error) => return StepResult::failure(idx, "HTTP request", error),
+            }
+        }
+    }
+    let summary = format!(
+        "{} {} -> {} {} ({} bytes, {} cookies set)",
+        response.method,
+        refact_browser::mask_text(&response.final_url),
+        response.status,
+        response.status_text,
+        response.body.len(),
+        response.set_cookies.len()
+    );
+    if options.fail_on_status.unwrap_or(false) && !(200..300).contains(&response.status) {
+        return StepResult::failure(
+            idx,
+            summary,
+            format!("HTTP {} {}", response.status, response.status_text),
+        )
+        .with_data(data);
+    }
+    StepResult::success(idx, summary).with_data(data)
+}
+
 fn is_instrumentation_step(step: &BrowserStep) -> bool {
     matches!(
         step,
@@ -1679,6 +1806,9 @@ pub async fn execute_request_with_runtime(
         } else if matches!(step, BrowserStep::Reset) {
             let mut rt = runtime_arc.lock().await;
             execute_reset_step(&mut rt, idx)
+        } else if let BrowserStep::HttpRequest { options } = step {
+            let mut rt = runtime_arc.lock().await;
+            execute_http_request_step(&mut rt, options, idx).await
         } else if is_instrumentation_step(step) {
             let mut rt = runtime_arc.lock().await;
             execute_instrumentation_step(&mut rt, step, idx)
@@ -2253,6 +2383,10 @@ pub fn execute_steps_with_runtime(
                 execute_route_management_step(runtime, step, idx).unwrap()
             }
             BrowserStep::Reset => execute_reset_step(runtime, idx),
+            BrowserStep::HttpRequest { options } => tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(execute_http_request_step(runtime, options, idx))
+            }),
             step if is_instrumentation_step(step) => {
                 execute_instrumentation_step(runtime, step, idx)
             }
@@ -2986,6 +3120,7 @@ fn execute_single_step(
         | BrowserStep::StopHarRecording
         | BrowserStep::RouteFromHar { .. }
         | BrowserStep::Reset
+        | BrowserStep::HttpRequest { .. }
         | BrowserStep::StartCoverage { .. }
         | BrowserStep::StopCoverage
         | BrowserStep::AddVirtualAuthenticator { .. }
@@ -6076,6 +6211,7 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn actionable_state() -> refact_browser::ElementState {
         refact_browser::ElementState {
@@ -6782,6 +6918,116 @@ mod tests {
             serde_json::json!({"by": "css", "value": "svg"})
         );
         assert!(payload.get("frames").is_none());
+    }
+
+    fn http_response(status: u16, body: Vec<u8>, content_type: &str) -> http_client::HttpResponse {
+        http_client::HttpResponse {
+            status,
+            status_text: "OK".to_string(),
+            final_url: "https://api.example.test/v1/session".to_string(),
+            method: "GET".to_string(),
+            redirects: 1,
+            headers: BTreeMap::from([
+                ("content-type".to_string(), content_type.to_string()),
+                ("set-cookie".to_string(), "sid=supersecret".to_string()),
+                ("server".to_string(), "fixture".to_string()),
+            ]),
+            set_cookies: vec![BrowserCookie {
+                name: "sid".to_string(),
+                value: "supersecret".to_string(),
+                domain: "api.example.test".to_string(),
+                path: "/".to_string(),
+                expires: None,
+                http_only: true,
+                secure: true,
+                same_site: None,
+                url: None,
+            }],
+            body,
+        }
+    }
+
+    #[test]
+    fn http_request_result_inlines_small_bodies_and_reports_cookies_without_their_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = http_response(200, br#"{"session":"live"}"#.to_vec(), "application/json");
+        let options = BrowserHttpRequest {
+            url: "https://api.example.test/v1/session".to_string(),
+            ..Default::default()
+        };
+
+        let result = http_request_result(&response, &options, 3, dir.path());
+
+        assert!(result.ok);
+        assert_eq!(
+            result.summary,
+            "GET https://api.example.test/v1/session -> 200 OK (18 bytes, 1 cookies set)"
+        );
+        let data = &result.data.as_ref().unwrap()["http_request"];
+        assert_eq!(data["status"], 200);
+        assert_eq!(data["redirects"], 1);
+        assert_eq!(data["body"], "{\n  \"session\": \"live\"\n}");
+        assert_eq!(data["body_bytes"], 18);
+        assert_eq!(data["set_cookies"]["count"], 1);
+        assert_eq!(data["set_cookies"]["names"][0], "sid");
+        assert!(data.get("artifact").is_none());
+
+        let payload = serde_json::to_string(data).unwrap();
+        assert!(!payload.contains("supersecret"), "{payload}");
+        assert!(!payload.contains("server"), "{payload}");
+        assert_eq!(data["headers"].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn http_request_result_spills_oversized_bodies_and_keeps_full_headers_redacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = vec![b'x'; http_client::HTTP_INLINE_BODY_LIMIT_BYTES + 1];
+        let response = http_response(200, body.clone(), "text/plain");
+        let options = BrowserHttpRequest {
+            url: "https://api.example.test/v1/session".to_string(),
+            full_headers: Some(true),
+            ..Default::default()
+        };
+
+        let result = http_request_result(&response, &options, 0, dir.path());
+
+        assert!(result.ok);
+        let data = &result.data.as_ref().unwrap()["http_request"];
+        assert!(data.get("body").is_none());
+        assert_eq!(data["artifact"]["bytes"], body.len());
+        let path = PathBuf::from(data["artifact"]["path"].as_str().unwrap());
+        assert!(path.starts_with(dir.path()));
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        assert_eq!(data["headers"]["set-cookie"], "[REDACTED]");
+        assert_eq!(data["headers"]["server"], "fixture");
+    }
+
+    #[test]
+    fn http_request_result_only_fails_on_non_2xx_when_fail_on_status_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = http_response(404, b"missing".to_vec(), "text/plain");
+        let lenient = BrowserHttpRequest {
+            url: "https://api.example.test/v1/session".to_string(),
+            ..Default::default()
+        };
+        let strict = BrowserHttpRequest {
+            fail_on_status: Some(true),
+            ..lenient.clone()
+        };
+
+        assert!(http_request_result(&response, &lenient, 0, dir.path()).ok);
+
+        let failed = http_request_result(&response, &strict, 0, dir.path());
+        assert!(!failed.ok);
+        assert_eq!(failed.error.as_deref(), Some("HTTP 404 OK"));
+        assert_eq!(failed.data.as_ref().unwrap()["http_request"]["body"], "missing");
+
+        let created = http_response(201, Vec::new(), "text/plain");
+        let accepted = http_request_result(&created, &strict, 0, dir.path());
+        assert!(accepted.ok);
+        assert!(accepted.data.as_ref().unwrap()["http_request"]
+            .get("body")
+            .is_none());
     }
 
     #[test]

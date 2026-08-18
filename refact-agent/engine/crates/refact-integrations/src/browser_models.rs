@@ -950,6 +950,29 @@ pub struct BrowserScreenshotClip {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BrowserHttpRequest {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_json: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_redirects: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_on_status: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_headers: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct BrowserScreenshotOptions {
     #[serde(default, skip_serializing_if = "is_false")]
     pub full_page: bool,
@@ -1106,6 +1129,10 @@ pub enum BrowserStep {
         not_found: HarNotFound,
     },
     Reset,
+    HttpRequest {
+        #[serde(flatten)]
+        options: BrowserHttpRequest,
+    },
 
     StartCoverage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1628,6 +1655,7 @@ impl BrowserStep {
         "stop_har_recording",
         "route_from_har",
         "reset",
+        "http_request",
         "start_coverage",
         "stop_coverage",
         "add_virtual_authenticator",
@@ -2270,6 +2298,12 @@ mod tests {
                 not_found: HarNotFound::Abort,
             },
             BrowserStep::Reset,
+            BrowserStep::HttpRequest {
+                options: BrowserHttpRequest {
+                    url: "https://example.com/api/session".to_string(),
+                    ..Default::default()
+                },
+            },
             BrowserStep::StartCoverage {
                 js: Some(true),
                 css: Some(true),

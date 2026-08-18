@@ -71,10 +71,11 @@ impl LocatorHandler {
                         | BrowserStep::Unroute { .. }
                         | BrowserStep::ListRoutes
                         | BrowserStep::Reset
+                        | BrowserStep::HttpRequest { .. }
                 )
             }) {
                 return Err(
-                    "Locator handler steps cannot manage handlers, browser tabs, or network routes"
+                    "Locator handler steps cannot manage handlers, browser tabs, network routes, or send HTTP requests"
                         .to_string(),
                 );
             }

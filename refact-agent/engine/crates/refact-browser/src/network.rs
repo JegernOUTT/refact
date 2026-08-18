@@ -687,7 +687,7 @@ pub(crate) fn mask_headers(headers: BTreeMap<String, String>) -> BTreeMap<String
         .collect()
 }
 
-pub(crate) fn mask_text(value: &str) -> String {
+pub fn mask_text(value: &str) -> String {
     let redacted = redact_sensitive(value);
     let expression =
         Regex::new(r"(?i)(password|passwd|token|api[_-]?key|authorization)(=|%3[dD])([^&\s]+)")

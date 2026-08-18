@@ -11,6 +11,7 @@ mod frames;
 mod handles;
 pub mod har;
 mod hit_target;
+pub mod http_client;
 mod injected_source;
 mod keyboard;
 mod locator_gen;
@@ -71,7 +72,7 @@ pub use mouse::{
 };
 pub use network::{
     NetworkLoadState, NetworkMonitorHandle, RequestStarted, ResponseReceived, UrlMatcher,
-    apply_network_report_mode, summarize_network_entry,
+    apply_network_report_mode, mask_text, summarize_network_entry,
 };
 pub use websocket::{WebSocketRegistry, install_websocket_router};
 pub use refs::{ElementHandleInfo, Ref, RefError, RefParseError, RefRegistry, SnapshotGeneration};

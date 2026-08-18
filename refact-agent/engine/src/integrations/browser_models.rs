@@ -322,6 +322,74 @@ mod tests {
     }
 
     #[test]
+    fn http_request_defaults_to_a_bare_get_and_keeps_its_optional_fields() {
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "http_request", "url": "https://example.com/api/session"}]
+        }))
+        .unwrap();
+
+        let BrowserStep::HttpRequest { options } = &request.steps[0] else {
+            panic!("expected an http_request step");
+        };
+        assert_eq!(options.url, "https://example.com/api/session");
+        assert_eq!(options.method, None);
+        assert!(options.headers.is_empty());
+        assert_eq!(options.body, None);
+        assert_eq!(options.form, None);
+        assert_eq!(options.fail_on_status, None);
+        assert_eq!(
+            serde_json::to_value(&request.steps[0]).unwrap(),
+            serde_json::json!({"action": "http_request", "url": "https://example.com/api/session"})
+        );
+
+        let full = parse_browser_action_request(serde_json::json!({
+            "steps": [{
+                "action": "http_request",
+                "url": "https://example.com/api/items",
+                "method": "post",
+                "headers": {"accept": "application/json"},
+                "body_json": {"name": "widget"},
+                "timeout_ms": 1_000,
+                "max_redirects": 0,
+                "fail_on_status": true,
+                "full_headers": true
+            }]
+        }))
+        .unwrap();
+        let BrowserStep::HttpRequest { options } = &full.steps[0] else {
+            panic!("expected an http_request step");
+        };
+        assert_eq!(options.method.as_deref(), Some("post"));
+        assert_eq!(options.body_json, Some(serde_json::json!({"name": "widget"})));
+        assert_eq!(options.max_redirects, Some(0));
+        assert_eq!(options.fail_on_status, Some(true));
+        assert_eq!(options.full_headers, Some(true));
+    }
+
+    #[test]
+    fn http_request_requires_a_url_and_rejects_unknown_fields() {
+        let missing = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "http_request", "method": "GET"}]
+        }))
+        .unwrap_err();
+        assert!(
+            missing.starts_with("step[0] (http_request): "),
+            "unexpected error: {missing}"
+        );
+        assert!(missing.contains("url"), "unexpected error: {missing}");
+
+        let unknown = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "http_request", "url": "https://x.test/", "bodyy": "oops"}]
+        }))
+        .unwrap_err();
+        assert!(
+            unknown.starts_with("step[0] (http_request): "),
+            "unexpected error: {unknown}"
+        );
+        assert!(unknown.contains("bodyy"), "unexpected error: {unknown}");
+    }
+
+    #[test]
     fn route_accepts_times_and_the_new_chain_handlers() {
         let request = parse_browser_action_request(serde_json::json!({
             "steps": [

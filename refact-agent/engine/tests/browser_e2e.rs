@@ -23,7 +23,8 @@ use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
     AccessibilitySnapshotOptions, BrowserActionRequest, BrowserCookie, BrowserCookieSameSite,
-    BrowserExpectedText, BrowserExpectation, BrowserLoadState, BrowserLocator, BrowserPdfOptions,
+    BrowserExpectedText, BrowserExpectation, BrowserHttpRequest, BrowserLoadState, BrowserLocator,
+    BrowserPdfOptions,
     BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
     BrowserStorageItem, BrowserStorageKind, FillStrategy, LocatorHandlerAction, LocatorRegex,
     NetworkReportMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
@@ -184,6 +185,35 @@ async fn route_data(headers: HeaderMap) -> impl IntoResponse {
     axum::Json(json!({"source": source}))
 }
 
+async fn session_login() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::SET_COOKIE, "fixture_session=logged-in; Path=/")
+        .body(Body::from("<html><body><h1>logged in</h1></body></html>"))
+        .unwrap()
+}
+
+async fn session_probe(headers: HeaderMap) -> Response<Body> {
+    let session = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .split(';')
+                .map(str::trim)
+                .find_map(|pair| pair.strip_prefix("fixture_session="))
+        })
+        .unwrap_or("anonymous")
+        .to_string();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::SET_COOKIE, "api_issued=from-api; Path=/")
+        .body(Body::from(json!({"session": session}).to_string()))
+        .unwrap()
+}
+
 async fn route_redirect() -> Response<Body> {
     Response::builder()
         .status(StatusCode::FOUND)
@@ -246,6 +276,8 @@ impl FixtureServer {
             .route("/slow-echo", get(slow_echo))
             .route("/api/data", get(route_data))
             .route("/api/redirect", get(route_redirect))
+            .route("/login", get(session_login))
+            .route("/api/session", get(session_probe))
             .route("/download", get(download))
             .route("/upload", post(upload))
             .route("/*path", get(static_fixture))
@@ -678,6 +710,51 @@ fn chrome_discovery_returns_none_for_missing_candidates() {
         Some(empty_path.path().as_os_str().to_os_string()),
     );
     assert_eq!(found, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn http_request_shares_the_page_session_cookie_in_both_directions() {
+    let Some(mut case) = BrowserCase::start("login").await else {
+        return;
+    };
+    let report = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::HttpRequest {
+            options: BrowserHttpRequest {
+                url: case.server.url("api/session"),
+                fail_on_status: Some(true),
+                ..Default::default()
+            },
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+    assert!(report.ok, "http_request failed: {report:?}");
+
+    let data = &report.steps[0].data.as_ref().unwrap()["http_request"];
+    assert_eq!(data["status"], 200);
+    assert_eq!(data["method"], "GET");
+    assert_eq!(data["redirects"], 0);
+    assert_eq!(data["headers"]["content-type"], "application/json");
+    assert!(
+        data["body"].as_str().unwrap().contains("logged-in"),
+        "the API did not see the page session cookie: {data}"
+    );
+    assert_eq!(data["set_cookies"]["count"], 1);
+    assert_eq!(data["set_cookies"]["names"][0], "api_issued");
+    assert!(data.get("artifact").is_none());
+    assert!(!serde_json::to_string(data).unwrap().contains("from-api"));
+
+    case.navigate("context-probe.html");
+    let cookies = case
+        .tab
+        .evaluate("document.cookie", false)
+        .unwrap()
+        .value
+        .unwrap();
+    let cookies = cookies.as_str().unwrap();
+    assert!(cookies.contains("api_issued=from-api"), "{cookies}");
+    assert!(cookies.contains("fixture_session=logged-in"), "{cookies}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
