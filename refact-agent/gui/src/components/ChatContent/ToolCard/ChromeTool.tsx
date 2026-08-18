@@ -20,10 +20,12 @@ import type {
   BrowserPageContext,
   BrowserPageSnapshot,
   BrowserSnapshotArtifact,
+  BrowserSnapshotBox,
+  BrowserSnapshotGeneration,
 } from "../../../services/refact/browser";
 import { ShikiCodeBlock } from "../../Markdown";
 import { DialogImage } from "../../DialogImage";
-import { Chip } from "../../ui";
+import { Badge, Chip } from "../../ui";
 import { AriaSnapshotView } from "./AriaSnapshotView";
 import { ActionabilityLog } from "./ActionabilityLog";
 import { ArtifactsPanel } from "./ArtifactsPanel";
@@ -157,12 +159,66 @@ function isBrowserActionResponse(
   );
 }
 
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function parseSnapshotBox(value: unknown): BrowserSnapshotBox | null {
+  if (!isRecord(value)) return null;
+  const x = optionalNumber(value.x);
+  const y = optionalNumber(value.y);
+  const width = optionalNumber(value.width);
+  const height = optionalNumber(value.height);
+  if (
+    x === undefined ||
+    y === undefined ||
+    width === undefined ||
+    height === undefined
+  ) {
+    return null;
+  }
+  return { x, y, width, height };
+}
+
 function parseAriaSnapshotNode(value: unknown): BrowserAriaSnapshotNode | null {
   if (!isRecord(value) || typeof value.role !== "string") return null;
   return {
     role: value.role,
     name: typeof value.name === "string" ? value.name : null,
     ref: typeof value.ref === "string" ? value.ref : null,
+    box: parseSnapshotBox(value.box),
+  };
+}
+
+function parseSnapshotGeneration(
+  value: unknown,
+): BrowserSnapshotGeneration | null {
+  if (!isRecord(value)) return null;
+  const documentGeneration = optionalNumber(value.document_generation);
+  const frameGeneration = optionalNumber(value.frame_generation);
+  if (documentGeneration === undefined || frameGeneration === undefined) {
+    return null;
+  }
+  const refs: BrowserSnapshotGeneration["refs"] = {};
+  if (isRecord(value.refs)) {
+    for (const [reference, info] of Object.entries(value.refs)) {
+      if (!isRecord(info) || typeof info.role !== "string") continue;
+      refs[reference] = {
+        role: info.role,
+        name: typeof info.name === "string" ? info.name : null,
+      };
+    }
+  }
+  return {
+    document_generation: documentGeneration,
+    frame_generation: frameGeneration,
+    refs,
   };
 }
 
@@ -173,17 +229,11 @@ function parseAriaSnapshot(value: unknown): BrowserAriaSnapshot | null {
         .map(parseAriaSnapshotNode)
         .filter((node): node is BrowserAriaSnapshotNode => node !== null)
     : [];
-  return { yaml: value.yaml, nodes };
-}
-
-function optionalBoolean(value: unknown): boolean | undefined {
-  return typeof value === "boolean" ? value : undefined;
-}
-
-function optionalNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value)
-    ? value
-    : undefined;
+  return {
+    yaml: value.yaml,
+    nodes,
+    generation: parseSnapshotGeneration(value.generation),
+  };
 }
 
 function parseConsoleCounts(value: unknown): BrowserConsoleCounts {
@@ -289,9 +339,14 @@ function captureDetail(
   const parts: string[] = [];
   if (kind === "filmstrip") {
     const frames = optionalNumber(data.frame_count);
+    const columns = optionalNumber(data.columns);
+    const rows = optionalNumber(data.rows);
     const duration = optionalNumber(data.duration_ms);
     if (frames !== undefined) {
       parts.push(`${frames} frame${frames === 1 ? "" : "s"}`);
+    }
+    if (columns !== undefined && rows !== undefined) {
+      parts.push(`${columns}×${rows} grid`);
     }
     if (duration !== undefined) parts.push(`${duration}ms`);
   } else if (kind === "element_gallery") {
@@ -402,6 +457,29 @@ function renderAssertionValue(value: unknown): string {
 function summarizeStep(step: BrowserExecutionStep): string {
   if (step.ok) return step.summary;
   return step.error ? `${step.summary}: ${step.error}` : step.summary;
+}
+
+interface FillDiagnosticChip {
+  label: string;
+  tone: "muted" | "success" | "warning";
+}
+
+function fillDiagnostics(step: BrowserExecutionStep): FillDiagnosticChip[] {
+  const chips: FillDiagnosticChip[] = [];
+  if (typeof step.field_kind === "string" && step.field_kind.length > 0) {
+    chips.push({ label: step.field_kind, tone: "muted" });
+  }
+  if (typeof step.fill_strategy === "string" && step.fill_strategy.length > 0) {
+    chips.push({ label: step.fill_strategy, tone: "muted" });
+  }
+  if (typeof step.verified === "boolean") {
+    chips.push(
+      step.verified
+        ? { label: "verified", tone: "success" }
+        : { label: "unverified", tone: "warning" },
+    );
+  }
+  return chips;
 }
 
 function prettifyActionName(action: string): string {
@@ -676,9 +754,19 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         typeof step.locator_echo === "string" && step.locator_echo.length > 0
           ? step.locator_echo
           : null,
+      diagnostics: fillDiagnostics(step),
     }));
-    return rows.some((row) => row.locatorEcho !== null) ? rows : null;
+    return rows.some(
+      (row) => row.locatorEcho !== null || row.diagnostics.length > 0,
+    )
+      ? rows
+      : null;
   }, [typedResult]);
+
+  const reportWarnings = useMemo(
+    () => (typedResult ? stringList(typedResult.warnings) : []),
+    [typedResult],
+  );
 
   const pageContext = useMemo(
     () => (typedResult ? parsePageContext(typedResult.page) : null),
@@ -928,6 +1016,16 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
         />
       )}
 
+      {reportWarnings.length > 0 && (
+        <Box className={styles.warningBanner} data-testid="browser-warnings">
+          {reportWarnings.map((warning, index) => (
+            <Box className={styles.warningLine} key={index}>
+              {warning}
+            </Box>
+          ))}
+        </Box>
+      )}
+
       {typedStepsBlock && (
         <Box className={styles.section}>
           <Box className={styles.sectionLabel}>Request</Box>
@@ -1018,6 +1116,24 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
             {typedStepRows.map((row) => (
               <Box className={styles.stepRow} key={row.stepIndex}>
                 <Box className={styles.stepSummary}>{row.summary}</Box>
+                {row.diagnostics.length > 0 && (
+                  <Flex
+                    data-testid="browser-fill-diagnostics"
+                    gap="1"
+                    wrap="wrap"
+                  >
+                    {row.diagnostics.map((chip) => (
+                      <Badge
+                        key={chip.label}
+                        size="xs"
+                        tone={chip.tone}
+                        variant="soft"
+                      >
+                        {chip.label}
+                      </Badge>
+                    ))}
+                  </Flex>
+                )}
                 {row.locatorEcho && (
                   <Box
                     className={styles.locatorEcho}
@@ -1169,7 +1285,11 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       {typedAriaSnapshots.map(({ stepIndex, snapshot }) => (
         <Box className={styles.section} key={stepIndex}>
           <Box className={styles.sectionLabel}>ARIA Snapshot</Box>
-          <AriaSnapshotView yaml={snapshot.yaml} nodes={snapshot.nodes} />
+          <AriaSnapshotView
+            generation={snapshot.generation}
+            nodes={snapshot.nodes}
+            yaml={snapshot.yaml}
+          />
         </Box>
       ))}
 

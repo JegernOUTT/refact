@@ -174,3 +174,21 @@
   font-size: var(--rf-text-1);
   overflow-wrap: anywhere;
 }
+
+.warningBanner {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2);
+  color: var(--rf-color-warning);
+  background: color-mix(in oklab, var(--rf-color-warning) 12%, transparent);
+  border: var(--rf-hairline) solid
+    color-mix(in oklab, var(--rf-color-warning) 40%, transparent);
+  border-radius: var(--rf-radius-card);
+}
+
+.warningLine {
+  min-width: 0;
+  font-size: var(--rf-text-1);
+  overflow-wrap: anywhere;
+}

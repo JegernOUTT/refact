@@ -2,7 +2,11 @@ import { ChevronRight, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Box, Flex, Text } from "@radix-ui/themes";
 
-import type { BrowserAriaSnapshotNode } from "../../../services/refact/browser";
+import type {
+  BrowserAriaSnapshotNode,
+  BrowserSnapshotBox,
+  BrowserSnapshotGeneration,
+} from "../../../services/refact/browser";
 import { Badge, Button, FieldText, Icon } from "../../ui";
 import { ShikiCodeBlock } from "../../Markdown";
 import styles from "./AriaSnapshotView.module.css";
@@ -23,6 +27,7 @@ interface AriaTreeNode {
   name: string | null;
   states: string[];
   reference: string | null;
+  box: BrowserSnapshotBox | null;
   properties: Record<string, string>;
   children: AriaTreeNode[];
   searchText: string;
@@ -31,6 +36,7 @@ interface AriaTreeNode {
 export interface AriaSnapshotViewProps {
   yaml: string;
   nodes?: BrowserAriaSnapshotNode[];
+  generation?: BrowserSnapshotGeneration | null;
 }
 
 interface MutableTreeNode extends Omit<AriaTreeNode, "searchText"> {
@@ -247,6 +253,7 @@ function parseSnapshot(yaml: string): AriaTreeNode[] | null {
       name: header.name,
       states: header.states,
       reference: header.reference,
+      box: null,
       properties: header.text === null ? {} : { text: header.text },
       children: [],
     };
@@ -284,33 +291,53 @@ function enrichReferences(
   if (metadata.length === 0) return roots;
 
   const byRoleAndName = new Map<string, string[]>();
+  const boxesByRoleAndName = new Map<string, BrowserSnapshotBox[]>();
   for (const item of metadata) {
-    if (!item.ref) continue;
     const key = `${item.role}\u0000${item.name ?? ""}`;
-    const references = byRoleAndName.get(key) ?? [];
-    references.push(item.ref);
-    byRoleAndName.set(key, references);
+    if (item.ref) {
+      const references = byRoleAndName.get(key) ?? [];
+      references.push(item.ref);
+      byRoleAndName.set(key, references);
+    }
+    if (item.box) {
+      const boxes = boxesByRoleAndName.get(key) ?? [];
+      boxes.push(item.box);
+      boxesByRoleAndName.set(key, boxes);
+    }
   }
 
   const cursors = new Map<string, number>();
+  const boxCursors = new Map<string, number>();
   const visit = (node: AriaTreeNode): AriaTreeNode => {
+    const key = `${node.role}\u0000${node.name ?? ""}`;
     let reference = node.reference;
     if (!reference) {
-      const key = `${node.role}\u0000${node.name ?? ""}`;
       const references = byRoleAndName.get(key);
       const cursor = cursors.get(key) ?? 0;
       reference = references?.[cursor] ?? null;
       if (reference) cursors.set(key, cursor + 1);
     }
+    let box = node.box;
+    if (!box) {
+      const boxes = boxesByRoleAndName.get(key);
+      const boxCursor = boxCursors.get(key) ?? 0;
+      box = boxes?.[boxCursor] ?? null;
+      if (box) boxCursors.set(key, boxCursor + 1);
+    }
     const enriched = {
       ...node,
       reference,
+      box,
       children: node.children.map(visit),
     };
     return { ...enriched, searchText: buildSearchText(enriched) };
   };
 
   return roots.map(visit);
+}
+
+function formatBox(box: BrowserSnapshotBox): string {
+  return `${box.width}×${box.height}@${box.x},${box.y}`;
 }
 
 function filterTree(nodes: AriaTreeNode[], query: string): AriaTreeNode[] {
@@ -405,6 +432,18 @@ function TreeNode({ node, query }: { node: AriaTreeNode; query: string }) {
               ref={node.reference}
             </Badge>
           )}
+          {node.box && (
+            <Badge
+              className={styles.boxBadge}
+              data-testid="aria-box-badge"
+              size="xs"
+              title={`x ${node.box.x}, y ${node.box.y}, ${node.box.width}×${node.box.height}`}
+              tone="muted"
+              variant="outline"
+            >
+              {formatBox(node.box)}
+            </Badge>
+          )}
         </Flex>
       </Box>
       {Object.entries(node.properties).length > 0 && (
@@ -433,7 +472,11 @@ function Tree({ nodes, query }: { nodes: AriaTreeNode[]; query: string }) {
   );
 }
 
-export function AriaSnapshotView({ yaml, nodes = [] }: AriaSnapshotViewProps) {
+export function AriaSnapshotView({
+  yaml,
+  nodes = [],
+  generation = null,
+}: AriaSnapshotViewProps) {
   const parsed = useMemo(() => parseSnapshot(yaml), [yaml]);
   const enriched = useMemo(
     () => (parsed ? enrichReferences(parsed, nodes) : null),
@@ -474,6 +517,16 @@ export function AriaSnapshotView({ yaml, nodes = [] }: AriaSnapshotViewProps) {
           placeholder="Filter roles, names, states, refs…"
           value={query}
         />
+        {generation && (
+          <Text
+            as="span"
+            className={styles.generation}
+            data-testid="aria-generation"
+          >
+            gen d{generation.document_generation}/f
+            {generation.frame_generation}
+          </Text>
+        )}
         <Text as="span" className={styles.nodeCount}>
           {query.trim()
             ? `${matchCount} match${matchCount === 1 ? "" : "es"}`

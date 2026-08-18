@@ -633,6 +633,7 @@ export type BrowserElementState = {
 export type BrowserActionResponse = {
   ok: boolean;
   steps: BrowserExecutionStep[];
+  warnings?: string[];
   network_summary?: string[];
   url?: string | null;
   title?: string | null;

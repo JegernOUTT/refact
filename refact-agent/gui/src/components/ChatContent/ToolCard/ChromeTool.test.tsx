@@ -986,7 +986,7 @@ describe("ChromeTool", () => {
     expect(screen.getByText("Captures")).toBeInTheDocument();
     expect(screen.getByTestId("browser-capture-filmstrip")).toBeInTheDocument();
     expect(screen.getByText("Filmstrip")).toBeInTheDocument();
-    expect(screen.getByText("3 frames · 900ms")).toBeInTheDocument();
+    expect(screen.getByText("3 frames · 3×1 grid · 900ms")).toBeInTheDocument();
     expect(screen.getByText("+0ms")).toBeInTheDocument();
     expect(screen.getByText("+450ms · 12.5% changed")).toBeInTheDocument();
     expect(screen.getByText("+900ms · 3.0% changed")).toBeInTheDocument();
@@ -1179,6 +1179,130 @@ describe("ChromeTool", () => {
     expect(
       screen.getByText((text) => text.includes('+ navigation "Secondary"')),
     ).toBeInTheDocument();
+  });
+
+  test("renders report warnings and per-step fill diagnostics", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-warnings",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: {
+            steps: [
+              {
+                action: "fill",
+                locator: { by: "css", value: "input[name=q]" },
+                text: "hello",
+              },
+              {
+                action: "fill",
+                locator: { by: "css", value: "#bio" },
+                text: "bio",
+              },
+            ],
+          },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-warnings",
+      content: JSON.stringify({
+        ok: true,
+        warnings: [
+          "browser session was dead; relaunched and retried (open tabs lost, cookies/localStorage kept)",
+          "screenshot capture failed: target closed",
+        ],
+        steps: [
+          {
+            step_index: 0,
+            ok: true,
+            summary: "Filled <input> with 5 chars",
+            field_kind: "text_input",
+            fill_strategy: "dom_value_setter",
+            verified: true,
+            retries: 0,
+          },
+          {
+            step_index: 1,
+            ok: true,
+            summary: "Filled <div> with 3 chars",
+            field_kind: "content_editable",
+            fill_strategy: "content_editable_path",
+            verified: false,
+            retries: 0,
+          },
+        ],
+      }),
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+
+    const banner = screen.getByTestId("browser-warnings");
+    expect(banner).toHaveTextContent("browser session was dead; relaunched");
+    expect(banner).toHaveTextContent(
+      "screenshot capture failed: target closed",
+    );
+
+    expect(screen.getAllByTestId("browser-fill-diagnostics")).toHaveLength(2);
+    expect(screen.getByText("text_input")).toBeInTheDocument();
+    expect(screen.getByText("dom_value_setter")).toBeInTheDocument();
+    expect(screen.getByText("verified")).toBeInTheDocument();
+    expect(screen.getByText("content_editable")).toBeInTheDocument();
+    expect(screen.getByText("content_editable_path")).toBeInTheDocument();
+    expect(screen.getByText("unverified")).toBeInTheDocument();
+  });
+
+  test("renders no warning banner when the report carries none", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-no-warnings",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({
+          request: { steps: [{ action: "navigate", url: "https://a.test" }] },
+        }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-no-warnings",
+      content: JSON.stringify({
+        ok: true,
+        steps: [
+          {
+            step_index: 0,
+            ok: true,
+            summary: "Navigated to https://a.test",
+            retries: 0,
+          },
+        ],
+      }),
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+
+    expect(screen.queryByTestId("browser-warnings")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("browser-fill-diagnostics"),
+    ).not.toBeInTheDocument();
   });
 
   test("renders wave-3 step families inside the card", async () => {

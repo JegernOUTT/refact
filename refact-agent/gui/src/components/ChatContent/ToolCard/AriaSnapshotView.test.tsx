@@ -66,6 +66,49 @@ describe("AriaSnapshotView", () => {
     );
   });
 
+  test("renders box chips and the snapshot generation header", () => {
+    render(
+      <AriaSnapshotView
+        yaml={`- button "Save"\n- paragraph "Status"`}
+        nodes={[
+          {
+            role: "button",
+            name: "Save",
+            ref: "e9",
+            box: { x: 120, y: 340, width: 24, height: 18 },
+          },
+          { role: "paragraph", name: "Status", ref: null, box: null },
+        ]}
+        generation={{
+          document_generation: 3,
+          frame_generation: 7,
+          refs: { e9: { role: "button", name: "Save" } },
+        }}
+      />,
+    );
+
+    const boxes = screen.getAllByTestId("aria-box-badge");
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0]).toHaveTextContent("24×18@120,340");
+    expect(boxes[0]).toHaveAttribute("title", "x 120, y 340, 24×18");
+    expect(screen.getByTestId("aria-generation")).toHaveTextContent(
+      "gen d3/f7",
+    );
+  });
+
+  test("omits box chips and the generation header when absent", () => {
+    render(
+      <AriaSnapshotView
+        yaml={`- button "Save"`}
+        nodes={[{ role: "button", name: "Save", ref: "e1" }]}
+      />,
+    );
+
+    expect(screen.queryByTestId("aria-box-badge")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("aria-generation")).not.toBeInTheDocument();
+    expect(screen.getByText("ref=e1")).toBeInTheDocument();
+  });
+
   test("filters to matching nodes and highlights the direct match", async () => {
     const user = userEvent.setup();
     render(<AriaSnapshotView yaml={SNAPSHOT} />);

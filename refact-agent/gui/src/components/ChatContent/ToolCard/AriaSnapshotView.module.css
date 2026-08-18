@@ -135,6 +135,18 @@
   font-family: var(--rf-font-mono);
 }
 
+.boxBadge {
+  font-family: var(--rf-font-mono);
+}
+
+.generation {
+  flex: 0 0 auto;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  white-space: nowrap;
+}
+
 .properties {
   min-width: 0;
   padding: 0 var(--rf-space-2) var(--rf-space-1)
