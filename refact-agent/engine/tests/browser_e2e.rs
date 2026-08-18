@@ -2161,13 +2161,22 @@ async fn emulate_device_changes_reported_viewport_and_user_agent() {
     assert!(report.ok, "emulate_device failed: {report:?}");
     assert!(report.steps[0].summary.contains("Pixel 7"));
 
-    let width = case
-        .tab
-        .evaluate("window.innerWidth", false)
-        .unwrap()
-        .value
-        .unwrap();
-    assert_eq!(width, json!(412));
+    let metrics: serde_json::Value = serde_json::from_str(
+        case.tab
+            .evaluate(
+                "JSON.stringify({inner: innerWidth, screen: screen.width, dpr: devicePixelRatio})",
+                false,
+            )
+            .unwrap()
+            .value
+            .unwrap()
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(metrics["inner"], json!(412), "viewport metrics: {metrics}");
+    assert_eq!(metrics["screen"], json!(412), "viewport metrics: {metrics}");
+    assert_eq!(metrics["dpr"], json!(2.625), "viewport metrics: {metrics}");
     let user_agent = case
         .tab
         .evaluate("navigator.userAgent", false)
