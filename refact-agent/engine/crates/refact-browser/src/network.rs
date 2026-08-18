@@ -627,6 +627,10 @@ impl UrlMatcher {
     }
 
     pub fn regex(source: &str, flags: &str) -> Result<Self, String> {
+        let flags = flags
+            .chars()
+            .filter(|flag| !matches!(flag, 'g' | 'y'))
+            .collect::<String>();
         let unsupported = flags
             .chars()
             .filter(|flag| !matches!(flag, 'i' | 'm' | 's' | 'u'))
@@ -650,6 +654,10 @@ impl UrlMatcher {
         } else {
             Self::exact(value)
         }
+    }
+
+    pub fn substring(value: &str) -> Result<Self, String> {
+        Self::regex(&regex::escape(value), "")
     }
 
     pub fn is_match(&self, url: &str) -> bool {
@@ -889,6 +897,33 @@ mod tests {
         assert!(UrlMatcher::regex(r"/items/\d+$", "")
             .unwrap()
             .is_match("https://x/items/42"));
+    }
+
+    #[test]
+    fn regex_flags_drop_javascript_only_modifiers_and_honor_the_rest() {
+        for flags in ["g", "y", "gy", "gi", "iy"] {
+            assert!(
+                UrlMatcher::regex("/API/", flags)
+                    .unwrap()
+                    .is_match("https://x.test/API/items"),
+                "flags {flags} must be accepted"
+            );
+        }
+        assert!(UrlMatcher::regex("/api/", "gi")
+            .unwrap()
+            .is_match("https://x.test/API/items"));
+        assert!(!UrlMatcher::regex("/api/", "g")
+            .unwrap()
+            .is_match("https://x.test/API/items"));
+        assert!(UrlMatcher::regex("a.b", "s").unwrap().is_match("a\nb"));
+        assert!(UrlMatcher::regex("^b", "m").unwrap().is_match("a\nb"));
+
+        assert_eq!(
+            UrlMatcher::regex("/api/", "d").unwrap_err(),
+            "Unsupported regex flags: d"
+        );
+        let lookahead = UrlMatcher::regex("/api/(?=v2)", "").unwrap_err();
+        assert!(lookahead.starts_with("Invalid URL regex"), "{lookahead}");
     }
 
     #[test]

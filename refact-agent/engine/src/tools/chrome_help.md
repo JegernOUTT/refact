@@ -141,8 +141,9 @@ wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_el
 Put `wait_for_popup` immediately before the popup-producing click in ONE batch; the returned popup
 becomes active for later steps.
 
-`wait_for_url` takes a plain substring in `pattern` and matches when the current URL contains it,
-unlike the glob/regex `pattern` used by route and wait_for_request.
+`wait_for_url` reads a plain-string `pattern` as a case-sensitive substring of the current URL, and a
+`{source, flags}` pattern as a regex just like wait_for_request. Plain text is never globbed here,
+unlike the glob `pattern` used by route and wait_for_request.
 
 `wait_for_selector` takes an optional `state`: attached (the default, any match in the DOM), visible
 (a match with a non-empty box), hidden (no visible match, including no match at all), or detached
@@ -407,7 +408,11 @@ http_request, add_init_script, remove_init_script, cdp_send, and the clock_* fam
 
 `times` bounds how often a handler fires and `no_wait_after` skips waiting for it to become hidden.
 
-`dismiss_overlays` is the one-shot version. Other advanced steps: eval, highlight_element, highlight
+`dismiss_overlays` is the one-shot version. It only clicks known cookie/consent/close buttons, so a
+legitimate modal (possibly holding your target) is never deleted; the default handler that runs
+before pointer actions behaves the same way. Pass `aggressive: true` to also delete large fixed
+overlays with a z-index above 1000 — an explicit, destructive opt-in that never runs automatically.
+Other advanced steps: eval, highlight_element, highlight
 (locator/ref plus optional `style` and `label`), hide_highlight, annotate (locator/ref plus `text`),
 and fixed-delay wait_seconds.
 

@@ -404,7 +404,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "timeout_ms".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "description": "Step timeout in milliseconds; waits and expect default to 5000"}),
+        serde_json::json!({"type": "integer", "minimum": 0, "description": "Step timeout in milliseconds; waits, navigate, and expect default to 5000"}),
     );
     properties.insert(
         "ticks".to_string(),
@@ -655,9 +655,13 @@ fn browser_step_schema_with_actions(
     );
     let mut pattern_schema = url_pattern_schema();
     pattern_schema["description"] = serde_json::json!(
-        "Glob or {source,flags} regex; wait_for_url instead takes a plain substring"
+        "Glob or {source,flags} regex; wait_for_url reads plain text as a substring"
     );
     properties.insert("pattern".to_string(), pattern_schema);
+    properties.insert(
+        "aggressive".to_string(),
+        serde_json::json!({"type": "boolean", "description": "dismiss_overlays only: also delete large fixed overlays instead of just clicking dismiss buttons"}),
+    );
     properties.insert(
         "save_as".to_string(),
         serde_json::json!({"type": "string", "description": "Artifact file name for storage_state and wait_for_download"}),
@@ -1740,8 +1744,10 @@ mod tests {
             .pointer("/properties/request/properties/steps/items/properties/pattern/description")
             .and_then(Value::as_str)
             .is_some_and(|description| description.contains("wait_for_url")
-                && description.contains("plain substring")));
-        assert!(CHROME_HELP.contains("wait_for_url"));
+                && description.contains("substring")));
+        assert!(CHROME_HELP.contains(
+            "`wait_for_url` reads a plain-string `pattern` as a case-sensitive substring"
+        ));
     }
 
     #[test]

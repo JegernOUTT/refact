@@ -5,6 +5,7 @@ if (!window.__refact_inspect_element) {
   window.__refact_inspect_element = function(el, count) {
     var rect = el.getBoundingClientRect();
     var tag = el.tagName.toLowerCase();
+    var visibility = window.getComputedStyle(el).visibility;
     var inputType = (tag === 'input') ? (el.type || 'text').toLowerCase() : null;
     var fieldKind = 'unknown';
     if (tag === 'textarea') { fieldKind = 'textarea'; }
@@ -30,7 +31,7 @@ if (!window.__refact_inspect_element) {
       placeholder: el.placeholder || null,
       aria_label: el.getAttribute('aria-label') || null,
       role: el.getAttribute('role') || null,
-      visible: rect.width > 0 && rect.height > 0,
+      visible: rect.width > 0 && rect.height > 0 && visibility !== 'hidden' && visibility !== 'collapse',
       enabled: !el.disabled,
       readonly: !!el.readOnly,
       content_editable: !!el.isContentEditable,
@@ -218,88 +219,68 @@ pub fn js_highlight_element() -> &'static str {
 }"#
 }
 
-pub fn js_dismiss_overlays() -> &'static str {
-    r#"(function() {
-  var dismissed = 0;
-  var selectors = [
-    '[id*="cookie"] button[id*="accept"]',
-    '[id*="cookie"] button[id*="agree"]',
-    '[class*="cookie"] button[class*="accept"]',
-    '[id*="consent"] button[id*="accept"]',
-    '[class*="consent"] button[class*="accept"]',
-    '[id*="gdpr"] button',
-    'button[id*="accept-all"]',
-    'button[class*="accept-all"]',
-    '#onetrust-accept-btn-handler',
-    '.cc-btn.cc-dismiss',
-    '[data-testid*="cookie"] button',
-    '[data-testid*="accept"]',
-    'dialog[open] button[aria-label="Close"]',
-    'dialog[open] button[aria-label="Dismiss"]',
-    '[role="dialog"] button[aria-label="Close"]',
-    '[role="dialog"] button[aria-label="Dismiss"]',
-  ];
-  selectors.forEach(function(sel) {
-    try {
-      var btn = document.querySelector(sel);
-      if (btn && btn.offsetWidth > 0 && btn.offsetHeight > 0) {
-        btn.click();
-        dismissed++;
-      }
-    } catch(e) {}
-  });
+pub const DISMISS_OVERLAY_SELECTORS: [&str; 16] = [
+    "[id*=\"cookie\"] button[id*=\"accept\"]",
+    "[id*=\"cookie\"] button[id*=\"agree\"]",
+    "[class*=\"cookie\"] button[class*=\"accept\"]",
+    "[id*=\"consent\"] button[id*=\"accept\"]",
+    "[class*=\"consent\"] button[class*=\"accept\"]",
+    "[id*=\"gdpr\"] button",
+    "button[id*=\"accept-all\"]",
+    "button[class*=\"accept-all\"]",
+    "#onetrust-accept-btn-handler",
+    ".cc-btn.cc-dismiss",
+    "[data-testid*=\"cookie\"] button",
+    "[data-testid*=\"accept\"]",
+    "dialog[open] button[aria-label=\"Close\"]",
+    "dialog[open] button[aria-label=\"Dismiss\"]",
+    "[role=\"dialog\"] button[aria-label=\"Close\"]",
+    "[role=\"dialog\"] button[aria-label=\"Dismiss\"]",
+];
+
+const DISMISS_OVERLAY_REMOVAL_JS: &str = r#"
   var overlays = document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]');
   overlays.forEach(function(el) {
     var rect = el.getBoundingClientRect();
     if (rect.width > window.innerWidth * 0.5 && rect.height > window.innerHeight * 0.3) {
       var z = parseInt(window.getComputedStyle(el).zIndex) || 0;
       if (z > 1000) {
-        el.remove();
-        dismissed++;
+        if (!dryRun) el.remove();
+        count++;
+        removed++;
       }
     }
-  });
-  return JSON.stringify({ok: true, dismissed: dismissed});
-})()"#
-}
+  });"#;
 
-pub fn js_dismiss_overlays_probe() -> &'static str {
-    r#"(function() {
-  var dismissable = 0;
-  var selectors = [
-    '[id*="cookie"] button[id*="accept"]',
-    '[id*="cookie"] button[id*="agree"]',
-    '[class*="cookie"] button[class*="accept"]',
-    '[id*="consent"] button[id*="accept"]',
-    '[class*="consent"] button[class*="accept"]',
-    '[id*="gdpr"] button',
-    'button[id*="accept-all"]',
-    'button[class*="accept-all"]',
-    '#onetrust-accept-btn-handler',
-    '.cc-btn.cc-dismiss',
-    '[data-testid*="cookie"] button',
-    '[data-testid*="accept"]',
-    'dialog[open] button[aria-label="Close"]',
-    'dialog[open] button[aria-label="Dismiss"]',
-    '[role="dialog"] button[aria-label="Close"]',
-    '[role="dialog"] button[aria-label="Dismiss"]',
-  ];
-  selectors.forEach(function(sel) {
-    try {
+pub fn js_dismiss_overlays(dry_run: bool, aggressive: bool) -> String {
+    let selectors = DISMISS_OVERLAY_SELECTORS
+        .iter()
+        .map(|selector| js_string_literal(selector))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let removal = if aggressive {
+        DISMISS_OVERLAY_REMOVAL_JS
+    } else {
+        ""
+    };
+    format!(
+        r#"(function() {{
+  var dryRun = {dry_run};
+  var count = 0;
+  var removed = 0;
+  var selectors = [{selectors}];
+  selectors.forEach(function(sel) {{
+    try {{
       var btn = document.querySelector(sel);
-      if (btn && btn.offsetWidth > 0 && btn.offsetHeight > 0) dismissable++;
-    } catch(e) {}
-  });
-  var overlays = document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]');
-  overlays.forEach(function(el) {
-    var rect = el.getBoundingClientRect();
-    if (rect.width > window.innerWidth * 0.5 && rect.height > window.innerHeight * 0.3) {
-      var z = parseInt(window.getComputedStyle(el).zIndex) || 0;
-      if (z > 1000) dismissable++;
-    }
-  });
-  return JSON.stringify({ok: true, dismissable: dismissable});
-})()"#
+      if (btn && btn.offsetWidth > 0 && btn.offsetHeight > 0) {{
+        if (!dryRun) btn.click();
+        count++;
+      }}
+    }} catch(e) {{}}
+  }});{removal}
+  return JSON.stringify({{ok: true, count: count, removed: removed}});
+}})()"#
+    )
 }
 
 pub fn js_check_text_present(text: &str) -> String {
@@ -409,15 +390,29 @@ mod tests {
 
     #[test]
     fn test_js_dismiss_overlays_valid_js() {
-        let js = js_dismiss_overlays();
+        let js = js_dismiss_overlays(false, false);
         assert!(js.contains("cookie"));
         assert!(js.contains("consent"));
-        assert!(js.contains("dismissed"));
+        assert!(js.contains("count"));
     }
 
     #[test]
-    fn dismiss_overlays_probe_keeps_the_battle_tested_selectors() {
-        let probe = js_dismiss_overlays_probe();
+    fn the_default_dismiss_overlays_pass_never_removes_an_element() {
+        let default_pass = js_dismiss_overlays(false, false);
+        assert!(!default_pass.contains("el.remove()"));
+        assert!(default_pass.contains("if (!dryRun) btn.click();"));
+
+        let aggressive = js_dismiss_overlays(false, true);
+        assert!(aggressive.contains("if (!dryRun) el.remove();"));
+
+        let probe = js_dismiss_overlays(true, false);
+        assert!(probe.contains("var dryRun = true;"));
+        assert!(!probe.contains("el.remove()"));
+    }
+
+    #[test]
+    fn dismiss_overlays_keeps_the_battle_tested_selectors() {
+        let probe = js_dismiss_overlays(true, true);
 
         for selector in [
             "#onetrust-accept-btn-handler",

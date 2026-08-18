@@ -716,6 +716,7 @@ impl<C: Clock> ActionabilityEngine<C> {
         let mut attached = None;
         let mut last_state = None;
         let mut receives_events = None;
+        let deadline = Deadline::new(&self.clock, timeout);
         if let Err(error) = self.perform_action_prechecks(mode, driver, &mut call_log) {
             return Err(self.enrich_error(
                 error,
@@ -726,7 +727,6 @@ impl<C: Clock> ActionabilityEngine<C> {
                 receives_events,
             ));
         }
-        let deadline = Deadline::new(&self.clock, timeout);
         call_log.push(format!("waiting for {locator}"));
 
         loop {
@@ -1614,12 +1614,36 @@ mod tests {
     }
 
     #[test]
-    fn completed_handler_checkpoint_does_not_consume_the_action_retry_budget() {
+    fn prechecks_consume_the_callers_timeout_budget() {
         let clock = MockClock::default();
         let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
         let mut driver = MockDriver::new();
         driver.precheck_clock = Some(clock.clone());
         driver.precheck_advance = Duration::from_millis(30);
+
+        let error = engine
+            .execute_with_timeout(
+                "button",
+                ActionKind::Click,
+                Duration::from_millis(25),
+                &mut driver,
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ActionabilityError::Timeout { .. }),
+            "{error:?}"
+        );
+        assert_eq!(driver.action_calls, 0);
+    }
+
+    #[test]
+    fn a_cheap_precheck_leaves_the_rest_of_the_budget_for_the_action() {
+        let clock = MockClock::default();
+        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
+        let mut driver = MockDriver::new();
+        driver.precheck_clock = Some(clock.clone());
+        driver.precheck_advance = Duration::from_millis(5);
 
         let success = engine
             .execute_with_timeout(
@@ -1631,7 +1655,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(success.output, "done");
-        assert_eq!(success.elapsed, Duration::from_millis(30));
         assert_eq!(driver.action_calls, 1);
     }
 

@@ -79,7 +79,7 @@ fn websocket_inspection_and_har_replay_contracts_are_additive_and_masked() {
     let replay =
         refact_lsp::refact_browser::har::HarReplay::load(&path, None, HarNotFound::Abort).unwrap();
     assert!(matches!(
-        replay.match_request("GET", "https://example.test/missing"),
+        replay.match_request("GET", "https://example.test/missing", None),
         Some(refact_lsp::integrations::browser_models::RouteHandler::Abort { .. })
     ));
 }
@@ -301,6 +301,7 @@ async fn differentiator_01_multi_step_batching_returns_ordered_indexed_results()
             },
             BrowserStep::Navigate {
                 url: case.server.url("cookie-banner.html"),
+                timeout_ms: None,
             },
         ],
         &ImagePolicy::browser_capture(),
@@ -360,7 +361,7 @@ async fn differentiator_03_dismiss_overlays_explicit_and_default_handler_paths()
     let explicit = execute_steps_with_runtime(
         &mut case.runtime,
         &[
-            BrowserStep::DismissOverlays,
+            BrowserStep::DismissOverlays { aggressive: false },
             BrowserStep::Click {
                 locator: BrowserLocator::css("#target"),
             },

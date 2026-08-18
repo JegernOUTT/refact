@@ -62,10 +62,22 @@ pub struct HarRequest {
     #[serde(rename = "queryString")]
     pub query_string: Vec<HarNameValue>,
     pub cookies: Vec<HarNameValue>,
+    #[serde(rename = "postData", default, skip_serializing_if = "Option::is_none")]
+    pub post_data: Option<HarPostData>,
     #[serde(rename = "headersSize")]
     pub headers_size: i64,
     #[serde(rename = "bodySize")]
     pub body_size: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HarPostData {
+    #[serde(rename = "mimeType", default)]
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<HarNameValue>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -388,13 +400,11 @@ pub fn merge_har_entries(base: Vec<HarEntry>, recorded: Vec<HarEntry>) -> HarMer
         ..Default::default()
     };
     for entry in recorded {
-        match merge.entries.iter_mut().find(|existing| {
-            existing.request.url == entry.request.url
-                && existing
-                    .request
-                    .method
-                    .eq_ignore_ascii_case(&entry.request.method)
-        }) {
+        match merge
+            .entries
+            .iter_mut()
+            .find(|existing| request_matches(existing, &entry.request))
+        {
             Some(existing) => {
                 *existing = entry;
                 merge.replaced += 1;
@@ -406,6 +416,19 @@ pub fn merge_har_entries(base: Vec<HarEntry>, recorded: Vec<HarEntry>) -> HarMer
         }
     }
     merge
+}
+
+fn post_data_text(request: &HarRequest) -> Option<&str> {
+    request
+        .post_data
+        .as_ref()
+        .and_then(|data| data.text.as_deref())
+}
+
+fn request_matches(entry: &HarEntry, request: &HarRequest) -> bool {
+    entry.request.url == request.url
+        && entry.request.method.eq_ignore_ascii_case(&request.method)
+        && post_data_text(&entry.request).is_none_or(|text| post_data_text(request) == Some(text))
 }
 
 fn artifact_har_path(artifacts_dir: &Path, path: &str) -> Result<PathBuf, String> {
@@ -456,7 +479,12 @@ impl HarReplay {
         self.not_found
     }
 
-    pub fn match_request(&self, method: &str, url: &str) -> Option<RouteHandler> {
+    pub fn match_request(
+        &self,
+        method: &str,
+        url: &str,
+        post_data: Option<&str>,
+    ) -> Option<RouteHandler> {
         if self
             .matcher
             .as_ref()
@@ -464,10 +492,26 @@ impl HarReplay {
         {
             return None;
         }
-        let masked_url = mask_text(url);
-        if let Some(entry) = self.entries.iter().find(|entry| {
-            entry.request.method.eq_ignore_ascii_case(method) && entry.request.url == masked_url
-        }) {
+        let request = HarRequest {
+            method: method.to_string(),
+            url: mask_text(url),
+            http_version: String::new(),
+            headers: Vec::new(),
+            query_string: Vec::new(),
+            cookies: Vec::new(),
+            post_data: post_data.map(|text| HarPostData {
+                mime_type: String::new(),
+                text: Some(mask_text(text)),
+                params: Vec::new(),
+            }),
+            headers_size: -1,
+            body_size: 0,
+        };
+        if let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| request_matches(entry, &request))
+        {
             let headers = entry
                 .response
                 .headers
@@ -562,6 +606,7 @@ fn entry_from_monitor(
             headers: header_pairs(request_headers),
             query_string: query_pairs(&entry.url),
             cookies: Vec::new(),
+            post_data: None,
             headers_size: if mode == HarMode::Full { 0 } else { -1 },
             body_size: 0,
         },
@@ -850,6 +895,76 @@ mod tests {
         entry
     }
 
+    fn entry_with_body(method: &str, url: &str, status: u16, body: &str) -> HarEntry {
+        let mut entry = entry_for(method, url, status);
+        entry.request.post_data = Some(HarPostData {
+            mime_type: "application/json".to_string(),
+            text: Some(body.to_string()),
+            params: Vec::new(),
+        });
+        entry
+    }
+
+    #[test]
+    fn replay_disambiguates_repeated_posts_by_request_body() {
+        let replay = HarReplay {
+            entries: vec![
+                entry_with_body("POST", "https://x.test/rpc", 200, r#"{"op":"one"}"#),
+                entry_with_body("POST", "https://x.test/rpc", 201, r#"{"op":"two"}"#),
+            ],
+            matcher: None,
+            not_found: HarNotFound::Fallback,
+            label: "rpc.har".to_string(),
+        };
+
+        for (body, status) in [(r#"{"op":"one"}"#, 200), (r#"{"op":"two"}"#, 201)] {
+            let handler = replay
+                .match_request("POST", "https://x.test/rpc", Some(body))
+                .unwrap();
+            assert!(
+                matches!(handler, RouteHandler::Fulfill { status: found, .. } if found == status),
+                "{body} should replay {status}"
+            );
+        }
+        assert!(replay
+            .match_request("POST", "https://x.test/rpc", Some(r#"{"op":"three"}"#))
+            .is_none());
+        assert!(replay
+            .match_request("POST", "https://x.test/rpc", None)
+            .is_none());
+    }
+
+    #[test]
+    fn replay_entries_without_a_body_still_match_on_method_and_url() {
+        let replay = HarReplay {
+            entries: vec![entry_for("POST", "https://x.test/rpc", 204)],
+            matcher: None,
+            not_found: HarNotFound::Fallback,
+            label: "rpc.har".to_string(),
+        };
+
+        for post_data in [None, Some("anything")] {
+            assert!(replay
+                .match_request("POST", "https://x.test/rpc", post_data)
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn merging_keeps_posts_with_different_bodies_apart() {
+        let merge = merge_har_entries(
+            vec![
+                entry_with_body("POST", "https://x.test/rpc", 200, "one"),
+                entry_with_body("POST", "https://x.test/rpc", 201, "two"),
+            ],
+            vec![entry_with_body("POST", "https://x.test/rpc", 503, "two")],
+        );
+
+        assert_eq!((merge.replaced, merge.appended), (1, 0));
+        assert_eq!(merge.entries[0].response.status, 200);
+        assert_eq!(merge.entries[1].response.status, 503);
+    }
+
     #[test]
     fn merging_replaces_matched_method_and_url_and_appends_the_rest() {
         let merge = merge_har_entries(
@@ -989,14 +1104,14 @@ mod tests {
             label: "page.har".to_string(),
         };
         assert!(matches!(
-            replay.match_request("GET", "https://example.test/page?token=secret"),
+            replay.match_request("GET", "https://example.test/page?token=secret", None),
             Some(RouteHandler::Fulfill {
                 body_base64: true,
                 ..
             })
         ));
         assert!(matches!(
-            replay.match_request("GET", "https://example.test/missing"),
+            replay.match_request("GET", "https://example.test/missing", None),
             Some(RouteHandler::Abort { .. })
         ));
 
@@ -1005,7 +1120,7 @@ mod tests {
             ..replay
         };
         assert!(fallback
-            .match_request("GET", "https://example.test/missing")
+            .match_request("GET", "https://example.test/missing", None)
             .is_none());
     }
 }

@@ -199,7 +199,7 @@ impl RouteRegistry {
         post_data: Option<String>,
         redirect_hop: bool,
     ) -> RequestPausedDecision {
-        let Some((pattern, handler)) = self.match_chain(&method, &url) else {
+        let Some((pattern, handler)) = self.match_chain(&method, &url, post_data.as_deref()) else {
             return RequestPausedDecision::Continue(None);
         };
         let outcome = execute_handler(
@@ -230,7 +230,12 @@ impl RouteRegistry {
         outcome.decision
     }
 
-    fn match_chain(&self, method: &str, url: &str) -> Option<(UrlPattern, RouteHandler)> {
+    fn match_chain(
+        &self,
+        method: &str,
+        url: &str,
+        post_data: Option<&str>,
+    ) -> Option<(UrlPattern, RouteHandler)> {
         let mut state = self.state.lock().unwrap();
         let mut fallback_pattern = None;
         let mut expired = Vec::new();
@@ -261,7 +266,7 @@ impl RouteRegistry {
                 state
                     .har_replay
                     .as_ref()
-                    .and_then(|replay| replay.match_request(method, url))
+                    .and_then(|replay| replay.match_request(method, url, post_data))
                     .map(|handler| (UrlPattern::Text(HAR_ROUTE_PATTERN.to_string()), handler))
             })
             .or_else(|| fallback_pattern.map(|pattern| (pattern, RouteHandler::Fallback)))

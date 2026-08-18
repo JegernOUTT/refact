@@ -210,6 +210,7 @@ impl BrowserCase {
             &tab,
             &[BrowserStep::Navigate {
                 url: server.url(page),
+                timeout_ms: None,
             }],
         );
         assert!(report.ok, "navigation failed: {report:?}");
@@ -226,6 +227,7 @@ impl BrowserCase {
             &self.tab,
             &[BrowserStep::Navigate {
                 url: self.server.url(page),
+                timeout_ms: None,
             }],
         );
         assert!(report.ok, "navigation failed: {report:?}");
@@ -453,6 +455,7 @@ async fn a_default_navigate_batch_returns_a_snapshot_context_and_zero_images() {
             network: NetworkReportMode::default(),
             steps: vec![BrowserStep::Navigate {
                 url: target.clone(),
+                timeout_ms: None,
             }],
             block_service_workers: None,
         },
@@ -514,7 +517,10 @@ async fn page_context_screenshot_returns_a_png_instead_of_a_snapshot() {
             attach_screenshot: None,
             page_context: Some(PageContextMode::Screenshot),
             network: NetworkReportMode::default(),
-            steps: vec![BrowserStep::Navigate { url: target }],
+            steps: vec![BrowserStep::Navigate {
+                url: target,
+                timeout_ms: None,
+            }],
             block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
@@ -541,7 +547,10 @@ async fn page_context_screenshot_returns_a_png_instead_of_a_snapshot() {
             attach_screenshot: None,
             page_context: Some(PageContextMode::Both),
             network: NetworkReportMode::default(),
-            steps: vec![BrowserStep::Navigate { url: snapshot_page }],
+            steps: vec![BrowserStep::Navigate {
+                url: snapshot_page,
+                timeout_ms: None,
+            }],
             block_service_workers: None,
         },
         &ImagePolicy::browser_capture(),
@@ -890,6 +899,7 @@ async fn navigation_steps_wait_for_reload_history_and_open_tab() {
             BrowserStep::GoForward,
             BrowserStep::Navigate {
                 url: next_url.clone(),
+                timeout_ms: None,
             },
             BrowserStep::GoBack,
             BrowserStep::GoForward,
@@ -1005,6 +1015,7 @@ async fn an_idle_session_outlives_its_own_idle_eviction_window() {
             block_service_workers: None,
             steps: vec![BrowserStep::Navigate {
                 url: server.url("delayed-button.html"),
+                timeout_ms: None,
             }],
         },
         &ImagePolicy::browser_capture(),
@@ -1086,6 +1097,7 @@ async fn dead_cdp_transport_is_relaunched_and_the_batch_is_retried_once() {
                 block_service_workers: None,
                 steps: vec![BrowserStep::Navigate {
                     url: case.server.url("delayed-button.html"),
+                    timeout_ms: None,
                 }],
             },
             &ImagePolicy::browser_capture(),
@@ -1536,6 +1548,7 @@ async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
             },
             BrowserStep::Navigate {
                 url: case.server.url("snapshot.html"),
+                timeout_ms: None,
             },
             BrowserStep::Expect {
                 locator: None,
@@ -3530,7 +3543,7 @@ async fn legacy_dismiss_overlays_step_still_clears_cookie_banner() {
     let report = execute_fixture_steps(
         &case.tab,
         &[
-            BrowserStep::DismissOverlays,
+            BrowserStep::DismissOverlays { aggressive: false },
             BrowserStep::Click {
                 locator: BrowserLocator::css("#target"),
             },
@@ -4147,7 +4160,10 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
                     on_page_message: WebSocketMessageAction::Forward,
                     on_server_message: WebSocketMessageAction::Forward,
                 },
-                BrowserStep::Navigate { url: page },
+                BrowserStep::Navigate {
+                    url: page,
+                    timeout_ms: None,
+                },
                 BrowserStep::SendWebSocketMessage {
                     pattern: pattern.clone(),
                     text: "mocked-frame".to_string(),
@@ -4220,7 +4236,10 @@ async fn intercept_case(
             on_page_message,
             on_server_message,
         },
-        BrowserStep::Navigate { url: page },
+        BrowserStep::Navigate {
+            url: page,
+            timeout_ms: None,
+        },
     ];
     steps.extend(extra);
 
@@ -6198,7 +6217,10 @@ impl ClockCase {
                 BrowserStep::ClockInstall {
                     time: Some(clock_time("2020-02-02T00:00:00Z")),
                 },
-                BrowserStep::Navigate { url: page_url },
+                BrowserStep::Navigate {
+                    url: page_url,
+                    timeout_ms: None,
+                },
                 BrowserStep::ClockPauseAt {
                     time: clock_time("2020-02-02T00:10:00Z"),
                 },
@@ -6929,6 +6951,7 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
                 },
                 BrowserStep::Navigate {
                     url: server_url.clone(),
+                    timeout_ms: None,
                 },
                 BrowserStep::Eval {
                     expression: "window.__refact_init_flag || 'missing'".to_string(),
@@ -6963,6 +6986,7 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
                 BrowserStep::RemoveInitScript { id },
                 BrowserStep::Navigate {
                     url: server_url.clone(),
+                    timeout_ms: None,
                 },
                 BrowserStep::Eval {
                     expression: "window.__refact_init_flag || 'missing'".to_string(),
@@ -6990,7 +7014,10 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
                     content: "window.__refact_init_flag = 'reinstalled';".to_string(),
                 },
                 BrowserStep::Reset,
-                BrowserStep::Navigate { url: server_url },
+                BrowserStep::Navigate {
+                    url: server_url,
+                    timeout_ms: None,
+                },
                 BrowserStep::Eval {
                     expression: "window.__refact_init_flag || 'missing'".to_string(),
                 },

@@ -271,6 +271,7 @@ impl WebSocketRegistry {
         let route = state
             .routes
             .iter()
+            .rev()
             .find(|route| route.matcher.is_match(url))
             .cloned();
         let socket = RoutedSocket {
@@ -1089,6 +1090,34 @@ mod tests {
             matches!(event.kind, WebSocketEventKind::FrameReceived)
                 && event.data.as_deref() == Some("mocked-frame")
         }));
+    }
+
+    #[test]
+    fn the_newest_matching_websocket_route_wins() {
+        let registry = WebSocketRegistry::default();
+        registry
+            .add_route(
+                UrlPattern::Text("wss://example.test/**".to_string()),
+                WebSocketRouteMode::Intercept,
+                WebSocketMessageAction::Forward,
+                WebSocketMessageAction::Forward,
+            )
+            .unwrap();
+        registry
+            .add_route(
+                UrlPattern::Text("wss://example.test/**".to_string()),
+                WebSocketRouteMode::Mock,
+                WebSocketMessageAction::Drop,
+                WebSocketMessageAction::Drop,
+            )
+            .unwrap();
+
+        registry.handle_page_event(
+            "tab-1",
+            &json!({"type": "created", "id": "route-1", "url": "wss://example.test/socket"}),
+        );
+
+        assert_eq!(registry.take_commands()[0]["type"], json!("open"));
     }
 
     #[test]

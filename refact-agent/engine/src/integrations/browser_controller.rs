@@ -20,7 +20,7 @@ use refact_browser::{
     ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
     ActionabilityExecutionMode, ActionabilityTimeouts, CDP_INLINE_RESULT_LIMIT_BYTES,
     CdpDragObserver, CdpGuardrail, CdpKeyboardDispatcher, CdpMouseDispatcher, ClockOp,
-DEFAULT_DISMISS_OVERLAYS_HANDLER, ElementHandle, ElementStateName, ExpectPollResult,
+    DEFAULT_DISMISS_OVERLAYS_HANDLER, ElementHandle, ElementStateName, ExpectPollResult,
     FUNCTION_POLL_BACKOFF_MS, HitTargetController, HitTargetPoint, HitTargetResult, Keyboard,
     KeyboardDispatcher, LocatorGenerationOptions, LocatorHandler, LocatorHandlerLease,
     LocatorHandlerOperation, LocatorHandlerProbe, LocatorHandlerRegistry, LocatorOutcome,
@@ -84,9 +84,7 @@ const REPORT_STABILIZATION_TIMEOUT_MS: u64 = 3_000;
 const REPORT_STABILITY_INTERVAL_MS: u64 = 200;
 const CONSOLE_POLL_INTERVAL_MS: u64 = 50;
 
-const VISIBLE_BOUNDING_BOX_JS: &str =
-    "function() { const r = this.getBoundingClientRect(); return r.width > 0 && r.height > 0; }";
-
+#[allow(dead_code)]
 pub fn resolve_tab(runtime: &BrowserRuntime, target: &TabTarget) -> Result<Arc<Tab>, String> {
     match target {
         TabTarget::Active => runtime
@@ -337,6 +335,7 @@ impl<'a> BrowserActionDriver<'a> {
         handlers: Option<&'a Arc<Mutex<LocatorHandlerRegistry>>>,
         locator_handler_firings: &'a mut Vec<LocatorHandlerFiring>,
         image_policy: &'a ImagePolicy,
+        timeout: Duration,
     ) -> Self {
         Self {
             tab,
@@ -346,7 +345,8 @@ impl<'a> BrowserActionDriver<'a> {
             handlers,
             locator_handler_firings,
             image_policy,
-            precheck_deadline: Instant::now() + Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS),
+            precheck_deadline: Instant::now()
+                + timeout.min(Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS)),
             resolved: None,
             locator_echo: None,
         }
@@ -4181,6 +4181,7 @@ fn perform_locator_handlers_checkpoint(
             image_policy,
             deadline,
             &lease,
+            false,
         );
         let (ok, outcome) = match &result {
             Ok(outcome) => (true, outcome.clone()),
@@ -4202,18 +4203,20 @@ fn probe_locator_handler(
     handler: &LocatorHandler,
 ) -> Result<LocatorHandlerProbe, String> {
     if matches!(handler.operation, LocatorHandlerOperation::DismissOverlays) {
-        return eval_js_ok(tab, browser_locators::js_dismiss_overlays_probe()).map(|result| {
-            if result
-                .get("dismissable")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0)
-                == 0
-            {
-                LocatorHandlerProbe::Hidden
-            } else {
-                LocatorHandlerProbe::Visible
-            }
-        });
+        return eval_js_ok(tab, &browser_locators::js_dismiss_overlays(true, false)).map(
+            |result| {
+                if result
+                    .get("count")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0)
+                    == 0
+                {
+                    LocatorHandlerProbe::Hidden
+                } else {
+                    LocatorHandlerProbe::Visible
+                }
+            },
+        );
     }
     let locator = serde_json::to_value(&handler.locator)
         .map_err(|error| format!("Failed to serialize locator handler: {error}"))?;
@@ -4259,9 +4262,10 @@ fn execute_locator_handler(
     image_policy: &ImagePolicy,
     deadline: Instant,
     lease: &LocatorHandlerLease,
+    aggressive: bool,
 ) -> Result<String, String> {
     let outcome = match &lease.handler.operation {
-        LocatorHandlerOperation::DismissOverlays => dismiss_overlays(tab),
+        LocatorHandlerOperation::DismissOverlays => dismiss_overlays(tab, aggressive),
         LocatorHandlerOperation::Action(LocatorHandlerAction::Click) => {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -4424,7 +4428,9 @@ fn execute_single_step(
         }
     }
     match step {
-        BrowserStep::Navigate { url } => step_navigate(tab, idx, url),
+        BrowserStep::Navigate { url, timeout_ms } => {
+            step_navigate(tab, idx, url, clamp_timeout_ms(*timeout_ms))
+        }
         BrowserStep::Reload => step_nav_js(tab, idx, "location.reload()", "Reloaded page"),
         BrowserStep::GoBack => step_nav_js(tab, idx, "history.back()", "Navigated back"),
         BrowserStep::GoForward => step_nav_js(tab, idx, "history.forward()", "Navigated forward"),
@@ -4929,9 +4935,14 @@ fn execute_single_step(
             step_remove_locator_handler(idx, handlers, name)
         }
 
-        BrowserStep::DismissOverlays => {
-            step_dismiss_overlays(tab, idx, handlers, locator_handler_firings, image_policy)
-        }
+        BrowserStep::DismissOverlays { aggressive } => step_dismiss_overlays(
+            tab,
+            idx,
+            handlers,
+            locator_handler_firings,
+            image_policy,
+            *aggressive,
+        ),
         BrowserStep::HighlightElement { locator } => {
             step_highlight(tab, world, idx, locator, None, None, true)
         }
@@ -5909,6 +5920,7 @@ fn resolve_drag_endpoint(
     refact_browser::ActionabilityError,
 > {
     let engine = ActionabilityEngine::new(SystemClock::default(), ActionabilityTimeouts::default());
+    let timeout = ActionabilityTimeouts::default().action;
     let mut driver = DragActionabilityDriver {
         tab,
         world,
@@ -5916,14 +5928,15 @@ fn resolve_drag_endpoint(
         handlers,
         locator_handler_firings: firings,
         image_policy,
-        precheck_deadline: Instant::now() + ActionabilityTimeouts::default().action,
+        precheck_deadline: Instant::now()
+            + timeout.min(Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS)),
         resolved: None,
         position,
     };
     engine.execute_with_timeout_in_mode(
         &describe_locator(locator),
         action,
-        ActionabilityTimeouts::default().action,
+        timeout,
         mode,
         &mut driver,
     )
@@ -6102,10 +6115,8 @@ fn step_set_input_files(
     }
 }
 
-fn step_navigate(tab: &Tab, idx: usize, url: &str) -> StepResult {
-    match run_and_wait_for_navigation(tab, DEFAULT_WAIT_TIMEOUT_MS, || {
-        trigger_page_navigation(tab, url)
-    }) {
+fn step_navigate(tab: &Tab, idx: usize, url: &str, timeout_ms: u64) -> StepResult {
+    match run_and_wait_for_navigation(tab, timeout_ms, || trigger_page_navigation(tab, url)) {
         Ok(warning) => navigation_step_success(idx, format!("Navigated to {}", url), warning),
         Err(e) => StepResult::failure(idx, format!("Navigate to {}", url), e.to_string()),
     }
@@ -6518,6 +6529,7 @@ fn step_actionable_action_in_mode(
         handlers,
         locator_handler_firings,
         image_policy,
+        timeout,
     );
     match engine.execute_with_timeout_in_mode(
         &describe_locator(locator),
@@ -7186,6 +7198,17 @@ fn wait_for_selector_matches(
     }
 }
 
+fn handle_is_visible(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: &ElementHandle,
+) -> Result<bool, String> {
+    world
+        .element_state(tab, handle, ElementStateName::Visible)
+        .map_err(|error| error.to_string())
+        .map(|value| value.get("matches") == Some(&serde_json::Value::Bool(true)))
+}
+
 fn count_visible_handles(
     tab: &Tab,
     world: &WorldManager,
@@ -7193,10 +7216,7 @@ fn count_visible_handles(
 ) -> Result<usize, String> {
     let mut visible = 0;
     for handle in handles {
-        let value = world
-            .call_function_on(tab, handle, VISIBLE_BOUNDING_BOX_JS, Vec::new())
-            .map_err(|error| error.to_string())?;
-        if value == serde_json::Value::Bool(true) {
+        if handle_is_visible(tab, world, handle)? {
             visible += 1;
         }
     }
@@ -7290,14 +7310,58 @@ fn step_wait_for_navigation(
     }
 }
 
-fn step_wait_for_url(tab: &Tab, idx: usize, contains: &str, timeout_ms: u64) -> StepResult {
-    let js = format!(
-        r#"(function() {{ return window.location.href.includes({}); }})()"#,
-        js_string_literal(contains),
-    );
-    match poll_condition(tab, &js, timeout_ms, DEFAULT_POLL_INTERVAL_MS) {
-        Ok(()) => StepResult::success(idx, format!("URL contains '{}'", contains)),
-        Err(e) => StepResult::failure(idx, format!("Wait for URL containing '{}'", contains), e),
+fn wait_for_url_matcher(pattern: &UrlPattern) -> Result<UrlMatcher, String> {
+    match pattern {
+        UrlPattern::Text(value) => UrlMatcher::substring(value),
+        UrlPattern::Regex { source, flags } => UrlMatcher::regex(source, flags),
+    }
+}
+
+fn describe_url_pattern(pattern: &UrlPattern) -> String {
+    match pattern {
+        UrlPattern::Text(value) => format!("'{value}'"),
+        UrlPattern::Regex { source, flags } => format!("/{source}/{flags}"),
+    }
+}
+
+fn poll_url_match(tab: &Tab, matcher: &UrlMatcher, timeout_ms: u64) -> Result<String, String> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last_error: Option<String>;
+    loop {
+        match eval_js_value(tab, "window.location.href") {
+            Ok(value) => {
+                let url = value.as_str().unwrap_or_default().to_string();
+                if matcher.is_match(&url) {
+                    return Ok(url);
+                }
+                last_error = None;
+            }
+            Err(error) if refact_browser::is_transport_dead_error(&error) => {
+                return Err(format!("Polling failed: {error}"));
+            }
+            Err(error) => last_error = Some(error),
+        }
+        if Instant::now() >= deadline {
+            return Err(poll_deadline_error(
+                last_error,
+                format!("Timed out after {}ms", timeout_ms),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(DEFAULT_POLL_INTERVAL_MS));
+    }
+}
+
+fn step_wait_for_url(tab: &Tab, idx: usize, pattern: &UrlPattern, timeout_ms: u64) -> StepResult {
+    let matcher = match wait_for_url_matcher(pattern) {
+        Ok(matcher) => matcher,
+        Err(error) => return StepResult::failure(idx, "Invalid URL pattern", error),
+    };
+    let description = describe_url_pattern(pattern);
+    match poll_url_match(tab, &matcher, timeout_ms) {
+        Ok(url) => StepResult::success(idx, format!("URL matches {description}: {url}")),
+        Err(error) => {
+            StepResult::failure(idx, format!("Wait for URL matching {description}"), error)
+        }
     }
 }
 
@@ -7321,10 +7385,7 @@ fn step_wait_for_element_hidden(
             return Ok(Some(()));
         };
         let handle = world.wrap_scoped(tab, handle);
-        world
-            .call_function_on(tab, &handle, VISIBLE_BOUNDING_BOX_JS, Vec::new())
-            .map_err(|error| error.to_string())
-            .map(|visible| (visible != serde_json::Value::Bool(true)).then_some(()))
+        handle_is_visible(tab, world, &handle).map(|visible| (!visible).then_some(()))
     }) {
         Ok(()) => StepResult::success(idx, "Element is hidden".to_string()),
         Err(e) => StepResult::failure(idx, "Wait for element hidden", e),
@@ -9184,13 +9245,13 @@ fn step_remove_locator_handler(
     }
 }
 
-fn dismiss_overlays(tab: &Tab) -> Result<String, String> {
-    match eval_js_ok(tab, browser_locators::js_dismiss_overlays()) {
+fn dismiss_overlays(tab: &Tab, aggressive: bool) -> Result<String, String> {
+    match eval_js_ok(
+        tab,
+        &browser_locators::js_dismiss_overlays(false, aggressive),
+    ) {
         Ok(result) => {
-            let count = result
-                .get("dismissed")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
             Ok(format!("Dismissed {count} overlay(s)"))
         }
         Err(error) => Err(error),
@@ -9203,9 +9264,10 @@ fn step_dismiss_overlays(
     handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
     firings: &mut Vec<LocatorHandlerFiring>,
     image_policy: &ImagePolicy,
+    aggressive: bool,
 ) -> StepResult {
     let Some(handlers) = handlers else {
-        return match dismiss_overlays(tab) {
+        return match dismiss_overlays(tab, aggressive) {
             Ok(outcome) => StepResult::success(idx, outcome),
             Err(error) => StepResult::failure(idx, "Dismiss overlays failed", error),
         };
@@ -9248,6 +9310,7 @@ fn step_dismiss_overlays(
         image_policy,
         Instant::now() + Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS),
         &lease,
+        aggressive,
     );
     let (ok, outcome) = match &result {
         Ok(outcome) => (true, outcome.clone()),

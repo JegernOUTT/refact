@@ -503,8 +503,8 @@ pub fn clickable_point_from_quads(
     quads
         .iter()
         .map(|quad| intersect_quad_with_viewport(*quad, viewport))
-        .find(|quad| quad_area(*quad) > 0.99)
-        .map(quad_center)
+        .find(|polygon| polygon_area(polygon) > 0.99)
+        .map(|polygon| polygon_center(&polygon))
         .ok_or(MouseError::OutsideViewport)
 }
 
@@ -535,27 +535,102 @@ fn content_quad_from_cdp(values: Vec<f64>) -> Result<ContentQuad, MouseError> {
     ]))
 }
 
-fn intersect_quad_with_viewport(quad: ContentQuad, viewport: MainFrameCssViewport) -> ContentQuad {
-    ContentQuad(quad.0.map(|point| MainFrameCssPoint {
-        x: point.x.clamp(0.0, viewport.width),
-        y: point.y.clamp(0.0, viewport.height),
-    }))
+#[derive(Clone, Copy, Debug)]
+enum ViewportEdge {
+    MinX(f64),
+    MaxX(f64),
+    MinY(f64),
+    MaxY(f64),
 }
 
-fn quad_area(quad: ContentQuad) -> f64 {
+impl ViewportEdge {
+    fn contains(self, point: MainFrameCssPoint) -> bool {
+        match self {
+            Self::MinX(x) => point.x >= x,
+            Self::MaxX(x) => point.x <= x,
+            Self::MinY(y) => point.y >= y,
+            Self::MaxY(y) => point.y <= y,
+        }
+    }
+
+    fn crossing(self, from: MainFrameCssPoint, to: MainFrameCssPoint) -> MainFrameCssPoint {
+        match self {
+            Self::MinX(x) | Self::MaxX(x) => MainFrameCssPoint {
+                x,
+                y: from.y + (to.y - from.y) * ((x - from.x) / (to.x - from.x)),
+            },
+            Self::MinY(y) | Self::MaxY(y) => MainFrameCssPoint {
+                x: from.x + (to.x - from.x) * ((y - from.y) / (to.y - from.y)),
+                y,
+            },
+        }
+    }
+}
+
+fn intersect_quad_with_viewport(
+    quad: ContentQuad,
+    viewport: MainFrameCssViewport,
+) -> Vec<MainFrameCssPoint> {
+    let edges = [
+        ViewportEdge::MinX(0.0),
+        ViewportEdge::MaxX(viewport.width),
+        ViewportEdge::MinY(0.0),
+        ViewportEdge::MaxY(viewport.height),
+    ];
+    let mut polygon = quad.0.to_vec();
+    for edge in edges {
+        if polygon.is_empty() {
+            break;
+        }
+        let mut clipped = Vec::with_capacity(polygon.len() + 1);
+        let mut previous = polygon[polygon.len() - 1];
+        for current in polygon {
+            let current_inside = edge.contains(current);
+            if current_inside {
+                if !edge.contains(previous) {
+                    clipped.push(edge.crossing(previous, current));
+                }
+                clipped.push(current);
+            } else if edge.contains(previous) {
+                clipped.push(edge.crossing(previous, current));
+            }
+            previous = current;
+        }
+        polygon = clipped;
+    }
+    polygon
+}
+
+fn signed_polygon_area(polygon: &[MainFrameCssPoint]) -> f64 {
+    if polygon.len() < 3 {
+        return 0.0;
+    }
     let mut area = 0.0;
-    for index in 0..quad.0.len() {
-        let first = quad.0[index];
-        let second = quad.0[(index + 1) % quad.0.len()];
+    for index in 0..polygon.len() {
+        let first = polygon[index];
+        let second = polygon[(index + 1) % polygon.len()];
         area += (first.x * second.y - second.x * first.y) / 2.0;
     }
-    area.abs()
+    area
 }
 
-fn quad_center(quad: ContentQuad) -> MainFrameCssPoint {
+fn polygon_area(polygon: &[MainFrameCssPoint]) -> f64 {
+    signed_polygon_area(polygon).abs()
+}
+
+fn polygon_center(polygon: &[MainFrameCssPoint]) -> MainFrameCssPoint {
+    let area = signed_polygon_area(polygon);
+    let mut center = MainFrameCssPoint::default();
+    for index in 0..polygon.len() {
+        let first = polygon[index];
+        let second = polygon[(index + 1) % polygon.len()];
+        let cross = first.x * second.y - second.x * first.y;
+        center.x += (first.x + second.x) * cross;
+        center.y += (first.y + second.y) * cross;
+    }
     MainFrameCssPoint {
-        x: quad.0.iter().map(|point| point.x).sum::<f64>() / 4.0,
-        y: quad.0.iter().map(|point| point.y).sum::<f64>() / 4.0,
+        x: center.x / (6.0 * area),
+        y: center.y / (6.0 * area),
     }
 }
 
@@ -670,6 +745,50 @@ mod tests {
         assert_eq!(
             clickable_point_from_quads(&quads, viewport()).unwrap(),
             MainFrameCssPoint { x: 3.0, y: 2.0 }
+        );
+    }
+
+    #[test]
+    fn clipping_a_rotated_quad_keeps_the_click_point_inside_the_element() {
+        let bar = quad([(0.0, 0.0), (10.0, 10.0), (11.0, 9.0), (1.0, -1.0)]);
+        let viewport = MainFrameCssViewport {
+            width: 5.0,
+            height: 100.0,
+        };
+        let point = clickable_point_from_quads(&[bar], viewport).unwrap();
+
+        assert!(point.x <= viewport.width && point.y >= 0.0, "{point:?}");
+        assert!(
+            point.y <= point.x && point.y >= point.x - 2.0,
+            "clipped centroid {point:?} escaped the rotated bar"
+        );
+    }
+
+    #[test]
+    fn clipping_keeps_the_visible_area_of_a_partially_offscreen_quad() {
+        let polygon = intersect_quad_with_viewport(
+            quad([(-40.0, -40.0), (60.0, -40.0), (60.0, 40.0), (-40.0, 40.0)]),
+            viewport(),
+        );
+        assert_eq!(polygon_area(&polygon), 60.0 * 40.0);
+        assert_eq!(
+            polygon_center(&polygon),
+            MainFrameCssPoint { x: 30.0, y: 20.0 }
+        );
+    }
+
+    #[test]
+    fn a_quad_entirely_outside_the_viewport_clips_to_nothing() {
+        let offscreen = quad([
+            (200.0, 200.0),
+            (300.0, 200.0),
+            (300.0, 300.0),
+            (200.0, 300.0),
+        ]);
+        assert!(intersect_quad_with_viewport(offscreen, viewport()).is_empty());
+        assert_eq!(
+            clickable_point_from_quads(&[offscreen], viewport()),
+            Err(MouseError::OutsideViewport)
         );
     }
 

@@ -1191,6 +1191,8 @@ pub enum BrowserMouseButton {
 pub enum BrowserStep {
     Navigate {
         url: String,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
     },
     Reload,
     GoBack,
@@ -1674,7 +1676,7 @@ pub enum BrowserStep {
     },
     WaitForUrl {
         #[serde(alias = "contains")]
-        pattern: String,
+        pattern: UrlPattern,
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
@@ -1885,7 +1887,10 @@ pub enum BrowserStep {
         prompt_text: Option<String>,
     },
 
-    DismissOverlays,
+    DismissOverlays {
+        #[serde(default)]
+        aggressive: bool,
+    },
     HighlightElement {
         locator: BrowserLocator,
     },
@@ -2887,6 +2892,7 @@ mod tests {
         vec![
             BrowserStep::Navigate {
                 url: "https://example.com".to_string(),
+                timeout_ms: Some(1_000),
             },
             BrowserStep::Reload,
             BrowserStep::GoBack,
@@ -3239,7 +3245,7 @@ mod tests {
                 timeout_ms: Some(1_000),
             },
             BrowserStep::WaitForUrl {
-                pattern: "/done".to_string(),
+                pattern: UrlPattern::Text("/done".to_string()),
                 timeout_ms: Some(1_000),
             },
             BrowserStep::WaitForText {
@@ -3385,7 +3391,7 @@ mod tests {
                 accept: true,
                 prompt_text: Some("answer".to_string()),
             },
-            BrowserStep::DismissOverlays,
+            BrowserStep::DismissOverlays { aggressive: true },
             BrowserStep::HighlightElement { locator: locator() },
             BrowserStep::Highlight {
                 locator: locator(),
@@ -3901,6 +3907,7 @@ mod tests {
     fn test_step_navigate_serde() {
         let step = BrowserStep::Navigate {
             url: "https://example.com".to_string(),
+            timeout_ms: None,
         };
         let json = serde_json::to_value(&step).unwrap();
         assert_eq!(json["action"], "navigate");
@@ -3983,11 +3990,23 @@ mod tests {
                 pattern,
                 timeout_ms,
             } => {
-                assert_eq!(pattern, "/search");
+                assert_eq!(pattern, UrlPattern::Text("/search".to_string()));
                 assert_eq!(timeout_ms, Some(5000));
             }
             _ => panic!("Expected WaitForUrl"),
         }
+
+        let regex: BrowserStep = serde_json::from_str(
+            r#"{"action": "wait_for_url", "pattern": {"source": "/search\\?q=", "flags": "i"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            regex,
+            BrowserStep::WaitForUrl {
+                pattern: UrlPattern::Regex { .. },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -4503,7 +4522,17 @@ mod tests {
     fn test_step_dismiss_overlays_serde() {
         let json_str = r#"{"action": "dismiss_overlays"}"#;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        assert!(matches!(step, BrowserStep::DismissOverlays));
+        assert!(matches!(
+            step,
+            BrowserStep::DismissOverlays { aggressive: false }
+        ));
+
+        let opt_in: BrowserStep =
+            serde_json::from_str(r#"{"action": "dismiss_overlays", "aggressive": true}"#).unwrap();
+        assert!(matches!(
+            opt_in,
+            BrowserStep::DismissOverlays { aggressive: true }
+        ));
     }
 
     #[test]

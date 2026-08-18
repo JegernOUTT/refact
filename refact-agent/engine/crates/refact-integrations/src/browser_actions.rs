@@ -497,9 +497,10 @@ pub fn get_tab_id(action: &BrowserAction) -> Option<&str> {
 
 pub fn to_browser_steps(action: &BrowserAction) -> Option<Vec<BrowserStep>> {
     match action {
-        BrowserAction::NavigateTo { url, .. } => {
-            Some(vec![BrowserStep::Navigate { url: url.clone() }])
-        }
+        BrowserAction::NavigateTo { url, .. } => Some(vec![BrowserStep::Navigate {
+            url: url.clone(),
+            timeout_ms: None,
+        }]),
         BrowserAction::ScrollTo { selector, .. } => Some(vec![BrowserStep::ScrollTo {
             locator: BrowserLocator::css(selector),
         }]),
@@ -1156,7 +1157,9 @@ mod tests {
         let action = parse_command("navigate_to 1 https://example.com").unwrap();
         let steps = to_browser_steps(&action).unwrap();
         assert_eq!(steps.len(), 1);
-        assert!(matches!(&steps[0], BrowserStep::Navigate { url } if url == "https://example.com"));
+        assert!(
+            matches!(&steps[0], BrowserStep::Navigate { url, .. } if url == "https://example.com")
+        );
     }
 
     #[test]

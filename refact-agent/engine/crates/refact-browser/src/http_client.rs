@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use refact_integrations::browser_models::{BrowserCookie, BrowserCookieSameSite};
@@ -148,6 +148,17 @@ pub fn parse_set_cookies(url: &Url, headers: &[String]) -> SetCookieScan {
     scan
 }
 
+pub fn remaining_budget(deadline: Instant, timeout: Duration) -> Result<Duration, String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(format!(
+            "HTTP request timed out after {}ms while following redirects",
+            timeout.as_millis()
+        ));
+    }
+    Ok(remaining)
+}
+
 pub fn same_origin(left: &Url, right: &Url) -> bool {
     left.scheme() == right.scheme()
         && left.host_str() == right.host_str()
@@ -245,7 +256,6 @@ pub async fn send_http_request(
 ) -> Result<HttpResponse, String> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(spec.timeout)
         .build()
         .map_err(|error| {
             format!(
@@ -253,6 +263,7 @@ pub async fn send_http_request(
                 mask_text(&error.to_string())
             )
         })?;
+    let deadline = Instant::now() + spec.timeout;
     let mut url = spec.url.clone();
     let mut method = spec.method.clone();
     let mut body = spec.body.clone();
@@ -281,7 +292,10 @@ pub async fn send_http_request(
                 );
             }
         }
-        let mut request = client.request(method.clone(), url.clone()).headers(headers);
+        let mut request = client
+            .request(method.clone(), url.clone())
+            .timeout(remaining_budget(deadline, spec.timeout)?)
+            .headers(headers);
         if let Some(body) = &body {
             request = request.body(body.bytes.clone());
         }
@@ -554,6 +568,28 @@ fn parse_cookie_expires(value: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_redirect_chain_shares_one_timeout_budget() {
+        let timeout = Duration::from_millis(300);
+        let deadline = Instant::now() + timeout;
+        let first = remaining_budget(deadline, timeout).unwrap();
+        assert!(
+            first <= timeout && first > Duration::from_millis(250),
+            "{first:?}"
+        );
+
+        let spent = Instant::now() - Duration::from_millis(200) + timeout;
+        let second = remaining_budget(spent, timeout).unwrap();
+        assert!(second < first, "later hops must get a smaller budget");
+
+        let error =
+            remaining_budget(Instant::now() - Duration::from_millis(1), timeout).unwrap_err();
+        assert_eq!(
+            error,
+            "HTTP request timed out after 300ms while following redirects"
+        );
+    }
 
     fn cookie(name: &str, value: &str, domain: &str, path: &str, secure: bool) -> BrowserCookie {
         BrowserCookie {
