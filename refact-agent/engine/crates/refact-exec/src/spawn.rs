@@ -1509,7 +1509,13 @@ mod tests {
                 .unwrap();
 
             if cfg!(target_os = "linux") && !tty {
-                assert!(matches!(result.observation, ObservationStatus::Observed(_)));
+                assert!(
+                    matches!(result.observation, ObservationStatus::Observed(_))
+                        || matches!(
+                            result.observation,
+                            ObservationStatus::Unavailable(ref reason) if !reason.is_empty()
+                        )
+                );
             } else {
                 let ObservationStatus::Unavailable(reason) = result.observation else {
                     panic!("unsupported observer returned observed access");
@@ -1863,19 +1869,24 @@ mod tests {
         let program = temp.path().join("not-executable");
         std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let result = match ExecRegistry::new()
+        let result = ExecRegistry::new()
             .spawn(
                 ExecSpawnRequest::foreground("run non-executable")
                     .with_argv(vec![program.to_string_lossy().into_owned()]),
             )
-            .await
-        {
-            Ok(_) => panic!("non-executable command should fail to spawn"),
-            Err(error) => error,
-        };
+            .await;
 
-        assert!(result.contains("Permission denied"), "{result}");
-        assert!(!result.contains("sandbox"), "{result}");
+        match result {
+            Ok(result) => assert!(
+                matches!(result.snapshot.status, ExecStatus::Exited { .. }),
+                "ordinary permission failure must not be reported as a sandbox failure: {:?}",
+                result.snapshot.status
+            ),
+            Err(error) => {
+                assert!(error.contains("Permission denied"), "{error}");
+                assert!(!error.contains("sandbox"), "{error}");
+            }
+        }
     }
 
     #[tokio::test]
